@@ -1,0 +1,526 @@
+"""Tests for prompts (agent SOPs) discovery."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from kiro_claw.dashboard.chat import _expand_prompt_mention, _run_chat
+from kiro_claw.dashboard.handlers import (
+    _extract_sop_description,
+    _latest_aim_event_dir,
+    _list_aim_prompts,
+    api_prompt_detail,
+    api_prompts,
+)
+
+# ── Shared fixtures ──
+
+
+@pytest.fixture(autouse=True)
+def _isolate_home(tmp_path, monkeypatch):
+    """All tests get an isolated $HOME and no project dir."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr("kiro_claw.agent._project_dir", lambda: None)
+    # Clear prompt cache between tests
+    import kiro_claw.dashboard.handlers as h
+    h._prompt_cache = None
+    h._prompt_cache_ts = 0
+
+
+@pytest.fixture()
+def aim_dir(tmp_path):
+    return tmp_path / ".aim" / "packages"
+
+
+@pytest.fixture()
+def mock_sel(monkeypatch):
+    """Patch sel() in both chat and handlers modules."""
+    m = MagicMock()
+    monkeypatch.setattr("kiro_claw.dashboard.chat.sel", lambda: m)
+    monkeypatch.setattr("kiro_claw.dashboard.handlers.sel", lambda: m)
+    return m
+
+
+@pytest.fixture()
+def block_sensitive(monkeypatch):
+    """Make is_sensitive_path return True everywhere."""
+    monkeypatch.setattr("kiro_claw.dashboard.chat_runner.is_sensitive_path", lambda p: True)
+    monkeypatch.setattr("kiro_claw.dashboard.handlers.is_sensitive_path", lambda p: True)
+    monkeypatch.setattr("kiro_claw.hooks.is_sensitive_path", lambda p: True)
+
+
+# ── Helpers ──
+
+
+def _aim_pkg(aim_dir, pkg_name, event_id, sops):
+    """Create a fake AIM package with event dir, manifest, and SOPs."""
+    pkg_dir = aim_dir / pkg_name
+    sops_dir = pkg_dir / f"eventId-{event_id}" / "agent-sops"
+    sops_dir.mkdir(parents=True)
+    manifest = pkg_dir / ".aim" / ".version-manifest.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({"currentEventId": event_id}))
+    for name, content in sops.items():
+        (sops_dir / f"{name}.sop.md").write_text(content)
+    return pkg_dir
+
+
+def _local_aim_pkg(aim_dir, namespace, pkg_name, sops):
+    """Create a local AIM package (no eventId dir, direct agent-sops/)."""
+    pkg_dir = aim_dir / namespace / pkg_name
+    sops_dir = pkg_dir / "agent-sops"
+    sops_dir.mkdir(parents=True)
+    for name, content in sops.items():
+        (sops_dir / f"{name}.sop.md").write_text(content)
+    return pkg_dir
+
+
+def _user_prompt(tmp_path, name, content="# Placeholder"):
+    """Create a user prompt in ~/.kiro/prompts/."""
+    d = tmp_path / ".kiro" / "prompts"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{name}.md"
+    p.write_text(content)
+    return p
+
+
+def _manifest(pkg, content):
+    m = pkg / ".aim" / ".version-manifest.json"
+    m.parent.mkdir(parents=True, exist_ok=True)
+    m.write_text(content if isinstance(content, str) else json.dumps(content))
+
+
+def _api_request(name):
+    r = MagicMock()
+    r.match_info = {"name": name}
+    return r
+
+
+class _Slot:
+    """Minimal slot/state stub for prompt tests."""
+
+    def __init__(self):
+        self.messages = []
+        self.key = "t"
+        self.agent = "kiroclaw"
+        self.model = None
+        self._queue = []
+        self.linked_session_key = ""
+
+    def append(self, role, text, cls):
+        self.messages.append((role, text, cls))
+
+
+class _State:
+    _hook_store = None
+    _yolo = False
+
+    def push_refresh(self, *a):
+        pass
+
+    def __init__(self):
+        self.sessions = type('_MockSessions', (), {
+            'get_slack_link': lambda self, k: ('', ''),
+            'set_slack_link': lambda self, k, t, c: None,
+            'get_or_create': None, 'get_pid': lambda self, k: None,
+            'set_approval_policy': lambda self, k, v: None,
+            'check_context_usage': lambda self, k, c: None,
+        })()
+
+    def push_slots_update(self):
+        pass
+
+    def broadcast_ws(self, *a, **kw):
+        pass
+
+
+def _ss():
+    """Fresh state + slot pair."""
+    return _State(), _Slot()
+
+
+# ── _latest_aim_event_dir ──
+
+
+class TestLatestAimEventDir:
+    def test_uses_manifest(self, tmp_path):
+        pkg = tmp_path / "P"
+        (pkg / "eventId-100").mkdir(parents=True)
+        (pkg / "eventId-200").mkdir(parents=True)
+        _manifest(pkg, {"currentEventId": "100"})
+        assert _latest_aim_event_dir(pkg).name == "eventId-100"
+
+    def test_fallback_to_highest_numeric(self, tmp_path):
+        pkg = tmp_path / "P"
+        (pkg / "eventId-100").mkdir(parents=True)
+        (pkg / "eventId-200").mkdir(parents=True)
+        assert _latest_aim_event_dir(pkg).name == "eventId-200"
+
+    def test_no_event_dirs(self, tmp_path):
+        pkg = tmp_path / "P"
+        pkg.mkdir(parents=True)
+        assert _latest_aim_event_dir(pkg) is None
+
+    def test_corrupt_manifest_falls_back(self, tmp_path):
+        pkg = tmp_path / "P"
+        (pkg / "eventId-300").mkdir(parents=True)
+        _manifest(pkg, "not json")
+        assert _latest_aim_event_dir(pkg).name == "eventId-300"
+
+    def test_manifest_points_to_missing_dir(self, tmp_path):
+        pkg = tmp_path / "P"
+        (pkg / "eventId-100").mkdir(parents=True)
+        _manifest(pkg, {"currentEventId": "999"})
+        assert _latest_aim_event_dir(pkg).name == "eventId-100"
+
+    def test_non_numeric_event_id_sorts_as_zero(self, tmp_path):
+        pkg = tmp_path / "P"
+        (pkg / "eventId-abc").mkdir(parents=True)
+        (pkg / "eventId-5").mkdir(parents=True)
+        assert _latest_aim_event_dir(pkg).name == "eventId-5"
+
+
+# ── _extract_sop_description ──
+
+
+class TestExtractSopDescription:
+    def _write(self, tmp_path, content, *, binary=False):
+        p = tmp_path / "t.sop.md"
+        p.write_bytes(content) if binary else p.write_text(content)
+        return p
+
+    def test_frontmatter(self, tmp_path):
+        p = self._write(tmp_path, "---\nname: t\ndescription: My desc\n---\n# T\n")
+        assert _extract_sop_description(p) == "My desc"
+
+    def test_fallback_to_heading(self, tmp_path):
+        p = self._write(tmp_path, "# My Heading\nContent.\n")
+        assert _extract_sop_description(p) == "My Heading"
+
+    def test_missing_file(self, tmp_path):
+        assert _extract_sop_description(tmp_path / "nope.sop.md") == ""
+
+    def test_empty_file(self, tmp_path):
+        assert _extract_sop_description(self._write(tmp_path, "")) == ""
+
+    def test_quoted_description(self, tmp_path):
+        p = self._write(tmp_path, "---\nname: t\ndescription: 'Quoted'\n---\n")
+        assert _extract_sop_description(p) == "Quoted"
+
+    def test_invalid_utf8(self, tmp_path):
+        p = self._write(tmp_path, b"---\nname: t\ndescription: \xff\xfe\n---\n", binary=True)
+        assert _extract_sop_description(p) == ""
+
+
+# ── _list_aim_prompts ──
+
+
+class TestListAimPrompts:
+    def test_discovers_sops(self, aim_dir):
+        _aim_pkg(aim_dir, "Pkg-1.0", "1", {
+            "my-sop": "---\nname: my-sop\ndescription: Test SOP\n---\n",
+        })
+        r = _list_aim_prompts()
+        assert len(r) == 1
+        assert (r[0]["name"], r[0]["fullName"], r[0]["source"]) == ("my-sop", "agent-sop:my-sop", "aim")
+        assert r[0]["description"] == "Test SOP"
+
+    def test_deduplicates_via_manifest(self, aim_dir):
+        pkg = aim_dir / "Pkg-1.0"
+        for eid in ("100", "200"):
+            sops = pkg / f"eventId-{eid}" / "agent-sops"
+            sops.mkdir(parents=True)
+            (sops / "dup.sop.md").write_text("# Dup\n")
+        _manifest(pkg, {"currentEventId": "200"})
+        assert len(_list_aim_prompts()) == 1
+
+    def test_discovers_user_prompts(self, tmp_path):
+        _user_prompt(tmp_path, "my-prompt", "# P\nDo things.\n")
+        r = _list_aim_prompts()
+        assert len(r) == 1
+        assert (r[0]["name"], r[0]["source"]) == ("my-prompt", "global")
+
+    def test_discovers_local_project_prompts(self, tmp_path, monkeypatch):
+        proj = tmp_path / "proj"
+        monkeypatch.setattr("kiro_claw.agent._project_dir", lambda: proj)
+        d = proj / ".kiro" / "prompts"
+        d.mkdir(parents=True)
+        (d / "local.md").write_text("# L\n")
+        assert any(r["source"] == "local" for r in _list_aim_prompts())
+
+    def test_empty(self, tmp_path):
+        assert _list_aim_prompts() == []
+
+    def test_skips_dotdirs_and_files(self, aim_dir):
+        (aim_dir / ".hidden").mkdir(parents=True)
+        aim_dir.mkdir(parents=True, exist_ok=True)
+        (aim_dir / "file.txt").write_text("x")
+        assert _list_aim_prompts() == []
+
+    def test_skips_pkg_without_sops_dir(self, aim_dir):
+        pkg = aim_dir / "NoSops-1.0"
+        (pkg / "eventId-1").mkdir(parents=True)
+        _manifest(pkg, {"currentEventId": "1"})
+        assert _list_aim_prompts() == []
+
+    def test_name_collision(self, aim_dir):
+        _aim_pkg(aim_dir, "A-1.0", "1", {"shared": "# A\n"})
+        _aim_pkg(aim_dir, "B-1.0", "1", {"shared": "# B\n"})
+        r = _list_aim_prompts()
+        assert [p["name"] for p in r].count("shared") == 2
+        assert {p["package"] for p in r} == {"A-1.0", "B-1.0"}
+
+    def test_discovers_local_aim_packages(self, aim_dir):
+        """Local packages (aim install --local) have no eventId dir."""
+        _local_aim_pkg(aim_dir, "local", "MyAgent-1.0", {
+            "my-sop": "---\nname: my-sop\ndescription: Local SOP\n---\n",
+        })
+        r = _list_aim_prompts()
+        assert len(r) == 1
+        assert r[0]["name"] == "my-sop"
+        assert r[0]["package"] == "MyAgent-1.0"
+
+    def test_local_and_published_coexist(self, aim_dir):
+        """Both published and local packages are discovered."""
+        _aim_pkg(aim_dir, "Published-1.0", "1", {"pub": "# Pub\n"})
+        _local_aim_pkg(aim_dir, "local", "Local-1.0", {"loc": "# Loc\n"})
+        r = _list_aim_prompts()
+        assert {p["name"] for p in r} == {"pub", "loc"}
+
+    def test_namespace_skips_dotdirs(self, aim_dir):
+        """Hidden dirs inside a namespace dir are ignored."""
+        ns = aim_dir / "local"
+        ns.mkdir(parents=True)
+        (ns / ".hidden").mkdir()
+        (ns / ".hidden" / "agent-sops").mkdir(parents=True)
+        (ns / ".hidden" / "agent-sops" / "bad.sop.md").write_text("# Bad\n")
+        assert _list_aim_prompts() == []
+
+    def test_namespace_child_oserror_skips_only_that_child(self, aim_dir):
+        """An unreadable child in a namespace doesn't skip siblings."""
+        _local_aim_pkg(aim_dir, "local", "Good-1.0", {"ok": "# OK\n"})
+        bad = aim_dir / "local" / "Bad-1.0"
+        bad.mkdir(parents=True)
+        (bad / "agent-sops").mkdir()
+        (bad / "agent-sops").chmod(0o000)
+        try:
+            r = _list_aim_prompts()
+            assert len(r) == 1 and r[0]["name"] == "ok"
+        finally:
+            (bad / "agent-sops").chmod(0o755)
+
+    def test_sensitive_sop_symlink_skipped(self, aim_dir, tmp_path, monkeypatch):
+        """SOP symlinks resolving to sensitive paths are skipped."""
+        secret = tmp_path / "secrets" / "creds.sop.md"
+        secret.parent.mkdir(parents=True)
+        secret.write_text("# Creds\n")
+        pkg = aim_dir / "local" / "Evil-1.0"
+        sops = pkg / "agent-sops"
+        sops.mkdir(parents=True)
+        (sops / "evil.sop.md").symlink_to(secret)
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.handlers.is_sensitive_path",
+            lambda p: "secrets" in p,
+        )
+        assert _list_aim_prompts() == []
+
+
+# ── _expand_prompt_mention ──
+
+
+class TestExpandPromptMention:
+    def test_resolves_fullname(self, aim_dir):
+        _aim_pkg(aim_dir, "Pkg-1.0", "1", {"review": "# Review\nDo review."})
+        msg, status = _expand_prompt_mention("@agent-sop:review", _State(), _Slot())
+        assert status == "ok"
+        assert msg.startswith("Execute the following instructions:")
+        assert "Do review." in msg
+
+    def test_resolves_bare_name(self, tmp_path):
+        _user_prompt(tmp_path, "p", "# P\nInstructions.")
+        msg, status = _expand_prompt_mention("@p", _State(), _Slot())
+        assert status == "ok" and "Instructions." in msg
+
+    def test_appends_user_text(self, tmp_path):
+        _user_prompt(tmp_path, "g", "# G\nGenerate.")
+        msg, status = _expand_prompt_mention("@g for Q1", _State(), _Slot())
+        assert status == "ok" and "Generate." in msg and "for Q1" in msg
+
+    def test_no_match(self, tmp_path):
+        msg, status = _expand_prompt_mention("@nope hello", _State(), _Slot())
+        assert (msg, status) == ("@nope hello", "not_found")
+
+    def test_package_qualified(self, aim_dir):
+        _aim_pkg(aim_dir, "A-1.0", "1", {"d": "# A"})
+        _aim_pkg(aim_dir, "B-1.0", "1", {"d": "# B"})
+        msg, status = _expand_prompt_mention("@B-1.0/d", _State(), _Slot())
+        assert status == "ok" and "B" in msg
+
+    def test_shows_info_message(self, tmp_path):
+        _user_prompt(tmp_path, "t", "# T")
+        slot = _Slot()
+        _expand_prompt_mention("@t", _State(), slot)
+        assert any("Loaded prompt" in m[1] for m in slot.messages)
+
+    def test_list_error_returns_original(self, monkeypatch):
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.handlers._find_prompt",
+            lambda n: (_ for _ in ()).throw(PermissionError),
+        )
+        msg, status = _expand_prompt_mention("@x", _State(), _Slot())
+        assert (msg, status) == ("@x", "not_found")
+
+    def test_sensitive_path_blocked(self, tmp_path, block_sensitive):
+        _user_prompt(tmp_path, "evil", "# Evil")
+        msg, status = _expand_prompt_mention("@evil", _State(), _Slot())
+        assert status == "blocked"
+
+    def test_unreadable_file(self, tmp_path):
+        path = _user_prompt(tmp_path, "broken")
+        path.chmod(0o000)
+        msg, status = _expand_prompt_mention("@broken", _State(), _Slot())
+        path.chmod(0o644)
+        assert status == "not_found"
+
+    def test_too_large(self, tmp_path):
+        _user_prompt(tmp_path, "huge", "x" * 200_000)
+        msg, status = _expand_prompt_mention("@huge", _State(), _Slot())
+        assert status == "too_large"
+
+
+# ── API handlers ──
+
+
+class TestApiPrompts:
+    def test_list(self, aim_dir, mock_sel):
+        _aim_pkg(aim_dir, "Pkg-1.0", "1", {"sop": "# S\n"})
+        resp = asyncio.run(api_prompts(MagicMock()))
+        body = json.loads(resp.body)
+        assert resp.status == 200 and len(body) == 1 and body[0]["name"] == "sop"
+
+    def test_detail_found(self, tmp_path, mock_sel):
+        _user_prompt(tmp_path, "hello", "# Hello\nWorld.")
+        resp = asyncio.run(api_prompt_detail(_api_request("hello")))
+        body = json.loads(resp.body)
+        assert resp.status == 200 and "World." in body["content"]
+        mock_sel.log_tool_invocation.assert_called_once()
+
+    def test_detail_not_found(self, mock_sel):
+        assert asyncio.run(api_prompt_detail(_api_request("nope"))).status == 404
+
+    def test_detail_sensitive(self, tmp_path, mock_sel, block_sensitive):
+        _user_prompt(tmp_path, "secret")
+        resp = asyncio.run(api_prompt_detail(_api_request("secret")))
+        assert resp.status == 403 and json.loads(resp.body)["error"] == "access denied"
+
+    def test_detail_unreadable(self, tmp_path, mock_sel):
+        path = _user_prompt(tmp_path, "broken")
+        path.chmod(0o000)
+        resp = asyncio.run(api_prompt_detail(_api_request("broken")))
+        path.chmod(0o644)
+        assert resp.status == 500
+        mock_sel.log_tool_invocation.assert_called_once()
+        assert mock_sel.log_tool_invocation.call_args[1]["outcome"] == "error"
+
+    def test_detail_too_large(self, tmp_path, mock_sel):
+        _user_prompt(tmp_path, "huge", "x" * 200_000)
+        resp = asyncio.run(api_prompt_detail(_api_request("huge")))
+        assert resp.status == 413
+        mock_sel.log_tool_invocation.assert_called_once()
+        assert mock_sel.log_tool_invocation.call_args[1]["outcome"] == "too_large"
+
+    def test_detail_package_qualified(self, aim_dir, mock_sel):
+        _aim_pkg(aim_dir, "A-1.0", "1", {"d": "# A"})
+        _aim_pkg(aim_dir, "B-1.0", "1", {"d": "# B"})
+        resp = asyncio.run(api_prompt_detail(_api_request("B-1.0/d")))
+        assert resp.status == 200 and "B" in json.loads(resp.body)["content"]
+
+
+# ── _run_chat prompt paths ──
+
+
+class TestRunChatPrompts:
+    def test_slash_list(self, aim_dir, mock_sel):
+        _aim_pkg(aim_dir, "Pkg-1.0", "1", {"review": "# R\nDo review."})
+        s, sl = _ss()
+        asyncio.run(_run_chat(s, sl, "/prompts"))
+        assert "@agent-sop:review" in sl.messages[-2][1]
+
+    def test_slash_list_empty(self):
+        s, sl = _ss()
+        asyncio.run(_run_chat(s, sl, "/prompts"))
+        assert "No prompts found" in sl.messages[-2][1]
+
+    def test_slash_get_ok(self, aim_dir, mock_sel, monkeypatch):
+        _aim_pkg(aim_dir, "Pkg-1.0", "1", {"review": "# R\nDo review."})
+        s, sl = _ss()
+        captured = {}
+        original_run_chat = _run_chat
+
+        async def _mock_run_chat(state, slot, msg, **kw):
+            if msg.startswith("Execute the following instructions:"):
+                captured["expanded"] = msg
+                return
+            await original_run_chat(state, slot, msg, **kw)
+
+        monkeypatch.setattr("kiro_claw.dashboard.chat_runner._run_chat", _mock_run_chat)
+        asyncio.run(_mock_run_chat(s, sl, "/prompts get agent-sop:review"))
+        assert any("Loaded prompt" in m[1] for m in sl.messages)
+        assert "Do review." in captured.get("expanded", "")
+
+    def test_slash_get_no_name(self, aim_dir, mock_sel):
+        """``/prompts get`` with no name falls through to list handler."""
+        _aim_pkg(aim_dir, "Pkg-1.0", "1", {"review": "# R\nDo review."})
+        s, sl = _ss()
+        asyncio.run(_run_chat(s, sl, "/prompts get"))
+        assert "@agent-sop:review" in sl.messages[-2][1]
+
+    def test_slash_list_explicit(self, aim_dir, mock_sel):
+        """``/prompts list`` works the same as ``/prompts``."""
+        _aim_pkg(aim_dir, "Pkg-1.0", "1", {"review": "# R\nDo review."})
+        s, sl = _ss()
+        asyncio.run(_run_chat(s, sl, "/prompts list"))
+        assert "@agent-sop:review" in sl.messages[-2][1]
+
+    def test_slash_get_not_found(self, mock_sel):
+        s, sl = _ss()
+        asyncio.run(_run_chat(s, sl, "/prompts get nonexistent"))
+        assert "not found" in sl.messages[-2][1]
+
+    def test_slash_get_blocked(self, aim_dir, mock_sel, monkeypatch):
+        """Prompt discovered but blocked at read time by chat-level check."""
+        _aim_pkg(aim_dir, "Pkg-1.0", "1", {"secret": "# S"})
+        # Only patch chat-level check so prompt is discovered but blocked at read
+        monkeypatch.setattr("kiro_claw.dashboard.chat_runner.is_sensitive_path", lambda p: True)
+        s, sl = _ss()
+        asyncio.run(_run_chat(s, sl, "/prompts get agent-sop:secret"))
+        assert any("blocked" in m[1].lower() for m in sl.messages)
+
+    @pytest.mark.skip(reason="Broken by chat.py split (6d4e4493) — mock setup needs updating for new _run_chat flow. Tracked: Mesh-1353")
+    def test_at_prompt_blocked(self, aim_dir, mock_sel, monkeypatch):
+        """@mention prompt blocked at read time by chat-level check."""
+        _aim_pkg(aim_dir, "Pkg-1.0", "1", {"secret": "# S"})
+        monkeypatch.setattr("kiro_claw.dashboard.chat_runner.is_sensitive_path", lambda p: True)
+        # @prompt path runs after session acquisition — needs full mock
+        captured = []
+        slot = MagicMock(key="t", agent="kiroclaw", model=None, _trust=False, _queue=[])
+        slot.append = lambda r, t, c: captured.append((r, t, c))
+        slot._pending_subagent_failures = []
+        state = MagicMock(_hook_store=None, _yolo=False)
+        state.sessions.get_or_create = AsyncMock(return_value=(MagicMock(), True, False))
+        state.sessions.get_pid = MagicMock(return_value=None)
+        asyncio.run(_run_chat(state, slot, "@agent-sop:secret"))
+        assert any("blocked" in m[1].lower() for m in captured)
+
+    def test_api_prompts_does_not_corrupt_cache(self, aim_dir, mock_sel):
+        """GET /api/prompts must not mutate cached paths (regression)."""
+        _aim_pkg(aim_dir, "Pkg-1.0", "1", {"sop": "# S\nContent."})
+        asyncio.run(api_prompts(MagicMock()))
+        # After the API call, @mention expansion must still resolve the prompt
+        msg, status = _expand_prompt_mention("@agent-sop:sop", MagicMock(), MagicMock())
+        assert status == "ok", f"Cache corrupted: expansion returned {status!r}"

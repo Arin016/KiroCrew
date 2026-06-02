@@ -1,0 +1,81 @@
+# KiroClaw Documentation
+
+KiroClaw is a personal, autonomous AI agent that runs locally on your machine.
+It's powered by an agent backend (claude-agent-acp by default; Claude Code CLI
+or kiro-cli optional) and connects to tools over the Model Context Protocol
+(MCP).
+
+## Quick Start
+
+**Install the backend (pip) and dashboard (npm):**
+
+```bash
+pip install kiro-claw
+cd website && npm install && npm run build
+```
+
+**Then start the gateway:**
+
+```bash
+kiroclaw gateway
+```
+
+Then open `http://localhost:7777`.
+
+See [Getting Started](getting-started.md) for the full setup, including the
+agent backend and Slack credentials.
+
+## Core Capabilities
+
+| Capability | Description |
+|------------|-------------|
+| [Cron Jobs](cron-and-scheduling.md) | Schedule recurring tasks — "every weekday at 9am give me a pipeline briefing" |
+| [Subagents](subagents.md) | Spawn parallel background workers for fan-out research and multi-package work |
+| [Memory](memory-and-learning.md) | Persistent preferences, project context, and learned corrections across sessions |
+| [Task Runner](task-runner.md) | Autonomous multi-step execution from spec files — hand it a task, walk away |
+| [Dashboard](dashboard.md) | React web UI with multi-session chat, memory management, and live system metrics |
+| [Slack](slack-integration.md) | DM-based interaction with tool approval, streaming, and channel monitoring |
+| [Agents](agents.md) | Switch between specialized agents per conversation, thread, or cron job |
+| [Skills](skills.md) | Drop-in markdown knowledge packs for domain-specific workflows |
+
+### Additional Features
+
+| Feature | Description |
+|---------|-------------|
+| App Kit | Build and distribute apps that run inside KiroClaw (App Store, SDK, manifest) |
+| Snapshot & Restore | Portable backup/restore of KiroClaw state for machine migration |
+| Eval Harness | Multi-session evaluation framework for testing agent behavior |
+| Autonudge | Reactive same-session self-nudge for autonomous goal loops |
+| Warm Pool | Pre-warm agent sessions for instant response |
+| Cooperative Stop | Soft-stop with cancel ack before hard kill (preserves session state) |
+| Streaming STT | Live speech-to-text partials in dashboard input (Whisper local; AWS Transcribe optional) |
+| Memory Modes | Per-session persistent, incognito, or temporary memory |
+| TUI | Terminal UI with Ink (React for CLI) — alternative to web dashboard |
+
+## Guides
+
+- [Getting Started](getting-started.md) — Installation, first-time setup, background running
+- [Configuration](configuration.md) — Config file reference, environment variables, sandbox modes
+- [Use Cases](use-cases.md) — Real-world workflows from the community
+- [Troubleshooting](troubleshooting.md) — Common issues and fixes
+
+## Security
+
+- OS-level sandbox with tiered modes (auto/strict/off)
+- Credential redaction across all LLM output paths
+- HMAC-SHA256 signed, IP-pinned dashboard tokens
+- Denied-command patterns with audit logging
+- Prompt-injection credential exfiltration protection
+- Multi-user Slack access disabled (owner-only)
+
+## Contributing
+
+- See `CONTRIBUTING.md` in the repository root for contribution guidelines
+- File issues and feature requests on the project's GitHub repository
+  (https://github.com/YOUR_ORG/kiroclaw)
+
+## Links
+
+- [Repository](https://github.com/YOUR_ORG/kiroclaw)
+- [Getting Started](getting-started.md)
+- [Configuration](configuration.md)

@@ -1,0 +1,467 @@
+# Rules for AI Assistants
+
+## Specification Management
+
+When working on code changes:
+- MUST read the relevant module specification from `docs/system-specs/modules/` before making changes
+- SHOULD read relevant shared pattern specifications from `docs/system-specs/common/`
+- MUST update the appropriate system specification when making changes that impact APIs, schemas, or documented behavior
+- MUST include specification updates in the same commit as code changes
+- MUST NOT create additional markdown files unless explicitly instructed
+
+When creating task specifications:
+- MUST store in `docs/task-specs/YYYY/MM/${task-id}/`
+- MUST ignore `docs/task-specs/` for current system context (archived only)
+
+## Development Workflow
+
+1. Read the relevant spec in `docs/system-specs/modules/` first
+2. Update specifications when making changes that impact documented behavior
+3. Format, lint, type-check, and test before committing (see Build Commands below)
+4. Commit with well-formed message (see Git Conventions below)
+
+### Dev Mode
+
+Set `KIROCLAW_HOME=.kiroclaw-dev` to use an isolated data directory in the repo root (gitignored). This keeps dev data (contacts, lessons, config) separate from your real `~/.kiroclaw`. Data files are visible in the IDE for easy inspection.
+
+Set `KIROCLAW_PORT=6777` so dev and production gateways can run side by side. Pass the same env var to `./dev-frontend.sh` so the Vite proxy points at the dev backend.
+
+To authenticate the Vite dev server (port 3000) against the dev gateway (port 6777):
+
+1. Generate a token for the dev instance: `kiroclaw token --port 6777`
+2. Take the URL, replace `:6777` with `:3000` → `http://localhost:3000?token=xxx`
+3. The Vite dev server proxies the token to the backend, sets the auth cookie, and redirects to `/`
+
+### Build Commands
+
+The backend is a standard Python package (pip/setuptools). Run the full quality cycle before committing:
+
+```bash
+# 1. Auto-format
+black src/kiro_claw test
+isort src/kiro_claw test
+
+# 2. Lint + type-check
+flake8 src/kiro_claw test
+mypy src/kiro_claw
+
+# 3. Test
+python -m pytest
+```
+
+If all four pass cleanly, you're done. Fix any reported errors (flake8, mypy, pytest) and re-run.
+
+For the frontend (in `website/`):
+
+```bash
+npm run build    # production bundle into src/kiro_claw/static/dist/
+npm run test     # vitest unit/integration tests
+```
+
+### Common Lint/Type Pitfalls
+
+- Flake8 enforces **no unused imports** (F401) — remove any import not directly used in the file
+- Flake8 enforces **pep8-naming** (N806) — variables inside functions must be lowercase (use `mock_client` not `MockClient`)
+- Flake8 enforces **W504** — line break before binary operator, not after
+- mypy requires **type annotations** on untyped collections (e.g. `output: list[str] = []`)
+- Use `# type: ignore[arg-type]` sparingly for third-party API mismatches
+- `asyncio: mode=strict` — every async test MUST have `@pytest.mark.asyncio`
+
+### Selective Test Execution (testmon)
+
+For faster iteration during development, use `pytest-testmon` to run only tests affected by changed files instead of the full suite. This uses dependency tracking to skip unaffected tests.
+
+```bash
+# Fast iteration — only tests affected by your changes (no coverage overhead):
+python -m pytest --testmon --override-ini="addopts=-v --ignore=build/private --durations=5 --color=yes" -q 2>&1 | tail -25
+
+# Only previously failed tests:
+python -m pytest --lf --override-ini="addopts=-v --ignore=build/private --durations=5 --color=yes" -q
+
+# Specific test file only:
+python -m pytest test/test_dashboard_chat.py --override-ini="addopts=-v --ignore=build/private --durations=5 --color=yes" -q
+
+# Specific test by keyword:
+python -m pytest -k "flush_segment" --override-ini="addopts=-v --ignore=build/private --durations=5 --color=yes" -q
+```
+
+**When to use which:**
+
+| Scenario | Command |
+|----------|---------|
+| Iterating on a single task | `python -m pytest --testmon ...` |
+| Debugging a specific failure | `python -m pytest --lf ...` or `-k "test_name"` |
+| Checkpoint / pre-commit | `black && isort && flake8 && mypy && python -m pytest` |
+
+**Note:** The `--override-ini` flag is needed because `setup.cfg` hardcodes `--cov` flags in `addopts` which conflict with selective runs. `--cov` enables coverage measurement and adds significant overhead — skip it during iteration.
+
+## Frontend Integration Tests
+
+Frontend code lives in the `website/` directory.
+See `website/README.md` for integration test (MSW) and E2E test (Playwright) instructions.
+All integration tests MUST pass before committing frontend changes.
+
+## Git Conventions
+
+- Do NOT proactively `git commit` or `git push` — only when explicitly requested by the user
+- Do NOT run `git push` unless the user explicitly says to push. Committing is OK when asked, but pushing requires separate explicit approval.
+
+Commit messages follow this format:
+
+```
+<type>: <summary> (max 72 chars)
+
+<body — explain what and why, not how>
+```
+
+Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`
+
+Examples:
+```
+feat: add ACP client for kiro-cli JSON-RPC communication
+fix: handle EOF in ACP message reader
+docs: add system specs for acp-client module
+test: add unit tests for config loader
+refactor: extract permission handling from prompt reader
+```
+
+Rules:
+- Summary line: imperative mood, lowercase, no period
+- Body: wrap at 72 chars, explain motivation
+- One logical change per commit
+
+### Release Changelog
+
+When writing a release entry in `CHANGELOG.md`:
+
+1. **Header**: `## [X.Y.Z] — YYYY-MM-DD`
+2. **Sections** in order: Features, Fixes, Refactors, Docs
+3. **Features** — bold title + plain-language description with use cases. Explain *why* it matters, not implementation details
+4. **Fixes / Refactors / Docs** — one-line bullets, no bold, no implementation details
+5. **Contributors** — `Full Name (github-handle)` format
+6. Keep it scannable — a reader should understand the release in 30 seconds
+
+Example:
+```markdown
+## [1.0.2] — 2026-03-20
+
+### Features
+
+- **Inline markdown viewer** — Click file paths in chat to open a side panel with edit/preview/save. Useful for reviewing configs or editing code without leaving the chat.
+
+### Fixes
+
+- `kiroclaw learn` CLI now reads from vector store instead of only JSONL
+- IME composition: CJK Enter no longer triggers message send
+
+### Contributors
+
+Jane Doe (janedoe), John Smith (jsmith)
+```
+
+## Code Style
+
+| Rule | Requirement |
+|------|-------------|
+| Line length | 100 chars (black configured) |
+| Python version | ≥ 3.9 (`from __future__ import annotations` for type hints) |
+| Imports | Use `import logging` + `logger = logging.getLogger(__name__)` |
+| Error handling | Custom exceptions in `acp/client.py`; return error strings at tool boundaries |
+| Async | Use `asyncio` throughout; `async def` for all I/O operations |
+| Dataclasses | Use `@dataclass` for data containers |
+| Constants | No hardcoded strings/values in business logic. Protocol strings in `acp/types.py`, timeouts in `acp/client.py`, UX strings in `slack/handler.py`, credential keys in `config/loader.py`, hook results in `hooks.py`, memory paths in `memory.py`, lesson limits in `learn.py`, cron limits in `cron.py`, MCP protocol version in `mcp_cron.py`, MCP protocol version in `mcp_core.py`, dashboard port in `dashboard.py`, built-in skills in `skills/*/SKILL.md`, provider event kinds in `providers/base.py`, Bedrock defaults in `providers/bedrock.py`, session limits in `history.py`, context budgets in `context.py` (preferences 1k, projects 2k, history 6k, lessons 1k, conversation 8k, cross-tab 2k, per-message 800, total 50k), task states in `task.py`, heartbeat intervals in `heartbeat.py`, subagent limits in `subagent.py`, agent config in `agents/defaults.json`, shutdown signal in `__init__.py`, slot message cap (5000) in `dashboard/state.py`, JSONL rotation (2MB) in `history.py`, usage cache (600s) in `dashboard/handlers.py`, webhook hook limits (max 6 concurrent, 50KB message, 600s default / 3600s max timeout) in `dashboard/handlers.py`, embed cache (128) in `embeddings.py` |
+| Naming | Module-level constants: `UPPER_SNAKE_CASE`. Private constants: `_UPPER_SNAKE_CASE` |
+| Icons | **Never use emojis in the UI.** Use `lucide-react` components with `className="lucide-inline"`. See `website/AGENTS.md` for full icon conventions. |
+
+## Test Patterns
+
+- Test files: `test/test_<module>.py`
+- Use `pytest` with `pytest-asyncio` for async tests
+- Use `tmp_path` fixture for filesystem tests
+- Use `monkeypatch` for config overrides
+- Mock external processes (kiro-cli) — never spawn real processes in tests
+- Group related tests in classes: `class TestFeatureName:`
+
+## Architecture Principles
+
+- LLMProvider ABC is the interface for all LLM backends (`providers/base.py`)
+- ACP provider (default) wraps kiro-cli or claude-agent-acp (JSON-RPC 2.0 over stdio) — full tool execution, session management, and auto-compaction. Backend selection:
+  - `"acp"` (default): spawns `kiro-cli acp --agent <name>`
+  - `"claude_code"` (legacy): spawns `claude-agent-acp` via AcpProvider with `acp_backend="claude"`
+- Bedrock provider is text-only Q&A (no tools) via `converse_stream()`
+- Config-driven provider selection: `"provider": "acp"` (default, kiro-cli), `"claude_code"` (claude-agent-acp adapter), or `"bedrock"`
+- Tool permissions auto-approved in phase 1; interactive approval in phase 3
+- Config loaded from `~/.kiroclaw/config.json` with dataclass defaults
+- CLI uses `argparse` (stdlib only, no external deps)
+- Minimal dependencies — prefer stdlib over third-party packages
+
+### New Modules (since v1.1.0)
+
+| Module | Purpose |
+|--------|---------|
+| `autonudge.py` | Reactive same-session self-nudge service |
+| `snapshot.py` | Portable snapshot and restore for KiroClaw state |
+| `vector_memory.py` | Vector-based semantic memory with FAISS |
+| `voice_reply.py` | Voice reply synthesis |
+| `atomic_write.py` | Atomic file write utilities |
+| `constants.py` | Shared constants |
+| `llm_helpers.py` | LLM helper utilities |
+| `git_coord.py` | Git coordination utilities |
+| `apps/` | App Kit platform (manifest, manager, registry, routes, scaffold, backend, bridges, permissions, dependencies, dependency_ledger, version) |
+| `eval/` | Multi-session eval harness (runner, judge, scenario) |
+| `channel.py` | Persistent agent channels for multi-agent collaboration |
+| `conductor_skill.py` | Agent delegation conductor |
+| `context_management.py` | Conductor context isolation for multi-agent sessions |
+| `sync_bridge.py` | Sync-to-async bridge for MCP tools |
+| `agent_metadata.py` | Agent metadata extraction |
+| `session_workspace.py` | Session workspace management |
+| `mcp_shared.py` | Shared MCP utilities |
+| `transcribe.py` | Voice memo STT (whisper or optional cloud transcription) |
+| `slack/files.py` | Slack file/image/voice attachment handling |
+| `slack/events.py` | Slack event dispatch (Home Tab, file handling, display names) |
+| `slack/blocks.py` | Block Kit message builder |
+| `slack/client.py` | Slack client abstraction (`SlackClientOps` ABC + `RealSlackClient`) |
+| `slack/interactions.py` | Slack interactive component handling |
+| `config/schema.py` | JSON Schema generation from config dataclasses |
+| `aidlc/` | Project management models (Activity, Comment) for dashboard |
+| `task_executor.py` | Task execution engine (extracted from taskrunner) |
+| `task_models.py` | Task data models (extracted from taskrunner) |
+| `task_planner.py` | Task planning engine (extracted from taskrunner) |
+| `task_reporter.py` | Task reporting (extracted from taskrunner) |
+| `dashboard/handlers/` | API handlers split into focused modules (core, sessions, messaging, files, cron, memory, agents, mcp, hooks, prompts, autonudge, taskrunner, updates, usage) |
+| `dashboard/stt_stream.py` | Streaming speech-to-text WebSocket |
+| `dashboard/_types.py` | Dashboard type definitions |
+| `validation.py` | Input validation for cron, config, user actions |
+| `embeddings.py` | Embedding provider with LRU cache (128 entries) |
+| `providers/claude_code.py` | Claude Code CLI provider — legacy (per_session + ephemeral modes) |
+| `cc_agent.py` | Claude Code .mcp.json generation and agent config |
+| `session_map.py` | Session key → CWD/provider persistence (split from session.py) |
+| `session_pid.py` | PID tracking for ACP processes (split from session.py) |
+| `optimizer.py` | Native prompt optimizer (Cmd+Shift+Enter) |
+| `subagent_persistence.py` | Folder-per-agent persistence for orphan recovery |
+| `doc_parser.py` | Stdlib-only .docx/.pdf/.pptx text extraction |
+| `seed.py` | Gateway seed fixtures for reproducible testing |
+| `cli_chat.py` | CLI chat commands (split from cli.py) |
+| `cli_commands.py` | CLI utility commands (split from cli.py) |
+| `cli_config.py` | CLI config commands (split from cli.py) |
+| `cli_doctor.py` | CLI doctor diagnostics (split from cli.py) |
+| `cli_server.py` | CLI gateway/server commands (split from cli.py) |
+| `cli_setup.py` | CLI setup wizard (split from cli.py) |
+| `chat_runner.py` | Chat execution logic (split from chat.py) |
+| `chat_context.py` | Chat context assembly (split from chat.py) |
+| `chat_tools.py` | Chat tool handling (split from chat.py) |
+
+### Frontend Architecture
+
+React + TypeScript SPA in the `website/` directory. Built assets are bundled into `src/kiro_claw/static/dist/`.
+
+**All frontend conventions (icons, components, layout, styling, data fetching) are documented in `website/AGENTS.md`.** Refer to that file when making frontend changes.
+
+### Platform Support
+
+KiroClaw runs on macOS and Linux (x86_64 and ARM/Graviton). Windows is not supported.
+
+**All code changes MUST be verified for macOS + Linux compatibility:**
+- **Backend**: macOS, Linux — file paths, process management, signal handling
+- **Frontend**: Chrome, Firefox, Safari, Edge — use standard Web APIs only, guard browser-specific APIs (e.g. `typeof Notification !== 'undefined'`)
+
+Platform-specific patterns:
+
+- **Process management** (`acp/client.py`): uses `start_new_session` + `killpg(SIGTERM/SIGKILL)`
+- **Signal handling** (`slack/gateway.py`): uses `loop.add_signal_handler()`
+- **File locking** (`cron.py`): uses `fcntl.flock()`
+- **System metrics** (`handlers_system.py`): macOS uses `sysctl`/`vm_stat`; Linux uses `/proc/*`
+- **Frontend build** (`setup.py`): uses `/bin/bash build-frontend.sh`
+- **Launcher scripts**: `bin/kiroclaw` (POSIX sh)
+- **Setup scripts**: `setup.sh` (bash/zsh)
+
+### Skills & MCP Tools for the LLM
+
+KiroClaw exposes capabilities to the LLM via two mechanisms:
+
+1. **MCP tools** (native): kiro-cli calls them directly with structured JSON params — **preferred for all LLM-facing operations**
+   - `kiroclaw-cron` MCP server: `cron_list`, `cron_add`, `cron_update`, `cron_remove`, `cron_remove_all`, `cron_pause`, `cron_resume`, `cron_trigger`
+   - `kiroclaw-core` MCP server: `spawn_run`, `spawn_list`, `spawn_status`, `learn_add`, `learn_list`, `learn_remove`, `task_run`, `wait`, `register_hook`, `send_message`, `local_knowledge_search`
+   - `playwright` MCP server (`@playwright/mcp`): `browser_navigate`, `browser_click`, `browser_snapshot`, `browser_take_screenshot`, `browser_fill_form`, `browser_type`, `browser_press_key`, `browser_evaluate`, `browser_hover`, `browser_drag`, `browser_select_option`, `browser_tabs`, `browser_close`, `browser_wait_for`, `browser_resize`
+   - `slack-mcp` (mcpServers): Slack integration
+   - Configured in `agents/defaults.json` → `mcpServers` → installed to `kiroclaw.json`
+   - `kiroclaw-cron` and `kiroclaw-core` are managed MCP servers in `agent.py:_MANAGED_MCP_SERVERS` — auto-registered, refreshed preserving user customizations
+   - MCP discovery (`mcp_discovery.py`): on-demand only — users trigger from dashboard "Discover & Sync" button
+
+2. **Skills** (`skills/*/SKILL.md`): on-demand knowledge files for specialized workflows
+   - Supports nested directories (e.g. `skills/utils/tiny-url/SKILL.md`)
+   - Descriptions loaded at session start; full content loaded when the LLM reads the file
+   - Skills with `always: true` in frontmatter have full content injected every session
+   - Triggers support `!` prefix for negative matching (e.g. `triggers: search, code, !test` excludes when "test" appears)
+   - Skills with auxiliary files (scripts, assets) include `dir` path so the LLM can `cd` and run them
+
+#### IMPORTANT: MCP-First Rule
+
+**When adding a new LLM-facing CLI command, MUST also add it as an MCP tool.**
+
+kiro-cli reliably calls MCP tools but may refuse to run CLI commands via bash.
+MCP tools are defined in:
+- `mcp_cron.py` — cron scheduling tools
+- `mcp_core.py` — spawn, learn, task tools
+- External MCP servers — configured in `agents/defaults.json` → `mcpServers`
+
+The CLI commands (`kiroclaw spawn/learn/cron/run`) remain for human use but the LLM
+should always use the MCP tool equivalents.
+
+| CLI Command | MCP Tool | MCP Server |
+|-------------|----------|------------|
+| `kiroclaw cron add` | `cron_add` | kiroclaw-cron |
+| `kiroclaw cron list` | `cron_list` | kiroclaw-cron |
+| `kiroclaw cron remove` | `cron_remove` | kiroclaw-cron |
+| `kiroclaw cron remove-all` | `cron_remove_all` | kiroclaw-cron |
+| `kiroclaw cron pause` | `cron_pause` | kiroclaw-cron |
+| `kiroclaw cron resume` | `cron_resume` | kiroclaw-cron |
+| `kiroclaw cron trigger` | `cron_trigger` | kiroclaw-cron |
+| `kiroclaw cron update` | `cron_update` | kiroclaw-cron |
+| `kiroclaw spawn run` | `spawn_run` | kiroclaw-core |
+| `kiroclaw spawn list` | `spawn_list` | kiroclaw-core |
+| — | `spawn_status` | kiroclaw-core |
+| `kiroclaw learn add` | `learn_add` | kiroclaw-core |
+| `kiroclaw learn list` | `learn_list` | kiroclaw-core |
+| `kiroclaw learn remove` | `learn_remove` | kiroclaw-core |
+| `kiroclaw run TASK.md` | `task_run` | kiroclaw-core |
+| — | `wait` | kiroclaw-core |
+| — | `register_hook` | kiroclaw-core |
+| — | `send_message` | kiroclaw-core |
+| — | `local_knowledge_search` | kiroclaw-core |
+| — | `file_send` | kiroclaw-core |
+| — | `autonudge_stop` | kiroclaw-core |
+| — | `browser_navigate` | playwright |
+| — | `browser_click` | playwright |
+| — | `browser_snapshot` | playwright |
+| — | `browser_take_screenshot` | playwright |
+| — | `browser_fill_form` | playwright |
+| — | `browser_type` | playwright |
+| — | `browser_evaluate` | playwright |
+| — | `browser_close` | playwright |
+
+- **Handler keywords**: only for instant user-typed commands with no LLM round-trip (e.g. `cron list`, `spawn list`)
+- **Do NOT** add regex to match NL variants — the LLM handles NL interpretation
+
+#### Project-Level Configuration
+
+Agent config and skills live in top-level project directories for easy editing without code changes:
+
+```
+agents/                  ← agent config (edit without rebuilding)
+├── defaults.json        ← base agent config (tools, model, permissions)
+├── prompt.md            ← system prompt
+└── README.md
+
+skills/                  ← on-demand skill definitions (edit without rebuilding)
+├── utils/tiny-url/SKILL.md       ← nested directories supported
+└── README.md
+```
+
+- `KIROCLAW_PROJECT_DIR` env var points to the project root
+- Auto-detected from CWD at CLI startup (walks up looking for `agents/` + `skills/`)
+- Saved to `~/.kiroclaw/project_dir` during `kiroclaw setup` so it works from any directory
+- Falls back to bundled copies in the Python package if project dir not found
+
+#### Skill Loading
+
+1. **Always-on skills**: skills with `always: true` in YAML frontmatter have full content injected into every new session context
+2. **On-demand skills**: skill summaries (name + description + dir path) are in session context. Matched via word-overlap scoring with negative trigger support — skills are loaded when message words overlap with trigger phrases and no `!`-prefixed negative trigger matches.
+3. **Nested directories**: skills can be organized in subdirectories (e.g. `skills/utils/tiny-url/`). The skill name is the relative path.
+
+#### Example Flows
+
+- User says "report system status every 5 minutes" → LLM calls `cron_add` MCP tool directly → CronService writes to crons.json → gateway picks it up
+- User says "poll a status endpoint every 5 min, don't carry context between runs" → LLM calls `cron_add` with `persistent_session: false` → each run opens a fresh session, no `last_result` prefix, session context cannot accumulate.
+- User says "remember to always use X" → LLM calls `learn_add` MCP tool directly → saved to lessons.jsonl
+- User says "run 4Sum in 6 languages in parallel" → LLM calls `spawn_run` MCP tool 6 times → gateway spawns subagents
+
+## Injected Messages
+
+Messages from automated sources may appear in your conversation. These are **not typed by the user** — treat them as automated input and respond accordingly.
+
+### Cron notifications
+```
+[Cron notification from "job name"]
+<content from the cron agent>
+[End of cron notification]
+```
+A cron job sent this via `send_message(session="origin")`. This appears as an `inject` role message (⏰ icon) in the dashboard chat and triggers an agent turn. The session should process it automatically — e.g., if a cron reports a build failure, fix it. The user may not be present.
+
+### Subagent completions
+```
+[Subagent completion event]
+Agent <id> completed ✅
+<result>
+```
+A background subagent finished its task. This is injected directly into the LLM context (not visible in the dashboard chat). Synthesize the result into your response — your reply is what the user sees.
+
+### Subagent delivery failures
+```
+[Subagent completion event]
+Agent <id> ❌ delivery timed out
+Task: <task preview>
+The agent finished but result delivery timed out.
+Result saved at: <path>
+Use the read tool to retrieve it if needed.
+```
+The subagent completed but injection timed out. Result is on disk — use `read` tool if needed.
+
+## File Attachments
+
+Users attach files via `@filename` syntax in chat input. The file picker searches the active project directory.
+
+- `@relative/path` tokens resolved to full paths
+- Image files rendered inline as markdown `![image](path)`
+- Non-image files sent as `[attached_file N] /full/path`
+- The `[PROJECT]` context entry tells you which directory is active
+
+## Widget Protocol
+
+Widgets rendered via `<mcwidget title="Title">HTML</mcwidget>` now support bidirectional communication:
+
+- Widgets can emit `data-action` events back to the agent session
+- Use `window.parent.postMessage({type: 'kiroclaw:action', action: 'name', payload: {...}}, '*')` from widget JS
+- The agent receives these as `[Widget action event]` messages in the conversation
+- Tailwind CSS and theme variables (`var(--bg)`, `var(--text)`, etc.) are available in all widgets
+
+## Service Management
+
+KiroClaw can run as a system service:
+
+```bash
+kiroclaw service install    # systemd (Linux) or launchd (macOS)
+kiroclaw service status
+kiroclaw service uninstall
+```
+
+## Steering Files
+
+Workspace `.kiro/steering` files are automatically loaded into kiro-cli sessions. Place project-specific rules in `.kiro/steering/*.md` and they apply without manual configuration.
+
+## App SDK Hooks
+
+Apps can register gateway-level hooks via the App SDK:
+
+- Gateway hooks fire for lifecycle events (session start/end, tool call, message)
+- `ChatEmbed` component lets apps embed a full chat interface within their UI
+
+## Testing Conventions
+
+- Frontend: jscpd duplication check — copy-paste code fails the build
+- Frontend: vitest coverage emitted as cobertura XML
+- Backend: pytest-timeout enforced, xdist worksteal mode for parallel execution
+- Backend: security-critical modules require 80%+ coverage
+
+## Gateway Test Harness
+
+For integration tests and eval harnesses, use composable CLI flags:
+
+```bash
+kiroclaw gateway --test-mode                    # bundle: ephemeral port + json-ready + reads approval
+kiroclaw gateway --port auto --json-ready       # OS-assigned port, prints KIROCLAW_READY:{port,token,pid,home}
+kiroclaw gateway --approval reads               # auto-approve read-only tools
+kiroclaw gateway --approval yolo                # auto-approve ALL tools (requires KIROCLAW_HOME != ~/.kiroclaw)
+```
+
+Safety: `--approval yolo` refuses to start unless `KIROCLAW_HOME` is explicitly set to a non-default path.

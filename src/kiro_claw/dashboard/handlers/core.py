@@ -1,0 +1,979 @@
+"""Core handlers — page serving, branding, STT, config, SEL, auth, session workspace."""
+
+from __future__ import annotations
+
+import asyncio
+import hmac
+import json
+import logging
+import math
+import os
+import shlex
+import shutil
+from pathlib import Path
+
+from aiohttp import web
+from aiohttp.client_exceptions import ClientConnectionResetError
+
+import kiro_claw.validation as _validation_mod
+from kiro_claw.agent import build_agent_config
+from kiro_claw.config.loader import (
+    _VALID_STT_PROVIDERS,
+    KiroClawConfig,
+)
+from kiro_claw.context_management import RESULT_FILE_MAX_BYTES
+from kiro_claw.dashboard.state import DashboardState
+from kiro_claw.dashboard.token_auth import MAX_SESSION_TTL_SECS, generate_token, parse_duration
+from kiro_claw.security import SUSPICIOUS_BASH_PATTERNS
+from kiro_claw.transcribe import ensure_ffmpeg_in_path
+
+logger = logging.getLogger(__name__)
+
+_STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
+_DIST_DIR = _STATIC_DIR / "dist"
+_HTML_PATH = _STATIC_DIR / "dashboard.html"
+_SSE_INTERVAL_SECS = 5
+
+
+def _sel():
+    """Late-binding _sel() for test monkeypatch compatibility."""
+    import kiro_claw.dashboard.handlers as _pkg  # noqa: F811 — circular import
+
+    return _pkg.sel()
+
+
+# ── Page ──
+
+
+async def index(request: web.Request) -> web.Response:
+    """Serve the dashboard HTML — prefer React build if available."""
+    react_index = _DIST_DIR / "index.html"
+    path = react_index if react_index.is_file() else _HTML_PATH
+    try:
+        html = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        html = "<h1>Dashboard HTML not found</h1>"
+    return web.Response(text=html, content_type="text/html")
+
+
+async def logo(request: web.Request) -> web.StreamResponse:
+    """Serve the logo — prefer custom avatar from config, fall back to default."""
+    import kiro_claw.dashboard.handlers as _h  # noqa: F811
+    from kiro_claw.hooks import validate_file_path  # noqa: F811
+
+    cfg = _h.KiroClawConfig.load()
+    if cfg.dashboard.avatar:
+        if _h.is_sensitive_path(cfg.dashboard.avatar):
+            return web.Response(status=404)
+        validated = validate_file_path(cfg.dashboard.avatar)
+        if validated and Path(validated).is_file():
+            return web.FileResponse(validated)
+    path = _h._STATIC_DIR / "kiroclaw-logo.png"
+    if path.is_file():
+        return web.FileResponse(path)
+    return web.Response(status=404)
+
+
+async def api_branding(request: web.Request) -> web.Response:
+    """GET /api/dashboard/branding — bot name and avatar config."""
+    cfg = KiroClawConfig.load()
+    return web.json_response(
+        {
+            "bot_name": cfg.dashboard.bot_name or "KiroClaw",
+            "avatar": "/logo.png",
+        }
+    )
+
+
+async def pwa_file(request: web.Request) -> web.StreamResponse:
+    """Serve PWA root files (manifest, service worker, icons) from dist/."""
+    name = request.match_info["name"]
+    path = _DIST_DIR / name
+    # Resolve both sides so a symlinked _DIST_DIR (dev-backend.sh points it
+    # at KiroClawWebsite/dist) still passes the traversal guard.
+    if path.is_file() and _DIST_DIR.resolve() in path.resolve().parents:
+        return web.FileResponse(path)
+    raise web.HTTPNotFound()
+
+
+# ── STT (Speech-to-Text) ──
+
+
+_STT_MODEL_SIZES: dict[str, str] = {
+    "turbo": "~1.6 GB",
+}
+
+
+# Common BCP-47 language codes surfaced in the Chat Settings STT picker.
+# The handler accepts any string value on PUT — this list only drives the UI
+# dropdown. AWS Transcribe supports many more; advanced users can edit
+# config.json directly.
+_STT_LANGUAGE_CODES: tuple[str, ...] = (
+    "en-US",
+    "en-GB",
+    "fr-FR",
+    "de-DE",
+    "es-ES",
+    "es-US",
+    "it-IT",
+    "pt-BR",
+    "ja-JP",
+    "zh-CN",
+)
+
+
+_stt_install_status: dict[str, str] = {"step": "idle", "detail": "", "error": ""}
+
+
+async def api_stt_config(request: web.Request) -> web.Response:
+    """GET/PUT /api/config/stt — speech-to-text settings."""
+    from kiro_claw.config.loader import KiroClawConfig, config_path  # noqa: F811
+
+    cfg = KiroClawConfig.load()
+    if request.method == "PUT":
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        path = config_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except Exception:
+            data = {}
+        stt = data.setdefault("stt", {})
+        if "enabled" in body:
+            stt["enabled"] = bool(body["enabled"])
+        if "provider" in body and body["provider"] in _VALID_STT_PROVIDERS:
+            stt["provider"] = body["provider"]
+        if "model" in body and body["model"] in _STT_MODEL_SIZES:
+            stt["model"] = body["model"]
+        if "transcribe_region" in body and isinstance(body["transcribe_region"], str):
+            stt["transcribe_region"] = body["transcribe_region"]
+        if "transcribe_profile" in body and isinstance(body["transcribe_profile"], str):
+            stt["transcribe_profile"] = body["transcribe_profile"]
+        if "language_code" in body and isinstance(body["language_code"], str):
+            stt["language_code"] = body["language_code"]
+        if "streaming" in body and isinstance(body["streaming"], bool):
+            stt["streaming"] = body["streaming"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        cfg = KiroClawConfig.load()
+
+    from kiro_claw.transcribe import is_available as _stt_available  # noqa: F811
+
+    provider = cfg.stt.provider
+    available = _stt_available(cfg.stt)
+    return web.json_response(
+        {
+            "enabled": cfg.stt.enabled,
+            "provider": provider,
+            "model": cfg.stt.model,
+            "available": available,
+            "streaming": cfg.stt.streaming,
+            "transcribe_region": cfg.stt.transcribe_region,
+            "transcribe_profile": cfg.stt.transcribe_profile,
+            "language_code": cfg.stt.language_code,
+            "models": _STT_MODEL_SIZES,
+            "language_codes": list(_STT_LANGUAGE_CODES),
+            "install_step": _stt_install_status["step"],
+            "install_detail": _stt_install_status["detail"],
+            "install_error": _stt_install_status["error"],
+            "prereqs": _stt_prereq_commands(),
+        }
+    )
+
+
+def _stt_prereq_commands() -> list[str]:
+    """Return shell commands the user must run manually (need sudo/GUI)."""
+    import platform  # noqa: F811
+
+    ensure_ffmpeg_in_path()
+
+    system = platform.system()
+    cmds: list[str] = []
+    has_ffmpeg = shutil.which("ffmpeg") is not None
+    has_python = _find_suitable_python() is not None
+
+    if system == "Darwin":
+        import subprocess as _sp  # noqa: F811
+
+        try:
+            _sp.run(["/usr/bin/xcrun", "--show-sdk-path"], capture_output=True, timeout=5)
+        except Exception:
+            cmds.append("sudo xcodebuild -license accept")
+        if not shutil.which("brew"):
+            cmds.append(
+                '/bin/bash -c "$(curl -fsSL'
+                ' https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+            )
+        pkgs: list[str] = []
+        if not has_python:
+            pkgs.append("python@3.12")
+        if not has_ffmpeg:
+            pkgs.append("ffmpeg")
+        if pkgs:
+            cmds.append("brew install " + " ".join(pkgs))
+    else:
+        is_al2023 = _is_al2023()
+        if not has_python:
+            if shutil.which("apt-get"):
+                cmds.append("sudo apt-get install -y python3 python3-pip python3-dev gcc g++")
+            elif is_al2023:
+                cmds.append(
+                    "sudo dnf install -y python3.11 python3.11-pip python3.11-devel gcc gcc-c++"
+                )
+            else:
+                # AL2: python3.7 is too old for whisper; Docker mode handles it
+                pass
+        if not has_ffmpeg:
+            if shutil.which("apt-get"):
+                cmds.append("sudo apt-get install -y ffmpeg")
+            else:
+                # AL2023/AL2: build minimal ffmpeg from source (official recommendation)
+                proj = os.environ.get("KIROCLAW_PROJECT_DIR", "")
+                script = os.path.join(proj, "scripts", "build-ffmpeg.sh") if proj else ""
+                if script and os.path.isfile(script):
+                    cmds.append(
+                        "sudo dnf install -y gcc make nasm diffutils 2>/dev/null"
+                        " || sudo yum install -y gcc make nasm diffutils"
+                    )
+                    cmds.append(f"bash {shlex.quote(script)}")
+                else:
+                    cmds.append("echo 'Build ffmpeg from source:" " https://ffmpeg.org/releases/'")
+    return cmds
+
+
+def _is_al2023() -> bool:
+    """Return True if running on Amazon Linux 2023."""
+    try:
+        return "2023" in Path("/etc/system-release").read_text(encoding="utf-8")
+    except Exception:
+        return False
+
+
+def _find_suitable_python() -> str | None:
+    """Find a non-free-threaded python3 >= 3.10 with pip."""
+    import subprocess as _sp  # noqa: F811
+
+    for name in ("python3.12", "python3.11", "python3", "python3.13", "python3.10"):
+        p = shutil.which(name)
+        if not p:
+            continue
+        try:
+            ver = _sp.check_output(
+                [p, "-c", "import sys; print(sys.version)"], timeout=5, text=True
+            )
+            if "free-threading" in ver:
+                continue
+            _sp.check_output(
+                [p, "-m", "pip", "--version"],
+                timeout=5,
+                text=True,
+                stderr=_sp.DEVNULL,
+            )
+            return p
+        except Exception:
+            continue
+    return None
+
+
+async def api_stt_install(request: web.Request) -> web.Response:
+    """POST /api/stt/install — install openai-whisper + ffmpeg."""
+    global _stt_install_status
+    if _stt_install_status["step"] not in ("idle", "done", "error"):
+        return web.json_response(
+            {"error": f"Install already in progress: {_stt_install_status['step']}"}, status=409
+        )
+
+    _stt_install_status = {"step": "starting", "detail": "", "error": ""}
+
+    # Native install via shell script
+    script = _build_stt_install_script()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "bash",
+            "-c",
+            script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        # Read output line by line to update progress
+        lines: list[str] = []
+        assert proc.stdout is not None
+        while True:
+            line_bytes = await asyncio.wait_for(proc.stdout.readline(), timeout=600)
+            if not line_bytes:
+                break
+            line = line_bytes.decode(errors="replace").rstrip()
+            lines.append(line)
+            # Update status based on output
+            if "Xcode" in line or "xcode" in line:
+                _stt_install_status = {"step": "installing_xcode", "detail": line, "error": ""}
+            elif ("Homebrew" in line or "brew" in line.lower()) and "Installing" in line:
+                _stt_install_status = {"step": "installing_brew", "detail": line, "error": ""}
+            elif "Installing ffmpeg" in line:
+                _stt_install_status = {"step": "installing_ffmpeg", "detail": line, "error": ""}
+            elif "Installing openai-whisper" in line:
+                _stt_install_status = {"step": "installing_whisper", "detail": line, "error": ""}
+            elif "No suitable python3" in line:
+                _stt_install_status = {"step": "installing_python", "detail": line, "error": ""}
+            elif "Using:" in line:
+                _stt_install_status = {"step": "checking", "detail": line, "error": ""}
+            elif "Done." in line:
+                _stt_install_status["detail"] = line
+            elif line.startswith("ERROR:") or line.startswith("error:"):
+                _stt_install_status["detail"] = line
+
+        await proc.wait()
+        output = "\n".join(lines[-20:])
+        if proc.returncode != 0:
+            _stt_install_status = {"step": "error", "detail": "", "error": output[-500:]}
+            return web.json_response({"ok": False, "error": output[-500:]}, status=500)
+
+        _stt_install_status = {"step": "done", "detail": "Whisper ready", "error": ""}
+        return web.json_response(
+            {
+                "ok": True,
+                "ffmpeg": shutil.which("ffmpeg") is not None
+                or os.path.isfile(os.path.expanduser("~/ffmpeg/ffmpeg")),
+            }
+        )
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+            await proc.communicate()
+        except OSError:
+            pass
+        _stt_install_status = {"step": "error", "detail": "", "error": "Install timed out (10min)"}
+        return web.json_response({"ok": False, "error": "Install timed out"}, status=500)
+    except FileNotFoundError:
+        _stt_install_status = {"step": "error", "detail": "", "error": "bash not found"}
+        return web.json_response({"ok": False, "error": "bash not found"}, status=500)
+
+
+def _build_stt_install_script() -> str:
+    """Shell script that installs whisper + ffmpeg on macOS and Linux."""
+    return r"""
+# Pick up ffmpeg from ~/ffmpeg if installed there
+[ -d "$HOME/ffmpeg" ] && export PATH="$HOME/ffmpeg:$PATH"
+
+# Prefer brew install (avoids externally-managed-environment errors)
+if command -v brew >/dev/null 2>&1; then
+    echo "Installing openai-whisper via brew..."
+    if brew install openai-whisper 2>&1; then
+        echo "Installing ffmpeg via brew..."
+        brew install ffmpeg 2>&1 || true
+        echo "Done. whisper=$(command -v whisper 2>/dev/null || echo 'check PATH') ffmpeg=$(command -v ffmpeg 2>/dev/null || echo 'MISSING')"
+        exit 0
+    fi
+    echo "brew install failed, falling back to pip..."
+fi
+
+# Fallback: pip install (AL2023 / systems without brew)
+PY=""
+for py in python3.11 python3.12 python3 python3.13 python3.10; do
+    p=$(command -v "$py" 2>/dev/null) || continue
+    "$p" -c "import sys; sys.exit(0 if 'free-threading' not in sys.version else 1)" 2>/dev/null || continue
+    "$p" -m pip --version >/dev/null 2>&1 || continue
+    PY="$p"; break
+done
+
+if [ -z "$PY" ]; then
+    echo "ERROR: python3 with pip not found. Install brew first: https://brew.sh/"
+    exit 1
+fi
+echo "Using: $PY ($($PY --version))"
+
+echo "Installing openai-whisper..."
+"$PY" -m pip install -q --user openai-whisper || { echo "ERROR: pip install openai-whisper failed"; exit 1; }
+
+echo "Done. whisper=$(command -v whisper 2>/dev/null || echo 'check PATH') ffmpeg=$(command -v ffmpeg 2>/dev/null || echo 'MISSING')"
+"""
+
+
+async def api_stt_transcribe(request: web.Request) -> web.Response:
+    """POST /api/stt/transcribe — transcribe uploaded audio via whisper."""
+    import tempfile  # noqa: F811
+
+    from kiro_claw.transcribe import is_available, transcribe_audio  # noqa: F811
+
+    if not is_available():
+        return web.json_response({"error": "STT not available"}, status=503)
+
+    reader = await request.multipart()
+    field = await reader.next()
+    if field is None or not hasattr(field, "name") or field.name != "audio":  # type: ignore[union-attr]
+        return web.json_response({"error": "missing audio field"}, status=400)
+
+    # Use uploaded filename extension (recording.webm / .mp4 / .ogg)
+    fname = getattr(field, "filename", None) or "recording.webm"
+    ext = os.path.splitext(fname)[1] or ".webm"
+    fd, tmp = tempfile.mkstemp(suffix=ext)
+    try:
+        os.close(fd)
+        size = 0
+        with open(tmp, "wb") as f:
+            while True:
+                chunk = await field.read_chunk(8192)  # type: ignore[union-attr]
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > 25 * 1024 * 1024:  # 25 MB cap
+                    return web.json_response({"error": "audio too large"}, status=413)
+                f.write(chunk)
+
+        text = await transcribe_audio(tmp)
+        if text:
+            from kiro_claw.security import (  # noqa: F811
+                redact_credentials,
+                redact_exfiltration_urls,
+            )
+
+            text, _ = redact_exfiltration_urls(text)
+            text, _ = redact_credentials(text)
+        return web.json_response({"text": text or ""})
+    except Exception:
+        logger.exception("STT transcribe failed")
+        return web.json_response({"error": "transcription failed"}, status=500)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+# ── Security Event Log API ──
+
+
+async def api_sel_events(request: web.Request) -> web.Response:
+    """GET /api/sel/events — recent security events."""
+
+    try:
+        limit = min(int(request.query.get("limit", "100")), 1000)
+    except (TypeError, ValueError):
+        limit = 100
+    events = _sel().recent(limit=limit)
+    return web.json_response({"events": events, "count": len(events)})
+
+
+async def api_sel_verify(request: web.Request) -> web.Response:
+    """GET /api/sel/verify — verify HMAC chain integrity."""
+
+    total, valid = _sel().verify_integrity()
+    return web.json_response(
+        {
+            "total": total,
+            "valid": valid,
+            "integrity": "ok" if total == valid else "compromised",
+            "tampered": total - valid,
+        }
+    )
+
+
+async def api_security_stats(_request: web.Request) -> web.Response:
+    """GET /api/security/stats — live security feature counts."""
+    denied = 0
+    try:
+        dc = (
+            build_agent_config()
+            .get("toolsSettings", {})
+            .get("execute_bash", {})
+            .get("deniedCommands", [])
+        )
+        denied = len(dc)
+    except Exception:
+        logger.warning("Failed to load denied commands count", exc_info=True)
+
+    schemas = sum(1 for name in dir(_validation_mod) if name.endswith("_SCHEMA") and name.isupper())
+
+    # 5 output paths where redaction is applied (architectural constant from
+    # security-deep-dive.md): dashboard streaming mid-flush, dashboard streaming
+    # trailing, dashboard non-chunk messages, dashboard history save, Slack final.
+    return web.json_response(
+        {
+            "denied_commands": denied,
+            "suspicious_patterns": len(SUSPICIOUS_BASH_PATTERNS),
+            "tool_schemas": schemas,
+            "redaction_paths": 5,
+        }
+    )
+
+
+# ── KiroClaw Config API ──
+async def api_kiroclaw_config(request: web.Request) -> web.Response:
+    """GET/PUT /api/config/kiroclaw — read or update KiroClaw config."""
+    from kiro_claw.config.loader import config_path  # noqa: F811
+
+    if request.method == "PUT":
+        caller = request.get("user", "dashboard")
+
+        def _deny(error: str, status: int = 400) -> web.Response:
+            _sel().log_api_access(
+                caller=caller,
+                operation="config.update",
+                outcome="denied",
+                error=error,
+            )
+            return web.json_response({"error": error}, status=status)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return _deny("invalid JSON")
+        agent_settings = body.get("agent")
+        if not isinstance(agent_settings, dict):
+            return _deny("agent must be an object")
+        path = config_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except Exception:
+            _sel().log_api_access(
+                caller=caller,
+                operation="config.update",
+                outcome="error",
+                error="config.json is corrupt",
+            )
+            return web.json_response({"error": "config.json is corrupt"}, status=500)
+        if not isinstance(data.get("agent"), dict):
+            data["agent"] = {}
+        agent = data["agent"]
+        limits = {"subagent_max_turns": 200, "max_subagents": 5}
+        applied: list[str] = []
+        for key, upper in limits.items():
+            if key in agent_settings:
+                val = agent_settings[key]
+                if isinstance(val, bool) or not isinstance(val, int) or val < 1 or val > upper:
+                    return _deny(f"{key} must be an integer between 1 and {upper}")
+                agent[key] = val
+                applied.append(key)
+        # Boolean toggles
+        for key in ("conductor_skill",):
+            if key in agent_settings:
+                val = agent_settings[key]
+                if not isinstance(val, bool):
+                    return _deny(f"{key} must be a boolean")
+                agent[key] = val
+                applied.append(key)
+        if not applied:
+            return _deny("no recognized settings provided")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+        _sel().log_api_access(
+            caller=caller,
+            operation="config.update",
+            outcome="ok",
+            resources=",".join(applied),
+        )
+        # Regenerate or clean up conductor skill on toggle.
+        if "conductor_skill" in applied:
+            if agent.get("conductor_skill"):
+                from kiro_claw.dashboard.handlers.agents import _regen_conductor  # noqa: F811
+
+                _regen_conductor()
+            else:
+                try:
+                    from kiro_claw.skills import SkillsLoader  # noqa: F811
+
+                    p = SkillsLoader()._dir / "conductor" / "SKILL.md"
+                    if p.exists():
+                        p.unlink()
+                except Exception:
+                    logger.exception("Failed to clean up conductor skill")
+        return web.json_response({"ok": True})
+
+    cfg = KiroClawConfig.load()
+    return web.json_response(cfg.to_dict())
+
+
+# Allowed editable config paths and their validators
+def _agent_values() -> set[str]:
+    """Return allowed pool_agent values: empty string + all configured agent names."""
+    from kiro_claw.config.loader import KiroClawConfig
+
+    return {"", *KiroClawConfig.load().agents}
+
+
+_EDITABLE_CONFIG: dict[str, dict] = {
+    "agent.provider": {"type": "enum", "values": ["acp", "bedrock", "claude_code"]},
+    "agent.approval_mode": {"type": "enum", "values": ["auto", "interactive"]},
+    "agent.sandbox": {"type": "enum", "values": ["auto", "off"]},
+    "agent.enforce_denied_commands": {"type": "enum", "values": ["all", "kiroclaw"]},
+    "agent.completion_keep": {"type": "enum", "values": ["head", "tail", "both"]},
+    "agent.completion_keep_chars": {"type": "int", "min": 0, "max": RESULT_FILE_MAX_BYTES},
+    "agent.soft_stop_budget_secs": {"type": "float", "min": 0.5, "max": 60.0},
+    "agent.cc_model": {"type": "str"},
+    "agent.cc_permission_mode": {"type": "enum", "values": ["bypassPermissions", "default", "plan"]},
+    "agent.cc_max_turns": {"type": "int", "min": 0, "max": 1000},
+    "agent.cc_max_budget_usd": {"type": "float", "min": 0.0, "max": 100.0},
+    "agent.bedrock_model_id": {"type": "str"},
+    "agent.bedrock_region": {"type": "str"},
+    "session.timeout_secs": {"type": "int", "min": 0, "max": 86400},
+    "session.autocompact_pct": {"type": "float", "min": 5.0, "max": 90.0},
+    "session.pool_size": {"type": "int", "min": 0, "max": 10},
+    "session.pool_agent": {"type": "str", "values_fn": _agent_values},
+    "session.pool_ttl_secs": {"type": "int", "min": 0, "max": 7200},
+    "auto_update": {"type": "bool"},
+    "dashboard.mcp_probe_timeout_secs": {"type": "int", "min": 5, "max": 120},
+}
+
+
+async def api_kiroclaw_config_patch(request: web.Request) -> web.Response:
+    """PATCH /api/config/kiroclaw — update a single config field."""
+    from kiro_claw.agent import _atomic_json_write  # noqa: F811
+    from kiro_claw.config.loader import config_path  # noqa: F811
+
+    caller = request.get("user")
+    if not caller:
+        logger.warning(
+            "config.patch called without authenticated user; falling back to 'dashboard'"
+        )
+        caller = "dashboard"
+
+    def _log_sel(outcome: str, resources: str) -> None:
+        _sel().log_api_access(
+            caller=caller,
+            operation="config.patch",
+            outcome=outcome,
+            source="dashboard",
+            resources=resources,
+        )
+
+    def _deny(msg: str, resources: str = "", status: int = 400) -> web.Response:
+        _log_sel("denied", resources or msg)
+        return web.json_response({"error": msg}, status=status)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _deny("invalid JSON", "invalid JSON body")
+
+    path_key = body.get("path", "")
+    value = body.get("value")
+    spec = _EDITABLE_CONFIG.get(path_key)
+    if not spec:
+        return _deny(f"field not editable: {path_key}", f"{path_key}={value}")
+
+    # Validate value
+    if spec["type"] == "enum":
+        if value not in spec["values"]:
+            return _deny(f"invalid value, must be one of {spec['values']}", f"{path_key}={value}")
+    elif spec["type"] == "int":
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return _deny("must be an integer", f"{path_key}={value}")
+        lo, hi = spec.get("min", 0), spec.get("max", 999999)
+        if value < lo or value > hi:
+            return _deny(f"must be between {lo} and {hi}", f"{path_key}={value}")
+    elif spec["type"] == "bool":
+        if not isinstance(value, bool):
+            return _deny("must be a boolean", f"{path_key}={value}")
+    elif spec["type"] == "float":
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return _deny("must be a number", f"{path_key}={value}")
+        if not math.isfinite(value):
+            return _deny("must be a finite number", f"{path_key}={value}")
+        lo, hi = spec.get("min", 0.0), spec.get("max", 999999.0)
+        if value < lo or value > hi:
+            return _deny(f"must be between {lo} and {hi}", f"{path_key}={value}")
+    elif spec["type"] == "str":
+        if not isinstance(value, str):
+            return _deny("must be a string", f"{path_key}={value}")
+        max_len = spec.get("max_len", 256)
+        if len(value) > max_len:
+            return _deny(f"must be at most {max_len} characters", f"{path_key}={value}")
+        if "values" in spec and value not in spec["values"]:
+            return _deny(f"invalid value, must be one of {spec['values']}", f"{path_key}={value}")
+        values_fn = spec.get("values_fn")
+        if values_fn and value not in values_fn():
+            return _deny(f"invalid value for {path_key}", f"{path_key}={value}")
+    else:
+        return _deny("unsupported config type", f"{path_key}={value}", 500)
+
+    # Read, update, write
+    cfg_path = config_path()
+    from kiro_claw.dashboard.handlers.agents import _get_config_lock  # noqa: F811
+
+    async with _get_config_lock():
+        try:
+            data = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+        except Exception:
+            _log_sel("error", f"{path_key}=read_failed")
+            return web.json_response({"error": "failed to read config file"}, status=500)
+
+        parts = path_key.split(".")
+        if len(parts) == 2:
+            section = data.setdefault(parts[0], {})
+            if not isinstance(section, dict):
+                _log_sel("error", f"{path_key}=section_not_dict")
+                return web.json_response(
+                    {"error": f"config section '{parts[0]}' is not an object"}, status=500
+                )
+            section[parts[1]] = value
+        else:
+            data[parts[0]] = value
+
+        try:
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_json_write(cfg_path, data)
+        except OSError:
+            _log_sel("error", f"{path_key}=write_failed")
+            return web.json_response({"error": "failed to write config file"}, status=500)
+
+    _log_sel("success", f"{path_key}={value}")
+
+    # If provider changed, reload the factory so new sessions use the new provider
+    if path_key == "agent.provider":
+        state: DashboardState = request.app["state"]
+        # Refresh agent artifacts so the target provider is immediately usable.
+        # For claude_code this (re)writes ~/.claude/agents/kiroclaw.mcp.json —
+        # the MCP registry the claude-agent-acp backend reads at session/new —
+        # picking up any servers installed while on kiro. Best-effort: a failure
+        # here must not block the provider switch (gateway boot also rebuilds).
+        try:
+            from kiro_claw.agent import rebuild_agent_config  # noqa: F811  circular import
+
+            await asyncio.to_thread(rebuild_agent_config)
+        except Exception:
+            logger.warning("Agent config rebuild after provider switch failed", exc_info=True)
+        await state.sessions.reload_provider_factory()
+        # Clear model on all slots — aliases are provider-specific
+        for slot in state._slots.values():
+            if slot.model:
+                slot.model = ""
+        state.push_slots_update()
+        logger.info("Provider switched to %s — config rebuilt, factory reloaded, slot models cleared", value)
+
+    cfg = KiroClawConfig.load()
+    return web.json_response(cfg.to_dict())
+
+
+# ── Local token bootstrap (Electron / local apps) ─────────────────────
+
+
+async def api_token_local(request: web.Request) -> web.Response:
+    """GET /api/token/local — issue a token for local apps.
+
+    Requires a per-session secret written to ~/.kiroclaw/.local_secret at
+    gateway startup. Only processes on the same machine can read the file.
+    Secret passed via ``X-Local-Secret`` header (not query string, to avoid
+    leaking in logs).
+    """
+    import kiro_claw.dashboard.handlers as _h  # noqa: F811
+
+    if not _h.is_loopback(request.remote or ""):
+        _sel().log_api_access(
+            caller=request.remote or "unknown",
+            operation="token.local",
+            outcome="denied",
+            source="local-bootstrap",
+            resources="non-loopback",
+        )
+        return web.json_response({"error": "loopback only"}, status=403)
+
+    expected = request.app.get("local_secret", "")
+    if not expected:
+        return web.json_response({"error": "not available"}, status=503)
+    provided = request.headers.get("X-Local-Secret", "")
+    if not provided or not hmac.compare_digest(expected, provided):
+        _sel().log_api_access(
+            caller=request.remote or "unknown",
+            operation="token.local",
+            outcome="denied",
+            source="local-bootstrap",
+            resources="invalid-secret",
+        )
+        return web.json_response({"error": "invalid secret"}, status=403)
+    ttl = MAX_SESSION_TTL_SECS
+    ttl_param = request.query.get("ttl", "")
+    if ttl_param:
+        parsed = parse_duration(ttl_param)
+        if parsed:
+            ttl = parsed
+    token = generate_token("local-app", ttl_seconds=ttl)
+    _sel().log_api_access(
+        caller=request.remote or "unknown",
+        operation="token.local",
+        outcome="success",
+        source="local-bootstrap",
+        resources="token-issued",
+    )
+    return web.json_response({"token": token, "expires_in": ttl})
+
+
+# ── Session workspace (Orchestrated Chat) ────────────────────────────
+
+
+async def api_session_agents_list(request: web.Request) -> web.Response:
+    """GET /api/sessions/{id}/agents — list sub-agent results for a session."""
+    session_id = request.match_info["id"]
+    from kiro_claw.session_workspace import list_results  # noqa: F811
+
+    results = list_results(session_id)
+    _sel().log_api_access(
+        caller=request.get("user", "dashboard"),
+        operation="session.agents.list",
+        outcome="ok",
+        source="dashboard",
+        resources=session_id,
+    )
+    return web.json_response({"results": results})
+
+
+async def api_session_agent_result(request: web.Request) -> web.Response:
+    """GET /api/sessions/{id}/agents/{agent_id} — read sub-agent result."""
+    session_id = request.match_info["id"]
+    agent_id = request.match_info["agent_id"]
+    from kiro_claw.session_workspace import read_result  # noqa: F811
+
+    content = read_result(session_id, agent_id)
+    if not content:
+        return web.json_response({"error": "not found"}, status=404)
+    from kiro_claw.security import redact_credentials, redact_exfiltration_urls  # noqa: F811
+
+    content, _ = redact_exfiltration_urls(content)
+    content, _ = redact_credentials(content)
+    _sel().log_api_access(
+        caller=request.get("user", "dashboard"),
+        operation="session.agent.result",
+        outcome="ok",
+        source="dashboard",
+        resources=f"{session_id}/{agent_id}",
+    )
+    return web.json_response({"agent_id": agent_id, "content": content})
+
+
+async def api_session_agent_stream(request: web.Request) -> web.StreamResponse:
+    """GET /api/sessions/{id}/agents/{agent_id}/stream — SSE stream of result file."""
+    session_id = request.match_info["id"]
+    agent_id = request.match_info["agent_id"]
+    _sel().log_api_access(
+        caller=request.get("user", "dashboard"),
+        operation="session.agent.stream",
+        outcome="ok",
+        source="dashboard",
+        resources=f"{session_id}/{agent_id}",
+    )
+    from kiro_claw.session_workspace import result_path  # noqa: F811
+
+    path = result_path(session_id, agent_id)
+    resp = web.StreamResponse()
+    resp.content_type = "text/event-stream"
+    resp.headers["Cache-Control"] = "no-cache"
+    await resp.prepare(request)
+
+    last_pos = 0
+    import asyncio  # noqa: F811
+
+    from kiro_claw.security import redact_credentials, redact_exfiltration_urls  # noqa: F811
+
+    for _ in range(1200):  # 20 min max
+        try:
+            if path.exists():
+                content = path.read_text(encoding="utf-8")
+                if len(content) > last_pos:
+                    chunk = content[last_pos:]
+                    last_pos = len(content)
+                    chunk, _ = redact_exfiltration_urls(chunk)
+                    chunk, _ = redact_credentials(chunk)
+                    await resp.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            # Check if the subagent is done.
+            state: DashboardState = request.app["state"]
+            if state.subagents:
+                info = state.subagents.get(agent_id)
+                if info and info.done:
+                    await resp.write(b"event: done\ndata: {}\n\n")
+                    break
+        except (ConnectionResetError, ClientConnectionResetError):
+            break
+        await asyncio.sleep(1)
+    return resp
+
+
+async def api_logout(request: web.Request) -> web.Response:
+    """POST /api/logout — revoke all active dashboard sessions.
+
+    Called by ``kiroclaw logout`` CLI. Requires loopback + local secret
+    (same auth as /api/token/local) to prevent unauthorized revocation.
+    """
+    import kiro_claw.dashboard.handlers as _h  # noqa: F811
+    from kiro_claw.dashboard.token_auth import revoke_all_sessions  # noqa: F811
+
+    if not _h.is_loopback(request.remote or ""):
+        _sel().log_api_access(
+            caller=request.remote or "unknown",
+            operation="logout",
+            outcome="denied",
+            source="cli",
+            resources="non-loopback",
+        )
+        return web.json_response({"error": "loopback only"}, status=403)
+
+    expected = request.app.get("local_secret", "")
+    provided = request.headers.get("X-Local-Secret", "")
+    if not expected or not provided or not hmac.compare_digest(expected, provided):
+        _sel().log_api_access(
+            caller=request.remote or "unknown",
+            operation="logout",
+            outcome="denied",
+            source="cli",
+            resources="invalid-secret",
+        )
+        return web.json_response({"error": "invalid secret"}, status=403)
+
+    revoke_all_sessions()
+    _sel().log_api_access(
+        caller=request.remote or "unknown",
+        operation="logout",
+        outcome="success",
+        source="cli",
+        resources="all-sessions-revoked",
+    )
+    return web.json_response({"ok": True})
+
+
+async def api_app_token(request: web.Request) -> web.Response:
+    """POST /api/apps/{name}/token — exchange app secret for app-scoped token.
+
+    Apps authenticate by presenting their per-app secret (stored on disk
+    at install time) via the ``X-App-Secret`` header.  On success, returns
+    an HMAC token with ``app=<name>`` in the payload so downstream
+    middleware can extract the verified app identity.
+    """
+    from kiro_claw.dashboard.token_auth import generate_token, validate_app_secret
+    from kiro_claw.sel import sel
+
+    app_name = request.match_info["name"]
+    provided_secret = request.headers.get("X-App-Secret", "")
+    if not provided_secret:
+        sel().log_api_access(
+            caller=app_name,
+            operation="app_token_exchange",
+            outcome="denied",
+            source="app_auth",
+            error="missing X-App-Secret header",
+        )
+        return web.json_response({"error": "missing X-App-Secret header"}, status=403)
+
+    if not validate_app_secret(app_name, provided_secret):
+        sel().log_api_access(
+            caller=app_name,
+            operation="app_token_exchange",
+            outcome="denied",
+            source="app_auth",
+            error="invalid secret",
+        )
+        return web.json_response({"error": "invalid secret"}, status=403)
+
+    token = generate_token(app_name, app=app_name)
+    sel().log_api_access(
+        caller=app_name,
+        operation="app_token_exchange",
+        outcome="granted",
+        source="app_auth",
+    )
+    return web.json_response({"token": token})

@@ -1,0 +1,214 @@
+"""Tests for kiro_claw.slack.enterprise — workspace validation.
+
+Focus: the default-open behaviour AND the fail-closed security property
+when auth.test cannot verify the workspace identity but an allowlist is
+configured.
+"""
+
+from __future__ import annotations
+
+import sys
+import types
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from kiro_claw.slack import enterprise
+
+
+@pytest.fixture(autouse=True)
+def _reset_module_state():
+    """Reset cached module state and silence SEL between tests."""
+    enterprise._validated_team_id = ""
+    enterprise._validated_enterprise_id = ""
+    enterprise._allowed_team_ids = set()
+    enterprise._allowlist_configured = False
+    with patch.object(enterprise, "sel", return_value=MagicMock()):
+        yield
+    enterprise._validated_team_id = ""
+    enterprise._validated_enterprise_id = ""
+    enterprise._allowed_team_ids = set()
+    enterprise._allowlist_configured = False
+
+
+def _install_fake_slack_sdk(resp: dict | None = None, *, raise_exc: bool = False):
+    """Install a fake ``slack_sdk.web`` module exposing WebClient.
+
+    Returns a context-managing patch on sys.modules. ``auth_test`` returns
+    ``resp`` (or raises if ``raise_exc``).
+    """
+    mod = types.ModuleType("slack_sdk")
+    web_mod = types.ModuleType("slack_sdk.web")
+
+    class _FakeWebClient:
+        def __init__(self, *_, **__):
+            pass
+
+        def auth_test(self):
+            if raise_exc:
+                raise RuntimeError("auth.test boom")
+            return resp or {}
+
+    web_mod.WebClient = _FakeWebClient
+    mod.web = web_mod
+    return patch.dict(sys.modules, {"slack_sdk": mod, "slack_sdk.web": web_mod})
+
+
+def _fake_config(allowed_ids: list[str]):
+    cfg = MagicMock()
+    cfg.slack.allowed_enterprise_ids = list(allowed_ids)
+    return cfg
+
+
+# --------------------------------------------------------------------------
+# Default-open behaviour (no allowlist)
+# --------------------------------------------------------------------------
+
+
+def test_no_allowlist_accepts_any_workspace():
+    resp = {"team_id": "T_RANDOM", "team": "Random Co", "url": "https://x"}
+    with _install_fake_slack_sdk(resp), patch.object(
+        enterprise.KiroClawConfig, "load", return_value=_fake_config([])
+    ):
+        assert enterprise.validate_enterprise("xoxb-token") is True
+    assert enterprise._allowlist_configured is False
+    # check_message_origin accepts anything when no allowlist configured.
+    assert enterprise.check_message_origin("T_ANYTHING") is True
+    assert enterprise.check_message_origin("") is True
+
+
+def test_auth_test_failure_no_allowlist_defaults_open():
+    """auth.test fails, no allowlist -> default-open (return True)."""
+    with _install_fake_slack_sdk(raise_exc=True), patch.object(
+        enterprise.KiroClawConfig, "load", return_value=_fake_config([])
+    ):
+        assert enterprise.validate_enterprise("xoxb-token") is True
+    assert enterprise._allowlist_configured is False
+    assert enterprise.check_message_origin("T_WHATEVER") is True
+
+
+# --------------------------------------------------------------------------
+# Allowlist configured + auth.test succeeds
+# --------------------------------------------------------------------------
+
+
+def test_allowlist_accepts_listed_workspace():
+    resp = {"team_id": "T_GOOD", "team": "Good Co", "url": "https://x"}
+    with _install_fake_slack_sdk(resp), patch.object(
+        enterprise.KiroClawConfig, "load", return_value=_fake_config(["T_GOOD"])
+    ):
+        assert enterprise.validate_enterprise("xoxb-token") is True
+    assert enterprise._allowlist_configured is True
+    assert enterprise.check_message_origin("T_GOOD") is True
+    assert enterprise.check_message_origin("T_OTHER") is False
+
+
+def test_allowlist_rejects_unlisted_enterprise():
+    # On Enterprise Grid auth.test returns an org-level enterprise_id; when
+    # an allowlist is configured and that enterprise_id is not listed,
+    # validation must fail (the token's own team_id does not bypass it).
+    resp = {
+        "team_id": "T_BAD",
+        "enterprise_id": "E_NOT_LISTED",
+        "team": "Bad Co",
+        "url": "https://x",
+    }
+    with _install_fake_slack_sdk(resp), patch.object(
+        enterprise.KiroClawConfig, "load", return_value=_fake_config(["E_GOOD"])
+    ):
+        assert enterprise.validate_enterprise("xoxb-token") is False
+
+
+def test_extra_ids_form_allowlist_and_enforce():
+    resp = {
+        "team_id": "T_GOOD",
+        "enterprise_id": "E_NOT_LISTED",
+        "team": "Good Co",
+        "url": "https://x",
+    }
+    with _install_fake_slack_sdk(resp), patch.object(
+        enterprise.KiroClawConfig, "load", return_value=_fake_config([])
+    ):
+        # extra_ids does not contain the enterprise_id -> validation fails.
+        assert (
+            enterprise.validate_enterprise("xoxb-token", extra_ids={"T_ONLY"})
+            is False
+        )
+
+
+# --------------------------------------------------------------------------
+# Fail-closed: allowlist configured + auth.test FAILS (the security hole)
+# --------------------------------------------------------------------------
+
+
+def test_auth_test_failure_with_config_allowlist_fails_closed():
+    """auth.test fails but slack.allowed_enterprise_ids is set -> deny."""
+    sel_mock = MagicMock()
+    with _install_fake_slack_sdk(raise_exc=True), patch.object(
+        enterprise.KiroClawConfig, "load", return_value=_fake_config(["T_ALLOWED"])
+    ), patch.object(enterprise, "sel", return_value=sel_mock):
+        assert enterprise.validate_enterprise("xoxb-token") is False
+    # A denial must be SEL-audited.
+    audited = [
+        c.kwargs
+        for c in sel_mock.log_api_access.call_args_list
+        if c.kwargs.get("outcome") == "denied"
+    ]
+    assert audited, "expected a SEL denial audit entry"
+    assert audited[-1]["error"] == "auth_test_unavailable_with_allowlist"
+    # check_message_origin must also deny: no validated team_id was cached.
+    assert enterprise._allowlist_configured is True
+    assert enterprise.check_message_origin("T_REAL_WORKSPACE") is False
+    # Only the explicitly allowlisted id (which we could not verify against
+    # the live workspace) is in the set; the real workspace id is denied.
+    assert enterprise.check_message_origin("T_ALLOWED") is True
+
+
+def test_auth_test_failure_with_extra_ids_fails_closed():
+    """auth.test fails but extra_ids passed -> deny (no fail-open)."""
+    sel_mock = MagicMock()
+    with _install_fake_slack_sdk(raise_exc=True), patch.object(
+        enterprise.KiroClawConfig, "load", return_value=_fake_config([])
+    ), patch.object(enterprise, "sel", return_value=sel_mock):
+        assert (
+            enterprise.validate_enterprise("xoxb-token", extra_ids={"T_EXTRA"})
+            is False
+        )
+    assert enterprise._allowlist_configured is True
+    assert enterprise.check_message_origin("T_REAL_WORKSPACE") is False
+
+
+def test_auth_test_failure_with_allowlist_and_bad_config_load_fails_closed():
+    """auth.test fails, config load also fails, but extra_ids set -> deny.
+
+    Even if config cannot be read, an explicit extra_ids allowlist must
+    still force fail-closed.
+    """
+    with _install_fake_slack_sdk(raise_exc=True), patch.object(
+        enterprise.KiroClawConfig, "load", side_effect=RuntimeError("no config")
+    ):
+        assert (
+            enterprise.validate_enterprise("xoxb-token", extra_ids={"T_EXTRA"})
+            is False
+        )
+    assert enterprise._allowlist_configured is True
+
+
+def test_auth_test_failure_bad_config_no_allowlist_defaults_open():
+    """auth.test fails, config load fails, no extra_ids -> default-open."""
+    with _install_fake_slack_sdk(raise_exc=True), patch.object(
+        enterprise.KiroClawConfig, "load", side_effect=RuntimeError("no config")
+    ):
+        assert enterprise.validate_enterprise("xoxb-token") is True
+    assert enterprise._allowlist_configured is False
+
+
+# --------------------------------------------------------------------------
+# check_message_origin direct coverage
+# --------------------------------------------------------------------------
+
+
+def test_check_message_origin_denies_empty_team_id_when_allowlist():
+    enterprise._allowlist_configured = True
+    enterprise._allowed_team_ids = {"T_GOOD"}
+    assert enterprise.check_message_origin("") is False

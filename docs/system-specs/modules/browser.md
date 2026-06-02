@@ -1,0 +1,140 @@
+## Browser Module
+
+Thin auth layer for Amazon internal website browsing via Playwright MCP.
+
+### Architecture
+
+```
+User clicks Globe → backend injects [BROWSE] → agent loads browser-auth skill
+  → kiroclaw browse auth health / refresh
+  → Playwright MCP tools: browser_navigate, browser_click, browser_snapshot, etc.
+
+Without Globe → agent uses ReadInternalWebsites (builder-mcp)
+```
+
+### Two Modes
+
+| Mode | Platform | How it works |
+|------|----------|--------------|
+| **Extension** | macOS (recommended) | Playwright attaches to user's running Chrome via extension. All existing auth (Midway, Sentry, MCS, Kerberos) works automatically. |
+| **Headless** | Linux Cloud Desktops | Launches separate Chromium with `--auth-server-allowlist` + storage state cookie injection. |
+
+### Key Design Decisions
+
+**Delegate browsing to Playwright MCP** — we don't implement click/fill/navigate/screenshot.
+Playwright MCP handles all browser interaction. KiroClaw only handles Amazon-specific auth.
+
+**Two auth strategies:**
+- Extension mode: zero auth work — real Chrome session has everything
+- Headless mode: storage state (`~/.midway/playwright-storage-state.json`) + Kerberos via `--auth-server-allowlist`
+
+**AIM-managed installation** — `aim mcp install npm:@playwright/mcp`. Auto-installed on gateway startup if missing.
+
+**Globe button triggers browse mode** — Backend injects `[BROWSE]` marker. Without it, agent uses `ReadInternalWebsites` (builder-mcp) instead.
+
+### Auth Flow (Headless Mode)
+
+1. `kiroclaw browse auth health` — validates Midway cookie, Kerberos ticket, AEA posture
+2. `kiroclaw browse auth refresh` — converts `~/.midway/cookie` → `~/.midway/playwright-storage-state.json`
+3. Playwright loads cookies from storage state at context creation (no manual injection)
+4. `--auth-server-allowlist=*.amazon.com,*.a2z.com,*.aws.dev` handles SPNEGO challenges
+5. For federate-gated sites: `kiroclaw browse auth federate <url>` completes 4-hop SPNEGO chain via curl
+
+### Auth Flow (Extension Mode)
+
+1. User has Chrome open with existing auth (Midway, Sentry, MCS extension)
+2. Playwright MCP connects via extension token (`PLAYWRIGHT_MCP_EXTENSION_TOKEN`)
+3. All navigation uses the real authenticated session — no cookie injection needed
+
+### Config Files
+
+| File | Purpose |
+|------|---------|
+| `~/.kiroclaw/playwright-config.json` | Playwright MCP config: `--auth-server-allowlist`, `storageState`, `isolated: true`, capabilities |
+| `~/.midway/playwright-storage-state.json` | Playwright storage state (generated from `~/.midway/cookie`) |
+| `~/.kiroclaw/playwright-extension-mode` | Flag file: extension mode enabled |
+| `~/.kiroclaw/playwright-extension-token` | Chrome extension connection token (0o600 perms) |
+| `~/.kiro/settings/mcp.json` | MCP server config (args: `--extension` or `--config`) |
+
+### Source Files
+
+| File | Purpose |
+|------|---------|
+| `browser/auth.py` | Midway cookies, federate SSO, KRB5CCNAME, health checks, URL validation |
+| `browser/setup.py` | AIM install, config generation, storage state refresh, MCP config patching |
+| `browser/cli.py` | `kiroclaw browse` CLI: setup, auth health/refresh/inject/federate, extension on/off |
+| `mcp_playwright_proxy.py` | Stdio proxy: intercepts Playwright MCP responses, compresses accessibility trees |
+| `skills/browser-auth/SKILL.md` | Agent skill for auth + Playwright MCP workflow |
+| `scripts/refresh-playwright-cookies.py` | Standalone script: `~/.midway/cookie` → storage state |
+| `config/playwright-mcp-config.json.template` | Template for the Playwright config structure |
+
+### Context Window Optimization (Playwright Proxy)
+
+Playwright MCP's `browser_snapshot` returns full accessibility trees (50-100K tokens on heavy pages). The **Playwright proxy** (`kiroclaw mcp-playwright-proxy`) intercepts these responses and auto-compresses them before they reach the LLM — the full tree never enters context.
+
+**How it works:**
+- kiro-cli → `kiroclaw mcp-playwright-proxy` (stdio) → real `npm-playwright-mcp` (subprocess)
+- Proxy forwards all messages bidirectionally
+- Intercepts responses with accessibility trees (>5K chars with tree-like structure)
+- Compresses to compact outline: only interactive elements (links, buttons, inputs, headings, images) with refs
+- ~95% token reduction on heavy pages
+
+**Registration:** The proxy is auto-registered in `mcp.json` via:
+- `kiroclaw setup` — new installs get the proxy from the start
+- Gateway startup — `_migrate_playwright_to_proxy()` auto-migrates existing `npm-playwright-mcp` entries
+- Settings → Browser save — `patch_mcp_extension()`/`patch_mcp_headless()` always write the proxy command
+
+**Source:** `src/kiro_claw/mcp_playwright_proxy.py`
+
+**Fallback tools** in kiroclaw-core (for manual use if needed):
+
+| Tool | Purpose |
+|------|---------|
+| `browse_outline` | Compress snapshot text → compact outline with refs |
+| `browse_search` | Regex search snapshot text → matching lines only |
+
+### Dashboard Integration
+
+- **Globe button** in ChatInput toggles browse mode → sends `{ browse: true }` in POST
+- **Backend** prepends `[BROWSE]` marker to message when browse mode active
+- **Settings → Browser** panel: toggle extension mode, paste token, auto session restart
+- **BrowserAuthPrompt** component: notification banner when auth gate detected
+- **API endpoints:**
+  - `GET /api/browser/config` — read extension mode + token status
+  - `PUT /api/browser/config` — save extension mode + token (patches `mcp.json`, restarts sessions)
+  - `POST /api/browser-auth-retry` — retry auth (calls `ensure()`)
+  - `POST /api/browser-event` — broadcast browser activity events via WebSocket
+
+### Security
+
+| Control | Implementation |
+|---------|----------------|
+| URL validation | `federate_auth()` restricts to `*.amazon.com`, `*.a2z.com`, `*.aws.dev`, `*.amazon.dev` |
+| Token storage | Written with `os.open(..., 0o600)` — not world-readable |
+| SEL audit | All browser API endpoints emit SEL audit events |
+| `browser_evaluate` | NOT auto-approved — requires user confirmation (cookie exfiltration risk) |
+| Storage state | Written with `0o600` permissions via `os.open` |
+
+### Platform Matrix
+
+| Platform | Mode | Auth | Browser |
+|----------|------|------|---------|
+| macOS | Extension (recommended) | Real Chrome session | User's Chrome via extension |
+| macOS | Headed (fallback) | Storage state + SPNEGO | Separate Chromium |
+| AL2/AL2023 x86_64 | Headless | Storage state + SPNEGO | Playwright Chromium |
+| AL2/AL2023 NICE DCV | Extension (opt-in) | Real Chrome session | User's Chrome via extension |
+| AL2 aarch64 (glibc 2.26) | Fallback | N/A | `ReadInternalWebsites` only |
+
+### Credential Lifetimes
+
+| Credential | Lifetime | Refresh | MCP Restart? |
+|---|---|---|---|
+| Midway session cookie | ~20 hours | `mwinit` + `kiroclaw browse auth refresh` + `browser_set_storage_state` | No |
+| Kerberos TGT | ~6 hours | `kinit -f` | Yes (read at Chromium launch) |
+| Extension token | Permanent (until Chrome extension reinstalled) | Re-copy from extension popup | Yes |
+
+### MCS Enforcement (Future)
+
+Cookie replay will stop working when MCS proof-of-possession is enforced.
+- **Extension mode:** unaffected — real Chrome has AEA extension
+- **Headless mode:** will break — fall back to `ReadInternalWebsites` or switch to extension mode

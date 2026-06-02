@@ -1,0 +1,600 @@
+"""Tests for kiro_claw.dashboard.handlers.usage."""
+from __future__ import annotations
+
+import json
+import os
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
+
+import kiro_claw.dashboard.handlers.usage as usage_mod
+from kiro_claw.dashboard.handlers.usage import (
+    _parse_sessions,
+    _parse_token_history,
+    api_kiro_usage,
+    get_usage_cache,
+    persist_token_record,
+)
+
+# ── _parse_sessions ─────────────────────────────────────────────────────
+
+
+def _write_session(path, lines, mtime=None):
+    """Write a JSONL session file and optionally set mtime."""
+    path.write_text("\n".join(json.dumps(item) for item in lines) + "\n")
+    if mtime:
+        os.utime(path, (mtime, mtime))
+
+
+class TestParseSessions:
+    def test_no_directory(self, tmp_path):
+        with patch.object(usage_mod, "_SESSIONS_DIR", tmp_path / "nope"):
+            assert _parse_sessions() == {"error": "No sessions directory"}
+
+    def test_iterdir_oserror(self, tmp_path):
+        d = tmp_path / "cli"
+        d.mkdir()
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
+             patch("pathlib.Path.iterdir", side_effect=OSError("boom")):
+            result = _parse_sessions()
+            assert "error" in result
+            assert "boom" in result["error"]
+
+    def test_skips_non_jsonl(self, tmp_path):
+        d = tmp_path / "cli"
+        d.mkdir()
+        (d / "readme.txt").write_text("hi")
+        with patch.object(usage_mod, "_SESSIONS_DIR", d):
+            r = _parse_sessions()
+            assert r["total_sessions"] == 0
+            assert r["all_time_sessions"] == 0
+
+    def test_skips_invalid_path(self, tmp_path):
+        d = tmp_path / "cli"
+        d.mkdir()
+        _write_session(d / "s1.jsonl", [{"kind": "Prompt"}])
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
+             patch.object(usage_mod, "validate_file_path", return_value=None):
+            r = _parse_sessions()
+            assert r["total_sessions"] == 0
+
+    def test_stat_oserror(self, tmp_path):
+        d = tmp_path / "cli"
+        d.mkdir()
+        f = d / "s1.jsonl"
+        _write_session(f, [{"kind": "Prompt"}])
+        orig_stat = Path.stat
+
+        def stat_side_effect(self_, *a, **kw):
+            if self_.name == f.name:
+                raise OSError("stat fail")
+            return orig_stat(self_, *a, **kw)
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
+             patch.object(usage_mod, "validate_file_path", return_value=str(f)), \
+             patch.object(Path, "stat", stat_side_effect):
+            r = _parse_sessions()
+            assert r["all_time_sessions"] == 0
+
+    def test_old_session_counted_alltime_only(self, tmp_path):
+        d = tmp_path / "cli"
+        d.mkdir()
+        f = d / "old.jsonl"
+        old_mtime = time.time() - (60 * 86400)  # 60 days ago
+        _write_session(f, [{"kind": "Prompt"}], mtime=old_mtime)
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
+             patch.object(usage_mod, "validate_file_path", return_value=str(f)):
+            r = _parse_sessions()
+            assert r["all_time_sessions"] == 1
+            assert r["total_sessions"] == 0
+
+    def test_counts_messages_and_tools(self, tmp_path):
+        d = tmp_path / "cli"
+        d.mkdir()
+        f = d / "s1.jsonl"
+        lines = [
+            {"kind": "Prompt"},
+            {"kind": "AssistantMessage"},
+            {"kind": "ToolResults"},
+            {"kind": "ToolResults"},
+            {"kind": "Other"},
+        ]
+        _write_session(f, lines)
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
+             patch.object(usage_mod, "validate_file_path", return_value=str(f)):
+            r = _parse_sessions()
+            assert r["total_sessions"] == 1
+            assert r["total_messages"] == 2
+            assert r["total_tool_calls"] == 2
+            assert r["all_time_sessions"] == 1
+            assert len(r["daily_history"]) == 1
+            assert r["avg_msgs_per_session"] == 2.0
+            assert r["avg_tools_per_session"] == 2.0
+
+    def test_json_decode_error_skipped(self, tmp_path):
+        d = tmp_path / "cli"
+        d.mkdir()
+        f = d / "s1.jsonl"
+        f.write_text('{"kind":"Prompt"}\nNOT_JSON\n{"kind":"ToolResults"}\n')
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
+             patch.object(usage_mod, "validate_file_path", return_value=str(f)):
+            r = _parse_sessions()
+            assert r["total_messages"] == 1
+            assert r["total_tool_calls"] == 1
+
+    def test_non_dict_json_skipped(self, tmp_path):
+        d = tmp_path / "cli"
+        d.mkdir()
+        f = d / "s1.jsonl"
+        f.write_text('"just a string"\n42\nnull\n[1,2]\n{"kind":"Prompt"}\n')
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
+             patch.object(usage_mod, "validate_file_path", return_value=str(f)):
+            r = _parse_sessions()
+            assert r["total_messages"] == 1
+
+    def test_file_read_oserror(self, tmp_path):
+        d = tmp_path / "cli"
+        d.mkdir()
+        f = d / "s1.jsonl"
+        _write_session(f, [{"kind": "Prompt"}])
+        orig_open = Path.open
+
+        def open_raises(self_, *a, **kw):
+            if self_.suffix == ".jsonl":
+                raise OSError("read fail")
+            return orig_open(self_, *a, **kw)
+
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
+             patch.object(usage_mod, "validate_file_path", return_value=str(f)), \
+             patch.object(Path, "open", open_raises):
+            r = _parse_sessions()
+            assert r["all_time_sessions"] == 1
+            assert r["total_sessions"] == 0  # not counted when file read fails
+            assert r["total_messages"] == 0
+
+    def test_period_summaries(self, tmp_path):
+        d = tmp_path / "cli"
+        d.mkdir()
+        now = time.time()
+        f = d / "today.jsonl"
+        _write_session(f, [{"kind": "Prompt"}, {"kind": "ToolResults"}], mtime=now)
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
+             patch.object(usage_mod, "validate_file_path", return_value=str(f)):
+            r = _parse_sessions()
+            assert r["today"]["sessions"] == 1
+            assert r["today"]["messages"] == 1
+            assert r["today"]["tool_calls"] == 1
+            assert r["this_week"]["sessions"] >= 1
+            assert r["this_month"]["sessions"] >= 1
+
+    def test_timestamp_derives_day(self, tmp_path):
+        d = tmp_path / "cli"
+        d.mkdir()
+        f = d / "s1.jsonl"
+        lines = [
+            {"kind": "Prompt", "timestamp": "2026-04-20T10:00:00"},
+            {"kind": "ToolResults"},
+        ]
+        # mtime is today, but timestamp says April 20
+        _write_session(f, lines)
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
+             patch.object(usage_mod, "validate_file_path", return_value=str(f)):
+            r = _parse_sessions()
+            assert r["total_sessions"] == 1
+            assert r["daily_history"][0]["date"] == "2026-04-20"
+            assert r["total_messages"] == 1
+            assert r["total_tool_calls"] == 1
+
+    def test_malformed_timestamp_fallback_to_mtime(self, tmp_path):
+        d = tmp_path / "cli"
+        d.mkdir()
+        f = d / "s1.jsonl"
+        lines = [
+            {"kind": "Prompt", "timestamp": "not-a-date"},
+            {"kind": "ToolResults"},
+        ]
+        _write_session(f, lines)
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
+             patch.object(usage_mod, "validate_file_path", return_value=str(f)):
+            r = _parse_sessions()
+            assert r["total_sessions"] == 1
+            # Messages still counted despite bad timestamp
+            assert r["total_messages"] == 1
+            assert r["total_tool_calls"] == 1
+
+    def test_z_suffix_timestamp(self, tmp_path):
+        d = tmp_path / "cli"
+        d.mkdir()
+        f = d / "s1.jsonl"
+        lines = [
+            {"kind": "Prompt", "timestamp": "2026-04-20T10:00:00Z"},
+            {"kind": "AssistantMessage"},
+        ]
+        _write_session(f, lines)
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
+             patch.object(usage_mod, "validate_file_path", return_value=str(f)):
+            r = _parse_sessions()
+            assert r["total_sessions"] == 1
+            # Z suffix parsed and converted to local TZ via .astimezone()
+            expected = (
+                datetime(2026, 4, 20, 10, 0, 0, tzinfo=timezone.utc)
+                .astimezone()
+                .strftime("%Y-%m-%d")
+            )
+            assert r["daily_history"][0]["date"] == expected
+            assert r["total_messages"] == 2
+
+
+# ── get_usage_cache ──────────────────────────────────────────────────────
+
+
+class TestGetUsageCache:
+    def test_returns_cache(self):
+        mock_cache = {"credits_used": 42}
+        with patch.dict("sys.modules", {
+            "kiro_claw.dashboard.handlers.sessions": MagicMock(_usage_cache=mock_cache)
+        }):
+            assert get_usage_cache() == {"credits_used": 42}
+
+    def test_empty_cache(self):
+        with patch.dict("sys.modules", {
+            "kiro_claw.dashboard.handlers.sessions": MagicMock(_usage_cache={})
+        }):
+            assert get_usage_cache() == {}
+
+    def test_import_error(self):
+        with patch.dict("sys.modules", {
+            "kiro_claw.dashboard.handlers.sessions": None
+        }):
+            assert get_usage_cache() == {}
+
+
+# ── api_kiro_usage ───────────────────────────────────────────────────────
+
+
+class TestApiKiroUsage:
+    @pytest.fixture(autouse=True)
+    def _reset_cache(self):
+        usage_mod._CACHE = {}
+        usage_mod._CACHE_TS = 0.0
+        yield
+        usage_mod._CACHE = {}
+        usage_mod._CACHE_TS = 0.0
+
+    @pytest.mark.asyncio
+    async def test_returns_cached(self):
+        usage_mod._CACHE = {"cached": True}
+        usage_mod._CACHE_TS = time.time()
+        app = web.Application()
+        app.router.add_get("/api/usage/kiro", api_kiro_usage)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/usage/kiro")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data == {"cached": True}
+
+    @pytest.mark.asyncio
+    async def test_fresh_fetch(self, tmp_path):
+        d = tmp_path / "cli"
+        d.mkdir()
+        f = d / "s.jsonl"
+        _write_session(f, [{"kind": "Prompt"}])
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
+             patch.object(usage_mod, "validate_file_path", return_value=str(f)), \
+             patch.object(usage_mod, "get_usage_cache", return_value={"credits_used": 10, "credits_plan": 100, "cost_usd": 0, "resets": "May 1", "plan": "Pro", "overage_rate": 0.01}):
+            app = web.Application()
+            app.router.add_get("/api/usage/kiro", api_kiro_usage)
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.get("/api/usage/kiro")
+                assert resp.status == 200
+                data = await resp.json()
+                assert "sessions" in data
+                assert "billing" in data
+                assert data["billing"]["credits_used"] == 10
+                assert data["sessions"]["total_sessions"] == 1
+
+    @pytest.mark.asyncio
+    async def test_error_not_cached(self, tmp_path):
+        with patch.object(usage_mod, "_SESSIONS_DIR", tmp_path / "nope"), \
+             patch.object(usage_mod, "get_usage_cache", return_value={}):
+            app = web.Application()
+            app.router.add_get("/api/usage/kiro", api_kiro_usage)
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.get("/api/usage/kiro")
+                data = await resp.json()
+                assert "error" in data
+                # Cache should NOT be set
+                assert usage_mod._CACHE == {}
+
+
+# ── _parse_token_history ─────────────────────────────────────────────────
+
+
+def _reset_token_cache():
+    """Tests share a process-global cache; clear it before each test that
+    swaps out the shard directory."""
+    usage_mod._TOKEN_CACHE = {}
+    usage_mod._TOKEN_CACHE_KEY = None
+    usage_mod._TOKEN_CACHE_TS = 0.0
+
+
+def _patch_shard_layout(monkeypatch, tmp_path):
+    """Point the module at an isolated shard directory so each test runs
+    against an empty slate.
+    """
+    shard_dir = tmp_path / "tokens"
+    shard_dir.mkdir()
+    monkeypatch.setattr(usage_mod, "_TOKEN_USAGE_DIR", shard_dir)
+    _reset_token_cache()
+    return shard_dir
+
+
+def _write_shard(shard_dir: Path, day: str, records):
+    (shard_dir / f"{day}.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n"
+    )
+
+
+class TestParseTokenHistory:
+    def test_no_file(self, tmp_path, monkeypatch):
+        _patch_shard_layout(monkeypatch, tmp_path)
+        # Empty shard dir → empty result.
+        assert _parse_token_history() == {}
+
+    def test_skips_old_records(self, tmp_path, monkeypatch):
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+        record = {
+            "_type": "tokens",
+            "ts": "2020-01-01T00:00:00+00:00",
+            "input": 100,
+            "output": 50,
+        }
+        _write_shard(shard_dir, "2020-01-01", [record])
+        # Old shard is outside the 30-day window → directory listing skips
+        # it, so the parse returns the empty-history result.
+        assert _parse_token_history() == {}
+
+    def test_aggregates_tokens(self, tmp_path, monkeypatch):
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+        now = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
+        ts1 = (now - timedelta(minutes=30)).isoformat()
+        ts2 = (now - timedelta(minutes=15)).isoformat()
+        records = [
+            {"_type": "tokens", "ts": ts1, "input": 100, "output": 50, "cache_create": 10, "cache_read": 5, "cost": 0.01},
+            {"_type": "tokens", "ts": ts2, "input": 200, "output": 100, "cache_create": 20, "cache_read": 10, "cost": 0.02},
+        ]
+        _write_shard(shard_dir, now.strftime("%Y-%m-%d"), records)
+        result = _parse_token_history()
+        assert result["total_input"] == 300
+        assert result["total_output"] == 150
+        assert result["cache_creation"] == 30
+        assert result["cache_read"] == 15
+        assert result["total"] == 495
+        assert result["cost_usd"] == 0.03
+        assert len(result["daily_history"]) == 1
+        assert result["daily_history"][0]["input"] == 300
+
+    def test_multi_day_aggregation(self, tmp_path, monkeypatch):
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+        now = datetime.now().astimezone().replace(hour=12, minute=0, second=0)
+        yesterday = now - timedelta(days=1)
+        _write_shard(
+            shard_dir,
+            yesterday.strftime("%Y-%m-%d"),
+            [{"_type": "tokens", "ts": yesterday.isoformat(), "input": 50, "output": 25}],
+        )
+        _write_shard(
+            shard_dir,
+            now.strftime("%Y-%m-%d"),
+            [{"_type": "tokens", "ts": now.isoformat(),
+              "input": 100, "output": 75}],
+        )
+        result = _parse_token_history()
+        assert result["total_input"] == 150
+        assert result["total_output"] == 100
+        assert len(result["daily_history"]) == 2
+
+    def test_ignores_non_token_records(self, tmp_path, monkeypatch):
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+        now = datetime.now().astimezone()
+        recent_ts = (now - timedelta(hours=1)).isoformat()
+        records = [
+            {"_type": "metadata", "created_at": recent_ts},
+            {"role": "user", "content": "hello"},
+            {"_type": "tokens", "ts": recent_ts, "input": 42, "output": 10},
+        ]
+        _write_shard(shard_dir, now.strftime("%Y-%m-%d"), records)
+        result = _parse_token_history()
+        assert result["total_input"] == 42
+        assert result["total_output"] == 10
+
+    def test_skips_files_with_invalid_names(self, tmp_path, monkeypatch):
+        """A stray file with a non-date stem (e.g. README, .DS_Store) in
+        the shard dir must not crash the parser."""
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+        (shard_dir / "README.txt").write_text("not a shard")
+        (shard_dir / "garbage.jsonl").write_text("{}\n")
+        # Real shard alongside the noise.
+        now = datetime.now().astimezone()
+        _write_shard(
+            shard_dir,
+            now.strftime("%Y-%m-%d"),
+            [{"_type": "tokens", "ts": now.isoformat(), "input": 9, "output": 1}],
+        )
+        result = _parse_token_history()
+        assert result["total_input"] == 9
+
+
+# ── _persist_token_record ────────────────────────────────────────────────
+
+
+class TestPersistTokenRecord:
+    def test_writes_token_record(self, tmp_path, monkeypatch):
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+
+        slot_key = "test-slot"
+        model = "claude-sonnet-4"
+
+        event = MagicMock()
+        event.input_tokens = 500
+        event.output_tokens = 200
+        event.cache_creation_tokens = 50
+        event.cache_read_tokens = 25
+        event.cost_usd = 0.05
+        event.num_turns = 3
+        event.duration_ms = 1500
+
+        persist_token_record(slot_key, model, event)
+
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
+        shard_path = shard_dir / f"{today}.jsonl"
+        assert shard_path.exists()
+        lines = shard_path.read_text().strip().split("\n")
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["_type"] == "tokens"
+        assert record["slot"] == "test-slot"
+        assert record["model"] == "claude-sonnet-4"
+        assert record["input"] == 500
+        assert record["output"] == 200
+        assert record["cache_create"] == 50
+        assert record["cache_read"] == 25
+        assert record["cost"] == 0.05
+        assert record["turns"] == 3
+        assert record["duration_ms"] == 1500
+        assert "ts" in record
+
+    def test_no_crash_on_error(self, tmp_path, monkeypatch):
+        slot_key = "test"
+        model = "test-model"
+        event = MagicMock()
+        event.input_tokens = 100
+        event.output_tokens = 50
+
+        # Point the shard dir at an unwritable location; persist must swallow.
+        monkeypatch.setattr(
+            usage_mod, "_TOKEN_USAGE_DIR", Path("/proc/nonexistent/usage/tokens")
+        )
+        # Should not raise
+        persist_token_record(slot_key, model, event)
+
+    def test_appends_multiple_records(self, tmp_path, monkeypatch):
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+
+        slot_key = "s1"
+        model = "opus"
+
+        event1 = MagicMock()
+        event1.input_tokens = 100
+        event1.output_tokens = 50
+        event1.cache_creation_tokens = 0
+        event1.cache_read_tokens = 0
+        event1.cost_usd = 0.01
+        event1.num_turns = 1
+        event1.duration_ms = 500
+
+        event2 = MagicMock()
+        event2.input_tokens = 200
+        event2.output_tokens = 80
+        event2.cache_creation_tokens = 10
+        event2.cache_read_tokens = 5
+        event2.cost_usd = 0.02
+        event2.num_turns = 1
+        event2.duration_ms = 800
+
+        persist_token_record(slot_key, model, event1)
+        persist_token_record(slot_key, model, event2)
+
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
+        shard_path = shard_dir / f"{today}.jsonl"
+        lines = shard_path.read_text().strip().split("\n")
+        assert len(lines) == 2
+
+    def test_writes_provider_field(self, tmp_path, monkeypatch):
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+        event = MagicMock()
+        event.input_tokens = 10
+        event.output_tokens = 5
+        event.cache_creation_tokens = 0
+        event.cache_read_tokens = 0
+        event.cost_usd = 0.0
+        event.num_turns = 0
+        event.duration_ms = 0
+
+        persist_token_record("slot", "opus", event, provider="claude_code")
+
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
+        record = json.loads((shard_dir / f"{today}.jsonl").read_text().strip())
+        assert record["provider"] == "claude_code"
+        assert record["model"] == "opus"
+
+    def test_provider_defaults_to_empty(self, tmp_path, monkeypatch):
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+        event = MagicMock()
+        event.input_tokens = 10
+        event.output_tokens = 5
+        event.cache_creation_tokens = 0
+        event.cache_read_tokens = 0
+        event.cost_usd = 0.0
+        event.num_turns = 0
+        event.duration_ms = 0
+
+        persist_token_record("slot", "opus", event)
+
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
+        record = json.loads((shard_dir / f"{today}.jsonl").read_text().strip())
+        assert record["provider"] == ""
+
+    def test_parse_token_history_aggregates_provider(self, tmp_path, monkeypatch):
+        _patch_shard_layout(monkeypatch, tmp_path)
+        for ev in (
+            ("opencode", "claude-sonnet-4", 100, 50),
+            ("opencode", "claude-haiku-3", 30, 10),
+            ("claude_code", "opus", 200, 80),
+        ):
+            event = MagicMock()
+            event.input_tokens = ev[2]
+            event.output_tokens = ev[3]
+            event.cache_creation_tokens = 0
+            event.cache_read_tokens = 0
+            event.cost_usd = 0.01
+            event.num_turns = 1
+            event.duration_ms = 100
+            persist_token_record("slot", ev[1], event, provider=ev[0])
+
+        # Cache may have been populated by the empty-shard parse triggered
+        # before the writes; reset so the next read picks them up.
+        _reset_token_cache()
+        history = usage_mod._parse_token_history()
+
+        assert sorted(history["providers"]) == ["claude_code", "opencode"]
+        assert "claude-sonnet-4" in history["models"]
+        assert "opus" in history["models"]
+        # The day entry should carry both providers + models sub-maps.
+        day = history["daily_history"][0]
+        assert "providers" in day
+        assert "models" in day
+        assert "opencode" in day["providers"]
+        assert day["providers"]["opencode"]["input"] == 130
+
+        # provider_models maps each provider to ONLY the models that have
+        # actually appeared paired with it, so the frontend can cascade
+        # the model dropdown safely.
+        pm = history["provider_models"]
+        assert sorted(pm["opencode"]) == ["claude-haiku-3", "claude-sonnet-4"]
+        assert pm["claude_code"] == ["opus"]
+        # opus must NOT appear under opencode — that would be the bug.
+        assert "opus" not in pm["opencode"]
+
+        # Per-day cross-tab carries the true intersection bucket, so the
+        # chart can render correct numbers when both filters are active.
+        day_pm = day["provider_models"]
+        assert day_pm["opencode"]["claude-sonnet-4"]["input"] == 100
+        assert day_pm["opencode"]["claude-haiku-3"]["input"] == 30
+        assert day_pm["claude_code"]["opus"]["input"] == 200
+        # Invalid pair (opencode + opus) is absent from the cross-tab.
+        assert "opus" not in day_pm["opencode"]

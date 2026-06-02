@@ -1,0 +1,1609 @@
+"""Agent configuration, themes, AIM integration, and agent CRUD handlers."""
+
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from aiohttp import web
+
+from kiro_claw.aim_agents import (
+    install_cc_plugin,
+    installed_kiro_packages_missing_from_cc,
+    list_agents,
+)
+from kiro_claw.config.loader import (
+    KiroClawAgentConfig,
+    KiroClawConfig,
+    config_dir,
+    resolve_agent_config_path,
+)
+from kiro_claw.config.schema import SCHEMA_REGISTRY, config_entry_to_dict
+from kiro_claw.dashboard.chat_persistence import get_reasoning_effort_ordered
+from kiro_claw.dashboard.chat_utils import _SLASH_COMMANDS, _history_key_for
+from kiro_claw.dashboard.state import DashboardState
+from kiro_claw.env import augmented_path
+from kiro_claw.mirror import mirror_kiro_to_cc
+
+_VALID_PACKAGE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$")
+
+try:
+    from kiro_claw.providers.claude_code import _CC_CURATED_MODELS, _CC_VALID_MODELS
+except ImportError:
+    _CC_VALID_MODELS: list = []  # type: ignore[no-redef]
+    _CC_CURATED_MODELS: list = []  # type: ignore[no-redef]
+
+logger = logging.getLogger(__name__)
+
+
+def _sel():
+    """Late-binding _sel() for test monkeypatch compatibility."""
+    import kiro_claw.dashboard.handlers as _pkg  # noqa: F811
+    return _pkg.sel()
+
+
+# ── Custom Themes ──
+
+_THEMES_DIR_NAME = "themes"
+_THEME_NAME_MAX_LEN = 60
+_THEME_SLUG_MAX_LEN = 40
+_THEME_EMOJI_MAX_LEN = 4
+_THEME_DEFAULT_EMOJI = "🎨"
+_THEME_REQUIRED_VARS = ("--bg", "--text", "--accent")
+
+# CSS variables that constitute a complete theme definition.
+_THEME_CSS_VARS = (
+    "--bg",
+    "--bg-accent",
+    "--bg-elevated",
+    "--bg-hover",
+    "--card",
+    "--card-fg",
+    "--card-hl",
+    "--panel",
+    "--panel-strong",
+    "--chrome",
+    "--text",
+    "--text-strong",
+    "--muted",
+    "--muted-strong",
+    "--border",
+    "--border-strong",
+    "--border-hover",
+    "--accent",
+    "--accent-hover",
+    "--accent-subtle",
+    "--accent-glow",
+    "--ring",
+    "--ok",
+    "--ok-subtle",
+    "--warn",
+    "--warn-subtle",
+    "--danger",
+    "--danger-subtle",
+    "--info",
+    "--aim",
+    "--aim-subtle",
+    "--clarify",
+    "--clarify-subtle",
+    "--diff-add",
+    "--diff-add-text",
+    "--diff-del",
+    "--diff-del-text",
+    "--diff-hunk",
+    "--diff-hunk-text",
+    "--diff-meta-text",
+    "--shadow-sm",
+    "--shadow-md",
+    "--shadow-lg",
+)
+
+
+def _themes_dir() -> Path:
+    """Return the custom themes directory under config_dir()."""
+    return config_dir() / _THEMES_DIR_NAME
+
+
+# Positive allowlist: only characters that appear in legitimate CSS color,
+# shadow, and length values.  This blocks semicolons, braces, backslashes,
+# angle brackets, quotes, at-signs, colons, and everything else that could
+# escape the CSS declaration context.
+_CSS_VALUE_ALLOWED_RE = re.compile(r"^[a-zA-Z0-9#(),.\- %/]+$")
+
+# Function denylist for dangerous CSS functions whose individual characters
+# pass the allowlist above (e.g. url(), expression(), image(), image-set()).
+_CSS_DANGEROUS_FUNC_RE = re.compile(
+    r"url\s*\(|expression\s*\(|image\s*\(|image-set\s*\(",
+    re.IGNORECASE,
+)
+
+# Set of allowed CSS variable names (mirrors frontend ALLOWED_CSS_VARS).
+_THEME_CSS_VARS_SET: frozenset[str] = frozenset(_THEME_CSS_VARS)
+
+
+def _sanitize_css_value(value: str) -> str | None:
+    """Validate a single CSS value using a positive character allowlist.
+
+    Returns the trimmed value if safe, or None if rejected.
+    """
+    if not isinstance(value, str):
+        return None
+    if len(value) > 200:
+        return None
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    if not _CSS_VALUE_ALLOWED_RE.match(trimmed):
+        return None
+    if _CSS_DANGEROUS_FUNC_RE.search(trimmed):
+        return None
+    return trimmed
+
+
+def _validate_theme_data(data: dict) -> str | None:
+    """Validate a theme JSON object. Returns error string or None.
+
+    Validates keys against ``_THEME_CSS_VARS_SET`` allowlist.
+    Unknown keys are rejected.
+    """
+    if not isinstance(data, dict):
+        return "theme must be a JSON object"
+    name = data.get("name", "")
+    if not isinstance(name, str):
+        return "name must be a string"
+    name = name.strip()
+    if not name:
+        return "name is required"
+    if len(name) > _THEME_NAME_MAX_LEN:
+        return f"name too long (max {_THEME_NAME_MAX_LEN} chars)"
+    emoji = data.get("emoji", "")
+    if not isinstance(emoji, str):
+        return "emoji must be a string"
+    for mode in ("dark", "light"):
+        mode_data = data.get(mode, {})
+        if not isinstance(mode_data, dict):
+            return f"'{mode}' must be a JSON object"
+        for required_var in _THEME_REQUIRED_VARS:
+            if required_var not in mode_data:
+                return f"'{mode}' is missing required" f" variable '{required_var}'"
+        for key, val in mode_data.items():
+            if key not in _THEME_CSS_VARS_SET:
+                return f"'{mode}' key '{key}' is not a recognized theme variable"
+            if _sanitize_css_value(val) is None:
+                return f"'{mode}' variable '{key}' has an invalid value"
+    return None
+
+
+def _strip_to_allowed_vars(mode_data: dict[str, str]) -> dict[str, str]:
+    """Return only the allowed CSS vars with sanitized values.
+
+    Defense-in-depth: even after validation, re-filter before writing
+    so only known variables with clean values reach disk.
+    """
+    result: dict[str, str] = {}
+    for key, val in mode_data.items():
+        if key not in _THEME_CSS_VARS_SET:
+            continue
+        clean = _sanitize_css_value(val)
+        if clean is not None:
+            result[key] = clean
+    return result
+
+
+def _slugify_theme_name(name: str) -> str:
+    """Convert a theme name to a filesystem-safe slug."""
+    slug = re.sub(r"[^a-z0-9\-]", "-", name.lower()).strip("-")
+    slug = re.sub(r"-+", "-", slug)
+    return slug[:_THEME_SLUG_MAX_LEN] or "custom"
+
+
+async def api_themes(request: web.Request) -> web.Response:
+    """GET /api/themes — list all custom themes, sorted by creation date."""
+    themes_path = _themes_dir()
+    result: list[dict[str, Any]] = []
+    if themes_path.is_dir():
+        for f in themes_path.glob("*.json"):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                result.append(
+                    {
+                        "slug": f.stem,
+                        "name": data.get("name", f.stem),
+                        "emoji": data.get("emoji", "🎨"),
+                        "created_at": data.get("created_at", ""),
+                    }
+                )
+            except (json.JSONDecodeError, OSError):
+                continue
+    # Sort by created_at (oldest first), falling back to name
+    result.sort(key=lambda t: t.get("created_at") or "9999")
+    return web.json_response({"themes": result})
+
+
+async def api_themes_create(request: web.Request) -> web.Response:
+    """POST /api/themes — create a new custom theme."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+
+    err = _validate_theme_data(body)
+    if err:
+        return web.json_response({"error": err}, status=400)
+
+    name = body["name"].strip()
+    slug = _slugify_theme_name(name)
+    emoji = (
+        body.get("emoji", _THEME_DEFAULT_EMOJI).strip()[:_THEME_EMOJI_MAX_LEN]
+        or _THEME_DEFAULT_EMOJI
+    )
+
+    themes_path = _themes_dir()
+    themes_path.mkdir(parents=True, exist_ok=True)
+    target = themes_path / f"{slug}.json"
+    if target.exists():
+        return web.json_response({"error": f"theme '{slug}' already exists"}, status=409)
+
+    theme_data = {
+        "name": name,
+        "slug": slug,
+        "emoji": emoji,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "dark": _strip_to_allowed_vars(body.get("dark", {})),
+        "light": _strip_to_allowed_vars(body.get("light", {})),
+    }
+    target.write_text(json.dumps(theme_data, indent=2) + "\n", encoding="utf-8")
+    return web.json_response({"ok": True, "slug": slug, "theme": theme_data})
+
+
+async def api_theme_detail(request: web.Request) -> web.Response:
+    """GET/PUT/DELETE /api/themes/{slug} — get, update, or delete a custom theme."""
+    slug = request.match_info["slug"]
+    # Sanitize slug to prevent path traversal
+    safe_slug = re.sub(r"[^a-z0-9\-]", "", slug)
+    if not safe_slug or safe_slug != slug:
+        return web.json_response({"error": "invalid theme slug"}, status=400)
+
+    target = _themes_dir() / f"{safe_slug}.json"
+
+    if request.method == "DELETE":
+        if not target.exists():
+            return web.json_response({"error": "not found"}, status=404)
+        target.unlink()
+        return web.json_response({"ok": True})
+
+    if request.method == "PUT":
+        if not target.exists():
+            return web.json_response({"error": "not found"}, status=404)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        err = _validate_theme_data(body)
+        if err:
+            return web.json_response({"error": err}, status=400)
+        name = body["name"].strip()
+        emoji = (
+            body.get("emoji", _THEME_DEFAULT_EMOJI).strip()[:_THEME_EMOJI_MAX_LEN]
+            or _THEME_DEFAULT_EMOJI
+        )
+        # Preserve created_at from existing file
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+        theme_data = {
+            "name": name,
+            "slug": safe_slug,
+            "emoji": emoji,
+            "created_at": existing.get("created_at", datetime.now(timezone.utc).isoformat()),
+            "dark": _strip_to_allowed_vars(body.get("dark", {})),
+            "light": _strip_to_allowed_vars(body.get("light", {})),
+        }
+        target.write_text(json.dumps(theme_data, indent=2) + "\n", encoding="utf-8")
+        return web.json_response({"ok": True, "theme": theme_data})
+
+    # GET
+    if not target.exists():
+        return web.json_response({"error": "not found"}, status=404)
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return web.json_response({"error": "failed to read theme"}, status=500)
+    return web.json_response(data)
+
+
+# ── Agent Config ──
+
+
+def _auto_install_agent() -> None:
+    """Re-install agent config to kiro-cli so changes take effect immediately."""
+    try:
+        from kiro_claw.agent import install_agent  # noqa: F811
+
+        install_agent()
+        logger.info("Auto-applied agent config via dashboard")
+    except Exception:
+        logger.debug("Auto-apply agent config failed", exc_info=True)
+
+
+def _find_agent_config() -> Path:
+    """Find agents/defaults.json — delegates to centralized resolver."""
+    return resolve_agent_config_path()
+
+
+def _installed_agent_config() -> Path:
+    """Return the installed agent config path (~/.kiro/agents/kiroclaw.json).
+
+    This is the live config that kiro-cli reads.  Dashboard MCP toggle
+    and sync operations write here — NOT to agents/defaults.json.
+    """
+    from kiro_claw.agent import AGENT_FILENAME, KIRO_AGENTS_DIR  # noqa: F811
+
+    return KIRO_AGENTS_DIR / AGENT_FILENAME
+
+
+async def api_agent_config(request: web.Request) -> web.Response:
+    """GET/PUT /api/agent/config — read or write the installed agent config.
+
+    Reads/writes ``~/.kiro/agents/kiroclaw.json`` — the live config that
+    kiro-cli actually uses at runtime.  Falls back to ``agents/defaults.json``
+    if the installed config doesn't exist yet.
+    """
+    import kiro_claw.dashboard.handlers as _h  # noqa: F811
+    installed_path = _h._installed_agent_config()
+    defaults_path = _h._find_agent_config()
+    # Prefer installed config (what kiro-cli reads); fall back to defaults
+    agent_config_path = installed_path if installed_path.is_file() else defaults_path
+
+    if request.method == "PUT":
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        config = body.get("config")
+        if not isinstance(config, dict):
+            return web.json_response({"error": "config must be an object"}, status=400)
+        try:
+            # Inject security-critical deniedCommands before writing
+            from kiro_claw.agent import build_agent_config  # noqa: F811
+
+            defaults_ts = build_agent_config().get("toolsSettings", {}).get("execute_bash", {})
+            if "deniedCommands" in defaults_ts:
+                config.setdefault("toolsSettings", {}).setdefault("execute_bash", {})[
+                    "deniedCommands"
+                ] = defaults_ts["deniedCommands"]
+            # Track tools the user intentionally removed from shipped defaults
+            # so they don't reappear on upgrade.  Stored in ~/.kiroclaw/config.json
+            # (NOT kiroclaw.json — kiro-cli rejects unknown fields).
+            # Per-key dict so removing from allowedTools only doesn't affect tools.
+            from kiro_claw.agent import get_shipped_tools  # noqa: F811
+
+            shipped = get_shipped_tools()
+            removed_per_key: dict[str, list[str]] = {}
+            for key in ("tools", "allowedTools"):
+                diff = sorted(set(shipped.get(key, [])) - set(config.get(key, [])))
+                if diff:
+                    removed_per_key[key] = diff
+            mc_cfg_path = _h.config_path()  # type: ignore[operator]
+            try:
+                mc_cfg = json.loads(mc_cfg_path.read_text(encoding="utf-8")) if mc_cfg_path.exists() else {}
+            except Exception:
+                mc_cfg = {}
+            if removed_per_key:
+                mc_cfg["removedTools"] = removed_per_key
+            else:
+                mc_cfg.pop("removedTools", None)
+            mc_cfg_path.write_text(json.dumps(mc_cfg, indent=2) + "\n", encoding="utf-8")
+            installed_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+            # Restart kiro-cli sessions so new config takes effect
+            await _h._reset_all_sessions(request)
+            return web.json_response({"ok": True, "applied": True})
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+    # GET
+    try:
+        data = json.loads(agent_config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        data = {}
+    return web.json_response(data)
+
+
+async def api_default_agent(request: web.Request) -> web.Response:
+    """GET/PUT /api/config/default-agent — read or set the default agent."""
+    import kiro_claw.dashboard.handlers as _h  # noqa: F811
+    if request.method == "PUT":
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        name = body.get("agent", "")
+        path = _h.config_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except Exception:
+            data = {}
+        data.setdefault("agent", {})["default_agent"] = name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        return web.json_response({"ok": True, "default_agent": name})
+    cfg = KiroClawConfig.load()
+    return web.json_response({"default_agent": cfg.agent.default_agent})
+
+
+# ── Config Schema ──
+
+
+async def api_config_schema(request: web.Request) -> web.Response:
+    """GET /api/config/schema — return config schema entries."""
+    entries = SCHEMA_REGISTRY
+
+    # Filter by tags (comma-separated, intersection)
+    tags_param = request.query.get("tags", "").strip()
+    if tags_param:
+        requested_tags = {t.strip() for t in tags_param.split(",") if t.strip()}
+        entries = [e for e in entries if set(e.tags) & requested_tags]
+
+    # Filter out deprecated entries when deprecated=false
+    dep_param = request.query.get("deprecated", "").strip().lower()
+    if dep_param == "false":
+        entries = [e for e in entries if not e.deprecated]
+
+    # Serialize, masking sensitive defaultValues and converting dataclass
+    # defaults to None (they aren't JSON-serializable).
+    result = []
+    for entry in entries:
+        d = config_entry_to_dict(entry)
+        if entry.sensitive or dataclasses.is_dataclass(d.get("defaultValue")):
+            d["defaultValue"] = None
+        result.append(d)
+
+    return web.json_response({"entries": result})
+
+
+_AIM_TIMEOUT = 60
+
+
+def _aim_cap_type() -> str:
+    """Return the AIM capability subcommand based on active provider.
+
+    Claude Code uses 'plugins' while kiro-cli uses 'agents'.
+    """
+    cfg = KiroClawConfig.load()
+    return "plugins" if cfg.agent.provider == "claude_code" else "agents"
+
+
+def _aim_path() -> str | None:
+    """Return the absolute path to the ``aim`` CLI, or None if not installed.
+
+    Uses the same PATH augmentation as :func:`_run_aim` so handler guards
+    don't false-negative when the gateway runs under systemd (or any other
+    non-login context) with a stripped ``$PATH``.
+    """
+    return shutil.which("aim", path=augmented_path(os.environ.get("PATH", "")))
+
+
+async def _run_aim(*args: str, timeout: int = _AIM_TIMEOUT) -> tuple[int, str]:
+    """Run an ``aim`` CLI command and return (returncode, combined_output).
+
+    ``aim`` is an optional, Amazon-internal package manager that is not
+    bundled with the public distribution.  When it is not resolvable on
+    PATH this returns a graceful failure ``(127, …)`` instead of raising,
+    so AIM-backed handlers become no-ops on a vanilla machine rather than
+    crashing with ``FileNotFoundError``.
+    """
+    env = {**os.environ}
+    env["PATH"] = augmented_path(env.get("PATH", ""))
+    aim_bin = shutil.which("aim", path=env["PATH"])
+    if not aim_bin:
+        return (127, "aim CLI not available")
+    proc = await asyncio.create_subprocess_exec(
+        aim_bin,
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,  # merge stderr into stdout
+        env=env,
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        await proc.communicate()
+        return (1, f"aim command timed out after {timeout}s")
+    output = out.decode(errors="replace") if out else ""
+    return (proc.returncode or 0, output)
+
+
+def _friendly_aim_error(raw: str, package: str) -> str:
+    """Translate raw ``aim`` CLI errors into user-friendly messages."""
+    lower = raw.lower()
+    if "couldn't find a version set" in lower or "failed to parse" in lower:
+        return f"Package '{package}' not found. Check the name and try again."
+    if "not installed" in lower:
+        return f"Package '{package}' is not installed."
+    # Strip ANSI codes and truncate
+    clean = re.sub(r"\x1b\[[0-9;]*m", "", raw).strip()
+    return clean[:500] if clean else "Unknown error"
+
+
+async def api_aim_mcp_list(request: web.Request) -> web.Response:
+    """GET /api/aim/mcp — list installed AIM MCP servers."""
+    if not _aim_path():
+        return web.json_response({"error": "aim CLI not found"}, status=503)
+    try:
+        rc, out = await _run_aim("mcp", "list", "--installed")
+        if rc != 0:
+            return web.json_response({"error": out[:500]}, status=500)
+        return web.json_response({"installed": out.strip()})
+    except Exception as exc:
+        return web.json_response({"error": str(exc)[:500]}, status=500)
+
+
+async def api_aim_mcp_install(request: web.Request) -> web.Response:
+    """POST /api/aim/mcp/install — install MCP server via AIM."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    server_id = body.get("server_id", "").strip()
+    if not server_id:
+        return web.json_response({"error": "server_id required"}, status=400)
+    try:
+        rc, out = await _run_aim("mcp", "install", server_id, timeout=120)
+        if rc != 0:
+            return web.json_response({"error": out[:500]}, status=500)
+        from kiro_claw.dashboard.handlers.mcp import (  # noqa: E402 circular: mcp imports agents
+            _sync_mcp_to_agent,
+        )
+        async with _get_config_lock():
+            _sync_mcp_to_agent(server_id, True)
+        state: DashboardState = request.app["state"]
+        state.push_refresh("agents")
+        return web.json_response({"ok": True, "server_id": server_id})
+    except Exception as exc:
+        return web.json_response({"error": str(exc)[:500]}, status=500)
+
+
+async def api_aim_mcp_uninstall(request: web.Request) -> web.Response:
+    """POST /api/aim/mcp/uninstall — uninstall MCP server via AIM."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    server_id = body.get("server_id", "").strip()
+    if not server_id:
+        return web.json_response({"error": "server_id required"}, status=400)
+    try:
+        rc, out = await _run_aim("mcp", "uninstall", server_id)
+        if rc != 0:
+            return web.json_response({"error": out[:500]}, status=500)
+        from kiro_claw.dashboard.handlers.mcp import (  # noqa: E402 circular: mcp imports agents
+            _sync_mcp_to_agent,
+        )
+        async with _get_config_lock():
+            _sync_mcp_to_agent(server_id, False, remove=True)
+        state: DashboardState = request.app["state"]
+        state.push_refresh("agents")
+        return web.json_response({"ok": True, "server_id": server_id})
+    except Exception as exc:
+        return web.json_response({"error": str(exc)[:500]}, status=500)
+
+
+async def api_aim_skills_list(request: web.Request) -> web.Response:
+    """GET /api/aim/skills — list installed AIM skill packages."""
+    if not _aim_path():
+        return web.json_response({"error": "aim CLI not found"}, status=503)
+    try:
+        rc, out = await _run_aim("skills", "list")
+        if rc != 0:
+            return web.json_response({"error": out[:500]}, status=500)
+        return web.json_response({"skills": out.strip()})
+    except Exception as exc:
+        return web.json_response({"error": str(exc)[:500]}, status=500)
+
+
+async def api_aim_skills_install(request: web.Request) -> web.Response:
+    """POST /api/aim/skills/install — install AIM skill package."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    package = body.get("package", "").strip()
+    if not package:
+        return web.json_response({"error": "package required"}, status=400)
+    vs = body.get("version_set", "").strip()
+    try:
+        args = ["skills", "install", package]
+        if vs:
+            args.extend(["--version-set", vs])
+        rc, out = await _run_aim(*args, timeout=120)
+        if rc != 0:
+            return web.json_response({"error": _friendly_aim_error(out, package)}, status=500)
+        # Regenerate agent config to pick up new skill paths
+        from kiro_claw.agent import install_agent  # noqa: F811
+
+        install_agent()
+        state: DashboardState = request.app["state"]
+        state.push_refresh("agents")
+        return web.json_response({"ok": True, "package": package})
+    except Exception as exc:
+        return web.json_response({"error": str(exc)[:500]}, status=500)
+
+
+async def api_aim_skills_uninstall(request: web.Request) -> web.Response:
+    """POST /api/aim/skills/uninstall — uninstall AIM skill package."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    package = body.get("package", "").strip()
+    if not package:
+        return web.json_response({"error": "package required"}, status=400)
+    try:
+        rc, out = await _run_aim("skills", "uninstall", package)
+        if rc != 0:
+            return web.json_response({"error": out[:500]}, status=500)
+        from kiro_claw.agent import install_agent  # noqa: F811
+
+        install_agent()
+        state: DashboardState = request.app["state"]
+        state.push_refresh("agents")
+        return web.json_response({"ok": True, "package": package})
+    except Exception as exc:
+        return web.json_response({"error": str(exc)[:500]}, status=500)
+
+
+async def api_agents_installed(request: web.Request) -> web.Response:
+    """GET /api/agents/installed — list all installed kiro-cli agents.
+
+    kiroclaw is always first; kiroclaw-lite is excluded.
+    """
+    agents = list(list_agents())
+    agents.sort(key=lambda a: (0 if a.name == "kiroclaw" else 1, a.name))
+    return web.json_response([a.to_dict() for a in agents])
+
+
+def _normalize_model_key(name: str) -> str:
+    """Canonical key for de-duping CC model ids across spelling variants.
+
+    The claude-agent-acp adapter advertises dashed ids (``claude-opus-4-7``)
+    while curated/config entries may use dotted versions (``claude-opus-4.7``);
+    case can also differ. Without normalization the same model surfaces twice in
+    the dropdown (one curated row + one advertised row). Lowercase and fold
+    ``.``→``-`` so equivalent ids collapse to one entry. ``default`` and ``auto``
+    both mean "let the backend pick", so they map to a single key too.
+    """
+    key = (name or "").strip().lower().replace(".", "-")
+    if key in ("default", "auto"):
+        return "auto"
+    return key
+
+
+def _advertised_cc_models(request: web.Request) -> list[dict]:
+    """Map the first active CC provider's advertised models to the API shape.
+
+    claude-agent-acp captures its real versioned list at session init (see
+    AcpClient._capture_available_models). Returns ``[]`` when no session has
+    initialized or the backend advertised nothing.
+    """
+    try:
+        state: DashboardState = request.app["state"]
+        providers = state.sessions.active_providers()
+    except (KeyError, AttributeError):
+        return []
+    for provider in providers:
+        getter = getattr(provider, "available_models", None)
+        if not callable(getter):
+            continue
+        try:
+            advertised = getter()
+        except Exception:
+            continue
+        if advertised:
+            return [
+                {
+                    "model_name": m.get("modelId", ""),
+                    "display_name": m.get("name", "") or m.get("modelId", ""),
+                    "description": m.get("description", ""),
+                }
+                for m in advertised
+                if m.get("modelId")
+            ]
+    return []
+
+
+def _cc_models(request: web.Request, configured_default: str = "") -> list[dict]:
+    """Assemble the CC model dropdown: curated set first, then adapter extras.
+
+    Merge order (deduped by model_name, first wins):
+      1. The KiroClaw-curated list (_CC_CURATED_MODELS: Opus 4.8 1M/200k, Opus
+         4.7, Sonnet 4.6, Haiku 4.5) — shown FIRST so users always see clean,
+         current defaults ahead of whatever the adapter advertises.
+      2. The live backend's advertised models NOT already covered — appended,
+         de-duped, so nothing the adapter offers is hidden. The adapter's set
+         can be stale (older builds list Opus 4.1 / Sonnet 4.5).
+      3. The static catalog fallback only when nothing has initialized yet AND
+         the curated list somehow came up empty.
+    The configured default is force-included so the active model is always
+    selectable even if neither source lists it.
+    """
+    advertised = _advertised_cc_models(request)
+    # Curated entries lead; adapter-advertised extras (or the static fallback)
+    # follow so they are never hidden but never displace the curated defaults.
+    extras = advertised if advertised else list(_CC_VALID_MODELS)
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for entry in (*_CC_CURATED_MODELS, *extras):
+        name = entry.get("model_name", "")
+        key = _normalize_model_key(name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(entry)
+    # Guarantee the configured default is present (e.g. a custom cc_model the
+    # backend doesn't advertise) so the selected model never vanishes.
+    if configured_default and _normalize_model_key(configured_default) not in seen:
+        merged.insert(0, {
+            "model_name": configured_default,
+            "display_name": configured_default,
+            "description": "Configured default",
+        })
+    return merged
+
+
+async def api_models(request: web.Request) -> web.Response:
+    """GET /api/models — list available models (provider-aware).
+
+    For claude_code provider: prefer models reported by an active ACP session
+    (live from ACP configOptions), fallback to static _CC_VALID_MODELS.
+    """
+    cfg = KiroClawConfig.load()
+    if cfg.agent.provider == "claude_code":
+        # Surface the real versioned Claude set (Opus 4.8/4.7, Sonnet 4.6, …),
+        # merging the backend's advertised list with Opus 4.8 (which the
+        # adapter does not yet advertise) and the configured default.
+        return web.json_response(_cc_models(request, cfg.agent.cc_model or ""))
+
+    try:
+        from kiro_claw.acp.client import _resolve_kiro_bin, _resolve_ssh_auth_sock  # noqa: F811
+        from kiro_claw.env import augmented_path  # noqa: F811
+        from kiro_claw.sandbox import wrap_argv  # noqa: F811
+
+        kiro_bin = _resolve_kiro_bin()
+        if not kiro_bin:
+            return web.json_response([])
+        argv = [kiro_bin, "chat", "--list-models", "--format", "json", "--no-interactive"]
+        # Mirror AcpClient._spawn() sandbox: wrap_argv + env + process isolation.
+        # Note: AcpClient._spawn() is for interactive ACP sessions (stdin/stdout
+        # pipes); this is a one-shot read-only command, so we replicate the
+        # sandbox setup directly.  See AUTOSDE.yaml security-controls.
+        argv, cleanup = wrap_argv(argv)
+        try:
+            env = {**os.environ}
+            env["PATH"] = augmented_path(env.get("PATH", ""))
+            _resolve_ssh_auth_sock(env)
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+                env=env,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.communicate()
+                return web.json_response([])
+        finally:
+            if cleanup and callable(cleanup):
+                cleanup()
+        data = json.loads(stdout.decode(errors="replace"))
+        models = data.get("models", [])
+        try:
+            from kiro_claw.dashboard.chat import is_deprecated_model  # noqa: F811
+            models = [m for m in models if not is_deprecated_model(m.get("model_name", ""))]
+        except ImportError:
+            logger.warning("Failed to import is_deprecated_model; serving unfiltered model list", exc_info=True)
+        return web.json_response(models)
+    except Exception:
+        return web.json_response([])
+
+
+async def api_effort_levels(request: web.Request) -> web.Response:
+    """GET /api/effort-levels — list available reasoning effort levels.
+
+    Per-slot: when a ``?slot=`` query param resolves to a live ACP provider,
+    return the levels that slot's CURRENT model reported (ACP escalation order),
+    so concurrent slots on different models/backends each see their own set and
+    a model switch is reflected immediately. Falls back to the process-global
+    ordered list (cold start / no live provider / provider without the getter).
+    """
+    slot = request.query.get("slot")
+    if slot:
+        try:
+            state: DashboardState = request.app["state"]
+            provider = state.sessions.get_provider(_history_key_for(slot))
+            getter = getattr(provider, "get_valid_effort_levels", None) if provider else None
+            if callable(getter):
+                levels = getter()
+                if levels:
+                    return web.json_response(levels)
+        except (KeyError, AttributeError):
+            pass
+    return web.json_response(get_reasoning_effort_ordered())
+
+
+async def api_slash_commands(request: web.Request) -> web.Response:
+    """GET /api/slash-commands — list available slash commands (provider-aware)."""
+    cfg = KiroClawConfig.load()
+    if cfg.agent.provider == "claude_code":
+        state: DashboardState = request.app["state"]
+        cc_commands: list[str] = []
+        for provider in state.sessions.active_providers():
+            cmds = getattr(provider, "_slash_commands", [])
+            if cmds:
+                cc_commands = cmds
+                break
+        if not cc_commands:
+            cc_commands = [
+                "compact", "clear", "context", "help", "init",
+                "review", "security-review", "usage",
+            ]
+        result = [{"name": f"/{c}", "description": ""} for c in cc_commands]
+        result.append({"name": "/side", "description": "Open side conversation panel"})
+        return web.json_response(result)
+
+    return web.json_response([{"name": c, "description": ""} for c in sorted(_SLASH_COMMANDS)])
+
+
+async def api_agent_detail(request: web.Request) -> web.Response:
+    """GET/DELETE/PATCH /api/agents/detail/{name} — view, delete, or update agent config."""
+    name = request.match_info["name"]
+    from kiro_claw.agent import KIRO_AGENTS_DIR  # noqa: F811
+
+    # Parse body early so JSONDecodeError returns 400, not 404 from the file loop.
+    patch_body = None
+    if request.method == "PATCH":
+        try:
+            patch_body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+    for f in KIRO_AGENTS_DIR.glob("*.json"):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            if data.get("name") == name or f.stem == name:
+                if request.method == "DELETE":
+                    if f.name in (
+                        "kiroclaw.json",
+                        "kiroclaw-lite.json",
+                        "KiroClawAICapabilities-kiroclaw-lite.json",
+                    ):
+                        return web.json_response({"error": "cannot delete kiroclaw"}, status=400)
+                    f.unlink()
+                    state: DashboardState = request.app["state"]
+                    state.push_refresh("agents")
+                    return web.json_response({"ok": True})
+                if request.method == "PATCH" and patch_body is not None:
+                    async with _get_config_lock():
+                        data = json.loads(f.read_text(encoding="utf-8"))
+                        if "model" in patch_body:
+                            data["model"] = patch_body["model"] or None
+                            if data["model"] is None:
+                                data.pop("model", None)
+                        f.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+                    state = request.app["state"]
+                    state.push_refresh("agents")
+                    return web.json_response({"ok": True, "model": data.get("model", "")})
+                return web.json_response(data)
+        except (json.JSONDecodeError, OSError):
+            continue
+    # "default" is the built-in agent with no config file
+    if name == "default":
+        if request.method != "GET":
+            return web.json_response({"error": "cannot modify built-in default agent"}, status=400)
+        return web.json_response({"name": "default", "model": ""})
+    return web.json_response({"error": "not found"}, status=404)
+
+
+async def api_aim_agents_list(request: web.Request) -> web.Response:
+    """GET /api/aim/agents — list installed AIM agent/plugin packages."""
+    if not _aim_path():
+        return web.json_response({"error": "aim CLI not found"}, status=503)
+    try:
+        rc, out = await _run_aim(_aim_cap_type(), "list")
+        if rc != 0:
+            return web.json_response({"error": out[:500]}, status=500)
+        return web.json_response({"output": out.strip()})
+    except Exception as exc:
+        return web.json_response({"error": str(exc)[:500]}, status=500)
+
+
+async def api_aim_agents_install(request: web.Request) -> web.Response:
+    """POST /api/aim/agents/install — install AIM agent/plugin package."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    package = body.get("package", "").strip()
+    if not package:
+        return web.json_response({"error": "package required"}, status=400)
+    if not _VALID_PACKAGE_RE.match(package) or ".." in package:
+        return web.json_response({"error": "invalid package name"}, status=400)
+    vs = body.get("version_set", "").strip()
+    if vs and not _VALID_PACKAGE_RE.match(vs):
+        return web.json_response({"error": "invalid version_set"}, status=400)
+    try:
+        # Install for the active provider
+        args = [_aim_cap_type(), "install", package]
+        if vs:
+            args.extend(["--version-set", vs])
+        rc, out = await _run_aim(*args, timeout=120)
+        if rc != 0:
+            return web.json_response({"error": _friendly_aim_error(out, package)}, status=500)
+
+        # Bidirectional: also install for the other provider
+        other = "agents" if _aim_cap_type() == "plugins" else "plugins"
+        other_args = [other, "install", package, "--non-interactive"]
+        if vs:
+            other_args.extend(["--version-set", vs])
+        rc2, out2 = await _run_aim(*other_args, timeout=120)
+        if rc2 != 0:
+            logger.warning("AIM %s install %s failed: %s", other, package, out2[:200])
+        try:
+            _sel().log_api_access(
+                caller="dashboard",
+                operation=f"aim_{other}.install",
+                outcome="ok" if rc2 == 0 else "error",
+                source="api_aim_agents_install",
+                resources=package,
+            )
+        except Exception:
+            logger.warning("SEL logging failed for cross-provider sync", exc_info=True)
+
+        # Regenerate kiroclaw.json to pick up new skill paths + enforce security
+        from kiro_claw.agent import install_agent  # noqa: F811
+
+        install_agent()
+        _regen_conductor()
+        state: DashboardState = request.app["state"]
+        state.push_refresh("agents")
+        return web.json_response({"ok": True, "package": package, "output": out.strip()})
+    except Exception as exc:
+        return web.json_response({"error": str(exc)[:500]}, status=500)
+
+
+async def api_aim_agents_uninstall(request: web.Request) -> web.Response:
+    """POST /api/aim/agents/uninstall — uninstall AIM agent/plugin package."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    package = body.get("package", "").strip()
+    if not package:
+        return web.json_response({"error": "package required"}, status=400)
+    # Protect KiroClaw's own AIM package from accidental uninstall
+    bare = package.removeprefix("local/")
+    if bare.startswith("KiroClawAICapabilities"):
+        try:
+            _sel().log_api_access(
+                caller="dashboard",
+                operation="aim_agents.uninstall",
+                outcome="denied",
+                source="dashboard",
+                resources=package,
+            )
+        except Exception:
+            logger.warning("SEL logging failed for uninstall denial", exc_info=True)
+        return web.json_response(
+            {"error": "KiroClawAICapabilities is managed by KiroClaw and cannot be uninstalled"},
+            status=400,
+        )
+    if not _VALID_PACKAGE_RE.match(package) or ".." in package:
+        return web.json_response({"error": "invalid package name"}, status=400)
+    try:
+        rc, out = await _run_aim(_aim_cap_type(), "uninstall", package)
+        if rc != 0:
+            return web.json_response({"error": out[:500]}, status=500)
+
+        # Bidirectional: also uninstall from the other provider
+        other = "agents" if _aim_cap_type() == "plugins" else "plugins"
+        rc2, out2 = await _run_aim(other, "uninstall", package, "--non-interactive")
+        if rc2 != 0:
+            logger.warning("AIM %s uninstall %s failed: %s", other, package, out2[:200])
+        try:
+            _sel().log_api_access(
+                caller="dashboard",
+                operation=f"aim_{other}.uninstall",
+                outcome="ok" if rc2 == 0 else "error",
+                source="api_aim_agents_uninstall",
+                resources=package,
+            )
+        except Exception:
+            logger.warning("SEL logging failed for cross-provider sync", exc_info=True)
+
+        # Also uninstall skills so sync_aim_packages does not reinstall the
+        # package from a stale skills artifact (Mesh-1330).  Packages with no
+        # skills component return non-zero here — log and continue.
+        rc3, out3 = await _run_aim("skills", "uninstall", package, "--non-interactive")
+        if rc3 != 0:
+            logger.warning("AIM skills uninstall %s failed: %s", package, out3[:200])
+        try:
+            _sel().log_api_access(
+                caller="dashboard",
+                operation="aim_skills.uninstall",
+                outcome="ok" if rc3 == 0 else "error",
+                source="api_aim_agents_uninstall",
+                resources=package,
+            )
+        except Exception:
+            logger.warning("SEL logging failed for skills uninstall", exc_info=True)
+
+        state: DashboardState = request.app["state"]
+        state.push_refresh("agents")
+        state.push_refresh("skills")
+        from kiro_claw.agent import install_agent  # noqa: F811
+
+        install_agent()
+        _regen_conductor()
+        return web.json_response({"ok": True, "package": package})
+    except Exception as exc:
+        return web.json_response({"error": str(exc)[:500]}, status=500)
+
+
+async def api_aim_update(request: web.Request) -> web.Response:
+    """POST /api/aim/update — update agents/plugins, skills, or MCP packages."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    kind = body.get("kind", "agents")  # agents | skills | mcp
+    package = body.get("package", "").strip()  # empty = update all
+    if package and (not _VALID_PACKAGE_RE.match(package) or ".." in package):
+        return web.json_response({"error": "invalid package name"}, status=400)
+    try:
+        if kind == "mcp":
+            args = ["mcp", "update"] + ([package] if package else [])
+        elif kind == "skills":
+            args = ["skills", "update"] + ([package] if package else [])
+        else:
+            args = [_aim_cap_type(), "update"] + ([package] if package else [])
+        rc, out = await _run_aim(*args, timeout=120)
+        if rc != 0:
+            return web.json_response({"error": out[:500]}, status=500)
+
+        # For agents/plugins updates, update ALL types to converge versions
+        if kind == "agents":
+            other = "agents" if _aim_cap_type() == "plugins" else "plugins"
+            rc_o, _ = await _run_aim(other, "update", *([package] if package else []), "--non-interactive", timeout=120)
+            rc_s, _ = await _run_aim("skills", "update", *([package] if package else []), "--non-interactive", timeout=120)
+            try:
+                _sel().log_api_access(
+                    caller="dashboard",
+                    operation=f"aim_{other}.update",
+                    outcome="ok" if rc_o == 0 else "error",
+                    source="api_aim_update",
+                    resources=package or "all",
+                )
+                _sel().log_api_access(
+                    caller="dashboard",
+                    operation="aim_skills.update",
+                    outcome="ok" if rc_s == 0 else "error",
+                    source="api_aim_update",
+                    resources=package or "all",
+                )
+            except Exception:
+                logger.warning("SEL logging failed for cross-provider update", exc_info=True)
+
+        from kiro_claw.agent import install_agent  # noqa: F811
+
+        install_agent()
+        state: DashboardState = request.app["state"]
+        state.push_refresh("agents")
+        return web.json_response({"ok": True, "output": out.strip()})
+    except Exception as exc:
+        return web.json_response({"error": str(exc)[:500]}, status=500)
+
+
+async def api_aim_mcp_registry(request: web.Request) -> web.Response:
+    """GET /api/aim/mcp/registry — browse available MCP servers from registry."""
+    if not _aim_path():
+        return web.json_response({"error": "aim CLI not found"}, status=503)
+    try:
+        rc, out = await _run_aim("mcp", "list", "-o", "JSON", timeout=30)
+        if rc != 0:
+            return web.json_response({"error": out[:500]}, status=500)
+        # Parse JSON output from `aim mcp list -o JSON`
+        raw = out.strip()
+        start = raw.find("[")
+        if start == -1:
+            return web.json_response({"error": "unexpected aim output format"}, status=500)
+        try:
+            decoder = json.JSONDecoder()
+            items, _ = decoder.raw_decode(raw, start)
+        except json.JSONDecodeError:
+            return web.json_response({"error": "unexpected aim output format"}, status=500)
+
+        entries: list[dict[str, Any]] = []
+        for item in items:
+            name_str = item.get("name", "")
+            # Extract tier from name like "Title [Recommended]"
+            tier = ""
+            tier_match = re.search(r"\[(Recommended|Supported)\]\s*$", name_str)
+            if tier_match:
+                tier = tier_match.group(1)
+                name_str = name_str[: tier_match.start()].strip()
+
+            entries.append({
+                "id": item.get("bundleId", ""),
+                "installed": "yes" if item.get("isInstalled") else "",
+                "title": name_str,
+                "tier": tier,
+                "description": item.get("description", ""),
+            })
+        return web.json_response({"servers": entries})
+    except Exception as exc:
+        return web.json_response({"error": str(exc)[:500]}, status=500)
+
+
+# ── KiroClaw Agent CRUD API ──
+
+
+async def api_kiroclaw_agents(request: web.Request) -> web.Response:
+    """GET /api/agents — list all KiroClaw agent definitions."""
+    cfg = KiroClawConfig.load()
+    agents = [
+        {"name": name, **dataclasses.asdict(agent_cfg)} for name, agent_cfg in cfg.agents.items()
+    ]
+    return web.json_response(
+        {
+            "agents": agents,
+            "default_agent": cfg.default_agent,
+        }
+    )
+
+
+_config_lock: asyncio.Lock | None = None
+_config_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_config_lock() -> asyncio.Lock:
+    """Return a config lock bound to the current event loop (Python 3.10 compat)."""
+    global _config_lock, _config_lock_loop
+    loop = asyncio.get_running_loop()
+    if _config_lock is None or _config_lock_loop is not loop:
+        _config_lock = asyncio.Lock()
+        _config_lock_loop = loop
+    return _config_lock
+
+
+async def api_kiroclaw_agents_sync(request: web.Request) -> web.Response:
+    """POST /api/agents/sync — auto-sync AIM-installed agents into config.json."""
+    async with _get_config_lock():
+        return await _do_agents_sync(request)
+
+
+async def _do_agents_sync(request: web.Request) -> web.Response:
+
+    cfg = KiroClawConfig.load()
+    synced: list[str] = []
+    pruned: list[str] = []
+    try:
+        aim_agents = list(list_agents())
+        aim_names = {a.name for a in aim_agents}
+
+        # Add new agents
+        mc_kiro_agents = {a.kiro_agent for a in cfg.agents.values()}
+        for aim in aim_agents:
+            if (
+                aim.name not in mc_kiro_agents
+                and aim.name not in cfg.agents
+                and aim.source != "kiroclaw"
+            ):
+                cfg.agents[aim.name] = KiroClawAgentConfig(
+                    kiro_agent=aim.name,
+                    description=aim.description,
+                    source=aim.source,
+                )
+                synced.append(aim.name)
+
+        # Prune agents whose kiro_agent file no longer exists on disk.
+        # Only prune AIM-sourced agents (never user-created or kiroclaw-owned).
+        # Skip pruning if scan returned nothing -- likely a transient issue.
+        # Invariant: for source="aim" entries, kiro_agent == dict key == AIM agent name.
+        if aim_names:
+            for name, agent_cfg in list(cfg.agents.items()):
+                if agent_cfg.source == "aim" and agent_cfg.kiro_agent not in aim_names:
+                    del cfg.agents[name]
+                    pruned.append(name)
+    except Exception:
+        logger.warning("Failed to scan AIM agents", exc_info=True)
+        try:
+            _sel().log_api_access(
+                caller=request.get("user", "dashboard"),
+                operation="agent.auto_sync",
+                outcome="failure",
+                source="aim",
+            )
+        except Exception:
+            logger.warning("SEL logging failed for agent sync failure", exc_info=True)
+        return web.json_response({"ok": False, "error": "sync failed", "synced": []}, status=500)
+
+    if synced or pruned:
+        try:
+            cfg.save()
+        except Exception:
+            logger.warning("Failed to save config after AIM sync", exc_info=True)
+            try:
+                _sel().log_api_access(
+                    caller=request.get("user", "dashboard"),
+                    operation="agent.auto_sync",
+                    outcome="failure",
+                    source="aim",
+                )
+            except Exception:
+                logger.warning("SEL logging failed for config save failure", exc_info=True)
+            return web.json_response(
+                {"ok": False, "error": "config save failed", "synced": []}, status=500
+            )
+        try:
+            _sel().log_api_access(
+                caller=request.get("user", "dashboard"),
+                operation="agent.auto_sync",
+                outcome="success",
+                source="aim",
+                resources=", ".join(synced + [f"-{p}" for p in pruned]),
+            )
+        except Exception:
+            logger.warning("SEL logging failed for agent sync success", exc_info=True)
+    else:
+        try:
+            _sel().log_api_access(
+                caller=request.get("user", "dashboard"),
+                operation="agent.auto_sync",
+                outcome="noop",
+                source="aim",
+            )
+        except Exception:
+            logger.warning("SEL logging failed for agent sync noop", exc_info=True)
+
+    if pruned:
+        logger.info("Pruned %d stale AIM agents: %s", len(pruned), ", ".join(pruned))
+
+    return web.json_response({"ok": True, "synced": synced, "pruned": pruned})
+
+
+async def api_kiroclaw_agents_create(request: web.Request) -> web.Response:
+    """POST /api/agents — create a new KiroClaw agent."""
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    name = body.get("name", "").strip()
+    if not name:
+        return web.json_response({"error": "Agent name is required"}, status=400)
+    async with _get_config_lock():
+        cfg = KiroClawConfig.load()
+        if name in cfg.agents:
+            return web.json_response({"error": f"Agent '{name}' already exists"}, status=409)
+        cfg.agents[name] = KiroClawAgentConfig(
+            kiro_agent=body.get("kiro_agent", "kiroclaw"),
+            workspace=body.get("workspace", "default"),
+            memory_store=body.get("memory_store", "default"),
+            description=body.get("description", ""),
+            source=body.get("source", "kiroclaw"),
+        )
+        cfg.save()
+    _sel().log_api_access(
+        caller=request.get("user", "dashboard"),
+        operation="agent.create",
+        outcome="success",
+        source="dashboard",
+        resources=name,
+    )
+    return web.json_response({"ok": True, "name": name})
+
+
+async def api_kiroclaw_agent_update(request: web.Request) -> web.Response:
+    """PUT /api/agents/{name} — update a KiroClaw agent."""
+
+    name = request.match_info["name"]
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    async with _get_config_lock():
+        cfg = KiroClawConfig.load()
+        if name not in cfg.agents:
+            return web.json_response({"error": f"Agent '{name}' not found"}, status=404)
+        agent = cfg.agents[name]
+        changed: list[str] = []
+        if "kiro_agent" in body:
+            agent.kiro_agent = body["kiro_agent"]
+            changed.append("kiro_agent")
+        if "workspace" in body:
+            agent.workspace = body["workspace"]
+            changed.append("workspace")
+        if "memory_store" in body:
+            agent.memory_store = body["memory_store"]
+            changed.append("memory_store")
+        if "description" in body:
+            agent.description = body["description"]
+            changed.append("description")
+        if "source" in body:
+            agent.source = body["source"]
+            changed.append("source")
+        cfg.save()
+    _sel().log_api_access(
+        caller=request.get("user", "dashboard"),
+        operation="agent.update",
+        outcome="success",
+        source="dashboard",
+        resources=f"{name} ({','.join(changed)})",
+    )
+    return web.json_response({"ok": True, "name": name})
+
+
+async def api_kiroclaw_agent_delete(request: web.Request) -> web.Response:
+    """DELETE /api/agents/{name} — delete a KiroClaw agent."""
+
+    name = request.match_info["name"]
+    async with _get_config_lock():
+        cfg = KiroClawConfig.load()
+        if name not in cfg.agents:
+            return web.json_response({"error": f"Agent '{name}' not found"}, status=404)
+        if name == cfg.default_agent:
+            return web.json_response(
+                {"error": f"Cannot delete default agent '{name}'. Change default_agent first."},
+                status=409,
+            )
+        del cfg.agents[name]
+        cfg.save()
+    _sel().log_api_access(
+        caller=request.get("user", "dashboard"),
+        operation="agent.delete",
+        outcome="success",
+        source="dashboard",
+        resources=name,
+    )
+    return web.json_response({"ok": True})
+
+
+# ── Agent metadata (Phase 1: Agents as Skills) ──────────────────────
+
+
+def _regen_conductor() -> None:
+    """Regenerate conductor skill after metadata or agent roster changes."""
+    try:
+        cfg = KiroClawConfig.load()
+        if not cfg.agent.conductor_skill:
+            return
+        from kiro_claw.conductor_skill import generate_conductor_skill  # noqa: F811
+        from kiro_claw.skills import SkillsLoader  # noqa: F811
+
+        generate_conductor_skill(SkillsLoader())
+    except Exception:
+        logger.exception("Failed to regenerate conductor skill")
+
+
+async def api_agent_metadata_get(request: web.Request) -> web.Response:
+    """GET /api/agent-metadata/{name} — read agent routing metadata."""
+    name = request.match_info["name"]
+    from kiro_claw.agent_metadata import load  # noqa: F811
+
+    content = load(name)
+    return web.json_response({"name": name, "content": content})
+
+
+async def api_agent_metadata_put(request: web.Request) -> web.Response:
+    """PUT /api/agent-metadata/{name} — write agent routing metadata."""
+    caller = request.get("user", "")
+    if not caller:
+        try:
+            _sel().log_api_access(caller="anonymous", operation="agent_metadata.put", outcome="denied", source="dashboard", resources="unauthenticated")
+        except Exception:
+            logger.warning("SEL logging failed", exc_info=True)
+        return web.json_response({"error": "authentication required"}, status=401)
+    name = request.match_info["name"]
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    content = body.get("content", "").strip()
+    if not content:
+        return web.json_response({"error": "content required"}, status=400)
+    from kiro_claw.agent_metadata import save  # noqa: F811
+
+    save(name, content)
+    _regen_conductor()
+    try:
+        _sel().log_api_access(
+            caller=caller, operation="agent_metadata.put", outcome="ok", resources=name
+        )
+    except Exception:
+        logger.warning("SEL logging failed", exc_info=True)
+    return web.json_response({"ok": True, "name": name})
+
+
+async def api_agent_metadata_delete(request: web.Request) -> web.Response:
+    """DELETE /api/agent-metadata/{name} — delete agent routing metadata."""
+    caller = request.get("user", "")
+    if not caller:
+        try:
+            _sel().log_api_access(caller="anonymous", operation="agent_metadata.delete", outcome="denied", source="dashboard", resources="unauthenticated")
+        except Exception:
+            logger.warning("SEL logging failed", exc_info=True)
+        return web.json_response({"error": "authentication required"}, status=401)
+    name = request.match_info["name"]
+    from kiro_claw.agent_metadata import delete  # noqa: F811
+
+    delete(name)
+    _regen_conductor()
+    try:
+        _sel().log_api_access(
+            caller=caller, operation="agent_metadata.delete", outcome="ok", resources=name
+        )
+    except Exception:
+        logger.warning("SEL logging failed", exc_info=True)
+    return web.json_response({"ok": True, "name": name})
+
+
+# ── Claude Code migration (kiro → CC) ──
+
+
+def _summarize_mirror_result(result: dict[str, Any]) -> dict[str, int]:
+    """Reduce a ``mirror_kiro_to_cc`` result dict to scalar counts for the UI."""
+    mirrored = (
+        sum(1 for a in result["agents"] if a["action"] == "mirrored")
+        + sum(1 for m in result["mcp"] if "mirrored" in m["action"])
+        + sum(1 for s in result["skills"] if s["action"] == "mirrored")
+    )
+    skipped = (
+        sum(1 for a in result["agents"] if "skipped" in a["action"])
+        + sum(1 for m in result["mcp"] if "skipped" in m["action"])
+        + sum(1 for s in result["skills"] if "skipped" in s["action"])
+    )
+    return {
+        "agents_total": len(result["agents"]),
+        "mcp_total": len(result["mcp"]),
+        "skills_total": len(result["skills"]),
+        "mirrored": mirrored,
+        "skipped": skipped,
+        "errors": len(result["errors"]),
+    }
+
+
+async def api_cc_mirror_preview(request: web.Request) -> web.Response:
+    """GET /api/cc/mirror/preview — dry-run kiro→CC mirror; report counts."""
+    try:
+        result = await asyncio.to_thread(mirror_kiro_to_cc, dry_run=True, force=False)
+    except Exception as exc:
+        logger.warning("mirror preview failed", exc_info=True)
+        return web.json_response({"error": str(exc)[:500]}, status=500)
+    summary = _summarize_mirror_result(result)
+    try:
+        _sel().log_api_access(
+            caller=request.get("user", "anonymous"),
+            operation="cc_mirror.preview",
+            outcome="ok",
+            source="dashboard",
+            resources=(
+                f"{summary['mirrored']}/"
+                f"{summary['agents_total'] + summary['mcp_total'] + summary['skills_total']}"
+            ),
+        )
+    except Exception:
+        logger.warning("SEL logging failed for cc_mirror.preview", exc_info=True)
+    return web.json_response({"summary": summary, **result})
+
+
+async def api_cc_mirror_run(request: web.Request) -> web.Response:
+    """POST /api/cc/mirror/run — apply kiro→CC mirror to disk."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    force = bool(body.get("force", False))
+    try:
+        result = await asyncio.to_thread(mirror_kiro_to_cc, dry_run=False, force=force)
+    except Exception as exc:
+        logger.warning("mirror run failed", exc_info=True)
+        return web.json_response({"error": str(exc)[:500]}, status=500)
+    summary = _summarize_mirror_result(result)
+    try:
+        _sel().log_api_access(
+            caller=request.get("user", "anonymous"),
+            operation="cc_mirror.run",
+            outcome="ok" if not result["errors"] else "partial",
+            source="dashboard",
+            resources=(
+                f"force={force} mirrored={summary['mirrored']} errors={summary['errors']}"
+            ),
+        )
+    except Exception:
+        logger.warning("SEL logging failed for cc_mirror.run", exc_info=True)
+    state: DashboardState = request.app["state"]
+    state.push_refresh("agents")
+    state.push_refresh("skills")
+    return web.json_response({"summary": summary, **result})
+
+
+async def api_cc_aim_missing(request: web.Request) -> web.Response:
+    """GET /api/cc/aim/missing — kiro AIM packages not installed for CC."""
+    try:
+        missing = await asyncio.to_thread(installed_kiro_packages_missing_from_cc)
+    except Exception as exc:
+        logger.warning("cc aim missing query failed", exc_info=True)
+        return web.json_response({"error": str(exc)[:500]}, status=500)
+    return web.json_response({"missing": missing})
+
+
+async def api_cc_aim_sync(request: web.Request) -> web.Response:
+    """POST /api/cc/aim/sync — install missing AIM packages as CC plugins."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    requested = body.get("packages")
+    if requested is not None and not isinstance(requested, list):
+        return web.json_response({"error": "packages must be a list or null"}, status=400)
+
+    try:
+        targets: list[str]
+        if requested is not None:
+            # Caller passed an explicit list; an empty list means "install nothing".
+            targets = [str(p).strip() for p in requested if str(p).strip()]
+        else:
+            targets = await asyncio.to_thread(installed_kiro_packages_missing_from_cc)
+    except Exception as exc:
+        logger.warning("cc aim sync target resolution failed", exc_info=True)
+        return web.json_response({"error": str(exc)[:500]}, status=500)
+
+    invalid = [p for p in targets if not _VALID_PACKAGE_RE.match(p) or ".." in p]
+    if invalid:
+        return web.json_response(
+            {"error": f"invalid package name(s): {', '.join(invalid)[:200]}"}, status=400
+        )
+
+    installed: list[str] = []
+    failed: list[dict[str, str]] = []
+    for pkg in targets:
+        try:
+            ok, msg = await asyncio.to_thread(install_cc_plugin, pkg, standalone=True)
+        except Exception as exc:
+            ok, msg = False, str(exc)[:200]
+        if ok:
+            installed.append(pkg)
+        else:
+            failed.append({"package": pkg, "error": msg})
+        try:
+            _sel().log_api_access(
+                caller=request.get("user", "anonymous"),
+                operation="cc_aim.install",
+                outcome="ok" if ok else "error",
+                source="dashboard",
+                resources=pkg,
+            )
+        except Exception:
+            logger.warning("SEL logging failed for cc_aim.install", exc_info=True)
+
+    state: DashboardState = request.app["state"]
+    state.push_refresh("agents")
+    return web.json_response({"installed": installed, "failed": failed})

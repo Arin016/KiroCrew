@@ -1,0 +1,13 @@
+{
+  "browser": {
+    "browserName": "chromium",
+    "isolated": true,
+    "launchOptions": {
+      "args": ["--auth-server-allowlist=*.amazon.com,*.a2z.com,*.aws.dev"]
+    },
+    "contextOptions": {
+      "storageState": "STORAGE_STATE_PATH"
+    }
+  },
+  "capabilities": ["network", "storage"]
+}

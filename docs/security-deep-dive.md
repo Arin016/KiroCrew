@@ -1,0 +1,317 @@
+# Security Deep Dive
+
+Defense-in-depth security architecture across all KiroClaw layers.
+
+## Threat Model
+
+KiroClaw runs an LLM agent with filesystem and shell access. The primary threat is **Cross-Plugin Injection Attack (XPIA)** — a malicious prompt embedded in content the LLM reads (web pages, files, Slack messages) that tricks it into exfiltrating credentials or executing destructive commands.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Defense-in-Depth Layers                      │
+│                                                                 │
+│  Layer 5: Audit ──────── SEL event logging on all tool calls    │
+│  Layer 4: Output ─────── Credential redaction + URL scanning    │
+│  Layer 3: Validation ─── MCP input schemas + length limits      │
+│  Layer 2: Command ────── 113 denied patterns + 55 suspicious    │
+│  Layer 1: Filesystem ─── Hook-layer path blocking               │
+│  Layer 0: OS Sandbox ─── Namespace/Seatbelt process isolation   │
+│                                                                 │
+│  Cross-cutting: Auth (Slack owner lock + dashboard tokens)      │
+│  Cross-cutting: Enterprise Grid workspace validation            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Layer 0: OS-Level Sandbox (`sandbox.py`)
+
+Hides credential paths from the kiro-cli subprocess tree using platform-native isolation. The parent KiroClaw process is unaffected — only agent subprocesses are sandboxed.
+
+### How It Works
+
+**Linux** — user + mount namespaces:
+1. Fork child process
+2. Child calls `unshare(CLONE_NEWUSER)` — new user namespace
+3. Parent writes identity UID/GID map to `/proc/<child>/{uid_map,gid_map}`
+4. Child calls `unshare(CLONE_NEWNS)` — new mount namespace
+5. Sets mount propagation private (`MS_REC|MS_PRIVATE`)
+6. Bind-mounts empty dirs over credential paths (per mode)
+7. Scrubs sensitive env vars
+8. Execs the agent binary
+
+Two-pipe synchronization ensures correct ordering. The child retains the real UID/GID so toolchains (JVM, brazil-build, Gradle, npm) work without workarounds.
+
+**macOS** — Seatbelt sandbox:
+- `sandbox-exec` with a generated Seatbelt profile that denies file reads on credential paths
+- Same env var scrubbing as Linux
+
+### Sandbox Modes
+
+| Mode | Config | Hidden Paths | Accessible | Env Scrub |
+|------|--------|-------------|------------|-----------|
+| Standard | `"auto"` (default) | `.gnupg`, `.gpg`, `.config/gcloud`, `.azure`, `.docker` | `.aws`, `.ssh`, `.kube` | `AWS_SECRET*`, `AWS_SESSION*`, `SSH_AUTH_SOCK`, `GNUPGHOME`, `GIT_ASKPASS` |
+| Strict | `"strict"` | All above + `.aws`, `.ssh`, `.kube` | Only `~/.ssh/known_hosts` | Same |
+| Off | `"off"` | Nothing | Everything | Nothing |
+
+Config: `agent.sandbox` in `~/.kiroclaw/config.json`.
+
+### Why Standard Mode Is Safe
+
+Protection depth depends on the access path:
+
+- **kiro-cli tool reads** (primary attack path): two layers protect `.aws`/`.ssh` — denied command patterns block `cat`/`head`/`tail`/`python open()` on those paths, and output redaction (`redact_credentials()`) catches any credential patterns that leak through tool output.
+- **Non-tool reads** (KiroClaw's own file operations): a third hook layer (`safe_read_file()` → `is_sensitive_path()`) blocks reads before they reach the filesystem.
+
+Standard mode allows git-over-SSH via key files, AWS CLI via `credential_process`, and kubectl. Note: `SSH_AUTH_SOCK` is scrubbed in both Standard and Strict modes, so ssh-agent forwarding is unavailable unless the sandbox is set to `"off"`. Users relying on passphrase-protected keys or hardware tokens must either use unencrypted key files directly or set `agent.sandbox` to `"off"`.
+
+### AL2 Compatibility
+
+On AL2, kiro-cli is a bash shim (`aim sandbox --client kiro-cli`). `_resolve_real_kiro_bin()` bypasses the shim by resolving the real ELF binary (magic byte check rejects shell scripts).
+
+## Layer 1: Filesystem Protection (`security.py` + `hooks.py`)
+
+### Sensitive Path Blocking
+
+`is_sensitive_path(path)` resolves and checks against 13 sensitive directories:
+
+```
+~/.aws, ~/.ssh, ~/.gnupg, ~/.gpg, ~/.config/gcloud, ~/.azure,
+~/.docker/config.json, ~/.kube/config, ~/.npmrc, ~/.pypirc,
+~/.netrc, ~/.git-credentials, ~/.kiroclaw/.env
+```
+
+### Sensitive Bash Command Detection
+
+`is_sensitive_bash_command(cmd)` regex-matches commands that read credential files:
+- `cat`, `head`, `tail`, `less`, `cp`, `scp` targeting sensitive paths
+- `python open()` / `python -c` targeting sensitive paths
+- Pipe redirects from sensitive paths
+
+### How the Hook Layer Works
+
+`hooks.py:safe_read_file(path)` is the central guarded file read. All file reads outside kiro-cli tool calls go through this function:
+
+```python
+def safe_read_file(path: str) -> str:
+    resolved = Path(path).expanduser().resolve()
+    if is_sensitive_path(str(resolved)):
+        raise PermissionError(f"Access denied: {path}")
+    return resolved.read_text()
+```
+
+## Layer 2: Command Denial (`security.py` + `agents/defaults.json`)
+
+### Denied Commands (113 patterns)
+
+Regex patterns in `agents/defaults.json` blocking:
+
+**Credential exfiltration:**
+- `echo $AWS_SECRET*`, `printenv AWS*`, `env | grep AWS`
+- `python boto3.get_credentials`, `python botocore.credentials`
+- `curl 169.254.169.254` (IMDS metadata endpoint)
+- `curl $AWS_SECRET*` (credential exfil via HTTP)
+- `aws s3 cp/mv/sync . s3://` (file upload exfil)
+- `cat ~/.aws/*`, `cat ~/.ssh/*` (direct reads)
+
+**Destructive operations:**
+- `rm -rf /`, `rm -rf ~`, `git push --force`
+- `aws * delete-*`, `aws ec2 terminate-instances`
+- `cdk destroy`, `terraform destroy`
+- `DROP TABLE`, `DROP DATABASE`
+
+**Enforcement**: `_enforce_denied_commands()` replaces denied commands in ALL agent configs from bundled defaults at install, gateway startup, and periodically (~60s).
+
+### Per-Segment Deny Pattern Evaluation (`security.py`)
+
+The `is_denied()` function uses a two-pass evaluation algorithm to balance security (blocking chaining-bypass attacks) with usability (allowing legitimate piped workflows):
+
+**Pass 1 (whole-string deny):** Every deny pattern is matched against the full input. If a pattern matches and no exception pattern also matches the full input, the command is denied outright. This catches evasion vectors that span separator boundaries (e.g., `git$(echo ' ')push origin main`).
+
+**Pass 2 (per-segment evaluation):** Only runs when pass 1 found a deny match AND a matching exception exists. The input is split on shell separators (`;`, `&&`, `||`, `|`, `&`, `$(`, `)`, backticks, newlines) into independent segments. Each segment is re-evaluated against deny patterns + exceptions.
+
+**Threat model preserved:**
+- Real `git push` (any form): BLOCKED
+- `git push` chained after `stash` via `;`/`&&`/`||`/`|`: BLOCKED (embedded publish is its own segment)
+- `git push` via subshell (`$(...)` or backtick): BLOCKED (subshell content is its own segment)
+- Path containing "stash" as directory with real push: BLOCKED (exception requires literal ` stash push` with leading space)
+
+**New permissive behavior:**
+- `git stash push | tail -3`: ALLOWED (stash exception in segment 1, tail in segment 2 is deny-free)
+- `git stash push && git status`: ALLOWED
+- `git stash push; git rebase origin/main`: ALLOWED
+
+**Audit:** Every denial emits a `deny_event` SEL event. Every exception grant emits a `deny_exception` SEL event (fail-closed: if SEL logging fails, the exception is not granted).
+
+### Suspicious Bash Patterns (55 patterns)
+
+`SUSPICIOUS_BASH_PATTERNS` checked by `audit_bash_command()` at tool invocation time:
+
+- **Deletion**: `find * -delete`, `xargs rm`, `shred`, `truncate`, `rm -rf /`
+- **Exfiltration**: `curl -d @file`, `wget --post-file`, `nc < file`
+- **Pipe execution**: `| bash`, `| sh`, `| python`, `| perl`
+
+## Layer 3: Input/Output Validation (`validation.py`)
+
+Centralized validation for all 12 MCP tool handlers:
+
+| Control | Implementation |
+|---------|---------------|
+| Type-safe schemas | `FieldSpec` + `ToolSchema` declarative validation |
+| Unicode normalization | NFC + hidden character stripping (control chars, format chars, private use, surrogates) |
+| Allow-lists | Enum enforcement for lesson categories, cron schedule kinds |
+| Regex patterns | Agent name, job ID format validation |
+| Range checks | Positive numbers for timeouts/intervals, valid timestamps |
+| Length limits | Tool names (64), short strings (500), medium (5K), long (50K) |
+| Unknown field rejection | Rejects unexpected fields in tool inputs |
+| Response truncation | 100K char limit prevents DoS from unbounded tool output |
+
+## Layer 4: Output Scanning
+
+### Credential Redaction (`redact_credentials`)
+
+Scans for plaintext AND base64-encoded credentials:
+- `AKIA`/`ASIA` access key IDs
+- `SecretAccessKey=`, `aws_secret_access_key=`
+- `SessionToken=`, `aws_session_token=`
+- Private key headers (`BEGIN RSA/DSA/EC/OPENSSH PRIVATE KEY`)
+- Slack tokens (`xoxb-`/`xoxp-`)
+
+Base64 detection: finds 40+ char base64 chunks, decodes, checks if decoded content matches any credential pattern.
+
+Applied on ALL 5 output paths:
+1. Dashboard streaming (mid-flush)
+2. Dashboard streaming (trailing)
+3. Dashboard non-chunk messages
+4. Dashboard history save (JSONL)
+5. Slack final response
+
+### URL Exfiltration Detection (`scan_exfiltration_urls`)
+
+Domain-agnostic — flags the payload, not the destination:
+- Long query strings (≥200 chars)
+- Base64 blobs (40+ chars)
+- Heavy URL-encoding
+- AWS access key IDs in URLs
+- SSH keys, private key headers, Slack tokens in URLs
+
+Suspicious URLs replaced with `[REDACTED: suspicious URL to {domain}]`.
+
+## Layer 5: Audit Logging (SEL)
+
+Security Event Log — immutable audit trail integrated across 8 surfaces:
+- Slack handler, dashboard chat, task runner, subagent
+- Background tasks, MCP core, MCP cron, API middleware
+
+All string fields redacted via `redact()` before forwarding to centralized log integration.
+
+## Authentication & Authorization
+
+### Slack Owner Lock (Deny-by-Default)
+
+5 defense-in-depth layers:
+1. `_init_socket_mode()` refuses to connect if `KIROCLAW_OWNER_ID` unset
+2. `_on_event()` rejects all messages when owner ID missing
+3. `conversations.info` DM gate for Trust/YOLO actions
+4. Trust/YOLO buttons suppressed in group channels
+5. Safety override (YOLO) time-limited: Slack 30min, dashboard 6h, config 24h (no permanent mode)
+6. Re-authorization required after expiry (5-minute grace window for renewal)
+7. Fleet governance: `/api/status` reports `yolo_active`/`yolo_expires_at`; `/api/admin/compliance/yolo-status` provides full override status
+8. SEL audit on every lifecycle event: `safety_override:activate`, `safety_override:renew`, `safety_override:expired`, `safety_override:deactivate`
+
+### Challenge-and-Redirect (Slack Security Enforcement)
+
+All Slack messages that would reach the agent now require dashboard session verification first. This is a deny-by-default security control:
+
+1. User sends message in Slack (channel, DM, or thread)
+2. KiroClaw generates a presigned dashboard URL with the prompt HMAC-signed inside the token payload
+3. Ephemeral message (channels) or DM sent with link + lock emoji acknowledgment
+4. Dashboard frontend extracts prompt from validated token, pre-fills chat (no auto-send)
+5. If challenge fails: message is NOT processed inline; user receives fallback message
+
+The prompt is embedded in the signed token payload (not as a separate URL parameter) to prevent tampering. Token TTL uses `LINK_WINDOW_SECS` as single source of truth. `window.history.replaceState` strips `?token=` after consumption.
+
+Configuration: OFF by default (the redirect flow is not yet ready for general use); enabled exclusively via the `KIROCLAW_ENABLE_CHALLENGE=1` environment variable (not configurable via config.json). When disabled, Slack messages are processed inline. The legacy `KIROCLAW_DISABLE_CHALLENGE` variable is no longer consulted.
+
+### 3-Tier Interactive Trust Escalation
+
+Dashboard tool approval prompts offer three trust levels for user control over auto-approval scope:
+
+| Level | Action | Scope | Example |
+|-------|--------|-------|---------|
+| 1 | Trust this command | Session, exact match | `ls /tmp` |
+| 2 | Trust this tool | Session, base glob | `ls *` (any args) |
+| 3 | YOLO | Global, time-limited | All tools, all slots |
+
+Trust patterns are session-scoped fnmatch globs stored per-slot. Security: matching uses the ACTUAL command from `tool_input` (not LLM-controlled display text). Multi-command titles generate patterns for each binary.
+
+### Dashboard Token Auth
+
+HMAC-SHA256 signed tokens with dual expiry:
+- 5-minute link click window (`exp`)
+- Session TTL up to 20 hours (`session_exp`)
+- IP-pinned on first use
+- Single-use token → `mc_token` cookie for subsequent requests
+- Loopback trusted only in local-only mode (SSH tunnel via `ssh -NL`)
+
+### CSRF Protection
+
+Origin/Referer validation on POST/PUT/DELETE. Shared `check_origin()` for both HTTP middleware and WebSocket.
+
+### Enterprise Grid Validation
+
+Two-layer defense against data exfiltration to personal/external Slack workspaces:
+1. **Startup**: `auth.test` verifies `enterprise_id` matches Amazon production/sandbox
+2. **Per-message**: compares event `team` field against cached `team_id`
+
+## Observe Mode Context Isolation
+
+`channel_history.push` in observe-mode channels is gated on `_user_authorized`. Only messages from the owner or allowlisted users are recorded. This prevents non-owner messages from influencing LLM context via prompt injection through shared channel traffic.
+
+## Frontend Security
+
+| Control | Implementation |
+|---------|---------------|
+| XSS prevention | DOMPurify on all HTML content |
+| Safe DOM APIs | `createElement` + `textContent` for error fallbacks |
+| Mermaid sandboxing | `securityLevel: 'strict'` — iframe sandbox |
+| No `innerHTML` | React text children instead of HTML string construction |
+| No regex URL linkification | React elements via `.split()` |
+
+## Credential File Permissions
+
+`load_credentials()` enforces `chmod 600` on `~/.kiroclaw/.env` at load time. Too-open permissions are tightened automatically.
+
+---
+
+## Gaps & Suggested Features
+
+### Gap 1: No Network Egress Control
+**Problem**: The sandbox hides credential files but doesn't restrict network access. A compromised agent could `curl` data to an external server using non-credential data.
+**Suggestion**: Add optional network namespace isolation (Linux) or outbound firewall rules. Allow-list internal domains (*.amazon.com, *.a2z.com) and block all other egress.
+
+### Gap 2: No cgroups/ulimits for Resource Isolation
+**Problem**: Agent subprocesses can consume unlimited CPU/memory. A runaway process can OOM the host (documented in `resource-protection.md` as known gap).
+**Suggestion**: Add cgroup v2 limits for agent subprocesses: memory cap (e.g., 4GB), CPU quota, PID limit. Configurable via `agent.resource_limits` in config.
+
+### Gap 3: No Runtime Integrity Verification
+**Problem**: If an attacker modifies `agents/defaults.json` to remove denied commands, there's no detection mechanism.
+**Suggestion**: Compute SHA-256 hash of `defaults.json` at install time, verify at gateway startup. Alert on mismatch. Store hash in a separate protected location.
+
+### Gap 4: Denied Command Patterns Are Regex-Based
+**Problem**: Regex patterns can be bypassed with creative shell tricks (e.g., `c"a"t ~/.aws/credentials`, `$(echo cat) ~/.ssh/id_rsa`, variable expansion).
+**Suggestion**: Add AST-level bash parsing (e.g., `bashlex`) to normalize commands before pattern matching. Alternatively, use a shell wrapper that intercepts `execve` syscalls.
+
+### Gap 5: No Audit Dashboard
+**Problem**: SEL events are logged but there's no UI to browse, search, or alert on security events.
+**Suggestion**: Add a Security tab in the dashboard with: event timeline, filter by severity/operation, anomaly detection (e.g., spike in denied commands), export to SIEM.
+
+### Gap 6: No Sandbox Escape Detection
+**Problem**: If the sandbox fails (e.g., namespace setup error), the agent runs unsandboxed with only a log warning.
+**Suggestion**: Add a health check that verifies sandbox is active from within the agent process (e.g., try to read a canary file that should be hidden). Fail-closed: refuse to start agent if sandbox verification fails.
+
+### Gap 7: Base64 Credential Detection Has Blind Spots
+**Problem**: `redact_credentials()` only checks base64 chunks ≥40 chars. Shorter encoded fragments or split-across-messages exfiltration could bypass detection.
+**Suggestion**: Add cross-message correlation — track partial credential patterns across consecutive messages. Add entropy-based detection for high-entropy strings that may be encoded credentials.
+
+### Gap 8: No File Write Auditing
+**Problem**: The agent can write arbitrary files. While reads are guarded, writes to sensitive locations (e.g., `~/.bashrc`, `~/.ssh/authorized_keys`) are not blocked.
+**Suggestion**: Add write-path protection: deny writes to sensitive directories, require explicit user approval for writes outside the workspace directory.

@@ -1,0 +1,453 @@
+# Memory, Skills & Hooks Modules
+
+Last Updated: 2026-04-21 (pysqlite3, Snowball stemming, Docker fallback simplified)
+
+## Overview
+
+Persistent memory, skill system, and config-driven hooks. Assembled by `ContextBuilder` and injected into ACP prompts.
+
+## Memory (`memory.py`)
+
+Structured files under `~/.kiroclaw/workspace/memory/`:
+- `preferences.md` — learned user preferences (replaced wholesale by consolidator)
+- `projects.md` — active project context (replaced wholesale by consolidator)
+- `history/{date}.md` — daily conversation summaries (append-only, pruned by heartbeat)
+
+FTS5 search via `~/.kiroclaw/memory_index.db` (SQLite via `pysqlite3-binary` on Linux for FTS5/UPSERT compat, stdlib `sqlite3` on macOS). Self-healing: corrupted DB auto-rebuilt. Incremental updates on writes, full rebuild on gateway startup. Snowball stemming for keyword scoring. Connection leak prevention: all FTS methods use try/finally.
+
+Context injection includes source citations per section. Agent can update memory files via kiro-cli's file tools.
+
+### Decaying Memory (`read_recent_history`)
+
+History context uses natural decay — recent days in full detail, older days compressed:
+- **Last 14 days**: full entries (days 0–13, vivid recall)
+- **14-60 days ago**: first entry per day + count (fading summary)
+- **61-180 days ago**: date + entry count only (existence marker)
+- **181-364 days ago**: retained on disk but not loaded into context
+- **365+ days**: pruned by heartbeat (forgotten)
+
+Total output capped at `history_cap = 25_000` chars in `get_context()`. Timestamps use local timezone.
+
+### History Pruning
+
+`prune_history(keep_days)` deletes daily files older than `keep_days` (default 365). Runs once per day via heartbeat (`_PRUNE_TICKS = 1440`). Parses `YYYY-MM-DD.md` filenames, skips non-date files.
+
+### Consolidation (`history.py` `HistoryConsolidator`)
+
+Two separate consolidation paths with independent triggers:
+
+| Path | Trigger | What it updates | Offset tracking |
+|------|---------|-----------------|-----------------|
+| Preferences/projects | 30 messages (per session) | `preferences.md`, `projects.md` | In-memory `_prefs_offset` dict |
+| Daily history + lessons | 3h idle (per session) | `history/{date}.md`, `lessons.jsonl` (or `lesson.*` in vector store) | Persisted `last_consolidated` in JSONL metadata |
+
+The prefs path does NOT advance the persisted `last_consolidated` marker — only the history path does. This ensures history consolidation always covers all messages, even if prefs consolidation fired earlier.
+
+Idle detection: `_last_activity[key]` updated on every `maybe_consolidate()` call. `check_idle_sessions()` called every heartbeat tick (60s), fires history consolidation when `now - last_activity > history_idle_secs` and there are unconsolidated messages.
+
+### Lesson Extraction from Chat
+
+The history consolidation prompt includes a `"lessons"` key that extracts only implicit correction patterns — corrections the user made without explicitly saying "remember" (those are already saved immediately via `learn_add`). All lesson writes go through `write_lesson()` which provides substring dedup and topic-overlap dedup (>50% keyword overlap → newer replaces older). When vector memory is not active, falls back to `lessons.jsonl` via `LessonStore.save()`.
+
+### Configuration
+
+`~/.kiroclaw/config.json` → `"memory"` section:
+```json
+{"history_idle_hours": 3.0, "history_max_days": 365}
+```
+
+Exposed on dashboard: Overview → Memory tab → Memory Settings card. Changes apply immediately to running consolidator via `PUT /api/memory/settings`.
+
+## Vector Memory (`vector_memory.py`)
+
+Opt-in structured memory system backed by SQLite + FAISS + local Ollama embeddings. Off by default — enabled via dashboard "Enable Vector Memory" button.
+
+### Semantic Memory
+
+SQLite table `semantic_memory` — structured key-value store with:
+- **Allowed keys**: only `pref.*`, `project.*`, `user.*` prefixes allowed (+ user-configurable extras)
+- **Confidence gating**: LLM writes require confidence ≥ 0.8; user-explicit writes always win
+- **Conflict resolution**: higher confidence wins; same confidence → newer source wins; user-explicit overrides all
+- **Injection detection**: 14 regex patterns scanned on every value write
+- **Audit trail**: `memory_events` table logs every create/update/delete with old+new values
+
+Context injection: formatted as `key: value` pairs in `[Semantic Memory]` block, capped at 1500 chars. Injected at session start via `get_context()`. Excludes `lesson.*` keys (they have their own `[Learned corrections]` block). Uses hybrid retrieval when embeddings are available: `0.6 × vector_score + 0.4 × keyword_score`. Falls back to keyword-only scoring (word overlap on keys and values, with Snowball stemming) without embeddings.
+
+### Episodic Memory
+
+SQLite table `episodic_memories` — conversation fragments with optional embeddings:
+- **Write**: text validation (10-2000 chars), tag sanitization, importance clamping (0-1), FAISS dedup (cosine > 0.88)
+- **Search**: FAISS vector similarity with decay scoring: `cosine_sim × (0.7 + 0.3×importance) × exp(-0.03×days)`, then MMR diversity reranking (Jaccard-based, λ=0.6)
+- **MMR reranking**: Maximal Marginal Relevance balances relevance with diversity. Greedy iterative selection penalizes candidates similar to already-selected results. Prevents redundant episodic fragments from consuming the context budget. Configurable via `mmr=False` parameter to disable.
+- **Relevance threshold**: `cosine_sim ≥ 0.55` required for context injection (empirically determined from 100-query benchmark: 50 relevant + 50 irrelevant, F1=0.980). Results below threshold are filtered in `get_episodic_context()` only — `search_episodic()` returns all results for dashboard/API use. FTS5 keyword fallback is unaffected (no cosine scores).
+- **Fallback**: keyword search (OR logic, LIKE on text + tags) when embeddings unavailable
+- **Cap**: 10,000 active entries; lowest-importance oldest pruned when exceeded
+
+Context injection: top-8 results in `[Episodic Memory]` block, capped at 12000 chars. Injected per-message via `build_message()`.
+
+### Embedding Client (`embeddings.py`)
+
+Async HTTP client for local Ollama server (`localhost:11434`):
+- `embed_one(text)` / `embed_batch(texts)` → returns 1024-dim vectors or `None` on error
+- Ollama API: `POST /api/embed` with `{"model": "qwen3:0.6b", "input": [...]}`
+- Localhost-only URL validation (rejects remote servers, credentials in URL)
+- Rate-limited warnings (once per 60s on repeated failures)
+- Health check: `GET /api/tags` — verifies server running AND model loaded
+
+**Sync embedding cache** (`make_sync_embed_fn`): The sync callable used by `vector_memory.py` caches results via `functools.lru_cache` keyed by input text. Embeddings are deterministic (same text → same vector for a given model), so caching is safe. Bounded to 128 entries (~4 MB with Python boxed floats). Failures (None) are not cached — `lru_cache` does not cache exceptions, so transient errors are retried. Cache stats logged every 20 misses. Cache lives per `make_sync_embed_fn()` call — reset when embeddings are disabled/re-enabled or gateway restarts.
+
+### Ollama Manager (`embeddings.py`)
+
+Manages Ollama server lifecycle and model provisioning:
+
+**Install** (`install_ollama()`):
+- macOS: `brew install ollama` (requires Homebrew), fallback to direct binary download
+- Linux: `brew install ollama` or `curl -fsSL https://ollama.com/install.sh | sh`
+- Docker fallback code preserved for runtime recovery (triggers only if native binary fails with GLIBC error and brew is unavailable)
+- Only triggered from dashboard "Enable Vector Memory" or gateway startup when `embedding_provider: "ollama"`
+
+**Docker fallback** (legacy, last-resort only):
+- Only activated when native binary crashes with GLIBC error **and** brew reinstall fails (or brew is unavailable)
+- Preserved for backwards compatibility but not recommended — `brew install ollama` resolves glibc issues
+- `_needs_sudo_cache` persists across `OllamaManager` instances within the gateway process
+
+**Model loading** (`pull_model()`):
+- Clones `KiroClawModelQwen3Embedding` from Gitfarm (internal, no external model download)
+- Finds `qwen3-embedding-0.6b.gguf` (Q8_0 quantized, 610MB) in cloned package
+- Creates Ollama model via `ollama create qwen3:0.6b -f Modelfile` from local GGUF
+- IMPORTANT: `ollama pull qwen3:0.6b` from registry is a CHAT model — does NOT support embeddings
+- Only the Gitfarm GGUF produces a working embedding model
+- No fallback to Ollama registry — internal package is the only model source
+
+**Server** (`start_server()` / `stop()`):
+- Native: starts `ollama serve` as subprocess (Metal GPU on macOS, CUDA/CPU on Linux)
+- Docker fallback: `docker rm -f kiroclaw-ollama` then `docker run -d` (only if native fails and brew unavailable)
+- Health polling with 30s timeout
+- SIGTERM → SIGKILL cleanup (native) or `docker stop` (Docker)
+
+**Dashboard Enable Flow** (retryable):
+- `POST /api/memory/enable-embeddings` — installs Ollama, starts server, loads model
+- On failure: status resets to `idle` with error message, frontend shows error + 🔄 Retry button
+- Prevents concurrent setup attempts (409 if already in progress)
+- `can_retry` flag in status response for frontend retry button
+- Progress steps: `checking` → `installing_ollama` (or `installing_docker` if Docker fallback) → `starting` → `downloading` → `done`
+
+### Model Security & Policy
+
+| Field | Value |
+|-------|-------|
+| Model | Qwen/Qwen3-Embedding-0.6B (Q8_0 GGUF) |
+| License | Apache-2.0 (on approved list for self-approval) |
+| Source | `KiroClawModelQwen3Embedding` Brazil package on Gitfarm (internal) |
+| Runtime | Ollama (MIT license, native via brew or install script) |
+| Data flow | Text → localhost:11434 → float vectors (no data leaves machine) |
+| Policy | Self-approvable under [Public Dataset and ML Model Policy](https://policy.a2z.com/docs/83291/publication) |
+| Approval | [P392279208](https://issues.amazon.com/issues/P392279208) (self-resolving ticket, resolved 2026-03-03) |
+
+Conditions met for self-approval:
+1. Internal use only — model runs locally, no 3P API calls
+2. Apache-2.0 license — on approved list
+3. Outputs are float vectors — no excluded categories (health, financial, biometric, PII)
+4. Not recreating training data — generating embeddings, not content
+5. Model weights sourced from internal Gitfarm package (no 3P model download at runtime)
+
+### Why Ollama (not TEI)
+
+TEI (Text Embeddings Inference) uses the candle Rust framework with a Metal backend that has an [unmerged memory bug](https://github.com/huggingface/candle/pull/3197) causing unbounded GPU buffer allocation on macOS. The process consumes 4+ GB RAM and never becomes healthy. This affects ALL models on TEI/Metal, not just Qwen3. Ollama uses llama.cpp which works correctly on all platforms (macOS Metal, Linux CUDA/CPU).
+
+### Lessons in Vector Memory
+
+When vector memory is active, lessons are stored as semantic entries:
+- Key: `lesson.<md5_of_rule>` (dedup via hash)
+- Value: `"rule text"` or `"rule text — NOT: negative text"`
+- Confidence: 1.0 for `user_explicit`, 0.9 for `migration`
+- Methods: `write_lesson()`, `get_lessons()`, `delete_lesson()`, `get_lessons_context()`
+- Context: injected as `[Learned corrections]` block, separate from `[Semantic Memory]`
+- Allowlist: `lesson.*` prefix in `_BUILTIN_PREFIXES`
+- `start()` / `stop()` — subprocess lifecycle (SIGTERM → SIGKILL, same pattern as kiro-cli)
+- `ensure_running()` — auto-start on dashboard "Enable Vector Memory" click when `embedding_provider: "ollama"`
+
+Model: `Qwen/Qwen3-Embedding-0.6B` Q8_0 GGUF (610MB). Apache-2.0 licensed. Served via Ollama on all platforms.
+
+### Consolidation Integration
+
+`HistoryConsolidator._consolidate()` now extracts structured data alongside existing fields:
+- `"semantic"` array → `write_semantic()` for each (max 20 per consolidation)
+- `"episodic"` array → `write_episodic()` for each (max 10 per consolidation)
+- Dual-write mode: when `config.memory.migrated` is False, also writes markdown files (backward compat)
+
+### Dashboard Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/memory/semantic` | List all semantic entries |
+| PUT | `/api/memory/semantic` | Create/update (validates key, allowlist, injection) |
+| DELETE | `/api/memory/semantic/{key}` | Tombstone + log event |
+| GET | `/api/memory/events` | Recent audit trail |
+| GET | `/api/memory/episodic` | Paginated episodic list |
+| GET | `/api/memory/episodic/search?q=` | Search episodic memories |
+| DELETE | `/api/memory/episodic/{id}` | Tombstone episodic entry |
+| GET | `/api/memory/stats` | Counts, index size, provider status |
+| GET | `/api/memory/embedding-status` | Embedding system health |
+| POST | `/api/memory/enable-embeddings` | Install Ollama + load model from Gitfarm + update config |
+| POST | `/api/memory/disable-embeddings` | Set provider to none (Ollama keeps running) |
+| POST | `/api/memory/migrate` | Migrate markdown → structured memory |
+| POST | `/api/memory/import` | Import from JSON export |
+| GET | `/api/memory/context-preview?q=` | Preview injected semantic + episodic context |
+
+### CLI
+
+`kiroclaw memory {list,search,stats,audit,export,migrate,import}` — manage vector memory from command line:
+- `migrate` — one-time markdown → structured migration (preferences.md → semantic, history/*.md → episodic)
+- `import <file>` — restore from JSON export with full validation
+- `kiroclaw security audit` also scans vector memory for injection patterns
+
+### Migration (`migrate_from_markdown`)
+
+Parses legacy markdown files into structured memory:
+- `preferences.md`: bullet points with `key: value` → semantic entries (confidence 0.85, source "migration"). Bare prefix keys get `.default` suffix.
+- `projects.md`: project names → `project.name` semantic entries, details → episodic
+- `history/*.md`: daily summaries → episodic entries (importance 0.4)
+- **Embedding during migration**: when Ollama is enabled, the dashboard handler sets `store.embed_fn` before calling migration. Each episodic entry is embedded via Ollama and stored with its FAISS vector, enabling vector search immediately after migration.
+- Idempotent: re-running skips existing semantic entries (conflict resolution), episodic dedup via FAISS when available
+- Dashboard: "📦 Migrate from Markdown" button shown when `migrated=false` and legacy files exist
+
+### Cross-Platform
+
+macOS (Apple Silicon) and Linux (x86_64, arm64/Graviton) supported. All paths use `pathlib.Path`. GGUF model loaded from internal `KiroClawModelQwen3Embedding` Gitfarm package (no external model downloads).
+
+| Platform | Ollama Install | GPU | Notes |
+|----------|---------------|-----|-------|
+| macOS (Apple Silicon) | `brew install ollama` or direct download | Metal | Native, fastest |
+| Linux glibc ≥ 2.27 (AL2023+) | `brew install ollama` or `curl install.sh` | CUDA if available | Native |
+| Linux glibc < 2.27 (AL2) | `brew install ollama` or Docker fallback | CPU only | Brew avoids glibc issues |
+
+## Lessons (`learn.py` → `vector_memory.py`)
+
+User-taught corrections ("always do X", "never do Y"). Single write path through `vector_memory.write_lesson()`:
+
+1. **Vector memory** (primary): stored as `lesson.<md5hash>` semantic entries with `confidence=1.0, source=user_explicit`. Negative rules stored as `"rule — NOT: negative"`. Injected via `get_lessons_context()` — separate from `[Semantic Memory]` block.
+2. **JSONL fallback** (`~/.kiroclaw/lessons.jsonl`): only used when vector memory is not initialized. Read-only migration source once vector memory is active.
+
+**Priority**: vector lessons override JSONL. If `vector_store.get_lessons()` returns entries, JSONL is skipped entirely.
+
+**Single write path** — all lesson writes go through `write_lesson()` which provides:
+- Substring dedup: "use dark mode" won't duplicate "always use dark mode"
+- Topic-overlap dedup: "use light mode" replaces "use dark mode" (>50% keyword overlap → newer wins)
+- Allowlist validation, injection scanning, audit logging
+
+**Write sources**:
+1. **`learn_add` MCP tool** (immediate): user says "remember X" → LLM calls tool → `POST /api/lessons` → `write_lesson()`
+2. **Task runner** (on failure): step fails → LLM extracts lesson → `write_lesson(source="task_runner")`
+3. **Consolidation** (background): extracts only implicit corrections not already saved via `learn_add` → `write_lesson(source="consolidation")`
+4. **Dashboard/CLI** (manual): `POST /api/lessons` → `write_lesson()`
+
+**Migration**: `migrate_from_markdown()` reads `lessons.jsonl` and writes each entry as `lesson.*` semantic key with `source=migration, confidence=0.9`. User-explicit lessons (confidence 1.0) can't be overwritten by migration.
+
+Categories: `tool`, `preference`, `knowledge`. Injected as `[Learned corrections]` block, capped at 50.
+
+## Skills (`skills.py`)
+
+Markdown files at `~/.kiroclaw/skills/{name}/SKILL.md` with optional YAML frontmatter (`name`, `description`, `always`).
+
+Supports nested directories (e.g. `skills/utils/tiny-url/SKILL.md`). The skill name is the relative path from the skills root (e.g. `utils/tiny-url`).
+
+**Source precedence** (project-level wins): `$KIROCLAW_PROJECT_DIR/skills/` → `builtin_skills/` (bundled). Auto-copied to `~/.kiroclaw/skills/` on first run. Copies entire skill directories (scripts, assets, etc.).
+
+**Loading:**
+1. **Always-on**: skills with `always: true` have full content injected every new session
+2. **On-demand**: skill summaries (name + description + dir path) in session context; LLM can `cat` the file when relevant
+
+Skills with auxiliary files (scripts, assets) include `dir` path so the LLM can `cd` and run them.
+
+**CRUD operations** (via `SkillsLoader`):
+- `create_skill(name, content)` — creates `{name}/SKILL.md`, supports nested paths
+- `update_skill(name, content)` — overwrites existing SKILL.md
+- `delete_skill(name)` — removes entire skill directory
+- Path traversal protection: `_safe_name()` rejects `..` and `\` (allows `/` for nesting)
+
+**Dashboard endpoints**: GET/POST `/api/skills`, GET/PUT/DELETE `/api/skills/{name:.+}`. POST sanitizes name to lowercase + hyphens + slashes.
+
+**LLM tool mechanisms:**
+- MCP tools (native): kiro-cli calls directly — **preferred for all LLM-facing operations**
+  - `kiroclaw-cron`: cron scheduling
+  - `kiroclaw-core`: spawn, learn, task tools
+  - `builder-mcp`: internal websites, tickets, search
+- Skills are for on-demand knowledge only (not for CLI command wrappers — use MCP tools instead)
+
+## MCP Discovery (`mcp_discovery.py`)
+
+Auto-sync at startup + on-demand discovery from dashboard. Default servers: `builder-mcp`, `kiroclaw-cron`, `kiroclaw-core`.
+
+**Server sources** (merged by `list_servers()`):
+1. `agents/defaults.json` → `mcpServers` (default: only `builder-mcp`)
+2. `~/.kiro/agents/kiroclaw.json` → `mcpServers` (installed config, merged)
+3. `~/.kiro/settings/mcp.json` and `~/.kiroclaw/mcp.json` (scanned at startup and on-demand)
+
+**Startup behavior**: gateway calls `_init_mcp_discovery()` which runs `discover_servers_to_sync()` + `sync_to_agent_config()` to auto-add new servers from mcp.json, then logs all configured servers. Discovery/sync failures are caught independently so `list_servers()` always runs. Additionally, `server.py` fires `_bg_mcp_probe()` as a background task at startup to populate the probe cache.
+
+**sync_to_agent_config()**: registers servers via `kiro-cli mcp add` in parallel (all Popen spawned at once, then waited), followed by a single config patch pass for `tools`/`allowedTools`. Atomic write (tmp + rename) prevents corrupted config. Checks returncode, logs stderr on failure, separate timeout handling. Falls back to direct JSON edit if kiro-cli unavailable.
+
+**On-demand discovery** (dashboard): same `discover_servers_to_sync()` + `sync_to_agent_config()` triggered by "Discover & Sync" button.
+
+**Probing**: spawns each MCP server, sends JSON-RPC `initialize` + `tools/list` handshake, reports status + tool names. 30-second timeout, 1MB stdout buffer (builder-mcp responses exceed default 64KB). Cleanup via `finally` block (no zombie processes). Results cached in `handlers.py` with 10-min TTL; GET `/api/mcp/probe` returns cached results non-blocking, POST `/api/mcp/probe` forces a fresh probe and updates cache.
+
+**Enable/Disable**: `POST /api/mcp/toggle` adds/removes `@name` from `tools` and `allowedTools` arrays in installed config (`~/.kiro/agents/kiroclaw.json`). Does NOT modify `agents/defaults.json`. Disabled servers stay in `mcpServers` but kiro-cli won't load their tools.
+
+**Sync**: `POST /api/mcp/sync` uses `kiro-cli mcp add --agent kiroclaw --force` to properly register new servers with kiro-cli. Falls back to direct JSON edit if kiro-cli unavailable. After sync, all active sessions are reset so kiro-cli picks up the new config (~30s).
+
+**Dashboard workflow**: ① Probe All → ② Enable/Disable → ③ Apply & Restart Sessions.
+
+**Dashboard endpoints**: GET `/api/mcp` (list with enabled state from installed config), GET `/api/mcp/probe` (cached probe results, non-blocking), POST `/api/mcp/probe` (live probe all, updates cache), POST `/api/mcp/sync` (on-demand discover + add + session reset), POST `/api/mcp/toggle` (enable/disable in installed config).
+
+## Auto Skill Creation (`skills.py` + `history.py`)
+
+Hermes-style autonomous skill creation from completed sessions (Mesh-677). Disabled by default; opt-in per user via `skills.auto_create_from_sessions`.
+
+### Flow
+
+```
+session ends → HistoryConsolidator (3h idle path)
+            → LLM consolidation prompt gains new_skill / refined_skill keys
+            → result piped through redact_credentials + redact_exfiltration_urls
+            → SkillsLoader.find_similar() dedup check
+            → SkillsLoader.create_auto_skill() writes SKILL.md under auto/<slug>/
+            → SEL audit event emitted
+```
+
+No new timer, no new background task — piggybacks on the existing idle-fired `HistoryConsolidator._consolidate()` path. The auxiliary LLM already runs on the background kiro-cli session every 3 hours of idle per session; the auto-skill keys are appended to the same JSON the LLM already returns.
+
+### Eligibility gate (`_count_tool_call_messages`, `_session_touched_sensitive`)
+
+Prompt keys are only appended when ALL hold:
+
+| Condition | Source |
+|-----------|--------|
+| `skills.auto_create_from_sessions: true` | Config flag, default off |
+| `skills_loader` instance passed | Wired from `slack/gateway.py` + `cli.py` |
+| `include_history=True` | Idle path only, not prefs-only |
+| `≥ skills.auto_min_tool_calls` messages with non-empty `tools` | Default 5 |
+| No tool in the session referenced `~/.aws`, `~/.ssh`, IMDS, etc. | `_SENSITIVE_TOOL_PATTERNS` |
+
+### Namespace
+
+Auto-generated skills live under `~/.kiroclaw/skills/auto/<slug>/SKILL.md`. Slug validated against `^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$`. The `auto/` prefix:
+- Makes provenance visible without parsing frontmatter (`list_auto_skills()`)
+- Prevents accidental overwrite of hand-authored skills via the refine path (`update_auto_skill()` explicitly refuses names outside `auto/`)
+
+### Provenance (`AutoSkillProvenance`)
+
+Serialized into SKILL.md YAML frontmatter on every create/refine:
+
+```yaml
+---
+name: auto/grep-with-context
+description: Search log files with grep then contextualize hits
+triggers: grep, log search, context lines
+source: auto
+session_key: dashboard:chat-1
+created_at: 2026-05-05T11:30:00+00:00
+refined_at: 2026-05-06T09:15:00+00:00   # omitted until first refinement
+reuse_count: 0                          # omitted when zero
+---
+```
+
+`source: auto` is the canonical marker — hand-authored skills omit it.
+
+### Safety rails (non-negotiable per `security.md`)
+
+1. **Sensitive-session skip** — `_session_touched_sensitive()` scans all tool names across the session; any match in `_SENSITIVE_TOOL_PATTERNS` (AWS/SSH/GPG/netrc/.env/IMDS) skips extraction entirely. Complements the runtime hook-layer block; if the LLM *tried* to read credentials, we still don't synthesize a skill from the session.
+2. **Output redaction** — `redact_credentials()` + `redact_exfiltration_urls()` applied to `description`, `triggers`, and `procedure_md` before the SKILL.md is written. `AKIA*`, `ASIA*`, private key headers, Slack tokens, base64-encoded credentials all get scrubbed. Defense even against a prompt-injected LLM that tries to embed credentials in the procedure.
+3. **Size cap** — `AUTO_SKILL_MAX_PROCEDURE_CHARS = 10_240`; oversized outputs are rejected entirely (indicates the aux LLM went off-task).
+4. **Similarity dedup** — `find_similar()` rejects near-duplicates above `skills.auto_similarity_threshold` (default 0.85) Jaccard overlap on description words.
+5. **Namespace lock** — `update_auto_skill()` refuses to touch any skill whose name doesn't start with `auto/`, preventing the refine path from ever clobbering hand-authored skills.
+6. **SEL audit** — every create/refine/dedup-rejection emits `tool_name=auto_skill_create` or `auto_skill_refine` to the security event log with session key + skill name metadata.
+
+### Refinement (`skills.auto_refine_on_deviation`)
+
+Opt-in secondary flag, gated by `auto_create_from_sessions`. When on, the consolidation prompt also asks for a `refined_skill` object. LLM judges whether a previously-loaded `auto/...` skill's procedure was improved during the session; if so, returns an updated body. No explicit tool-sequence tracking — the LLM reads both the loaded skill content (from session context) and the actual transcript and makes the call. Same safety rails apply; refine always writes to the same `auto/<slug>/SKILL.md`, never to a new file.
+
+### Config (`config.json` → `skills`)
+
+```json
+{
+  "skills": {
+    "max_triggered": 3,
+    "auto_create_from_sessions": false,
+    "auto_refine_on_deviation": false,
+    "auto_min_tool_calls": 5,
+    "auto_similarity_threshold": 0.85
+  }
+}
+```
+
+### CLI
+
+No new command. Users interact via the existing skill management surface:
+
+- Enable: `kiroclaw config set skills.auto_create_from_sessions true`
+- List auto skills: filter `kiroclaw` skill listings to those under `auto/`, or use `SkillsLoader.list_auto_skills()` in code
+- Remove unwanted auto skill: `rm -rf ~/.kiroclaw/skills/auto/<slug>` (or dashboard skill delete when UI lands)
+- Audit trail: `kiroclaw security events -n 20 | grep auto_skill`
+
+## Hooks (`hooks.py`)
+
+Config-driven from `config.json` → `hooks` section:
+- **auto_approve_tools** / **auto_deny_tools** — tool patterns (exact, `prefix*`, `*suffix`, `*contains*`)
+- **auto_replies** — pattern → direct reply (skip ACP entirely)
+- **transforms** — pattern → prefix prepended to message
+- **context_rules** — trigger keywords → context injected into message
+
+Hook evaluation order: deny overrides approve; auto-reply → transform → context rules.
+
+### `safe_read_file(path: str) -> str`
+
+Central guarded file read. Resolves the path via `expanduser().resolve()`, checks against
+`is_sensitive_path()`, and raises `PermissionError` if blocked. All file reads outside of
+kiro-cli tool calls must go through this function — never call `is_sensitive_path()` inline.
+
+### User kiro-cli Hooks (`agent.kiro_hooks` in `config.json`)
+
+User-defined kiro-cli hooks that persist across `kiroclaw update`. Follows the
+`removedTools` precedent — a raw key in `~/.kiroclaw/config.json` read by
+`_refresh_dynamic_fields()` at install time.
+
+```json
+{"agent": {"kiro_hooks": {"preToolUse": [{"matcher": "*", "command": "/path/to/hook.sh"}]}}}
+```
+
+Merge rules (implemented in `_merge_kiro_hooks()` in `agent.py`):
+- Bundled hooks from `config/defaults.json` are always present and always first
+- User hooks are appended per event type after bundled hooks
+- Deduped by `(command, matcher)` tuple — same hook won't fire twice
+- Malformed entries (missing `command`, non-dict, non-list) are skipped with warning
+- Commands are validated via allowlist regex (`[a-zA-Z0-9/_.-]`), must be absolute paths to existing files, not in sensitive locations (`is_sensitive_path`); symlinks and path traversal are resolved before the sensitive-path check
+- Matcher values must be strings; non-string matchers are skipped
+- Matcher content is validated via allowlist regex (`[a-zA-Z0-9_.*-]`) with a 200-char max length
+- Only `command` and `matcher` fields are kept from user entries; arbitrary extra keys are stripped
+- Applied in both `build_agent_config()` (fresh install) and `_refresh_dynamic_fields()` (existing config refresh)
+
+## Context Builder (`context.py`)
+
+Assembles all sources into prompts:
+- New session: `_CRITICAL_RULES` (diff blocks + OPTIONS buttons) + agent prompt + memory (with citations) + skills + lessons + conversation history (last 20 messages, thread history at TOP with explicit framing)
+- Every message: channel history, episodic memory, hook transforms, triggered skills, context rules, OPTIONS hint (interactive sessions only)
+- Thread history is injected only at session start (via `build_session_context`). Within the same ACP session, kiro-cli manages conversation history natively — duplicate injection wastes context window and accelerates compaction.
+- `_CRITICAL_RULES` injected for ALL agents (including custom) at session start — ensures diff rendering and OPTIONS buttons work universally
+- Cap: 50k chars max
+
+### Session Resume (`resumed=True`)
+
+When a session is restored via ACP `session/load`, `build_session_context()` and
+`build_message()` accept `resumed=True`. This skips ONLY the `[THREAD CONVERSATION
+HISTORY]` block — kiro-cli already has full native history. All other context blocks
+are still injected:
+
+| Block | Skip on resume? | Why |
+|-------|-----------------|-----|
+| `[THREAD CONVERSATION HISTORY]` | ✅ Skip | kiro-cli has full native history |
+| Memory + skills + lessons | ❌ Keep | KiroClaw-specific, not in kiro-cli |
+| `[Other chat tabs]` (cross-tab) | ❌ Keep | Reads OTHER sessions' JSONL |
+| `[Recent Session Context]` (provenance) | ❌ Keep | Cross-thread entries |
+| Agent system prompt | ❌ Keep | kiro-cli ACP doesn't load agent prompts |
+| `_CRITICAL_RULES` | ❌ Keep | Diff rendering, OPTIONS buttons |

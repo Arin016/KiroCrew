@@ -1,0 +1,264 @@
+"""Tests for file-change snapshot logic in chat_runner.
+
+Covers:
+  * ``_truncate_snapshot`` — caps content at 200KB.
+  * ``_safe_read_snapshot`` — reads through validate_file_path; rejects sensitive paths.
+  * ``_snapshot_write_target`` — captures before-content for write tools only.
+  * ``_flush_file_changes`` — dedups, scrubs credentials, attaches to last assistant message
+    or creates a synthetic one when the turn aborts before any assistant text.
+
+These tests target the file-chips feature added in CR-276050100. They drive
+new-line coverage on chat_runner.py from ~0% to a substantial fraction without
+touching the live ACP runtime — every test stays in pure-Python land.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import MagicMock
+
+from kiro_claw.dashboard.chat_runner import (
+    _MAX_SNAPSHOT,
+    _flush_file_changes,
+    _safe_read_snapshot,
+    _snapshot_write_target,
+    _truncate_snapshot,
+)
+from kiro_claw.dashboard.state import _ChatSlot
+
+# ── _truncate_snapshot ──────────────────────────────────────────────────────
+
+
+class TestTruncateSnapshot:
+    def test_below_cap_passes_through(self):
+        assert _truncate_snapshot("hello world") == "hello world"
+
+    def test_empty_string_passes_through(self):
+        assert _truncate_snapshot("") == ""
+
+    def test_exactly_at_cap_not_truncated(self):
+        content = "a" * _MAX_SNAPSHOT
+        assert _truncate_snapshot(content) == content
+
+    def test_above_cap_truncated_with_marker(self):
+        content = "a" * (_MAX_SNAPSHOT + 100)
+        out = _truncate_snapshot(content)
+        # Original prefix preserved, marker appended.
+        assert out.startswith("a" * _MAX_SNAPSHOT)
+        assert "(truncated at" in out
+        assert str(_MAX_SNAPSHOT) in out
+
+    def test_truncation_idempotent_on_already_short_content(self):
+        out = _truncate_snapshot("short")
+        assert _truncate_snapshot(out) == "short"
+
+
+# ── _safe_read_snapshot ─────────────────────────────────────────────────────
+
+
+class TestSafeReadSnapshot:
+    def test_reads_normal_file(self, tmp_path: Path):
+        f = tmp_path / "file.txt"
+        f.write_text("hello\nworld\n")
+        assert _safe_read_snapshot(str(f)) == "hello\nworld\n"
+
+    def test_returns_none_for_missing_file(self, tmp_path: Path):
+        assert _safe_read_snapshot(str(tmp_path / "ghost")) is None
+
+    def test_returns_none_for_directory(self, tmp_path: Path):
+        # validate_file_path resolves to the directory, .is_file() == False.
+        assert _safe_read_snapshot(str(tmp_path)) is None
+
+    def test_returns_none_for_empty_path(self):
+        # validate_file_path returns None for empty string.
+        assert _safe_read_snapshot("") is None
+
+    def test_returns_none_for_sensitive_path(self):
+        # ~/.aws is on the sensitive-path list — should never be read for snapshot.
+        assert _safe_read_snapshot("~/.aws/credentials") is None
+        assert _safe_read_snapshot("~/.ssh/id_rsa") is None
+
+    def test_truncates_large_file(self, tmp_path: Path):
+        big = tmp_path / "big.txt"
+        big.write_text("x" * (_MAX_SNAPSHOT + 50))
+        out = _safe_read_snapshot(str(big))
+        assert out is not None
+        assert "(truncated at" in out
+
+    def test_replaces_undecodable_bytes(self, tmp_path: Path):
+        # errors="replace" is used so binary garbage doesn't crash the read.
+        f = tmp_path / "binary.bin"
+        f.write_bytes(b"hello\xff\xfeworld")
+        out = _safe_read_snapshot(str(f))
+        assert out is not None
+        assert "hello" in out and "world" in out
+
+
+# ── _snapshot_write_target ─────────────────────────────────────────────────
+
+
+class TestSnapshotWriteTarget:
+    def test_returns_none_for_non_dict_params(self):
+        assert _snapshot_write_target(None) is None
+        assert _snapshot_write_target("str") is None  # type: ignore[arg-type]
+        assert _snapshot_write_target([]) is None  # type: ignore[arg-type]
+
+    def test_returns_none_for_non_write_command(self, tmp_path: Path):
+        f = tmp_path / "x.txt"
+        f.write_text("body")
+        assert _snapshot_write_target({"command": "Line", "path": str(f)}) is None
+        assert _snapshot_write_target({"command": "", "path": str(f)}) is None
+
+    def test_returns_none_for_empty_path(self):
+        assert _snapshot_write_target({"command": "create", "path": ""}) is None
+
+    def test_returns_none_for_sensitive_path(self):
+        # validate_file_path rejects ~/.aws/credentials → no snapshot taken.
+        assert (
+            _snapshot_write_target({"command": "strReplace", "path": "~/.aws/credentials"})
+            is None
+        )
+
+    def test_create_on_new_file_returns_empty_content(self, tmp_path: Path):
+        # File doesn't exist yet — chip should still surface with empty before.
+        target = tmp_path / "new.txt"
+        out = _snapshot_write_target({"command": "create", "path": str(target)})
+        assert out == {"path": str(target), "content": ""}
+
+    def test_str_replace_on_existing_file_captures_content(self, tmp_path: Path):
+        f = tmp_path / "code.py"
+        f.write_text("def hello():\n    pass\n")
+        out = _snapshot_write_target({"command": "strReplace", "path": str(f)})
+        assert out is not None
+        assert out["path"] == str(f)
+        assert out["content"] == "def hello():\n    pass\n"
+
+    def test_insert_command_recognized_as_write(self, tmp_path: Path):
+        f = tmp_path / "list.txt"
+        f.write_text("a\nb\n")
+        out = _snapshot_write_target({"command": "insert", "path": str(f)})
+        assert out is not None
+        assert out["content"] == "a\nb\n"
+
+
+# ── _flush_file_changes ────────────────────────────────────────────────────
+
+
+def _make_slot_with_assistant_message() -> _ChatSlot:
+    """Build a _ChatSlot with one assistant message ready to receive file_changes."""
+    slot = _ChatSlot("test-flush")
+    slot.append("assistant", "done.", "msg msg-a", broadcast=False)
+    return slot
+
+
+class TestFlushFileChanges:
+    def test_no_changes_is_noop(self):
+        slot = _make_slot_with_assistant_message()
+        _flush_file_changes(slot)
+        # No meta added — message stays clean.
+        assert "meta" not in slot.messages[-1] or "file_changes" not in slot.messages[-1].get("meta", {})
+
+    def test_magicmock_attribute_does_not_fabricate_message(self):
+        # A MagicMock-backed slot leaves _file_changes truthy but not a list.
+        # Without the isinstance guard, _flush would synthesize a "stopped"
+        # message every test invocation. This test pins that down.
+        slot = MagicMock()
+        slot.messages = []
+        slot._file_changes = MagicMock()  # truthy but not a list
+        _flush_file_changes(slot)
+        # No synthetic message created.
+        assert slot.messages == []
+
+    def test_attaches_to_last_assistant_message(self, tmp_path: Path):
+        f = tmp_path / "x.py"
+        f.write_text("after\n")
+        slot = _make_slot_with_assistant_message()
+        slot._file_changes = [{"path": str(f), "content": "before\n"}]
+        _flush_file_changes(slot)
+        meta = slot.messages[-1]["meta"]
+        assert "file_changes" in meta
+        assert len(meta["file_changes"]) == 1
+        assert meta["file_changes"][0]["path"] == str(f)
+        assert meta["file_changes"][0]["before"] == "before\n"
+        assert meta["file_changes"][0]["after"] == "after\n"
+        # Slot's accumulator is reset for the next turn.
+        assert slot._file_changes == []
+
+    def test_dedup_keeps_first_before(self, tmp_path: Path):
+        f = tmp_path / "loop.py"
+        f.write_text("v3\n")
+        slot = _make_slot_with_assistant_message()
+        slot._file_changes = [
+            {"path": str(f), "content": "v1\n"},
+            {"path": str(f), "content": "v2\n"},
+        ]
+        _flush_file_changes(slot)
+        changes = slot.messages[-1]["meta"]["file_changes"]
+        assert len(changes) == 1
+        # First "before" wins (truest pre-turn snapshot).
+        assert changes[0]["before"] == "v1\n"
+        # After-content is read from disk once.
+        assert changes[0]["after"] == "v3\n"
+
+    def test_dedup_across_multiple_files(self, tmp_path: Path):
+        a = tmp_path / "a.py"
+        b = tmp_path / "b.py"
+        a.write_text("a-after")
+        b.write_text("b-after")
+        slot = _make_slot_with_assistant_message()
+        slot._file_changes = [
+            {"path": str(a), "content": "a-before"},
+            {"path": str(b), "content": "b-before"},
+            {"path": str(a), "content": "a-mid"},  # dedup'd
+        ]
+        _flush_file_changes(slot)
+        changes = slot.messages[-1]["meta"]["file_changes"]
+        assert len(changes) == 2
+        paths = {c["path"] for c in changes}
+        assert paths == {str(a), str(b)}
+
+    def test_after_empty_when_file_deleted_during_turn(self, tmp_path: Path):
+        slot = _make_slot_with_assistant_message()
+        # Simulate: write tool ran, captured before, then the file was removed.
+        ghost = tmp_path / "ghost.txt"
+        slot._file_changes = [{"path": str(ghost), "content": "had-content\n"}]
+        _flush_file_changes(slot)
+        changes = slot.messages[-1]["meta"]["file_changes"]
+        assert changes[0]["after"] == ""
+        assert changes[0]["before"] == "had-content\n"
+
+    def test_redacts_credentials_in_after_content(self, tmp_path: Path):
+        f = tmp_path / "config.ini"
+        f.write_text("aws_access_key_id=AKIAIOSFODNN7EXAMPLE\n")
+        slot = _make_slot_with_assistant_message()
+        slot._file_changes = [{"path": str(f), "content": "(empty)"}]
+        _flush_file_changes(slot)
+        changes = slot.messages[-1]["meta"]["file_changes"]
+        # AKIA key is scrubbed before reaching the UI.
+        assert "AKIAIOSFODNN7EXAMPLE" not in changes[0]["after"]
+
+    def test_redacts_credentials_in_before_content(self, tmp_path: Path):
+        f = tmp_path / "post-edit.ini"
+        f.write_text("clean\n")
+        slot = _make_slot_with_assistant_message()
+        slot._file_changes = [
+            {"path": str(f), "content": "aws_secret_access_key=AKIAIOSFODNN7EXAMPLE\n"}
+        ]
+        _flush_file_changes(slot)
+        changes = slot.messages[-1]["meta"]["file_changes"]
+        assert "AKIAIOSFODNN7EXAMPLE" not in changes[0]["before"]
+
+    def test_synthetic_message_created_when_no_assistant_text(self, tmp_path: Path):
+        """User stopped before any assistant chunk: still surface modified files."""
+        f = tmp_path / "edit.py"
+        f.write_text("after\n")
+        slot = _ChatSlot("aborted-turn")
+        # No assistant message present — only a user message.
+        slot.append("user", "hi", "msg msg-u", broadcast=False)
+        slot._file_changes = [{"path": str(f), "content": "before\n"}]
+        _flush_file_changes(slot)
+        # New synthetic message appended at the end.
+        last = slot.messages[-1]
+        assert last["role"] == "assistant"
+        assert "stopped" in last["content"].lower()
+        assert last["meta"]["file_changes"][0]["path"] == str(f)

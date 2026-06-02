@@ -1,0 +1,2373 @@
+"""Core LLM runner — _run_chat, segment flushing, prompt expansion."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+import time
+from pathlib import Path
+from typing import Any
+
+from kiro_claw.acp.client import AcpError, AcpProcessDied, _is_safe_oauth_url
+from kiro_claw.acp.types import (
+    EVENT_AGENT_SWITCHED,
+    EVENT_CLEAR_STATUS,
+    EVENT_COMPACTION_STATUS,
+    EVENT_MCP_OAUTH_REQUEST,
+    EVENT_MCP_SERVER_INIT_FAILURE,
+    EVENT_MCP_SERVER_INITIALIZED,
+    STOP_REASON_CANCELLED,
+    STOP_REASON_END_TURN,
+)
+from kiro_claw.config.loader import (
+    KiroClawConfig,
+    config_dir,
+    resolve_agent_bindings,
+)
+from kiro_claw.constants import CHAT_TURN_TIMEOUT
+from kiro_claw.context_management import (
+    ensure_go_all_option,
+    looks_like_plan,
+    strip_plan_markers,
+    validate_plan_format,
+)
+from kiro_claw.dashboard.chat_persistence import _build_history_prefix, _save_slot_to_history
+from kiro_claw.dashboard.chat_title import (
+    _extract_and_redact_plan_metadata,
+    _maybe_auto_title,
+    _rephrase_plan_lite,
+    _reset_auto_run_for_new_plan,
+)
+from kiro_claw.dashboard.chat_utils import (
+    _BLOCKED_SLASH_COMMANDS,
+    _MAX_TOOL_PURPOSE,
+    _SLASH_COMMANDS,
+    _apply_incognito_prefix,
+    _broadcast_auto_tool,
+    _broadcast_compaction_result,
+    _dequeue_next_message,
+    _extract_bash_command,
+    _history_key_for,
+    _maybe_consolidate,
+    _maybe_inject_persona,
+    _normalize_model,
+    _redact_for_display,
+    _redact_tool_field,
+    _remove_queued_by_id,
+    _validate_tool_name,
+)
+from kiro_claw.dashboard.handlers import MAX_PROMPT_BYTES, _find_prompt, _list_aim_prompts
+from kiro_claw.dashboard.handlers.usage import persist_token_record
+from kiro_claw.dashboard.state import (
+    CRON_NOTIFY_PREFIX,
+    CRON_NOTIFY_RE,
+    SUBAGENT_COMPLETION_PREFIX,
+    DashboardState,
+    _ChatSlot,
+    is_read_only_bash,
+)
+from kiro_claw.hooks import (
+    HOOK_EVENT_AGENT_SPAWN,
+    HOOK_EVENT_POST_TOOL_USE,
+    HOOK_EVENT_PRE_TOOL_USE,
+    HOOK_EVENT_STOP,
+    HOOK_EVENT_USER_PROMPT_SUBMIT,
+    TOOL_AUTO_APPROVE,
+    TOOL_DENY,
+    _normalize_tool_name,
+    _tool_matches,
+    fire_tool_hooks,
+    validate_file_path,
+)
+from kiro_claw.llm_helpers import PromptBusyExhaustedError
+from kiro_claw.providers.acp import is_claude_backend
+from kiro_claw.providers.base import (
+    EVENT_COMPLETE,
+    EVENT_PERMISSION_REQUEST,
+    EVENT_TEXT_CHUNK,
+    EVENT_THINKING_CHUNK,
+    EVENT_TOOL_CALL,
+    EVENT_TOOL_CALL_UPDATE,
+    EVENT_TOOL_RESULT,
+    LLMEvent,
+)
+from kiro_claw.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
+from kiro_claw.sel import sel
+from kiro_claw.stats import Stats
+from kiro_claw.validation import ValidationError, validate_ask_user_question
+
+logger = logging.getLogger(__name__)
+
+
+def _context_usage_payload(slot_key: str, client: Any) -> dict[str, Any]:
+    """Build the ``context_usage`` WS payload: pct plus real token counts.
+
+    The token counts let the frontend ring tooltip show "used / window" in
+    absolute tokens (sourced from the adapter's usage_update), so a 44%-of-200k
+    reading is not misread as 44%-of-1M. Token fields are omitted (0) when the
+    provider doesn't report them.
+    """
+    pct = client.context_usage_pct()
+    payload: dict[str, Any] = {"slot": slot_key, "pct": round(pct, 1)}
+    # Use the provider's public accessors — last_prompt_stats lives on the
+    # inner AcpClient, not on the provider, so reaching for it on `client`
+    # (the AcpProvider returned by get_or_create) would always miss.
+    window = client.context_window_tokens() if hasattr(client, "context_window_tokens") else 0
+    if window:
+        used = client.context_used_tokens() if hasattr(client, "context_used_tokens") else 0
+        payload["used_tokens"] = used
+        payload["window_tokens"] = window
+    return payload
+
+
+# ── File-chip snapshots ────────────────────────────────────────────────────
+# When the agent invokes a write tool, capture the file's content BEFORE the
+# write executes. After the turn ends, capture the AFTER content and attach
+# {path, before, after} entries to the assistant message meta. Frontend
+# renders these as file-change chips with click-through to a Monaco diff.
+
+_WRITE_COMMANDS = frozenset({"create", "strReplace", "insert"})
+_MAX_SNAPSHOT = 200_000  # cap per-file snapshot to bound message meta size
+
+
+def _truncate_snapshot(content: str) -> str:
+    """Cap content at _MAX_SNAPSHOT chars, appending a marker if truncated.
+    Shared by before-content (in _snapshot_write_target) and after-content
+    (in _flush_file_changes) so both paths show consistent diffs."""
+    if len(content) > _MAX_SNAPSHOT:
+        return content[:_MAX_SNAPSHOT] + f"\n... (truncated at {_MAX_SNAPSHOT} chars)"
+    return content
+
+
+def _safe_read_snapshot(path: str) -> str | None:
+    """Read a file's content for snapshot purposes, refusing sensitive paths.
+
+    Routes path validation through ``hooks.validate_file_path`` (the same
+    helper hooks.py uses for its own file ops) so the sensitive-path check
+    has a single enforcement point — if the security policy gains additional
+    checks in the future, both the LLM-tool intercept layer and the snapshot
+    layer pick them up automatically.
+
+    Returns the (possibly truncated) text content, or None if the path is
+    sensitive / not a regular file / unreadable.
+    """
+    try:
+        validated = validate_file_path(path)
+        if validated is None:
+            return None
+        p = Path(validated)
+        if not p.is_file():
+            return None
+        return _truncate_snapshot(p.read_text(errors="replace"))
+    except Exception:
+        return None
+
+
+def _snapshot_write_target(raw_params: dict | None) -> dict | None:
+    """If raw_params describes a write tool, return {"path", "content"} of the file before modification.
+
+    Returns None for non-write tools or when a path can't be resolved. Failures
+    (file not found, permission, decode errors) yield empty content rather than
+    raising — file-chip capture must never block a turn. Sensitive paths
+    (~/.aws, ~/.ssh, etc.) yield None so credentials never enter message meta.
+    """
+    if not isinstance(raw_params, dict):
+        return None
+    cmd = raw_params.get("command", "")
+    path = raw_params.get("path", "")
+    if not path or cmd not in _WRITE_COMMANDS:
+        return None
+    # Refuse sensitive paths even before the write executes (the file may not
+    # exist yet for `create`, which makes _safe_read_snapshot return None for
+    # a different reason). validate_file_path is the same hooks.py helper used
+    # by the LLM-tool intercept layer, so the security boundary is identical.
+    if validate_file_path(path) is None:
+        return None
+    content = _safe_read_snapshot(path)
+    if content is None:
+        # File doesn't exist yet (`create` on a new file is the common case)
+        # OR was unreadable. Either way, record an empty before so the chip
+        # still surfaces.
+        return {"path": path, "content": ""}
+    return {"path": path, "content": content}
+
+
+def _flush_file_changes(slot: "_ChatSlot") -> None:
+    """Attach accumulated file changes to the last assistant message.
+
+    Dedups by path (first before, last after), reads the AFTER content from
+    disk, and writes the list to message meta as ``file_changes``. Called on
+    every exit path (success / cancel / error) so users always see what was
+    modified, even on aborted turns.
+    """
+    # Defensive: only proceed when a real, non-empty list is present. Tests
+    # using MagicMock slots leave _file_changes as a MagicMock attribute
+    # (always truthy), so an isinstance check is needed in addition to the
+    # length check to avoid a synthetic message getting fabricated when no
+    # writes actually happened.
+    fc_changes = getattr(slot, "_file_changes", None)
+    if not isinstance(fc_changes, list) or not fc_changes:
+        return
+    # Dedup: keep first before for each path (truest "before") since a file
+    # may be modified multiple times in one turn.
+    deduped: dict[str, dict[str, str]] = {}
+    for fc in slot._file_changes:
+        p = fc["path"]
+        if p not in deduped:
+            deduped[p] = {"path": p, "before": fc["content"], "after": ""}
+    # Read after-content once per path. Uses _safe_read_snapshot so sensitive
+    # paths and unreadable files yield empty after rather than crashing or
+    # leaking credentials.
+    for entry in deduped.values():
+        after = _safe_read_snapshot(entry["path"])
+        entry["after"] = after if after is not None else ""
+    # Scrub credentials and exfil URLs from path/before/after BEFORE attaching
+    # to message meta. _save_slot_to_history runs _redact_meta on persist, but
+    # the in-memory slot.messages reaches the dashboard UI via SSE/WS BEFORE
+    # persistence — so without this, a config file containing an AKIA* key
+    # (path not on the sensitive-path list) would briefly appear in the chip
+    # diff. Redact in place so both the live and persisted views are clean.
+    for entry in deduped.values():
+        entry["path"], _ = redact_credentials(entry["path"])
+        entry["path"], _ = redact_exfiltration_urls(entry["path"])
+        if entry["before"]:
+            entry["before"], _ = redact_credentials(entry["before"])
+            entry["before"], _ = redact_exfiltration_urls(entry["before"])
+        if entry["after"]:
+            entry["after"], _ = redact_credentials(entry["after"])
+            entry["after"], _ = redact_exfiltration_urls(entry["after"])
+    fc_list = list(deduped.values())
+    # Attach to the most recent assistant message; if none exists (turn
+    # aborted before any text), create a synthetic message so the chips
+    # still surface.
+    for m in reversed(slot.messages):
+        if m.get("role") == "assistant":
+            m.setdefault("meta", {})["file_changes"] = fc_list
+            break
+    else:
+        # broadcast=False: the synthetic message reaches the UI via the same
+        # SSE/WS path the dashboard already drains for this slot. Default
+        # broadcast=True would schedule a fan-out via asyncio.ensure_future(),
+        # which (a) is redundant here and (b) raises RuntimeError when the
+        # function is invoked from a sync context like a unit test.
+        slot.append(
+            "assistant",
+            "*(stopped — files were modified)*",
+            "msg msg-a",
+            broadcast=False,
+            meta={"file_changes": fc_list},
+        )
+    logger.info("Attached %d file_changes to slot %s", len(fc_list), slot.key)
+    slot._file_changes = []
+
+
+def _redact_acp_string(s: str) -> str:
+    """Scrub credentials + exfil URLs from an ACP-controlled string.
+
+    server_name and error fields come from kiro-cli (and ultimately from the
+    MCP server's own metadata).  Treat them as untrusted: they end up in chat
+    content and in the live WS broadcast, both of which are external surfaces.
+    """
+    if not s:
+        return s
+    s, _ = redact_credentials(s)
+    s, _ = redact_exfiltration_urls(s)
+    return s
+
+
+def _oauth_url_contains_credential(url: str) -> bool:
+    """True if the URL embeds a credential or exfil-eligible host.
+
+    Legitimate OAuth consent URLs carry only state + code_challenge + client_id;
+    if redact_credentials/redact_exfiltration_urls would scrub anything, the URL
+    is not safe to render as <a href> regardless of scheme.
+    """
+    if not url:
+        return False
+    _, hit_cred = redact_credentials(url)
+    _, hit_exfil = redact_exfiltration_urls(url)
+    return bool(hit_cred or hit_exfil)
+
+
+def _emit_mcp_oauth_request(
+    state: "DashboardState", slot: "_ChatSlot", server_name: str, oauth_url: str
+) -> None:
+    """Append an mcp_oauth banner so the user can authorize an MCP server.
+
+    If the URL is unsafe (non-http(s) scheme) or carries a credential / exfil
+    pattern, surface a *rejected* banner explaining why instead of silently
+    dropping.  Otherwise the user has no idea their MCP server failed to
+    authenticate, and they can't escalate to whoever owns that server.
+    """
+    safe_name = _redact_acp_string(server_name)
+    label = safe_name or "MCP server"
+
+    if not _is_safe_oauth_url(oauth_url):
+        logger.warning("ACP: refusing unsafe MCP OAuth URL for %s", server_name or "(unknown)")
+        slot.append(
+            "mcp_oauth",
+            f"🚫 {label} sent an unsafe authentication URL (scheme rejected).",
+            "msg msg-warn",
+            meta={
+                "server_name": safe_name,
+                "failed": True,
+                "rejected_url": True,
+                "error": "unsafe URL scheme",
+            },
+        )
+        return
+    if _oauth_url_contains_credential(oauth_url):
+        # Legitimate OAuth consent URLs carry state/code_challenge/client_id —
+        # never AKIA*/Bearer/etc.  Surface this so the user can ask the server
+        # owner to fix it instead of just seeing nothing happen.
+        logger.warning(
+            "ACP: rejecting MCP OAuth URL with credential/exfil pattern for %s",
+            server_name or "(unknown)",
+        )
+        slot.append(
+            "mcp_oauth",
+            f"🚫 {label} sent an authentication URL containing a credential pattern (rejected).",
+            "msg msg-warn",
+            meta={
+                "server_name": safe_name,
+                "failed": True,
+                "rejected_url": True,
+                "error": "URL contained credential or exfiltration pattern",
+            },
+        )
+        return
+    content = f"🔐 {label} requires authentication."
+    slot.append(
+        "mcp_oauth",
+        content,
+        "msg msg-info",
+        meta={"server_name": safe_name, "oauth_url": oauth_url},
+    )
+
+
+def _mark_mcp_oauth_completed(
+    state: "DashboardState", slot: "_ChatSlot", server_name: str, success: bool, error: str = ""
+) -> None:
+    """Patch the most recent open mcp_oauth banner for ``server_name`` to a terminal state."""
+    safe_name = _redact_acp_string(server_name)
+    target: dict | None = None
+    for m in reversed(slot.messages):
+        if m.get("role") != "mcp_oauth":
+            continue
+        meta = m.get("meta") or {}
+        # Compare against the redacted form already stored on the banner.
+        if meta.get("server_name") != safe_name:
+            continue
+        if meta.get("completed") or meta.get("failed"):
+            continue
+        target = m
+        break
+    if target is None:
+        return
+    new_meta = dict(target.get("meta") or {})
+    if success:
+        new_meta["completed"] = True
+        new_meta.pop("failed", None)
+        new_meta.pop("error", None)
+    else:
+        new_meta["failed"] = True
+        safe_err = _redact_acp_string(error)
+        if safe_err:
+            new_meta["error"] = safe_err
+    label = safe_name or "MCP server"
+    new_content = (
+        f"🔓 {label} authenticated." if success else f"🚫 {label} authentication failed."
+    )
+    updated = slot.update_message(
+        target.get("ts", ""), content=new_content, meta=new_meta
+    )
+    if updated is None:
+        return
+    state.broadcast_ws(
+        "chat_message_update",
+        {"slot": slot.key, "ts": target.get("ts", ""), "meta": new_meta, "content": new_content},
+    )
+
+
+def _tool_meta(event: "LLMEvent") -> dict[str, str] | None:
+    """Build the meta dict persisted on a tool message — `tool_call_id`,
+    `purpose`, and the full redacted `input`. Output is appended later by the
+    EVENT_TOOL_RESULT handler. The inline detail panel is the only source of
+    truth for what an agent ran, so the meta carries the full content (capped
+    at 1 MB and 8 KB respectively as defensive safety nets).
+
+    `tool_call_id` is redacted to match `_broadcast_auto_tool` in
+    `chat_utils.py`, which has always redacted before the WS broadcast.
+    Keeping it consistent across persisted meta and live broadcast means the
+    frontend join (`toolLog[i].tool_call_id` ↔ `message.meta.tool_call_id`)
+    works whether the entry came from the live tool-call event or from a
+    historical replay. Comparison sites (e.g. EVENT_TOOL_RESULT) must
+    redact `event.tool_call_id` before matching against the stored value."""
+    if not event.tool_call_id:
+        return None
+    return {
+        "tool_call_id": _redact_tool_field(event.tool_call_id),
+        "purpose": _redact_tool_field(event.tool_purpose, limit=_MAX_TOOL_PURPOSE),
+        "input": _redact_tool_field(event.tool_input),
+    }
+
+
+def _matches_trusted_pattern(tool_title: str, patterns: set[str]) -> str | None:
+    """Return the matched pattern if tool_title matches any trusted pattern."""
+    normalized = _normalize_tool_name(tool_title)
+    for pattern in patterns:
+        if _tool_matches(pattern, tool_title) or _tool_matches(pattern, normalized):
+            return pattern
+    return None
+
+
+def _extract_base_command(tool_title: str) -> str:
+    """Extract base binary name(s) for glob pattern generation.
+
+    Handles piped/chained commands split by |, &&, ;
+    "Running: ls /tmp" -> "ls"
+    "Running: cat /etc/hosts | wc -l" -> "cat,wc"
+    "Running: grep -r foo . && echo done" -> "grep,echo"
+    "SomeMcpTool" -> "SomeMcpTool"
+    """
+    normalized = _normalize_tool_name(tool_title)
+    segments = re.split(r"\s*(?:\|\||&&|;|\|)\s*", normalized)
+    bases = []
+    for seg in segments:
+        parts = seg.strip().split(None, 1)
+        if parts:
+            bases.append(parts[0])
+    return ",".join(dict.fromkeys(bases)) if bases else normalized
+
+
+def _extract_full_command(tool_title: str) -> str:
+    """Extract the full normalized command (strip display prefix)."""
+    return _normalize_tool_name(tool_title)
+
+
+def _flush_segment(
+    state: DashboardState,
+    slot: _ChatSlot,
+    assistant_text: str,
+    *,
+    broadcast: bool = True,
+) -> None:
+    """Finalize current text block as a segment and persist it."""
+    # Remove trailing chunk messages (they belong to this segment).
+    # Also pull aside any stop_event interleaved with this segment's chunks
+    # so it lands AFTER the finalized assistant message. Historical
+    # stop_events from prior turns stay in place.
+    def _is_stop_event(m: dict) -> bool:
+        cls_val = m.get("cls", "")
+        if not cls_val or not isinstance(cls_val, str):
+            return False
+        try:
+            parsed = json.loads(cls_val)
+            return isinstance(parsed, dict) and parsed.get("kind") == "stop_event"
+        except (json.JSONDecodeError, ValueError):
+            return False
+    # Walk backwards to find the start of the trailing chunk/stop_event run.
+    boundary = len(slot.messages)
+    for i in range(len(slot.messages) - 1, -1, -1):
+        role = slot.messages[i].get("role", "")
+        if role == "chunk" or _is_stop_event(slot.messages[i]):
+            boundary = i
+        else:
+            break
+    head = slot.messages[:boundary]
+    tail = slot.messages[boundary:]
+    trailing_stop_events = [m for m in tail if _is_stop_event(m)]
+    slot.messages = head  # drops chunks AND trailing stop_events; tail.non-chunk-non-stop stays in head
+    # Redact the accumulated text
+    redacted, exfil_warnings = redact_exfiltration_urls(assistant_text)
+    for w in exfil_warnings:
+        logger.warning("Exfiltration URL redacted in chat segment: %s", w)
+    redacted, cred_warnings = redact_credentials(redacted)
+    for w in cred_warnings:
+        logger.warning("Credential redacted in chat segment: %s", w)
+    # Persist as assistant message. Broadcast is kept enabled so that
+    # other tabs viewing the same slot receive the finalized text.
+    # The active tab already has this content from streaming chunks;
+    # the chat_segment event tells it to finalize streaming → assistant.
+    slot.append("assistant", redacted, "msg msg-a")
+    last_msg: dict = slot.messages[-1]
+    # If a regenerate is pending, attach the stashed variants to this fresh assistant message.
+    if slot._pending_variants:
+        pending_list = [
+            {**v, "content": redact_credentials(redact_exfiltration_urls(v.get("content", ""))[0])[0]}
+            for v in slot._pending_variants if isinstance(v, dict)
+        ]
+        pending_list.append({"content": redacted, "ts": last_msg.get("ts", "")})
+        last_msg["variants"] = pending_list
+        last_msg["variant_idx"] = len(pending_list) - 1
+        slot._pending_variants = []
+    # Re-append any stop_event that belongs to this segment's trailing run,
+    # placed AFTER the finalized assistant message so the UI shows
+    # prose → stop card.
+    for ev in trailing_stop_events:
+        slot.messages.append(ev)
+    # Tell the frontend to finalize streaming → assistant.
+    if broadcast:
+        state.broadcast_ws("chat_segment", {"slot": slot.key})
+        # Notify other tabs about variant metadata so they don't need a full refresh.
+        # Use last_msg (the assistant message) not slot.messages[-1] which may be a
+        # trailing stop_event appended after the assistant message.
+        if last_msg.get("variants"):
+            state.broadcast_ws(
+                "chat_variant_switch",
+                {"slot": slot.key, "index": last_msg.get("variant_idx", 0), "content": redacted},
+            )
+
+
+def _expand_prompt_mention(
+    message: str,
+    state: DashboardState,
+    slot: _ChatSlot,
+) -> tuple[str, str]:
+    """Expand ``@prompt-name rest`` into SOP content + user instructions.
+
+    Returns ``(expanded_message, "ok")`` if a prompt was resolved,
+    ``(original_message, "blocked")`` if blocked by sensitive-path check,
+    ``(original_message, "too_large")`` if file exceeds size limit, or
+    ``(original_message, "not_found")`` if no match.
+    """
+    if not message.startswith("@"):
+        return message, "not_found"
+
+    # Parse @name from start of message — name ends at first whitespace or EOL
+    body = message[1:]  # strip leading @
+    parts = body.split(None, 1)
+    mention = parts[0] if parts else body
+    user_text = parts[1].strip() if len(parts) > 1 else ""
+
+    try:
+        match = _find_prompt(mention)
+    except Exception:
+        return message, "not_found"
+    if not match:
+        return message, "not_found"
+
+    if is_sensitive_path(match["path"]):
+        return message, "blocked"
+
+    try:
+        raw = Path(match["path"]).read_bytes()
+    except OSError:
+        return message, "not_found"
+    if len(raw) > MAX_PROMPT_BYTES:
+        logger.warning(
+            "Prompt %s exceeds max size (%d > %d bytes)",
+            mention,
+            len(raw),
+            MAX_PROMPT_BYTES,
+        )
+        return message, "too_large"
+    content = raw.decode("utf-8", errors="replace")
+
+    content, _ = redact_credentials(content)
+    content, _ = redact_exfiltration_urls(content)
+
+    # Inject SOP as instructions the agent must follow
+    expanded = f"Execute the following instructions:\n\n{content}"
+    if user_text:
+        expanded += f"\n\n---\nAdditional context from user: {user_text}"
+
+    # Show the user what happened
+    slot.append(
+        "system",
+        f"📜 Loaded prompt **@{match['fullName']}** ({len(content):,} chars)",
+        "msg msg-info",
+    )
+    state.push_slots_update()
+
+    return expanded, "ok"
+
+
+async def _run_chat(
+    state: DashboardState,
+    slot: _ChatSlot,
+    message: str,
+    *,
+    _prompt_depth: int = 0,
+    regenerate_hint: str = "",
+) -> None:
+    """Stream LLM response into *slot*.  Survives browser disconnect."""
+
+    async def _fire(
+        event: str,
+        context: str = "",
+        tool_name: str = "",
+        tool_input: dict | None = None,
+        tool_response: dict | None = None,
+    ) -> list[str]:
+        """Fire script hooks. Returns stdout texts from exit-0 hooks (for context injection)."""
+        injected: list[str] = []
+        if state._hook_store is None:
+            if event == HOOK_EVENT_PRE_TOOL_USE:
+                injected.append("BLOCKED:system:hook store not initialized")
+                logger.error("Hook store not initialized for PRE_TOOL_USE - blocking tool")
+            return injected
+        try:
+            results = await state._hook_store.fire(
+                event,
+                context,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                tool_response=tool_response,
+            )
+            for r in results:
+                if r.exit_code == 0 and r.stdout:
+                    injected.append(r.stdout)
+                    logger.info("Hook %s stdout: %s", r.hook_name, r.stdout[:200])
+                    state.broadcast_ws(
+                        "activity_event",
+                        {
+                            "slot": slot.key,
+                            "kind": "hook",
+                            "text": f"Hook {r.hook_name}: injected {len(r.stdout)} chars",
+                        },
+                    )
+                elif r.exit_code == 2:
+                    injected.append(
+                        f"BLOCKED:{r.hook_name}:{r.stderr[:200] if r.stderr else 'hook denied'}"
+                    )
+                    logger.warning(
+                        "Hook %s blocked tool: %s",
+                        r.hook_name,
+                        r.stderr[:200] if r.stderr else "exit 2",
+                    )
+                    state.broadcast_ws(
+                        "activity_event",
+                        {
+                            "slot": slot.key,
+                            "kind": "hook",
+                            "text": f"Hook {r.hook_name} BLOCKED: {r.stderr[:100] if r.stderr else 'denied'}",
+                        },
+                    )
+                elif r.exit_code not in (0, 2) and r.stderr:
+                    # Non-zero, non-block: show warning
+                    logger.warning("Hook %s warning: %s", r.hook_name, r.stderr[:200])
+        except Exception as exc:
+            if event == HOOK_EVENT_PRE_TOOL_USE:
+                logger.warning("Hook fire error during blocking event %s: %s", event, exc)
+                raise
+            logger.warning("Hook fire error: %s", exc)
+        return injected
+
+    session_key = slot.linked_session_key or _history_key_for(slot.key)
+
+    # Inherit Slack link: if this dashboard session mirrors a Slack thread,
+    # copy the link so bidirectional sync works.
+    if session_key.startswith("dashboard:"):
+        _link = state.sessions.get_slack_link(session_key)
+        if not (_link and _link[0]):
+            _raw = session_key[len("dashboard:") :]
+            _link = state.sessions.get_slack_link(_raw)
+            if _link and _link[0] and _link[1]:
+                state.sessions.set_slack_link(session_key, _link[0], _link[1])
+
+    assistant_text = ""
+    last_heartbeat = time.time()
+    chunk_seq = 0
+    in_tool_group = False
+    _pending_tools: dict[str, str] = {}  # tool_call_id -> tool_name
+    needs_session_reset = False
+    saw_compaction = False
+
+    # ── Slash commands: detect early, before session acquisition ──
+    first_word = message.split()[0] if message.strip() else ""
+    _is_cc_provider = KiroClawConfig.load().agent.provider == "claude_code"
+    is_slash = (
+        first_word.startswith("/") and _is_cc_provider
+    ) or first_word in _SLASH_COMMANDS
+
+    # Block dangerous/local-only commands before acquiring a session
+    if first_word in _BLOCKED_SLASH_COMMANDS:
+        sel().log_tool_invocation(
+            session_key="",
+            agent=slot.agent or "kiroclaw",
+            source="dashboard",
+            tool_name=first_word,
+            tool_kind="slash_command",
+            outcome="blocked",
+            metadata={"slot": slot.key},
+        )
+        slot.append(
+            "assistant",
+            f"⚠️ `{first_word}` is not available in the dashboard.",
+            "msg msg-a",
+        )
+        state.push_slots_update()
+        slot.append("done", "", "done")
+        return
+
+    # ── /prompts: handle locally instead of forwarding to kiro-cli ──
+    if first_word == "/prompts":
+
+        args = message.split(None, 2)  # /prompts [get] [name]
+        sub = args[1] if len(args) > 1 else ""
+
+        if sub == "get" and len(args) > 2:
+            # /prompts get <name> — invoke the prompt in this chat
+            name = args[2]
+            expanded, status = _expand_prompt_mention(f"@{name}", state, slot)
+            if status == "ok":
+                sel().log_tool_invocation(
+                    session_key="",
+                    agent=slot.agent or "kiroclaw",
+                    source="dashboard",
+                    tool_name="prompt_expansion",
+                    tool_kind="prompt",
+                    outcome="ok",
+                    metadata={"mention": f"@{name}", "slot": slot.key, "via": "/prompts get"},
+                )
+                # Re-enter _run_chat with the expanded message (depth=1, no further expansion)
+                await _run_chat(state, slot, expanded, _prompt_depth=1)
+            elif status == "blocked":
+                sel().log_tool_invocation(
+                    session_key="",
+                    agent=slot.agent or "kiroclaw",
+                    source="dashboard",
+                    tool_name="prompt_expansion",
+                    tool_kind="prompt",
+                    outcome="blocked",
+                    metadata={"mention": f"@{name}", "slot": slot.key, "via": "/prompts get"},
+                )
+                slot.append(
+                    "assistant", f"🔒 Prompt `{name}` blocked — sensitive path.", "msg msg-a"
+                )
+                state.push_slots_update()
+                slot.append("done", "", "done")
+            elif status == "too_large":
+                sel().log_tool_invocation(
+                    session_key="",
+                    agent=slot.agent or "kiroclaw",
+                    source="dashboard",
+                    tool_name="prompt_expansion",
+                    tool_kind="prompt",
+                    outcome="too_large",
+                    metadata={"mention": f"@{name}", "slot": slot.key, "via": "/prompts get"},
+                )
+                slot.append(
+                    "assistant",
+                    f"⚠️ Prompt `{name}` exceeds size limit ({MAX_PROMPT_BYTES // 1000}KB).",
+                    "msg msg-a",
+                )
+                state.push_slots_update()
+                slot.append("done", "", "done")
+            else:
+                sel().log_tool_invocation(
+                    session_key="",
+                    agent=slot.agent or "kiroclaw",
+                    source="dashboard",
+                    tool_name="prompt_expansion",
+                    tool_kind="prompt",
+                    outcome="not_found",
+                    metadata={"mention": f"@{name}", "slot": slot.key, "via": "/prompts get"},
+                )
+                slot.append("assistant", f"❌ Prompt `{name}` not found.", "msg msg-a")
+                state.push_slots_update()
+                slot.append("done", "", "done")
+            return
+
+        # /prompts or /prompts list — show available prompts
+        try:
+            prompts = _list_aim_prompts()
+        except Exception:
+            prompts = []
+        if not prompts:
+            slot.append(
+                "assistant",
+                "No prompts found. Create prompts in `~/.kiro/prompts/` (or `~/.kiroclaw/prompts/`).",
+                "msg msg-a",
+            )
+            sel().log_tool_invocation(
+                session_key="",
+                agent=slot.agent or "kiroclaw",
+                source="dashboard",
+                tool_name="prompt_list",
+                tool_kind="prompt",
+                outcome="empty",
+                metadata={"count": 0, "slot": slot.key, "via": "/prompts"},
+            )
+            state.push_slots_update()
+            slot.append("done", "", "done")
+            return
+        lines = ["**Available Prompts** — type `@name` to invoke\n"]
+        by_source: dict[str, list] = {}
+        for p in prompts:
+            (by_source.setdefault(p["source"], [])).append(p)
+        for src, items in sorted(by_source.items()):
+            label = "Agent SOPs" if src == "aim" else f"User Prompts ({src})"
+            lines.append(f"\n**{label}:**")
+            for p in items:
+                desc = f" — {p['description']}" if p["description"] else ""
+                lines.append(f"- `@{p['fullName']}`{desc}")
+        text = "\n".join(lines)
+        text, _ = redact_credentials(text)
+        text, _ = redact_exfiltration_urls(text)
+        slot.append("assistant", text, "msg msg-a")
+        sel().log_tool_invocation(
+            session_key="",
+            agent=slot.agent or "kiroclaw",
+            source="dashboard",
+            tool_name="prompt_list",
+            tool_kind="prompt",
+            outcome="ok",
+            metadata={"count": len(prompts), "slot": slot.key, "via": "/prompts"},
+        )
+        state.push_slots_update()
+        slot.append("done", "", "done")
+        return
+
+    _acquired = False
+    _mirror_stream_ts: str = ""
+    _mirror_chan: str | None = ""
+    _mirror_active_task = ""
+    _mirror_active_task_title = ""
+    _mirror_thread: str | None = ""
+    _mirror_task_counter = 0
+    try:
+        # Resolve agent bindings early so we pass the correct kiro-cli
+        # agent name (e.g. "kiroclaw") instead of the KiroClaw slot name
+        # (e.g. "default") which has no matching ~/.kiro/agents/ config.
+        kiro_agent: str | None = None
+        memory_store: str | None = None
+        try:
+            cfg = KiroClawConfig.load()
+            bindings = resolve_agent_bindings(cfg, slot.agent or None)
+            kiro_agent = bindings.kiro_agent
+            memory_store = bindings.memory_store_name
+        except Exception:
+            logger.warning("Failed to resolve agent bindings in _run_chat", exc_info=True)
+
+        state.broadcast_ws(
+            "activity_event", {"slot": slot.key, "kind": "status", "text": "Creating session…"}
+        )
+        slot.model = _normalize_model(slot.model or "") or ""
+        client, is_new, resumed = await state.sessions.get_or_create(
+            session_key, agent=kiro_agent or slot.agent or None, model=slot.model or None,
+            cwd=slot.project or None,
+            reasoning_effort_override=slot.reasoning_effort or None,
+        )
+        _acquired = True
+        # Backfill slot.model from provider if user didn't explicitly set one.
+        # AcpProvider stores the resolved model on client._model.
+        if not slot.model:
+            _prov_model = getattr(getattr(client, "client", None), "_model", "") or ""
+            if isinstance(_prov_model, str) and _prov_model and _prov_model != "auto":
+                slot.model = _prov_model
+        agent_label = kiro_agent or slot.agent or "default"
+        model_label = slot.model or "auto"
+        if resumed:
+            state.broadcast_ws(
+                "activity_event",
+                {
+                    "slot": slot.key,
+                    "kind": "session",
+                    "text": f"Session resumed · {agent_label} · {model_label}",
+                },
+            )
+        else:
+            state.broadcast_ws(
+                "activity_event",
+                {
+                    "slot": slot.key,
+                    "kind": "session",
+                    "text": f"Session created · {agent_label} · {model_label}",
+                },
+            )
+
+        # Propagate trust/YOLO to session so subagents inherit auto-approve.
+        if slot._trust or state.is_yolo_active():
+            state.sessions.set_approval_policy(session_key, "auto")
+        else:
+            state.sessions.set_approval_policy(session_key, "")
+
+        # Drain MCP OAuth requests captured during session init. kiro-cli
+        # buffers `_kiro.dev/mcp/oauth_request` notifications during MCP
+        # server bring-up; the AcpClient collected them into
+        # `pending_oauth_requests`. Surface each as an inline banner so the
+        # user can authorize the affected MCP server.
+        try:
+            acp_client = getattr(client, "client", None)
+            pop_pending = getattr(acp_client, "pop_pending_oauth_requests", None)
+            if callable(pop_pending):
+                for req in pop_pending():
+                    _emit_mcp_oauth_request(
+                        state, slot, req.get("serverName", ""), req.get("oauthUrl", "")
+                    )
+        except Exception:  # pragma: no cover — never let UI surfacing kill chat init
+            logger.warning("Failed to surface pending MCP OAuth requests", exc_info=True)
+
+        # Write current session key so MCP tools can pass it to spawn API.
+        # Keyed by kiro-cli PID to avoid races between concurrent sessions.
+        try:
+            pid = state.sessions.get_pid(session_key)
+            if isinstance(pid, int):
+                (config_dir() / f"session_pid_{pid}.txt").write_text(session_key, encoding="utf-8")
+        except Exception:
+            pass
+
+        # ── @prompt expansion: resolve @name to SOP/prompt content ──
+        if message.startswith("@") and not is_slash and _prompt_depth < 1:
+            original = message
+            message, _status = _expand_prompt_mention(message, state, slot)
+            if _status == "ok":
+                sel().log_tool_invocation(
+                    session_key=session_key,
+                    agent=slot.agent or "kiroclaw",
+                    source="dashboard",
+                    tool_name="prompt_expansion",
+                    tool_kind="prompt",
+                    outcome="ok",
+                    metadata={"mention": original.split()[0], "slot": slot.key},
+                )
+            elif _status in ("blocked", "too_large"):
+                sel().log_tool_invocation(
+                    session_key=session_key,
+                    agent=slot.agent or "kiroclaw",
+                    source="dashboard",
+                    tool_name="prompt_expansion",
+                    tool_kind="prompt",
+                    outcome=_status,
+                    metadata={"mention": original.split()[0], "slot": slot.key},
+                )
+                label = (
+                    "sensitive path"
+                    if _status == "blocked"
+                    else f"size limit ({MAX_PROMPT_BYTES // 1000}KB)"
+                )
+                slot.append("system", f"🔒 Prompt blocked — {label}.", "msg msg-info")
+                state.push_slots_update()
+                return
+            elif _status == "not_found":
+                sel().log_tool_invocation(
+                    session_key=session_key,
+                    agent=slot.agent or "kiroclaw",
+                    source="dashboard",
+                    tool_name="prompt_expansion",
+                    tool_kind="prompt",
+                    outcome="not_found",
+                    metadata={"mention": original.split()[0], "slot": slot.key},
+                )
+
+        if is_slash:
+            full_message = message
+            sel().log_tool_invocation(
+                session_key=session_key,
+                agent=slot.agent or "kiroclaw",
+                source="dashboard",
+                tool_name="slash_command",
+                tool_kind="slash",
+                outcome="bypass",
+                metadata={"command": first_word, "slot": slot.key},
+            )
+        elif state.context_builder:
+
+            compressed: str | None = None
+            # Provider-agnostic session replay: KiroClaw's conversation_log
+            # is the canonical history source. Skip only when the provider
+            # successfully resumed its own native session (same provider,
+            # full-fidelity history already loaded via ACP session/load).
+            _provider_has_history = resumed
+            if not _provider_has_history:
+                from kiro_claw.providers.acp import (
+                    AcpProvider,  # circular: providers -> session -> chat_runner
+                )
+                if isinstance(client, AcpProvider) and client.client.resumed:
+                    _provider_has_history = True
+            if is_new and not _provider_has_history and state.context_builder.conversation_log:
+                from kiro_claw.context import build_session_replay  # circular: context -> chat
+
+                # Mesh-1726: drop the just-flushed current-turn user message
+                # from replay. chat_handlers.py:146 (or queue dequeue at L1898)
+                # always appended exactly one message before _run_chat fires,
+                # and the periodic flush_loop may have already written it to
+                # disk during the kiro-cli cold spawn (~5s flush vs ≥15s spawn).
+                compressed = build_session_replay(
+                    state.context_builder.conversation_log,
+                    session_key,
+                    exclude_last_n=1,
+                )
+                logger.info(
+                    "Session replay: key=%s result=%s",
+                    session_key,
+                    f"{len(compressed)} chars" if compressed else "None (no history)",
+                )
+            # After a soft-cancel, kiro-cli drops the cancelled turn from its
+            # conversation log — but everything BEFORE the cancel is preserved.
+            # Re-inject just the cancelled turn (user prompt + partial assistant)
+            # as a preamble so the LLM remembers what was interrupted, without
+            # duplicating older history. Flag lives on the session (set by
+            # SessionManager.stop_turn), consumed one-shot here. Use getattr
+            # for prev_turn_cancelled so test doubles don't raise on access.
+            _session = getattr(state.sessions, "_sessions", {}).get(session_key)
+            if _session is not None and getattr(
+                _session, "prev_turn_cancelled", False
+            ):
+                _session.prev_turn_cancelled = False
+                if state.context_builder and state.context_builder.conversation_log:
+                    from kiro_claw.context import (
+                        build_cancelled_turn_preamble,  # circular: context -> dashboard.chat -> chat_runner (can't top-level: context imports chat at module load); circular: context -> chat -> chat_runner; circular: context -> chat
+                    )
+
+                    preamble = build_cancelled_turn_preamble(
+                        state.context_builder.conversation_log, session_key
+                    )
+                    if preamble:
+                        message = preamble + "\n\n" + message
+            logger.info("🔍 Chat slot=%s is_new=%s mode=%r", slot.key, is_new, slot.mode)
+            # Drain any pending subagent delivery failures so the LLM knows
+            # about timed-out results and can read them from disk.
+            if slot._pending_subagent_failures:
+                failures = slot._pending_subagent_failures[:]
+                slot._pending_subagent_failures.clear()
+                message = "\n\n".join(failures) + "\n\n" + message
+            # Drain pending context injections (silent background context
+            # from apps/subagents).  Expired entries are discarded.
+            if slot._pending_context:
+                now = time.time()
+                ctx_parts: list[str] = []
+                for entry in slot._pending_context:
+                    max_age = entry.get("maxAge")
+                    if max_age is not None:
+                        injected_at = entry.get("injectedAt", 0)
+                        if injected_at + max_age < now:
+                            continue  # expired — silently discard
+                    source = entry.get("source", "app")
+                    ctx_parts.append(
+                        f'[Background context from "{source}"]\n'
+                        f'{entry["content"]}\n'
+                        f"[End of background context]\n"
+                    )
+                slot._pending_context.clear()
+                if ctx_parts:
+                    message = "\n".join(ctx_parts) + "\n" + message
+            # Use resolved kiro agent name (e.g. "kiroclaw"), not the slot
+            # name (e.g. "default"), so build_message's is_custom check
+            # correctly identifies kiroclaw sessions and enables skills.
+            # Lumon persona injection — prepend to message so build_message
+            # accounts for it in context budget calculations.
+            message = _maybe_inject_persona(message, getattr(slot, "color_theme", ""), is_new)
+            full_message, _ = state.context_builder.build_message(
+                message,
+                is_new,
+                session_key,
+                agent=kiro_agent or slot.agent or None,
+                resumed=resumed,
+                workspace=slot.workspace or None,
+                project=slot.project or None,
+                memory_store=memory_store,
+                compressed_history=compressed,
+                mode=slot.mode,
+                blocks_reads=slot.blocks_reads,
+                provider_type=cfg.agent.provider,
+                exclude_last_n=1,
+            )
+            full_message = _apply_incognito_prefix(slot, full_message)
+            if is_new:
+                ctx_len = len(full_message) - len(message)
+                state.broadcast_ws(
+                    "activity_event",
+                    {
+                        "slot": slot.key,
+                        "kind": "context",
+                        "text": f"Injected {ctx_len:,} chars of context (memory, lessons, history, episodic)",
+                    },
+                )
+        else:
+            full_message = message
+
+        # Re-inject history if session was reset but messages haven't been
+        # saved to JSONL yet (e.g. stop button killed the process mid-chat).
+        # build_session_context already injects recent() from JSONL, so this
+        # only adds value when in-memory messages are newer than disk.
+        # Skip for soft stops — session is preserved, no re-injection needed.
+        if is_new and slot.messages:
+            # Check if last stop was soft (session preserved, no re-injection).
+            # cls is a JSON-encoded dict (see api_chat_slot_stop); parse it.
+            _last_stop_soft = False
+            for m in reversed(slot.messages):
+                cls_val = m.get("cls", "")
+                if not isinstance(cls_val, str) or not cls_val.startswith("{"):
+                    continue
+                try:
+                    _cls = json.loads(cls_val)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(_cls, dict) or _cls.get("kind") != "stop_event":
+                    continue
+                if _cls.get("outcome") == "soft":
+                    _last_stop_soft = True
+                break
+            if not _last_stop_soft:
+                history_key = _history_key_for(slot.key)
+                disk_count = 0
+                if state.conversation_log:
+                    disk_count = len(
+                        state.conversation_log.read_messages(history_key)
+                    )
+                mem_count = sum(
+                    1 for m in slot.messages
+                    if m.get("role") in ("user", "assistant")
+                )
+                if mem_count > disk_count:
+                    history = _build_history_prefix(slot)
+                    if history:
+                        full_message = history + full_message
+
+        if is_new:
+            spawn_injected = await _fire(HOOK_EVENT_AGENT_SPAWN, session_key)
+        else:
+            spawn_injected = []
+
+        injected = await _fire(HOOK_EVENT_USER_PROMPT_SUBMIT, message)
+        all_injected = spawn_injected + injected
+        if all_injected:
+            hook_ctx = "\n\n".join(all_injected)
+            full_message = f"[Hook context]\n{hook_ctx}\n[End hook context]\n\n{full_message}"
+
+        if regenerate_hint:
+            full_message = f"[System: {regenerate_hint}]\n\n{full_message}"
+
+        # Slash commands use _kiro.dev/commands/execute for full native output;
+        # regular messages use session/prompt.
+        event_stream = client.stream_command(message) if is_slash else client.stream(full_message)
+        state.broadcast_ws("chat_status", {"slot": slot.key, "status": "Thinking…"})
+        state.broadcast_ws(
+            "activity_event", {"slot": slot.key, "kind": "status", "text": "Thinking…"}
+        )
+
+        # ── Bidirectional sync: mirror user message to linked Slack thread ──
+        if state.slack_client and not is_slash:
+            _mirror_thread, _mirror_chan = state.sessions.get_slack_link(session_key)
+            if _mirror_thread and _mirror_chan:
+                try:
+                    _mirror_msg = message[:500]
+                    _mirror_msg, _ = redact_exfiltration_urls(_mirror_msg)
+                    _mirror_msg, _ = redact_credentials(_mirror_msg)
+                    await state.slack_client.post_message(
+                        _mirror_chan, f"💬 _{_mirror_msg}_", _mirror_thread
+                    )
+                    # Start a stream for real-time tool animations
+                    _mirror_stream_ts = await state.slack_client.start_stream(
+                        _mirror_chan, _mirror_thread, initial_text="Thinking…"
+                    ) or ""
+                except Exception:
+                    logger.debug("Failed to mirror user message to Slack", exc_info=True)
+
+        _stop_reason = ""
+        async for event in event_stream:
+            # Heartbeat every 5s during long operations
+            if time.time() - last_heartbeat > 5:
+                state.broadcast_ws("heartbeat", {"slot": slot.key, "ts": time.time()})
+                last_heartbeat = time.time()
+
+            # Security: tool_call_id originates from LLM — redact before any use
+            if hasattr(event, 'tool_call_id') and event.tool_call_id:
+                _tcid, _ = redact_exfiltration_urls(event.tool_call_id)
+                _tcid, _ = redact_credentials(_tcid)
+                event.tool_call_id = _tcid
+
+            if event.kind == EVENT_TEXT_CHUNK:
+                # If we just exited a tool group, finalize the streaming
+                # message so post-tool text starts a fresh message.
+                if in_tool_group:
+                    if assistant_text:
+                        _flush_segment(state, slot, assistant_text)
+                        assistant_text = ""
+                    else:
+                        # No accumulated text, but still tell frontend to
+                        # finalize any streaming message before tools.
+                        state.broadcast_ws("chat_segment", {"slot": slot.key})
+                    # Fallback: text after tools means all preceding tools
+                    # are complete — mark any that weren't already marked
+                    # (e.g. tools with no output).
+                    for m in reversed(slot.messages):
+                        if m.get("role") == "tool" and not m.get("meta", {}).get("done"):
+                            m.setdefault("meta", {})["done"] = True
+                            tcid = m.get("meta", {}).get("tool_call_id", "")
+                            if tcid:
+                                state.broadcast_ws("tool_result", {"slot": slot.key, "tool_call_id": tcid, "output": ""})
+                        elif m.get("role") not in ("tool", "permission", "chunk"):
+                            break
+                in_tool_group = False
+                chunk_seq += 1
+                safe_chunk, _ = redact_exfiltration_urls(event.text)
+                safe_chunk, _ = redact_credentials(safe_chunk)
+                assistant_text += safe_chunk
+                slot.append("chunk", safe_chunk, "chunk")
+                # Push chunk to WS clients (HTTP SSE reader drains from slot._pending)
+                state.broadcast_ws(
+                    "chat_chunk",
+                    {"slot": slot.key, "content": safe_chunk, "seq": chunk_seq},
+                )
+            elif event.kind == EVENT_THINKING_CHUNK:
+                # Thinking content is not included in the main response text.
+                # Broadcast as a separate WS event for frontend rendering.
+                # Per-chunk redaction is best-effort (patterns spanning chunks
+                # could be missed); the Slack handler applies full-text
+                # redaction on the accumulated result before posting.
+                # This matches chat_chunk which also broadcasts raw text.
+                safe_text, exfil_warnings = redact_exfiltration_urls(event.text)
+                for w in exfil_warnings:
+                    logger.warning("Exfiltration URL redacted in thinking: %s", w)
+                safe_text, cred_warnings = redact_credentials(safe_text)
+                for w in cred_warnings:
+                    logger.warning("Credential redacted in thinking: %s", w)
+                state.broadcast_ws(
+                    "chat_thinking",
+                    {"slot": slot.key, "content": safe_text},
+                )
+            elif event.kind == EVENT_TOOL_CALL:
+                # Flush pre-tool text silently (no broadcast) so it persists,
+                # but keep the streaming message in place for correct tool ordering.
+                if not in_tool_group and assistant_text:
+                    _flush_segment(state, slot, assistant_text, broadcast=False)
+                    assistant_text = ""
+                in_tool_group = True
+                # Broadcast for real-time visibility and persist
+                _title, _ = redact_exfiltration_urls(event.title)
+                _title, _ = redact_credentials(_title)
+                _kind, _ = redact_exfiltration_urls(event.tool_kind)
+                _kind, _ = redact_credentials(_kind)
+                # Snapshot file BEFORE write tools execute. Accumulates per-turn,
+                # flushed to assistant message meta in _flush_file_changes on turn end.
+                _file_snapshot = _snapshot_write_target(event.raw_tool_params)
+                if _file_snapshot:
+                    slot._file_changes.append(_file_snapshot)
+                state.broadcast_ws(
+                    "tool_call",
+                    {
+                        "slot": slot.key,
+                        "tool": _title,
+                        "kind": _kind,
+                        "tool_call_id": _redact_tool_field(event.tool_call_id),
+                        "purpose": _redact_tool_field(event.tool_purpose, limit=_MAX_TOOL_PURPOSE),
+                        "input_preview": _redact_tool_field(event.tool_input),
+                    },
+                )
+                slot.append("tool", f"🔧 {_title}", "msg msg-tool", meta=_tool_meta(event))
+                sel().log_tool_invocation(
+                    session_key=session_key,
+                    agent=slot.agent or "kiroclaw",
+                    source="dashboard",
+                    tool_name=event.title,
+                    tool_kind=event.tool_kind,
+                    outcome="invoked",
+                )
+                # AskUserQuestion: validate via schema, redact, and broadcast
+                if event.title == "AskUserQuestion" and event.tool_input:
+                    try:
+                        _q_input = json.loads(event.tool_input)
+                        _questions = validate_ask_user_question(_q_input)
+                        for q in _questions:
+                            q["question"], _ = redact_exfiltration_urls(q["question"])
+                            q["question"], _ = redact_credentials(q["question"])
+                            q["header"], _ = redact_exfiltration_urls(q["header"])
+                            q["header"], _ = redact_credentials(q["header"])
+                            for o in q["options"]:
+                                o["label"], _ = redact_exfiltration_urls(o["label"])
+                                o["label"], _ = redact_credentials(o["label"])
+                                o["description"], _ = redact_exfiltration_urls(o["description"])
+                                o["description"], _ = redact_credentials(o["description"])
+                        state.broadcast_ws(
+                            "question_card",
+                            {"slot": slot.key, "questions": _questions},
+                        )
+                    except (json.JSONDecodeError, TypeError, KeyError, AttributeError, ValidationError) as exc:
+                        logger.warning("AskUserQuestion validation failed: %s", exc)
+                # Fire PreToolUse hooks for auto-approved tools.
+                # NOTE: For EVENT_TOOL_CALL, hooks are informational only - the tool
+                # is already running (auto-approved by kiro-cli). Hook results cannot
+                # block execution. Hook scripts can log, audit, or trigger side effects.
+                _raw = event.title or ""
+                if _raw.startswith("Running: "):
+                    _raw = _raw[9:]
+                if event.tool_call_id:
+                    _pending_tools[event.tool_call_id] = _raw
+                await fire_tool_hooks(state._hook_store, event.title, event.tool_input)
+                # Mirror tool call to linked Slack stream
+                if _mirror_stream_ts:
+                    try:
+                        if _mirror_active_task:
+                            await state.slack_client.append_task(
+                                _mirror_chan, _mirror_stream_ts,
+                                _mirror_active_task, _mirror_active_task_title, "complete",
+                            )
+                        _mirror_task_counter += 1
+                        _mirror_active_task = f"tool_{_mirror_task_counter}"
+                        _task_title = event.tool_purpose or _title
+                        _task_title, _ = redact_exfiltration_urls(_task_title)
+                        _task_title, _ = redact_credentials(_task_title)
+                        _task_title = _task_title[:75]
+                        _mirror_active_task_title = _task_title
+                        await state.slack_client.append_task(
+                            _mirror_chan, _mirror_stream_ts,
+                            _mirror_active_task, _task_title, "in_progress",
+                        )
+                    except Exception:
+                        logger.debug("Mirror tool task failed", exc_info=True)
+            elif event.kind == EVENT_TOOL_CALL_UPDATE:
+                # claude-agent-acp emits an initial `tool_call` with empty
+                # input (title falls back to generic name like "Terminal" or
+                # "grep") followed by a `tool_call_update` carrying the
+                # populated rawInput and a refined title from the upstream
+                # `toolInfoFromToolUse`.  Patch the existing pill (toolLog)
+                # and the persisted message in place by tool_call_id so the
+                # user sees the actual command rather than the stub.
+                if not event.tool_call_id:
+                    continue
+                try:
+                    _tcid_upd = _redact_tool_field(event.tool_call_id)
+                    _title_upd = ""
+                    if event.title:
+                        _title_upd, _ = redact_exfiltration_urls(event.title)
+                        _title_upd, _ = redact_credentials(_title_upd)
+                    _kind_upd = ""
+                    if event.tool_kind:
+                        _kind_upd, _ = redact_exfiltration_urls(event.tool_kind)
+                        _kind_upd, _ = redact_credentials(_kind_upd)
+                    _input_upd = _redact_tool_field(event.tool_input) if event.tool_input else ""
+                    # Snapshot file BEFORE the write tool actually executes.
+                    # Initial tool_call had empty rawInput so no snapshot was
+                    # taken there; this is the first event with the file path.
+                    _file_snapshot_upd = _snapshot_write_target(event.raw_tool_params)
+                    if _file_snapshot_upd:
+                        slot._file_changes.append(_file_snapshot_upd)
+                    # Refresh the toolLog entry (sseToolActivity merges by id).
+                    state.broadcast_ws(
+                        "tool_call",
+                        {
+                            "slot": slot.key,
+                            "tool": _title_upd,
+                            "kind": _kind_upd,
+                            "tool_call_id": _tcid_upd,
+                            "input_preview": _input_upd,
+                            "is_update": True,
+                        },
+                    )
+                    # Update the audit log so the SEL trail captures the
+                    # refined title/kind, not just the "Terminal"/"grep" stub
+                    # logged at the initial EVENT_TOOL_CALL.
+                    sel().log_tool_invocation(
+                        session_key=session_key,
+                        agent=slot.agent or "kiroclaw",
+                        source="dashboard",
+                        tool_name=_title_upd,
+                        tool_kind=_kind_upd,
+                        outcome="refined",
+                    )
+                    # Patch the persisted tool message in place so its content
+                    # shows the refined title and meta carries the populated
+                    # input.  Walk in reverse and break on the first match —
+                    # auto-approved tools may have a later "✅ {title}" entry
+                    # with the same tool_call_id, and we don't want to
+                    # overwrite that post-approval marker. Preserve whatever
+                    # leading icon (🔧/✅/🚫) the existing message has.
+                    _meta_patch: dict[str, str] = {}
+                    if _input_upd:
+                        _meta_patch["input"] = _input_upd
+                    _patched = False
+                    _patched_content: str | None = None
+                    for m in reversed(slot.messages):
+                        if m.get("role") != "tool":
+                            continue
+                        if m.get("meta", {}).get("tool_call_id") != _tcid_upd:
+                            continue
+                        if _title_upd:
+                            existing = m.get("content", "") or ""
+                            prefix = existing[:1] if existing[:1] in ("🔧", "✅", "🚫") else "🔧"
+                            _patched_content = f"{prefix} {_title_upd}"
+                            m["content"] = _patched_content
+                        if _meta_patch:
+                            m_meta = m.setdefault("meta", {})
+                            m_meta.update(_meta_patch)
+                        _patched = True
+                        break
+                    if _patched:
+                        slot._dirty = True
+                        state.broadcast_ws(
+                            "chat_message_update",
+                            {
+                                "slot": slot.key,
+                                "tool_call_id": _tcid_upd,
+                                **({"content": _patched_content} if _patched_content else {}),
+                                **({"meta": _meta_patch} if _meta_patch else {}),
+                            },
+                        )
+                    # Update _pending_tools so PostToolUse hooks see the
+                    # refined name (e.g. "ls /tmp") instead of the stub
+                    # ("Terminal").  Strip the "Running: " prefix to match
+                    # the EVENT_TOOL_CALL handler's normalization — hooks
+                    # match by tool name and would miss otherwise.
+                    if event.title and event.tool_call_id in _pending_tools:
+                        _refined_name = event.title
+                        if _refined_name.startswith("Running: "):
+                            _refined_name = _refined_name[9:]
+                        _pending_tools[event.tool_call_id] = _refined_name
+                except Exception:
+                    logger.warning(
+                        "EVENT_TOOL_CALL_UPDATE handler failed for tool_call_id=%s",
+                        event.tool_call_id, exc_info=True,
+                    )
+            elif event.kind == EVENT_TOOL_RESULT:
+                _out = _redact_tool_field(event.tool_output)
+                # Redact the join key once for the WS broadcast and the
+                # message-meta comparison below. `_tool_meta` stores the
+                # redacted form, so the comparison must use the redacted form
+                # too — see the `_tool_meta` docstring for the convention.
+                _tcid = _redact_tool_field(event.tool_call_id) if event.tool_call_id else ""
+                state.broadcast_ws(
+                    "tool_result",
+                    {
+                        "slot": slot.key,
+                        "tool_call_id": _tcid,
+                        "output": _out,
+                    },
+                )
+                # Mark the matching tool message as done so completion state
+                # survives page reload (persisted in message meta, replayed via SSE).
+                # Also persist the redacted output here so the inline detail panel
+                # has data after a chat reload (toolLog Redux state is in-memory).
+                # Iterate ALL matching messages — auto-approved tools create two
+                # tool entries (🔧 pre-approval + ✅ post-approval) with the same
+                # tool_call_id, and both pills should reflect the same output.
+                if _tcid:
+                    for m in slot.messages:
+                        if m.get("role") == "tool" and m.get("meta", {}).get("tool_call_id") == _tcid:
+                            _meta = m.setdefault("meta", {})
+                            _meta["done"] = True
+                            _meta["output"] = _out
+                # Fire PostToolUse hooks
+                _tool_name = _pending_tools.pop(event.tool_call_id, "")
+                try:
+                    _redacted_out, _ = redact_credentials(_out[:2000])
+                    _redacted_out, _ = redact_exfiltration_urls(_redacted_out)
+                    await _fire(
+                        HOOK_EVENT_POST_TOOL_USE,
+                        tool_name=_tool_name,
+                        tool_response={"output": _redacted_out},
+                    )
+                except Exception:
+                    logger.debug("PostToolUse hook error", exc_info=True)
+            elif event.kind == EVENT_PERMISSION_REQUEST:
+                # Permission is part of the tool group, not a break in it —
+                # leaving in_tool_group True ensures the post-tool text fallback
+                # (above, in EVENT_TEXT_CHUNK) still fires once the tool resolves
+                # and the LLM continues with text. Resetting it here was the
+                # cause of pills staying in "running" state until the next tool
+                # call or message end.
+                # Flush accumulated text as a finalized segment before the
+                # permission flow so the frontend renders them in order.
+                if assistant_text:
+                    _flush_segment(state, slot, assistant_text)
+                    assistant_text = ""
+                _pre_tool_hooks_fired = False
+                if state.context_builder:
+                    tool_result = state.context_builder.hooks.on_tool_call(event.title)
+                    if tool_result.action == TOOL_DENY:
+                        await client.reject_tool(event.request_id)
+                        slot.append("tool", f"🚫 {event.title} (blocked)", "msg msg-tool")
+                        sel().log_tool_invocation(
+                            session_key=session_key,
+                            agent=slot.agent or "kiroclaw",
+                            source="dashboard",
+                            tool_name=event.title,
+                            tool_kind=event.tool_kind,
+                            outcome="denied",
+                            request_id=event.request_id,
+                            error="hook_deny",
+                        )
+                        continue
+                    if tool_result.action == TOOL_AUTO_APPROVE:
+                        try:
+                            validated_tool = _validate_tool_name(event.title, event.tool_kind)
+                        except ValueError as e:
+                            await client.reject_tool(event.request_id)
+                            slot.append("tool", f"🚫 {event.title} (invalid: {e})", "msg msg-tool")
+                            sel().log_tool_invocation(
+                                session_key=session_key,
+                                agent=slot.agent or "kiroclaw",
+                                source="dashboard",
+                                tool_name=event.title,
+                                tool_kind=event.tool_kind,
+                                outcome="denied",
+                                request_id=event.request_id,
+                                error=f"validation_failed: {e}",
+                            )
+                        else:
+                            await client.approve_tool(event.request_id)
+                            _tool_title = _broadcast_auto_tool(state, slot, event)
+                            state.broadcast_ws(
+                                "activity_event",
+                                {
+                                    "slot": slot.key,
+                                    "kind": "permission",
+                                    "text": f"Auto-approved: {_tool_title}",
+                                },
+                            )
+                            sel().log_tool_invocation(
+                                session_key=session_key,
+                                agent=slot.agent or "kiroclaw",
+                                source="dashboard",
+                                tool_name=_tool_title,
+                                tool_kind=event.tool_kind,
+                                outcome="auto_approved",
+                                request_id=event.request_id,
+                            )
+                        continue
+                    try:
+                        validated_tool = _validate_tool_name(event.title, event.tool_kind)
+                    except ValueError as e:
+                        await client.reject_tool(event.request_id)
+                        slot.append("tool", f"🚫 {event.title} (invalid: {e})", "msg msg-tool")
+                        sel().log_tool_invocation(
+                            session_key=session_key,
+                            agent=slot.agent or "kiroclaw",
+                            source="dashboard",
+                            tool_name=event.title,
+                            tool_kind=event.tool_kind,
+                            outcome="denied",
+                            request_id=event.request_id,
+                            error=f"validation_failed: {e}",
+                        )
+                        continue
+                    try:
+                        _parsed_input = json.loads(event.tool_input) if event.tool_input else None
+                    except Exception:
+                        _parsed_input = None
+                    try:
+                        pre_hook_results = await _fire(
+                            HOOK_EVENT_PRE_TOOL_USE, tool_name=validated_tool,
+                            tool_input=_parsed_input,
+                        )
+                    except Exception as hook_exc:
+                        await client.reject_tool(event.request_id)
+                        slot.append("tool", f"🚫 {event.title} (hook error)", "msg msg-tool")
+                        sel().log_tool_invocation(
+                            session_key=session_key,
+                            agent=slot.agent or "kiroclaw",
+                            source="dashboard",
+                            tool_name=event.title,
+                            tool_kind=event.tool_kind,
+                            outcome="hook_error",
+                            request_id=event.request_id,
+                            error=str(hook_exc),
+                        )
+                        continue
+                    if any(r.startswith("BLOCKED:") for r in pre_hook_results):
+                        await client.reject_tool(event.request_id)
+                        slot.append("tool", f"🚫 {event.title} (hook blocked)", "msg msg-tool")
+                        sel().log_tool_invocation(
+                            session_key=session_key,
+                            agent=slot.agent or "kiroclaw",
+                            source="dashboard",
+                            tool_name=event.title,
+                            tool_kind=event.tool_kind,
+                            outcome="hook_blocked",
+                            request_id=event.request_id,
+                        )
+                        continue
+                    _pre_tool_hooks_fired = True
+                    # Hooks passed — fall through to patterns/trust-reads/trust/yolo/interactive
+                # Session-trusted patterns: auto-approve commands matching user globs.
+                # Security: match against the ACTUAL command from tool_input (not
+                # event.title which is LLM-controlled display text). For shell tools,
+                # extract the real command; for non-shell MCP tools (no tool_input),
+                # use event.title as it IS the provider-controlled tool name.
+                # When tool_input exists but isn't recognized as bash, skip pattern
+                # matching entirely (deny-by-default).
+                if slot._trusted_patterns:
+                    _tp_cmd = _extract_bash_command(event.tool_input) if event.tool_input else ""
+                    if _tp_cmd:
+                        _tp_check_title = f"Running: {_tp_cmd}"
+                    elif not event.tool_input:
+                        _tp_check_title = event.title
+                    else:
+                        _tp_check_title = None
+                    matched = _matches_trusted_pattern(_tp_check_title, slot._trusted_patterns) if _tp_check_title is not None else None
+                    if matched:
+                        try:
+                            validated_tool = _validate_tool_name(event.title, event.tool_kind)
+                        except ValueError as e:
+                            await client.reject_tool(event.request_id)
+                            _safe, _ = redact_exfiltration_urls(event.title)
+                            _safe, _ = redact_credentials(_safe)
+                            slot.append(
+                                "tool",
+                                f"🚫 {_safe} (invalid: {e})",
+                                "msg msg-tool",
+                            )
+                            sel().log_tool_invocation(
+                                session_key=session_key,
+                                agent=slot.agent or "kiroclaw",
+                                source="dashboard",
+                                tool_name=event.title,
+                                tool_kind=event.tool_kind,
+                                outcome="rejected",
+                                request_id=event.request_id,
+                                metadata={"reason": "invalid_tool_name", "pattern": matched},
+                            )
+                            continue
+                        await client.approve_tool(event.request_id)
+                        _tool_title = _broadcast_auto_tool(state, slot, event)
+                        _tool_title, _ = redact_exfiltration_urls(_tool_title)
+                        _tool_title, _ = redact_credentials(_tool_title)
+                        slot.append(
+                            "tool",
+                            f"🔧 {_tool_title}",
+                            "msg msg-tool",
+                            meta={"tool_call_id": event.tool_call_id, "purpose": redact_credentials(redact_exfiltration_urls((event.tool_purpose or "")[:200])[0])[0]} if event.tool_call_id else None,
+                        )
+                        sel().log_tool_invocation(
+                            session_key=session_key,
+                            agent=slot.agent or "kiroclaw",
+                            source="dashboard",
+                            tool_name=event.title,
+                            tool_kind=event.tool_kind,
+                            outcome="auto_approved",
+                            request_id=event.request_id,
+                            metadata={"reason": "trusted_pattern", "pattern": matched},
+                        )
+                        continue
+                # Trust-reads: auto-approve read-only bash commands
+                # Detect bash tools by tool_input content (title is human-readable)
+                cmd = _extract_bash_command(event.tool_input) if event.tool_input else ""
+                yolo_active = state.is_yolo_active()
+                if slot._trust_reads and not slot._trust and not yolo_active and cmd:
+                    if is_read_only_bash(cmd):
+                        try:
+                            validated_tool = _validate_tool_name(event.title, event.tool_kind)
+                        except ValueError as e:
+                            await client.reject_tool(event.request_id)
+                            slot.append(
+                                "tool",
+                                f"🚫 {event.title} (invalid: {e})",
+                                "msg msg-tool",
+                            )
+                            continue
+                        await client.approve_tool(event.request_id)
+                        _tool_title = _broadcast_auto_tool(state, slot, event)
+                        slot.append(
+                            "tool",
+                            f"🔧 {_tool_title}",
+                            "msg msg-tool",
+                            meta=_tool_meta(event),
+                        )
+                        sel().log_tool_invocation(
+                            session_key=session_key,
+                            agent=slot.agent or "kiroclaw",
+                            source="dashboard",
+                            tool_name=event.title,
+                            tool_kind=event.tool_kind,
+                            outcome="auto_approved",
+                            request_id=event.request_id,
+                            metadata={"reason": "trust_reads"},
+                        )
+                        continue
+                # Trust mode (per-slot) or YOLO mode (global) — auto-approve
+                if slot._trust or yolo_active:
+                    try:
+                        validated_tool = _validate_tool_name(event.title, event.tool_kind)
+                    except ValueError as e:
+                        await client.reject_tool(event.request_id)
+                        slot.append("tool", f"🚫 {event.title} (invalid: {e})", "msg msg-tool")
+                        sel().log_tool_invocation(
+                            session_key=session_key,
+                            agent=slot.agent or "kiroclaw",
+                            source="dashboard",
+                            tool_name=event.title,
+                            tool_kind=event.tool_kind,
+                            outcome="denied",
+                            request_id=event.request_id,
+                            error=f"validation_failed: {e}",
+                        )
+                        continue
+                    if not _pre_tool_hooks_fired:
+                        try:
+                            _parsed_input = json.loads(event.tool_input) if event.tool_input else None
+                        except Exception:
+                            _parsed_input = None
+                        try:
+                            pre_hook_results = await _fire(
+                                HOOK_EVENT_PRE_TOOL_USE, tool_name=validated_tool,
+                                tool_input=_parsed_input,
+                            )
+                        except Exception as hook_exc:
+                            await client.reject_tool(event.request_id)
+                            slot.append("tool", f"🚫 {event.title} (hook error)", "msg msg-tool")
+                            sel().log_tool_invocation(
+                                session_key=session_key,
+                                agent=slot.agent or "kiroclaw",
+                                source="dashboard",
+                                tool_name=event.title,
+                                tool_kind=event.tool_kind,
+                                outcome="hook_error",
+                                request_id=event.request_id,
+                                error=str(hook_exc),
+                            )
+                            continue
+                        if any(r.startswith("BLOCKED:") for r in pre_hook_results):
+                            await client.reject_tool(event.request_id)
+                            slot.append("tool", f"🚫 {event.title} (hook blocked)", "msg msg-tool")
+                            sel().log_tool_invocation(
+                                session_key=session_key,
+                                agent=slot.agent or "kiroclaw",
+                                source="dashboard",
+                                tool_name=event.title,
+                                tool_kind=event.tool_kind,
+                                outcome="hook_blocked",
+                                request_id=event.request_id,
+                            )
+                            continue
+                    # always=False — KiroClaw owns trust scope; per-call request_permission
+                    # is required for PreToolUse hooks to run on every tool invocation.
+                    await client.approve_tool(event.request_id)
+                    _tool_title = _broadcast_auto_tool(state, slot, event)
+                    sel().log_tool_invocation(
+                        session_key=session_key,
+                        agent=slot.agent or "kiroclaw",
+                        source="dashboard",
+                        tool_name=_tool_title,
+                        tool_kind=event.tool_kind,
+                        outcome="auto_approved",
+                        request_id=event.request_id,
+                        metadata={"reason": "yolo" if yolo_active else "trust"},
+                    )
+                    continue
+                # Auto-reject remaining tools after one rejection in a batch
+                if getattr(slot, '_batch_rejected', False):
+                    await client.reject_tool(event.request_id)
+                    _title, _ = redact_exfiltration_urls(event.title)
+                    _title, _ = redact_credentials(_title)
+                    slot.append("tool", f"🚫 {_title} (rejected)", "msg msg-tool",
+                                meta=_tool_meta(event))
+                    # Mark the permission as resolved so UI shows rejection
+                    perm_meta: dict[str, str] = {"request_id": str(event.request_id), "tool_call_id": event.tool_call_id or "", "resolved": "rejected"}
+                    slot.append("permission", _title, json.dumps(perm_meta))
+                    sel().log_tool_invocation(
+                        session_key=session_key,
+                        agent=slot.agent or "kiroclaw",
+                        source="dashboard",
+                        tool_name=event.title,
+                        tool_kind=event.tool_kind,
+                        outcome="rejected",
+                        request_id=event.request_id,
+                        metadata={"reason": "batch_rejection"},
+                    )
+                    logger.warning("AUTO-REJECTED tool=%r (batch rejection)", event.title)
+                    continue
+                # Interactive approval — send to frontend, wait for decision
+                perm_meta = {"request_id": str(event.request_id), "tool_call_id": event.tool_call_id or ""}
+                if event.tool_input:
+                    # Security: scan for exfiltration URLs and credentials
+                    sanitized, _ = redact_exfiltration_urls(event.tool_input)
+                    sanitized, _ = redact_credentials(sanitized)
+                    perm_meta["tool_input"] = sanitized
+                # Flag read-only bash commands for context-aware buttons
+                cmd = _extract_bash_command(event.tool_input) if event.tool_input else ""
+                if cmd:
+                    perm_meta["is_read_only"] = "1" if is_read_only_bash(cmd) else ""
+                # Pre-compute pattern fields for the TrustDropdown
+                _safe_title, _ = redact_exfiltration_urls(event.title)
+                _safe_title, _ = redact_credentials(_safe_title)
+                perm_meta["tool_title"] = _safe_title
+                _full = _extract_full_command(event.title)
+                _full, _ = redact_exfiltration_urls(_full)
+                _full, _ = redact_credentials(_full)
+                perm_meta["full_command"] = _full
+                _base = _extract_base_command(event.title)
+                _base, _ = redact_exfiltration_urls(_base)
+                _base, _ = redact_credentials(_base)
+                perm_meta["base_command"] = _base
+                slot.append(
+                    "permission",
+                    _safe_title,
+                    json.dumps(perm_meta),
+                )
+                loop = asyncio.get_running_loop()
+                fut: asyncio.Future[str] = loop.create_future()
+                slot._approval_futures[str(event.request_id)] = fut
+                # Push via global SSE AFTER registering the future, so the
+                # slot dict reflects pending_approval=true and Board cards
+                # move into the Blocked lane without a browser refresh.
+                state.push_slots_update()
+                try:
+                    outcome = await asyncio.wait_for(fut, timeout=7200.0)
+                except asyncio.TimeoutError:
+                    outcome = "rejected"
+                finally:
+                    slot._approval_futures.pop(str(event.request_id), None)
+                if outcome == "approved_trust_reads":
+                    slot._trust_reads = True
+                    outcome = "approved"
+                if outcome == "approved":
+                    try:
+                        validated_tool = _validate_tool_name(event.title, event.tool_kind)
+                    except ValueError as e:
+                        await client.reject_tool(event.request_id)
+                        slot.append("tool", f"🚫 {event.title} (invalid: {e})", "msg msg-tool")
+                        sel().log_tool_invocation(
+                            session_key=session_key,
+                            agent=slot.agent or "kiroclaw",
+                            source="dashboard",
+                            tool_name=event.title,
+                            tool_kind=event.tool_kind,
+                            outcome="denied",
+                            request_id=event.request_id,
+                            error=f"validation_failed: {e}",
+                            metadata={"reason": "interactive"},
+                        )
+                        break
+                    try:
+                        _parsed_input = json.loads(event.tool_input) if event.tool_input else None
+                    except Exception:
+                        _parsed_input = None
+                    try:
+                        pre_hook_results = await _fire(
+                            HOOK_EVENT_PRE_TOOL_USE, tool_name=validated_tool,
+                            tool_input=_parsed_input,
+                        )
+                    except Exception as hook_exc:
+                        await client.reject_tool(event.request_id)
+                        slot.append("tool", f"🚫 {event.title} (hook error)", "msg msg-tool")
+                        sel().log_tool_invocation(
+                            session_key=session_key,
+                            agent=slot.agent or "kiroclaw",
+                            source="dashboard",
+                            tool_name=event.title,
+                            tool_kind=event.tool_kind,
+                            outcome="hook_error",
+                            request_id=event.request_id,
+                            error=str(hook_exc),
+                            metadata={"reason": "interactive"},
+                        )
+                        break
+                    if any(r.startswith("BLOCKED:") for r in pre_hook_results):
+                        await client.reject_tool(event.request_id)
+                        slot.append("tool", f"🚫 {event.title} (hook blocked)", "msg msg-tool")
+                        sel().log_tool_invocation(
+                            session_key=session_key,
+                            agent=slot.agent or "kiroclaw",
+                            source="dashboard",
+                            tool_name=event.title,
+                            tool_kind=event.tool_kind,
+                            outcome="hook_blocked",
+                            request_id=event.request_id,
+                            metadata={"reason": "interactive"},
+                        )
+                    else:
+                        await client.approve_tool(event.request_id)
+                        _approved_title, _ = redact_exfiltration_urls(event.title)
+                        _approved_title, _ = redact_credentials(_approved_title)
+                        slot.append("tool", f"✅ {_approved_title}", "msg msg-tool",
+                                    meta=_tool_meta(event))
+                        sel().log_tool_invocation(
+                            session_key=session_key,
+                            agent=slot.agent or "kiroclaw",
+                            source="dashboard",
+                            tool_name=event.title,
+                            tool_kind=event.tool_kind,
+                            outcome="approved",
+                            request_id=event.request_id,
+                            metadata={"reason": "interactive"},
+                        )
+                else:
+                    await client.reject_tool(event.request_id)
+                    slot.append("tool", f"🚫 {event.title} (rejected)", "msg msg-tool")
+                    sel().log_tool_invocation(
+                        session_key=session_key,
+                        agent=slot.agent or "kiroclaw",
+                        source="dashboard",
+                        tool_name=event.title,
+                        tool_kind=event.tool_kind,
+                        outcome="rejected",
+                        request_id=event.request_id,
+                        metadata={"reason": "interactive"},
+                    )
+
+                if outcome != "approved":
+                    # mark batch_rejected as true and continue loop instead of breaking
+                    # This will allow for marking other batched approval requests as rejected too
+                    slot._batch_rejected = True
+                    logger.warning("PERM REJECTED tool=%r outcome=%r — auto-rejecting remaining batch", event.title, outcome)
+                    continue
+            elif event.kind == EVENT_COMPACTION_STATUS:
+                logger.debug("Main loop: compaction event text=%r", event.text)
+                if _broadcast_compaction_result(state, slot, event):
+                    saw_compaction = True
+                    assistant_text = ""
+            elif event.kind == EVENT_CLEAR_STATUS:
+                slot.messages.clear()
+                assistant_text = ""
+                slot.append("assistant", "🗑️ Conversation cleared.", "msg msg-a")
+                state.broadcast_ws("slot_clear", {"slot": slot.key})
+                state.broadcast_ws(
+                    "chat_message",
+                    {"slot": slot.key, "role": "assistant", "content": "🗑️ Conversation cleared."},
+                )
+            elif event.kind == EVENT_AGENT_SWITCHED:
+                new_agent, _ = redact_credentials(event.text)
+                new_agent, _ = redact_exfiltration_urls(new_agent)
+                if new_agent:
+                    slot.agent = new_agent
+                    assistant_text = ""
+                    slot.append(
+                        "assistant",
+                        f"🔄 Switched to agent: {new_agent}",
+                        "msg msg-a",
+                    )
+                    state.broadcast_ws(
+                        "slot_agent_switch",
+                        {"slot": slot.key, "agent": new_agent},
+                    )
+                    needs_session_reset = True
+            elif event.kind == EVENT_MCP_OAUTH_REQUEST:
+                # kiro-cli emits this notification when an MCP server's token
+                # has expired or never existed. Surface as an inline banner —
+                # kiro-cli's local callback handles the rest of the OAuth flow.
+                _emit_mcp_oauth_request(state, slot, event.server_name, event.oauth_url)
+            elif event.kind == EVENT_MCP_SERVER_INITIALIZED:
+                # kiro-cli emits this once an MCP server has finished init
+                # (typically right after a successful OAuth callback completes).
+                # Patch the matching mcp_oauth banner so the user sees a
+                # confirmation instead of a stale "Authorize" prompt.
+                _mark_mcp_oauth_completed(state, slot, event.server_name, success=True)
+            elif event.kind == EVENT_MCP_SERVER_INIT_FAILURE:
+                _mark_mcp_oauth_completed(
+                    state, slot, event.server_name, success=False, error=event.text or ""
+                )
+            elif event.kind == EVENT_COMPLETE:
+                if event.input_tokens or event.output_tokens:
+                    stats = Stats()
+                    stats.inc_input_tokens(event.input_tokens)
+                    stats.inc_output_tokens(event.output_tokens)
+                    if event.cache_creation_tokens:
+                        stats.inc_cache_creation_tokens(event.cache_creation_tokens)
+                    if event.cache_read_tokens:
+                        stats.inc_cache_read_tokens(event.cache_read_tokens)
+                    if event.cost_usd:
+                        stats.inc_cost_usd(event.cost_usd)
+                    if event.num_turns:
+                        stats.inc_turns(event.num_turns)
+                    if event.duration_ms:
+                        stats.inc_duration_ms(event.duration_ms)
+                    try:
+                        _provider_name = cfg.agent.provider  # type: ignore[possibly-undefined]
+                    except (NameError, AttributeError):
+                        _provider_name = ""
+                    # Late backfill: CC reports model only via the `init`
+                    # system event which arrives after the run starts, so
+                    # slot.model may still be empty here even though the
+                    # provider learned the model mid-turn. Read it back
+                    # before persisting so tokens.jsonl is never tagged
+                    # with a blank model for CC sessions.
+                    _record_model = slot.model
+                    if not _record_model:
+                        _prov_model = getattr(
+                            getattr(client, "client", None), "_model", ""
+                        ) or ""
+                        if (
+                            isinstance(_prov_model, str)
+                            and _prov_model
+                            and _prov_model != "auto"
+                        ):
+                            slot.model = _prov_model
+                            _record_model = _prov_model
+                    persist_token_record(
+                        slot.key, _record_model, event, provider=_provider_name
+                    )
+                _stop_reason = event.stop_reason
+                if (
+                    _stop_reason
+                    and _stop_reason != STOP_REASON_END_TURN
+                    and _stop_reason != STOP_REASON_CANCELLED
+                ):
+                    logger.warning(
+                        "Unexpected stop_reason %r for slot %s",
+                        _stop_reason,
+                        slot.key,
+                    )
+                break
+
+        # CC process died mid-turn: re-queue message for automatic retry
+        # (mirrors AcpProcessDied handling). Eager reconnect in the provider
+        # restores MCPs in background; re-queue ensures the user's message
+        # is not silently dropped.
+        if _stop_reason and _stop_reason.startswith("error:"):
+            _rc = getattr(client, "exit_code", None)
+            _rc_suffix = f" (exit {_rc})" if _rc is not None else ""
+
+            def _emit_error(msg: str) -> None:
+                slot.append("error", msg, "msg msg-err")
+                state.broadcast_ws(
+                    "chat_message",
+                    {"slot": slot.key, "role": "error", "content": msg},
+                )
+
+            if _prompt_depth == 0 and slot._acp_pipe_death_retries < 3:
+                slot._acp_pipe_death_retries += 1
+                slot.queue_insert(0, message)
+                _emit_error(f"⟳ Connection lost{_rc_suffix} — retrying...")
+            elif slot._acp_pipe_death_retries >= 3:
+                _emit_error(f"Session stuck{_rc_suffix} — please start a new chat.")
+            else:
+                _emit_error(f"⟳ Connection lost{_rc_suffix} — please retry.")
+            return
+
+        # /compact acknowledged but compaction deferred — send a lightweight
+        # follow-up to trigger the actual compaction so the user doesn't have to.
+        logger.debug(
+            "Compaction check: first_word=%r saw_compaction=%s", first_word, saw_compaction
+        )
+        if first_word == "/compact" and not saw_compaction:
+            # Clear streamed "Compacting conversation..." text from kiro-cli
+            # (claude-agent-acp doesn't stream that, but the cleanup is harmless).
+            slot.messages = [m for m in slot.messages if m.get("role") != "chunk"]
+            assistant_text = ""
+            state.broadcast_ws("chat_done", {"slot": slot.key})
+
+            # claude-agent-acp performs /compact synchronously inside session/prompt;
+            # there is no out-of-band _kiro.dev/compaction/status notification, so
+            # EVENT_COMPLETE is the done signal. Skip the kiro-only async wait.
+            #
+            # Note: the success message is hardcoded so no redaction pass is
+            # needed today. If claude-agent-acp ever returns a compaction
+            # summary (e.g. via EVENT_COMPLETE payload growing a `summary`
+            # field), pipe it through redact_credentials + redact_exfiltration_urls
+            # before interpolation — matching the kiro-cli path below.
+            if is_claude_backend(client):
+                msg = "✅ Conversation compacted."
+                slot.append("assistant", msg, "msg msg-a")
+                state.broadcast_ws(
+                    "chat_message",
+                    {"slot": slot.key, "role": "assistant", "content": msg},
+                )
+                state.broadcast_ws("context_usage", _context_usage_payload(slot.key, client))
+            else:
+                # Tell frontend to show compacting state and disable input
+                logger.info("Deferred compaction: waiting for compaction result")
+                state.broadcast_ws(
+                    "chat_message",
+                    {"slot": slot.key, "role": "compacting", "content": ""},
+                )
+                # kiro-cli fires compaction asynchronously after EVENT_COMPLETE —
+                # just wait for the result without sending another prompt.
+                compaction_result = await client.wait_for_compaction(timeout=120.0)
+                logger.info("Deferred compaction result: %s", compaction_result)
+                if compaction_result["type"] == "completed":
+                    summary, _ = redact_credentials(compaction_result.get("summary", ""))
+                    summary, _ = redact_exfiltration_urls(summary)
+                    msg = (
+                        f"✅ Conversation compacted: {summary}"
+                        if summary
+                        else "✅ Conversation compacted."
+                    )
+                elif compaction_result["type"] == "failed":
+                    msg = "❌ Compaction failed."
+                else:
+                    msg = "⚠️ Compaction timed out."
+                slot.append("assistant", msg, "msg msg-a")
+                state.broadcast_ws(
+                    "chat_message",
+                    {"slot": slot.key, "role": "assistant", "content": msg},
+                )
+                # Update context usage after compaction
+                state.broadcast_ws("context_usage", _context_usage_payload(slot.key, client))
+
+        if assistant_text:
+            # ── Plan format validation (orchestrator mode only) ─────
+            if getattr(slot, "mode", "") == "orchestrator":
+
+                has_plan, valid, issues = validate_plan_format(assistant_text)
+                if not has_plan and looks_like_plan(assistant_text):
+                    # Cheap regex thinks it's a plan — let LLM confirm/reformat
+                    logger.info(
+                        "Detected plan-like response without header, asking LLM to reformat"
+                    )
+                    issues = [
+                        "No '📋 Plan for:' header",
+                        "No 'Stage N:' lines found",
+                        "Missing [OPTION: Go | Go All | Cancel] footer",
+                    ]
+                    rephrased = await _rephrase_plan_lite(
+                        state,
+                        assistant_text,
+                        issues,
+                        might_not_be_plan=True,
+                    )
+                    if rephrased:
+                        has_plan = True
+                        _, valid, issues = validate_plan_format(rephrased)
+                        if valid:
+                            logger.info("LLM reformatted plan-like response into valid plan")
+                            assistant_text = rephrased
+                if has_plan and not valid:
+                    logger.info("Plan format invalid (%s), attempting rephrase", issues)
+                    rephrased = await _rephrase_plan_lite(state, assistant_text, issues)
+                    if rephrased:
+                        _, valid2, issues2 = validate_plan_format(rephrased)
+                        if valid2:
+                            logger.info("Plan rephrased successfully")
+                            assistant_text = rephrased
+                        else:
+                            logger.warning("Rephrase still invalid (%s), stripping plan", issues2)
+                            assistant_text = strip_plan_markers(assistant_text)
+                            has_plan = False
+                    else:
+                        logger.warning("Rephrase failed, stripping plan markers")
+                        assistant_text = strip_plan_markers(assistant_text)
+                        has_plan = False
+                if has_plan:
+                    _reset_auto_run_for_new_plan(slot)
+                    assistant_text = ensure_go_all_option(assistant_text)
+                    # Store stage count for _stage_loop
+                    slot._stage_titles, slot._plan_goal, slot._stage_descriptions = _extract_and_redact_plan_metadata(
+                        assistant_text
+                    )
+            _flush_segment(state, slot, assistant_text, broadcast=False)
+        # Attach accumulated file changes to last assistant message before persist
+        _flush_file_changes(slot)
+        # Save to history and trigger memory consolidation
+        _save_slot_to_history(state, slot)
+        slot._prompt_busy_retries = 0
+        slot._acp_pipe_death_retries = 0
+
+        if _stop_reason == STOP_REASON_CANCELLED:
+            logger.info("Turn cancelled by user for slot %s", slot.key)
+        else:
+            _maybe_consolidate(state, slot)
+        state.sessions.check_context_usage(session_key, client)
+        pct = client.context_usage_pct()
+        state.broadcast_ws("context_usage", _context_usage_payload(slot.key, client))
+        if _stop_reason != STOP_REASON_CANCELLED:
+            state.sessions.record_success(session_key)
+        # Broadcast prompt stats for activity viewer
+        _prompt_stats = getattr(  # type: ignore[assignment]
+            getattr(client, "_client", client), "last_prompt_stats", None
+        )
+        if _prompt_stats:
+            state.broadcast_ws(
+                "activity_event",
+                {
+                    "slot": slot.key,
+                    "kind": "stats",
+                    "text": f"Turn complete: {_prompt_stats.event_count} events, {len(_prompt_stats.tool_calls)} tool calls, context {round(pct)}%",  # type: ignore[attr-defined]
+                },
+            )
+        _stop_text = redact_exfiltration_urls(assistant_text[:500])[0]
+        _stop_text = redact_credentials(_stop_text)[0]
+        await _fire(HOOK_EVENT_STOP, _stop_text)
+
+        # ── AutoNudge: arm idle timer now that the turn has completed. ──
+        try:
+            from kiro_claw.autonudge import (
+                get_instance as _autonudge_get,  # circular: autonudge -> dashboard.chat -> chat_runner; circular: autonudge -> dashboard.chat -> chat_runner; circular: autonudge -> chat
+            )
+
+            _autonudge = _autonudge_get()
+            if _autonudge is not None:
+                _autonudge.notify_turn_complete(slot.key)
+        except Exception:
+            logger.debug("autonudge.notify_turn_complete failed", exc_info=True)
+
+        # ── Bidirectional sync: mirror response to linked Slack thread ──
+        if assistant_text and state.slack_client and _mirror_thread and _mirror_chan:
+            try:
+                from kiro_claw.slack.format import (  # circular: slack.format -> dashboard.state -> chat
+                    build_options_blocks,
+                    extract_options,
+                    split_message,
+                    to_slack_mrkdwn,
+                )
+
+                _mirror_text = to_slack_mrkdwn(assistant_text)
+                _mirror_text = redact_exfiltration_urls(_mirror_text)[0]
+                _mirror_text = redact_credentials(_mirror_text)[0]
+                _mirror_text, _mirror_options = extract_options(_mirror_text)
+
+                for _part in split_message(_mirror_text):
+                    await state.slack_client.post_message(
+                        _mirror_chan, _part, _mirror_thread
+                    )
+                if _mirror_options:
+                    await state.slack_client.post_blocks(
+                        _mirror_chan,
+                        build_options_blocks(_mirror_options),
+                        "Options",
+                        _mirror_thread,
+                    )
+            except Exception:
+                logger.debug("Failed to mirror response to Slack", exc_info=True)
+    except asyncio.CancelledError:
+        if assistant_text:
+            slot.messages = [m for m in slot.messages if m.get("role") != "chunk"]
+            slot.append("assistant", redact_credentials(redact_exfiltration_urls(assistant_text)[0])[0], "msg msg-a")
+    except AcpProcessDied as exc:
+        logger.warning("ACP process died in slot %s: %s — resetting session", slot.key, exc)
+        needs_session_reset = True
+        if assistant_text:
+            slot.messages = [m for m in slot.messages if m.get("role") != "chunk"]
+            slot.append("assistant", redact_credentials(redact_exfiltration_urls(assistant_text)[0])[0], "msg msg-a")
+        slot._acp_pipe_death_retries += 1
+        if _prompt_depth == 0 and slot._acp_pipe_death_retries <= 3:
+            slot.queue_insert(0, message)
+            slot.append("error", "⟳ Connection lost — retrying...", "msg msg-err")
+        elif slot._acp_pipe_death_retries > 3:
+            slot.append("error", "Session stuck — please start a new chat.", "msg msg-err")
+        else:
+            slot.append("error", "⟳ Connection lost — please retry.", "msg msg-err")
+    except PromptBusyExhaustedError:
+        # Provider was killed after prompt-busy retries exhausted — reset + re-queue.
+        logger.info("Prompt busy exhausted in slot %s — resetting session and re-queuing", slot.key)
+        needs_session_reset = True  # checked in finally block
+        if assistant_text:
+            slot.messages = [m for m in slot.messages if m.get("role") != "chunk"]
+            slot.append("assistant", redact_credentials(redact_exfiltration_urls(assistant_text)[0])[0], "msg msg-a")
+        slot._prompt_busy_retries += 1
+        if _prompt_depth == 0 and slot._prompt_busy_retries <= 3:
+            slot.queue_insert(0, message)
+        elif slot._prompt_busy_retries > 3:
+            slot.append("error", "Session stuck — please start a new chat.", "msg msg-err")
+    except AcpError as exc:
+        logger.warning("ACP error in slot %s: %s", slot.key, exc)
+        _msg = str(exc)
+        # Retry-eligible transients:
+        #   - "already in progress": prompt busy (kiro-cli side)
+        #   - "process exited" / "not running": ACP subprocess died, need cold-start
+        # For both: reset the session and re-queue the message so auto-nudges
+        # (and dashboard messages) get executed on a fresh provider instead of
+        # surfacing a bare ❌ error card with no work done.
+        _retry_eligible = (
+            "already in progress" in _msg
+            or "process exited" in _msg
+            or "not running" in _msg
+        )
+        if _retry_eligible and _prompt_depth == 0:
+            logger.info(
+                "ACP transient (%s) in slot %s — resetting session and re-queuing",
+                _msg[:80], slot.key,
+            )
+            needs_session_reset = True  # checked in finally block
+            if assistant_text:
+                _safe, _ = redact_exfiltration_urls(assistant_text)
+                _safe, _ = redact_credentials(_safe)
+                slot.messages = [m for m in slot.messages if m.get("role") != "chunk"]
+                slot.append("assistant", _safe, "msg msg-a")
+            slot._prompt_busy_retries += 1
+            if slot._prompt_busy_retries <= 3:
+                slot.queue_insert(0, message)
+            else:
+                slot.append("error", "Session stuck — please start a new chat.", "msg msg-err")
+        else:
+            if assistant_text:
+                _safe, _ = redact_exfiltration_urls(assistant_text)
+                _safe, _ = redact_credentials(_safe)
+                slot.messages = [m for m in slot.messages if m.get("role") != "chunk"]
+                slot.append("assistant", _safe, "msg msg-a")
+            _err_text, _ = redact_exfiltration_urls(str(exc))
+            _err_text, _ = redact_credentials(_err_text)
+            slot.append(
+                "error",
+                f"⏱️ {_err_text}" if "timed out" in _msg else f"❌ {_err_text}",
+                "msg msg-err",
+            )
+    except Exception as exc:
+        logger.exception("Dashboard chat error in slot %s", slot.key)
+        _err_text, _ = redact_exfiltration_urls(str(exc))
+        _err_text, _ = redact_credentials(_err_text)
+        slot.append("error", _err_text, "msg msg-err")
+        await state.sessions.record_failure(session_key)
+    finally:
+        slot._batch_rejected = False
+        # Ensure file changes always surface, even on cancel/error
+        _flush_file_changes(slot)
+        # Clean up mirror stream on any exit path
+        if _mirror_stream_ts and state.slack_client and _mirror_chan:
+            try:
+                if _mirror_active_task:
+                    await state.slack_client.append_task(
+                        _mirror_chan, _mirror_stream_ts,
+                        _mirror_active_task, _mirror_active_task_title, "complete",
+                    )
+            except Exception:
+                logger.debug("Task append cleanup failed", exc_info=True)
+            try:
+                await state.slack_client.stop_stream(_mirror_chan, _mirror_stream_ts)
+            except Exception:
+                logger.debug("Stream cleanup failed", exc_info=True)
+        if _acquired:
+            if needs_session_reset:
+                try:
+                    await state.sessions.reset(session_key)
+                except Exception:
+                    logger.warning("Failed to reset session %s after agent switch", session_key)
+            state.sessions.release(session_key)
+        # Process queued messages (FIFO) — keep SSE stream alive
+        if slot._queue:
+            if slot._stopping:
+                slot.append(
+                    "error",
+                    "⟳ Session reset — processing next message with conversation history",
+                    "msg msg-err",
+                )
+            slot._stopping = False
+            state.push_slots_update()
+            # ── Merge or pop: combine queued messages if configured ──
+            try:
+                _cfg = KiroClawConfig.load()
+                merge = _cfg.dashboard.merge_queued_messages
+            except Exception:
+                logger.warning("Failed to load config; falling back to sequential dequeue", exc_info=True)
+                merge = False
+            next_msg, consumed = _dequeue_next_message(slot, merge_enabled=merge)
+            # Notify frontend to remove each consumed queued card
+            for item in consumed:
+                _c, _ = redact_exfiltration_urls(item["content"])
+                _c, _ = redact_credentials(_c)
+                _redacted = _redact_for_display(_c)
+                state.broadcast_ws("queue_pop", {"slot": slot.key, "content": _redacted, "queue_id": item["id"]})
+                _remove_queued_by_id(slot.messages, item["id"])
+            # Redact merged message before storing in slot
+            next_msg, _ = redact_exfiltration_urls(next_msg)
+            next_msg, _ = redact_credentials(next_msg)
+            is_cron = next_msg.startswith(CRON_NOTIFY_PREFIX)
+            is_subagent = next_msg.startswith(SUBAGENT_COMPLETION_PREFIX)
+            _m = CRON_NOTIFY_RE.match(next_msg) if is_cron else None
+            cron_label = _m.group(1) if _m else "cron"
+            cron_label, _ = redact_exfiltration_urls(cron_label)
+            cron_label, _ = redact_credentials(cron_label)
+            slot.append(
+                "subagent" if is_subagent else "inject" if is_cron else "user",
+                next_msg,
+                json.dumps({"cronLabel": cron_label}) if is_cron else "msg msg-u",
+            )
+
+            task = asyncio.create_task(
+                asyncio.wait_for(_run_chat(state, slot, next_msg), timeout=CHAT_TURN_TIMEOUT)
+            )
+            slot.task = task
+            state._background_tasks.add(task)
+            task.add_done_callback(state._background_tasks.discard)
+        else:
+            slot._stopping = False
+            # Only send "done" when queue is empty — keeps SSE reader alive
+            slot.append("done", "", "done")
+            # Clear task reference BEFORE pushing slot update so that
+            # slot.running returns False immediately.  Without this,
+            # push_slots_update() reports running=True because the task
+            # (this coroutine) hasn't finished its finally block yet.
+            slot.task = None
+            # Push updated running state (now idle) + history refresh to SSE clients
+            state.push_slots_update()
+            state.broadcast_ws("chat_done", {"slot": slot.key})
+            state.push_refresh("history")
+            # Auto-title: fire in background so it doesn't block the response
+            if not slot._titled:
+                t = asyncio.create_task(_maybe_auto_title(state, slot))
+                state._background_tasks.add(t)
+                t.add_done_callback(state._background_tasks.discard)

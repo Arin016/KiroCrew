@@ -1,0 +1,436 @@
+# API Reference — KiroClaw Gateway API & Client
+
+Reference for the KiroClaw Gateway HTTP and WebSocket APIs, and how apps consume
+them.
+
+How you talk to the Gateway depends on where your code runs:
+
+- **Dashboard UI pages (TypeScript/React)** — use the `@kiroclaw/app-sdk` hooks
+  (`useAppApi`, `useAppEvents`, …). You do **not** `npm install` this package;
+  the dashboard host provides it at runtime through its import map (the bare
+  specifier `@kiroclaw/app-sdk` resolves to the host's vendored copy via
+  `window.__kiroclaw_modules`). See
+  [getting-started.md](getting-started.md) and the [App SDK Hooks](#app-sdk-hooks)
+  section below.
+- **Python apps / external CLI tools / services** — use the standalone
+  `kiroclaw-client` package (`pip install kiroclaw-client`). It is async
+  (`aiohttp`) and has no dependency on the KiroClaw main package. See the
+  [Python Client](#python-client) section.
+- **Node.js / Electron apps** — call the Gateway REST/WS endpoints directly via
+  `fetch()` / a WebSocket. The full endpoint list is in
+  [Gateway REST API Endpoints](#gateway-rest-api-endpoints).
+
+There is no published TypeScript gateway-client npm package. The `kiroclaw-client`
+method names below describe the canonical Gateway API surface — the same
+endpoints any client (including raw `fetch`) talks to.
+
+## App SDK Hooks (dashboard UI)
+
+Dashboard UI pages import permission-scoped hooks from `@kiroclaw/app-sdk`,
+resolved at runtime via the host import map:
+
+```tsx
+import { useAppApi, useAppEvents } from '@kiroclaw/app-sdk'
+
+function MyPage() {
+  const api = useAppApi()        // permission-scoped GET/POST/PUT/PATCH/DELETE
+  useAppEvents('notification', (e) => console.log(e))
+  // ...
+}
+```
+
+`useAppApi()` returns a client whose methods (`get`, `post`, `put`, `patch`,
+`del`) call the Gateway endpoints listed below, scoped to the `permissions.api`
+paths your `app.json` declares. The host injects auth automatically.
+
+For the full hook list see [getting-started.md](getting-started.md#app-sdk-hooks).
+
+## Gateway API Surface
+
+The sections below document the canonical Gateway API surface as exposed by the
+`kiroclaw-client` Python package (see the [Python Client](#python-client)
+section for the constructor and full method list). Method names are also a
+convenient way to refer to each endpoint — the same endpoints any client
+(including raw `fetch`) talks to.
+
+When `app_name` is set and no explicit auth is provided, the client auto-reads
+the app secret from `~/.kiroclaw/apps/{name}/.app_secret` and exchanges it
+for a short-lived token via `POST /api/apps/{name}/token`.
+
+### Authentication
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `authenticate()` | `Promise<boolean>` | Exchange app secret for token (auto-called if appName set) |
+| `setToken(token)` | `void` | Manually set auth token on both HTTP and WS clients |
+
+### Connection
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `ping()` | `Promise<boolean>` | Check if Gateway is reachable |
+| `getStatus()` | `Promise<GatewayStatus>` | Gateway health (version, uptime, slots, provider) |
+| `getSystemInfo()` | `Promise<SystemInfo>` | CPU, memory, disk metrics |
+
+### Chat Slots
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `createSlot(name, agent?)` | `Promise<SlotInfo>` | Create a new chat session |
+| `listSlots()` | `Promise<SlotInfo[]>` | List all active sessions |
+| `deleteSlot(slotId)` | `Promise<void>` | Remove a session |
+| `getSlotHistory(slotId, limit?)` | `Promise<{messages, total}>` | Get slot message history |
+| `sendMessage(slotId, message)` | `Promise<void>` | Send a message (validates length, auto-flushes pending context) |
+
+### WebSocket Events
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `connect()` | `void` | Open WebSocket connection |
+| `disconnect()` | `void` | Close WebSocket connection |
+| `connected` | `boolean` | Current connection state |
+| `onChatChunk(slotId, cb)` | `() => void` | Stream response chunks for a slot |
+| `onChatDone(slotId, cb)` | `() => void` | Response complete for a slot |
+| `onNotification(cb)` | `() => void` | Receive notifications |
+| `onToolCall(cb)` | `() => void` | Receive tool call events |
+| `onConnectionChange(cb)` | `() => void` | Connection state changes |
+| `onRaw(cb)` | `() => void` | All parsed WebSocket events |
+| `onRawMessage(cb)` | `() => void` | All raw WebSocket messages |
+
+All `on*` methods return an unsubscribe function.
+
+WebSocket event types: `chat_chunk`, `chat_done`, `chat_message`, `chat_error`,
+`tool_call`, `notification`, `slots`, `slot_title`, `dashboard`, `log`, `refresh`,
+`approval`, `subagent_done`, `task_update`, `task_complete`, `proactive_notification`, `error`.
+
+### Subagents
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `spawn(task, agent?)` | `Promise<string>` | Spawn a background subagent |
+| `spawnMany(tasks, agents?)` | `Promise<string[]>` | Spawn multiple subagents in parallel |
+| `listSubagents()` | `Promise<SubagentInfo[]>` | List all subagents |
+| `getSubagentStatus(id)` | `Promise<SubagentResult>` | Get subagent output |
+
+### Cron Jobs
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `addCron(name, options)` | `Promise<CronJob>` | Create a scheduled job |
+| `listCrons()` | `Promise<CronJob[]>` | List all cron jobs |
+| `updateCron(id, options)` | `Promise<CronJob>` | Update a cron job |
+| `removeCron(id)` | `Promise<void>` | Delete a cron job |
+| `pauseCron(id)` | `Promise<void>` | Pause without deleting |
+| `resumeCron(id)` | `Promise<void>` | Resume a paused job |
+
+### Lessons
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `addLesson(rule, category, scope?)` | `Promise<void>` | Save a learned rule |
+| `listLessons()` | `Promise<Lesson[]>` | List all lessons |
+| `removeLesson(query)` | `Promise<void>` | Remove matching lessons |
+
+### Notifications
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `sendNotification(text, options?)` | `Promise<void>` | Send via Slack or dashboard |
+| `listNotifications()` | `Promise<{notifications}>` | List notifications |
+| `ackNotifications()` | `Promise<void>` | Acknowledge all notifications |
+
+### Approvals
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `approveAction(slotId, taskId)` | `Promise<void>` | Approve a pending tool action |
+| `rejectAction(slotId, taskId)` | `Promise<void>` | Reject a pending tool action |
+| `resolveApproval(approvalId, approved)` | `Promise<void>` | Resolve an approval by ID |
+| `getApprovalMode()` | `Promise<'auto'\|'interactive'>` | Get current approval mode |
+| `setApprovalMode(mode)` | `Promise<void>` | Set approval mode |
+
+### Models
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `listModels()` | `Promise<ModelInfo[]>` | List available LLM models |
+| `setSlotModel(slotId, model)` | `Promise<void>` | Set model for a slot |
+
+### MCP Servers
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `listMcpServers()` | `Promise<McpServerInfo[]>` | List registered MCP servers |
+| `registerMcpServer(def)` | `Promise<void>` | Register an MCP server (requires name + command) |
+| `removeMcpServer(name)` | `Promise<void>` | Remove an MCP server |
+| `registerAppMcp(name, entry)` | `Promise<void>` | Write MCP entry to `~/.kiroclaw/mcp.json` (Node.js only) |
+| `unregisterAppMcp(name)` | `Promise<void>` | Remove MCP entry from `~/.kiroclaw/mcp.json` (Node.js only) |
+
+### Agent & Skill Installation (Node.js only)
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `installAgentConfig(name, config)` | `void` | Install agent JSON to `~/.kiro/agents/` (merges mcpServers) |
+| `removeAgentConfig(name)` | `void` | Remove agent config |
+| `installSkill(name, srcDir)` | `void` | Copy skill directory to `~/.kiroclaw/skills/` |
+| `removeSkill(name)` | `void` | Remove skill directory |
+
+### Agent Runtime
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `dispatchAgent(agent, prompt)` | `Promise<TaskResult>` | Run agent synchronously |
+| `dispatchAgentAsync(agent, prompt)` | `Promise<string>` | Run agent in background |
+| `getTaskResult(taskId)` | `Promise<TaskResult>` | Poll task status |
+
+### Gateway Config
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `getGatewayConfig(key)` | `Promise<Record<string, unknown>>` | Read gateway config section |
+| `setGatewayConfig(key, value)` | `Promise<void>` | Write gateway config section |
+
+### App Storage
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `getAppDataDir()` | `string` | App-scoped data directory path |
+| `getAppConfig()` | `Promise<Record<string, unknown>>` | Read app config via REST |
+| `setAppConfig(config)` | `Promise<void>` | Write app config via REST |
+
+### Memory
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `memorySearch(query, topK?)` | `Promise<MemoryResult[]>` | Semantic memory search |
+
+### Context Injection
+
+Silent background context for LLM — content appears in the next user-initiated turn without triggering a response or showing a visible message.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `injectContext(slotId, content, options?)` | `Promise<void>` | Inject context (null slotId = buffer locally) |
+| `flushPendingContext(slotId)` | `Promise<void>` | Flush buffered entries to a slot |
+| `setDefaultSlot(slotId)` | `void` | Auto-flush pending context on sendMessage |
+| `pendingContextCount` | `number` | Number of buffered context entries |
+
+Options: `{ source?: string, ephemeral?: boolean, maxAge?: number }`
+
+### Proxy Authentication (Server-side)
+
+Verify that an incoming request was signed by the KiroClaw gateway reverse proxy. Use in app backends to authenticate proxied requests.
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `verifyProxyRequest(req, appName, opts?)` | `boolean` | Verify HMAC signature on any Node.js request object |
+
+Options: `{ secret?: string, maxAgeSecs?: number }`
+
+---
+
+## Python Client
+
+Standalone async client using `aiohttp` — `pip install kiroclaw-client`. Covers
+the full Gateway API surface documented above.
+
+```python
+from kiroclaw_client import KiroClawClient
+
+async with KiroClawClient(app_name="my-app") as mc:
+    ok = await mc.ping()
+    slots = await mc.list_slots()
+```
+
+### Constructor
+
+```python
+KiroClawClient(
+    base_url="",              # default: http://localhost:{KIROCLAW_PORT or 7777}
+    token="",                 # optional for localhost
+    app_name="",              # for app-scoped storage & auto-auth
+    timeout=30,               # request timeout seconds
+    max_retries=3,            # retry count
+    retry_base_delay=1.0,     # base delay for backoff
+    message_length_limit=40000,
+    on_auth_expired=None,     # async callback returning new token
+)
+```
+
+### Method Reference
+
+Method names use `snake_case` per Python convention. The left column is the
+canonical API-surface name used in the sections above:
+
+| API surface | Python |
+|-----------|--------|
+| `ping()` | `ping()` |
+| `getStatus()` | `get_status()` |
+| `getSystemInfo()` | `get_system_info()` |
+| `createSlot(name, agent?)` | `create_slot(name, agent="")` |
+| `listSlots()` | `list_slots()` |
+| `deleteSlot(id)` | `delete_slot(id)` |
+| `getSlotHistory(id, limit?)` | `get_slot_history(id, limit=50)` |
+| `sendMessage(id, msg)` | `send_message(id, msg)` |
+| `spawn(task, agent?)` | `spawn(task, agent="")` |
+| `spawnMany(tasks, agents?)` | `spawn_many(tasks, agents=None)` |
+| `listSubagents()` | `list_subagents()` |
+| `getSubagentStatus(id)` | `get_subagent_status(id)` |
+| `addCron(name, opts)` | `add_cron(name, **opts)` |
+| `listCrons()` | `list_crons()` |
+| `updateCron(id, opts)` | `update_cron(id, **opts)` |
+| `removeCron(id)` | `remove_cron(id)` |
+| `pauseCron(id)` | `pause_cron(id)` |
+| `resumeCron(id)` | `resume_cron(id)` |
+| `addLesson(rule, cat, scope?)` | `add_lesson(rule, cat, scope="")` |
+| `listLessons()` | `list_lessons()` |
+| `removeLesson(query)` | `remove_lesson(query)` |
+| `sendNotification(text, opts?)` | `send_notification(text, **opts)` |
+| `listNotifications()` | `list_notifications()` |
+| `ackNotifications()` | `ack_notifications()` |
+| `approveAction(slot, task)` | `approve_action(slot, task)` |
+| `rejectAction(slot, task)` | `reject_action(slot, task)` |
+| `resolveApproval(id, ok)` | `resolve_approval(id, ok)` |
+| `getApprovalMode()` | `get_approval_mode()` |
+| `setApprovalMode(mode)` | `set_approval_mode(mode)` |
+| `listModels()` | `list_models()` |
+| `setSlotModel(slot, model)` | `set_slot_model(slot, model)` |
+| `getGatewayConfig(key)` | `get_gateway_config(key)` |
+| `setGatewayConfig(key, val)` | `set_gateway_config(key, val)` |
+| `listMcpServers()` | `list_mcp_servers()` |
+| `registerMcpServer(def)` | `register_mcp_server(name, cmd, args?, env?)` |
+| `removeMcpServer(name)` | `remove_mcp_server(name)` |
+| `registerAppMcp(name, entry)` | `register_app_mcp(name, *, url?, cmd?, ...)` |
+| `unregisterAppMcp(name)` | `unregister_app_mcp(name)` |
+| `installAgentConfig(name, cfg)` | `install_agent_config(name, cfg)` |
+| `removeAgentConfig(name)` | `remove_agent_config(name)` |
+| `installSkill(name, dir)` | `install_skill(name, dir)` |
+| `removeSkill(name)` | `remove_skill(name)` |
+| `dispatchAgent(agent, prompt)` | `dispatch_agent(agent, prompt)` |
+| `dispatchAgentAsync(agent, prompt)` | `dispatch_agent_async(agent, prompt)` |
+| `getTaskResult(id)` | `get_task_result(id)` |
+| `getAppDataDir()` | `get_app_data_dir()` → `Path` |
+| `getAppConfig()` | `get_app_config()` |
+| `setAppConfig(cfg)` | `set_app_config(cfg)` |
+| `memorySearch(q, topK?)` | `memory_search(q, top_k=8)` |
+| `injectContext(slot, content, opts?)` | `inject_context(slot, content, *, source?, ephemeral?, max_age?)` |
+| `flushPendingContext(slot)` | `flush_pending_context(slot)` |
+| `setDefaultSlot(slot)` | `set_default_slot(slot)` |
+
+**Proxy Authentication (standalone functions):**
+
+| API surface | Python |
+|-----------|--------|
+| `verifyProxyRequest(req, appName, opts?)` | `verify_proxy_request(request, app_name, *, secret?, max_age_secs?)` |
+| — | `verify_proxy_request_raw(header, method, path, app_name, ...)` |
+
+---
+
+## AppManifest
+
+Validate and serialize app.json manifests, via the `kiroclaw-client` package.
+
+```python
+from kiroclaw_client import AppManifest
+
+m = AppManifest.from_dict({"name": "my-app", "version": "1.0.0", ...})
+errors = m.validate()   # list[str] — empty if valid
+data = m.to_dict()
+```
+
+## AppLifecycle
+
+Manage app installation via the Gateway REST API.
+
+```python
+from kiroclaw_client import KiroClawClient, AppLifecycle
+
+async with KiroClawClient() as mc:
+    lifecycle = AppLifecycle(mc)
+    await lifecycle.install("/path/to/my-app")
+    await lifecycle.enable("my-app")
+    await lifecycle.disable("my-app")
+    await lifecycle.uninstall("my-app")
+    apps = await lifecycle.list()
+```
+
+## GatewayManager
+
+Manage the KiroClaw Gateway process (start, stop, health check).
+
+```python
+from kiroclaw_client import GatewayManager
+
+gm = GatewayManager(port=7777)
+await gm.start()
+healthy = await gm.is_healthy()
+await gm.stop()
+```
+
+---
+
+## Error Handling
+
+All `kiroclaw-client` errors are `KiroClawError` instances with `code`,
+`message`, `status`, `body`.
+
+| Code | Trigger | Retried? |
+|------|---------|----------|
+| `AUTH_REQUIRED` | Remote connection without token | No |
+| `AUTH_EXPIRED` | 401/403 response | No (calls on_auth_expired if set) |
+| `VALIDATION_ERROR` | Invalid input | No |
+| `NOT_FOUND` | 404 response | No |
+| `RATE_LIMITED` | 429 response | Yes (Retry-After or backoff) |
+| `SERVER_ERROR` | 5xx response | Yes (exponential backoff) |
+| `NETWORK_ERROR` | Timeout or connection failure | Yes (exponential backoff) |
+| `WS_DISCONNECTED` | WebSocket not connected | No |
+
+```python
+from kiroclaw_client import KiroClawError
+
+try:
+    await mc.send_message("slot-1", "hello")
+except KiroClawError as e:
+    print(e.code, e.message, e.status)
+```
+
+---
+
+## Gateway REST API Endpoints
+
+The `useAppApi()` hook and the `kiroclaw-client` package wrap these Gateway
+endpoints. Apps can also call them directly via `fetch()`.
+
+### App Management
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/apps` | List all installed apps |
+| GET | `/api/apps/registry` | List available apps from registry |
+| GET | `/api/apps/blob?repo=&path=&ref=` | Proxy images from GitFarm repos |
+| POST | `/api/apps/install` | Install from local path |
+| POST | `/api/apps/register` | Register a self-managed app |
+| POST | `/api/apps/registry/install` | Install from registry |
+| GET | `/api/apps/{name}` | Get app details |
+| GET | `/api/apps/{name}/manifest` | Get app manifest |
+| GET/PUT | `/api/apps/{name}/config` | Read/write app config |
+| POST | `/api/apps/{name}/update` | Update installed app |
+| POST | `/api/apps/{name}/uninstall` | Uninstall app |
+| POST | `/api/apps/{name}/enable` | Enable app |
+| POST | `/api/apps/{name}/disable` | Disable app |
+| POST | `/api/apps/{name}/open` | Launch app via openCommand |
+| GET | `/apps/{name}/ui/{path}` | Serve app UI bundle files |
+| * | `/apps/{name}/api/{path}` | Reverse proxy to app backend (HMAC-signed) |
+
+### Reverse Proxy Authentication
+
+The gateway signs each proxied request with `X-KiroClaw-Proxy: <timestamp>:<hmac-sha256>`. Python app backends verify this with `kiroclaw-client`:
+
+```python
+from kiroclaw_client import verify_proxy_request
+if not verify_proxy_request(request, 'my-app'): return Response(status=401)
+```
+
+Node.js app backends can verify the signature directly: compute
+`HMAC-SHA256(timestamp + path, app_secret)` and compare against the value in the
+`X-KiroClaw-Proxy` header (constant-time), rejecting stale timestamps.

@@ -1,0 +1,272 @@
+# ACP Client Module
+
+Last Updated: 2026-05-31 (v2.6.1 — JSON-RPC frame-correlation hardening: deferral in `_wait_for_response`, -32601 for unknown server requests, activity-based load timeout)
+
+## Overview
+
+JSON-RPC 2.0 client for `kiro-cli acp` or `claude-agent-acp` over stdio (`acp/client.py`). Manages subprocess lifecycle, session initialization, prompt streaming, and tool permissions. All protocol constants in `acp/types.py`.
+
+## Backend Selection
+
+`AcpClient(acp_backend=...)` selects which subprocess to launch:
+
+- `""` (default): `kiro-cli acp --agent <name>` (resolved by `_resolve_kiro_bin`).
+- `"claude"` (`ACP_BACKEND_CLAUDE`): `claude-agent-acp` (resolved by `_resolve_claude_acp_bin` → `list[str] | None`). Resolution order: `CLAUDE_AGENT_ACP_BIN` env var, then the **vendored copy** (`_resolve_vendored_claude_acp` — `<node_modules>/@agentclientprotocol/claude-agent-acp/dist/index.js` found under the package's `_vendor/node_modules` from the toolbox bundle, the sibling `KiroClawWebsite/node_modules` in a Brazil workspace, or `KIROCLAW_PROJECT_DIR`; needs no global npm install or network — matters on Amazon hosts that have no CodeArtifact token at gateway runtime), then `mise which claude-agent-acp` (respects MISE_DATA_DIR and all mise config), then `~/.local/share/mise/installs/node/*/bin/claude-agent-acp` (direct glob fallback), then augmented PATH (`env.augmented_path` — mise shims, `~/.npm-packages/bin`, `~/.volta/bin`, `/opt/homebrew/bin`, plus globbed nvm/fnm node bins via `_node_version_manager_bins`, so a non-login launchd/systemd gateway also finds globally-installed binaries). The adapter is vendored into the toolbox bundle and the pip build by `setup.py` (`_vendor_acp_into_pkg` → `kiro_claw/_vendor/node_modules`), so every install method ships it without asking the user to `npm i -g`. Vendoring copies the adapter **plus its full transitive dependency closure** (`_acp_dependency_closure` walks `dependencies`/`optionalDependencies` from the resolved website `node_modules`, ~96 flat top-level packages) — npm hoists deps like `@agentclientprotocol/sdk` flat, so copying only the adapter package crashes the ESM loader with `ERR_MODULE_NOT_FOUND`. `_resolve_vendored_claude_acp` accepts a root only when the hoisted dependency marker `@agentclientprotocol/sdk` is present alongside the entry, so an incomplete vendored copy is skipped in favour of a complete one instead of being spawned and crashed. For scripts under mise installs, returns `[node_binary, script_path]` to bypass `#!/usr/bin/env node` shebang resolution which fails in non-interactive daemon contexts. For standalone binaries, returns `[binary_path]`. Pre-spawn the client writes `<work_dir>/.claude/settings.local.json` with `defaultMode: default` so the adapter routes every tool decision back to KiroClaw via `session/request_permission`. This makes claude-agent-acp participate in the same approve / trust_reads / trust / yolo protocol as kiro-cli — dashboard, subagents, channel agents, cron, and heartbeat all share the path. KiroClaw still enforces per-tool security via `HooksConfig.auto_deny_tools` (evaluated by `HookManager.on_tool_call` in `hooks.py`) on every `session/request_permission` event. The subprocess env also carries `CLAUDE_CONFIG_DIR=<config_dir>/cc-config` (isolated config root, distinct from the project-scope `<work_dir>/.claude/settings.local.json` which stays) so the adapter's `SettingsManager` and the SDK read KiroClaw's seeded settings (creds/models kept, plugins stripped) instead of the user's global `~/.claude` — see claude-code-provider.md "Config Isolation". Disable via `KIROCLAW_CC_ISOLATE=0`. The env also carries `CLAUDE_CODE_EXECUTABLE` (claude backend only, set in `_spawn` when unset): the adapter delegates the model turn to `@anthropic-ai/claude-agent-sdk`, which needs a per-platform native Claude binary (~250 MB each) shipped as npm `optionalDependencies` that the website install omits — so the vendored closure does **not** include it and the SDK fails `session/new` with `Claude native binary not found for <platform>`. The SDK does **not** search PATH for `claude` itself (so the host merely having Claude Code installed is not enough), and bundling a quarter-GB binary per platform is not viable; instead `_resolve_claude_code_executable` finds an existing `claude` (`CLAUDE_CODE_EXECUTABLE` override → `mise which claude` → augmented PATH incl. `~/.toolbox/bin`, where the toolbox ships ASBX Claude Code) and the adapter forwards it to the SDK as `pathToClaudeCodeExecutable` (no version check). If none is found the var is left unset (with a warning) so the adapter's native-binary error surfaces rather than a guessed bad path; an explicit operator-set value always wins.
+
+## Tool Permission Protocol
+
+`session/request_permission` is the single inbound channel. The agent sends:
+
+```jsonc
+{ "method": "session/request_permission",
+  "params": { "sessionId": "...", "options": [PermissionOption], "toolCall": ToolCallUpdate } }
+```
+
+**Unknown server→client requests are answered, never dropped.** `session/request_permission` is the only inbound *request* KiroClaw implements. Any other server→client request (method **and** id — e.g. `fs/read_text_file`, `terminal/create`) is classified by `_process_message` as `"server_request_unknown"`. Every prompt dispatch site (`send_message_stream`, `_dispatch_events`, `_read_prompt_response`) handles that action by calling `_reject_unknown_server_request`, which replies with a JSON-RPC `-32601` (`_JSONRPC_METHOD_NOT_FOUND`, "Method not found") error via `_send_error`. Without this, JSON-RPC semantics leave the agent blocked forever on an unanswered request — the turn hangs. Notifications (method, no id) are unaffected and still classified `"skip"`.
+
+`PermissionOption` field names differ between backends — kiro-cli uses `id`/`label`, claude-agent-acp uses `optionId`/`name` (per the public ACP spec). `_build_permission_event` reads both and remembers the optionIds keyed by `kind` (`allow_once`/`allow_always`/`reject_once`/`reject_always`) on the request id. `approve_tool(request_id, *, always=False)` echoes the matching id back, so the host doesn't need to know whether it's talking to kiro (`"allow_once"`/`"allow_always"`) or claude-agent-acp (`"allow"`/`"allow_always"`). `reject_tool` sends `outcome: "cancelled"`.
+
+The host always sends one-shot approvals (`always=False`, the default). KiroClaw — not the agent — owns the trust scope (`slot._trust`, `slot._trust_reads`, `slot._trusted_patterns`, `safety_override`, `channel.trusted`, parent session `approval_policy`). Per-call `session/request_permission` is required so KiroClaw's PreToolUse hooks (`auto_deny_tools`, sensitive-path checks, credential redaction) fire on every tool invocation. The `always=True` path is reserved for a future "skip KiroClaw hooks for this exact tool" feature; no caller passes it today.
+
+The handshake also branches on the backend:
+
+- `protocolVersion` in the `initialize` request: kiro-cli expects the date string `"2025-08-22"`; claude-agent-acp expects an integer (`1`, per the upstream ACP SDK schema).
+- claude skips `session/set_mode` and uses `session/set_config_option` (configId `model`) instead of `session/set_model`.
+
+Sending the wrong shape yields `-32602 Invalid params` or `-32601 Method not found`.
+
+**Request-id namespaces are independent.** Our outbound requests (prompt, initialize, set_model, ...) use `_next_req_id()`; the agent's inbound server→client requests (`session/request_permission`) carry their own id counter. The two collide on small integers, so `JsonRpcMessage.is_response_for(req_id)` requires both `id == req_id` **and** `method is None` — a response never has a `method`. Without the `method is None` guard, a permission request whose id equals the in-flight prompt's `req_id` was misclassified as that prompt's completion in `_process_message`, ending the turn early and leaving the tool's permission unanswered → the Claude Code turn hangs on follow-up messages (the agent waits forever for a `session/request_permission` response that never comes).
+
+This same method-aware discipline is enforced in `_wait_for_response()`. While it awaits a specific `req_id`, an inbound server→client **request** (method + id — e.g. a colliding `session/request_permission`) or a **foreign-id response** (id ≠ req_id, no method) must not be misread as the awaited response, must not be dropped, and must not be re-appended to `self._buffer` and `continue`-d. The last is the critical hazard: `_read_message()` pops `self._buffer` first, so re-buffering + looping immediately re-reads the same frame and **spins until the deadline** (the original bug — stuck `init`/`load`/`set_config_option` ending in `AcpTimeoutError`). Instead, non-matching survivable frames are collected into a **local `deferred` list** and re-injected at the **front** of `self._buffer` *in arrival order* once the matching response arrives (or on timeout/shutdown), so a later `_prompt_loop`/`_process_message` can still answer a deferred permission request. Notifications (method, no id) continue to go to `_mcp_notifications` for `_drain_notifications`.
+
+### CC Agent Translation (cc_agent.py)
+
+When generating Claude Code agent artifacts, `cc_agent.py` translates kiro-native field names to CC equivalents using module-level translation tables:
+
+- `_KIRO_TO_CC_TOOL_NAME` — maps kiro tool names (`fs_read`, `execute_bash`, `shell`, `code`, etc.) to CC names (`Read`, `Bash`, `Edit`, etc.). `@server` prefix becomes `mcp__server`. `use_aws` is dropped (no CC equivalent).
+- `_KIRO_TO_CC_HOOK_EVENT` — maps kiro hook events (lowerCamel: `preToolUse`, `agentSpawn`) to CC hook events (PascalCase: `PreToolUse`, `SessionStart`).
+- `_translate_matcher(glob)` — converts kiro glob matchers to CC regex matchers (escapes regex metacharacters, `*` becomes `.*`, `?` becomes `.`).
+
+MCP server fields translated: `disabled: true` entries are omitted; `autoApprove: [tool]` maps to `mcp__<server>__<tool>` in settings allow-list; `disabledTools: [tool]` maps to agent-level `disallowedTools`.
+
+## Agent Configuration
+
+Data-driven — no code changes needed:
+- `config/defaults.json` — base config (tools, model, permissions), resolved via `_BUNDLED_CFG_DIR` in `agent.py`
+- `config/prompt.md` — system prompt, resolved via `_BUNDLED_CFG_DIR` in `agent.py`
+- `~/.kiroclaw/agent.json` — user overrides (optional)
+- Run `kiroclaw setup --agent-only` after editing
+
+Note: there IS a top-level `agents/` directory used at runtime for project-level overrides, but the bundled source lives in `src/kiro_claw/config/`.
+
+Default model: `claude-opus-4.6`. Default tools: `execute_bash`, `fs_read`, `fs_write`, `code`, `grep`, `glob`, `use_aws`, `web_fetch`, `web_search`, `introspect`, `session`, `report`, `@kiroclaw-cron`, `@kiroclaw-core`, `@builder-mcp`.
+
+**Security enforcement** (`agent.py`): `repair_agent_configs()` is the single entry point (called at install, gateway startup, and periodically ~60s). It runs two passes:
+
+1. `_enforce_denied_commands()` — injects bundled `deniedCommands` patterns into ALL agent configs in `~/.kiro/agents/` (not just kiroclaw). Uses mtime to skip unchanged files. Replaces the agent's denied commands entirely with bundled defaults (canonical source; user-added patterns via dashboard are not supported). Targets both `execute_bash` and `shell` tool settings.
+2. `_sanitize_agent_hooks()` — strips invalid hook keys from agent configs. Kiro-cli 2.4.2+ rejects unknown variants in the `hooks` field (e.g. `auto_approve_tools`), causing silent fallback to the default agent which loses builder-mcp, kiroclaw-core, kiroclaw-cron. `_kiro_hooks_only()` filters to valid events (`preToolUse`, `postToolUse`, `userPromptSubmit`, `agentSpawn`, `stop`). Also uses mtime-based caching to skip unchanged files. Bundled `auto_approve_tools` patterns are now applied at runtime in the hooks layer (`_BUNDLED_AUTO_APPROVE_TOOLS` in `hooks.py`) rather than being serialized to the config file.
+
+## Custom Agent Support
+
+Custom agents (AIM-installed or user-created) are fully supported. The `--agent`
+flag passed to `kiro-cli acp` at spawn time drives all configuration:
+
+- **Model**: `set_model` is skipped for custom agents — kiro-cli uses the
+  agent's own `model` field. Only the default kiroclaw agent gets KiroClaw's
+  configured model override.
+- **MCP servers**: backend-dependent.
+  - **kiro-cli**: `session/new` passes `mcpServers: []` — kiro-cli loads
+    servers from the agent config (respects `mcpServers` in the agent's config
+    file). Non-kiroclaw agents (e.g. AIM-installed) load only their own
+    `mcpServers`. The kiroclaw agent loads from global `~/.kiro/settings/mcp.json`
+    where `disabled` and `disabledTools` flags are respected. KiroClaw's dashboard
+    MCP tab writes directly to the global config.
+  - **claude-agent-acp**: does NOT read any config file or `--agent` flag, so
+    `session/new` (and `session/load`) must carry the servers in the
+    `mcpServers` param. `_claude_acp_mcp_servers()` reads the KiroClaw-owned
+    `~/.claude/agents/kiroclaw.mcp.json` (kept current by
+    `agent.install_cc_agent_config`) and reshapes it to the ACP array via
+    `cc_agent.acp_servers_from_cc_map` (stdio → `{name,command,args,env:[{name,value}],type}`;
+    url → `{name,type:"http"|"sse",url,headers}`). kiroclaw-core/cron are forced
+    to their canonical stdio command (overriding any stale `url`) and always
+    injected even when the registry is missing. Read per spawn so MCP
+    installs/toggles apply on the next session without a gateway restart.
+- **Tools/allowedTools/toolsSettings**: Applied by kiro-cli via `set_mode`.
+- **Prompt/resources/hooks**: Applied by kiro-cli via `set_mode`.
+- **deniedCommands**: Enforced by KiroClaw's `_enforce_denied_commands()` on
+  all agent configs regardless.
+
+Custom agents use cold start with `--agent <name>` flag at spawn time.
+
+## Protocol Flow
+
+`initialize` → `session/load` or `session/new` → `set_mode` (conditional) → `set_model` (conditional) → drain notifications → `session/prompt`
+
+`ensure_ready()` re-creates `_work_dir` on every call (idempotent `mkdir -p`) so
+that prompts still succeed if the directory was deleted externally between
+calls. kiro-cli's spawned shell inherits the client's cwd and does not revalidate
+it per-command.
+
+Steps 1–2 (`initialize`, `session/load` or `session/new`) block until a JSON-RPC
+response arrives (base 240s) because the session ID is required before proceeding.
+If the first attempt times out, `ensure_ready()` kills the process and retries once
+with a fresh spawn — this handles slow kiro-cli first launches where MCP servers are
+still initializing.  `_wait_for_response()` checks `shutdown_event` each iteration
+so init aborts promptly on Ctrl+C instead of blocking for the full timeout.
+
+**Activity-based deadline.** `_wait_for_response()`'s deadline is *not* a fixed
+wall-clock. Every received frame (notification, deferred server request, or
+foreign response) resets the deadline to `now + timeout`, bounded by an absolute
+`_WAIT_RESPONSE_MAX_TIMEOUT` (600s) safety cap. This matters for `session/load`:
+the adapter streams the ENTIRE prior transcript as `session/update`
+**notifications** before resolving the load response, so a fixed deadline would
+kill a long replay and silently fall back to `session/new`. Extending only while
+the agent is actively sending data is safe for the init/handshake callers — the
+hard cap still bounds a truly stuck handshake.
+
+### Session Resume via `session/load`
+
+When `set_resume_session_id(sid)` is called before `ensure_ready()`, the client
+attempts `session/load` instead of `session/new`:
+
+1. Check `agentCapabilities.loadSession` from `initialize` response
+2. Verify `~/.kiro/sessions/cli/{sid}.json` exists on disk
+3. Send `session/load` with `sessionId`, `cwd`, `mcpServers: []`, and
+   `_meta: {"_kiro.dev/session_file": "<path>"}` (required — without it kiro-cli
+   silently ignores the request)
+4. On success (response contains `modes`): set `_session_id`, `_resumed = True`
+5. On failure (JSON-RPC error, timeout, file missing): fall through to `session/new`
+
+The resume ID is consumed on attempt (no retry loop). After successful load,
+`client.resumed` returns `True` — callers use this to skip thread history injection.
+
+Step 3 (`set_mode`) is **conditional**: sent for all kiro-cli backend agents.
+Skipped for claude-agent-acp backend (which does not support set_mode).
+
+Step 4 (`set_model`) is **conditional**: only sent when `model` is explicitly
+set (i.e., for the default kiroclaw agent).  Custom agents skip this so
+kiro-cli uses the model from their own agent config file.
+
+Step 5 drains MCP server init notifications (both after `session/load` and
+`session/new` — loading a session triggers MCP re-initialization).
+
+### Notification Buffering
+
+`_wait_for_response()` buffers ALL JSON-RPC notifications in `_mcp_notifications` list instead of discarding them. `_drain_notifications()` processes buffered notifications first, then reads any remaining from stdout. This ensures no MCP `server_initialized` notifications are lost during `session/new` — all servers load reliably within ~2.4s.
+
+## Key APIs
+
+| Method | Purpose |
+|--------|---------|
+| `ensure_ready()` | Spawn kiro-cli + init handshake (steps 1-5) |
+| `send_message(msg)` | Full response text, auto-approves tools |
+| `send_message_stream(msg)` | Yields text chunks, auto-approves (CLI) |
+| `stream_events(msg)` | Yields `AcpEvent` objects, caller handles permissions (dashboard) |
+| `approve_tool(id)` / `reject_tool(id)` | Tool permission responses |
+| `send_command(cmd)` | Slash commands (e.g. `/compact`), returns response text |
+| `cancel_session()` | Cancel in-flight operation |
+| `wait_turn_done(timeout)` | Wait for the current prompt to finish; returns `stop_reason` or raises `asyncio.TimeoutError` |
+| `has_active_turn()` | Returns `True` while a prompt is in flight and not yet complete |
+| `shutdown()` | Kill kiro-cli process |
+
+### Extension Notifications
+
+`stream_events()` yields events for kiro-cli extension notifications:
+
+| Notification | Event Kind | Fields |
+|-------------|-----------|--------|
+| `_kiro.dev/compaction/status` | `compaction_status` | `text` = started/completed/failed, `title` = summary |
+| `_kiro.dev/clear/status` | `clear_status` | (none) |
+| `_kiro.dev/agent/switched` | `agent_switched` | `text` = new agent name |
+| `_kiro.dev/mcp/oauth_request` | `mcp_oauth_request` | `server_name`, `oauth_url` |
+| `_kiro.dev/mcp/server_initialized` | `mcp_server_initialized` | `server_name` |
+| `_kiro.dev/mcp/server_init_failure` | `mcp_server_init_failure` | `server_name`, `text` = error |
+
+`_process_message()` classifies these as `"compaction"`, `"clear"`, `"agent_switched"`, `"mcp_oauth_request"`, `"mcp_server_initialized"`, `"mcp_server_init_failure"` actions.
+Other methods (`send_message_stream`, `send_message`) log compaction but do not yield
+clear/agent events (CLI/Slack paths handle these differently).
+
+### MCP OAuth Inline Banner
+
+When kiro-cli needs OAuth authentication for an MCP server, `AcpClient` surfaces the flow inline:
+
+1. `_kiro.dev/mcp/oauth_request` — captured during `_drain_notifications()` (init) and `_prompt_loop()` (mid-session). Yields `EVENT_MCP_OAUTH_REQUEST` with `serverName` + `oauthUrl`. Frontend renders an Authorize banner; kiro-cli's local callback handles the OAuth redirect.
+2. `_kiro.dev/mcp/server_initialized` — flips the banner to authenticated state. Clears the per-server dedupe entry so a future token expiry can re-prompt.
+3. `_kiro.dev/mcp/server_init_failure` — flips the banner to failed state with the error string. Also clears dedupe so a retry surfaces a fresh banner.
+
+**Dedupe**: Per-server dedupe via `_oauth_emitted_servers: set[str]` prevents kiro-cli's per-probe retries from spamming the user. Works across both buffered (init drain) and live (mid-session) paths. Cleared on new session.
+
+**URL validation**: `_is_safe_oauth_url()` rejects non-http(s) schemes before dedupe — an unsafe URL doesn't consume the dedupe slot.
+
+**Persistence**: Role-aware redaction (`_redact_meta_for_role`) preserves `oauth_url` for `mcp_oauth` messages so the Authorize link survives history rehydrate, while still scrubbing unsafe schemes on the read path.
+
+**API**: `pop_pending_oauth_requests()` drains requests captured during init (called after `ensure_ready()`).
+
+## Cancellation
+
+`cancel_session()` sends a `session/cancel` JSON-RPC notification to kiro-cli's stdin. It is fire-and-forget — no response ID is awaited.
+
+### stopReason Parsing
+
+When the ACP agent acknowledges a cancel, the `session/prompt` response carries `result.stopReason`. `_dispatch_events` reads this field on `action == "complete"` and populates `AcpEvent.stop_reason`:
+
+- `"cancelled"` — agent honored the cancel request (`STOP_REASON_CANCELLED`)
+- `"end_turn"` — normal turn completion (`STOP_REASON_END_TURN`)
+- `""` — field absent or not a dict result
+
+### Cancel Grace Window
+
+Setting `_cancelled = True` no longer short-circuits `_read_message`. Instead, a 10-second grace window (`_CANCEL_GRACE_SECS = 10.0`) allows the agent to deliver its `stopReason` acknowledgement. If no response arrives within the window, `_read_message` raises `AcpError("Cancel grace window exceeded; agent unresponsive")`. This preserves the escape hatch for broken agents without sabotaging cooperative cancels.
+
+`_cancel_ts` is set to `time.monotonic()` inside `cancel_session()`.
+
+### Tool-Interruption Auto-Complete
+
+kiro-cli's built-in security filter can cancel tool calls before they execute (e.g.
+when a bash command contains sensitive keywords).  When this happens kiro-cli emits an
+`agent_message_chunk` with the exact text
+`Tool uses were interrupted, waiting for the next user prompt` **and then goes idle
+without sending a `session/prompt` response**.  Without special handling the caller
+would wait for the full 2-hour prompt timeout.
+
+All three prompt paths (`send_message_stream`, `_dispatch_events`, `_read_prompt_response`)
+detect this marker (exact stripped match, not substring, to avoid false positives when
+the model quotes the text in prose) and complete the turn immediately — `_dispatch_events`
+also synthesizes a final `EVENT_COMPLETE` so dashboard and CLI callers using
+`stream_events` exit cleanly.  The text itself is still yielded so the user sees what
+happened, and a `tool_interrupted`-tagged SEL audit event is written for the security
+log since kiro-cli's cancellation is a permission decision outside KiroClaw's control.
+
+## Session Update Handling
+
+`_extract_text_chunk()` handles two update types for text streaming:
+
+- `agent_message_chunk` — standard text/content. Detects `type: "thinking"` or `"reasoning"` content blocks for extended thinking (kiro-cli style).
+- `agent_thought_chunk` — dedicated reasoning update emitted by `claude-agent-acp`. Always treated as thinking content.
+
+`_track_usage_update()` tracks context window usage from `usage_update` session events. A `KNOWN_SESSION_UPDATES` frozenset in `acp/types.py` suppresses false "unhandled session update" logs for plumbing-only update kinds (`plan`, `available_commands_update`, `current_mode_update`, `config_option_update`, `session_info_update`, `user_message_chunk`, `tool_call_update`). Only genuinely unknown kinds are logged.
+
+## Exceptions
+
+`AcpError` (base), `AcpTimeoutError` (has `partial_output`), `AcpPermissionNeeded`, `AcpProcessDied`.
+
+## Process Management
+
+Subprocess lifecycle:
+
+- Spawned as process group leader (`start_new_session=True`); cleanup via `os.killpg(SIGTERM)` then `SIGKILL`
+- **OS-level sandbox**: `_spawn()` calls `sandbox.wrap_argv()` to wrap the kiro-cli command with platform-native isolation (Linux: two-stage `unshare -rm` → `unshare -U` bind-mounts + UID drop; macOS: `sandbox-exec` Seatbelt profile). Hides `~/.aws`, `~/.ssh`, `~/.gnupg`, `~/.docker`, `~/.kube` from the subprocess tree. Configurable via `sandbox_mode` constructor param (`"auto"` default, `"off"` to disable). See `docs/system-specs/modules/security.md`.
+- `_resolve_kiro_bin()` checks `~/.toolbox/bin/kiro-cli` and `~/.local/bin/kiro-cli` before falling back to `shutil.which()` — avoids shell wrappers/aliases
+- 10MB stdout buffer for large JSON-RPC lines
+- stderr drained in background to prevent pipe deadlock
+
+## Image Support
+
+`_send_prompt()` auto-detects image file paths in messages (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`) via regex. When a valid image path is found:
+
+1. Reads the file and base64-encodes it
+2. Appends an image content block: `{"type": "image", "data": "<base64>", "mimeType": "image/png"}`
+3. Replaces the path in the text with `[image: filename.png]`
+4. Sends both text and image blocks in the `prompt` array
+
+This leverages kiro-cli's `promptCapabilities.image: true` capability. The LLM receives the image inline — no tool call needed.

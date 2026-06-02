@@ -1,2 +1,108 @@
-# Ignore the `build/` directory in the package root.
+*~
+*#
+*.swp
+*.log
+
+*.DS_Store
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+/.coverage
+/.coverage.*
+/.cache
+/.pytest_cache
+/.mypy_cache
+/.hypothesis
+/.testmondata*
+
+/doc/_apidoc/
 /build
+
+# Generated agent config — contains machine-specific absolute paths
+.kiro/agents/kiroclaw.json
+
+# Generated per-machine by install_cc_agent_config()
+.mcp.json
+
+/venv/
+/.venv/
+
+# Editor / IDE
+.vscode/
+.idea/
+pyrightconfig.json
+*.sublime-*
+
+# Environment (machine-specific paths)
+.env
+.env.local
+.install-method
+
+# Frontend
+node_modules/
+frontend/package-lock.json
+frontend/dist/
+tui/dist/
+frontend/tsconfig.app.tsbuildinfo
+frontend/tsconfig.node.tsbuildinfo
+src/kiro_claw/static/dist/
+src/kiro_claw/static/dist
+
+# JVM crash logs
+hs_err_pid*.log
+
+# OS
+Thumbs.db
+.git.old
+
+# Dev mode data directory
+.kiroclaw-dev/
+.kiroclaw-dev2/
+
+# Potential task progress files
+*.TASK_PROGRESS.md
+docs/TASK_PLAN_MODE.md
+frontend/src/.backup_pre_mdpanel/
+kiroclaw-data.tar.gz
+.kiro/hooks/track-with-agent.kiro.hook
+
+# AI attribution tracking data
+.attribution/
+
+# Playwright test artifacts
+frontend/test-results/
+frontend/playwright-report/
+frontend/.rtx.toml
+
+# OpenClaw source checkout
+openclaw-main/
+TASK_PROGRESS.md
+*.iml
+reviews/
+test_plan_atomic_writes_subagent_progress.md
+
+# Top-level legacy electron build dir (the tracked desktop source lives in
+# website/electron/). Only ignore build OUTPUTS there, not the source.
+/electron/
+website/electron/backend-dist/
+website/electron/dist/
+website/electron/node_modules/
+tui/
+mise.toml
+
+# Git worktrees
+.worktrees/
+.attach_pid*
+python3.10
+FILE_SPLIT_PLAN.md
+
+# Eval harness output
+eval_results/
+build-log-trimmed_*.txt
+docs/APP_DEVELOPER_GUIDE.md
+.claude/scheduled_tasks.lock
+runs.json
+.review/

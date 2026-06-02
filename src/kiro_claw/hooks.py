@@ -1,0 +1,724 @@
+"""Config-driven hook system for KiroClaw's message pipeline.
+
+Hooks intercept messages and tool calls based on rules in config.json.
+Supports declarative rules and executable script hooks with timeout/sandboxing.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import fnmatch
+import json
+import logging
+import time
+import uuid
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+from kiro_claw.security import is_denied, is_sensitive_bash_command, is_sensitive_path
+
+logger = logging.getLogger(__name__)
+
+
+# ── Hook Results ──
+
+# Message hook action constants (backward compat — prefer direct string comparison)
+HOOK_PASSTHROUGH = "passthrough"
+HOOK_REPLY = "reply"
+HOOK_MODIFY = "modify"
+HOOK_INJECT_CONTEXT = "inject_context"
+
+# Tool hook action constants
+TOOL_ALLOW = "allow"
+TOOL_AUTO_APPROVE = "auto_approve"
+TOOL_DENY = "deny"
+
+# Script hook events (aligned with Kiro CLI)
+HOOK_EVENT_AGENT_SPAWN = "AgentSpawn"
+HOOK_EVENT_USER_PROMPT_SUBMIT = "UserPromptSubmit"
+HOOK_EVENT_PRE_TOOL_USE = "PreToolUse"
+HOOK_EVENT_POST_TOOL_USE = "PostToolUse"
+HOOK_EVENT_STOP = "Stop"
+
+HOOK_EVENTS = (
+    HOOK_EVENT_AGENT_SPAWN,
+    HOOK_EVENT_USER_PROMPT_SUBMIT,
+    HOOK_EVENT_PRE_TOOL_USE,
+    HOOK_EVENT_POST_TOOL_USE,
+    HOOK_EVENT_STOP,
+)
+
+
+@dataclass
+class HookResult:
+    """Result of running message hooks."""
+
+    action: str  # HOOK_PASSTHROUGH, HOOK_REPLY, HOOK_MODIFY, HOOK_INJECT_CONTEXT
+    text: str = ""
+
+    @staticmethod
+    def passthrough() -> HookResult:
+        return HookResult(action=HOOK_PASSTHROUGH)
+
+    @staticmethod
+    def reply(text: str) -> HookResult:
+        return HookResult(action=HOOK_REPLY, text=text)
+
+    @staticmethod
+    def modify(text: str) -> HookResult:
+        return HookResult(action=HOOK_MODIFY, text=text)
+
+    @staticmethod
+    def inject_context(text: str) -> HookResult:
+        return HookResult(action=HOOK_INJECT_CONTEXT, text=text)
+
+
+@dataclass
+class ToolHookResult:
+    action: str  # TOOL_ALLOW, TOOL_AUTO_APPROVE, TOOL_DENY
+    reason: str = ""
+
+    @staticmethod
+    def allow() -> ToolHookResult:
+        return ToolHookResult(action=TOOL_ALLOW)
+
+    @staticmethod
+    def auto_approve() -> ToolHookResult:
+        return ToolHookResult(action=TOOL_AUTO_APPROVE)
+
+    @staticmethod
+    def deny(reason: str) -> ToolHookResult:
+        return ToolHookResult(action=TOOL_DENY, reason=reason)
+
+
+# ── Config Types ──
+
+
+@dataclass
+class ContextRule:
+    """Inject context when any trigger keyword matches."""
+
+    triggers: list[str] = field(default_factory=list)
+    context: str = ""
+
+
+@dataclass
+class AutoReplyHook:
+    """Auto-reply without LLM for pattern matches."""
+
+    pattern: str = ""
+    reply: str = ""
+    exact: bool = False
+
+
+@dataclass
+class TransformHook:
+    """Transform message before sending to LLM."""
+
+    pattern: str = ""
+    prefix: str = ""
+    suffix: str = ""
+
+
+_BUNDLED_AUTO_APPROVE_TOOLS: list[str] = [
+    "kiroclaw browse *",
+    "*kiroclaw browse *",
+]
+
+
+@dataclass
+class HooksConfig:
+    """Loaded from config.json ``hooks`` section."""
+
+    auto_approve_tools: list[str] = field(default_factory=list)
+    auto_approve_sources: list[str] = field(default_factory=list)
+    auto_approve_subagent_spawn: bool = False
+    auto_approve_subagent_tools: bool = False
+    auto_deny_tools: list[str] = field(default_factory=list)
+    auto_replies: list[AutoReplyHook] = field(default_factory=list)
+    transforms: list[TransformHook] = field(default_factory=list)
+    context_rules: list[ContextRule] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> HooksConfig:
+        """Parse hooks config from a dict (config.json ``hooks`` section)."""
+        auto_replies = [
+            AutoReplyHook(
+                pattern=h.get("pattern", ""),
+                reply=h.get("reply", ""),
+                exact=h.get("exact", False),
+            )
+            for h in data.get("auto_replies", [])
+        ]
+        transforms = [
+            TransformHook(
+                pattern=h.get("pattern", ""),
+                prefix=h.get("prefix", ""),
+                suffix=h.get("suffix", ""),
+            )
+            for h in data.get("transforms", [])
+        ]
+        context_rules = [
+            ContextRule(
+                triggers=r.get("triggers", []),
+                context=r.get("context", ""),
+            )
+            for r in data.get("context_rules", [])
+        ]
+        user_approve = data.get("auto_approve_tools", [])
+        merged_approve = list(dict.fromkeys(_BUNDLED_AUTO_APPROVE_TOOLS + user_approve))
+        return cls(
+            auto_approve_tools=merged_approve,
+            auto_approve_sources=data.get("auto_approve_sources", []),
+            auto_approve_subagent_spawn=bool(data.get("auto_approve_subagent_spawn", False)),
+            auto_approve_subagent_tools=bool(data.get("auto_approve_subagent_tools", False)),
+            auto_deny_tools=data.get("auto_deny_tools", []),
+            auto_replies=auto_replies,
+            transforms=transforms,
+            context_rules=context_rules,
+        )
+
+
+# ── HookManager ──
+
+
+class HookManager:
+    """Process messages and tool calls through config-driven rules."""
+
+    def __init__(self, config: HooksConfig | None = None):
+        self._config = config or HooksConfig()
+
+    def reload(self, config: HooksConfig) -> None:
+        """Hot-reload hooks config."""
+        self._config = config
+
+    @property
+    def auto_approve_subagent_spawn(self) -> bool:
+        return self._config.auto_approve_subagent_spawn
+
+    @property
+    def auto_approve_subagent_tools(self) -> bool:
+        return self._config.auto_approve_subagent_tools
+
+    # ── Message hooks ──
+
+    def on_message(self, text: str) -> HookResult:
+        """Run message hooks. Returns first match or passthrough."""
+        lower = text.lower()
+
+        # Auto-replies (first match wins)
+        for ar_hook in self._config.auto_replies:
+            if ar_hook.exact:
+                if lower == ar_hook.pattern.lower():
+                    return HookResult.reply(ar_hook.reply)
+            else:
+                if ar_hook.pattern.lower() in lower:
+                    return HookResult.reply(ar_hook.reply)
+
+        # Transforms (first match wins)
+        for tf_hook in self._config.transforms:
+            if tf_hook.pattern.lower() in lower:
+                modified = text
+                if tf_hook.prefix:
+                    modified = f"{tf_hook.prefix}\n{modified}"
+                if tf_hook.suffix:
+                    modified = f"{modified}\n{tf_hook.suffix}"
+                return HookResult.modify(modified)
+
+        # Context injection (all matching rules)
+        injected: list[str] = []
+        for rule in self._config.context_rules:
+            if any(t.lower() in lower for t in rule.triggers):
+                injected.append(rule.context)
+        if injected:
+            return HookResult.inject_context("\n\n".join(injected))
+
+        return HookResult.passthrough()
+
+    # ── Tool hooks ──
+
+    def on_tool_call(self, tool_name: str) -> ToolHookResult:
+        """Check if a tool should be auto-approved, denied, or handled normally."""
+        # Strip display prefixes (e.g. "Running: ls *" → "ls *") so config
+        # patterns like "ls" or "rm *" match without the prefix.
+        normalized = _normalize_tool_name(tool_name)
+
+        # Sensitive path protection (always enforced, before all other checks)
+        if tool_name.startswith("Reading "):
+            # fs_read / ReadFile — check the path
+            if is_sensitive_path(normalized):
+                return ToolHookResult.deny(f"Blocked: access to sensitive path: {normalized}")
+        elif tool_name.startswith("Running: "):
+            # execute_bash — check for reads of sensitive paths
+            reason = is_sensitive_bash_command(normalized)
+            if reason:
+                return ToolHookResult.deny(reason)
+
+        # Built-in security deny list (always enforced)
+        reason = is_denied(normalized, self._config.auto_deny_tools) or is_denied(
+            tool_name, self._config.auto_deny_tools
+        )
+        if reason:
+            return ToolHookResult.deny(reason)
+
+        # Auto-approve — match against both the original title (preserves
+        # "Running: "/"Reading " prefixes) and the normalized name (stripped)
+        # so that "Running: *" and "TaskeiGetTask" patterns both work.
+        for pattern in self._config.auto_approve_tools:
+            if _tool_matches(pattern, tool_name) or _tool_matches(pattern, normalized):
+                return ToolHookResult.auto_approve()
+
+        return ToolHookResult.allow()
+
+
+# Display prefixes that kiro-cli ACP adds to tool titles
+_TOOL_TITLE_PREFIXES = ("Running: ", "Reading ")
+
+
+def _normalize_tool_name(tool_name: str) -> str:
+    """Strip display prefixes so hook patterns match the actual tool/command name."""
+    for prefix in _TOOL_TITLE_PREFIXES:
+        if tool_name.startswith(prefix):
+            return tool_name[len(prefix) :]
+    return tool_name
+
+
+def _tool_matches(pattern: str, tool_name: str) -> bool:
+    """Match a tool pattern against a tool name.
+
+    Supports: exact, ``prefix*``, ``*suffix``, ``*contains*``, ``*`` (all).
+    Case-insensitive.
+    """
+    if pattern == "*":
+        return True
+    return fnmatch.fnmatch(tool_name.lower(), pattern.lower())
+
+
+def validate_file_path(raw: str) -> str | None:
+    """Validate and canonicalize a file path for dashboard file I/O.
+
+    Enforces: is_sensitive_path(), realpath canonicalization.
+    Returns the canonical path or None if rejected.
+    """
+    import os
+
+    if not raw:
+        return None
+    path = os.path.realpath(os.path.expanduser(raw))
+    if is_sensitive_path(path):
+        return None
+    return path
+
+
+def safe_read_file(path: str) -> str:
+    """Read a file after enforcing ``is_sensitive_path``.
+
+    Raises ``PermissionError`` if the path is sensitive.
+    """
+    from pathlib import Path
+
+    resolved = str(Path(path).expanduser().resolve())
+    if is_sensitive_path(resolved):
+        raise PermissionError(f"Blocked: access to sensitive path: {resolved}")
+    return Path(resolved).read_text(encoding="utf-8")
+
+
+MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MB safety cap
+
+
+class FileTooLargeError(Exception):
+    """Raised when a file exceeds MAX_FILE_BYTES."""
+
+
+def safe_read_file_bytes(raw: str) -> bytes | None:
+    """Read file bytes through centralized is_sensitive_path() enforcement.
+
+    Returns file content as bytes, or None if path is rejected or unreadable.
+    """
+    path = validate_file_path(raw)
+    if path is None:
+        return None
+    from pathlib import Path
+
+    p = Path(path)
+    try:
+        with p.open("rb") as fh:
+            data = fh.read(MAX_FILE_BYTES + 1)
+        if len(data) > MAX_FILE_BYTES:
+            raise FileTooLargeError(f"File exceeds {MAX_FILE_BYTES // (1024 * 1024)} MB safety cap")
+        return data
+    except OSError:
+        return None
+
+
+# ── Script Hooks ──
+
+
+@dataclass
+class ScriptHook:
+    """Executable hook that runs a shell command on a trigger event.
+
+    Aligned with Kiro CLI hook semantics:
+    - Exit 0: success (stdout → context for AgentSpawn/UserPromptSubmit)
+    - Exit 2: block tool (PreToolUse only, stderr → LLM)
+    - Other: warning (stderr shown to user)
+    """
+
+    id: str = ""
+    name: str = ""
+    event: str = HOOK_EVENT_USER_PROMPT_SUBMIT
+    matcher: str = ""  # tool matcher for PreToolUse/PostToolUse (empty = all tools)
+    command: str = ""  # shell command to execute
+    timeout: int = 30  # seconds (Kiro CLI default is 30s)
+    enabled: bool = True
+    last_run: float = 0.0
+    last_status: str = ""  # "ok", "error", "timeout", "blocked"
+    run_count: int = 0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ScriptHook:
+        # Support legacy "pattern" field as fallback for "matcher"
+        matcher = data.get("matcher", data.get("pattern", ""))
+        return cls(
+            id=data.get("id", str(uuid.uuid4())[:8]),
+            name=data.get("name", ""),
+            event=data.get("event", HOOK_EVENT_USER_PROMPT_SUBMIT),
+            matcher=matcher,
+            command=data.get("command", ""),
+            timeout=data.get("timeout", 30),
+            enabled=data.get("enabled", True),
+            last_run=data.get("last_run", 0.0),
+            last_status=data.get("last_status", ""),
+            run_count=data.get("run_count", 0),
+        )
+
+
+@dataclass
+class ScriptHookResult:
+    """Result of executing a script hook."""
+
+    hook_id: str
+    hook_name: str
+    event: str
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int = -1
+    error: str = ""
+    duration_ms: int = 0
+
+    @property
+    def blocked(self) -> bool:
+        """PreToolUse exit code 2 = block tool."""
+        return self.exit_code == 2
+
+    @property
+    def succeeded(self) -> bool:
+        return self.exit_code == 0
+
+
+async def run_script_hook(
+    hook: ScriptHook, context: str = "", hook_event: dict | None = None
+) -> ScriptHookResult:
+    """Execute a script hook's command with timeout.
+
+    Passes hook event as JSON via STDIN (Kiro CLI compatible).
+    """
+    import os
+
+    start = time.monotonic()
+    # Build hook event JSON for STDIN
+    if hook_event is None:
+        hook_event = {"hook_event_name": hook.event, "cwd": os.getcwd()}
+    stdin_data = json.dumps(hook_event).encode()
+
+    try:
+        from kiro_claw.sandbox import wrap_argv
+
+        env = {**os.environ, "KIROCLAW_HOOK_EVENT": hook.event, "KIROCLAW_HOOK_CONTEXT": context}
+        argv = ["/bin/sh", "-c", hook.command]
+        wrapped_argv, cleanup_path = wrap_argv(argv)
+        # Process group isolation: start_new_session=True enables killpg (same as AcpClient)
+        proc = await asyncio.create_subprocess_exec(
+            *wrapped_argv,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            start_new_session=True,
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(input=stdin_data), timeout=hook.timeout
+            )
+        finally:
+            if cleanup_path:
+                try:
+                    os.unlink(cleanup_path)
+                except OSError:
+                    pass
+        elapsed = int((time.monotonic() - start) * 1000)
+        exit_code = proc.returncode or 0
+        hook.last_run = time.time()
+        hook.last_status = "blocked" if exit_code == 2 else ("ok" if exit_code == 0 else "error")
+        hook.run_count += 1
+        return ScriptHookResult(
+            hook_id=hook.id,
+            hook_name=hook.name,
+            event=hook.event,
+            stdout=stdout_b.decode(errors="replace").strip(),
+            stderr=stderr_b.decode(errors="replace").strip(),
+            exit_code=exit_code,
+            duration_ms=elapsed,
+        )
+    except asyncio.TimeoutError:
+        # Kill entire process group (shell + grandchildren) to prevent orphaned processes
+        import signal
+
+        try:
+            if proc.returncode is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+                await proc.communicate()
+        except Exception:
+            pass
+        elapsed = int((time.monotonic() - start) * 1000)
+        hook.last_run = time.time()
+        hook.last_status = "timeout"
+        hook.run_count += 1
+        return ScriptHookResult(
+            hook_id=hook.id,
+            hook_name=hook.name,
+            event=hook.event,
+            error=f"Timed out after {hook.timeout}s",
+            duration_ms=elapsed,
+        )
+    except Exception as exc:
+        elapsed = int((time.monotonic() - start) * 1000)
+        hook.last_run = time.time()
+        hook.last_status = "error"
+        hook.run_count += 1
+        return ScriptHookResult(
+            hook_id=hook.id,
+            hook_name=hook.name,
+            event=hook.event,
+            error=str(exc),
+            duration_ms=elapsed,
+        )
+
+
+# ── Script Hook Store (persistence) ──
+
+_HOOKS_FILE = "hooks.json"
+
+
+class ScriptHookStore:
+    """Persist script hooks to ~/.kiroclaw/hooks.json."""
+
+    def __init__(self, config_dir: Path | None = None):
+        from kiro_claw.config.loader import config_dir as _cfg_dir
+
+        self._dir = config_dir or _cfg_dir()
+        self._path = self._dir / _HOOKS_FILE
+        self._hooks: dict[str, ScriptHook] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not self._path.exists():
+            return
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+            for h in data.get("hooks", []):
+                hook = ScriptHook.from_dict(h)
+                self._hooks[hook.id] = hook
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to load hooks: %s", exc)
+
+    def _save(self) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        data = {"hooks": [h.to_dict() for h in self._hooks.values()]}
+        self._path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def list_all(self) -> list[ScriptHook]:
+        return list(self._hooks.values())
+
+    def get(self, hook_id: str) -> ScriptHook | None:
+        return self._hooks.get(hook_id)
+
+    def create(self, data: dict) -> ScriptHook:
+        hook = ScriptHook.from_dict(data)
+        if not hook.id:
+            hook.id = str(uuid.uuid4())[:8]
+        self._hooks[hook.id] = hook
+        self._save()
+        return hook
+
+    def update(self, hook_id: str, data: dict) -> ScriptHook | None:
+        hook = self._hooks.get(hook_id)
+        if not hook:
+            return None
+        if "event" in data and data["event"] not in HOOK_EVENTS:
+            raise ValueError(f"invalid event: {data['event']}")
+        if "timeout" in data:
+            t = data["timeout"]
+            if not isinstance(t, int) or not (1 <= t <= 300):
+                raise ValueError("timeout must be an integer between 1 and 300")
+        for k in ("name", "event", "matcher", "command", "timeout", "enabled"):
+            if k in data:
+                setattr(hook, k, data[k])
+        self._save()
+        return hook
+
+    def delete(self, hook_id: str) -> bool:
+        if hook_id in self._hooks:
+            del self._hooks[hook_id]
+            self._save()
+            return True
+        return False
+
+    def toggle(self, hook_id: str) -> ScriptHook | None:
+        hook = self._hooks.get(hook_id)
+        if not hook:
+            return None
+        hook.enabled = not hook.enabled
+        self._save()
+        return hook
+
+    async def fire(
+        self,
+        event: str,
+        context: str = "",
+        tool_name: str = "",
+        tool_input: dict | None = None,
+        tool_response: dict | None = None,
+        subagent_id: str | None = None,
+        parent_session_key: str | None = None,
+        agent_role: str | None = None,
+    ) -> list[ScriptHookResult]:
+        """Fire all enabled hooks matching the given event. Returns results.
+
+        For PreToolUse/PostToolUse, matcher filters by tool name.
+        For AgentSpawn/UserPromptSubmit/Stop, all hooks for that event fire.
+
+        Optional ``subagent_id``, ``parent_session_key``, and ``agent_role`` are
+        emitted into the hook_event payload so hook scripts can attribute tool
+        calls to the specific agent/session that fired them. Parent contexts
+        (dashboard chat, generic LLM helpers) leave them as ``None``.
+        """
+        import os
+
+        results = []
+        # Build base hook event (Kiro CLI format)
+        hook_event: dict = {"hook_event_name": event, "cwd": os.getcwd()}
+        if event == HOOK_EVENT_USER_PROMPT_SUBMIT and context:
+            hook_event["prompt"] = context
+        if tool_name:
+            hook_event["tool_name"] = tool_name
+        if tool_input is not None:
+            hook_event["tool_input"] = tool_input
+        if tool_response is not None:
+            hook_event["tool_response"] = tool_response
+        if subagent_id:
+            hook_event["subagent_id"] = subagent_id
+        if parent_session_key:
+            hook_event["parent_session_key"] = parent_session_key
+        if agent_role:
+            hook_event["agent_role"] = agent_role
+
+        for hook in list(self._hooks.values()):
+            if not hook.enabled or hook.event != event:
+                continue
+            # Matcher filtering: for tool hooks, match tool name; for others, match context
+            if hook.matcher:
+                if event in (HOOK_EVENT_PRE_TOOL_USE, HOOK_EVENT_POST_TOOL_USE):
+                    if not _tool_matches(hook.matcher, tool_name):
+                        continue
+                elif context and not fnmatch.fnmatch(context.lower(), hook.matcher.lower()):
+                    continue
+            result = await run_script_hook(hook, context, hook_event)
+            results.append(result)
+            logger.info(
+                "Hook %s (%s): %s in %dms (exit=%d)",
+                hook.name,
+                event,
+                hook.last_status,
+                result.duration_ms,
+                result.exit_code,
+            )
+        hooks_snapshot = [h.to_dict() for h in self._hooks.values()]
+        await asyncio.to_thread(self._save_snapshot, hooks_snapshot)
+        return results
+
+    def _save_snapshot(self, hooks_data: list[dict]) -> None:
+        """Thread-safe save using pre-captured hook snapshot."""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        data = {"hooks": hooks_data}
+        self._path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+# -- Global script hook store accessor --
+# Set by dashboard server.py / handlers.py when the store is initialized.
+# Allows any module (task_executor, llm_helpers, subagent) to fire script hooks
+# without needing a reference to DashboardState.
+
+_global_script_hook_store: ScriptHookStore | None = None
+
+
+def set_global_hook_store(store: ScriptHookStore) -> None:
+    """Register the global script hook store."""
+    global _global_script_hook_store
+    _global_script_hook_store = store
+
+
+def get_global_hook_store() -> ScriptHookStore | None:
+    """Get the global script hook store, or None if not initialized."""
+    return _global_script_hook_store
+
+
+async def fire_tool_hooks(
+    hook_store: ScriptHookStore | None,
+    event_title: str,
+    event_tool_input: str | None = None,
+    subagent_id: str | None = None,
+    parent_session_key: str | None = None,
+    agent_role: str | None = None,
+) -> None:
+    """Fire PreToolUse hooks for an EVENT_TOOL_CALL event.
+
+    PostToolUse is NOT fired here because EVENT_TOOL_CALL is a notification
+    that the tool is starting - the tool hasn't completed yet. PostToolUse
+    should be fired on EVENT_TOOL_RESULT when available.
+
+    Note: For EVENT_TOOL_CALL, hooks are informational only. The tool is
+    already running (auto-approved by kiro-cli), so hook results cannot
+    block execution. Hook scripts can log, audit, or trigger side effects.
+
+    Optional ``subagent_id``, ``parent_session_key``, and ``agent_role`` are
+    forwarded to the underlying hook_store so hook scripts can attribute
+    tool calls to the specific agent/session that fired them. Callers in
+    parent contexts (dashboard chat, generic LLM helpers) leave them as
+    ``None``; subagent and taskrunner callers pass real values.
+    """
+    if hook_store is None:
+        return
+    tool_name = event_title or ""
+    if tool_name.startswith("Running: "):
+        tool_name = tool_name[9:]
+    tool_input = None
+    if event_tool_input:
+        try:
+            tool_input = json.loads(event_tool_input)
+        except Exception:
+            pass
+    try:
+        await hook_store.fire(
+            HOOK_EVENT_PRE_TOOL_USE,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            subagent_id=subagent_id,
+            parent_session_key=parent_session_key,
+            agent_role=agent_role,
+        )
+    except Exception:
+        logger.debug("PreToolUse hook error", exc_info=True)

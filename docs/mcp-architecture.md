@@ -1,0 +1,374 @@
+# MCP Server Architecture
+
+How MCP (Model Context Protocol) servers are configured, probed, loaded,
+and distributed across KiroClaw, kiro-cli, and Claude Code.
+
+> **Design invariant:** KiroClaw does NOT write to provider globals
+> (`~/.kiro/settings/mcp.json`, `~/.claude.json`) under any normal code
+> path. Provider globals are user-owned.  KiroClaw layers its own
+> additions via per-agent files it fully owns
+> (`~/.kiro/agents/kiroclaw.json`, `~/.claude/agents/kiroclaw.mcp.json`).
+> This keeps KiroClaw-scoped tools out of every interactive kiro-cli and
+> Claude Code session the user runs outside KiroClaw.
+
+## Config File Hierarchy
+
+| File | Owner | Purpose | Read by |
+|------|-------|---------|---------|
+| `~/.kiro/agents/kiroclaw.json` | KiroClaw gateway (`rebuild_agent_config`) | Rendered Kiro agent: merged model + tools + MCP servers | kiro-cli when running as kiroclaw agent |
+| `~/.claude/agents/kiroclaw.md` + `~/.claude/agents/kiroclaw.mcp.json` | KiroClaw gateway (`install_cc_agent_config`) | Rendered Claude Code agent + MCP registry passed via `--mcp-config` | Claude Code when KiroClaw is the CC provider |
+| `~/.kiro/settings/mcp.json` | User / Toolbox | Kiro global MCP servers | kiro-cli for ALL agents (merged into KiroClaw's agent file at render time) |
+| `~/.claude.json` (`mcpServers`) | User / Claude Code | Claude Code global MCP servers | Interactive CC sessions (merged into KiroClaw's CC agent file at render time) |
+| `~/.kiroclaw/mcp.json` | User (dashboard MCP panel) | KiroClaw-specific additions and per-server disables | KiroClaw gateway only |
+
+### Merge Priority (in `rebuild_agent_config()`)
+
+Highest wins at collisions:
+
+1. `~/.kiroclaw/mcp.json` — KiroClaw-specific authority (user edits via
+   dashboard, merged via `update()` so its fields override)
+2. Existing `~/.kiro/agents/kiroclaw.json` — loaded as the merge base, so
+   any server already present with user customizations (`autoApprove`,
+   hand-edits, kiro-cli direct adds) survives the rebuild
+3. `~/.claude.json` `mcpServers` — Claude Code global (merged via
+   `setdefault`, only fills gaps the base didn't already have)
+4. `~/.kiro/settings/mcp.json` — Kiro global (merged via `setdefault`
+   after CC, so CC wins between the two globals)
+
+The existing-agent-config layer is what keeps user-added remote servers
+(e.g. `kiro-cli mcp add --agent kiroclaw --url ...`) and tweaked
+autoApprove lists from being wiped on every rebuild.  Servers that were
+in the previous rebuild's output but no longer in any source file also
+survive — the dashboard Uninstall flow deletes them from the agent file
+explicitly (see [Apply Pipeline](#apply-pipeline-post-apimcpapply)).
+
+Skill paths (`--skill-paths` for builder-mcp) are **stripped and
+re-resolved from AIM on every rebuild** (`_inject_skill_paths`) so they
+never go stale when AIM updates `eventId` directories.
+
+### What Goes Where
+
+| Server | Belongs in | Reason |
+|--------|-----------|--------|
+| kiroclaw-core | Managed defaults (rendered into both agent files) | Agent-scoped; gateway spawns directly, never in any global |
+| kiroclaw-cron | Managed defaults (rendered into both agent files) | Same as above |
+| builder-mcp | Toolbox-managed OR Kiro global | Shared across agents; KiroClaw injects fresh `--skill-paths` on top |
+| User-added servers | Any of: `~/.kiro/settings/mcp.json`, `~/.claude.json`, `~/.kiroclaw/mcp.json` | Merged into KiroClaw agent files at render time |
+| AIM Browse installs | `~/.kiro/settings/mcp.json` + `~/.claude.json` (AIM writes both) | Inherited into KiroClaw automatically via merge |
+
+## How MCP Servers Are Probed
+
+Source: `src/kiro_claw/mcp_discovery.py`
+
+### Discovery Flow
+
+```
+list_servers()
+  ├── _load_agent_config()        → reads ~/.kiro/agents/kiroclaw.json mcpServers
+  ├── _load_mcp_json_by_source()  → reads all three scope files with provenance:
+  │                                  kiroclaw-own, kiro-global, cc-global
+  ├── _fix_stale_managed_command() → re-resolves kiroclaw binary path
+  └── merge cached probe results   → overlays last-known status/tools
+```
+
+Each returned `McpServerInfo` carries a `presence` dict
+(`{kiroclaw, kiroGlobal, ccGlobal}`) so the dashboard can render
+per-scope badges.
+
+### Probe Mechanism
+
+The dashboard triggers probes via `POST /api/mcp/probe`. For each server:
+
+1. **stdio servers** — spawn the command with MCP `initialize` handshake,
+   wait for `tools/list` response (timeout: configurable, default 15s)
+2. **HTTP servers** — send HTTP POST to the `url` with MCP `initialize`
+3. Results cached for 30 minutes (`_PROBE_TTL_SECS`)
+
+The `GET /api/mcp` handler also kicks off a background re-probe when it
+sees a server that isn't in the probe cache yet (e.g. a fresh AIM Browse
+install), so status transitions from "Unknown" to "ok"/"error" on the
+next page refresh without waiting out the TTL.
+
+### Binary Resolution for Managed Servers
+
+`_fix_stale_managed_command()` re-resolves the kiroclaw binary on every
+`list_servers()` call because the stored path may be stale after updates:
+
+1. Try `brazil-path run.runtimefarm` → `bin/kiroclaw` (Brazil installs)
+2. Try `_resolve_kiroclaw_bin()` from `agent.py` (walk-up from package)
+3. Try `shutil.which("kiroclaw")` on augmented PATH (Toolbox/pip)
+
+## How kiro-cli Uses MCP Servers
+
+### Session Startup
+
+When KiroClaw spawns a kiro-cli session:
+
+1. kiro-cli reads `~/.kiro/agents/kiroclaw.json`
+2. Because `includeMcpJson: false` is set, kiro-cli uses ONLY
+   agent-level `mcpServers` (never merges the global a second time)
+3. kiro-cli spawns each MCP server as a stdio subprocess
+4. Sends `initialize` + `tools/list` to discover available tools
+5. Tools become available to the LLM
+
+### Sub-agent MCP Access
+
+Sub-agents (spawned via `spawn_run`) get MCP servers through the same
+mechanism — each sub-agent is a separate kiro-cli process that reads
+the same `kiroclaw.json` config. The gateway does NOT re-spawn MCP
+servers per sub-agent; kiro-cli handles its own MCP lifecycle.
+
+Key implication: if a sub-agent needs kiroclaw-core tools (`learn_add`,
+`spawn_run`, `send_message`), those must be in the agent config that
+kiro-cli reads. They are — `kiroclaw.json` always contains them.
+
+## How Claude Code Uses MCP Servers
+
+Source: `src/kiro_claw/agent.py::install_cc_agent_config`,
+`src/kiro_claw/providers/claude_code.py`
+
+When KiroClaw's provider is Claude Code, KiroClaw renders two files:
+
+```
+~/.claude/agents/
+├── kiroclaw.md          ← YAML-frontmatter agent definition
+│                          (name-only `mcpServers` list = scope filter)
+└── kiroclaw.mcp.json    ← full MCP server definitions (stdio/http specs)
+```
+
+At session spawn time the provider passes the mcp.json file via
+`--mcp-config ~/.claude/agents/kiroclaw.mcp.json` so CC loads it
+instead of (not in addition to) `~/.claude.json`. This keeps KiroClaw's
+server set scoped to KiroClaw sessions and leaves the user's
+interactive CC global untouched.
+
+### Always-Render Contract
+
+`install_cc_agent_config` renders its two files on **every rebuild**,
+regardless of which provider is currently active. This means a user on
+`kiro` can install a new server via the dashboard and the CC agent file
+is already current when they later switch to `claude_code`. The cost
+is a ~5KB file write per rebuild; the win is zero stale-file surprises
+across provider switches.
+
+### Provider-Defaults Layer
+
+The toolbox ships an `~/.toolbox/tools/claude-code/<version>/configuration/builder-mcp-defaults.json`
+with Amazon-specific builder-mcp exclusions
+(`--exclude-tools SkillsTool,WorkspaceSearch,Delegate,ToolReactivationTool`).
+When KiroClaw overrides CC's MCP config via `--mcp-config`, that
+defaults file is no longer automatically applied — so the renderer calls
+`_apply_cc_provider_defaults()` as a post-merge step to fold those
+flags back into the rendered `kiroclaw.mcp.json`. Other providers can
+register similar defaults files; the mechanism is extensible.
+
+## Agent Config vs Global Config
+
+### The `includeMcpJson` Field
+
+```json
+// ~/.kiro/agents/kiroclaw.json
+{
+  "includeMcpJson": false,
+  "mcpServers": {
+    "kiroclaw-core": { "command": "kiroclaw", "args": ["mcp-core"] },
+    "kiroclaw-cron": { "command": "kiroclaw", "args": ["mcp-cron"] },
+    "builder-mcp":   { "command": "builder-mcp", "args": [...] }
+  }
+}
+```
+
+- `includeMcpJson: false` → kiro-cli uses only the agent file
+- Backfilled on every gateway startup by `_refresh_dynamic_fields()`
+
+### Why `includeMcpJson: false` for KiroClaw-Managed Agents
+
+KiroClaw already merges user-added servers from `~/.kiro/settings/mcp.json`
+into the agent file at render time. The agent file is the **superset**.
+If `includeMcpJson` were `true`, kiro-cli would merge the global a second
+time at session start, causing:
+
+- Duplicate entries (same server from both sources)
+- Stale paths in global overriding fresh paths from the gateway
+- KiroClaw-internal servers leaking into unrelated flows
+
+| Agent type | `includeMcpJson` | Reason |
+|------------|-------------------|--------|
+| kiroclaw (default) | `false` | Gateway merges global → agent; double-merge causes conflicts |
+| KiroClaw-managed apps (Mochi, etc.) | `false` | SDK injects needed servers; global merge adds unwanted tools |
+| Plain kiro-cli agents (outside KiroClaw) | `true` (kiro-cli default) | No gateway merge — global mcp.json is their only source |
+
+**Rule:** KiroClaw forces `includeMcpJson: false` on every agent it
+manages. Standalone kiro-cli agents outside KiroClaw keep kiro-cli's
+default (`true`).
+
+### Why KiroClaw Does NOT Write to Globals
+
+Historical context (see CR-270156276, CR-272678129, CR-273320821,
+and the multi-provider refactor that followed):
+
+1. Kotaro removed the original global sync (3d82a516) after confirming
+   `includeMcpJson: false` is respected by kiro-cli 2.1+ — correct intent
+2. CR-272678129 re-added sync as a safety net for a transient ACP
+   regression, which Guillaume Marchand reported was polluting every
+   interactive kiro-cli / Kiro IDE session with KiroClaw-owned tools
+3. CR-273320821 removed sync permanently
+4. The multi-provider refactor (this CR) extends the same principle to
+   Claude Code: KiroClaw **never** writes to `~/.claude.json` either;
+   the CC agent file at `~/.claude/agents/kiroclaw.mcp.json` is
+   authoritative for KiroClaw's CC sessions
+
+**If kiroclaw-core/kiroclaw-cron ever appear in either global, it is
+legacy pollution from pre-fix builds.** Users can clean it up through the
+dashboard MCP panel (Kiro / Claude badge → off → Apply) or via
+`kiroclaw cli-setup` which invokes the narrowly-scoped
+`clean_stale_managed_mcp` migration helper.
+
+## Dashboard MCP Management
+
+The Integrations (MCP) page aggregates servers across all three scope
+files and presents a unified view:
+
+### Scope Badges
+
+Each row shows per-scope presence badges (green = enabled, gray = not
+enabled):
+
+| Badge | Means | Source of truth |
+|-------|-------|-----------------|
+| KiroClaw | Server will load in KiroClaw sessions | Effective state after merge, minus explicit `disabled:true` overrides in `~/.kiroclaw/mcp.json` |
+| Kiro | Server is present in `~/.kiro/settings/mcp.json` | Raw file contents |
+| Claude | Server is present in `~/.claude.json` `mcpServers` | Raw file contents |
+
+Clicking a badge **stages** an intent. The page accumulates all staged
+changes into a pending set and exposes Apply / Discard at the top. Only
+when the user clicks Apply does KiroClaw execute the imperative edits.
+
+### Apply Pipeline (`POST /api/mcp/apply`)
+
+The endpoint takes a batched payload of changes (scope add/remove,
+uninstall, per-tool overrides) and applies them atomically:
+
+1. **Uninstalls** first — removes from `~/.kiroclaw/mcp.json`,
+   `~/.kiro/settings/mcp.json`, and `~/.claude.json`, and also strips
+   the entry directly from `~/.kiro/agents/kiroclaw.json` and
+   `~/.claude/agents/kiroclaw.mcp.json` so the additive merge base
+   for the subsequent rebuild no longer contains the server
+2. **Scope adds** — write the server spec into the target scope file
+3. **Scope removes** — strip the server from the target scope file.
+   If the server will no longer be inherited into KiroClaw but the user
+   kept the KiroClaw badge ON, the full spec is first copied to
+   `~/.kiroclaw/mcp.json` to preserve inheritance (the **preservation
+   rule**)
+4. **Per-tool overrides** — update `disabledTools` on the server entry
+   in `~/.kiroclaw/mcp.json`
+5. **Single rebuild** at the end re-renders both agent files from the
+   new source-of-truth state
+
+No scope metadata is ever persisted. Apply does one-shot edits and
+forgets; state is always re-read from disk on the next page load.
+External edits (e.g. `kiro-cli mcp remove <name>`, hand-edits to
+`~/.claude.json`) are picked up naturally on the next render.
+
+### What Apply Does NOT Do
+
+- **Does not restart sessions** — scope changes take effect on the next
+  session spawn. The separate "Apply & Restart" button in the header
+  calls `POST /api/sessions/restart` to drain the warm pool when needed
+- **Does not add servers to scope files for you** — installs go through
+  AIM Browse cards (which in turn write to the Kiro/CC globals). The
+  MCP panel manages what's already installed
+
+## AppStore (SDK) MCP Distribution
+
+Source: CR-272639896 (`managedToolPolicy`)
+
+### How Other Agents Get KiroClaw MCP Servers
+
+Apps built on KiroClaw (Mochi, custom agents) declare dependencies:
+
+```json
+// app's agent spec
+{
+  "tools": ["@kiroclaw-core", "@kiroclaw-cron", "fs_read", "grep"],
+  "managedToolPolicy": {
+    "exclude": ["cron_add", "cron_remove"]
+  }
+}
+```
+
+The SDK's `installAgentConfig()`:
+
+1. Reads `kiroclaw.json` to get kiroclaw-core/kiroclaw-cron specs
+2. Copies server specs into the app's own agent config file
+3. Applies `managedToolPolicy.exclude` as `disabledTools` on injected specs
+4. kiro-cli reads the app's agent config and spawns MCP servers
+
+### Enforcement Layers
+
+| Layer | Mechanism | Availability |
+|-------|-----------|-------------|
+| 1. SDK install | Writes `disabledTools` into agent config | Always (no network) |
+| 2. kiro-cli | Reads `disabledTools`, filters before LLM | Always (no network) |
+| 3. MCP server | `GET /api/session-tool-policy` filters `tools/list` + `tools/call` | Network-dependent |
+
+Layer 3 is defense-in-depth for non-kiro-cli clients (CC, custom MCP
+hosts) that may not read `disabledTools`.
+
+## Startup Sequence
+
+On gateway startup, `rebuild_agent_config()`:
+
+1. Load existing `~/.kiro/agents/kiroclaw.json` as base
+2. `_refresh_dynamic_fields()` — managed defaults, resolved binary path
+3. Merge `~/.kiro/settings/mcp.json` (setdefault, lowest priority)
+4. Merge `~/.claude.json` `mcpServers` (setdefault)
+5. Merge `~/.kiroclaw/mcp.json` (`update`, wins over globals)
+6. `_inject_skill_paths()` — strip all `--skill-paths` and re-resolve
+   fresh from AIM
+7. Resolve commands to absolute paths
+8. Write `~/.kiro/agents/kiroclaw.json`
+9. Render `~/.claude/agents/kiroclaw.md` + `kiroclaw.mcp.json`
+   (always, regardless of active provider)
+
+Uninstalls happen out-of-band through `POST /api/mcp/apply` which
+explicitly deletes the server from the rendered agent files before
+calling `rebuild_agent_config` so the additive merge base no longer
+contains the entry.
+
+## Troubleshooting
+
+### "MCP tools not working"
+
+1. Check `~/.kiro/agents/kiroclaw.json` has `kiroclaw-core`/`kiroclaw-cron`
+2. Verify `includeMcpJson: false` is set
+3. Run `kiroclaw doctor` — checks MCP probe status
+4. Dashboard → MCP panel shows live probe results
+5. For CC sessions, also check `~/.claude/agents/kiroclaw.mcp.json`
+
+### "Status column shows Unknown forever"
+
+The handler auto-triggers a probe when it sees a new server in any
+config file, but the results only appear on the next refresh. Wait a
+few seconds and reload. If it stays "Unknown", the server is failing
+to handshake — check the dashboard error text or gateway logs.
+
+### "Tools available in KiroClaw but not in interactive kiro-cli / CC"
+
+This is **correct behavior**. `kiroclaw-core`/`kiroclaw-cron` are
+agent-scoped. They should NOT appear in interactive kiro-cli or
+Claude Code sessions. If they do, something wrote them to a provider
+global — file a bug.
+
+### "Removed a server from Kiro global but it came back"
+
+Check if the KiroClaw badge is still on. When the user keeps the
+server enabled for KiroClaw, the preservation rule copies its config
+into `~/.kiroclaw/mcp.json` before removing it from the global so the
+server stays loaded in KiroClaw sessions.
+
+### "New MCP server added via AIM Browse but sessions don't pick it up"
+
+Session reset drains the warm pool (pre-spawned processes with old
+config). Use Dashboard → Apply & Restart, or `kiroclaw config set`
+which auto-triggers a restart.

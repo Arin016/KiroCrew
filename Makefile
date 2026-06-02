@@ -1,0 +1,59 @@
+# KiroClaw — public build targets (pip + npm/vite + pytest).
+# Common flow: `make` runs build (frontend + backend) then tests.
+#
+# Standalone distribution targets:
+#   make wheel     — self-contained pip wheel (dashboard bundled)
+#   make backend-bin — frozen standalone backend binary (PyInstaller)
+#   make desktop   — double-clickable desktop app (DMG / AppImage)
+.PHONY: all build frontend backend test clean wheel backend-bin desktop
+
+PY ?= python3
+VENV := .venv
+PIP := $(VENV)/bin/pip
+PYTEST := $(VENV)/bin/pytest
+
+all: test
+
+# Build the frontend (npm/vite) and stage it into the package, then install
+# the backend into a local venv.
+build: frontend backend
+
+frontend:
+	cd website && \
+	  if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi && \
+	  npm run build
+	rm -rf src/kiro_claw/static/dist
+	mkdir -p src/kiro_claw/static
+	cp -R website/dist src/kiro_claw/static/dist
+
+backend:
+	test -x $(VENV)/bin/python || $(PY) -m venv $(VENV)
+	$(PIP) install --upgrade pip setuptools wheel
+	KIROCLAW_SKIP_FRONTEND=1 $(PIP) install -e .
+
+test: build
+	$(PYTEST) -q
+
+# --- Standalone distribution -------------------------------------------------
+
+# Self-contained pip wheel: builds + stages the dashboard, then produces a
+# wheel that bundles the SPA (see setup.py BuildWithFrontend + MANIFEST.in).
+wheel: frontend
+	$(PY) -m pip install --upgrade build
+	$(PY) -m build --wheel
+
+# Frozen standalone backend binary (no system Python needed). Stages the
+# dashboard first so it's embedded in the bundle.
+backend-bin: frontend
+	SKIP_FRONTEND=1 SKIP_ELECTRON=1 bash packaging/build-desktop.sh
+
+# Full double-clickable desktop app (DMG on macOS, AppImage on Linux).
+desktop:
+	bash packaging/build-desktop.sh
+
+clean:
+	rm -rf build dist *.egg-info src/*.egg-info \
+	       src/kiro_claw/static/dist website/dist \
+	       website/electron/backend-dist website/electron/dist \
+	       .pytest_cache .mypy_cache
+	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true

@@ -1,0 +1,109 @@
+"""Shared reasoning-effort vocabulary for all LLM providers.
+
+Both kiro-cli and claude-agent-acp expose a per-session "effort" (a.k.a.
+thinking depth) knob, but only on Claude Opus/Sonnet models.  This module
+is the single source of truth for the valid levels and the model-capability
+check so the CLI, dashboard handlers, providers, and config loader all agree.
+
+Stdlib-only and import-light on purpose — it is imported from hot paths
+(``providers/acp.py``, ``dashboard/chat_handlers.py``) and must not create
+import cycles.
+
+References:
+- kiro-cli ``/effort``: levels ``low|medium|high|xhigh|max``, Opus/Sonnet only,
+  per-model defaults via ``~/.kiro/settings/cli.json`` →
+  ``chat.modelDefaults.<model>.output_config.effort``.
+- claude-agent-acp ``buildConfigOptions``: effort options come from each
+  model's ``supportedEffortLevels``; recommended default ``xhigh`` then ``high``.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Concrete effort levels, ordered low→high.  ``""`` is NOT a level — it means
+# "no explicit override; use the provider/model default" and is handled by the
+# callers, not stored here.  ``xhigh`` sits between ``high`` and ``max`` and is
+# the recommended default for capable Opus models in both backends.
+EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+
+# Accepted by the API/persistence layer: the concrete levels plus the empty
+# sentinel for "provider default".  Single source for ``_REASONING_EFFORT_VALUES``.
+EFFORT_VALUES: frozenset[str] = frozenset({""} | set(EFFORT_LEVELS))
+
+
+def is_valid_effort(level: object) -> bool:
+    """True if *level* is one of the concrete effort levels (excludes "")."""
+    return isinstance(level, str) and level in EFFORT_LEVELS
+
+
+def model_supports_effort(model: str | None) -> bool:
+    """True when *model* is a Claude Opus/Sonnet model that accepts effort.
+
+    Effort is only available on Claude Opus and Sonnet (per kiro-cli FAQ and
+    the claude-agent-acp ``supportsEffort`` model flag).  Haiku, Nova, and
+    third-party models do not support it; ``"auto"``/``None`` cannot either
+    (kiro-cli errors "Effort configuration is currently not available on auto"
+    until a concrete model is selected).
+
+    Matches both naming conventions: kiro-cli (``claude-opus-4.7``) and the
+    Bedrock/claude-agent-acp form (``global.anthropic.claude-opus-4-8[1m]``).
+    """
+    if not model:
+        return False
+    m = model.lower()
+    if "haiku" in m:
+        return False
+    return "opus" in m or "sonnet" in m
+
+
+def _coerce_defaults(defaults: object) -> dict[str, str]:
+    """Normalize a per-model defaults blob into ``{model: level}``.
+
+    Accepts a dict or a JSON-string (the frontend ``setVariable`` signature
+    only takes strings, so saved values arrive stringified).  Returns ``{}``
+    on any malformed input — never raises.
+    """
+    if isinstance(defaults, str):
+        if not defaults.strip():
+            return {}
+        try:
+            defaults = json.loads(defaults)
+        except (ValueError, TypeError):
+            logger.debug("Discarding malformed effort defaults JSON: %r", defaults)
+            return {}
+    if not isinstance(defaults, dict):
+        return {}
+    out: dict[str, str] = {}
+    for model, level in defaults.items():
+        if isinstance(model, str) and is_valid_effort(level):
+            out[model] = level  # type: ignore[assignment]
+    return out
+
+
+def resolve_effort_for_model(
+    model: str | None,
+    slot_overrides: dict[str, str] | None = None,
+    defaults: object = None,
+) -> str | None:
+    """Resolve the effort level for *model* using the priority chain.
+
+    Priority: ``slot_overrides[model]`` → ``defaults[model]`` → ``None``.
+    Returns ``None`` when the model does not support effort or no level
+    resolves (caller should then leave the provider on its own default).
+    """
+    if not model_supports_effort(model):
+        return None
+    assert model is not None  # narrowed by model_supports_effort
+    if slot_overrides:
+        lvl = slot_overrides.get(model)
+        if is_valid_effort(lvl):
+            return lvl
+    coerced = _coerce_defaults(defaults)
+    lvl = coerced.get(model)
+    if is_valid_effort(lvl):
+        return lvl
+    return None

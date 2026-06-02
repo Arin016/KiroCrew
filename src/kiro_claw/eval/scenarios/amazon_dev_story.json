@@ -1,0 +1,564 @@
+{
+  "name": "amazon_dev_story",
+  "description": "Realistic multi-day Amazon SDE workflow: onboarding to a team building BananaHub \u2014 an internal tool where every Amazon employee can request one banana per day by location, brand, taste, and type, with a delivery system. Covers onboarding, codebase learning, feature development, production alarms, CR review feedback, and oncall. 54 turns across 8 sessions.\n",
+  "dimensions": [
+    "memory_recall",
+    "lesson_application",
+    "context_accumulation",
+    "tool_discovery",
+    "task_completion"
+  ],
+  "seed": {
+    "preferences": "# User Preferences\n- Prefers concise answers, no filler\n- Uses vim keybindings in IDE\n- Likes to see code examples before explanations\n- Timezone: US/Pacific\n",
+    "projects": "# Active Projects\nJust joined the BananaHub team (internal banana distribution platform).\nMain service: BananaHubService (Java, CDK, DynamoDB, SQS, Lambda).\nWorkspace: /workplace/alice/BananaHub\n",
+    "lessons": [
+      "Alice's team uses brazil-build for all packages \u2014 never suggest gradle directly",
+      "BananaHub uses Coral for API modeling, not Smithy"
+    ]
+  },
+  "sessions": [
+    {
+      "name": "day1_onboarding",
+      "turns": [
+        {
+          "user": "I just joined the BananaHub team. My manager is Priya (priyad). My mentor is Marcus (marcusl). The team wiki is at https://wiki.example.com/BananaHub/",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "priya|marcusl|bananahub"
+            }
+          ]
+        },
+        {
+          "user": "BananaHub lets every Amazon employee request one banana per day. They pick location, brand, taste (sweet, tart, mild), and type (Cavendish, plantain, red, baby). We handle ordering, inventory, and desk delivery.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "banana|request|delivery"
+            }
+          ]
+        },
+        {
+          "user": "The backend has 3 Lambda handlers: OrderHandler (takes requests), FulfillmentHandler (matches to inventory), and DeliveryHandler (dispatches to building mail rooms). They're chained via SQS.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "order|fulfillment|delivery|sqs"
+            }
+          ]
+        },
+        {
+          "user": "Our DynamoDB tables: BananaOrders (partition key employeeAlias, sort key orderDate) and BananaInventory (partition key locationId, sort key brand). Both on-demand capacity.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "banana|dynamo|order"
+            }
+          ]
+        },
+        {
+          "user": "Marcus told me to always run brazil-build before sending a CR. The test command is brazil-build test.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "brazil-build|test"
+            }
+          ]
+        },
+        {
+          "user": "Our oncall rotation is bananahub-oncall and we use #bananahub-ops Slack channel for incidents. Most alerts are about inventory sync failures.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "bananahub-oncall|bananahub-ops"
+            }
+          ]
+        },
+        {
+          "user": "The CR process: brazil-build, then cr --parent mainline. Marcus said always add priyad as a reviewer.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "cr|priyad"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "day1_first_task",
+      "turns": [
+        {
+          "user": "Got my first task: BANANA-42 \u2014 add rate limiting so employees can only order one banana per day. Right now there's no enforcement and some people are ordering 5+ bananas.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "rate.limit|one.*day|BANANA-42"
+            }
+          ]
+        },
+        {
+          "user": "Marcus said the CDK is in BananaHubServiceCDK, file lib/bananaStack.ts. The OrderHandler Lambda is defined around line 60.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "cdk|bananaStack"
+            }
+          ]
+        },
+        {
+          "user": "He also warned me: never use a TTL shorter than 25 hours for the rate limit record \u2014 timezone edge cases caused a bug last quarter where west coast employees couldn't order after 11pm.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "25|ttl|hour"
+            }
+          ]
+        },
+        {
+          "user": "I'll check BananaOrders table for existing orders by employeeAlias + today's date before accepting a new one. If exists, return 429.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "429|exist|order"
+            }
+          ]
+        },
+        {
+          "user": "What's the workspace path for the CDK package again?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "workplace|banana"
+            }
+          ]
+        },
+        {
+          "user": "What was the minimum TTL Marcus warned me about?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "25"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "day2_implementation",
+      "turns": [
+        {
+          "user": "Starting on BANANA-42 today. Can you remind me what I need to do?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "rate.limit|one.*banana|BANANA-42"
+            }
+          ]
+        },
+        {
+          "user": "I added the duplicate check in OrderHandler \u2014 query BananaOrders with employeeAlias + today's date, return 429 if found. Also added a TTL of 26 hours on the rate limit record.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "429|ttl|order"
+            }
+          ]
+        },
+        {
+          "user": "Marcus reviewed my CR and said I should use Duration.minutes(5) for the CloudWatch alarm period, not Duration.seconds(300). Team convention.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "duration|minutes"
+            }
+          ]
+        },
+        {
+          "user": "Good to know \u2014 always use Duration.minutes() instead of Duration.seconds() for alarm periods in our CDK.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "duration|minutes|convention"
+            }
+          ]
+        },
+        {
+          "user": "Build passed, tests green. Sending the CR now. Who should I add as reviewer?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "priya|priyad"
+            }
+          ]
+        },
+        {
+          "user": "CR approved and merged. Should I close BANANA-42?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "close|resolve|BANANA-42"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "day3_oncall_alarm",
+      "turns": [
+        {
+          "user": "Shadowing oncall today. Alarm fired: BananaHub-FulfillmentHandler-ErrorRate-High. Ticket is P98765432.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "alarm|fulfillment|error|P98765432"
+            }
+          ]
+        },
+        {
+          "user": "Alarm says error rate exceeded 5% on FulfillmentHandler in us-west-2, account 123456789012.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "5%|us-west-2|fulfillment"
+            }
+          ]
+        },
+        {
+          "user": "Marcus says first step is always: get Conduit credentials, then check CloudWatch Logs Insights. Never use Isengard for our accounts.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "conduit|cloudwatch"
+            }
+          ]
+        },
+        {
+          "user": "Found it \u2014 the errors are all ConditionalCheckFailedException on DynamoDB. The FulfillmentHandler tries to decrement BananaInventory count but it goes negative when two orders hit the same location simultaneously.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "conditional|inventory|negative|simultaneous"
+            }
+          ]
+        },
+        {
+          "user": "Marcus says this is a known race condition. The fix is to add a condition expression: SET inventoryCount = inventoryCount - 1 WITH attribute_exists AND inventoryCount > 0. Filed BANANA-55.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "race|condition|BANANA-55|inventory"
+            }
+          ]
+        },
+        {
+          "user": "Alarm self-recovered after 15 minutes. Marcus said to comment on P98765432 with the RCA and link BANANA-55.",
+          "assertions": []
+        },
+        {
+          "user": "What Slack channel should I post the RCA summary to?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "bananahub-ops"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "day5_inventory_fix",
+      "turns": [
+        {
+          "user": "Starting BANANA-55 \u2014 fixing the inventory race condition. What was the root cause from the alarm?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "race|conditional|inventory|negative"
+            }
+          ]
+        },
+        {
+          "user": "I'll add the condition expression on the DynamoDB update: inventoryCount > 0. If it fails, the order goes to a backorder queue instead of erroring.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "condition|backorder|inventory"
+            }
+          ]
+        },
+        {
+          "user": "Marcus reviewed and said: catch ConditionalCheckFailedException and log it as INFO, not ERROR. It's expected when inventory runs out \u2014 we don't want it triggering the error rate alarm.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "info|conditional|log"
+            }
+          ]
+        },
+        {
+          "user": "Makes sense \u2014 ConditionalCheckFailedException for expected inventory exhaustion should be INFO not ERROR.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "info|expected"
+            }
+          ]
+        },
+        {
+          "user": "What's the build command before I send the CR?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "brazil-build"
+            }
+          ]
+        },
+        {
+          "user": "And the CR command with the right reviewer?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "cr|priyad"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "day8_delivery_system",
+      "turns": [
+        {
+          "user": "New task: BANANA-70 \u2014 build the delivery routing system. When an order is fulfilled, DeliveryHandler needs to route it to the correct building mail room. Before I start, summarize what I know about BananaHub's architecture.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "order|fulfillment|delivery"
+            },
+            {
+              "type": "regex",
+              "value": "sqs|lambda"
+            },
+            {
+              "type": "regex",
+              "value": "dynamo"
+            }
+          ]
+        },
+        {
+          "user": "I need to add a new DynamoDB table for delivery routes: BuildingMailRooms with partition key buildingId. Which CDK file?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "bananaStack|cdk"
+            }
+          ]
+        },
+        {
+          "user": "For the alarm period on delivery latency metrics, should I use Duration.seconds(300) or something else?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "duration.minutes|minutes"
+            }
+          ]
+        },
+        {
+          "user": "Right, team convention. Duration.minutes(5) it is.",
+          "assertions": []
+        },
+        {
+          "user": "If the delivery dispatch to a mail room fails, should I log it as ERROR or INFO?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "error"
+            }
+          ]
+        },
+        {
+          "user": "Right \u2014 only expected conditions like inventory exhaustion are INFO. Actual delivery failures are ERROR.",
+          "assertions": []
+        },
+        {
+          "user": "Build and tests pass. Sending CR to priyad. Anything I'm forgetting?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "brazil-build|cr"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "day10_solo_oncall",
+      "turns": [
+        {
+          "user": "I'm primary oncall this week for bananahub-oncall. Got a new alarm: BananaHub-DeliveryHandler-Latency-High in us-west-2.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "alarm|latency|delivery"
+            }
+          ]
+        },
+        {
+          "user": "What's the first thing I should do based on what Marcus taught me?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "conduit|credential|cloudwatch"
+            }
+          ]
+        },
+        {
+          "user": "Found it \u2014 DeliveryHandler is timing out because the BuildingMailRooms table scan is slow. We're scanning instead of querying for the building's mail room.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "scan|slow|timeout"
+            }
+          ]
+        },
+        {
+          "user": "I need to fix the table access pattern. Where's the CDK config for the table?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "bananaStack|cdk"
+            }
+          ]
+        },
+        {
+          "user": "Switched from Scan to Query using buildingId partition key. Also added a GSI for locationId lookups. Sending CR.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "cr|query|gsi"
+            }
+          ]
+        },
+        {
+          "user": "Where should I post the RCA?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "bananahub-ops"
+            }
+          ]
+        },
+        {
+          "user": "What's my manager's alias? Need to loop her in since this affected delivery SLA.",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "priya|priyad"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "day12_comprehensive_recall",
+      "turns": [
+        {
+          "user": "Quick knowledge check \u2014 what's our team's oncall rotation name?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "bananahub-oncall"
+            }
+          ]
+        },
+        {
+          "user": "What DynamoDB tables do we have and what are their key schemas?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "BananaOrders"
+            },
+            {
+              "type": "regex",
+              "value": "employeeAlias"
+            },
+            {
+              "type": "regex",
+              "value": "BananaInventory"
+            },
+            {
+              "type": "regex",
+              "value": "locationId"
+            }
+          ]
+        },
+        {
+          "user": "What are the three Lambda handlers in our pipeline?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "order"
+            },
+            {
+              "type": "regex",
+              "value": "fulfillment"
+            },
+            {
+              "type": "regex",
+              "value": "delivery"
+            }
+          ]
+        },
+        {
+          "user": "What's the team convention for alarm periods in CDK?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "duration.minutes|minutes"
+            }
+          ]
+        },
+        {
+          "user": "How should we handle ConditionalCheckFailedException when inventory runs out?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "info"
+            }
+          ]
+        },
+        {
+          "user": "What build system do we use?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "brazil"
+            }
+          ]
+        },
+        {
+          "user": "Who's my mentor and who's my manager?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "marcus"
+            },
+            {
+              "type": "regex",
+              "value": "priya"
+            }
+          ]
+        },
+        {
+          "user": "What's the ops Slack channel?",
+          "assertions": [
+            {
+              "type": "regex",
+              "value": "bananahub-ops"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
