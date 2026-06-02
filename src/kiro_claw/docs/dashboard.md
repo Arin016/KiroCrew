@@ -118,7 +118,7 @@ its own set of agents and conversation history.
 ### Worlds (`/worlds`)
 
 Interactive agent visualization scenes (Mission Control, Wizard Tower,
-Underwater Lab, Neural Constellation, Office, Warehouse, Panda Den). Click agents to
+Deep Lab, Neural Constellation, Office, Panda Den). Click agents to
 start a chat session. Supports popout windows for viewing scenes while using
 other pages.
 

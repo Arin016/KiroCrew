@@ -10,9 +10,12 @@ or kiro-cli optional) and connects to tools over the Model Context Protocol
 **Install the backend (pip) and dashboard (npm):**
 
 ```bash
-pip install kiro-claw
+pip install kiroclaw
 cd website && npm install && npm run build
 ```
+
+Or, from a clone of the repository, run `pip install .` (or `pip install -e .`
+for development) in the project root.
 
 **Then start the gateway:**
 

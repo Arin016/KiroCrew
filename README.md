@@ -85,6 +85,59 @@ kiroclaw gateway              # start server → open http://localhost:7777
 **Dashboard-only mode**: skip Slack tokens during `kiroclaw setup` to run
 without Slack.
 
+## Installation & Distribution
+
+There are three ways to build and run KiroClaw, from lightest (developer
+checkout) to heaviest (double-clickable desktop app). All builds are driven by
+the [`Makefile`](Makefile) — plain `pip` + `npm`/Vite + `pytest`, no
+proprietary tooling. See [docs/INSTALL.md](docs/INSTALL.md) for the full guide.
+
+### a. From source (development)
+
+Build the dashboard, install the backend into a local virtualenv, then run the
+gateway straight from `src/`:
+
+```bash
+make build                                   # npm build + venv editable install
+PYTHONPATH=src python -m kiro_claw gateway   # → http://localhost:7777
+```
+
+### b. Self-contained pip wheel
+
+Produce a wheel that bundles the pre-built dashboard, then install it anywhere
+with Python:
+
+```bash
+make wheel                # → dist/kiroclaw-0.1.0-*.whl (dashboard bundled)
+pip install dist/*.whl    # installs the kiroclaw / kiroclaw-browse commands
+kiroclaw gateway          # → http://localhost:7777
+```
+
+### c. Bundled desktop app
+
+Build a double-clickable desktop app that embeds a frozen Python backend (via
+PyInstaller) inside an Electron shell — end users need **no** Python, pip, npm,
+or node:
+
+```bash
+make desktop              # → website/electron/dist/KiroClaw-*.dmg (macOS)
+                          #   or website/electron/dist/KiroClaw-*.AppImage (Linux)
+```
+
+See [docs/DESKTOP_APP.md](docs/DESKTOP_APP.md) for the build pipeline and how
+the app locates and launches the bundled backend.
+
+### Makefile targets
+
+| Target | What it does |
+|--------|--------------|
+| `make build` | Build the frontend (npm/Vite) + install the backend into `.venv` |
+| `make wheel` | Self-contained pip wheel with the dashboard bundled → `dist/` |
+| `make backend-bin` | Frozen standalone backend binary (PyInstaller), no Electron |
+| `make desktop` | Full desktop app — DMG (macOS) / AppImage (Linux) |
+| `make test` | Build, then run the `pytest` suite |
+| `make clean` | Remove build artifacts, dists, caches |
+
 ## What It Does
 
 | Surface | Description |
@@ -181,6 +234,8 @@ kiroclaw setup --agent-only --clean  # fresh config from scratch
 
 | Document | Description |
 |----------|-------------|
+| [docs/INSTALL.md](docs/INSTALL.md) | Build & install guide — the three run methods, Makefile targets, env vars |
+| [docs/DESKTOP_APP.md](docs/DESKTOP_APP.md) | Electron desktop app build pipeline and packaging |
 | [FEATURES.md](docs/FEATURES.md) | Complete feature reference |
 | [DEPENDENCIES.md](DEPENDENCIES.md) | Full dependency list (pip + npm + optional extras) |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |

@@ -14,14 +14,14 @@ KiroClaw's contributor community has grown rapidly. Contributors are building in
 **User Stories:**
 
 * **Secretary (lanxib@)** — Built a Slack inbox management feature for KiroClaw. The biggest pain point was the development cycle. Every code change required manually stopping and restarting the Gateway in the terminal to see the effect. Tried to avoid modifying core KiroClaw functionality to reduce risk, but still had to register routes in shared files. Not being familiar with UI design, had to iterate by trial and error. It would have been much easier with standardized UI components and clear API access.
-* **Mochi (rayrayxu@)** — Built a desktop pet assistant as an Electron app that connects to the KiroClaw Gateway running on a Cloud Desktop. Spent significant time figuring out the auth flow. Ray has to read source code to understand cookie formats, secret file paths, and the token exchange mechanism. When the token auth system was introduced, it took multiple iterations to get the Electron app to authenticate correctly. There was no documented way for an outside app to obtain and refresh tokens. Even after getting it working, there was no way to distribute Mochi to other KiroClaw users without asking them to clone the repo and set it up manually.
-* **Pipeline Health Tool (moelansa@)** — Wanted to build a pipelines dependency visualization tool with in-place AI actions for issue resolution. Started building it outside KiroClaw and tried to call Gateway APIs directly. Ran into auth issues and couldn't distribute it to teammates easily. Quote: *"What if we have a way to accommodate custom apps in KiroClaw, similar to VS Code extensions — each app has its own config, a defined interface to talk to agents and sessions, and can be distributed via a tool like AIM."*
+* **Mochi (rayrayxu@)** — Built a desktop pet assistant as an Electron app that connects to the KiroClaw Gateway running on a remote host. Spent significant time figuring out the auth flow. Ray has to read source code to understand cookie formats, secret file paths, and the token exchange mechanism. When the token auth system was introduced, it took multiple iterations to get the Electron app to authenticate correctly. There was no documented way for an outside app to obtain and refresh tokens. Even after getting it working, there was no way to distribute Mochi to other KiroClaw users without asking them to clone the repo and set it up manually.
+* **Pipeline Health Tool (moelansa@)** — Wanted to build a pipelines dependency visualization tool with in-place AI actions for issue resolution. Started building it outside KiroClaw and tried to call Gateway APIs directly. Ran into auth issues and couldn't distribute it to teammates easily. Quote: *"What if we have a way to accommodate custom apps in KiroClaw, similar to VS Code extensions — each app has its own config, a defined interface to talk to agents and sessions, and can be distributed via a package manager."*
 
 * * *
 
 ## 2. What is a KiroClaw App
 
-A KiroClaw App is a self-contained extension that adds functionality to the KiroClaw platform. An app is defined by a manifest (`app.json`) and can include any combination of agents, skills, cron jobs, a dashboard UI page, and a backend service. An app must do something beyond what a single AIM package provides. It may coordinate multiple resources, adds a UI, runs a backend service, or manages its own scheduling. An app may bundle AIM packages as part of its resources, so the two systems compose naturally.
+A KiroClaw App is a self-contained extension that adds functionality to the KiroClaw platform. An app is defined by a manifest (`app.json`) and can include any combination of agents, skills, cron jobs, a dashboard UI page, and a backend service. An app must do something beyond what a single capability package provides. It may coordinate multiple resources, adds a UI, runs a backend service, or manages its own scheduling. An app may bundle capability packages as part of its resources, so the two systems compose naturally.
 
 ### App types
 
@@ -41,7 +41,7 @@ A key architectural distinction: **plugins extend the Gateway's capabilities; ap
 |---	|---	|---	|
 |Example	|Context injection (adds a new endpoint for silent LLM context), custom memory provider	|Secretary (uses existing chat, cron, notification APIs), Mochi (uses existing slot, spawn APIs)	|
 |Permission level	|Higher — can modify platform behavior	|Standard — operates within declared permissions	|
-|Review bar	|Requires core team review (changes platform contract)	|Standard CR review	|
+|Review bar	|Requires core team review (changes platform contract)	|Standard pull-request review	|
 
 Apps can depend on plugins (e.g., Mochi depends on the context injection plugin), but apps themselves do not modify KiroClaw's behavior. This separation ensures that the core platform remains stable — only reviewed plugins can change how the Gateway works.
 
@@ -49,16 +49,16 @@ Apps can depend on plugins (e.g., Mochi depends on the context injection plugin)
 
 The App Store is the single place where users discover, install, and manage apps (see Section 5 for the full design).
 
-### Apps vs AIM packages
+### Apps vs capability packages
 
-|A	|AIM Package	|KiroClaw App	|
+|A	|Capability Package	|KiroClaw App	|
 |---	|---	|---	|
 |Scope	|Single agent, skill, or MCP server	|Full application with lifecycle	|
 |---	|---	|---	|
 |UI	|None	|Optional dashboard pages	|
 |Backend	|None	|Optional backend service	|
 |Lifecycle	|Install/uninstall/enable/disable/update	|Install/uninstall/enable/disable/update	|
-|Distribution	|Gitfarm (AIM CLI)	|Gitfarm (App Store)	|
+|Distribution	|git (package manager)	|git (App Store)	|
 |Inclusion criteria	|Any useful agent or skill	|Must provide differentiated experience beyond agents/skills alone	|
 
 * * *
@@ -75,7 +75,7 @@ Derived from the user stories and the "what is an app" definition. These require
 |App builders need a type-safe client library for Gateway HTTP and WebSocket APIs	|Eliminates reimplementation of auth, retry, reconnection across consumers	|
 |Platform apps with UI must render inside the dashboard without breaking the host	|Enables rich app experiences while protecting platform stability	|
 |Apps must be isolated from each other — a buggy app cannot destroy another app's data	|Protects user data and other apps from accidental damage	|
-|The platform must support apps that run outside the Gateway process (desktop apps, CLI tools)	|Enables Mochi, MimirCLI, and future external integrations	|
+|The platform must support apps that run outside the Gateway process (desktop apps, CLI tools)	|Enables Mochi, external CLI tools, and future external integrations	|
 |App installation and auth must be transparent to the developer	|Reduces friction and auth-related bugs	|
 |App builders must be able to distribute their apps to other KiroClaw users without requiring manual setup	|Enables an app ecosystem where users discover and install apps with one click	|
 |The security model must protect critical data (memory, lessons, chat history) from unauthorized access	|Prevents data leakage between apps	|
@@ -134,17 +134,17 @@ The App Store solves the distribution problem. App builders can reach all KiroCl
 The App Store lives in the dashboard sidebar. It has two tabs:
 
 * **Apps** — Full KiroClaw Apps with UI, backend, or workflow integration. Curated — each app must provide a differentiated experience.
-* **Agents & Skills** — AIM packages (agent configs, skills, MCP servers).
+* **Agents & Skills** — capability packages (agent configs, skills, MCP servers).
 
 ### Installation
 
 One-click install from the App Store for platform apps. The platform handles downloading, manifest validation, resource registration (agents, skills, crons), and secret generation for app authentication. Apps with UI pages appear in the sidebar immediately after install.
 
-External apps declare their type in the manifest. When the platform can handle installation directly (e.g., downloading a binary), it offers one-click install. When client-side setup is required (e.g., a desktop Electron app on a Cloud Desktop), the App Store shows installation instructions instead. The app registers itself with the Gateway when it first connects.
+External apps declare their type in the manifest. When the platform can handle installation directly (e.g., downloading a binary), it offers one-click install. When client-side setup is required (e.g., a desktop Electron app on a remote host), the App Store shows installation instructions instead. The app registers itself with the Gateway when it first connects.
 
 ### Publishing
 
-App builders publish by submitting their app to a curated git-based registry via CR. The registry entry points to the app's GitFarm repo. When a user clicks Install, the platform clones the app and runs the install lifecycle.
+App builders publish by submitting their app to a curated git-based registry via pull request. The registry entry points to the app's git repository. When a user clicks Install, the platform clones the app and runs the install lifecycle.
 
 ### Self-managed apps
 
@@ -231,9 +231,9 @@ Memory write operations are not exposed to apps — only the Gateway's internal 
 
 ### 6.5 Trust Model & Review
 
-* All apps are from Amazon-internal GitFarm repos, CR-reviewed by Amazon employees
-* App UI runs in the shared React tree (no JS isolation) — acceptable for trusted internal code
-* Install scripts run with the same trust level as internal code
+* All apps are from git repositories, reviewed via pull request before being added to the registry
+* App UI runs in the shared React tree (no JS isolation) — acceptable for trusted, reviewed code
+* Install scripts run with the same trust level as any code you clone and run
 
 **Automated app review:** App repo CRs will include an AutoSDE review pass checking for manifest validation, destructive API usage, potential prompt injection in `injectContext` calls, hardcoded secrets, and permission mismatches. Advisory initially — human reviewer makes the final call.
 
@@ -269,7 +269,7 @@ All security-relevant operations are logged via SEL:
 
 ## 8. Future Vision
 
-The SDK is location-agnostic by design — it takes a `baseUrl` and authenticates via app-scoped tokens (Section 6.1), regardless of where the Gateway runs. Today that's localhost or a Cloud Desktop over SSH tunnel. If KiroClaw moves to a dedicated cloud service, the same `KiroClawClient` works without changes — only the auth model evolves (local secret → Midway/OAuth). This positions the SDK as the universal integration point for any internal tool that wants to tap into a user's KiroClaw context (memory, lessons, agents).
+The SDK is location-agnostic by design — it takes a `baseUrl` and authenticates via app-scoped tokens (Section 6.1), regardless of where the Gateway runs. Today that's localhost or a remote host over an SSH tunnel. If KiroClaw moves to a dedicated cloud service, the same `KiroClawClient` works without changes — only the auth model evolves (local secret → OAuth). This positions the SDK as the universal integration point for any tool that wants to tap into a user's KiroClaw context (memory, lessons, agents).
 * * *
 
 ## 9. Open Questions
@@ -364,7 +364,7 @@ API surface.
 Apps serve as an incubation ground for platform capabilities. When multiple apps independently implement the same pattern, that's a signal to extract it into core:
 
 * **Scheduling + polling:** Both Mochi and Secretary implement their own polling loops → candidate for a Gateway "watch" primitive
-* **Background agent dispatch + result injection:** Both Mochi and MimirCLI need async agent dispatch → led to the Context Injection API
+* **Background agent dispatch + result injection:** Both Mochi and external CLI tools need async agent dispatch → led to the Context Injection API
 * **Notification routing:** Secretary routes Slack messages; Mochi routes desktop notifications → candidate for a unified notification pipeline
 
 This creates a virtuous cycle: apps innovate → patterns emerge → patterns get extracted into core → SDK distributes them → all apps benefit.
@@ -378,7 +378,7 @@ mkdir my-app && cd my-app              # 1. Create app directory
 cd ui && npm run build                 # 3. Build UI (if app has UI)
 # POST /api/apps/install               # 4. Install locally
 # POST /api/apps/{name}/enable         # 5. Enable
-# Submit to app-registry.json via CR   # 6. Publish to App Store
+# Submit to app-registry.json via PR   # 6. Publish to App Store
 ```
 
 The app directory should contain:

@@ -17,7 +17,7 @@ from the `aws/amazon-q-developer-cli` source
 ~/.aws/sso/cache/
 ```
 
-Yes — the same directory `aws sso login` and `mwinit` write to. kiro-cli
+Yes — the same directory `aws sso login` writes to. kiro-cli
 reuses the path for historical reasons (it's a fork of
 `amazon-q-developer-cli`). There is no XDG override.
 

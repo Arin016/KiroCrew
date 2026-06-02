@@ -21,7 +21,7 @@ orchestration. You interact with it via Slack DMs or a web dashboard.
 ### Backend (pip)
 
 ```bash
-pip install kiro-claw
+pip install kiroclaw
 ```
 
 Or, from a checkout of the repository:
@@ -47,7 +47,7 @@ In development, `npm run dev` serves the dashboard with hot reload.
 Install the default ACP backend (published to npm):
 
 ```bash
-npm install -g @zed-industries/claude-code-acp   # claude-agent-acp
+npm install -g @agentclientprotocol/claude-agent-acp
 ```
 
 Alternatively, install the Claude Code CLI and set `agent.provider` to
@@ -114,7 +114,7 @@ tools, Slack credentials, gateway status, and vector memory.
 ## Updating
 
 ```bash
-pip install -U kiro-claw
+pip install -U kiroclaw
 ```
 
 For a checkout, `git pull` and rebuild the frontend (`cd website && npm run

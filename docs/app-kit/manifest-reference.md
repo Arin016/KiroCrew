@@ -217,7 +217,7 @@ only one app is uninstalled.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `dependencies.managedBy` | string | `"gateway"` | Who manages dependency lifecycle: `"gateway"` or `"app"` |
-| `dependencies.aim` | object | `{}` | AIM ecosystem dependencies (MCP servers, skills, agents) |
+| `dependencies.aim` | object | `{}` | Capability-package dependencies (MCP servers, skills, agents) installed via the optional `aim` package manager. If the `aim` CLI is not on PATH, these are skipped gracefully. |
 | `dependencies.aim.mcp` | object[] | `[]` | Required MCP server dependencies |
 | `dependencies.aim.skills` | object[] | `[]` | Required skill dependencies |
 | `dependencies.aim.agents` | object[] | `[]` | Required agent dependencies |
@@ -263,7 +263,7 @@ Control how KiroClaw manages the app:
 When `installMode` is `"client"`, the App Store shows copy-paste terminal
 instructions instead of running the install on the server. This is used for
 apps that must run on the user's local machine (e.g. Electron desktop apps
-when KiroClaw runs on a Cloud Desktop).
+when KiroClaw runs on a remote host).
 
 ## Validation Rules
 

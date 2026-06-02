@@ -16,7 +16,7 @@ tools, credentials, gateway status, and vector memory.
 KiroClaw needs an agent backend on your PATH. Install the default ACP backend:
 
 ```bash
-npm install -g @zed-industries/claude-code-acp   # claude-agent-acp
+npm install -g @agentclientprotocol/claude-agent-acp
 ```
 
 Or install the Claude Code CLI and set `kiroclaw config set agent.provider claude_code`.

@@ -1,11 +1,11 @@
 # KiroClaw
 
-> ⚠️ **Do not enter Critical or Restricted classified data into KiroClaw. Your cloud desktop and laptop are not approved to handle this data classification. See the [Data Handling Standard](https://policy.a2z.com/docs/99/publication).**
+> ⚠️ **Be mindful of what you share with any AI agent. Avoid pasting secrets, credentials, or sensitive personal data into KiroClaw chats.**
 
-Personal AI agent for Amazon engineers. Powered by `kiro-cli` via ACP (Agent Client Protocol). **[What's New](../CHANGELOG.md)**
+Open-source personal AI agent (CLI + Slack gateway + web dashboard). Powered by an ACP (Agent Client Protocol) backend — the default is `claude-agent-acp`. **[What's New](../CHANGELOG.md)**
 
 ```
-CLI / Slack DM / Dashboard → KiroClaw → kiro-cli acp → LLM + MCP tools
+CLI / Slack DM / Dashboard → KiroClaw → ACP agent backend → LLM + MCP tools
 ```
 
 ## Quick Start
@@ -26,7 +26,7 @@ kiroclaw setup                # interactive wizard
 kiroclaw gateway              # open http://localhost:7777
 ```
 
-> **Windows is not currently supported.** kiro-cli is only available on macOS and Linux. Use a macOS machine or Cloud Desktop (Linux) for full KiroClaw features.
+> **Windows is not currently supported.** The OS-level sandbox relies on Linux namespaces or macOS Seatbelt, so KiroClaw runs on macOS and Linux. Use a macOS machine or a Linux host for full features.
 >
 > **Vector memory** uses Ollama for embeddings. Install via `brew install ollama` (recommended on all platforms). Markdown memory works without Ollama.
 >
@@ -41,16 +41,16 @@ Run the gateway as a launchd service so it starts on login and auto-restarts on 
 ```bash
 # Set your actual paths
 KIROCLAW_BIN=$(which kiroclaw)                    # or specify full path
-KIROCLAW_DIR="$HOME/workplace/KiroClaw/src/KiroClaw"  # update this
+KIROCLAW_DIR="$HOME/kiroclaw"                     # update this to your clone
 mkdir -p ~/Library/Logs/KiroClaw
 
-cat > ~/Library/LaunchAgents/com.amazon.kiroclaw.gateway.plist << EOF
+cat > ~/Library/LaunchAgents/dev.kiroclaw.gateway.plist << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.amazon.kiroclaw.gateway</string>
+    <string>dev.kiroclaw.gateway</string>
     <key>ProgramArguments</key>
     <array>
         <string>$KIROCLAW_BIN</string>
@@ -63,7 +63,7 @@ cat > ~/Library/LaunchAgents/com.amazon.kiroclaw.gateway.plist << EOF
         <key>KIROCLAW_PROJECT_DIR</key>
         <string>$KIROCLAW_DIR</string>
         <key>PATH</key>
-        <string>$KIROCLAW_DIR/bin:$HOME/.toolbox/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>$KIROCLAW_DIR/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -81,19 +81,19 @@ EOF
 Paths are expanded at creation time via shell variables. Then load:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.amazon.kiroclaw.gateway.plist
+launchctl load ~/Library/LaunchAgents/dev.kiroclaw.gateway.plist
 ```
 
-Manage with: `launchctl start|stop com.amazon.kiroclaw.gateway`. Uninstall with `launchctl unload` + `rm` the plist.
+Manage with: `launchctl start|stop dev.kiroclaw.gateway`. Uninstall with `launchctl unload` + `rm` the plist. (Or just use `kiroclaw service install` / `uninstall`, which manages this plist for you.)
 
-### Remote Desktop (24/7 Operation)
+### Remote Host (24/7 Operation)
 
-Run KiroClaw on an always-on Cloud Desktop so the Slack bot, cron jobs, and task runner work while your laptop sleeps.
+Run KiroClaw on an always-on remote Linux host (a VPS or cloud VM) so the Slack bot, cron jobs, and task runner work while your laptop sleeps.
 
 **Recommended setup:**
-- **OS**: Amazon Linux 2023 (AL2023) — recommended over AL2 (EOL June 2025)
-- **Instance**: m7a.4xlarge (16 vCPU, 64GB RAM). KiroClaw itself uses ~10GB RAM, but MCP cold starts and heavy tool calls (e.g. `brazil-build`) can cause memory spikes well beyond that. Extra vCPUs help with CPU-intensive tool calls like Brazil builds and parallel subagent execution.
-- **Architecture**: x86_64
+- **OS**: A current Linux distribution (e.g. Ubuntu 22.04+ or a recent Debian/Fedora release)
+- **Resources**: ~16 vCPU and 64GB RAM is comfortable for heavy use. KiroClaw itself uses ~10GB RAM, but MCP cold starts and CPU-intensive tool calls can cause memory spikes well beyond that. Extra vCPUs help with CPU-intensive tool calls and parallel subagent execution.
+- **Architecture**: x86_64 or arm64
 
 See [REMOTE_DESKTOP_SETUP.md](REMOTE_DESKTOP_SETUP.md) for the full setup guide.
 
@@ -176,7 +176,6 @@ Full-featured React SPA at `localhost:7777` (or `http://kiroclaw.localhost:7777`
 - **Incognito mode** — ephemeral sessions that block `learn_add` and memory consolidation
 - **File picker** — `@filename` in chat input triggers fuzzy file search scoped to active project
 - **Project picker** — set active project directory per session; recent projects + directory browser
-- **Mwinit terminal** — PTY-based WebSocket terminal for mwinit authentication with RSA-OAEP encrypted input
 - **Session archive viewer** — browse rotated/compacted session archives under Developer page
 - **Subagent progress bar** — compact expandable indicator showing running agents and current tools
 - **Real-time tool status** — live tool call status and results streamed to the dashboard as they execute
@@ -186,8 +185,6 @@ Full-featured React SPA at `localhost:7777` (or `http://kiroclaw.localhost:7777`
 - **`kiroclaw stop` command** — stop a running gateway via SIGTERM with port-based PID lookup
 - **`kiroclaw service` command** — install/uninstall/status for system-level daemon (systemd on Linux, launchd on macOS) with auto-restart on crash
 - **`kiroclaw logs` command** — tail systemd journal, launchd stdout, or gateway.log depending on install type
-- **Warehouse World scene** — interactive Peccy agent scene with click-to-chat
-- **CloudWatch RUM** — optional AWS CloudWatch RUM integration for user analytics
 - **CSRF protection** — allowed origin derived from `dashboard.url` config
 - **Edit & resend** — edit and resend previous user messages with history preserved
 - **Rewind** — edit any past user message in place and replay the conversation from that point
@@ -229,27 +226,33 @@ Full-featured React SPA at `localhost:7777` (or `http://kiroclaw.localhost:7777`
 - **FollowUp bar toggle** — click follow-up options to toggle text in input field
 - **Tool approval visibility** — improved visual prominence of tool approval boxes
 - **Strict schedule toggle** — cron creation UI includes strict_schedule checkbox
-- **AEA tunnel integration** — automatic Amazon Tunnels management for mobile dashboard access from postured devices; dynamic CORS, presigned links use tunnel URL, status pill in top bar
+- **Tunnel integration** — optional reverse-tunnel support for mobile dashboard access; dynamic CORS, presigned links use the tunnel URL, status pill in top bar
 - **Tool I/O detail panel** — tool input/output persisted on message meta for inline inspection
 - **Steering resource loading** — workspace `.kiro/steering` resources loaded into dashboard sessions
 
 ### Desktop App (Electron)
 
-Native macOS app wrapping the web dashboard. Auto-starts the gateway backend and connects to `localhost:7777`.
+Native desktop app (macOS DMG / Linux AppImage) wrapping the web dashboard. Bundles a PyInstaller backend so end users need no Python, pip, or npm; auto-starts the gateway and connects to `localhost:7777`.
 
 - **Multi-tab gateways** — connect to multiple KiroClaw gateways simultaneously in separate tabs
 - **WebContentsView architecture** — modern tab/window management replacing legacy BrowserView
 - **Remote Tunnel auto-discovery** — auto-discover kiroclaw binary over SSH in Remote Tunnel mode
-- **Toolbox bin resolution** — finds kiroclaw binary in toolbox path for Electron launches
+- **Binary resolution** — finds the kiroclaw binary on `PATH` (or the bundled backend) for Electron launches
 
-> **Note:** The Electron app moved to the `KiroClawWebsite` package in v2.3.0.
+The Electron wrapper lives in `website/electron/`. Build a distributable app with:
 
 ```bash
-git clone ssh://git.amazon.com/pkg/KiroClawWebsite ~/kiroclaw-electron
-cd ~/kiroclaw-electron/electron && npm install && npx electron .
+make desktop
+# → website/electron/dist/KiroClaw-*.dmg (macOS) or *.AppImage (Linux)
 ```
 
-See the [KiroClawWebsite electron/README.md](https://code.amazon.com/packages/KiroClawWebsite/blobs/mainline/--/electron/README.md) for build and packaging details.
+For local development you can run the wrapper directly:
+
+```bash
+cd website/electron && npm install && npx electron .
+```
+
+See `website/electron/README.md` for build and packaging details.
 
 ### Autonomous Task Runner
 
@@ -411,19 +414,21 @@ Edit skills in `skills/` without rebuilding. See `skills/README.md`.
 
 ### MCP Tool Discovery
 
-Only `builder-mcp`, `slack-mcp`, and `kiroclaw-cron` are loaded at startup — no auto-scan. Additional MCP servers are discovered on-demand from the dashboard:
+Only `kiroclaw-core` and `kiroclaw-cron` are loaded at startup — no auto-scan. Additional MCP servers (including `slack-mcp`) are discovered on-demand from the dashboard:
 - **⚡ Discover & Sync** — scans `~/.kiro/settings/mcp.json` and `~/.kiroclaw/mcp.json`, adds new servers to `agents/defaults.json`
 - **🔍 Probe All** — spawns each MCP server, sends initialize + tools/list handshake
 - **Enable/Disable** — toggle individual servers without removing them
 - **Live badges** — color-coded server status (Online/Error/Unknown)
 
-Install additional MCP servers via AIM: `aim mcp install <server-name>`
+Install additional MCP servers by adding them to `~/.kiroclaw/mcp.json` (or `~/.kiro/settings/mcp.json`) and clicking **Discover & Sync** in the dashboard.
 
 Built-in MCP servers:
+- `kiroclaw-core` — spawn, learn, task, wait, hook, send_message, file_send tools (native MCP, auto-configured)
 - `kiroclaw-cron` — cron job management (native MCP, auto-configured)
-- `builder-mcp` — ReadInternalWebsites, TicketingReadActions, TaskeiListTasks, TaskeiGetTask, InternalSearch, QuipEditor
-- `slack-mcp` — Slack integration
-- `aws-outlook-mcp` — Email and calendar via Outlook
+
+Common on-demand servers:
+- `slack-mcp` — Slack integration (discovered when Slack is configured)
+- `aws-outlook-mcp` — email and calendar via Outlook (optional)
 
 ### App Kit Platform
 
@@ -436,7 +441,6 @@ Build and distribute apps that run inside KiroClaw. Apps can be dashboard-hosted
 - **Gateway proxy** — `/api/apps/:id/*` proxies requests to app backends
 - **Dependency management** — apps declare dependencies; the platform resolves and installs them
 - **Gateway hooks** — apps register lifecycle hooks (session start/end, tool call, message) for analytics and guardrails
-- **AIM dependency resolution** — `dependencies.aim` in manifest auto-installs required AIM packages on enable
 - **Chat embedding** — `ChatEmbed` SDK component embeds a full chat interface within app UIs
 - **Fix with AI** — failed installs show "Fix with AI" button that sends errors to the agent
 - **Builtin auto-discovery** — frontend automatically discovers and registers routes for builtin apps
@@ -515,14 +519,14 @@ The dashboard also checks for updates on startup and every 12 hours. When a newe
 
 ## Setup
 
-1. Create a Slack App — see [SLACK_SETUP.md](../SLACK_SETUP.md) for the full walkthrough (manifest import, OPUS sandbox, token generation)
+1. Create a Slack App — see [SLACK_SETUP.md](../SLACK_SETUP.md) for the full walkthrough (manifest import, workspace approval, token generation)
 2. Run `kiroclaw setup` and paste your tokens
 
 **Dashboard-only mode**: Leave both Slack tokens empty during `kiroclaw setup` to skip Slack and run the web dashboard only via `kiroclaw gateway`.
 
 ## Architecture
 
-The frontend (React SPA) lives in the [KiroClawWebsite](https://code.amazon.com/packages/KiroClawWebsite) package. This package contains the Python backend and bundled static assets.
+The frontend (React SPA) lives in `website/`; the Python backend lives under `src/kiro_claw/`. Production frontend builds are bundled into `src/kiro_claw/static/dist/`.
 
 ```
 src/kiro_claw/
@@ -631,7 +635,7 @@ Config: `~/.kiroclaw/config.json`
   },
   "session": { "timeout_secs": 1800, "pool_size": 0, "pool_agent": "" },
   "hooks": {
-    "auto_approve_tools": ["ReadFile", "builder-mcp--*"],
+    "auto_approve_tools": ["ReadFile", "kiroclaw-core--*"],
     "auto_replies": [{"pattern": "ping", "reply": "pong 🦞", "exact": true}]
   },
   "slack": {
@@ -664,49 +668,36 @@ Credentials: `~/.kiroclaw/.env` — `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, `KIROC
 
 ## Troubleshooting
 
-### Build fails with `brazil-path failed with exit code: 1`
+### Build fails (frontend or backend)
 
-Brazil's toolchain (including `brazil-path`) is written in Java and requires Java 8 configured. This affects all packages, including Python ones. Fix:
-
-```bash
-brew install --cask corretto8      # install Java 8 (macOS)
-brazil setup --java                # register Java paths with Brazil
-brazil-build clean && brazil-build
-```
-
-On Linux (Cloud Desktop), Java is usually pre-installed. If not: `sudo yum install -y java-1.8.0-amazon-corretto`
-
-The `setup.sh` script auto-detects this and runs `brazil setup --java` if needed.
-
-### macOS build fails with `ld-linux-aarch64.so.1: No such file or directory`
-
-Brazil resolved a Linux aarch64 Python binary that can't run natively on macOS. Fix:
+The build has two halves: the React dashboard (`npm`) and the Python backend (`pip`). Common fixes:
 
 ```bash
-brazil ws use --platform AL2_aarch64
-brazil setup platform-support --force
-brazil-build clean && brazil-build
+# Frontend build errors → rebuild the dashboard, then re-bundle it
+cd website && npm install && npm run build && cd ..
+cp -r website/dist src/kiro_claw/static/dist
+
+# Backend install errors → reinstall into a clean venv
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
+
+# Or do both in one shot
+make build
 ```
 
-### `setup.sh` hangs at "Setting up platform (AL2_aarch64)..."
-
-`brazil setup platform-support` downloads cross-compilation toolchains and can take 10+ minutes on first run. Let it finish. If it's truly stuck, Ctrl+C and run manually:
-
-```bash
-brazil setup platform-support --force
-```
+If you see Node/GLIBC errors, confirm your Node version (Node 16+ via nvm is the tested baseline).
 
 ### `AcpTimeoutError: ACP prompt timed out`
 
-kiro-cli didn't respond to the initialize handshake in time. Common causes:
+The agent backend didn't respond to the initialize handshake in time. Common causes:
 
-1. **kiro-cli not logged in** — run `kiro-cli whoami`, then `kiro-cli login` if needed
-2. **Broken MCP servers in config** — a stale or missing MCP server binary in `~/.kiro/agents/kiroclaw.json` can cause kiro-cli to hang during startup. Fix with a clean reinstall:
+1. **Backend not installed** — confirm the default backend is present: `npm install -g @agentclientprotocol/claude-agent-acp` (or check your configured agent backend).
+2. **Broken MCP servers in config** — a stale or missing MCP server binary in `~/.kiro/agents/kiroclaw.json` can cause the backend to hang during startup. Fix with a clean reinstall:
    ```bash
    kiroclaw setup --agent-only --clean
    ```
-3. **First launch is slow** — kiro-cli loads MCP servers on first start, which can take over a minute. The init timeout is 120s with one automatic retry.
-4. **Network issues** — kiro-cli needs to reach AWS services. Check VPN/connectivity.
+3. **First launch is slow** — the backend loads MCP servers on first start, which can take over a minute. The init timeout is 120s with one automatic retry.
+4. **Network issues** — the agent backend needs to reach its LLM provider. Check connectivity.
 
 Diagnostic steps:
 
@@ -739,7 +730,7 @@ kiroclaw setup --agent-only --clean  # nuclear option: fresh config, no merge
 
 | Document | Description |
 |----------|-------------|
-| [SLACK_SETUP.md](../SLACK_SETUP.md) | Slack app creation, OPUS approval, slash commands |
+| [SLACK_SETUP.md](../SLACK_SETUP.md) | Slack app creation, workspace approval, slash commands |
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | Development setup, workflow, PR guidelines |
 | [AGENTS.md](../AGENTS.md) | AI assistant rules, code style, architecture reference |
 | [DEPENDENCIES.md](../DEPENDENCIES.md) | Full dependency list and manual install |
@@ -752,10 +743,10 @@ kiroclaw setup --agent-only --clean  # nuclear option: fresh config, no merge
 | [app-kit/getting-started.md](app-kit/getting-started.md) | App Kit developer guide |
 | [app-kit/manifest-reference.md](app-kit/manifest-reference.md) | App manifest reference |
 | [APP_STORE_GUIDELINES.md](APP_STORE_GUIDELINES.md) | App Store publishing guidelines |
-| [MOBILE_ACCESS_SETUP.md](MOBILE_ACCESS_SETUP.md) | Mobile dashboard access (AEA + Tunnels) |
+| [MOBILE_ACCESS_SETUP.md](MOBILE_ACCESS_SETUP.md) | Mobile dashboard access (tunnels) |
 | [kiro-cli/](kiro-cli/) | kiro-cli documentation (installation, chat, MCP, hooks, skills) |
 | [design/SOFT-STOP-DESIGN.md](design/SOFT-STOP-DESIGN.md) | Cooperative soft-stop design |
-| [REMOTE_DESKTOP_SETUP.md](REMOTE_DESKTOP_SETUP.md) | 24/7 Cloud Desktop setup |
+| [REMOTE_DESKTOP_SETUP.md](REMOTE_DESKTOP_SETUP.md) | 24/7 remote host setup |
 | [team-communication.md](team-communication.md) | Team communication guidelines |
 | [system-specs/](system-specs/) | Module-level specifications |
 
@@ -764,14 +755,23 @@ kiroclaw setup --agent-only --clean  # nuclear option: fresh config, no merge
 See [AGENTS.md](../AGENTS.md) for guidelines.
 
 ```bash
-# Development (brazil-build for linting, mypy, tests):
-brazil-build format                              # auto-fix formatting
-brazil-build clean && brazil-build               # rebuild after source changes
-brazil-build test                                # pytest + mypy + flake8 + format checks
+# Formatting & linting
+black src tests                                  # auto-fix formatting
+isort src tests                                  # sort imports
+flake8 src tests                                 # lint
+mypy src                                         # type-check
+
+# Tests
+pytest                                           # run the test suite
+make test                                        # format checks + flake8 + mypy + pytest
 ```
 
 ### Frontend Development
 
-The frontend React SPA has moved to the [KiroClawWebsite](https://code.amazon.com/packages/KiroClawWebsite) package. Production builds are bundled into `src/kiro_claw/static/dist/` during `brazil-build` via `build-frontend.sh`.
+The frontend React SPA lives in `website/`. For local development:
 
-For frontend development, check out KiroClawWebsite and follow its README.
+```bash
+cd website && npm install && npm run dev
+```
+
+Production builds are bundled into `src/kiro_claw/static/dist/` (run `npm run build`, then copy `website/dist` into `src/kiro_claw/static/dist`, or just `make build`).

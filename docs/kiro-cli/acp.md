@@ -179,7 +179,7 @@ Kiro CLI spec uses `prompt` for the system prompt field in agent config JSON fil
   "model": "auto",
   "description": "Agent description",
   "prompt": "You are a helpful assistant.",
-  "tools": ["@builder-mcp"]
+  "tools": ["@kiroclaw-core"]
 }
 ```
 

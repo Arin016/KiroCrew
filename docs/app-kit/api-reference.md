@@ -407,7 +407,7 @@ endpoints. Apps can also call them directly via `fetch()`.
 |--------|------|-------------|
 | GET | `/api/apps` | List all installed apps |
 | GET | `/api/apps/registry` | List available apps from registry |
-| GET | `/api/apps/blob?repo=&path=&ref=` | Proxy images from GitFarm repos |
+| GET | `/api/apps/blob?repo=&path=&ref=` | Proxy images from a registry app's git repo |
 | POST | `/api/apps/install` | Install from local path |
 | POST | `/api/apps/register` | Register a self-managed app |
 | POST | `/api/apps/registry/install` | Install from registry |

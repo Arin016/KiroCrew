@@ -112,7 +112,7 @@ Edit `agents/sample-agent.json` to customize your agent:
   "model": "auto",
   "description": "Analyzes data and generates reports",
   "prompt": "You are a data analyst assistant.",
-  "tools": ["@builder-mcp"]
+  "tools": ["@kiroclaw-core"]
 }
 ```
 
@@ -240,7 +240,7 @@ async def main():
         crons = await mc.list_crons()
 
         # Inject silent context (for background info)
-        await mc.inject_context("slot-id", "CR-456 was approved", source="watch")
+        await mc.inject_context("slot-id", "PR #456 was approved", source="watch")
 
 asyncio.run(main())
 ```

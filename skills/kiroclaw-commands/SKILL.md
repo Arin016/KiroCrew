@@ -202,8 +202,8 @@ LLM-generated UI components (widgets, HTML, markdown, SVG, JSON, text).
 | Command | Description |
 |---------|-------------|
 | `kiroclaw config get` | Show all config |
-| `kiroclaw config get dashboard.port` | Get specific value (dot-separated key) |
-| `kiroclaw config set dashboard.port 8888` | Set a config value |
+| `kiroclaw config get agent.provider` | Get specific value (dot-separated key) |
+| `kiroclaw config set dashboard.url http://localhost:7777` | Set a config value (port is the KIROCLAW_PORT env var, not a config key) |
 | `kiroclaw config set --file config.json` | Load full config from JSON file |
 | `kiroclaw config edit` | Open config in $EDITOR |
 

@@ -38,7 +38,7 @@ Hides credential paths from the kiro-cli subprocess tree using platform-native i
 7. Scrubs sensitive env vars
 8. Execs the agent binary
 
-Two-pipe synchronization ensures correct ordering. The child retains the real UID/GID so toolchains (JVM, brazil-build, Gradle, npm) work without workarounds.
+Two-pipe synchronization ensures correct ordering. The child retains the real UID/GID so toolchains (JVM, Gradle, npm, build tools) work without workarounds.
 
 **macOS** — Seatbelt sandbox:
 - `sandbox-exec` with a generated Seatbelt profile that denies file reads on credential paths
@@ -63,9 +63,9 @@ Protection depth depends on the access path:
 
 Standard mode allows git-over-SSH via key files, AWS CLI via `credential_process`, and kubectl. Note: `SSH_AUTH_SOCK` is scrubbed in both Standard and Strict modes, so ssh-agent forwarding is unavailable unless the sandbox is set to `"off"`. Users relying on passphrase-protected keys or hardware tokens must either use unencrypted key files directly or set `agent.sandbox` to `"off"`.
 
-### AL2 Compatibility
+### Wrapper-Shim Compatibility
 
-On AL2, kiro-cli is a bash shim (`aim sandbox --client kiro-cli`). `_resolve_real_kiro_bin()` bypasses the shim by resolving the real ELF binary (magic byte check rejects shell scripts).
+On some installs the agent backend (`kiro-cli`) is a bash shim that re-execs the real binary through a launcher, which can fail inside a user namespace. `_resolve_real_kiro_bin()` bypasses the shim by resolving the real ELF binary (magic byte check rejects shell scripts).
 
 ## Layer 1: Filesystem Protection (`security.py` + `hooks.py`)
 
@@ -258,9 +258,9 @@ Origin/Referer validation on POST/PUT/DELETE. Shared `check_origin()` for both H
 
 ### Enterprise Grid Validation
 
-Two-layer defense against data exfiltration to personal/external Slack workspaces:
-1. **Startup**: `auth.test` verifies `enterprise_id` matches Amazon production/sandbox
-2. **Per-message**: compares event `team` field against cached `team_id`
+Optional two-layer defense against data exfiltration to personal/external Slack workspaces. Default-open: with no `slack.allowed_enterprise_ids` configured, all workspaces the bot can reach are allowed.
+1. **Startup**: `auth.test` records the bot's workspace `team_id`; on Enterprise Grid it also captures the org-level enterprise ID. Operators may restrict the bot to specific workspaces via the `slack.allowed_enterprise_ids` allowlist.
+2. **Per-message**: compares event `team` field against the cached/allowlisted IDs.
 
 ## Observe Mode Context Isolation
 
@@ -286,7 +286,7 @@ Two-layer defense against data exfiltration to personal/external Slack workspace
 
 ### Gap 1: No Network Egress Control
 **Problem**: The sandbox hides credential files but doesn't restrict network access. A compromised agent could `curl` data to an external server using non-credential data.
-**Suggestion**: Add optional network namespace isolation (Linux) or outbound firewall rules. Allow-list internal domains (*.amazon.com, *.a2z.com) and block all other egress.
+**Suggestion**: Add optional network namespace isolation (Linux) or outbound firewall rules. Allow-list trusted domains (e.g. your LLM provider and any internal services) and block all other egress.
 
 ### Gap 2: No cgroups/ulimits for Resource Isolation
 **Problem**: Agent subprocesses can consume unlimited CPU/memory. A runaway process can OOM the host (documented in `resource-protection.md` as known gap).

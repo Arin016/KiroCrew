@@ -106,7 +106,7 @@ MyAppRepo/
 ## 4. Submit to App Registry
 
 The App Registry is a curated list in `src/kiro_claw/apps/app-registry.json`.
-Adding your app requires a Code Review (CR).
+Adding your app means opening a pull request against the KiroClaw repo.
 
 ### Add registry entry
 
@@ -116,8 +116,8 @@ Edit `app-registry.json` in the KiroClaw repo:
 [
   {
     "name": "my-app",
-    "repo": "MyAppRepo",
-    "branch": "mainline"
+    "gitUrl": "https://github.com/yourname/my-app",
+    "branch": "main"
   }
 ]
 ```
@@ -127,8 +127,8 @@ If your app is in a subdirectory of a larger repo:
 ```json
 {
   "name": "my-app",
-  "repo": "MonoRepo",
-  "branch": "mainline",
+  "gitUrl": "https://github.com/yourname/monorepo",
+  "branch": "main",
   "subdirectory": "apps/my-app"
 }
 ```
@@ -138,22 +138,23 @@ If your app is in a subdirectory of a larger repo:
 | Field | Required | Description |
 |-------|----------|-------------|
 | `name` | yes | Must match `app.json` name |
-| `repo` | yes | GitFarm package name (ssh://git.amazon.com/pkg/{repo}) |
-| `branch` | yes | Branch to clone from (usually `mainline`) |
+| `gitUrl` | yes | Any git-cloneable URL (e.g. `https://github.com/...`, `git@host:...`). The legacy `repo` field is also accepted and used as the clone target when no `gitUrl` is given. |
+| `branch` | yes | Branch to clone from (usually `main`) |
 | `subdirectory` | no | Path within repo if app isn't at root |
-| `versionSet` | yes | Brazil version set (e.g. `"KiroClaw/development"`). All registry apps are installed via Brazil workspaces. |
 | `resources` | no | `"gateway"` (default) or `"app"` — who registers agents/skills/MCP |
 | `lifecycle` | no | `"gateway"` (default), `"app"`, or `"locked"` — who manages lifecycle |
 | `detectInstalled` | no | Shell command to check if already installed (for self-managed apps) |
 
-### Submit CR
+### Submit a pull request
 
 ```bash
 cd /path/to/KiroClaw
+git checkout -b add-my-app
 # Edit src/kiro_claw/apps/app-registry.json
 git add src/kiro_claw/apps/app-registry.json
 git commit -m "feat(apps): add my-app to registry"
-cr --summary "[KiroClaw] Add my-app to App Store registry"
+git push origin add-my-app
+# Open a pull request titled "Add my-app to App Store registry"
 ```
 
 ### What happens during review
@@ -167,7 +168,7 @@ Reviewers check:
 
 ## 5. User Installation Flow
 
-After your CR merges, users can install your app:
+After your pull request merges, users can install your app:
 
 ### From App Store UI
 
@@ -243,6 +244,6 @@ Self-managed apps:
 | Install locally | `POST /api/apps/install` or App Store UI |
 | Enable | `POST /api/apps/{name}/enable` |
 | Test | Open dashboard, verify UI + agents + crons |
-| Submit | Add to `app-registry.json`, create CR |
+| Submit | Add to `app-registry.json`, open a pull request |
 | User install | App Store → Browse → Install |
 | Update | Bump version, push, users re-install |
