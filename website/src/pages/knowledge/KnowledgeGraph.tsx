@@ -1,0 +1,201 @@
+import { useEffect, useRef } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { Network, RotateCcw } from 'lucide-react'
+import { EmptyState } from '../../components/ui'
+import { knowledgeApi } from './api'
+import type { GraphData } from './types'
+
+const TYPE_COLORS: Record<string, string> = { service: '#3b82f6', technology: '#22c55e', concept: '#a855f7', org: '#f97316' }
+
+export default function KnowledgeGraph({ onSelectEntity, highlightEntity }: { onSelectEntity?: (name: string) => void; highlightEntity?: string | null }) {
+  const svgRef = useRef<SVGSVGElement>(null)
+  const zoomRef = useRef<{ reset: () => void; zoomToNode?: (name: string) => void } | null>(null)
+  const simRef = useRef<any>(null)
+  const renderedKeyRef = useRef<string>('')
+  const onSelectRef = useRef(onSelectEntity)
+  onSelectRef.current = onSelectEntity
+  const highlightRef = useRef(highlightEntity)
+  highlightRef.current = highlightEntity
+  const { data: graph, isLoading } = useQuery({ queryKey: ['knowledge-graph'], queryFn: () => knowledgeApi<GraphData>('/graph?limit=200') })
+
+  // Highlight a node when highlightEntity changes (without full re-render)
+  useEffect(() => {
+    if (!svgRef.current) return
+    if (!highlightEntity) {
+      // Reset all nodes to default style
+      const style = getComputedStyle(document.documentElement)
+      const textColor = style.getPropertyValue('--text').trim() || '#fff'
+      const circles = svgRef.current.querySelectorAll('g[data-entity] circle')
+      circles.forEach(circle => {
+        circle.setAttribute('stroke', textColor)
+        circle.setAttribute('stroke-width', '1.5')
+        circle.setAttribute('r', '8')
+      })
+      return
+    }
+    const svg = svgRef.current
+    const style = getComputedStyle(document.documentElement)
+    const accent = style.getPropertyValue('--accent').trim() || '#fbbf24'
+    const text = style.getPropertyValue('--text').trim() || '#fff'
+    const nodes = svg.querySelectorAll('g[data-entity]')
+    nodes.forEach(n => {
+      const circle = n.querySelector('circle')
+      if (!circle) return
+      if (n.getAttribute('data-entity') === highlightEntity) {
+        circle.setAttribute('stroke', accent)
+        circle.setAttribute('stroke-width', '4')
+        circle.setAttribute('r', '12')
+      } else {
+        circle.setAttribute('stroke', text)
+        circle.setAttribute('stroke-width', '1.5')
+        circle.setAttribute('r', '8')
+      }
+    })
+    // Zoom to the highlighted node (poll until graph is ready on first load)
+    if (zoomRef.current?.zoomToNode) {
+      zoomRef.current.zoomToNode(highlightEntity)
+    } else {
+      let attempts = 0
+      const interval = setInterval(() => {
+        attempts++
+        if (zoomRef.current?.zoomToNode) {
+          zoomRef.current.zoomToNode(highlightEntity)
+          clearInterval(interval)
+        } else if (attempts > 20) {
+          clearInterval(interval)
+        }
+      }, 200)
+      return () => clearInterval(interval)
+    }
+  }, [highlightEntity])
+
+  useEffect(() => {
+    if (!graph || !graph.nodes.length || !svgRef.current) return
+    const key = graph.nodes.map(n => n.id).join(',') + '|' + graph.edges.length
+    if (key === renderedKeyRef.current) return
+    renderedKeyRef.current = key
+
+    const svg = svgRef.current
+    while (svg.firstChild) svg.removeChild(svg.firstChild)
+
+    const style = getComputedStyle(document.documentElement)
+    const textColor = style.getPropertyValue('--text').trim() || '#ccc'
+    const mutedColor = style.getPropertyValue('--muted').trim() || '#888'
+    const accentColor = style.getPropertyValue('--accent').trim() || '#fbbf24'
+
+    let aborted = false
+    import('d3').then(d3 => {
+      if (aborted) return
+      const s = d3.select(svg)
+      const g = s.append('g')
+
+      const zoom = d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.3, 4]).on('zoom', (e) => g.attr('transform', e.transform))
+      s.call(zoom as any)
+
+      // Deep-clone to avoid mutating React Query cache
+      const simNodes = graph.nodes.map(n => ({ ...n }))
+      const simEdges = graph.edges.map(e => ({ ...e }))
+
+      simRef.current?.stop()
+      const sim = d3.forceSimulation(simNodes as any)
+        .force('link', d3.forceLink(simEdges).id((d: any) => d.id).distance(80))
+        .force('charge', d3.forceManyBody().strength(-200))
+        .force('collision', d3.forceCollide(25))
+        .alphaDecay(0.08)
+        .stop()
+      simRef.current = sim
+
+      for (let i = 0; i < 300; i++) sim.tick()
+
+      const width = svg.clientWidth || 800
+      const height = svg.clientHeight || 500
+      const xs = simNodes.map((d: any) => d.x as number)
+      const ys = simNodes.map((d: any) => d.y as number)
+      const x0 = Math.min(...xs), x1 = Math.max(...xs)
+      const y0 = Math.min(...ys), y1 = Math.max(...ys)
+      const pad = 60
+      const bw = (x1 - x0) || 1, bh = (y1 - y0) || 1
+      const scale = Math.min((width - pad * 2) / bw, (height - pad * 2) / bh, 1.5)
+      const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2
+      const fitTransform = d3.zoomIdentity.translate(width / 2 - cx * scale, height / 2 - cy * scale).scale(scale)
+      s.call(zoom.transform as any, fitTransform)
+      zoomRef.current = {
+        reset: () => s.transition().duration(300).call(zoom.transform as any, fitTransform),
+        zoomToNode: (name: string) => {
+          const target = (simNodes as any[]).find((n: any) => n.name === name)
+          if (!target) return
+          const w = svg.clientWidth || 800, h = svg.clientHeight || 500
+          const t = d3.zoomIdentity.translate(w / 2 - target.x * 2, h / 2 - target.y * 2).scale(2)
+          s.transition().duration(500).call(zoom.transform as any, t)
+        },
+      }
+
+      const link = g.append('g').attr('stroke', mutedColor).attr('stroke-opacity', 1)
+        .selectAll('line').data(simEdges).join('line').attr('stroke-width', (d: any) => Math.max(1.5, (d.weight || 1) * 1.5))
+        .attr('x1', (d: any) => d.source.x).attr('y1', (d: any) => d.source.y)
+        .attr('x2', (d: any) => d.target.x).attr('y2', (d: any) => d.target.y)
+
+      const node = g.append('g').selectAll('g').data(simNodes).join('g').attr('cursor', 'pointer')
+        .attr('transform', (d: any) => `translate(${d.x},${d.y})`)
+        .attr('data-entity', (d: any) => d.name)
+        .call(d3.drag<any, any>().clickDistance(8).on('start', (e, d: any) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y })
+          .on('drag', (e, d: any) => { d.fx = e.x; d.fy = e.y })
+          .on('end', (e, d: any) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null }) as any)
+
+      node.append('circle').attr('r', (d: any) => highlightRef.current === d.name ? 12 : 8)
+        .attr('fill', (d: any) => TYPE_COLORS[d.type] || '#6b7280')
+        .attr('stroke', (d: any) => highlightRef.current === d.name ? accentColor : textColor)
+        .attr('stroke-width', (d: any) => highlightRef.current === d.name ? 4 : 1.5)
+        .style('pointer-events', 'all')
+
+      node.append('text').text((d: any) => d.name).attr('x', 12).attr('y', 4)
+        .attr('font-size', '10px').attr('fill', textColor).attr('pointer-events', 'none')
+
+      node.on('click', (_e: any, d: any) => { onSelectRef.current?.(d.name) })
+
+      node.on('mouseenter', function() { d3.select(this).select('circle').attr('stroke', accentColor).attr('stroke-width', 3) })
+        .on('mouseleave', function(this: any, _e: any, d: any) {
+          const isHighlighted = highlightRef.current === d.name
+          d3.select(this).select('circle')
+            .attr('stroke', isHighlighted ? accentColor : textColor)
+            .attr('stroke-width', isHighlighted ? 4 : 1.5)
+        })
+
+      const edgeLabel = g.append('g').selectAll('text').data(simEdges).join('text')
+        .attr('font-size', '8px').attr('fill', mutedColor).attr('text-anchor', 'middle')
+        .text((d: any) => d.type)
+        .attr('x', (d: any) => (d.source.x + d.target.x) / 2).attr('y', (d: any) => (d.source.y + d.target.y) / 2)
+
+      sim.on('tick', () => {
+        link.attr('x1', (d: any) => d.source.x).attr('y1', (d: any) => d.source.y)
+          .attr('x2', (d: any) => d.target.x).attr('y2', (d: any) => d.target.y)
+        node.attr('transform', (d: any) => `translate(${d.x},${d.y})`)
+        edgeLabel.attr('x', (d: any) => (d.source.x + d.target.x) / 2).attr('y', (d: any) => (d.source.y + d.target.y) / 2)
+      })
+
+      // If a node was pre-selected (e.g. from search), zoom to it now
+      if (highlightRef.current) {
+        zoomRef.current?.zoomToNode?.(highlightRef.current)
+      }
+    }).catch(() => {})
+    return () => { aborted = true; simRef.current?.stop() }
+  }, [graph])
+
+  if (isLoading) return <div className="text-muted text-sm p-4">Loading graph...</div>
+  if (!graph || !graph.nodes.length) return <EmptyState icon={<Network size={40} />} title="No graph data yet" subtitle="Ingest documents to build the entity graph" />
+
+  return (
+    <div className="border border-border rounded-lg overflow-hidden">
+      <div className="px-4 py-2 border-b border-border flex items-center gap-3 text-[12px] text-muted">
+        <span>{graph.nodes.length} nodes, {graph.edges.length} edges</span>
+        <button onClick={() => zoomRef.current?.reset()} className="px-2 py-0.5 text-[11px] border border-border rounded hover:bg-bg-elevated bg-transparent cursor-pointer text-muted flex items-center gap-1">
+          <RotateCcw size={10} /> Recenter
+        </button>
+        <span className="ml-auto flex gap-2">
+          {Object.entries(TYPE_COLORS).map(([t, c]) => <span key={t} className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: c }} />{t}</span>)}
+        </span>
+      </div>
+      <svg ref={svgRef} className="w-full bg-bg-elevated" style={{ height: '500px' }} />
+    </div>
+  )
+}

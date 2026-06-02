@@ -1,0 +1,510 @@
+import { useEffect, useRef, useState, useCallback, type ReactNode } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { Bot, ScrollText, FileText, X, Lock, CheckCircle, AlertCircle, Loader as LoaderIcon, Ban, Handshake, Wrench, FolderOpen, ChevronLeft, ChevronRight, MessageSquare } from 'lucide-react'
+import { api } from '../../api/client'
+import { LogViewer } from '../LogsPage'
+import TrustDropdown from '../../components/TrustDropdown'
+import type { SubagentActivity, ToolActivity } from '../../types'
+import type { TouchedFile } from '../../hooks/useTouchedFiles'
+import { useAppSelector, useAppDispatch } from '../../store'
+import { markSubagentApproving, openActivityToTab } from '../../store/chatSlice'
+import SegmentedControl from '../../components/SegmentedControl'
+import { colorForExt, fileIcon } from '../../utils/fileIcons'
+import SideChat from './SideChat'
+
+const STATUS = {
+  pending: <Lock size={12} className="text-muted" />,
+  running: <LoaderIcon size={12} className="text-accent animate-spin" />,
+  tool: <Wrench size={12} className="text-amber-400" />,
+  done: <CheckCircle size={12} className="text-green-400" />,
+  error: <AlertCircle size={12} className="text-danger" />,
+} as const
+
+function fmtTime(ts: number) {
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+/* ── Subagent pane ── */
+
+/** Lazy-load subagent output from disk on demand (memory-friendly).
+ *  Backend GET /api/spawn/{id} applies _redact() (redact_exfiltration_urls + redact_credentials)
+ *  — see messaging.py:api_spawn_status line 109. */
+function DiskLoader({ id }: { id: string }) {
+  const [text, setText] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(false)
+  const ctrlRef = useRef<AbortController | null>(null)
+  useEffect(() => () => { ctrlRef.current?.abort() }, [])
+  const load = useCallback(() => {
+    ctrlRef.current?.abort()
+    const ctrl = ctrlRef.current = new AbortController()
+    setLoading(true); setError(false)
+    api.spawnStatus(id, { signal: ctrl.signal })
+      .then(d => { if (!ctrl.signal.aborted) setText(d.result || '(no output)') })
+      .catch(() => { if (!ctrl.signal.aborted) setError(true) })
+      .finally(() => { if (!ctrl.signal.aborted) setLoading(false) })
+  }, [id])
+  if (text !== null) return <>{text}</>
+  if (loading) return <span className="text-muted/30 italic">Loading…</span>
+  if (error) return <button className="text-danger/70 hover:text-danger text-[12px] underline cursor-pointer bg-transparent border-none p-0 font-mono" onClick={e => { e.stopPropagation(); load() }}>Failed — click to retry</button>
+  return <button className="text-accent/70 hover:text-accent text-[12px] underline cursor-pointer bg-transparent border-none p-0 font-mono" onClick={e => { e.stopPropagation(); load() }}>Load output from disk</button>
+}
+
+function SubagentPane({ a, onClick }: { a: SubagentActivity; onClick: () => void }) {
+  const bodyRef = useRef<HTMLPreElement>(null)
+  const autoScroll = useRef(true)
+  const isPending = a.status === 'pending'
+  const isDone = a.status === 'done' || a.status === 'error'
+  const [collapsed, setCollapsed] = useState(isDone)
+  // Auto-collapse when transitioning to done (not on mount)
+  const wasDone = useRef(isDone)
+  useEffect(() => {
+    if (isDone && !wasDone.current) { const t = setTimeout(() => setCollapsed(true), 2000); wasDone.current = true; return () => clearTimeout(t) }
+  }, [isDone])
+  const isRunning = a.status === 'running' || a.status === 'tool'
+
+  // Approval handling for pending subagents
+  const dispatch = useAppDispatch()
+  const onApprove = useCallback((e: React.MouseEvent, action: 'approve' | 'reject') => {
+    e.stopPropagation()
+    if (!a.approval_id) return
+    dispatch(markSubagentApproving({ id: a.id, approving: true }))
+    api.resolveApproval(a.approval_id, action).catch(() => dispatch(markSubagentApproving({ id: a.id, approving: false })))
+  }, [a.approval_id, a.id, dispatch])
+
+  // Live elapsed timer for running subagents
+  const [elapsed, setElapsed] = useState(0)
+  useEffect(() => {
+    if (!isRunning) return
+    const tick = () => setElapsed(Math.floor((Date.now() - a.startedAt) / 1000))
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [isRunning, a.startedAt])
+
+  useEffect(() => {
+    const el = bodyRef.current
+    if (el && autoScroll.current) el.scrollTop = el.scrollHeight
+  }, [a.streaming, a.lastTool])
+
+  const onScroll = useCallback(() => {
+    const el = bodyRef.current
+    if (!el) return
+    autoScroll.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 20
+  }, [])
+
+  const onCancel = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation()
+    api.spawnDelete(a.id).catch(() => {})
+  }, [a.id])
+
+  const displayElapsed = isRunning ? elapsed : Math.round(a.elapsed || 0)
+  const fmtElapsed = displayElapsed >= 60 ? `${Math.floor(displayElapsed / 60)}m ${displayElapsed % 60}s` : `${displayElapsed}s`
+
+  return (
+    <div className={`mx-2 mb-3 rounded-lg border bg-card overflow-hidden shadow-sm transition-all animate-scale-in ${isRunning || isPending ? 'border-border-strong' : 'border-border opacity-60'}`} onClick={onClick}>
+      {/* Header */}
+      <div className={`flex items-center gap-2 px-3 py-2.5${isDone ? ' cursor-pointer select-none hover:bg-bg-hover transition-colors' : ''}`} onClick={isDone ? () => setCollapsed(c => !c) : undefined}>
+        <span>{STATUS[a.status]}</span>
+        <span className="text-[13px] font-semibold text-text">Subagent {isPending ? 'Pending Approval' : a.status === 'tool' ? 'Running Tool' : a.status === 'running' ? (a.streaming ? 'Running' : 'Starting…') : a.status === 'done' ? 'Complete' : a.error?.includes('Cancelled') ? 'Cancelled' : 'Error'}</span>
+        {a.agent && <code className="text-[11px] text-muted/50 bg-bg-hover px-1.5 py-0.5 rounded">{a.agent}</code>}
+        {!isPending && <span className="text-[11px] text-muted/40 ml-auto font-mono">{fmtElapsed}</span>}
+        {isRunning && <button className="text-[11px] px-1.5 py-0.5 rounded border border-danger/40 text-danger/70 hover:bg-danger-subtle hover:text-danger cursor-pointer transition-all" onClick={onCancel}><X className="lucide-inline" /> Cancel</button>}
+        {isDone && <span className="text-[14px] text-muted bg-bg-hover px-1.5 py-0.5 rounded shrink-0 ml-1">{collapsed ? '▸' : '▾'}</span>}
+      </div>
+      {/* Input (task) */}
+      {!collapsed && (
+        <div className="px-3 pt-1 pb-2">
+          <div className="text-[10px] text-muted/40 uppercase tracking-wider mb-1">Input</div>
+          <pre className="px-2.5 py-2 bg-bg rounded-md text-[12px] font-mono whitespace-pre-wrap break-all max-h-[120px] overflow-y-auto text-muted/80 leading-relaxed">{a.task}</pre>
+        </div>
+      )}
+      {/* Approval buttons for pending */}
+      {isPending && !a.approving && (
+        <div className="px-3 pb-2 flex gap-1.5">
+          <button className="px-2.5 py-1 rounded-md border border-border bg-transparent text-muted text-[12px] cursor-pointer hover:text-text hover:border-border-strong hover:bg-bg-hover transition-all" onClick={e => onApprove(e, 'approve')}><CheckCircle className="lucide-inline" /> Approve</button>
+          <button className="px-2.5 py-1 rounded-md border border-border bg-transparent text-muted text-[12px] cursor-pointer hover:text-danger hover:border-danger transition-all" onClick={e => onApprove(e, 'reject')}><Ban className="lucide-inline" /> Reject</button>
+        </div>
+      )}
+      {isPending && a.approving && <div className="px-3 pb-2 text-[12px] text-muted/50">Resolving…</div>}
+      {/* Output (streaming body) */}
+      {!isPending && !collapsed && (
+      <>
+      <div className="px-3 pb-2">
+        <div className="text-[10px] text-muted/40 uppercase tracking-wider mb-1">Output</div>
+        <pre ref={bodyRef} onScroll={onScroll} className="px-2.5 py-2 bg-bg rounded-md text-[12px] font-mono whitespace-pre-wrap break-all max-h-[240px] overflow-y-auto text-muted/80 leading-relaxed">
+          {a.streaming || (isDone ? <DiskLoader id={a.id} /> : <span className="text-muted/30 italic">Waiting for output…</span>)}
+          {a.lastTool && <div className="text-accent mt-1"><Wrench className="lucide-inline" /> {a.lastTool}</div>}
+        </pre>
+      </div>
+      {/* Error details */}
+      {a.error && (
+        <div className="px-3 py-1.5 text-[12px] border-t border-border/20 space-y-0.5">
+          <div className="text-red-400">{a.error}</div>
+          {a.lastTool && <div className="text-muted/40">Last tool: {a.lastTool}</div>}
+        </div>
+      )}
+      </>
+      )}
+    </div>
+  )
+}
+
+/* ── Tool entries are now rendered inline inside chat messages (see ToolCallLine.tsx).
+ *    The activity viewer only hosts subagents, logs, and the file browser. ── */
+
+const isSpawnApproval = (e: ToolActivity) => (e.type === 'approval' || e.type === 'approval_resolved') && e.approval_type != null && e.approval_type !== 'chat'
+
+/* ── Approval entry ── */
+
+function ApprovalEntry({ entry, slot }: { entry: ToolActivity; slot: string }) {
+  const resolved = entry.type === 'approval_resolved'
+  const [localDecision, setLocalDecision] = useState<string | null>(null)
+  const isResolved = resolved || !!localDecision
+  const [acting, setActing] = useState(false)
+  const onAction = useCallback(async (action: string, pattern?: string) => {
+    setActing(true)
+    setLocalDecision(action)
+    try {
+      if (entry.approval_type === 'chat') {
+        const extra: Record<string, string> = {}
+        if (entry.approval_id) extra.request_id = entry.approval_id
+        if (pattern) extra.pattern = pattern
+        await api.approveChatSlot(slot, action, extra)
+      } else {
+        await api.resolveApproval(entry.approval_id!, action === 'rejected' ? 'reject' : 'approve')
+      }
+    } catch { setLocalDecision(null); setActing(false) }
+  }, [entry.approval_id, entry.approval_type, slot])
+
+  const toolTitle = entry.text || ''
+  const isShell = toolTitle.startsWith('Running: ')
+  const normalized = toolTitle.replace(/^(Running: |Reading )/, '')
+  const baseCmd = normalized.split(/\s+/)[0] || normalized
+
+  const decisionLabel: Record<string, ReactNode> = { approved: <><CheckCircle className="lucide-inline" /> Approved</>, trust: <><Handshake className="lucide-inline" /> Trusted</>, trust_command: <><CheckCircle className="lucide-inline" /> Trusted command</>, trust_base: <><CheckCircle className="lucide-inline" /> Trusted base</>, rejected: <><Ban className="lucide-inline" /> Rejected</> }
+  const btnClass = 'px-2.5 py-1 rounded-md border border-border bg-transparent text-muted text-[12px] cursor-pointer hover:text-text hover:border-border-strong hover:bg-bg-hover transition-all'
+  return (
+    <div className={`mx-2 mb-2 rounded-lg border overflow-hidden shadow-sm transition-all ${isResolved ? 'border-ok/40 bg-card' : 'border-warn/40 bg-warn/5'}`}>
+      <div className="flex items-center gap-2 px-3 py-2">
+        <span>{isResolved ? <CheckCircle size={15} className="text-green-400" /> : <Lock size={15} className="text-muted" />}</span>
+        <span className="text-[13px] font-semibold text-text">{isResolved ? (decisionLabel[localDecision || ''] || 'Resolved') : 'Approval Needed'}</span>
+        <span className="text-[11px] text-muted/40 font-mono ml-auto shrink-0">{fmtTime(entry.ts)}</span>
+      </div>
+      {!isResolved && <div className="px-3 pb-2 text-[13px] text-muted/70">{entry.text}</div>}
+      {!isResolved && !acting && (
+        <div className="px-3 pb-2 flex gap-1.5">
+          <button className={btnClass} onClick={() => onAction('approved')}><CheckCircle className="lucide-inline" /> Approve</button>
+          <TrustDropdown
+            fullCommand={normalized}
+            baseCommand={baseCmd}
+            isShell={isShell}
+            className={btnClass}
+            onAction={(action, pattern) => onAction(action, pattern)}
+          />
+          <button className={btnClass + ' hover:!text-danger hover:!border-danger'} onClick={() => onAction('rejected')}><Ban className="lucide-inline" /> Reject</button>
+        </div>
+      )}
+      {acting && <div className="px-3 pb-2 text-[12px] text-muted/50">Resolving…</div>}
+    </div>
+  )
+}
+
+/* ── Main component ── */
+
+
+function FileTile({ f, onFileOpen, onFileRemove }: { f: TouchedFile; onFileOpen?: (p: string) => void; onFileRemove?: (p: string) => void }) {
+  const name = f.path.split('/').pop() || f.path
+  const Icon = fileIcon(f.path)
+  const colorCls = colorForExt(f.path)
+  return (
+    <div
+      className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-border bg-bg-elevated text-[12px] cursor-pointer hover:bg-bg-hover hover:border-border-strong transition-all max-w-full"
+      onClick={() => onFileOpen?.(f.path)}
+      title={f.path}
+      role="button"
+      tabIndex={0}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onFileOpen?.(f.path) } }}
+    >
+      <span className="group/icon relative inline-flex items-center justify-center w-4 h-4 shrink-0">
+        <Icon size={12} className={`${colorCls} ${onFileRemove ? 'group-hover/icon:opacity-0' : ''} transition-opacity`} />
+        {onFileRemove && (
+          <button
+            className="absolute inset-0 flex items-center justify-center opacity-0 group-hover/icon:opacity-100 transition-opacity text-danger cursor-pointer bg-transparent border-none p-0"
+            onClick={e => { e.stopPropagation(); onFileRemove(f.path) }}
+            title="Remove"
+            aria-label="Remove file from list"
+          >
+            <X size={12} />
+          </button>
+        )}
+      </span>
+      <span className="truncate text-text max-w-[140px]">{name}</span>
+    </div>
+  )
+}
+
+/* ── FileBrowser: inline filesystem browser body, rendered inside the Files tab card. ── */
+function FileBrowser({ onFileOpen }: { onFileOpen?: (path: string) => void }) {
+  // Empty string targets the user's home dir (server expands ~). Tracking
+  // path as state keeps React Query's cache key in sync — revisiting a
+  // directory is instant on cache hit.
+  const [path, setPath] = useState<string>('')
+  const [search, setSearch] = useState('')
+  // Browser-style nav stack: history (Back) and forward (Forward). Mutated
+  // in place so cross-render closures stay stable; we tick `force` to push
+  // the disabled state of the buttons through.
+  const historyRef = useRef<string[]>([])
+  const forwardRef = useRef<string[]>([])
+  const [, force] = useState(0)
+  const tickNav = () => force(n => n + 1)
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['browse-files', path],
+    queryFn: () => api.browseFiles(path || undefined),
+    staleTime: 30_000, // a directory listing rarely changes within 30s — avoid refetching on remount
+  })
+
+  const dirs = data?.dirs ?? []
+  const files = data?.files ?? []
+  const resolvedPath = data?.path ?? path
+
+  const navigate = useCallback((target: string) => {
+    historyRef.current.push(resolvedPath)
+    forwardRef.current = []
+    setPath(target)
+    setSearch('')
+    tickNav()
+  }, [resolvedPath])
+
+  const goBack = useCallback(() => {
+    const prev = historyRef.current.pop()
+    if (prev !== undefined) {
+      forwardRef.current.push(resolvedPath)
+      setPath(prev)
+      setSearch('')
+      tickNav()
+    }
+  }, [resolvedPath])
+
+  const goForward = useCallback(() => {
+    const next = forwardRef.current.pop()
+    if (next !== undefined) {
+      historyRef.current.push(resolvedPath)
+      setPath(next)
+      setSearch('')
+      tickNav()
+    }
+  }, [resolvedPath])
+
+  const q = search.trim().toLowerCase()
+  const filteredDirs = q ? dirs.filter(d => d.name.toLowerCase().includes(q)) : dirs
+  const filteredFiles = q ? files.filter(f => f.name.toLowerCase().includes(q)) : files
+
+  return (
+    <div className="flex flex-col flex-1 min-h-0">
+      <div className="flex items-center gap-1.5 px-3 py-2 shrink-0 border-t border-border">
+        <button onClick={goBack} disabled={historyRef.current.length === 0} className="p-1 text-muted hover:text-text rounded-md hover:bg-bg-hover shrink-0 cursor-pointer bg-transparent border-none disabled:opacity-30 disabled:cursor-default" title="Back" aria-label="Back"><ChevronLeft size={14} /></button>
+        <button onClick={goForward} disabled={forwardRef.current.length === 0} className="p-1 text-muted hover:text-text rounded-md hover:bg-bg-hover shrink-0 cursor-pointer bg-transparent border-none disabled:opacity-30 disabled:cursor-default" title="Forward" aria-label="Forward"><ChevronRight size={14} /></button>
+        <input
+          type="text"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && search.trim()) navigate(search.trim()); else if (e.key === 'Escape') setSearch('') }}
+          placeholder={resolvedPath || 'Search…'}
+          className="flex-1 bg-bg border border-border rounded-md px-2.5 py-1.5 text-[11px] font-mono text-text placeholder:text-muted/50 focus:outline-none focus:border-accent min-w-0"
+        />
+      </div>
+      <div className="flex-1 overflow-y-auto px-1.5 py-1">
+        {isLoading && <div className="px-3 py-2 text-[12px] text-muted">Loading…</div>}
+        {!isLoading && filteredDirs.length === 0 && filteredFiles.length === 0 && (
+          <div className="px-3 py-6 text-[12px] text-muted text-center">{q ? 'No matches' : 'Empty directory'}</div>
+        )}
+        {filteredDirs.map(d => (
+          <button key={d.path} className="w-full text-left px-3 py-1.5 flex items-center gap-2.5 cursor-pointer hover:bg-bg-hover rounded-lg transition-colors bg-transparent border-none text-[13px]" onClick={() => navigate(d.path)} title={d.path}>
+            <FolderOpen size={14} className="text-accent shrink-0" />
+            <span className="text-text truncate">{d.name}</span>
+          </button>
+        ))}
+        {filteredFiles.map(f => {
+          const Icon = fileIcon(f.path)
+          return (
+            <button key={f.path} className="w-full text-left px-3 py-1.5 flex items-center gap-2.5 cursor-pointer hover:bg-bg-hover rounded-lg transition-colors bg-transparent border-none text-[13px]" onClick={() => onFileOpen?.(f.path)} title={f.path}>
+              <Icon size={14} className={`${colorForExt(f.path)} shrink-0`} />
+              <span className="text-text truncate">{f.name}</span>
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+export default function ActivityViewer({ subagents, toolLog, open, onToggle, slot, files, onFileOpen, onFileRemove, onFilesClear }: {
+  subagents: Record<string, SubagentActivity>; toolLog: ToolActivity[]; open: boolean; onToggle: () => void; slot: string
+  files?: TouchedFile[]; onFileOpen?: (path: string) => void; onFileRemove?: (path: string) => void; onFilesClear?: (source: 'history' | 'tool') => void
+}) {
+  const dispatch = useAppDispatch()
+  const [, setSelected] = useState(0)
+  const reduxTab = useAppSelector(s => s.chat.activityTab)
+  // Files-tab inline browser state
+  const [browserOpen, setBrowserOpen] = useState(false)
+  const [browserHeight, setBrowserHeight] = useState(320)
+  const [browserDragging, setBrowserDragging] = useState(false)
+  const [tab, setTab] = useState<'subagents' | 'logs' | 'files' | 'side'>(reduxTab)
+  const explicitTab = useRef(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const ids = Object.keys(subagents)
+  const hasSubagents = ids.length > 0
+
+  const visibleLog = toolLog.filter(e => e.type !== 'reasoning')
+
+  // Subagent events are subscribed eagerly at WS connect time — no need to toggle here.
+
+  useEffect(() => { setTab(reduxTab); explicitTab.current = true }, [reduxTab])
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); onToggle() } }
+    const el = containerRef.current
+    el?.addEventListener('keydown', handler)
+    return () => el?.removeEventListener('keydown', handler)
+  }, [open, onToggle])
+
+  // Auto-switch to subagents tab when subagents or spawn approvals first appear
+  const hadSubagents = useRef(false)
+  const hasSpawnApprovals = visibleLog.some(e => e.type === 'approval' && isSpawnApproval(e))
+  const hasSubagentActivity = hasSubagents || hasSpawnApprovals
+  useEffect(() => {
+    if (hasSubagentActivity && !hadSubagents.current && !explicitTab.current) setTab('subagents')
+    hadSubagents.current = hasSubagentActivity
+    explicitTab.current = false
+  }, [hasSubagentActivity])
+
+  if (!open) return null
+
+  const TABS: { key: typeof tab; label: string; icon: ReactNode; count?: number }[] = [
+    { key: 'files', label: 'Files', icon: <FileText size={13} />, count: files?.length || 0 },
+    { key: 'subagents', label: 'Subagents', icon: <Bot size={13} />, count: ids.length + visibleLog.filter(isSpawnApproval).length },
+    { key: 'logs', label: 'Logs', icon: <ScrollText size={13} /> },
+    { key: 'side', label: 'Side', icon: <MessageSquare size={13} /> },
+  ]
+
+  return (
+    <div ref={containerRef} className="flex flex-col h-full bg-bg relative" tabIndex={0}>
+      {/* Tab bar */}
+      <div className="px-3 py-2 shrink-0 flex justify-center">
+        <SegmentedControl
+          segments={TABS}
+          value={tab}
+          onChange={t => { setTab(t); explicitTab.current = true; dispatch(openActivityToTab(t)) }}
+          layoutId="activity-tab"
+        />
+      </div>
+
+      {/* Subagents tab */}
+      {tab === 'subagents' && (
+        <div className="flex-1 overflow-y-auto py-2">
+          {/* Pending approvals */}
+          {visibleLog.filter(isSpawnApproval).map((entry, i) => (
+            <ApprovalEntry key={`a${i}`} entry={entry} slot={slot} />
+          ))}
+          {hasSubagents ? ids.map((id, i) => (
+            <SubagentPane key={id} a={subagents[id]} onClick={() => setSelected(i)} />
+          )) : visibleLog.filter(isSpawnApproval).length === 0 && (
+            <div className="flex flex-col items-center justify-center h-full text-muted/30 gap-2">
+              <span className="text-[24px]"><Bot className="lucide-inline" /></span>
+              <span className="text-[13px]">No subagents running</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Logs tab */}
+      {tab === 'logs' && <LogViewer compact />}
+
+      {/* Files tab */}
+      {tab === 'files' && (() => {
+        const suggested = (files || []).filter(f => f.source === 'tool')
+        const history = (files || []).filter(f => f.source === 'history')
+        return (
+          <div className="flex-1 flex flex-col overflow-hidden">
+            {/* Top expandable file browser */}
+            <div className={`shrink-0 mx-2 mt-2 rounded-xl border border-border bg-bg-elevated overflow-hidden shadow-sm flex flex-col ${browserDragging ? '' : 'transition-all duration-200'}`} style={{ height: browserOpen ? browserHeight : 36 }}>
+              <div className="shrink-0">
+                <button
+                  className="flex items-center justify-between px-3.5 h-9 shrink-0 cursor-pointer bg-transparent hover:bg-bg-hover border-none w-full text-left transition-colors rounded-t-xl"
+                  onClick={() => setBrowserOpen(v => !v)}
+                  title={browserOpen ? 'Hide file browser' : 'Browse files'}
+                  aria-label={browserOpen ? 'Hide file browser' : 'Browse files'}
+                >
+                  <span className="flex items-center gap-1.5 text-[11px] font-medium text-muted"><FolderOpen size={13} /> Browse files</span>
+                  <ChevronLeft size={12} className={`text-muted transition-transform duration-200 ${browserOpen ? 'rotate-90' : '-rotate-90'}`} />
+                </button>
+              </div>
+              {browserOpen && <FileBrowser onFileOpen={onFileOpen} />}
+              {browserOpen && (
+                <div
+                  className="relative shrink-0 h-1.5 cursor-row-resize z-10 group/drag"
+                  onMouseDown={e => {
+                    e.preventDefault()
+                    setBrowserDragging(true)
+                    const startY = e.clientY; const startH = browserHeight
+                    const onMove = (ev: MouseEvent) => setBrowserHeight(Math.max(120, Math.min(startH + (ev.clientY - startY), 500)))
+                    const onUp = () => {
+                      setBrowserDragging(false)
+                      document.removeEventListener('mousemove', onMove)
+                      document.removeEventListener('mouseup', onUp)
+                    }
+                    document.addEventListener('mousemove', onMove)
+                    document.addEventListener('mouseup', onUp)
+                  }}
+                  title="Drag to resize"
+                >
+                  <div className="mx-auto w-8 h-0.5 rounded-full bg-border group-hover/drag:bg-accent mt-0.5" />
+                </div>
+              )}
+            </div>
+            <div className="flex-1 overflow-y-auto py-2">
+              {(suggested.length === 0 && history.length === 0) ? (
+                <div className="flex-1 flex items-center justify-center text-muted text-[13px] py-8">No files yet</div>
+              ) : (
+                <>
+                  {suggested.length > 0 && (
+                    <div className="px-3 mb-4">
+                      <div className="flex items-center gap-2 my-2">
+                        <span className="text-[14px] font-semibold text-muted">Suggested</span>
+                        <span className="flex-1 h-px bg-border" />
+                        <button className="text-[10px] text-muted hover:text-danger cursor-pointer bg-transparent border-none" onClick={() => onFilesClear?.('tool')} title="Clear suggested files">Clear</button>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {suggested.map(f => <FileTile key={f.path} f={f} onFileOpen={onFileOpen} onFileRemove={onFileRemove} />)}
+                      </div>
+                    </div>
+                  )}
+                  {history.length > 0 && (
+                    <div className="px-3 mb-4">
+                      <div className="flex items-center gap-2 my-2">
+                        <span className="text-[14px] font-semibold text-muted">History</span>
+                        <span className="flex-1 h-px bg-border" />
+                        <button className="text-[10px] text-muted hover:text-danger cursor-pointer bg-transparent border-none" onClick={() => onFilesClear?.('history')} title="Clear opened-file history">Clear</button>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {history.map(f => <FileTile key={f.path} f={f} onFileOpen={onFileOpen} onFileRemove={onFileRemove} />)}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* Side tab */}
+      {tab === 'side' && <SideChat slot={slot} />}
+
+      {/* Scroll to bottom button (tools tab only) */}
+    </div>
+  )
+}

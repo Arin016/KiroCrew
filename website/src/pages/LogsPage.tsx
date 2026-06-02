@@ -1,0 +1,128 @@
+import { useState, useEffect, useRef, useCallback, useContext, useMemo, type ReactNode } from 'react'
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
+import { api } from '../api/client'
+import { WsContext } from '../App'
+import { PageHeader } from '../components/ui'
+import { LAYOUT } from '../components/layout'
+
+const LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR'] as const
+const levelColor = (lvl: string) => lvl === 'ERROR' ? 'text-danger' : lvl === 'WARNING' ? 'text-warn' : lvl === 'DEBUG' ? 'text-muted' : 'text-text'
+const levelBg = (lvl: string, active: boolean) => {
+  if (!active) return 'bg-transparent text-muted border-border hover:border-border-strong hover:text-text'
+  if (lvl === 'DEBUG') return 'bg-muted text-muted-fg border-muted'
+  if (lvl === 'INFO') return 'bg-info text-info-fg border-info'
+  if (lvl === 'WARNING') return 'bg-warn text-warn-fg border-warn'
+  return 'bg-danger text-danger-fg border-danger'
+}
+
+/** Reusable log viewer — used in LogsPage and ActivityViewer */
+export function LogViewer({ compact }: { compact?: boolean }) {
+  const [lines, setLines] = useState<{ level: string; msg: string }[]>([])
+  const [currentLevel, setCurrentLevel] = useState('INFO')
+  const [search, setSearch] = useState('')
+  const [matchesOnly, setMatchesOnly] = useState(false)
+  const [autoFollow, setAutoFollow] = useState(true)
+  const virtuosoRef = useRef<VirtuosoHandle>(null)
+  const { subscribeLogs } = useContext(WsContext)
+
+  useEffect(() => { api.logLevel().then(d => setCurrentLevel(d.level)) }, [])
+
+  const onLog = useCallback((data: { level: string; msg: string }) => {
+    setLines(prev => { const next = [...prev, data]; return next.length > LAYOUT.LOG_LINE_CAP ? next.slice(-LAYOUT.LOG_LINE_CAP) : next })
+  }, [])
+
+  useEffect(() => {
+    subscribeLogs(onLog)
+    return () => subscribeLogs(null)
+  }, [subscribeLogs, onLog])
+
+  const changeLevel = async (level: string) => { const r = await api.setLogLevel(level); if (r.ok) setCurrentLevel(level) }
+
+  const { filtered, matchCount } = useMemo(() => {
+    const levelIdx = LEVELS.indexOf(currentLevel as typeof LEVELS[number])
+    const levelFiltered = lines.filter(l => LEVELS.indexOf(l.level as typeof LEVELS[number]) >= levelIdx)
+    const q = search.toLowerCase()
+    if (!q) return { filtered: levelFiltered.map(l => ({ ...l, match: false })), matchCount: 0 }
+    const result = levelFiltered.map(l => ({ ...l, match: l.msg.toLowerCase().includes(q) }))
+    const matched = result.filter(l => l.match)
+    return { filtered: matchesOnly ? matched : result, matchCount: matched.length }
+  }, [lines, search, matchesOnly, currentLevel])
+
+  useEffect(() => {
+    if (autoFollow && filtered.length > 0) {
+      virtuosoRef.current?.scrollToIndex({ index: filtered.length - 1, behavior: 'smooth' })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, matchesOnly, autoFollow])
+
+  const toggleTail = useCallback(() => {
+    setAutoFollow(p => !p)
+    if (!autoFollow && filtered.length > 0) {
+      virtuosoRef.current?.scrollToIndex({ index: filtered.length - 1, behavior: 'smooth' })
+    }
+  }, [autoFollow, filtered.length])
+
+  const highlight = (msg: string) => {
+    const q = search.toLowerCase()
+    if (!q) return <>{msg}</>
+    const parts: (string | ReactNode)[] = []
+    let remaining = msg, lower = remaining.toLowerCase(), idx = lower.indexOf(q), key = 0
+    while (idx !== -1) {
+      parts.push(remaining.slice(0, idx))
+      parts.push(<mark key={key++} className="bg-transparent text-accent font-bold">{remaining.slice(idx, idx + q.length)}</mark>)
+      remaining = remaining.slice(idx + q.length)
+      lower = remaining.toLowerCase()
+      idx = lower.indexOf(q)
+    }
+    parts.push(remaining)
+    return <>{parts}</>
+  }
+
+  const sz = compact ? { btn: 'px-2 py-0.5 text-[11px]', input: 'px-2 py-0.5 text-[11px]', row: 'text-[12px]', gap: 'gap-1 mb-2', label: 'text-[11px]' }
+    : { btn: 'px-3.5 py-[5px] text-[13px]', input: 'px-3 py-1.5 text-[13px]', row: 'text-[13px]', gap: 'gap-1.5 mb-3', label: 'text-[13px]' }
+
+  return (
+    <div className={`flex-1 flex flex-col min-h-0 ${compact ? '' : 'px-6 pb-8'}`}>
+      <div className={`flex ${sz.gap} flex-wrap items-center`}>
+        <span className={`${sz.label} text-muted mr-1`}>Log Level:</span>
+        {LEVELS.map(l => (
+          <button key={l} className={`${sz.btn} rounded-full font-medium font-body cursor-pointer border transition-all ${levelBg(l, currentLevel === l)}`} onClick={() => changeLevel(l)}>{l.charAt(0) + l.slice(1).toLowerCase()}</button>
+        ))}
+      </div>
+      <div className={`flex gap-2 ${compact ? 'mb-2' : 'mb-3'} items-center`}>
+        <input type="text" placeholder="Filter logs..." value={search}
+          onChange={e => { const v = e.target.value; setSearch(v); if (!v) setMatchesOnly(false) }}
+          className={`flex-1 ${sz.input} rounded-lg border border-border bg-surface text-text font-mono placeholder:text-muted focus:outline-none focus:border-accent`}
+        />
+        {search && (
+          <>
+            <button className={`${sz.btn} rounded cursor-pointer border transition-all whitespace-nowrap ${matchesOnly ? 'bg-surface border-border-strong text-text' : 'bg-transparent border-border text-muted'}`}
+              onClick={() => setMatchesOnly(p => !p)}>Matches only</button>
+            <span className={`${sz.label} text-muted whitespace-nowrap`}>{matchCount} matches</span>
+          </>
+        )}
+        <button className={`${sz.btn} rounded cursor-pointer border transition-all whitespace-nowrap ml-auto ${autoFollow ? 'bg-surface border-border-strong text-text' : 'bg-transparent border-border text-muted'}`}
+          onClick={toggleTail}>{autoFollow ? 'Tail: on' : 'Tail: off'}</button>
+      </div>
+      <div className={`flex-1 flex flex-col min-h-0 ${compact ? '' : 'card-glow border border-border bg-card rounded-lg p-5 animate-rise shadow-sm hover:border-border-strong hover:shadow-md transition-all'}`}>
+        <Virtuoso ref={virtuosoRef} data={filtered} followOutput={autoFollow ? 'smooth' : false}
+          style={{ flex: 1, minHeight: 0 }}
+          itemContent={(_i, l) => (
+            <div className={`font-mono ${sz.row} whitespace-pre-wrap break-all px-2.5 py-0.5 leading-[1.7] ${l.match ? 'border-l-2 border-accent bg-accent/10' : ''} ${levelColor(l.level)}`}>
+              {l.match ? highlight(l.msg) : l.msg}
+            </div>
+          )}
+        />
+      </div>
+    </div>
+  )
+}
+
+export default function LogsPage() {
+  return (
+    <>
+      <PageHeader title="Live Logs" subtitle="Real-time application output" />
+      <LogViewer />
+    </>
+  )
+}

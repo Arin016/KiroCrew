@@ -1,0 +1,267 @@
+/**
+ * Tests for persistent ?sid= URL parameter and slug behavior.
+ *
+ * Renders the REAL ChatPage with module-level mocks for child components.
+ * Verifies: URL sync, session activation from URL, error handling,
+ * slug generation, and backward compatibility with ?slot=.
+ */
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
+import { act, render, screen, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { Provider } from 'react-redux'
+import { MemoryRouter, Routes, Route, useLocation, useSearchParams } from 'react-router-dom'
+import { createTestStore } from './helpers'
+import { ThemeProvider } from '../hooks/useTheme'
+import type { ChatSlot } from '../types'
+
+// --- Stub child components (same as ChatPage.persist test) ---
+vi.mock('react-virtuoso', () => ({ Virtuoso: () => null }))
+vi.mock('../components/ChatInput', () => ({ default: () => null }))
+vi.mock('../components/WelcomeView', () => ({ default: () => null }))
+vi.mock('../components/MarkdownPanel', () => ({ default: () => null }))
+vi.mock('../components/MarkdownRenderer', () => ({ default: () => null }))
+vi.mock('../components/TypewriterText', () => ({ default: () => null }))
+vi.mock('../components/OverlayDrawer', () => ({ default: () => null }))
+vi.mock('../components/AgentDropdownList', () => ({ default: () => null }))
+vi.mock('../components/ModelDropdownList', () => ({ default: () => null }))
+vi.mock('../components/InfoTip', () => ({ default: () => null }))
+vi.mock('../components/SegmentedControl', () => ({ default: () => null }))
+vi.mock('../pages/chat/CollapsibleToolGroup', () => ({ default: () => null }))
+vi.mock('../pages/chat/ActivityViewer', () => ({ default: () => null }))
+vi.mock('../pages/chat/SessionColorPicker', () => ({ default: () => null }))
+vi.mock('../pages/chat', () => ({ ChatFooter: () => null, AssistantMessage: () => null, McpInfoButton: () => null }))
+vi.mock('../pages/ChatSidebar', () => ({ default: () => null, SIDEBAR_MIN: 200, SIDEBAR_MAX: 500 }))
+vi.mock('../pages/chat/ChatSettings', () => ({ loadChatConfig: () => ({ contentWidth: 'compact' }), CONTENT_WIDTH: { compact: { messages: '900px', input: '916px' }, comfortable: { messages: '84%', input: '85%' }, full: { messages: '92%', input: '93%' } } }))
+
+// --- Stub hooks ---
+vi.mock('../hooks/usePanelState', () => ({ usePanelState: () => ({ isOpen: false, openPanel: vi.fn(), closePanel: vi.fn() }), useDiffPanel: () => ({ isOpen: false, filePath: '', original: '', modified: '', openDiff: vi.fn(), closeDiff: vi.fn() }) }))
+vi.mock('../hooks/useBranding', () => ({ useBranding: () => ({ botName: 'Test', avatar: '' }) }))
+vi.mock('../hooks/useAgents', () => ({ useAgents: () => ({ agents: [], defaultAgent: null }) }))
+vi.mock('../hooks/useFilteredDropdown', () => ({ useFilteredDropdown: () => ({ filtered: [], query: '', setQuery: vi.fn(), selectedIndex: 0, setSelectedIndex: vi.fn(), onKeyDown: vi.fn() }) }))
+vi.mock('../hooks/useVoiceInput', () => ({ useVoiceInput: () => ({ recording: false, transcribing: false, toggle: vi.fn() }), voiceInputSupported: false }))
+
+// --- Stub API ---
+vi.mock('../api/client', () => ({
+  api: Object.fromEntries(
+    ['sessions', 'chatSlotDetail', 'createChatSlot', 'deleteChatSlot', 'resumeChatSlot',
+     'deleteSession', 'agentDetail', 'approveChatSlot', 'chatSlotAgent', 'chatSlotModel',
+     'chatSlotWorkspace', 'models', 'planAction', 'planFromChat', 'renameSlot',
+     'resolveApproval', 'screenshot', 'slackChannels', 'slackLink', 'spawnList',
+     'stopChatSlot', 'uploadFiles', 'voiceSynthesize', 'workspaces', 'chatSlots',
+     'notifications', 'status', 'generateTitle'].map(k => [k, vi.fn().mockResolvedValue(
+      k === 'chatSlotDetail' ? { messages: [], has_more: false, total: 0 } : {}
+    )])
+  ),
+}))
+
+// --- Browser APIs ---
+Object.defineProperty(window, 'matchMedia', {
+  writable: true,
+  value: vi.fn().mockImplementation((q: string) => ({
+    matches: false, media: q, onchange: null,
+    addListener: vi.fn(), removeListener: vi.fn(),
+    addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn(),
+  })),
+})
+globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) }) as any
+
+import ChatPage from '../pages/ChatPage'
+
+const slot = (key: string, title?: string, mode = ''): ChatSlot => ({
+  key, title: title ?? key, messages: 0, running: false, mode, created: '', last_ts: '',
+})
+
+/** Helper to capture the current URL from MemoryRouter */
+let currentUrl = ''
+function UrlCapture() {
+  const loc = useLocation()
+  const [sp] = useSearchParams()
+  currentUrl = loc.pathname + (sp.toString() ? '?' + sp.toString() : '')
+  return null
+}
+
+function renderChatPage(opts: {
+  route?: string
+  mode?: string
+  activeSlot?: string | null
+  slots?: ChatSlot[]
+}) {
+  const { route = '/chat', mode, activeSlot = null, slots = [] } = opts
+  const store = createTestStore({
+    dashboard: {
+      status: { platform: 'darwin' }, connected: false, slots, approvalMode: 'normal',
+      channelTrusted: false, refreshTrigger: 0, unreadSlots: [], updateProgress: null,
+      subagentRunning: {}, subagentDetails: {}, subagentText: {},
+      sessionDefaultColor: null, sessionColorsMode: 'tint', sessionColorsPalette: 'horizon', sessionColorsIntensity: 'clear',
+    } as any,
+    chat: {
+      activeSlot, messages: [], slotRunning: false, slotStopping: false, slotState: 'idle',
+      slotStatusDetail: {}, slotHasMore: false, slotOldestIndex: 0, loadingOlder: false,
+      lastChunkSeq: undefined, history: [], historyHasMore: false, historyOffset: 0,
+      pendingInput: null, slotContextPct: {}, voicePlaying: false, voiceAudio: null,
+      subagents: {}, toolLog: [], activityOpen: false, activityTab: 'tools', slotActivity: {}, slotHistory: [],
+      slotMessages: {}, slotLoading: false,
+    } as any,
+  })
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const result = render(
+    <QueryClientProvider client={qc}>
+      <Provider store={store}>
+        <ThemeProvider>
+          <MemoryRouter initialEntries={[route]}>
+            <Routes>
+              <Route path="/chat/:slug?" element={<ChatPage mode={mode} />} />
+              <Route path="/orchestrated/:slug?" element={<ChatPage mode="orchestrator" />} />
+            </Routes>
+            <UrlCapture />
+          </MemoryRouter>
+        </ThemeProvider>
+      </Provider>
+    </QueryClientProvider>,
+  )
+  return { store, ...result }
+}
+
+beforeEach(() => {
+  localStorage.clear()
+  currentUrl = ''
+})
+
+afterEach(() => vi.clearAllMocks())
+
+const slots = [
+  slot('chat-1-100', 'Debug video playback'),
+  slot('chat-2-200', 'Fix login bug'),
+  slot('chat-3-300'), // no title (title === key)
+]
+
+const orchSlots = [
+  slot('orch-1-100', 'Plan migration', 'orchestrator'),
+  slot('orch-2-200', 'Review design', 'orchestrator'),
+]
+
+describe('ChatPage ?sid= URL parameter', () => {
+  describe('URL sync on active slot', () => {
+    it('writes ?sid= to URL when activeSlot is set', async () => {
+      renderChatPage({ activeSlot: 'chat-1-100', slots })
+      await waitFor(() => expect(currentUrl).toContain('sid=chat-1-100'))
+    })
+
+    it('includes slug from session title', async () => {
+      renderChatPage({ activeSlot: 'chat-1-100', slots })
+      await waitFor(() => {
+        expect(currentUrl).toContain('/chat/debug-video-playback')
+        expect(currentUrl).toContain('sid=chat-1-100')
+      })
+    })
+
+    it('omits slug when title equals key', async () => {
+      renderChatPage({ activeSlot: 'chat-3-300', slots })
+      await waitFor(() => {
+        expect(currentUrl).toMatch(/^\/chat\?sid=chat-3-300$/)
+      })
+    })
+  })
+
+  describe('session activation from URL', () => {
+    it('activates session matching ?sid= on load', async () => {
+      const { store } = renderChatPage({ route: '/chat?sid=chat-2-200', slots })
+      await waitFor(() => expect(store.getState().chat.activeSlot).toBe('chat-2-200'))
+    })
+
+    it('activates session from legacy ?slot= param', async () => {
+      const { store } = renderChatPage({ route: '/chat?slot=chat-2-200', slots })
+      await waitFor(() => expect(store.getState().chat.activeSlot).toBe('chat-2-200'))
+    })
+
+    it('shows error for invalid ?sid=', async () => {
+      vi.useFakeTimers()
+      renderChatPage({ route: '/chat?sid=nonexistent', slots })
+      await vi.advanceTimersByTimeAsync(5100)
+      expect(screen.getByText(/session "nonexistent" not found/i)).toBeTruthy()
+      vi.useRealTimers()
+    })
+  })
+
+  describe('URL wins over localStorage', () => {
+    it('activates URL session even when localStorage has different value', async () => {
+      localStorage.setItem('mc-active-slot-chat', 'chat-1-100')
+      const { store } = renderChatPage({ route: '/chat?sid=chat-2-200', slots })
+      await waitFor(() => expect(store.getState().chat.activeSlot).toBe('chat-2-200'))
+    })
+  })
+
+  describe('orchestrated mode', () => {
+    it('uses /orchestrated base path', async () => {
+      const allSlots = [...slots, ...orchSlots]
+      renderChatPage({ route: '/orchestrated', activeSlot: 'orch-1-100', slots: allSlots, mode: 'orchestrator' })
+      await waitFor(() => {
+        expect(currentUrl).toContain('/orchestrated/plan-migration')
+        expect(currentUrl).toContain('sid=orch-1-100')
+      })
+    })
+
+    it('does not redirect orchestrated to /chat', async () => {
+      const allSlots = [...slots, ...orchSlots]
+      renderChatPage({ route: '/orchestrated?sid=orch-1-100', slots: allSlots, mode: 'orchestrator' })
+      await waitFor(() => {
+        expect(currentUrl).toContain('/orchestrated')
+        expect(currentUrl).not.toMatch(/^\/chat/)
+      })
+    })
+  })
+
+  describe('message deep-link (?msg=)', () => {
+    it('cleans ?msg= from URL after consumption (one-shot)', async () => {
+      renderChatPage({ route: '/chat?sid=chat-1-100&msg=2025-05-13T14:00:00.000Z', slots })
+      await waitFor(() => {
+        expect(currentUrl).toContain('sid=chat-1-100')
+        expect(currentUrl).not.toContain('msg=')
+      })
+    })
+
+    it('preserves ?sid= when ?msg= is cleaned', async () => {
+      renderChatPage({ route: '/chat?sid=chat-1-100&msg=2025-05-13T14:00:00.000Z', slots })
+      await waitFor(() => {
+        expect(currentUrl).toContain('sid=chat-1-100')
+      })
+    })
+  })
+
+  describe('backward compatibility', () => {
+    it('works without ?sid= param (falls back to localStorage)', async () => {
+      localStorage.setItem('mc-active-slot-chat', 'chat-2-200')
+      const { store } = renderChatPage({ route: '/chat', slots })
+      await waitFor(() => expect(store.getState().chat.activeSlot).toBe('chat-2-200'))
+    })
+
+    it('works without ?sid= and no localStorage (picks first slot)', async () => {
+      const { store } = renderChatPage({ route: '/chat', slots })
+      await waitFor(() => expect(store.getState().chat.activeSlot).toBe('chat-1-100'))
+    })
+  })
+
+  describe('slug generation', () => {
+    it('slugifies title to lowercase kebab-case', async () => {
+      renderChatPage({ activeSlot: 'chat-1-100', slots })
+      await waitFor(() => expect(currentUrl).toContain('/chat/debug-video-playback'))
+    })
+
+    it('strips special characters from slug', async () => {
+      const specialSlots = [slot('chat-4-400', 'Fix: login & auth (v2)!')]
+      renderChatPage({ activeSlot: 'chat-4-400', slots: specialSlots })
+      await waitFor(() => expect(currentUrl).toContain('/chat/fix-login-auth-v2'))
+    })
+
+    it('truncates slug to 80 chars', async () => {
+      const longTitle = 'a'.repeat(100)
+      const longSlots = [slot('chat-5-500', longTitle)]
+      renderChatPage({ activeSlot: 'chat-5-500', slots: longSlots })
+      await waitFor(() => {
+        const path = currentUrl.split('?')[0]
+        // /chat/ = 6 chars, slug should be <= 80
+        expect(path.length).toBeLessThanOrEqual(6 + 80)
+      })
+    })
+  })
+})

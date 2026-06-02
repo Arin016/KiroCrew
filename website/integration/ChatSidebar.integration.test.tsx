@@ -1,0 +1,593 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { screen, waitFor, fireEvent } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import ChatSidebar from '../src/pages/ChatSidebar'
+import { renderWithProviders } from './helpers'
+import { server } from './mocks/server'
+import { http, HttpResponse } from 'msw'
+
+const mockConfirm = vi.fn(() => true)
+Object.defineProperty(window, 'confirm', { writable: true, value: mockConfirm })
+
+const baseSlots = [
+  { key: 'slot-1', title: 'Pipeline debug', running: false, agent: 'kiroclaw', created: '2026-04-08T01:00:00Z', last_ts: '2026-04-08T02:00:00Z', folder_id: '' },
+  { key: 'slot-2', title: 'Code review', running: true, agent: 'kiroclaw', created: '2026-04-08T00:00:00Z', last_ts: '2026-04-08T01:30:00Z', folder_id: '' },
+  { key: 'slot-3', title: 'Oncall triage', running: false, agent: 'oncall', created: '2026-04-07T10:00:00Z', last_ts: '2026-04-07T12:00:00Z', folder_id: '' },
+]
+
+const defaultProps = {
+  slots: baseSlots,
+  activeSlot: 'slot-1',
+  unreadSlots: [] as string[],
+  history: [],
+  historyHasMore: false,
+  defaultAgent: 'kiroclaw',
+  installedAgents: [{ name: 'kiroclaw', source: 'builtin' }, { name: 'oncall', source: 'aim' }],
+}
+
+describe('ChatSidebar Folder Grouping', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    localStorage.clear()
+    mockConfirm.mockReturnValue(true)
+    // Default: no folders
+    server.use(
+      http.get('/api/chat/folders', () => HttpResponse.json([])),
+      http.post('/api/chat/folders', async ({ request }) => {
+        const body = await request.json() as { name: string }
+        return HttpResponse.json({ id: 'f-new', name: body.name, order: 0, collapsed: false }, { status: 201 })
+      }),
+      http.patch('/api/chat/folders/:id', async ({ request, params }) => {
+        const body = await request.json()
+        return HttpResponse.json({ id: params.id, ...body })
+      }),
+      http.delete('/api/chat/folders/:id', () => HttpResponse.json({ ok: true })),
+      http.patch('/api/chat/slots/:slot/folder', async ({ request }) => {
+        const body = await request.json() as { folder_id: string }
+        return HttpResponse.json({ ok: true, folder_id: body.folder_id })
+      }),
+    )
+  })
+
+  it('renders all sessions without folders by default', async () => {
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await waitFor(() => {
+      expect(screen.getByText('Pipeline debug')).toBeInTheDocument()
+      expect(screen.getByText('Code review')).toBeInTheDocument()
+      expect(screen.getByText('Oncall triage')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('UNGROUPED')).not.toBeInTheDocument()
+  })
+
+  it('shows new folder button', async () => {
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await waitFor(() => expect(screen.getByTitle('New folder')).toBeInTheDocument())
+  })
+
+  it('creates a folder via inline input and API', async () => {
+    const user = userEvent.setup()
+    let folders: any[] = []
+    server.use(
+      http.get('/api/chat/folders', () => HttpResponse.json(folders)),
+      http.post('/api/chat/folders', async ({ request }) => {
+        const body = await request.json() as { name: string }
+        const created = { id: 'f-new', name: body.name, order: 0, collapsed: false }
+        folders = [created]
+        return HttpResponse.json(created, { status: 201 })
+      }),
+    )
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+
+    await user.click(screen.getByTitle('New folder'))
+    const input = screen.getByPlaceholderText('Folder name…')
+    await user.type(input, 'Oncall Work')
+    await user.keyboard('{Enter}')
+
+    await waitFor(() => expect(screen.getByText('Oncall Work')).toBeInTheDocument())
+  })
+
+  it('cancels folder creation on Escape', async () => {
+    const user = userEvent.setup()
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+
+    await user.click(screen.getByTitle('New folder'))
+    expect(screen.getByPlaceholderText('Folder name…')).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+
+    expect(screen.queryByPlaceholderText('Folder name…')).not.toBeInTheDocument()
+  })
+
+  it('does not submit folder create on Enter while IME is composing', async () => {
+    const user = userEvent.setup()
+    const postSpy = vi.fn()
+    server.use(
+      http.post('/api/chat/folders', async ({ request }) => {
+        postSpy()
+        const body = await request.json() as { name: string }
+        return HttpResponse.json({ id: 'f-new', name: body.name, order: 0, collapsed: false }, { status: 201 })
+      }),
+    )
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+
+    await user.click(screen.getByTitle('New folder'))
+    const input = screen.getByPlaceholderText('Folder name…') as HTMLInputElement
+    fireEvent.compositionStart(input)
+    fireEvent.change(input, { target: { value: '测试' } })
+    // Enter pressed mid-composition: should commit composition, NOT submit
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 13, isComposing: true })
+    expect(postSpy).not.toHaveBeenCalled()
+    // Input still open so user can keep composing
+    expect(screen.getByPlaceholderText('Folder name…')).toBeInTheDocument()
+  })
+
+  it('fetches folders from API on mount', async () => {
+    server.use(
+      http.get('/api/chat/folders', () => HttpResponse.json([
+        { id: 'f1', name: 'Project A', order: 0, collapsed: false },
+      ])),
+    )
+    const slotsWithFolder = [{ ...baseSlots[0], folder_id: 'f1' }, baseSlots[1], baseSlots[2]]
+    renderWithProviders(<ChatSidebar {...defaultProps} slots={slotsWithFolder} />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Project A')).toBeInTheDocument()
+    })
+    // Ungrouped slots still visible (no section header, just rendered below folders)
+    expect(screen.getByText('Code review')).toBeInTheDocument()
+  })
+
+  it('collapses a folder', async () => {
+    let folders = [{ id: 'f1', name: 'My Folder', order: 0, collapsed: false }]
+    server.use(
+      http.get('/api/chat/folders', () => HttpResponse.json(folders)),
+      http.patch('/api/chat/folders/:id', async ({ request, params }) => {
+        const body = await request.json() as any
+        folders = folders.map(f => f.id === params.id ? { ...f, ...body } : f)
+        return HttpResponse.json(folders.find(f => f.id === params.id))
+      }),
+    )
+    const slotsWithFolder = [{ ...baseSlots[0], folder_id: 'f1' }, baseSlots[1], baseSlots[2]]
+    renderWithProviders(<ChatSidebar {...defaultProps} slots={slotsWithFolder} />)
+
+    await waitFor(() => expect(screen.getByText('My Folder')).toBeInTheDocument())
+    // Child session visible before collapse
+    expect(screen.getByText('Pipeline debug')).toBeInTheDocument()
+
+    const collapseBtn = screen.getByTestId('folder-collapse-f1')
+    fireEvent.click(collapseBtn)
+
+    // Folder name still visible, but child session hidden after collapse
+    expect(screen.getByText('My Folder')).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByText('Pipeline debug')).not.toBeVisible())
+  })
+
+  it('deletes a folder via API and slots become ungrouped', async () => {
+    let folders = [{ id: 'f1', name: 'Delete Me', order: 0, collapsed: false }]
+    server.use(
+      http.get('/api/chat/folders', () => HttpResponse.json(folders)),
+      http.delete('/api/chat/folders/:id', ({ params }) => {
+        folders = folders.filter(f => f.id !== params.id)
+        return HttpResponse.json({ ok: true })
+      }),
+    )
+    const slotsWithFolder = [{ ...baseSlots[0], folder_id: 'f1' }, baseSlots[1], baseSlots[2]]
+    renderWithProviders(<ChatSidebar {...defaultProps} slots={slotsWithFolder} />)
+    await waitFor(() => expect(screen.getByText('Delete Me')).toBeInTheDocument())
+    expect(screen.getByText('Pipeline debug')).toBeInTheDocument()
+
+    const deleteBtn = screen.getByTestId('folder-delete-f1')
+    fireEvent.click(deleteBtn)
+
+    await waitFor(() => expect(screen.queryByText('Delete Me')).not.toBeInTheDocument())
+    // Slot previously in the deleted folder is still visible, now ungrouped
+    expect(screen.getByText('Pipeline debug')).toBeInTheDocument()
+  })
+
+  it('renames a folder on double-click via API', async () => {
+    const user = userEvent.setup()
+    let folders = [{ id: 'f1', name: 'Old Name', order: 0, collapsed: false }]
+    server.use(
+      http.get('/api/chat/folders', () => HttpResponse.json(folders)),
+      http.patch('/api/chat/folders/:id', async ({ request, params }) => {
+        const body = await request.json() as any
+        folders = folders.map(f => f.id === params.id ? { ...f, ...body } : f)
+        return HttpResponse.json(folders.find(f => f.id === params.id))
+      }),
+    )
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await waitFor(() => expect(screen.getByText('Old Name')).toBeInTheDocument())
+
+    await user.dblClick(screen.getByText('Old Name'))
+    const renameInput = screen.getByDisplayValue('Old Name')
+    await user.clear(renameInput)
+    await user.type(renameInput, 'New Name')
+    await user.keyboard('{Enter}')
+
+    expect(screen.getByText('New Name')).toBeInTheDocument()
+  })
+
+  it('pinned sessions appear above folders', async () => {
+    server.use(
+      http.get('/api/chat/folders', () => HttpResponse.json([
+        { id: 'f1', name: 'Work', order: 0, collapsed: false },
+      ])),
+    )
+    const slotsWithFolder = [{ ...baseSlots[0], folder_id: 'f1' }, baseSlots[1], { ...baseSlots[2], pinned: true }]
+    renderWithProviders(<ChatSidebar {...defaultProps} slots={slotsWithFolder} />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Work')).toBeInTheDocument()
+      expect(screen.getByText('Oncall triage')).toBeInTheDocument()
+    })
+    // Folders render first, then ungrouped slots (pinned sort within ungrouped)
+    const pinnedSlot = screen.getByText('Oncall triage')
+    const folder = screen.getByText('Work')
+    expect(folder.compareDocumentPosition(pinnedSlot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('shows folder session count', async () => {
+    server.use(
+      http.get('/api/chat/folders', () => HttpResponse.json([
+        { id: 'f1', name: 'Team', order: 0, collapsed: false },
+      ])),
+    )
+    const slotsWithFolder = [
+      { ...baseSlots[0], folder_id: 'f1' },
+      { ...baseSlots[1], folder_id: 'f1' },
+      baseSlots[2],
+    ]
+    renderWithProviders(<ChatSidebar {...defaultProps} slots={slotsWithFolder} />)
+
+    await waitFor(() => expect(screen.getByText('Team')).toBeInTheDocument())
+    const folderHeader = screen.getByText('Team').closest('.flex')
+    expect(folderHeader).toHaveTextContent('2')
+  })
+
+  it('sessions are draggable', async () => {
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await waitFor(() => expect(screen.getByText('Pipeline debug')).toBeInTheDocument())
+    const sessionEl = screen.getByText('Pipeline debug').closest('[draggable]')
+    expect(sessionEl).toBeTruthy()
+    expect(sessionEl?.getAttribute('draggable')).toBe('true')
+  })
+
+  it('derives slot folders from slot.folder_id prop', async () => {
+    server.use(
+      http.get('/api/chat/folders', () => HttpResponse.json([
+        { id: 'f1', name: 'Backend', order: 0, collapsed: false },
+      ])),
+    )
+    const slotsWithFolder = [{ ...baseSlots[0], folder_id: 'f1' }, baseSlots[1], baseSlots[2]]
+    renderWithProviders(<ChatSidebar {...defaultProps} slots={slotsWithFolder} />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Backend')).toBeInTheDocument()
+    })
+    // Ungrouped slots still visible without a section header
+    expect(screen.getByText('Code review')).toBeInTheDocument()
+  })
+})
+
+describe('ChatSidebar confirmCloseSession', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    localStorage.clear()
+    mockConfirm.mockReturnValue(true)
+    server.use(
+      http.get('/api/chat/folders', () => HttpResponse.json([])),
+      http.delete('/api/chat/slots/:key', () => HttpResponse.json({ ok: true })),
+    )
+  })
+
+  it('skips confirm dialog when confirmCloseSession is false', async () => {
+    localStorage.setItem('mc-chat-config', JSON.stringify({ confirmCloseSession: false }))
+    const deleteSpy = vi.fn()
+    server.use(
+      http.delete('/api/chat/slots/:key', ({ params }) => { deleteSpy(params.key); return HttpResponse.json({ ok: true }) }),
+    )
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await waitFor(() => expect(screen.getByText('Pipeline debug')).toBeInTheDocument())
+
+    const closeBtn = screen.getByText('Pipeline debug').closest('[draggable]')!.querySelector('[data-close]')!
+    fireEvent.click(closeBtn)
+
+    expect(mockConfirm).not.toHaveBeenCalled()
+    await waitFor(() => expect(deleteSpy).toHaveBeenCalledWith('slot-1'))
+  })
+
+  it('does not delete when user cancels the confirm dialog', async () => {
+    localStorage.setItem('mc-chat-config', JSON.stringify({ confirmCloseSession: true }))
+    mockConfirm.mockReturnValue(false)
+    const deleteSpy = vi.fn()
+    server.use(
+      http.delete('/api/chat/slots/:key', ({ params }) => { deleteSpy(params.key); return HttpResponse.json({ ok: true }) }),
+    )
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await waitFor(() => expect(screen.getByText('Pipeline debug')).toBeInTheDocument())
+
+    const closeBtn = screen.getByText('Pipeline debug').closest('[draggable]')!.querySelector('[data-close]')!
+    fireEvent.click(closeBtn)
+
+    expect(mockConfirm).toHaveBeenCalledWith('Close this session?')
+    expect(deleteSpy).not.toHaveBeenCalled()
+  })
+
+  it('shows confirm dialog when confirmCloseSession is true', async () => {
+    localStorage.setItem('mc-chat-config', JSON.stringify({ confirmCloseSession: true }))
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await waitFor(() => expect(screen.getByText('Pipeline debug')).toBeInTheDocument())
+
+    const closeBtn = screen.getByText('Pipeline debug').closest('[draggable]')!.querySelector('[data-close]')!
+    fireEvent.click(closeBtn)
+
+    expect(mockConfirm).toHaveBeenCalledWith('Close this session?')
+  })
+})
+
+describe('ChatSidebar Cleanup', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    localStorage.clear()
+    server.use(
+      http.get('/api/chat/folders', () => HttpResponse.json([])),
+      http.post('/api/chat/slots/cleanup', async ({ request }) => {
+        const body = await request.json() as { max_inactive_days: number; active_slot: string; dry_run?: boolean }
+        if (body.dry_run) {
+          return HttpResponse.json({ ok: true, dry_run: true, keys: ['slot-old-1', 'slot-old-2'], count: 2 })
+        }
+        return HttpResponse.json({ ok: true, archived: 2, keys: ['slot-old-1', 'slot-old-2'], failed: [] })
+      }),
+    )
+  })
+
+  it('shows cleanup button in sidebar header', async () => {
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await waitFor(() => expect(screen.getByTitle('Clean up inactive sessions')).toBeInTheDocument())
+  })
+
+  it('opens cleanup dialog on click', async () => {
+    const user = userEvent.setup()
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await user.click(screen.getByTitle('Clean up inactive sessions'))
+    await waitFor(() => expect(screen.getByText('Clean Up Sessions')).toBeInTheDocument())
+  })
+
+  it('shows day selector buttons', async () => {
+    const user = userEvent.setup()
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await user.click(screen.getByTitle('Clean up inactive sessions'))
+    await waitFor(() => {
+      expect(screen.getByText('1 day')).toBeInTheDocument()
+      expect(screen.getByText('3 days')).toBeInTheDocument()
+      expect(screen.getByText('7 days')).toBeInTheDocument()
+    })
+  })
+
+  it('closes dialog on Cancel', async () => {
+    const user = userEvent.setup()
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await user.click(screen.getByTitle('Clean up inactive sessions'))
+    await waitFor(() => expect(screen.getByText('Clean Up Sessions')).toBeInTheDocument())
+    await user.click(screen.getByText('Cancel'))
+    expect(screen.queryByText('Clean Up Sessions')).not.toBeInTheDocument()
+  })
+
+  it('excludes pinned sessions from stale count', async () => {
+    const user = userEvent.setup()
+    const oldTs = '2020-01-01T00:00:00Z'
+    const slotsWithPinned = [
+      { ...baseSlots[0], last_ts: oldTs },
+      { ...baseSlots[1], last_ts: oldTs, pinned: true },
+      { ...baseSlots[2], last_ts: oldTs },
+    ]
+    server.use(
+      http.post('/api/chat/slots/cleanup', async ({ request }) => {
+        const body = await request.json() as any
+        if (body.dry_run) return HttpResponse.json({ ok: true, dry_run: true, keys: ['slot-3'], count: 1 })
+        return HttpResponse.json({ ok: true, archived: 1, keys: ['slot-3'], failed: [] })
+      }),
+    )
+    renderWithProviders(<ChatSidebar {...defaultProps} slots={slotsWithPinned} activeSlot="slot-1" />)
+    await user.click(screen.getByTitle('Clean up inactive sessions'))
+    // slot-1 is active (excluded), slot-2 is pinned (excluded), only slot-3 is archivable
+    await waitFor(() => expect(screen.getByText(/1 session will be moved/)).toBeInTheDocument())
+  })
+
+  it('shows active-slot-skipped message when active slot is stale', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.post('/api/chat/slots/cleanup', async ({ request }) => {
+        const body = await request.json() as any
+        if (body.dry_run) return HttpResponse.json({ ok: true, dry_run: true, keys: ['slot-2'], count: 1, active_is_stale: true })
+        return HttpResponse.json({ ok: true, archived: 1, keys: ['slot-2'], failed: [] })
+      }),
+    )
+    const oldTs = '2020-01-01T00:00:00Z'
+    const staleSlots = [
+      { ...baseSlots[0], last_ts: oldTs },
+      { ...baseSlots[1], last_ts: oldTs },
+    ]
+    renderWithProviders(<ChatSidebar {...defaultProps} slots={staleSlots} activeSlot="slot-1" />)
+    await user.click(screen.getByTitle('Clean up inactive sessions'))
+    await waitFor(() => expect(screen.getByText(/skipped.*currently selected/)).toBeInTheDocument())
+  })
+
+  it('shows no-sessions message when nothing is stale', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.post('/api/chat/slots/cleanup', async ({ request }) => {
+        const body = await request.json() as any
+        if (body.dry_run) return HttpResponse.json({ ok: true, dry_run: true, keys: [], count: 0 })
+        return HttpResponse.json({ ok: true, archived: 0, keys: [], failed: [] })
+      }),
+    )
+    const now = new Date().toISOString()
+    const freshSlots = baseSlots.map(s => ({ ...s, last_ts: now, created: now }))
+    renderWithProviders(<ChatSidebar {...defaultProps} slots={freshSlots} />)
+    await user.click(screen.getByTitle('Clean up inactive sessions'))
+    await waitFor(() => expect(screen.getByText('No inactive sessions to archive.')).toBeInTheDocument())
+  })
+
+  it('calls cleanup API and closes dialog on archive', async () => {
+    const user = userEvent.setup()
+    const cleanupSpy = vi.fn()
+    server.use(
+      http.post('/api/chat/slots/cleanup', async ({ request }) => {
+        const body = await request.json() as any
+        if (body.dry_run) return HttpResponse.json({ ok: true, dry_run: true, keys: ['slot-3'], count: 1 })
+        cleanupSpy(body)
+        return HttpResponse.json({ ok: true, archived: 1, keys: ['slot-3'], failed: [] })
+      }),
+    )
+    const oldTs = '2020-01-01T00:00:00Z'
+    const now = new Date().toISOString()
+    const slotsWithStale = [
+      { ...baseSlots[0], last_ts: now },
+      { ...baseSlots[1], last_ts: now },
+      { ...baseSlots[2], last_ts: oldTs },
+    ]
+    renderWithProviders(<ChatSidebar {...defaultProps} slots={slotsWithStale} />)
+    await user.click(screen.getByTitle('Clean up inactive sessions'))
+    await waitFor(() => expect(screen.getByText(/1 session will be moved/)).toBeInTheDocument())
+
+    const archiveBtn = screen.getByText(/Archive 1 session/)
+    await user.click(archiveBtn)
+
+    await waitFor(() => {
+      expect(cleanupSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ max_inactive_days: 3, active_slot: 'slot-1' })
+      )
+    })
+    expect(screen.queryByText('Clean Up Sessions')).not.toBeInTheDocument()
+  })
+
+  it('switching day threshold updates stale count', async () => {
+    const user = userEvent.setup()
+    let callCount = 0
+    server.use(
+      http.post('/api/chat/slots/cleanup', async ({ request }) => {
+        const body = await request.json() as any
+        if (body.dry_run) {
+          callCount++
+          // First call (3 days): nothing stale. Second call (1 day): 2 stale.
+          if (body.max_inactive_days <= 1) return HttpResponse.json({ ok: true, dry_run: true, keys: ['slot-2', 'slot-3'], count: 2 })
+          return HttpResponse.json({ ok: true, dry_run: true, keys: [], count: 0 })
+        }
+        return HttpResponse.json({ ok: true, archived: 0, keys: [], failed: [] })
+      }),
+    )
+    const now = new Date()
+    const twoDaysAgo = new Date(now.getTime() - 2 * 86400000).toISOString()
+    const slotsWithMixed = [
+      { ...baseSlots[0], last_ts: now.toISOString() },
+      { ...baseSlots[1], last_ts: twoDaysAgo },
+      { ...baseSlots[2], last_ts: twoDaysAgo },
+    ]
+    renderWithProviders(<ChatSidebar {...defaultProps} slots={slotsWithMixed} />)
+    await user.click(screen.getByTitle('Clean up inactive sessions'))
+
+    // Default 3 days: nothing stale (2 days < 3 days)
+    await waitFor(() => expect(screen.getByText('No inactive sessions to archive.')).toBeInTheDocument())
+
+    // Switch to 1 day: 2 sessions become stale
+    await user.click(screen.getByText('1 day'))
+    await waitFor(() => expect(screen.getByText(/2 sessions will be moved/)).toBeInTheDocument())
+  })
+
+  it('context menu shows Copy link and calls copySessionLink', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, writable: true, configurable: true })
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    const row = await screen.findByText('Pipeline debug')
+    fireEvent.contextMenu(row)
+    const copyItem = await screen.findByRole('menuitem', { name: /Copy link/ })
+    fireEvent.click(copyItem)
+    await waitFor(() => expect(writeText).toHaveBeenCalled())
+  })
+
+  it('action buttons stay visible while context menu is open', async () => {
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    const row = await screen.findByText('Pipeline debug')
+    fireEvent.contextMenu(row)
+    await screen.findByRole('menuitem', { name: /Rename/ })
+    // The action bar for the targeted session should have opacity-100 (not group-hover:opacity-100)
+    const actionBar = row.closest('[class*="group"]')!.querySelector('[class*="bg-card"]')
+    expect(actionBar?.className).toContain('opacity-100')
+    expect(actionBar?.className).not.toContain('opacity-0')
+  })
+
+  it('clicking Duplicate button calls fork endpoint and switches slot', async () => {
+    server.use(
+      http.post('/api/chat/slots/:slot/fork', ({ params }) => {
+        return HttpResponse.json({ ok: true, key: `${params.slot}-fork` })
+      }),
+    )
+    const { store } = renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await screen.findByText('Pipeline debug')
+    const dupBtn = screen.getAllByLabelText('Duplicate')[0]
+    fireEvent.click(dupBtn)
+    await waitFor(() => {
+      expect(store.getState().chat.activeSlot).toBe('slot-1-fork')
+    })
+  })
+
+  it('fork failure does not crash UI', async () => {
+    server.use(
+      http.post('/api/chat/slots/:slot/fork', () => HttpResponse.json({ error: 'boom' }, { status: 500 })),
+    )
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await screen.findByText('Pipeline debug')
+    const dupBtn = screen.getAllByLabelText('Duplicate')[0]
+    fireEvent.click(dupBtn)
+    // UI remains intact — sessions still rendered
+    await waitFor(() => {
+      expect(screen.getByText('Pipeline debug')).toBeInTheDocument()
+    })
+  })
+})
+
+describe('ChatSidebar Folder Reorder', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    localStorage.clear()
+    server.use(
+      http.get('/api/chat/folders', () => HttpResponse.json([
+        { id: 'f-1', name: 'Alpha', order: 0, collapsed: false, parent_id: '' },
+        { id: 'f-2', name: 'Beta', order: 1, collapsed: false, parent_id: '' },
+        { id: 'f-3', name: 'Gamma', order: 2, collapsed: false, parent_id: '' },
+      ])),
+    )
+  })
+
+  it('renders folders sorted by order field', async () => {
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await waitFor(() => {
+      expect(screen.getByText('Alpha')).toBeInTheDocument()
+      expect(screen.getByText('Beta')).toBeInTheDocument()
+      expect(screen.getByText('Gamma')).toBeInTheDocument()
+    })
+    // Verify order: Alpha before Beta before Gamma
+    const folderNames = screen.getAllByText(/Alpha|Beta|Gamma/).map(el => el.textContent)
+    expect(folderNames).toEqual(['Alpha', 'Beta', 'Gamma'])
+  })
+
+  it('renders sortable wrapper with data-folder-sortable attribute', async () => {
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await waitFor(() => expect(screen.getByText('Alpha')).toBeInTheDocument())
+    expect(document.querySelector('[data-folder-sortable="f-1"]')).toBeInTheDocument()
+    expect(document.querySelector('[data-folder-sortable="f-2"]')).toBeInTheDocument()
+  })
+
+  it('renders grip handle with correct accessibility attributes', async () => {
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await waitFor(() => expect(screen.getByText('Alpha')).toBeInTheDocument())
+    // dnd-kit places role="button" and tabIndex on the handle via attributes
+    const handles = document.querySelectorAll('[data-folder-sortable] [role="button"]')
+    expect(handles.length).toBeGreaterThanOrEqual(3)
+    // Verify aria-label is set
+    expect(handles[0].getAttribute('aria-label')).toContain('Reorder')
+  })
+
+  // Reorder logic is unit-tested in src/test/reorderFolders.test.ts
+  // (jsdom cannot simulate dnd-kit drag interactions)
+})

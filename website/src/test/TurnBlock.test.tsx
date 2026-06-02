@@ -1,0 +1,141 @@
+import { describe, it, expect } from 'vitest'
+import { render, screen } from '@testing-library/react'
+import TurnBlock from '../pages/chat/TurnBlock'
+import type { DisplayItem, TurnItem } from '../pages/chat/types'
+
+function makeTurn(items: TurnItem[], complete = true): Extract<DisplayItem, {kind:'turn'}> {
+  return { kind: 'turn', items, complete }
+}
+
+describe('TurnBlock — file role visibility', () => {
+  it('file messages are not collapsed behind reasoning toggle', () => {
+    const items: TurnItem[] = [
+      { kind: 'single', msg: { role: 'tool', content: '🔧 Running: file_send', ts: '1' }, idx: 0 },
+      { kind: 'single', msg: { role: 'file', content: '{"filename":"test.mp3","content_type":"audio/mpeg"}', ts: '2' }, idx: 1 },
+      { kind: 'single', msg: { role: 'assistant', content: 'Here is your file.', ts: '3' }, idx: 2 },
+    ]
+    const turn = makeTurn(items)
+    render(
+      <TurnBlock
+        turn={turn}
+        renderItem={(it) => <div data-testid={`item-${it.kind === 'single' ? it.msg.role : 'group'}`}>{it.kind === 'single' ? it.msg.content : 'group'}</div>}
+      />
+    )
+    // File message should be visible (not hidden behind collapse)
+    expect(screen.getByTestId('item-file')).toBeInTheDocument()
+    // Assistant message should also be visible
+    expect(screen.getByTestId('item-assistant')).toBeInTheDocument()
+  })
+
+  it('file messages visible even in collapseAll mode', () => {
+    const items: TurnItem[] = [
+      { kind: 'single', msg: { role: 'tool', content: '🔧 Running: edge-tts', ts: '1' }, idx: 0 },
+      { kind: 'single', msg: { role: 'file', content: '{"filename":"standup.mp3","content_type":"audio/mpeg"}', ts: '2' }, idx: 1 },
+      { kind: 'single', msg: { role: 'assistant', content: 'Generated your standup audio.', ts: '3' }, idx: 2 },
+    ]
+    const turn = makeTurn(items)
+    render(
+      <TurnBlock
+        turn={turn}
+        renderItem={(it) => <div data-testid={`item-${it.kind === 'single' ? it.msg.role : 'group'}`}>{it.kind === 'single' ? it.msg.content : 'group'}</div>}
+        collapseAll={true}
+      />
+    )
+    // In collapseAll mode, file is a "conclusion" so it should be visible
+    expect(screen.getByTestId('item-file')).toBeInTheDocument()
+  })
+
+  it('renders file in its original turn position (not hoisted to top)', () => {
+    const items: TurnItem[] = [
+      { kind: 'single', msg: { role: 'assistant', content: 'generating audio…', ts: '1' }, idx: 0 },
+      { kind: 'single', msg: { role: 'file', content: '{"filename":"a.mp3","content_type":"audio/mpeg"}', ts: '2' }, idx: 1 },
+      { kind: 'single', msg: { role: 'assistant', content: 'here it is', ts: '3' }, idx: 2 },
+    ]
+    const turn = makeTurn(items)
+    const { container } = render(
+      <TurnBlock
+        turn={turn}
+        renderItem={(it) => <div data-testid={`item-${it.kind === 'single' ? it.msg.role + '-' + (it as any).idx : 'group'}`}>{it.kind === 'single' ? it.msg.content : 'group'}</div>}
+      />
+    )
+    const rendered = Array.from(container.querySelectorAll('[data-testid^="item-"]'))
+    const order = rendered.map(el => el.getAttribute('data-testid'))
+    expect(order).toEqual(['item-assistant-0', 'item-file-1', 'item-assistant-2'])
+  })
+})
+
+describe('TurnBlock — renderable content stays visible in collapseAll mode', () => {
+  it('mcwidget emitted between tool calls is not folded into the reasoning pane', () => {
+    const widgetBody = '<mcwidget title="Hello">\n<div>hi</div>\n</mcwidget>'
+    const items: TurnItem[] = [
+      { kind: 'single', msg: { role: 'tool', content: '🔧 Running: read', ts: '1' }, idx: 0 },
+      { kind: 'single', msg: { role: 'assistant', content: widgetBody, ts: '2' }, idx: 1 },
+      { kind: 'single', msg: { role: 'tool', content: '🔧 Running: artifact_save', ts: '3' }, idx: 2 },
+      { kind: 'single', msg: { role: 'assistant', content: 'Saved as artifact `hello-world` (v1). Let me know if you want changes.', ts: '4' }, idx: 3 },
+    ]
+    const turn = makeTurn(items)
+    const { container } = render(
+      <TurnBlock
+        turn={turn}
+        renderItem={(it, i) => (
+          <div data-testid={`item-${i}`} data-role={it.kind === 'single' ? it.msg.role : 'group'}>
+            {it.kind === 'single' ? it.msg.content : 'group'}
+          </div>
+        )}
+        collapseAll={true}
+      />
+    )
+    // The widget-bearing assistant message must render outside the collapsed reasoning section.
+    const widgetItem = container.querySelector('[data-testid="item-1"]')
+    expect(widgetItem).not.toBeNull()
+    // It should NOT be a descendant of a CollapsibleSection (motion.div with overflow:hidden).
+    const collapsedAncestors = widgetItem?.closest('[style*="overflow"]') ?? null
+    expect(collapsedAncestors).toBeNull()
+    // The conclusion (last assistant message) is still visible.
+    expect(container.querySelector('[data-testid="item-3"]')).not.toBeNull()
+  })
+
+  it('image embed in mid-turn assistant text stays visible in collapseAll mode', () => {
+    const imgMsg = 'See the chart: ![chart](/tmp/chart.png)'
+    const items: TurnItem[] = [
+      { kind: 'single', msg: { role: 'tool', content: '🔧 Running: shell', ts: '1' }, idx: 0 },
+      { kind: 'single', msg: { role: 'assistant', content: imgMsg, ts: '2' }, idx: 1 },
+      { kind: 'single', msg: { role: 'tool', content: '🔧 Running: shell', ts: '3' }, idx: 2 },
+      { kind: 'single', msg: { role: 'assistant', content: 'Done — uploaded to S3 and verified the link works.', ts: '4' }, idx: 3 },
+    ]
+    const turn = makeTurn(items)
+    const { container } = render(
+      <TurnBlock
+        turn={turn}
+        renderItem={(it, i) => <div data-testid={`item-${i}`}>{it.kind === 'single' ? it.msg.content : 'group'}</div>}
+        collapseAll={true}
+      />
+    )
+    const imgItem = container.querySelector('[data-testid="item-1"]')
+    expect(imgItem).not.toBeNull()
+    expect(imgItem?.closest('[style*="overflow"]')).toBeNull()
+  })
+
+  it('plain prose between tool calls still collapses (no regression)', () => {
+    const items: TurnItem[] = [
+      { kind: 'single', msg: { role: 'tool', content: '🔧 Running: read', ts: '1' }, idx: 0 },
+      { kind: 'single', msg: { role: 'assistant', content: 'Inspecting the config file before patching.', ts: '2' }, idx: 1 },
+      { kind: 'single', msg: { role: 'tool', content: '🔧 Running: write', ts: '3' }, idx: 2 },
+      { kind: 'single', msg: { role: 'assistant', content: 'Patched the config and verified the build still passes.', ts: '4' }, idx: 3 },
+    ]
+    const turn = makeTurn(items)
+    const { container } = render(
+      <TurnBlock
+        turn={turn}
+        renderItem={(it, i) => <div data-testid={`item-${i}`}>{it.kind === 'single' ? it.msg.content : 'group'}</div>}
+        collapseAll={true}
+      />
+    )
+    // Plain prose at idx 1 should be inside a collapsed (overflow:hidden) section.
+    const proseItem = container.querySelector('[data-testid="item-1"]')
+    expect(proseItem).not.toBeNull()
+    expect(proseItem?.closest('[style*="overflow"]')).not.toBeNull()
+    // Conclusion still visible.
+    expect(container.querySelector('[data-testid="item-3"]')).not.toBeNull()
+  })
+})

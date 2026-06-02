@@ -1,0 +1,160 @@
+import { useState, useEffect, useMemo, useRef } from 'react'
+import { ClipboardList, ScrollText } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAppDispatch, useAppSelector } from '../../store'
+import { setPendingInput, switchSlot } from '../../store/chatSlice'
+import { api } from '../../api/client'
+import { Card, CardTitle, Btn, Badge, SearchInput } from '../../components/ui'
+import InfoTip from '../../components/InfoTip'
+import { useProvider } from '../../providers'
+
+interface Prompt {
+  name: string
+  fullName: string
+  description: string
+  path: string
+  package: string
+  source: string
+}
+
+function SlotPicker({ prompt, onClose }: { prompt: Prompt; onClose: () => void }) {
+  const slots = useAppSelector(s => s.dashboard.slots)
+  const dispatch = useAppDispatch()
+  const navigate = useNavigate()
+  const ref = useRef<HTMLDivElement>(null)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current() }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  const send = (slotKey?: string) => {
+    dispatch(setPendingInput(`@${prompt.fullName}`))
+    if (slotKey) {
+      dispatch(switchSlot(slotKey))
+      navigate('/chat?autoSend=1')
+    } else {
+      navigate('/chat?autoSend=1&newSession=1')
+    }
+    onClose()
+  }
+
+  return (
+    <div ref={ref} className="absolute right-0 top-full mt-1 z-50 bg-bg-elevated border border-border rounded-lg shadow-lg min-w-[220px] max-h-[240px] overflow-y-auto py-1 animate-slide-in-left">
+      <div className="px-3 py-1.5 text-[11px] text-muted uppercase tracking-wider font-semibold">Send to…</div>
+      <div className="px-2 py-1 mx-1 rounded-md cursor-pointer text-[13px] text-accent font-medium hover:bg-bg-hover transition-colors" onClick={() => send()}>+ New Chat</div>
+      {slots.map(s => (
+        <div key={s.key} className="px-2 py-1.5 mx-1 rounded-md cursor-pointer text-[13px] hover:bg-bg-hover transition-colors flex items-center gap-2" onClick={() => send(s.key)}>
+          {s.running && <span className="w-1.5 h-1.5 rounded-full bg-green-400 shrink-0" />}
+          <span className="truncate">{s.title && s.title !== s.key ? s.title : s.agent || s.key}</span>
+        </div>
+      ))}
+      {slots.length === 0 && <div className="px-3 py-1.5 text-[12px] text-muted italic">No active chats</div>}
+    </div>
+  )
+}
+
+export default function PromptsTab() {
+  const provider = useProvider()
+  const queryClient = useQueryClient()
+  const [activeKey, setActiveKey] = useState('')
+  const [content, setContent] = useState('')
+  const [filter, setFilter] = useState('')
+  const [pickerPrompt, setPickerPrompt] = useState<Prompt | null>(null)
+
+  const { data: prompts = [], isLoading: loading, error } = useQuery<Prompt[]>({
+    queryKey: ['prompts'],
+    queryFn: api.prompts,
+  })
+
+  const promptKey = (p: Prompt) => `${p.source}:${p.package}/${p.name}`
+  const pendingRef = useRef('')
+
+  const toggle = async (p: Prompt) => {
+    const key = promptKey(p)
+    if (activeKey === key) { setActiveKey(''); return }
+    pendingRef.current = key
+    const detailKey = p.package ? `${p.package}/${p.name}` : p.name
+    try {
+      const d = await queryClient.fetchQuery({
+        queryKey: ['prompts', detailKey],
+        queryFn: () => api.promptDetail(detailKey),
+      })
+      if (pendingRef.current !== key) return // stale response
+      setActiveKey(key); setContent(d.content || '')
+    } catch { if (pendingRef.current === key) { setActiveKey(key); setContent('(failed to load)') } }
+  }
+
+  const sf = (p: Prompt) => !filter || (p.name + ' ' + p.fullName + ' ' + p.description + ' ' + p.package).toLowerCase().includes(filter.toLowerCase())
+
+  const aimPrompts = useMemo(() => prompts.filter(p => p.source === 'aim'), [prompts])
+  const userPrompts = useMemo(() => prompts.filter(p => p.source !== 'aim'), [prompts])
+  const filteredUser = useMemo(() => userPrompts.filter(sf), [userPrompts, filter])
+  const filteredAim = useMemo(() => aimPrompts.filter(sf), [aimPrompts, filter])
+
+  const grouped = useMemo(() => {
+    const g: Record<string, Prompt[]> = {}
+    for (const p of filteredAim) (g[p.package || 'unknown'] ||= []).push(p)
+    return Object.entries(g).sort(([a], [b]) => a.localeCompare(b))
+  }, [filteredAim])
+
+  const renderPrompt = (p: Prompt) => {
+    const pk = promptKey(p)
+    const isPickerActive = pickerPrompt && promptKey(pickerPrompt) === pk
+    return (
+    <div key={pk} className="border-b border-border last:border-b-0">
+      <div className="flex items-start gap-2.5 px-3 py-2.5 cursor-pointer hover:bg-bg-hover transition-colors" onClick={() => toggle(p)}>
+        <span className="text-muted text-[13px] mt-0.5 w-4 shrink-0">{activeKey === pk ? '▼' : '▶'}</span>
+        <span className="font-semibold text-text-strong font-mono text-[13px] whitespace-nowrap">@{p.fullName}</span>
+        {p.source === 'aim' ? <Badge variant="ok">AIM SOP</Badge>
+         : <Badge variant="warn">{p.source}</Badge>}
+        <span className="text-muted text-[13px] leading-relaxed truncate">{p.description}</span>
+      </div>
+      {activeKey === pk && <div className="px-3 pb-3">
+        <div className="flex gap-1.5 mb-2 items-center">
+          <code className="text-muted text-[12px] truncate max-w-[400px]">{p.path}</code>
+          <div className="relative">
+            <Btn onClick={() => setPickerPrompt(isPickerActive ? null : p)}><ClipboardList className="lucide-inline" /> Use in Chat</Btn>
+            {isPickerActive && <SlotPicker prompt={p} onClose={() => setPickerPrompt(null)} />}
+          </div>
+        </div>
+        <pre className="bg-bg-elevated border border-border rounded-md p-3 font-mono text-[13px] text-text overflow-x-auto max-h-[400px] overflow-y-auto whitespace-pre-wrap leading-normal">{content}</pre>
+      </div>}
+    </div>
+  )}
+
+  return (<>
+    <Card>
+      <CardTitle><ScrollText className="lucide-inline" /> Prompts & Agent SOPs <InfoTip text={`Saved prompts and Agent SOPs from ${provider.labels.pluginRegistryName.toLowerCase()} and ~/.kiro/prompts/. Invoke with @name in chat or /prompts get name. SOPs are step-by-step workflows the agent follows when invoked.`} /></CardTitle>
+      <p className="text-muted text-[13px] mb-3 leading-relaxed">
+        Invoke in chat: <code className="text-[12px]">@agent-sop:name</code> or <code className="text-[12px]">/prompts get name</code>.
+        SOPs are loaded on-demand — they don't consume context until invoked.
+      </p>
+      {prompts.length > 0 && (
+        <div className="mb-3 px-3">
+          <SearchInput placeholder="Filter prompts…" value={filter} onChange={e => setFilter(e.target.value)} />
+        </div>
+      )}
+      {prompts.length === 0 && !loading && !error && <p className="text-muted italic text-sm px-3 py-4">No prompts or agent SOPs found. Install a {provider.labels.pluginRegistryName.toLowerCase().replace(/s$/, '')} with agent-sops/ or create prompts in ~/.kiro/prompts/.</p>}
+      {loading && <p className="text-muted italic text-sm px-3 py-4">Loading prompts…</p>}
+      {error && <p className="text-red-400 text-sm px-3 py-4">{error.message || 'Failed to load prompts'}</p>}
+    </Card>
+    {filteredUser.length > 0 && <Card>
+      <CardTitle>User Prompts ({filter ? `${filteredUser.length} of ${userPrompts.length}` : userPrompts.length})</CardTitle>
+      {filteredUser.map(renderPrompt)}
+    </Card>}
+    {grouped.length > 0 && <Card>
+      <CardTitle>{provider.labels.pluginRegistryName} Agent SOPs ({filter ? `${filteredAim.length} of ${aimPrompts.length}` : aimPrompts.length}) <InfoTip text="Agent SOPs from installed AIM packages. Step-by-step workflows with MUST/SHOULD/MAY constraints." /></CardTitle>
+      {grouped.map(([pkg, items]) => (
+          <div key={pkg} className="mb-3">
+            <div className="text-muted text-[12px] uppercase tracking-[.06em] font-semibold px-3 py-1.5 bg-bg-hover rounded-t-md">{pkg}</div>
+            {items.map(renderPrompt)}
+          </div>
+      ))}
+    </Card>}
+  </>)
+}

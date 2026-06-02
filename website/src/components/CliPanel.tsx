@@ -1,0 +1,343 @@
+import React, { useState, useEffect, useCallback, useRef, memo } from 'react'
+import { motion } from 'framer-motion'
+import { X, ArrowUpDown, Plus, TerminalSquare } from 'lucide-react'
+import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import { WebLinksAddon } from '@xterm/addon-web-links'
+import '@xterm/xterm/css/xterm.css'
+import { useAppDispatch, useAppSelector } from '../store'
+import {
+  closeCliPanel,
+  setCliPanelPosition,
+  addSession,
+  removeSession,
+  setActiveSession,
+  type TerminalSession,
+} from '../store/terminalSlice'
+import { useTerminalWs } from '../hooks/useTerminalWs'
+import { setActiveTerminalSession } from '../utils/terminalRegistry'
+
+const HEIGHT_KEY = 'kiroclaw-terminal-height'
+const WIDTH_KEY = 'kiroclaw-terminal-width'
+const MIN_H = 120
+const MIN_W = 300
+const DEFAULT_H = 280
+const DEFAULT_W = 420
+
+/* ── Per-session xterm instance cache ── */
+const termCache = new Map<string, { term: Terminal; fit: FitAddon }>()
+
+/* ── Terminal theme from CSS custom properties ── */
+function getTermTheme() {
+  const style = getComputedStyle(document.documentElement)
+  return {
+    background:          style.getPropertyValue('--bg-elevated').trim()   || '#1e1e2e',
+    foreground:          style.getPropertyValue('--text').trim()          || '#cdd6f4',
+    cursor:              style.getPropertyValue('--accent').trim()        || '#89b4fa',
+    selectionBackground: style.getPropertyValue('--accent-subtle').trim() || '#313244',
+  }
+}
+
+/** Refresh theme on all cached terminals (called on theme change). */
+function refreshTermThemes() {
+  const theme = getTermTheme()
+  for (const { term } of termCache.values()) {
+    term.options.theme = theme
+  }
+}
+
+function getOrCreateTerm(id: string): { term: Terminal; fit: FitAddon } {
+  let entry = termCache.get(id)
+  if (!entry) {
+    const term = new Terminal({
+      cursorBlink: true,
+      fontSize: 13,
+      fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
+      theme: getTermTheme(),
+    })
+    const fit = new FitAddon()
+    term.loadAddon(fit)
+    term.loadAddon(new WebLinksAddon())
+    entry = { term, fit }
+    termCache.set(id, entry)
+  }
+  return entry
+}
+
+function destroyTerm(id: string) {
+  const entry = termCache.get(id)
+  if (entry) {
+    entry.term.dispose()
+    termCache.delete(id)
+  }
+}
+
+/** Refit all cached terminals (called after animation/resize). */
+function refitAll() {
+  for (const entry of termCache.values()) {
+    entry.fit.fit()
+  }
+}
+
+/* ── Session chip (memoized) ── */
+const SessionChip = memo(function SessionChip({
+  session,
+  active,
+  onSelect,
+  onClose,
+}: {
+  session: TerminalSession
+  active: boolean
+  onSelect: () => void
+  onClose: (e: React.MouseEvent) => void
+}) {
+  return (
+    <button
+      onClick={onSelect}
+      className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[13px] whitespace-nowrap shrink-0 transition-colors ${
+        active
+          ? 'bg-accent/20 text-accent border border-accent/40'
+          : 'bg-bg-subtle text-text-muted border border-border hover:bg-bg-hover'
+      }`}
+    >
+      <TerminalSquare size={12} />
+      <span className="max-w-[120px] truncate">{session.label}</span>
+      <span
+        role="button"
+        onClick={onClose}
+        className="ml-0.5 hover:text-red-400 transition-colors"
+      >
+        <X size={10} />
+      </span>
+    </button>
+  )
+})
+
+/* ── Terminal view for one session ── */
+function TerminalView({ sessionId, visible }: { sessionId: string; visible: boolean }) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const entryRef = useRef<{ term: Terminal; fit: FitAddon } | null>(null)
+
+  if (!entryRef.current) {
+    entryRef.current = getOrCreateTerm(sessionId)
+  }
+  const { term, fit } = entryRef.current
+
+  useTerminalWs(sessionId, term, fit)
+
+  // Attach terminal to DOM
+  useEffect(() => {
+    if (!containerRef.current) return
+    const el = term.element
+    if (el) {
+      containerRef.current.appendChild(el)
+    } else {
+      term.open(containerRef.current)
+    }
+    fit.fit()
+  }, [term, fit])
+
+  // Focus + refit when becoming visible
+  useEffect(() => {
+    if (visible) {
+      requestAnimationFrame(() => fit.fit())
+      term.focus()
+    }
+  }, [visible, term, fit])
+
+  // Refit on container resize — always observe, not just when visible
+  useEffect(() => {
+    if (!containerRef.current) return
+    const ro = new ResizeObserver(() => {
+      if (containerRef.current?.offsetHeight) fit.fit()
+    })
+    ro.observe(containerRef.current)
+    return () => ro.disconnect()
+  }, [fit]) // stable — only depends on fit ref from cache
+
+  // xterm instances persist in termCache across panel close/open — only destroyed on explicit tab close
+
+  return (
+    <div
+      ref={containerRef}
+      className="flex-1 min-h-0 h-full overflow-hidden"
+      style={{ display: visible ? 'block' : 'none' }}
+    />
+  )
+}
+
+/* ── Main panel ── */
+export default function CliPanel() {
+  const dispatch = useAppDispatch()
+  const { position, sessions, activeSessionId } = useAppSelector(s => s.terminal)
+  const isBottom = position === 'bottom'
+
+  function readSize(bottom: boolean): number {
+    const key = bottom ? HEIGHT_KEY : WIDTH_KEY
+    const min = bottom ? MIN_H : MIN_W
+    const def = bottom ? DEFAULT_H : DEFAULT_W
+    const v = parseInt(localStorage.getItem(key) || '', 10)
+    return !isNaN(v) && v >= min ? v : def
+  }
+
+  const [size, setSize] = useState(() => readSize(isBottom))
+  const [prevPosition, setPrevPosition] = useState(position)
+
+  // Reset size when position changes (synchronous, no useEffect needed)
+  if (position !== prevPosition) {
+    setPrevPosition(position)
+    setSize(readSize(isBottom))
+  }
+
+  const MAX_TABS = 3
+
+  function createSession() {
+    if (sessions.length >= MAX_TABS) {
+      // Brief visual feedback — could be a toast, but console + title flash is zero-dep
+      const btn = document.querySelector('[title="New terminal"]')
+      if (btn) {
+        btn.classList.add('text-red-400')
+        setTimeout(() => btn.classList.remove('text-red-400'), 1000)
+      }
+      return
+    }
+    const id = Math.random().toString(36).slice(2, 10)
+    dispatch(addSession({ id, label: 'bash' }))
+  }
+
+  useEffect(() => {
+    if (sessions.length === 0) createSession()
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Refresh terminal theme colors when the user switches themes
+  useEffect(() => {
+    const observer = new MutationObserver(() => refreshTermThemes())
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    setActiveTerminalSession(activeSessionId)
+  }, [activeSessionId])
+
+  // Stable callbacks for SessionChip (prevent re-renders)
+  const handleSelect = useCallback((id: string) => dispatch(setActiveSession(id)), [dispatch])
+  const handleClose = useCallback((id: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    // Optimistic: instant UI cleanup, backend delete is fire-and-forget
+    destroyTerm(id)
+    dispatch(removeSession(id))
+    fetch(`/api/terminal/sessions/${id}`, { method: 'DELETE' }).catch(() => {})
+  }, [dispatch])
+
+  // ── Resize drag — use refs for size to avoid recreating on every pixel ──
+  const sizeRef = useRef(size)
+  sizeRef.current = size
+  const isBottomRef = useRef(isBottom)
+  isBottomRef.current = isBottom
+
+  const onDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    const startPos = isBottomRef.current ? e.clientY : e.clientX
+    const startSize = sizeRef.current
+
+    const onMove = (ev: MouseEvent) => {
+      const delta = isBottomRef.current ? startPos - ev.clientY : startPos - ev.clientX
+      setSize(Math.max(isBottomRef.current ? MIN_H : MIN_W, startSize + delta))
+    }
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      setSize(s => {
+        const clamped = Math.max(isBottomRef.current ? MIN_H : MIN_W, s)
+        localStorage.setItem(isBottomRef.current ? HEIGHT_KEY : WIDTH_KEY, String(clamped))
+        return clamped
+      })
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }, []) // stable — no deps, uses refs
+
+  return (
+    <motion.div
+      initial={isBottom ? { height: 0, width: '100%' } : { width: 0, height: '100%' }}
+      animate={isBottom ? { height: size, width: '100%' } : { width: size, height: '100%' }}
+      exit={isBottom ? { height: 0, width: '100%' } : { width: 0, height: '100%' }}
+      transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+      onAnimationComplete={refitAll}
+      className={`shrink-0 overflow-hidden border border-border rounded-lg bg-bg ${isBottom ? 'ml-0 mr-2 mb-2 mt-0' : 'ml-0 mr-2 my-2'}`}
+      style={isBottom ? undefined : { minWidth: MIN_W }}
+    >
+      <div
+        className="flex flex-col overflow-hidden relative w-full h-full"
+      >
+        {/* Resize handle */}
+        <div
+          className={`absolute z-20 group/drag ${
+            isBottom
+              ? 'left-0 right-0 top-0 h-[6px] cursor-ns-resize'
+              : 'left-0 top-0 bottom-0 w-[6px] cursor-col-resize'
+          }`}
+          onMouseDown={onDragStart}
+        >
+          <div
+            className={`absolute transition-colors duration-200 bg-transparent group-hover/drag:bg-accent ${
+              isBottom ? 'left-0 right-0 top-0 h-[2px]' : 'left-0 top-0 bottom-0 w-[2px]'
+            }`}
+          />
+        </div>
+
+        {/* Header */}
+        <div className="flex items-center gap-1.5 px-3 h-9 shrink-0 border-b border-border">
+          <div className="flex items-center gap-1 flex-1 min-w-0 overflow-x-auto scrollbar-none">
+            {sessions.map(s => (
+              <SessionChip
+                key={s.id}
+                session={s}
+                active={s.id === activeSessionId}
+                onSelect={() => handleSelect(s.id)}
+                onClose={(e) => handleClose(s.id, e)}
+              />
+            ))}
+            <button
+              onClick={createSession}
+              className={`p-1 rounded transition-colors shrink-0 ${sessions.length >= MAX_TABS ? 'text-text-muted/40 cursor-not-allowed' : 'text-text-muted hover:text-text-strong hover:bg-bg-hover'}`}
+              title={sessions.length >= MAX_TABS ? `Max ${MAX_TABS} terminals` : 'New terminal'}
+            >
+              <Plus size={14} />
+            </button>
+          </div>
+
+          <button
+            onClick={() => dispatch(setCliPanelPosition(isBottom ? 'right' : 'bottom'))}
+            className="p-1 rounded text-text-muted hover:text-text-strong hover:bg-bg-hover transition-colors"
+            title={`Move to ${isBottom ? 'right' : 'bottom'}`}
+          >
+            <ArrowUpDown size={14} />
+          </button>
+          <button
+            onClick={() => dispatch(closeCliPanel())}
+            className="p-1 rounded text-text-muted hover:text-text-strong hover:bg-bg-hover transition-colors"
+            title="Close terminal"
+          >
+            <X size={14} />
+          </button>
+        </div>
+
+        {/* Terminal views */}
+        <div className="flex-1 min-h-0 relative overflow-hidden">
+          {sessions.map(s => (
+            <TerminalView key={s.id} sessionId={s.id} visible={s.id === activeSessionId} />
+          ))}
+          {sessions.length === 0 && (
+            <div className="flex items-center justify-center h-full text-text-muted text-sm">
+              <button onClick={createSession} className="hover:text-accent transition-colors">
+                + New Terminal
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </motion.div>
+  )
+}

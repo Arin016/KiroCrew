@@ -1,0 +1,290 @@
+import { useMemo } from 'react'
+import type { ContentBlock } from '../types'
+
+const FENCE_OPEN = /^(`{3,})(\w*)\s*$/
+const FENCE_CLOSE_RE = (() => {
+  const cache = new Map<string, RegExp>()
+  return (tick: string) => {
+    let re = cache.get(tick)
+    if (!re) { re = new RegExp(`^${tick}\\s*$`); cache.set(tick, re) }
+    return re
+  }
+})()
+const DIFF_LINE = /^@@|^[+-]\d+:|^[+-][^+-\s]/
+// Per-line widget tag regexes. Matched against a line AFTER masking inline
+// code spans, so tags appearing inside backtick-quoted prose are ignored.
+// Match the open tag flexibly: capture the full attribute string so we can
+// extract title= and slug= regardless of order.
+const WIDGET_OPEN_LINE_RE = /<mcwidget((?:\s+\w+="[^"]*")*)\s*>/
+const WIDGET_ATTR_RE = /(\w+)="([^"]*)"/g
+const WIDGET_CLOSE_LINE_RE = /<\/mcwidget>/
+
+/** Extract title/slug attributes from the attribute string captured by
+ * WIDGET_OPEN_LINE_RE. Returns plain object, never throws. */
+function parseWidgetAttrs(attrStr: string): { title?: string; slug?: string } {
+  const out: { title?: string; slug?: string } = {}
+  if (!attrStr) return out
+  WIDGET_ATTR_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = WIDGET_ATTR_RE.exec(attrStr)) !== null) {
+    if (m[1] === 'title') out.title = m[2]
+    else if (m[1] === 'slug') out.slug = m[2]
+  }
+  return out
+}
+
+/**
+ * Mask inline-code regions within a single line.
+ *
+ * Returns a string of the same length as `line` where the contents of each
+ * balanced backtick run (`` `...` ``, `` ``...`` ``, etc.) including the
+ * delimiters themselves are replaced with space characters. Unbalanced runs
+ * are left as-is by default. CommonMark inline code does not span newlines,
+ * so a per-line mask is sufficient.
+ *
+ * Used to prevent widget tag detection from false-matching inside quoted
+ * examples like `` `<mcwidget>...</mcwidget>` `` that an author wrote to
+ * document the syntax.
+ *
+ * `streamingTrailingLine` (default false): when true, an unmatched opening
+ * backtick run is treated as an inline-code span whose closing run has not
+ * yet streamed in. Everything from the opening run to end-of-line is masked.
+ * Only set this for the LAST line of a streaming buffer — for any line that
+ * already has a newline after it the input is final and unmatched runs are
+ * literal text per CommonMark.
+ */
+export function maskInlineCode(line: string, streamingTrailingLine = false): string {
+  const out = line.split('')
+  let i = 0
+  while (i < line.length) {
+    if (line[i] !== '`') { i++; continue }
+    const runStart = i
+    while (i < line.length && line[i] === '`') i++
+    const runLen = i - runStart
+    // Search forward for a backtick run of exactly the same length.
+    let j = i
+    let matchStart = -1
+    while (j < line.length) {
+      if (line[j] !== '`') { j++; continue }
+      const r2Start = j
+      while (j < line.length && line[j] === '`') j++
+      if (j - r2Start === runLen) { matchStart = r2Start; break }
+    }
+    if (matchStart >= 0) {
+      for (let k = runStart; k < matchStart + runLen; k++) out[k] = ' '
+      i = matchStart + runLen
+    } else if (streamingTrailingLine) {
+      // Streaming: assume the closing run has not yet arrived. Mask the rest
+      // of the line so any widget tag inside the (still-incomplete) span is
+      // not falsely promoted to a widget. When the close arrives in the next
+      // streaming snapshot the run is balanced and the normal branch above
+      // takes over.
+      for (let k = runStart; k < line.length; k++) out[k] = ' '
+      i = line.length
+    }
+    // Otherwise unbalanced run on a final line: leave as-is per CommonMark.
+  }
+  return out.join('')
+}
+
+/** Classify whether code content looks like a unified diff. */
+function isDiffContent(code: string, lang?: string): boolean {
+  const lines = code.split('\n')
+  const count = lines.filter(l => DIFF_LINE.test(l)).length
+  return count >= 2 || (lang === 'diff' && count >= 1)
+}
+
+type State = 'outside' | 'fence' | 'widget' | 'widget-fence'
+
+/**
+ * Parse raw text into structured content blocks.
+ *
+ * Runs a single state-machine pass over input lines. States:
+ *
+ *   outside       — collecting markdown
+ *   fence         — inside a ``` code block (not inside a widget)
+ *   widget        — inside a <mcwidget>…</mcwidget> body
+ *   widget-fence  — inside a ``` code block that is itself inside a widget;
+ *                   the fence content is treated as opaque widget body and
+ *                   a </mcwidget> tag inside it is ignored until the fence
+ *                   closes.
+ *
+ * Widget tag detection runs against each line AFTER inline-code spans are
+ * masked, so tags quoted in prose with backticks (e.g. when documenting the
+ * widget syntax) are not falsely extracted as real widgets.
+ *
+ * Fences inside a widget body are preserved verbatim in the widget content
+ * so a widget containing a ```code``` example is still emitted as a single
+ * widget block, not shredded into markdown | code | markdown.
+ *
+ * When `streaming` is true, an unclosed fence or widget at end of input
+ * produces a block with `complete: false` so the renderer can show a
+ * provisional view.
+ */
+export function parseBlocks(raw: string, streaming: boolean): ContentBlock[] {
+  const lines = raw.split('\n')
+  const blocks: ContentBlock[] = []
+
+  let state: State = 'outside'
+  let mdBuf: string[] = []
+  let codeBuf: string[] = []
+  let widgetBuf: string[] = []
+  let fenceTick = ''
+  let fenceLang = ''
+  let widgetTitle = ''
+  let widgetSlug = ''
+  let widgetFenceTick = ''
+  let mdStart = 1
+  let codeStart = 1
+  let widgetStart = 1
+
+  const flushMd = () => {
+    if (mdBuf.length === 0) return
+    const text = mdBuf.join('\n')
+    if (text.trim()) blocks.push({ type: 'markdown', content: text, complete: true, startLine: mdStart })
+    mdBuf = []
+  }
+
+  const flushCode = (complete: boolean) => {
+    const code = codeBuf.join('\n')
+    const lang = fenceLang || undefined
+    let type: ContentBlock['type'] = 'code'
+    if (lang === 'mermaid') type = 'mermaid'
+    else if (lang === 'diff' || isDiffContent(code, lang)) type = 'diff'
+    blocks.push({ type, content: code, language: lang, complete, startLine: codeStart })
+    codeBuf = []
+    fenceTick = ''
+    fenceLang = ''
+  }
+
+  const flushWidget = (complete: boolean) => {
+    blocks.push({
+      type: 'widget',
+      content: widgetBuf.join('\n').trim(),
+      language: widgetTitle || 'Widget',
+      complete,
+      startLine: widgetStart,
+      slug: widgetSlug || undefined,
+    })
+    widgetBuf = []
+    widgetTitle = ''
+    widgetSlug = ''
+    widgetFenceTick = ''
+  }
+
+  const pushMd = (text: string, lineIdx: number) => {
+    if (mdBuf.length === 0) mdStart = lineIdx + 1
+    mdBuf.push(text)
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    // Conservative masking only for the trailing line of a streaming buffer:
+    // an unmatched opening backtick run there is treated as an inline-code
+    // span whose closing run has not yet streamed. Prevents a transient
+    // <mcwidget> tag inside that incomplete span from triggering a widget
+    // transition. Once the close arrives in a later snapshot the run is
+    // balanced and normal masking takes over.
+    const isStreamingTail = streaming && i === lines.length - 1
+    switch (state) {
+      case 'outside': {
+        const masked = maskInlineCode(line, isStreamingTail)
+        const wOpen = WIDGET_OPEN_LINE_RE.exec(masked)
+        if (wOpen) {
+          const before = line.slice(0, wOpen.index)
+          if (before) pushMd(before, i)
+          flushMd()
+          const attrs = parseWidgetAttrs(wOpen[1] || '')
+          widgetTitle = attrs.title || ''
+          widgetSlug = attrs.slug || ''
+          widgetStart = i + 1
+          const afterTag = line.slice(wOpen.index + wOpen[0].length)
+          // Close tag on the same line as the open tag: single-line widget.
+          const maskedAfter = maskInlineCode(afterTag, isStreamingTail)
+          const wClose = WIDGET_CLOSE_LINE_RE.exec(maskedAfter)
+          if (wClose) {
+            widgetBuf.push(afterTag.slice(0, wClose.index))
+            flushWidget(true)
+            const afterClose = afterTag.slice(wClose.index + wClose[0].length)
+            if (afterClose) pushMd(afterClose, i)
+          } else {
+            if (afterTag) widgetBuf.push(afterTag)
+            state = 'widget'
+          }
+          break
+        }
+        const fenceMatch = FENCE_OPEN.exec(line)
+        if (fenceMatch) {
+          flushMd()
+          fenceTick = fenceMatch[1].replace(/`/g, '\\`')
+          fenceLang = fenceMatch[2] || ''
+          codeStart = i + 2
+          state = 'fence'
+          break
+        }
+        pushMd(line, i)
+        break
+      }
+
+      case 'fence': {
+        if (FENCE_CLOSE_RE(fenceTick).test(line)) {
+          flushCode(true)
+          state = 'outside'
+        } else {
+          codeBuf.push(line)
+        }
+        break
+      }
+
+      case 'widget': {
+        const masked = maskInlineCode(line, isStreamingTail)
+        const wClose = WIDGET_CLOSE_LINE_RE.exec(masked)
+        if (wClose) {
+          const before = line.slice(0, wClose.index)
+          if (before) widgetBuf.push(before)
+          flushWidget(true)
+          const afterClose = line.slice(wClose.index + wClose[0].length)
+          if (afterClose) pushMd(afterClose, i)
+          state = 'outside'
+          break
+        }
+        const fenceMatch = FENCE_OPEN.exec(line)
+        if (fenceMatch) {
+          widgetBuf.push(line)
+          widgetFenceTick = fenceMatch[1].replace(/`/g, '\\`')
+          state = 'widget-fence'
+          break
+        }
+        widgetBuf.push(line)
+        break
+      }
+
+      case 'widget-fence': {
+        widgetBuf.push(line)
+        if (FENCE_CLOSE_RE(widgetFenceTick).test(line)) {
+          state = 'widget'
+        }
+        break
+      }
+    }
+  }
+
+  // End of input: flush any open state.
+  if (state === 'fence') {
+    flushCode(!streaming)
+  } else if (state === 'widget' || state === 'widget-fence') {
+    flushWidget(!streaming)
+  }
+  flushMd()
+
+  return blocks
+}
+
+/**
+ * Hook that parses raw message text into content blocks.
+ * During streaming, unclosed fences or widgets produce provisional blocks.
+ * On completion (streaming=false), does a clean full reparse.
+ */
+export function useBlockAssembler(rawText: string, streaming: boolean): ContentBlock[] {
+  return useMemo(() => parseBlocks(rawText, streaming), [rawText, streaming])
+}

@@ -1,0 +1,151 @@
+import { useState, useEffect } from 'react'
+import { Sparkles, PictureInPicture2 } from 'lucide-react'
+import { useAgentSync } from '../hooks/useAgentSync'
+import { usePopoutSync } from '../hooks/usePopoutSync'
+import { SCENES, SCENE_STORAGE_KEY, SCENE_LAYOUT_SCALE, type SceneKey } from './scenes/config'
+import { SCENE_COMPONENTS } from './scenes/components'
+
+export default function WorldsPage() {
+  const [scene, setScene] = useState<SceneKey>(() => {
+    const saved = localStorage.getItem(SCENE_STORAGE_KEY)
+    return (saved as SceneKey) || 'office'
+  })
+  const [collapsed, setCollapsed] = useState(false)
+  const { agents, maxAgents } = useAgentSync()
+  const { popoutActive, broadcastScene, openPopout } = usePopoutSync(false, s => setScene(s as SceneKey))
+  const activeCount = agents.filter(a => a.running).length
+
+  useEffect(() => {
+    localStorage.setItem(SCENE_STORAGE_KEY, scene)
+  }, [scene])
+
+  const changeScene = (key: SceneKey) => { setScene(key); broadcastScene(key) }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* Collapsible header + tabs — CSS grid 0fr/1fr for smooth height transition */}
+      <div
+        id="worlds-collapse-panel"
+        data-testid="collapse-panel"
+        style={{
+          display: 'grid',
+          gridTemplateRows: collapsed ? '0fr' : '1fr',
+          opacity: collapsed ? 0 : 1,
+          transition: 'grid-template-rows 0.5s ease, opacity 0.3s ease',
+          flexShrink: 0,
+          position: 'relative',
+          zIndex: 10,
+        }}
+        {...(collapsed ? { inert: true as any } : {})}
+      >
+        <div style={{ overflow: 'hidden' }}>
+        <div className="px-5 pt-4 pb-2">
+          <div className="text-lg font-semibold text-text-strong"><Sparkles className="lucide-inline" /> Agent Worlds</div>
+          <div className="text-sm text-muted">
+            {agents.length} agent{agents.length !== 1 ? 's' : ''} present,{' '}
+            {activeCount} active, {maxAgents - agents.length} slot{maxAgents - agents.length !== 1 ? 's' : ''} open
+          </div>
+        </div>
+
+        <div style={{
+          display: 'flex', gap: 6, padding: '0 20px 8px',
+          flexWrap: 'wrap',
+        }}>
+          {SCENES.map(s => (
+            <button
+              key={s.key}
+              onClick={() => changeScene(s.key)}
+              title={s.desc}
+              aria-pressed={scene === s.key}
+              aria-label={`${s.label} scene: ${s.desc}`}
+              style={{
+                padding: '5px 12px',
+                borderRadius: 6,
+                border: scene === s.key ? '1.5px solid var(--accent, #f90)' : '1.5px solid var(--border, #333)',
+                background: scene === s.key ? 'var(--accent, #f90)' : 'var(--bg-elevated, #1a1a2e)',
+                color: scene === s.key ? '#000' : 'var(--text-muted, #999)',
+                cursor: 'pointer',
+                fontSize: 13,
+                fontFamily: 'var(--font-body, inherit)',
+                transition: 'all 0.15s ease',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 5,
+              }}
+            >
+              <span>{s.icon}</span>
+              <span>{s.label}</span>
+            </button>
+          ))}
+        </div>
+        </div>
+      </div>
+
+      {/* Scene canvas — fixed aspect wrapper so all scenes occupy the same space */}
+      <div style={{ flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'start', padding: '0 20px 20px', minHeight: 0 }}>
+        <div style={{ position: 'relative', width: '100%', maxWidth: 480 * SCENE_LAYOUT_SCALE, aspectRatio: '3/2' }}>
+          <div style={{ position: 'absolute', top: 8, right: 8, zIndex: 20, display: 'flex', gap: 4 }}>
+            <button
+              onClick={() => setCollapsed(c => !c)}
+              title={collapsed ? 'Show controls' : 'Hide controls'}
+              aria-expanded={!collapsed}
+              aria-controls="worlds-collapse-panel"
+              aria-label={collapsed ? 'Show controls' : 'Hide controls'}
+              className="bg-black/55 hover:bg-black/75 transition-colors"
+              style={{
+                border: '1px solid var(--border, #333)',
+                borderRadius: 6, padding: '3px 8px', cursor: 'pointer',
+                color: 'var(--text-muted, #999)', fontSize: 16, lineHeight: 1,
+              }}
+            >
+              {collapsed ? '▼' : '▲'}
+            </button>
+            <button
+              onClick={openPopout}
+              title="Pop out to separate window"
+              aria-label="Pop out to separate window"
+              className="bg-black/55 hover:bg-black/75 transition-colors"
+              style={{
+                border: '1px solid var(--border, #333)',
+                borderRadius: 6, padding: '3px 6px', cursor: 'pointer',
+                color: 'var(--text-muted, #999)', lineHeight: 1, display: 'flex', alignItems: 'center',
+              }}
+            >
+              <PictureInPicture2 size={14} />
+            </button>
+          </div>
+
+          {popoutActive && (
+            <div style={{
+              position: 'absolute', inset: 0, zIndex: 15,
+              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+              background: 'var(--bg, #0a0a1a)', borderRadius: 8, gap: 12,
+            }}>
+              <PictureInPicture2 size={32} style={{ color: 'var(--accent, #f90)', opacity: 0.7 }} />
+              <div style={{ color: 'var(--text-muted, #999)', fontSize: 14 }}>Playing in popout window</div>
+              <button
+                onClick={openPopout}
+                style={{
+                  padding: '6px 16px', borderRadius: 6, fontSize: 13, cursor: 'pointer',
+                  border: '1px solid var(--border, #333)', background: 'var(--bg-elevated, #1a1a2e)',
+                  color: 'var(--text, #eee)', fontFamily: 'var(--font-body, inherit)',
+                }}
+              >
+                Focus popout
+              </button>
+            </div>
+          )}
+
+          {SCENES.map(s => {
+            const C = SCENE_COMPONENTS[s.key]
+            return (
+              <div key={s.key} style={{ display: scene === s.key ? 'contents' : 'none' }}>
+                <C agents={agents} visible={scene === s.key && !popoutActive} />
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}

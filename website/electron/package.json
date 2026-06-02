@@ -1,0 +1,63 @@
+{
+  "name": "kiroclaw-electron-mac",
+  "version": "1.0.0",
+  "description": "KiroClaw \u2014 AI agent desktop app",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.js",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "dev.kiroclaw.desktop",
+    "productName": "KiroClaw",
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "icon.png",
+      "target": [
+        "dmg"
+      ]
+    },
+    "linux": {
+      "category": "Development",
+      "icon": "icon.png",
+      "target": [
+        "AppImage"
+      ]
+    },
+    "dmg": {
+      "writeUpdateInfo": false
+    },
+    "files": [
+      "main.js",
+      "context-menu.js",
+      "find-bin.js",
+      "remote-token.js",
+      "token-retry.js",
+      "validation.js",
+      "context-menu.js",
+      "preload.js",
+      "loading.html",
+      "token-prompt.html",
+      "icon.png"
+    ],
+    "extraResources": [
+      {
+        "from": "backend-dist/kiroclaw-backend",
+        "to": "backend-dist/kiroclaw-backend",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ]
+  }
+}

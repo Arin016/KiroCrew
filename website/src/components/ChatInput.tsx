@@ -1,0 +1,1390 @@
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, memo } from 'react'
+import { ArrowUpFromLine, ArrowUp, Loader2, Plus, Scan, Bot, Mic, Square, ShieldCheck, BookOpen, Handshake, Rocket, X, ClipboardList, CheckCircle, Ban, Repeat, Sparkles, Target, Gauge, Lock, Globe } from 'lucide-react'
+import { useMutation } from '@tanstack/react-query'
+import { useBranding } from '../hooks/useBranding'
+import { useAppSelector, useAppDispatch } from '../store'
+import { resolveByApprovalId, openActivityToTool } from '../store/chatSlice'
+import { useToolPillVisible } from '../store/toolPillRegistry'
+import { ToolDetails } from '../pages/chat/ToolDetails'
+import { api } from '../api/client'
+import { createSelector } from 'reselect'
+import { shallowEqual } from 'react-redux'
+import { motion, AnimatePresence } from 'framer-motion'
+import { sanitizeLlmOutput } from '../utils/sanitize'
+import { useSimplifiedToolNames } from '../hooks/useSimplifiedToolNames'
+import TrustDropdown from './TrustDropdown'
+import { useIsMobile } from '../hooks/useIsMobile'
+import { useImeGuard } from '../hooks/useImeGuard'
+import ContextRing from './ContextRing'
+import FollowUpBar from './FollowUpBar'
+import { dispatchLightbox } from './MarkdownRenderer'
+import { IMG_EXT } from '../utils/fileTokens'
+import { platformShortcut } from '../utils/platform'
+import {
+  type PasteBlock,
+  shouldCollapse as shouldCollapsePaste,
+  countLines,
+  makePasteId,
+  formatToken,
+  tokenRangeAt,
+  pruneBlocks,
+  nextSeq,
+  findTokenRanges,
+} from '../utils/pasteTokens'
+import type { SendMode } from '../pages/chat/ChatSettings'
+import type { RootState } from '../store'
+
+const APPROVAL_DISPLAY: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
+  normal: { label: 'Normal', icon: <ShieldCheck size={13} />, color: '' },
+  trust_reads: { label: 'Reads', icon: <BookOpen size={13} />, color: 'text-accent' },
+  trust: { label: 'Trust', icon: <Handshake size={13} />, color: 'text-ok' },
+  yolo: { label: 'YOLO', icon: <Rocket size={13} />, color: 'text-danger' },
+}
+// Effort vocabulary lives in lib/effort.ts (mirrors backend effort.py).
+// Re-exported here for back-compat with existing `from './ChatInput'` imports.
+export {
+  EFFORT_DISPLAY,
+  EFFORT_LEVELS,
+  REASONING_EFFORT_PROVIDERS,
+  modelSupportsEffort,
+  effortLabel,
+} from '../lib/effort'
+// Re-export above does not create a local binding — import effortLabel for use
+// in this component's own render below.
+import { effortLabel } from '../lib/effort'
+import SlashCommandMenu from './SlashCommandMenu'
+import FilePickerMenu from './FilePickerMenu'
+
+const INPUT_MIN_H = 44
+const INPUT_DEFAULT_MAX_H = 140
+const INPUT_PREFILL_MAX_H = 320
+const INPUT_DRAG_MIN_H = 93
+const FILE_PREVIEW_H = 81 // h-16 (64px) + py-2 (16px) + border-t (1px)
+const INPUT_DRAG_MAX_RATIO = 0.5
+const INPUT_HEIGHT_LS_KEY = 'mc-input-height'
+
+function toApiDecision(d: string): 'approve' | 'reject' {
+  return (d === 'approved' || d === 'trust' || d === 'trust_reads') ? 'approve' : 'reject'
+}
+
+const selectPendingApproval = createSelector(
+  (s: RootState) => s.chat.messages,
+  msgs => {
+    // Only consider permissions after the last user message (current turn)
+    let lastUserIdx = -1
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'user') { lastUserIdx = i; break }
+    }
+    for (let i = msgs.length - 1; i > lastUserIdx; i--) {
+      const m = msgs[i]
+      if (m.role === 'permission' && !m.meta?.resolved && m.meta?.approval_id) return m
+    }
+    return null
+  }
+)
+
+/** Effective viewport height accounting for KiroClaw zoom scale.
+ *  --mc-vh is px when zoom active; falls back to window.innerHeight otherwise. */
+function effectiveVh(): number {
+  const v = getComputedStyle(document.documentElement).getPropertyValue('--mc-vh')
+  return v ? parseFloat(v) : window.innerHeight
+}
+
+/** Auto-size textarea to fit content (only when not manually sized).
+ *  Sets overflow:hidden during measurement so the parent flex container
+ *  never sees the collapsed (height:0) intermediate state — prevents the
+ *  Virtuoso message list above from reflowing and causing visible vibration. */
+function applyHeight(
+  el: HTMLTextAreaElement,
+  manualHeight: number | null,
+  prefillHint?: boolean,
+) {
+  if (manualHeight !== null) return // manual height — wrapper controls size
+  const cap = prefillHint ? INPUT_PREFILL_MAX_H : INPUT_DEFAULT_MAX_H
+  const prev = el.style.height
+  const prevOverflow = el.style.overflow
+  el.style.overflow = 'hidden'
+  el.style.height = '0'
+  const next = Math.max(INPUT_MIN_H, Math.min(el.scrollHeight, cap)) + 'px'
+  el.style.height = next === prev ? prev : next
+  el.style.overflow = prevOverflow
+}
+
+interface ChatInputProps {
+  value: string
+  onChange: (v: string) => void
+  onSend: () => void
+  disabled?: boolean
+  placeholder?: string
+  prefillHint?: boolean
+  onDismissHint?: () => void
+  /** macOS-only screenshot */
+  onScreenshot?: () => void
+  /** Browser-native file upload (cross-platform) */
+  onUploadFiles?: (files: File[]) => void
+  /** Whether file actions are in progress */
+  uploading?: boolean
+  /** Pending file paths (images + non-images) for preview strip */
+  pendingFiles?: string[]
+  /** Remove a pending file by path */
+  onRemoveFile?: (path: string) => void
+  /** Show macOS-only buttons (screenshot) */
+  isMac?: boolean
+  /** Drag-and-drop handler for the entire input bar */
+  onDrop?: (e: React.DragEvent) => void
+  /** Whether drag-over styling is active */
+  dragOver?: boolean
+  /** Drag-over event handler */
+  onDragOver?: (e: React.DragEvent) => void
+  /** Drag-leave event handler */
+  onDragLeave?: (e: React.DragEvent) => void
+  /** Voice input state */
+  voiceRecording?: boolean
+  voiceTranscribing?: boolean
+  onVoiceToggle?: () => void
+  /** Chat-level controls in input bar */
+  agentName?: string
+  agentSource?: string
+  modelName?: string
+  onAgentClick?: (rect: DOMRect) => void
+  onModelClick?: (rect: DOMRect) => void
+  contextPct?: number
+  contextUsedTokens?: number
+  contextWindowTokens?: number
+  isRunning?: boolean
+  onStop?: () => void
+  isQueued?: boolean
+  stopState?: 'idle' | 'soft_pending' | 'killing'
+  approvalMode?: string
+  onApprovalClick?: (rect: DOMRect) => void
+  reasoningEffort?: string
+  onReasoningEffortClick?: (rect: DOMRect) => void
+  providerId?: string
+  onFileSelect?: (path: string) => void
+  onFileOpen?: (path: string) => void
+  project?: string
+  memoryMode?: string
+  /** User-sent messages for ↑/↓ history navigation (oldest → newest). */
+  sentMessages?: string[]
+  /** Auto-nudge loop state for this slot (if any) */
+  autoNudgeActive?: boolean
+  autoNudgeCycleCount?: number
+  onAutoNudgeClick?: (rect: DOMRect) => void
+  /** Send-key mode. Default 'enter'. */
+  sendOnEnter?: SendMode
+  /** Follow-up options from assistant message */
+  followUpOptions?: string[]
+  /** Options the user has picked (visual highlight in FollowUpBar) */
+  followUpPicked?: Set<string>
+  /** Select a follow-up option — handler toggles text in input (see ChatPage wiring) */
+  onFollowUpSelect?: (option: string, event: React.MouseEvent) => void
+  /** Quick Send enabled — clicking sends immediately */
+  quickSend?: boolean
+  /** Layout mode for the follow-up bar: 'multiline' (default) or 'scroll' (original single-line). */
+  followUpLayout?: 'multiline' | 'scroll'
+  /** Collapsed paste blocks backing `⌜🗒 Pasted …⌟` tokens in `value`. */
+  pasteBlocks?: PasteBlock[]
+  /** Replace the current list of paste blocks (add/remove). */
+  onPasteBlocksChange?: (next: PasteBlock[]) => void
+  /** Optional knowledge chip rendered above the input */
+  knowledgeChip?: React.ReactNode
+  /** When this key changes, focus the textarea (e.g. on chat session switch). */
+  autoFocusKey?: string | null
+  /** Browse mode — when true, [BROWSE] prefix is prepended to sent messages */
+  browseMode?: boolean
+  onBrowseToggle?: () => void
+}
+
+function FilePreviewStrip({ files, onRemove }: { files: string[]; onRemove?: (path: string) => void }) {
+  const imgs = files.filter(p => IMG_EXT.test(p))
+  const nonImgs = files.filter(p => !IMG_EXT.test(p))
+  if (!imgs.length && !nonImgs.length) return null
+  return (
+    // NOTE: rendered height must match FILE_PREVIEW_H constant, update both together
+    <div className="flex gap-2 px-5 py-2 border-t border-border bg-chrome/50 overflow-x-auto items-end" data-image-scope="">
+      {imgs.map((path, i) => {
+        const src = `/api/file-raw?path=${encodeURIComponent(path)}`
+        return (
+          <div key={path} className="relative group/preview shrink-0" title={path}>
+            <span className="absolute -top-1.5 -left-1.5 w-5 h-5 rounded-full bg-accent text-white text-[10px] font-bold flex items-center justify-center z-10">{i + 1}</span>
+            <img src={src} alt={path} className="h-16 rounded border border-border object-contain cursor-pointer hover:opacity-80 transition-opacity"
+              data-lightbox-image=""
+              onClick={(e) => dispatchLightbox(e.currentTarget)} />
+            {onRemove && (
+              <button
+                aria-label="Remove"
+                className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-danger text-white text-[12px] flex items-center justify-center opacity-0 group-hover/preview:opacity-100 transition-opacity cursor-pointer"
+                onClick={() => onRemove(path)} title="Remove"
+              ><X className="lucide-inline" /></button>
+            )}
+          </div>
+        )
+      })}
+      {nonImgs.map(path => (
+        <div key={path} className="relative group/preview shrink-0 flex items-center gap-1.5 px-2 py-1 rounded border border-border bg-bg-hover text-[12px] text-text">
+          <span>{path.split('/').pop()}</span>
+          {onRemove && (
+            <button className="text-muted hover:text-danger cursor-pointer bg-transparent border-none p-0" onClick={() => onRemove(path)} title="Remove"><X size={12} /></button>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+
+function ChatInput({
+  value,
+  onChange,
+  onSend,
+  disabled = false,
+  placeholder = '',
+  prefillHint,
+  onScreenshot,
+  onUploadFiles,
+  uploading = false,
+  pendingFiles = [],
+  onRemoveFile,
+  isMac = false,
+  onDrop,
+  dragOver = false,
+  onDragOver,
+  onDragLeave,
+  voiceRecording = false,
+  voiceTranscribing = false,
+  onVoiceToggle,
+  agentName,
+  agentSource,
+  modelName,
+  onAgentClick,
+  onModelClick,
+  contextPct,
+  contextUsedTokens,
+  contextWindowTokens,
+  isRunning = false,
+  onStop,
+  isQueued = false,
+  stopState,
+  approvalMode,
+  onApprovalClick,
+  reasoningEffort,
+  onReasoningEffortClick,
+  providerId: _providerId,
+  onFileSelect,
+  onFileOpen,
+  project,
+  memoryMode,
+  sentMessages,
+  autoNudgeActive = false,
+  autoNudgeCycleCount = 0,
+  onAutoNudgeClick,
+  sendOnEnter = 'enter',
+  followUpOptions,
+  followUpPicked,
+  onFollowUpSelect,
+  quickSend,
+  followUpLayout,
+  pasteBlocks = [],
+  onPasteBlocksChange,
+  knowledgeChip,
+  autoFocusKey,
+  browseMode = false,
+  onBrowseToggle,
+}: ChatInputProps) {
+  const dispatch = useAppDispatch()
+  const pendingApproval = useAppSelector(selectPendingApproval, shallowEqual)
+  const hasApproval = !!pendingApproval
+  const [approvalSubmitting, setApprovalSubmitting] = useState(false)
+
+  const activeSlot = useAppSelector(s => s.chat.activeSlot)
+  const approvalMeta = pendingApproval?.meta as Record<string, unknown> | undefined
+  const approvalId = approvalMeta?.approval_id as string | undefined
+  const approvalToolInput = (approvalMeta?.tool_input as string) || ''
+  const approvalIsReadOnly = !!(approvalMeta?.is_read_only)
+  const approvalFullCommand = (approvalMeta?.full_command as string) || ''
+  const approvalBaseCommand = (approvalMeta?.base_command as string) || ''
+  const approvalToolTitle = (approvalMeta?.tool_title as string) || ''
+  const approvalIsShell = approvalToolTitle.startsWith('Running: ')
+  const simplified = useSimplifiedToolNames()
+  const approvalLabelRaw = sanitizeLlmOutput(pendingApproval?.content || '').replace(/^🔧\s*/, '')
+
+  const approvalToolCallId = (approvalMeta?.tool_call_id as string) || null
+
+  const approvalToolEntry = useAppSelector(s => {
+    if (!approvalToolCallId) return null
+    const entry = s.chat.toolLog.findLast(e => e.type === 'tool' && e.tool_call_id === approvalToolCallId)
+    return entry ? { purpose: entry.purpose || '', ts: entry.ts || 0 } : null
+  }, shallowEqual)
+  const approvalPurpose = approvalToolEntry?.purpose || ''
+  const approvalTs = approvalToolEntry?.ts || 0
+
+  const approvalLabel = (simplified && approvalPurpose) ? approvalPurpose : approvalLabelRaw
+
+  // Subscribe to the inline pill's viewport visibility. While the pill is in
+  // view, the bar collapses to just the always-visible button row; the moment
+  // the pill scrolls past the top, a "ghost pill" mirror slides into the bar
+  // so the user keeps full context (timestamp, purpose, input preview)
+  // alongside the action buttons. See src/store/toolPillRegistry.ts.
+  const pillVisible = useToolPillVisible(approvalToolCallId)
+  const showGhost = !!pendingApproval && !pillVisible
+  const showInChat = useCallback(() => {
+    if (approvalToolCallId) dispatch(openActivityToTool(approvalToolCallId))
+  }, [approvalToolCallId, dispatch])
+
+  const handleApprovalAction = useCallback((decision: string, pattern?: string) => {
+    if (!approvalId) return
+    setApprovalSubmitting(true)
+    const finish = () => {
+      dispatch(resolveByApprovalId({ id: approvalId, decision }))
+      setApprovalSubmitting(false)
+    }
+    const fail = (err: unknown) => {
+      console.error('Approval failed:', err)
+      setApprovalSubmitting(false)
+    }
+    if (['trust_command', 'trust_base', 'trust', 'trust_reads'].includes(decision) && activeSlot) {
+      const extra: Record<string, string> = { request_id: approvalId }
+      if (pattern) extra.pattern = pattern
+      api.approveChatSlot(activeSlot, decision, extra).then(finish).catch(fail)
+    } else {
+      api.resolveApproval(approvalId, toApiDecision(decision)).then(finish).catch(fail)
+    }
+  }, [approvalId, activeSlot, dispatch])
+
+  const approvalBtnClass = 'inline-flex items-center gap-1 px-2 py-1 rounded-md bg-[color-mix(in_srgb,var(--warn)_12%,transparent)] border border-border text-text text-[12px] cursor-pointer font-body hover:bg-[color-mix(in_srgb,var(--warn)_25%,transparent)] hover:text-text hover:border-border-strong transition-colors disabled:opacity-50'
+
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const wrapperRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const { botName } = useBranding()
+  const isMobile = useIsMobile()
+  const ime = useImeGuard()
+  const resolvedPlaceholder = placeholder || `Message ${botName}…`
+  const [slashMenuOpen, setSlashMenuOpen] = useState(false)
+  const [filePickerOpen, setFilePickerOpen] = useState(false)
+  const [fileQuery, setFileQuery] = useState('')
+  const chatMessages = useAppSelector(s => s.chat.messages)
+  const [manualHeight, setManualHeight] = useState<number | null>(() => {
+    const saved = localStorage.getItem(INPUT_HEIGHT_LS_KEY)
+    const n = saved ? parseInt(saved, 10) : NaN
+    return !isNaN(n) && n >= INPUT_MIN_H ? n : null
+  })
+
+  // Drag-to-resize refs — resize wrapper div via direct DOM writes, commit on mouseup.
+  // Resizing the wrapper (not the textarea) avoids layout thrashing: the textarea
+  // fills the wrapper with height:100% so the browser only reflows the wrapper's
+  // subtree, not the entire flex column + Virtuoso list above.
+  const dragging = useRef(false)
+  const dragStartY = useRef(0)
+  const dragStartH = useRef(0)
+
+  // Prompt history navigation: -1 = draft (not in history), else index into sentMessages.
+  // Refs keep the handler stable across re-renders while preserving state between keystrokes.
+  const historyIdxRef = useRef(-1)
+  const draftRef = useRef('')
+  // Refs mirror frequently-changing props/state read from inside the keydown handler
+  // so it doesn't re-create on every keystroke.
+  const valueRef = useRef(value)
+  valueRef.current = value
+  const slashMenuOpenRef = useRef(false)
+  slashMenuOpenRef.current = slashMenuOpen
+  const filePickerOpenRef = useRef(false)
+  filePickerOpenRef.current = filePickerOpen
+
+  // Auto-focus textarea when the active session changes (autoFocusKey).
+  // Track the previous key in a ref so the effect only acts on real key
+  // transitions — `disabled` and `isMobile` are in the dep array to keep the
+  // closure fresh, but a flip in either (e.g. AI finishes responding -> disabled
+  // goes true -> false) MUST NOT steal focus while the user reads or scrolls.
+  //
+  // IMPORTANT: bail on `disabled || isMobile` BEFORE advancing the ref. If a
+  // session switch lands while disabled=true (e.g. the user picks a session that
+  // is currently stopping), advancing the ref here would consume the focus
+  // opportunity — when disabled later flips false the effect re-runs but the
+  // key check matches and bails. Holding the ref preserves the pending focus
+  // until the gate clears.
+  //
+  // The active-element check IS placed after the ref update — that's a "decline
+  // and don't retry" condition (if the user is typing in the agent picker, we
+  // shouldn't come back later and steal focus once they switch back).
+  const prevAutoFocusKeyRef = useRef<typeof autoFocusKey>(undefined)
+  useEffect(() => {
+    if (autoFocusKey == null || autoFocusKey === prevAutoFocusKeyRef.current) {
+      prevAutoFocusKeyRef.current = autoFocusKey
+      return
+    }
+    if (disabled || isMobile) return
+    prevAutoFocusKeyRef.current = autoFocusKey
+    const ae = document.activeElement as HTMLElement | null
+    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return
+    inputRef.current?.focus()
+  }, [autoFocusKey, disabled, isMobile])
+
+  // Global "/" shortcut to focus chat input (like GitHub, YouTube, Slack)
+  useEffect(() => {
+    const onSlashFocus = (e: KeyboardEvent) => {
+      if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return
+      const tag = (e.target as HTMLElement)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement)?.isContentEditable) return
+      e.preventDefault()
+      inputRef.current?.focus()
+    }
+    document.addEventListener('keydown', onSlashFocus)
+    return () => document.removeEventListener('keydown', onSlashFocus)
+  }, [])
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!dragging.current || !wrapperRef.current) return
+      // Account for CSS zoom/scale on #root
+      const scale = parseInt(localStorage.getItem('mc-zoom') || '100', 10) / 100
+      const maxH = effectiveVh() * INPUT_DRAG_MAX_RATIO
+      const delta = (dragStartY.current - e.clientY) / scale
+      const h = Math.min(maxH, Math.max(dragMinHRef.current, dragStartH.current + delta))
+      // Direct DOM write on wrapper — no React state, no textarea auto-size
+      wrapperRef.current.style.height = h + 'px'
+    }
+    const onUp = () => {
+      if (!dragging.current || !wrapperRef.current) return
+      dragging.current = false
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      wrapperRef.current.style.contain = ''
+      // Commit final height to React state
+      const finalH = wrapperRef.current.offsetHeight
+      setManualHeight(finalH)
+      localStorage.setItem(INPUT_HEIGHT_LS_KEY, String(Math.round(finalH)))
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [])
+
+  const handleDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    if (!wrapperRef.current) return
+    const h = wrapperRef.current.offsetHeight
+    dragging.current = true
+    dragStartY.current = e.clientY
+    dragStartH.current = h
+    // Use current natural height as floor so drag never snaps up
+    dragMinHRef.current = Math.min(dragMinHRef.current, h)
+    // Lock in current height so auto-resize stops interfering
+    setManualHeight(h)
+    document.body.style.cursor = 'row-resize'
+    document.body.style.userSelect = 'none'
+    // Isolate reflow to this subtree during drag
+    wrapperRef.current.style.contain = 'strict'
+  }, [])
+
+  const resetHeight = useCallback(() => {
+    setManualHeight(null)
+    localStorage.removeItem(INPUT_HEIGHT_LS_KEY)
+    if (wrapperRef.current) { wrapperRef.current.style.height = ''; wrapperRef.current.style.maxHeight = '' }
+  }, [])
+
+  // Sync persisted manual height to DOM (same path as drag writes)
+  useEffect(() => {
+    if (!wrapperRef.current) return
+    if (manualHeight !== null) {
+      wrapperRef.current.style.height = Math.max(manualHeight, INPUT_MIN_H) + 'px'
+      wrapperRef.current.style.maxHeight = `calc(var(--mc-vh, 100vh) * ${INPUT_DRAG_MAX_RATIO})`
+    } else {
+      wrapperRef.current.style.height = ''
+      wrapperRef.current.style.maxHeight = ''
+    }
+  }, [manualHeight, pendingFiles.length])
+
+  // Auto-resize textarea to fit content
+  useEffect(() => {
+    if (inputRef.current && !dragging.current) applyHeight(inputRef.current, manualHeight, prefillHint)
+  }, [value, prefillHint, manualHeight])
+
+  // Reset manual height when input is cleared (new message sent)
+  const prevValueRef = useRef(value)
+  useEffect(() => {
+    if (prevValueRef.current && !value) resetHeight()
+    // Exit history mode when value diverges from the recalled message
+    // (user edited it, or the send pipeline cleared it).
+    if (historyIdxRef.current !== -1 && value !== sentMessages?.[historyIdxRef.current]) {
+      historyIdxRef.current = -1
+      draftRef.current = ''
+    }
+    prevValueRef.current = value
+  }, [value, resetHeight, sentMessages])
+
+  const handleInput = useCallback((e: React.FormEvent<HTMLTextAreaElement>) => {
+    if (!dragging.current) applyHeight(e.target as HTMLTextAreaElement, manualHeight, prefillHint)
+  }, [manualHeight, prefillHint])
+
+  const setTextUndoable = useCallback((text: string) => {
+    const el = inputRef.current
+    if (!el) { onChange(text); return }
+    el.readOnly = false
+    el.focus()
+    el.select()
+    document.execCommand('insertText', false, text)
+  }, [onChange])
+
+  const optimizeMutation = useMutation({
+    mutationFn: async ({ prompt, context }: { prompt: string; context: string }) => {
+      const resp = await fetch('/api/optimizer/optimize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-session-key': 'dashboard:ui' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ prompt, context }),
+      })
+      if (!resp.ok) throw new Error('optimizer failed')
+      return resp.json()
+    },
+    onSuccess: (data, variables) => {
+      // Drop the result if the input value no longer matches the prompt we
+      // optimized — typically because the user switched chat tabs/slots
+      // while the request was in flight. The textarea is readOnly during
+      // optimize, so any divergence means we'd be writing into a different
+      // slot's draft. The originating slot's draft was preserved by the
+      // slot-change effect, so the user can re-trigger after switching back.
+      if (valueRef.current.trim() !== variables.prompt.trim()) return
+      setTextUndoable(data.changed && data.optimized ? data.optimized : valueRef.current.trim())
+    },
+    onError: (err, variables) => {
+      console.warn('optimizer failed', err)
+      if (valueRef.current.trim() !== variables.prompt.trim()) return
+      setTextUndoable(valueRef.current.trim())
+    },
+  })
+  const optimizing = optimizeMutation.isPending
+  const optimizingRef = useRef(false)
+  optimizingRef.current = optimizing
+  const { mutate: runOptimize } = optimizeMutation
+
+  const optimizePrompt = useCallback(() => {
+    const txt = valueRef.current.trim()
+    if (!txt || optimizingRef.current) return
+    const context = chatMessages
+      .filter(m => m.role === 'user' || m.role === 'assistant')
+      .slice(-10)
+      .map(m => (m.content || '').slice(0, 200))
+      .join('\n')
+    runOptimize({ prompt: txt, context })
+  }, [runOptimize, chatMessages])
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Atomic paste-token handling — keep caret out of token interior and
+    // treat tokens as single deletable units. Runs before Enter/history so
+    // edits on or around a token never reach the default textarea handling.
+    if (pasteBlocks.length && !ime.isComposing(e)) {
+      const ta = e.currentTarget
+      const v = valueRef.current
+      const ss = ta.selectionStart ?? 0
+      const se = ta.selectionEnd ?? 0
+      const isCollapsed = ss === se
+      const ranges = findTokenRanges(v, pasteBlocks)
+
+      const removeBlockAtom = (r: { start: number; end: number; block: PasteBlock }) => {
+        e.preventDefault()
+        const next = v.slice(0, r.start) + v.slice(r.end)
+        onChange(next)
+        onPasteBlocksChange?.(pasteBlocks.filter(b => b.id !== r.block.id))
+        requestAnimationFrame(() => {
+          const el = inputRef.current
+          if (el) el.setSelectionRange(r.start, r.start)
+        })
+      }
+
+      // Backspace with caret just past a token → delete whole token
+      if (e.key === 'Backspace' && isCollapsed && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const adj = ranges.find(r => r.end === ss)
+        if (adj) { removeBlockAtom(adj); return }
+      }
+      // Cmd+Backspace (line-back delete on Mac) — extend deletion to cover
+      // any token that intersects the caret-to-line-start range, so we never
+      // slice a token mid-text. Also drops the associated PasteBlock(s).
+      if (e.key === 'Backspace' && isCollapsed && e.metaKey) {
+        const lineStart = v.lastIndexOf('\n', ss - 1) + 1
+        const intersecting = ranges.filter(r => r.start < ss && r.end > lineStart)
+        if (intersecting.length) {
+          e.preventDefault()
+          const deleteStart = Math.min(lineStart, ...intersecting.map(r => r.start))
+          const removedIds = new Set(
+            ranges.filter(r => r.start >= deleteStart && r.end <= ss).map(r => r.block.id),
+          )
+          const next = v.slice(0, deleteStart) + v.slice(ss)
+          onChange(next)
+          onPasteBlocksChange?.(pasteBlocks.filter(b => !removedIds.has(b.id)))
+          requestAnimationFrame(() => {
+            const el = inputRef.current
+            if (el) el.setSelectionRange(deleteStart, deleteStart)
+          })
+          return
+        }
+      }
+      // Alt/Ctrl+Backspace (word-back delete) — if caret is adjacent to a
+      // token, treat as full-token delete (same as plain Backspace). Beyond
+      // that, we leave native behavior alone; word boundaries are fuzzy and
+      // tokens are on their own line, so the common case is the adjacent one.
+      if (e.key === 'Backspace' && isCollapsed && (e.altKey || e.ctrlKey) && !e.metaKey) {
+        const adj = ranges.find(r => r.end === ss)
+        if (adj) { removeBlockAtom(adj); return }
+      }
+      // Delete with caret just before a token → delete whole token
+      if (e.key === 'Delete' && isCollapsed && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const adj = ranges.find(r => r.start === ss)
+        if (adj) { removeBlockAtom(adj); return }
+      }
+      // Cmd+Delete (forward line-delete on Mac) — mirror Cmd+Backspace in
+      // the forward direction: extend deletion to cover intersecting tokens.
+      if (e.key === 'Delete' && isCollapsed && e.metaKey) {
+        const nextNl = v.indexOf('\n', ss)
+        const lineEnd = nextNl === -1 ? v.length : nextNl
+        const intersecting = ranges.filter(r => r.end > ss && r.start < lineEnd)
+        if (intersecting.length) {
+          e.preventDefault()
+          const deleteEnd = Math.max(lineEnd, ...intersecting.map(r => r.end))
+          const removedIds = new Set(
+            ranges.filter(r => r.start >= ss && r.end <= deleteEnd).map(r => r.block.id),
+          )
+          const next = v.slice(0, ss) + v.slice(deleteEnd)
+          onChange(next)
+          onPasteBlocksChange?.(pasteBlocks.filter(b => !removedIds.has(b.id)))
+          requestAnimationFrame(() => {
+            const el = inputRef.current
+            if (el) el.setSelectionRange(ss, ss)
+          })
+          return
+        }
+      }
+      // Alt/Ctrl+Delete (word-forward delete) — adjacent-token atomic delete.
+      if (e.key === 'Delete' && isCollapsed && (e.altKey || e.ctrlKey) && !e.metaKey) {
+        const adj = ranges.find(r => r.start === ss)
+        if (adj) { removeBlockAtom(adj); return }
+      }
+      // Arrow left/right — skip over token as if it were a single character
+      if (e.key === 'ArrowLeft' && isCollapsed && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const adj = ranges.find(r => r.end === ss)
+        if (adj) {
+          e.preventDefault()
+          requestAnimationFrame(() => inputRef.current?.setSelectionRange(adj.start, adj.start))
+          return
+        }
+      }
+      if (e.key === 'ArrowRight' && isCollapsed && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const adj = ranges.find(r => r.start === ss)
+        if (adj) {
+          e.preventDefault()
+          requestAnimationFrame(() => inputRef.current?.setSelectionRange(adj.end, adj.end))
+          return
+        }
+      }
+      // Shift+Arrow — extend selection past the whole token in one step
+      if (e.key === 'ArrowLeft' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const dir = ta.selectionDirection || 'forward'
+        const active = dir === 'backward' ? ss : se
+        const adj = ranges.find(r => r.end === active)
+        if (adj) {
+          e.preventDefault()
+          requestAnimationFrame(() => {
+            const el = inputRef.current; if (!el) return
+            if (dir === 'backward') el.setSelectionRange(adj.start, se, 'backward')
+            else el.setSelectionRange(ss, adj.start, ss <= adj.start ? 'forward' : 'backward')
+          })
+          return
+        }
+      }
+      if (e.key === 'ArrowRight' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const dir = ta.selectionDirection || 'forward'
+        const active = dir === 'backward' ? ss : se
+        const adj = ranges.find(r => r.start === active)
+        if (adj) {
+          e.preventDefault()
+          requestAnimationFrame(() => {
+            const el = inputRef.current; if (!el) return
+            if (dir === 'backward') el.setSelectionRange(adj.end, se, adj.end <= se ? 'backward' : 'forward')
+            else el.setSelectionRange(ss, adj.end, 'forward')
+          })
+          return
+        }
+      }
+
+      // Post-keydown snap for word/line/document-jump shortcuts
+      // (Alt+Arrow on Mac, Ctrl+Arrow on Win/Linux, Cmd+Arrow line jump, Home/End).
+      // The browser performs the native jump; we check afterwards if caret or
+      // selection endpoint landed strictly inside a token and snap it out in
+      // the direction of motion.
+      const isNavKey = e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End'
+      const hasNavModifier = e.altKey || e.ctrlKey || e.metaKey || e.key === 'Home' || e.key === 'End'
+      if (isNavKey && hasNavModifier) {
+        const leftward = e.key === 'ArrowLeft' || e.key === 'Home'
+        requestAnimationFrame(() => {
+          const el = inputRef.current; if (!el) return
+          const freshRanges = findTokenRanges(el.value, pasteBlocks)
+          if (!freshRanges.length) return
+          const nss = el.selectionStart ?? 0
+          const nse = el.selectionEnd ?? 0
+          const snapPos = (p: number) => {
+            for (const r of freshRanges) {
+              if (p > r.start && p < r.end) return leftward ? r.start : r.end
+            }
+            return p
+          }
+          const a = snapPos(nss)
+          const b = snapPos(nse)
+          if (a === nss && b === nse) return
+          const dir = el.selectionDirection || 'forward'
+          el.setSelectionRange(Math.min(a, b), Math.max(a, b), dir as 'forward' | 'backward' | 'none')
+        })
+      }
+    }
+
+    // Cmd+Shift+Enter (or Ctrl+Shift+Enter) → optimize prompt
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && e.shiftKey) {
+      e.preventDefault()
+      optimizePrompt()
+      return
+    }
+    // Mode: enter-ctrl-newline — Ctrl/Cmd+Enter inserts newline, Enter sends
+    if (sendOnEnter === 'enter-ctrl-newline' && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault()
+      const ta = e.currentTarget
+      const start = ta.selectionStart
+      const end = ta.selectionEnd
+      const val = ta.value
+      onChange(val.slice(0, start) + '\n' + val.slice(end))
+      requestAnimationFrame(() => { ta.selectionStart = ta.selectionEnd = start + 1 })
+      return
+    }
+    const sendKey = sendOnEnter === 'ctrl-enter'
+      ? (e.key === 'Enter' && (e.metaKey || e.ctrlKey))
+      : (e.key === 'Enter' && !e.shiftKey)
+    if (sendKey && !e.defaultPrevented && !ime.isComposing(e) && !optimizingRef.current) {
+      e.preventDefault()
+      onSend()
+      return
+    }
+    // Prompt history: ↑/↓ cycles through prior user messages.
+    // Ignore when IME composing, no history, modifier keys, or when
+    // slash-command / file-picker menus are open (they own ↑/↓).
+    if (
+      !sentMessages?.length ||
+      slashMenuOpenRef.current || filePickerOpenRef.current ||
+      ime.isComposing(e) ||
+      e.metaKey || e.ctrlKey || e.altKey || e.shiftKey
+    ) return
+    const ta = e.currentTarget
+    const len = sentMessages.length
+    const cur = valueRef.current
+    // After recall, place the caret where the next arrow press will re-engage
+    // history immediately (↑ → start, ↓ → end). Deferred to next frame so the
+    // controlled textarea has re-rendered with the new value first.
+    const moveCaretAfterRecall = (pos: 'start' | 'end') => {
+      requestAnimationFrame(() => {
+        const el = inputRef.current
+        if (!el) return
+        const p = pos === 'start' ? 0 : el.value.length
+        el.setSelectionRange(p, p)
+      })
+    }
+    if (e.key === 'ArrowUp') {
+      // Only intercept when input is empty OR caret is collapsed at position 0.
+      const atStart = ta.selectionStart === 0 && ta.selectionEnd === 0
+      if (!atStart && cur !== '') return
+      const idx = historyIdxRef.current
+      if (idx === -1) {
+        // Entering history mode — save current draft (may be empty).
+        draftRef.current = cur
+        historyIdxRef.current = len - 1
+        onChange(sentMessages[len - 1])
+        moveCaretAfterRecall('start')
+      } else if (idx > 0) {
+        historyIdxRef.current = idx - 1
+        onChange(sentMessages[idx - 1])
+        moveCaretAfterRecall('start')
+      } else {
+        // Already at oldest — consume to avoid caret jumping in textarea.
+      }
+      e.preventDefault()
+    } else if (e.key === 'ArrowDown') {
+      const idx = historyIdxRef.current
+      if (idx === -1) return // not in history mode — let textarea handle
+      // Only intercept when caret is at end (so multi-line edits still navigate within).
+      const atEnd = ta.selectionStart === cur.length && ta.selectionEnd === cur.length
+      if (!atEnd) return
+      if (idx < len - 1) {
+        historyIdxRef.current = idx + 1
+        onChange(sentMessages[idx + 1])
+        moveCaretAfterRecall('end')
+      } else {
+        // Past newest — restore draft and exit history mode.
+        historyIdxRef.current = -1
+        onChange(draftRef.current)
+        draftRef.current = ''
+        moveCaretAfterRecall('end')
+      }
+      e.preventDefault()
+    }
+  }, [onSend, onChange, sentMessages, sendOnEnter, pasteBlocks, onPasteBlocksChange])
+
+  /** Intercept clipboard paste — files go to upload path, big text gets collapsed into a token. */
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    // File paste takes precedence
+    const files = Array.from(e.clipboardData.items)
+      .filter(i => i.kind === 'file')
+      .map(i => i.getAsFile())
+      .filter((f): f is File => f !== null)
+    if (files.length && onUploadFiles) {
+      e.preventDefault()
+      onUploadFiles(files)
+      return
+    }
+    // Text paste — collapse only when the chunk is big enough and we have a sink.
+    if (!onPasteBlocksChange) return
+    const pasted = e.clipboardData.getData('text')
+    if (!shouldCollapsePaste(pasted)) return
+
+    e.preventDefault()
+    const block: PasteBlock = { id: makePasteId(), seq: nextSeq(pasteBlocks), lines: countLines(pasted), content: pasted }
+    const token = formatToken(block)
+    const ta = e.currentTarget
+    const start = ta.selectionStart ?? value.length
+    const end = ta.selectionEnd ?? start
+    const before = value.slice(0, start)
+    const after = value.slice(end)
+    // Surround the token with newlines so the chip lives on its own line —
+    // long-form pasted content rarely flows with typed text around it.
+    // Skip the leading newline when the caret is at the start of a line,
+    // and the trailing one when the caret is at the end of a line.
+    const leadingNewline = before && !before.endsWith('\n') ? '\n' : ''
+    const trailingNewline = after && !after.startsWith('\n') ? '\n' : ''
+    const insert = leadingNewline + token + trailingNewline
+    const nextValue = before + insert + after
+    onChange(nextValue)
+    onPasteBlocksChange([...pasteBlocks, block])
+    // Restore caret right after the inserted token + trailing newline.
+    requestAnimationFrame(() => {
+      if (ta && document.activeElement === ta) {
+        const pos = before.length + insert.length
+        ta.setSelectionRange(pos, pos)
+      }
+    })
+  }, [onUploadFiles, onPasteBlocksChange, pasteBlocks, value, onChange])
+
+  /** Two-step click on a collapsed-paste token:
+   *    1st click (detail=1) → select the token as a range (visual highlight)
+   *    2nd click (detail=2, i.e. a quick second click = native "double click"
+   *       semantics) → expand to the original full content in the textarea
+   *  Uses `event.detail` (the click count) which the browser computes with
+   *  its own double-click timing — fully cross-browser (Chrome, Electron,
+   *  Safari, Firefox all agree) and no ref/selection tracking required. */
+  const handleTextareaClick = useCallback((e: React.MouseEvent<HTMLTextAreaElement>) => {
+    if (!onPasteBlocksChange || !pasteBlocks.length) return
+    const ta = e.currentTarget
+    const caret = ta.selectionStart ?? 0
+    const range = tokenRangeAt(value, pasteBlocks, caret)
+    if (!range) return
+
+    if (e.detail < 2) {
+      // First click in a (potential) sequence — highlight the token as an
+      // atomic range. If the user doesn't click again within the browser's
+      // double-click window, nothing else happens.
+      requestAnimationFrame(() => {
+        const el = inputRef.current
+        if (el) el.setSelectionRange(range.start, range.end)
+      })
+      return
+    }
+
+    // e.detail >= 2 — second (or more) click in a rapid sequence on the
+    // same region — expand.
+    const expanded = value.slice(0, range.start) + range.block.content + value.slice(range.end)
+    onChange(expanded)
+    onPasteBlocksChange(pasteBlocks.filter(b => b.id !== range.block.id))
+    requestAnimationFrame(() => {
+      if (ta) {
+        const pos = range.start + range.block.content.length
+        ta.setSelectionRange(pos, pos)
+        ta.focus()
+      }
+    })
+  }, [value, pasteBlocks, onPasteBlocksChange, onChange])
+
+  /** Snap selection endpoints that land inside a token range to the nearest edge.
+   *  Covers drag-select that ends mid-token, touch/long-press handles on mobile,
+   *  and any other non-keyboard way selection could split a token. */
+  const handleSelectSnap = useCallback(() => {
+    if (!pasteBlocks.length) return
+    const ta = inputRef.current
+    if (!ta) return
+    const ss = ta.selectionStart ?? 0
+    const se = ta.selectionEnd ?? 0
+    // Collapsed caret inside a token is handled by the click expander — skip.
+    if (ss === se) return
+    const ranges = findTokenRanges(ta.value, pasteBlocks)
+    if (!ranges.length) return
+    const snap = (pos: number) => {
+      for (const r of ranges) {
+        if (pos > r.start && pos < r.end) {
+          // Snap to the nearer edge (ties go to the start).
+          return pos - r.start <= r.end - pos ? r.start : r.end
+        }
+      }
+      return pos
+    }
+    const newSs = snap(ss)
+    const newSe = snap(se)
+    if (newSs === ss && newSe === se) return
+    const dir = ta.selectionDirection || 'forward'
+    ta.setSelectionRange(Math.min(newSs, newSe), Math.max(newSs, newSe), dir as 'forward' | 'backward' | 'none')
+  }, [pasteBlocks])
+
+  /** Prune paste blocks whose token was deleted from the textarea. */
+  useEffect(() => {
+    if (!onPasteBlocksChange || !pasteBlocks.length) return
+    const pruned = pruneBlocks(value, pasteBlocks)
+    if (pruned !== pasteBlocks) onPasteBlocksChange(pruned)
+  }, [value, pasteBlocks, onPasteBlocksChange])
+
+  /** Copy/cut that spans one or more collapsed-paste tokens writes the
+   *  expanded content to the clipboard instead of the literal token text.
+   *  Without this, pasting elsewhere yields "[ Paste #1 · 5 lines ]"
+   *  zombie strings that look like chips but have no backing block. Only
+   *  tokens *fully* covered by the selection are expanded; partial overlaps
+   *  fall back to the literal slice (rare — drag-select snaps to token
+   *  edges via handleSelectSnap). */
+  const expandSelectionForClipboard = useCallback(
+    (start: number, end: number): string | null => {
+      if (!pasteBlocks.length || start === end) return null
+      const ranges = findTokenRanges(value, pasteBlocks)
+      const covered = ranges.filter(r => r.start >= start && r.end <= end)
+      if (!covered.length) return null
+      let out = ''
+      let cursor = start
+      for (const r of covered) {
+        out += value.slice(cursor, r.start)
+        out += r.block.content
+        cursor = r.end
+      }
+      out += value.slice(cursor, end)
+      return out
+    },
+    [value, pasteBlocks],
+  )
+
+  const handleCopy = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const ta = e.currentTarget
+    const expanded = expandSelectionForClipboard(ta.selectionStart ?? 0, ta.selectionEnd ?? 0)
+    if (expanded === null) return
+    e.clipboardData.setData('text/plain', expanded)
+    e.preventDefault()
+  }, [expandSelectionForClipboard])
+
+  const handleCut = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const ta = e.currentTarget
+    const start = ta.selectionStart ?? 0
+    const end = ta.selectionEnd ?? 0
+    const expanded = expandSelectionForClipboard(start, end)
+    if (expanded === null) return
+    e.clipboardData.setData('text/plain', expanded)
+    // Manually excise the selection from the textarea; the pruneBlocks
+    // effect above will drop any blocks whose token text was removed.
+    const nextValue = value.slice(0, start) + value.slice(end)
+    onChange(nextValue)
+    requestAnimationFrame(() => {
+      if (ta) ta.setSelectionRange(start, start)
+    })
+    e.preventDefault()
+  }, [expandSelectionForClipboard, value, onChange])
+
+  const handleFileInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || [])
+    if (files.length && onUploadFiles) onUploadFiles(files)
+    e.target.value = '' // reset so same file can be re-selected
+  }, [onUploadFiles])
+
+  const hasFiles = pendingFiles.length > 0
+  const prevHadFiles = useRef(hasFiles)
+  const dragMinH = hasFiles ? INPUT_DRAG_MIN_H + FILE_PREVIEW_H : INPUT_DRAG_MIN_H
+  const dragMinHRef = useRef(dragMinH)
+  dragMinHRef.current = dragMinH
+  // Adjust height transiently when file strip appears/disappears (not persisted — files are session-only)
+  useLayoutEffect(() => {
+    const wasShowingFiles = prevHadFiles.current
+    prevHadFiles.current = hasFiles
+    if (wasShowingFiles && !hasFiles) {
+      setManualHeight(h => h !== null ? Math.max(INPUT_DRAG_MIN_H, h - FILE_PREVIEW_H) : h)
+    } else if (!wasShowingFiles && hasFiles) {
+      setManualHeight(h => h !== null ? h + FILE_PREVIEW_H : h)
+    }
+  }, [hasFiles])
+
+  return (
+    <div className={`px-5 pb-3 ${hasApproval ? 'pt-0' : 'pt-1'} mx-auto w-full flex flex-col`}
+      style={{ maxWidth: 'var(--mc-input-width, 900px)', ...(manualHeight !== null ? { minHeight: (pendingFiles.length > 0 ? INPUT_DRAG_MIN_H + FILE_PREVIEW_H : INPUT_DRAG_MIN_H) + 'px' } : {}) }}>
+
+      {/* Knowledge context chip */}
+      {!showGhost && knowledgeChip}
+
+      {/* Ghost follow-up bubbles floating above input */}
+      {!showGhost && followUpOptions && followUpOptions.length > 0 && onFollowUpSelect && (
+          <FollowUpBar options={followUpOptions} picked={followUpPicked ?? new Set()} onSelect={onFollowUpSelect} quickSend={quickSend} layout={followUpLayout} />
+      )}
+
+      {/* Drag handle — always visible, sits above approval bar or input */}
+      {!showGhost && <div
+        className="flex items-center justify-center h-[6px] cursor-row-resize group/drag"
+        onMouseDown={handleDragStart}
+        onDoubleClick={resetHeight}
+        title="Drag to resize (double-click to reset)"
+      >
+        <div className="w-12 h-[3px] rounded-full bg-border group-hover/drag:bg-accent group-active/drag:bg-accent-hover transition-all duration-200 opacity-0 group-hover/drag:opacity-100" />
+      </div>}
+
+      {/* Approval bar — always-visible button row, with a "ghost pill"
+       *  detail mirror that grows in when the inline pill scrolls out of
+       *  viewport. Buttons stay anchored on the same row across both states
+       *  for stable muscle memory.
+       *
+       *  Two stacked <AnimatePresence>s:
+       *    outer  → mounts/unmounts the whole bar with the approval lifecycle
+       *    inner  → toggles the ghost pill based on inline-pill viewport state
+       */}
+      <AnimatePresence>
+        {pendingApproval && approvalId && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{ type: 'spring', damping: 25, stiffness: 300, mass: 0.8 }}
+          >
+          <div className={`bg-[color-mix(in_srgb,var(--warn)_12%,transparent)] border border-border ${showGhost ? 'rounded-2xl' : 'border-b-0 rounded-t-2xl'} approval-glow transition-[border-radius,border-color,border-width] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]`}>
+              <AnimatePresence initial={false}>
+                  {showGhost && (
+                      <motion.div
+                          key="ghost"
+                          initial={{ height: 0, opacity: 0, y: -6 }}
+                          animate={{ height: 'auto', opacity: 1, y: 0 }}
+                          exit={{ height: 0, opacity: 0, y: -6 }}
+                          transition={{ type: 'spring', damping: 24, stiffness: 280, mass: 0.7 }}
+                          style={{ overflow: 'hidden' }}
+                      >
+                          <div className="px-3.5 pt-2.5 pb-1">
+                              <div className="inline-flex items-start gap-1 text-[13px] font-mono px-2 py-0.5">
+                                  <Lock size={12} className="text-warn shrink-0" style={{ marginTop: '3px' }} />
+                                  <span className="text-muted break-words min-w-0 line-clamp-2">{approvalLabel}</span>
+                              </div>
+                              <ToolDetails
+                                  purpose={approvalPurpose}
+                                  pillLabel={approvalLabel}
+                                  input={approvalToolInput}
+                                  output=""
+                                  auto={false}
+                                  pending={true}
+                                  ts={approvalTs}
+                                  hasEntry={!!approvalToolInput}
+                                  fmtTime={t => t ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                                  barColor="color-mix(in srgb, var(--warn) 70%, transparent)"
+                                  layoutId={`ghost-tool-detail-${approvalToolCallId || approvalId}`}
+                                  compact
+                              />
+                          </div>
+                          <div className="mx-3.5 h-px bg-[color-mix(in_srgb,var(--warn)_25%,transparent)]" />
+                      </motion.div>
+                  )}
+              </AnimatePresence>
+              <div className="flex items-center gap-1.5 px-3.5 py-2.5 select-none flex-wrap">
+                  {!showGhost && <>
+                      <Lock size={12} className="text-warn shrink-0" />
+                      <span className="text-[13px] font-mono text-muted truncate flex-1 min-w-0">{approvalLabel}</span>
+                  </>}
+                  {showGhost && <div className="flex-1 min-w-0" />}
+                  {showGhost && approvalToolCallId && (
+                      <button
+                          type="button"
+                          onClick={showInChat}
+                          title="Show pending tool call in chat"
+                          aria-label="Show pending tool call in chat"
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-transparent border border-border text-muted text-[11px] cursor-pointer hover:text-text hover:border-border-strong hover:bg-bg-hover transition-colors"
+                      >
+                          <Target size={11} className="shrink-0" />
+                          Show in chat
+                      </button>
+                  )}
+                  <div className="flex gap-1.5 flex-wrap items-center">
+                      <button disabled={approvalSubmitting} className={approvalBtnClass} onClick={() => handleApprovalAction('approved')}><CheckCircle size={12} className="shrink-0" />Allow once</button>
+                      {approvalIsReadOnly && <button disabled={approvalSubmitting} className={approvalBtnClass} onClick={() => handleApprovalAction('trust_reads')}><BookOpen size={12} className="shrink-0" />Trust reads</button>}
+                      <TrustDropdown
+                          fullCommand={approvalFullCommand || approvalLabelRaw}
+                          baseCommand={approvalBaseCommand || approvalLabelRaw.split(/\s+/)[0] || ''}
+                          isShell={approvalIsShell}
+                          disabled={approvalSubmitting}
+                          className={approvalBtnClass}
+                          onAction={(action, pattern) => { handleApprovalAction(action, pattern) }}
+                      />
+                      <button disabled={approvalSubmitting} className={`${approvalBtnClass} hover:!text-danger hover:!bg-[color-mix(in_srgb,var(--danger)_10%,transparent)]`} onClick={() => handleApprovalAction('rejected')}><Ban size={12} className="shrink-0" />Reject</button>
+                  </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+
+
+      {!showGhost && prefillHint && (
+        <div className="flex items-center gap-2 px-4 py-2 mb-1 bg-accent/10 rounded-lg">
+          <span className="text-accent text-[13px]"><ClipboardList className="lucide-inline" /> Plan pre-filled — add context then Send</span>
+        </div>
+      )}
+
+      <input ref={fileInputRef} type="file" multiple accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,image/svg+xml,.txt,.md,.json,.yaml,.yml,.xml,.csv,.log,.py,.js,.ts,.tsx,.jsx,.html,.css,.sh,.bash,.rb,.go,.rs,.java,.c,.cpp,.h,.hpp,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.rtf,.zip,.tar,.gz" className="hidden" onChange={handleFileInputChange} />
+
+      <SlashCommandMenu input={value} anchorRef={inputRef as React.RefObject<HTMLElement>} open={slashMenuOpen} onSelect={cmd => { onChange(cmd); setSlashMenuOpen(false) }} onClose={() => setSlashMenuOpen(false)} />
+
+      {onFileSelect && (
+        <FilePickerMenu
+          query={fileQuery}
+          anchorRef={inputRef as React.RefObject<HTMLElement>}
+          open={filePickerOpen}
+          project={project}
+          onFileOpen={onFileOpen}
+          onSelect={({ path, relativePath }) => {
+            // Replace @query with @relative/path inline in the textarea
+            const newVal = value.replace(/(^|[\s])@\S*$/, (_, prefix) => `${prefix}@${relativePath} `)
+            onChange(newVal)
+            setFilePickerOpen(false); setFileQuery('')
+            onFileSelect(path)
+          }}
+          onClose={() => { setFilePickerOpen(false); setFileQuery('') }}
+        />
+      )}
+
+      {/* Unified input container — drag-to-resize targets this div.
+       *  Wrapped in AnimatePresence so the swap between "bar above input"
+       *  and "bar replaces input" feels like a single continuous morph
+       *  rather than a hard pop. */}
+      <AnimatePresence initial={false}>
+      {!showGhost && (<motion.div
+        key="input-container"
+        initial={{ opacity: 0, height: 0 }}
+        animate={{ opacity: 1, height: 'auto' }}
+        exit={{ opacity: 0, height: 0 }}
+        transition={{ type: 'spring', damping: 26, stiffness: 280, mass: 0.7 }}
+        style={{ overflow: 'hidden' }}
+      ><div
+        data-testid="input-wrapper"
+        ref={wrapperRef}
+        className={`${hasApproval ? 'rounded-b-2xl rounded-t-none' : 'rounded-2xl'} relative transition-colors overflow-hidden ${manualHeight !== null ? 'flex flex-col min-h-0' : ''} ${(memoryMode === 'incognito' || memoryMode === 'temporary') ? 'border-2' : 'border'} ${dragOver ? 'border-accent bg-accent-subtle' : memoryMode === 'temporary' ? 'border-aim bg-bg-elevated' : memoryMode === 'incognito' ? 'border-warn bg-bg-elevated' : 'border-border bg-bg-elevated focus-within:border-accent/50'}`}
+
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+      >
+        <FilePreviewStrip files={pendingFiles} onRemove={onRemoveFile} />
+
+        {optimizing && <span className="absolute inset-0 flex items-start px-4 pt-3 text-sm text-white font-medium pointer-events-none z-10 bg-black/60 rounded-2xl"><Sparkles size={14} className="inline mr-1 text-yellow-400" /> Optimizing prompt…</span>}
+        <textarea
+          ref={inputRef}
+          aria-label="Message input"
+          className={`w-full bg-transparent border-none px-4 pt-3 pb-1 text-text text-sm font-body outline-none min-h-[44px] max-h-[calc(var(--mc-vh,100vh)*0.5)] leading-normal placeholder:text-muted resize-none ${manualHeight !== null ? 'flex-1' : ''} ${disabled ? 'opacity-40 pointer-events-none' : ''} ${optimizing ? 'opacity-30' : ''}`}
+          style={manualHeight !== null ? { height: '100%' } : undefined}
+          placeholder={disabled ? 'Stopping…' : voiceRecording ? '🎙️ Recording… click mic to stop' : voiceTranscribing ? '⏳ Transcribing, please wait…' : resolvedPlaceholder}
+          readOnly={optimizing}
+          rows={1}
+          value={value}
+          onDragOver={e => { e.preventDefault(); onDragOver?.(e); e.stopPropagation() }}
+          onDragLeave={e => { onDragLeave?.(e); e.stopPropagation() }}
+          onDrop={e => { e.preventDefault(); onDrop?.(e); e.stopPropagation() }}
+          onChange={e => {
+            const val = e.target.value; onChange(val); setSlashMenuOpen(val.startsWith('/'))
+            // Detect @query at word boundary for file picker
+            const m = val.match(/(^|[\s])@(\S*)$/)
+            if (m && onFileSelect) { setFilePickerOpen(true); setFileQuery(m[2]) }
+            else { setFilePickerOpen(false); setFileQuery('') }
+          }}
+          onKeyDown={handleKeyDown}
+          {...ime.composition}
+          onPaste={handlePaste}
+          onCopy={handleCopy}
+          onCut={handleCut}
+          onClick={handleTextareaClick}
+          onMouseUp={handleSelectSnap}
+          onSelect={handleSelectSnap}
+          onInput={handleInput}
+        />
+
+        {/* Bottom icon row */}
+        <div className="flex items-center justify-between px-2.5 pb-2 pt-0.5">
+          <div className="flex items-center gap-0.5 min-w-0">
+            {onUploadFiles && (
+              <button className="w-8 h-8 rounded-lg text-muted hover:text-text hover:bg-bg-hover flex items-center justify-center cursor-pointer transition-all disabled:opacity-30 bg-transparent border-none shrink-0" onClick={() => fileInputRef.current?.click()} disabled={uploading} title="Attach file">
+                {uploading ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} />}
+              </button>
+            )}
+            {isMac && !isMobile && onScreenshot && (
+              <button className="w-8 h-8 rounded-lg text-muted hover:text-text hover:bg-bg-hover flex items-center justify-center cursor-pointer transition-all disabled:opacity-30 bg-transparent border-none shrink-0" onClick={onScreenshot} disabled={uploading} title="Screenshot">
+                <Scan size={16} />
+              </button>
+            )}
+            <div className="flex items-center gap-0.5 min-w-0 overflow-hidden flex-1">
+              {onAgentClick && agentName && (
+                <button
+                  className={`h-7 px-2 rounded-lg text-[12px] font-mono hover:bg-bg-hover flex items-center gap-1 transition-all bg-transparent border-none shrink-0 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent ${agentSource === 'aim' ? 'text-[var(--aim)] hover:text-[var(--aim)]' : 'text-muted hover:text-text'} ${!isRunning ? 'cursor-pointer' : ''}`}
+                  onClick={e => onAgentClick(e.currentTarget.getBoundingClientRect())}
+                  disabled={isRunning}
+                  title={isRunning ? 'Stop the current response to switch agents' : `Agent: ${agentName}`}
+                >
+                  <Bot size={14} className="shrink-0" />
+                  {!isMobile && agentName}
+                </button>
+              )}
+              {onModelClick && modelName && (
+                <button
+                  className="h-7 px-2 rounded-lg text-[12px] font-mono text-muted hover:text-text hover:bg-bg-hover flex items-center gap-1.5 transition-all bg-transparent border-none shrink-0 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted cursor-pointer"
+                  onClick={e => onModelClick(e.currentTarget.getBoundingClientRect())}
+                  disabled={isRunning}
+                  title={isRunning ? 'Stop the current response to switch models' : `Model: ${modelName}`}
+                >
+                  {contextPct !== undefined && <ContextRing pct={contextPct} usedTokens={contextUsedTokens} windowTokens={contextWindowTokens} />}
+                  {!isMobile && modelName}
+                </button>
+              )}
+              {onReasoningEffortClick && (() => {
+                const label = effortLabel(reasoningEffort || '')
+                const d = { label }
+                return (
+                  <button
+                    aria-label={`Reasoning effort: ${d.label}`}
+                    className="h-7 px-2 rounded-lg text-[12px] font-mono text-muted hover:text-text hover:bg-bg-hover flex items-center gap-1 cursor-pointer transition-all bg-transparent border-none shrink-0 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
+                    onClick={e => onReasoningEffortClick(e.currentTarget.getBoundingClientRect())}
+                    disabled={isRunning}
+                    title={isRunning ? 'Stop the current response to switch reasoning effort' : `Reasoning: ${d.label}`}
+                  >
+                    <Gauge size={13} className="shrink-0" />
+                    {!isMobile && d.label}
+                  </button>
+                )
+              })()}
+              {!isMobile && onApprovalClick && approvalMode && (() => {
+                const d = APPROVAL_DISPLAY[approvalMode] || APPROVAL_DISPLAY.normal
+                return (
+                  <button className="h-7 px-2 rounded-lg text-[12px] font-mono text-muted hover:text-text hover:bg-bg-hover flex items-center gap-1 cursor-pointer transition-all bg-transparent border-none shrink-0 whitespace-nowrap" onClick={e => onApprovalClick(e.currentTarget.getBoundingClientRect())} title="Approval mode">
+                    <span className={`shrink-0 ${d.color}`}>{d.icon}</span>
+                    {d.label}
+                  </button>
+                )
+              })()}
+              {onAutoNudgeClick && (
+                <button
+                  className={`h-7 px-2 rounded-lg text-[12px] font-mono flex items-center gap-1 cursor-pointer transition-all bg-transparent border-none shrink-0 whitespace-nowrap ${
+                    autoNudgeActive
+                      ? 'text-accent hover:text-accent hover:bg-accent/10 animate-pulse'
+                      : 'text-muted hover:text-text hover:bg-bg-hover'
+                  }`}
+                  onClick={e => onAutoNudgeClick(e.currentTarget.getBoundingClientRect())}
+                  title={autoNudgeActive ? `Auto-nudge active (cycle ${autoNudgeCycleCount})` : 'Auto-nudge (off)'}
+                >
+                  <Repeat size={13} className="shrink-0" />
+                  {autoNudgeActive && autoNudgeCycleCount > 0 ? autoNudgeCycleCount : null}
+                </button>
+              )}
+            </div>
+            {isMobile && onApprovalClick && approvalMode && (() => {
+              const d = APPROVAL_DISPLAY[approvalMode] || APPROVAL_DISPLAY.normal
+              return (
+                <button className="h-7 px-2 rounded-lg text-[12px] font-mono text-muted hover:text-text hover:bg-bg-hover flex items-center gap-1 cursor-pointer transition-all bg-transparent border-none shrink-0 whitespace-nowrap" onClick={e => onApprovalClick(e.currentTarget.getBoundingClientRect())} title="Approval mode">
+                  <span className={`shrink-0 ${d.color}`}>{d.icon}</span>
+                </button>
+              )
+            })()}
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            {onBrowseToggle && (
+              <button
+                className={`w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer transition-all border-none ${
+                  browseMode
+                    ? 'bg-accent/15 text-accent hover:bg-accent/25'
+                    : 'bg-transparent text-muted hover:text-text hover:bg-bg-hover'
+                }`}
+                onClick={onBrowseToggle}
+                aria-label={browseMode ? 'Browse mode on — click to disable' : 'Browse mode off — click to enable'}
+                aria-pressed={browseMode}
+                title="Browse mode — agent will use the built-in browser to visit URLs"
+              >
+                <Globe size={16} />
+              </button>
+            )}
+            {onVoiceToggle && (
+              <button
+                className={`w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer transition-all border-none ${
+                  voiceRecording ? 'bg-danger/20 text-danger animate-pulse' : voiceTranscribing ? 'bg-accent/20 text-accent' : 'text-muted hover:text-text hover:bg-bg-hover bg-transparent'
+                } disabled:opacity-30`}
+                onClick={onVoiceToggle}
+                disabled={disabled || voiceTranscribing || optimizing}
+                title={voiceRecording ? 'Stop recording' : voiceTranscribing ? 'Transcribing…' : 'Voice input'}
+              >
+                {voiceTranscribing ? <Loader2 size={18} className="animate-spin" /> : <Mic size={18} />}
+              </button>
+            )}
+            {(isRunning || stopState === 'soft_pending' || stopState === 'killing') && onStop ? (
+              stopState === 'killing' ? (
+                <button className="w-8 h-8 rounded-lg bg-danger text-danger-fg border-none flex items-center justify-center cursor-not-allowed transition-all" disabled title="Killing…" aria-label="Killing session">
+                  <Loader2 size={18} className="animate-spin" />
+                </button>
+              ) : stopState === 'soft_pending' ? (
+                <motion.button
+                  className="w-8 h-8 rounded-lg bg-transparent border-none text-danger hover:bg-danger/10 flex items-center justify-center cursor-pointer transition-all"
+                  onClick={onStop}
+                  title="Force stop"
+                  aria-label="Force stop"
+                  animate={{ opacity: [0.6, 1, 0.6] }}
+                  transition={{ duration: 1.2, repeat: Infinity }}
+                  data-testid="stop-button-pulsing"
+                >
+                  <Square size={18} fill="currentColor" />
+                </motion.button>
+              ) : isQueued ? (
+                <button className="w-8 h-8 rounded-full bg-warn text-warn-fg border-none flex items-center justify-center cursor-pointer hover:bg-warn/80 transition-all" onClick={onStop} title="Stopping…" aria-label="Stopping">
+                  <Loader2 size={18} className="animate-spin" />
+                </button>
+              ) : value.trim() || pendingFiles.length ? (
+                <button className="w-8 h-8 rounded-full bg-warn text-warn-fg border-none flex items-center justify-center cursor-pointer hover:bg-warn/80 transition-all" onClick={onSend} title="Queue message" aria-label="Queue message">
+                  <ArrowUpFromLine size={18} />
+                </button>
+              ) : (
+                <button className="w-8 h-8 rounded-lg bg-transparent border-none text-danger hover:bg-danger/10 flex items-center justify-center cursor-pointer transition-all" onClick={onStop} title="Stop generation" aria-label="Stop generation" data-testid="stop-button-armed">
+                  <Square size={18} fill="currentColor" />
+                </button>
+              )
+            ) : (<>
+              <button
+                className={`w-8 h-8 rounded-lg border-none flex items-center justify-center cursor-pointer transition-all ${optimizing ? 'bg-accent/20 text-accent animate-pulse' : 'bg-transparent text-muted hover:text-accent hover:bg-accent/10'}`}
+                onClick={(e) => { e.stopPropagation(); e.preventDefault(); optimizePrompt() }}
+                disabled={!value.trim() || optimizing}
+                aria-label="Optimize prompt"
+                title={`Optimize prompt (${platformShortcut('Cmd+Shift+Enter')})`}
+              >
+                {optimizing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+              </button>
+              <button
+                className="w-8 h-8 rounded-full bg-accent text-accent-fg border-none flex items-center justify-center cursor-pointer hover:bg-accent-hover disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                onClick={onSend}
+                disabled={(!value.trim() && !pendingFiles.length) || disabled || optimizing}
+                aria-label="Send"
+              >
+                <ArrowUp size={18} />
+              </button>
+            </>)}
+          </div>
+        </div>
+
+        {/* Mobile bottom sheet */}
+
+      </div></motion.div>)}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+export default memo(ChatInput)

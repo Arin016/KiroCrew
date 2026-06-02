@@ -1,0 +1,268 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { screen, fireEvent, waitFor } from '@testing-library/react'
+import { renderWithProviders, createTestStore } from './helpers'
+import ToolCallLine from '../pages/chat/ToolCallLine'
+import { resolveByApprovalId } from '../store/chatSlice'
+import type { ChatMessage } from '../types'
+
+const LS_KEY = 'mc-chat-config'
+
+// jsdom polyfill: SegmentedControl uses ResizeObserver to switch between
+// full / compact / dropdown layouts based on container width.
+if (typeof globalThis.ResizeObserver === 'undefined') {
+  ;(globalThis as any).ResizeObserver = class { observe() {}; unobserve() {}; disconnect() {} }
+}
+
+beforeEach(() => { localStorage.clear() })
+
+function toolMsg(overrides: Partial<ChatMessage> = {}): ChatMessage {
+  return { role: 'tool', content: '🔧 Running: echo hello', cls: '', meta: { tool_call_id: 'tc_1', purpose: 'Say hello' }, ...overrides }
+}
+
+describe('ToolCallLine simplifiedToolNames', () => {
+  it('shows purpose text when simplifiedToolNames is enabled', () => {
+    localStorage.setItem(LS_KEY, JSON.stringify({ simplifiedToolNames: true }))
+    const store = createTestStore({
+      chat: {
+        messages: [toolMsg()],
+        toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', output: 'hello', ts: 1 }],
+        slotRunning: false,
+      } as any,
+    })
+    renderWithProviders(<ToolCallLine message={toolMsg()} running={false} />, { store })
+    expect(screen.getByText('Say hello')).toBeTruthy()
+  })
+
+  it('shows raw label when simplifiedToolNames is disabled', () => {
+    localStorage.setItem(LS_KEY, JSON.stringify({ simplifiedToolNames: false }))
+    const store = createTestStore({
+      chat: {
+        messages: [toolMsg()],
+        toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', output: 'hello', ts: 1 }],
+        slotRunning: false,
+      } as any,
+    })
+    renderWithProviders(<ToolCallLine message={toolMsg()} running={false} />, { store })
+    expect(screen.getByText('Running: echo hello')).toBeTruthy()
+  })
+
+  it('falls back to raw label when purpose is unavailable', () => {
+    localStorage.setItem(LS_KEY, JSON.stringify({ simplifiedToolNames: true }))
+    const msg = toolMsg({ meta: { tool_call_id: 'tc_2' } })
+    const store = createTestStore({
+      chat: {
+        messages: [msg],
+        toolLog: [{ type: 'tool', text: 'echo hello', tool_call_id: 'tc_2', output: 'hello', ts: 1 }],
+        slotRunning: false,
+      } as any,
+    })
+    renderWithProviders(<ToolCallLine message={msg} running={false} />, { store })
+    expect(screen.getByText('Running: echo hello')).toBeTruthy()
+  })
+})
+
+describe('ToolCallLine inline expansion', () => {
+  it('starts collapsed and expands on click, defaulting to Output section', () => {
+    const store = createTestStore({
+      chat: {
+        messages: [toolMsg()],
+        toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', input: 'echo "hi"', output: 'hi-output-content', ts: 1 }],
+        slotRunning: false,
+      } as any,
+    })
+    renderWithProviders(<ToolCallLine message={toolMsg()} running={false} />, { store })
+    // Collapsed: output content not yet rendered
+    expect(screen.queryByText('hi-output-content')).toBeNull()
+    // aria-expanded reflects collapsed state
+    const btn = screen.getByRole('button', { name: /Show details/i })
+    expect(btn.getAttribute('aria-expanded')).toBe('false')
+    // Click to expand
+    fireEvent.click(btn)
+    // Default segment is Output → output content visible, input content not rendered
+    expect(screen.getByText('hi-output-content')).toBeTruthy()
+    expect(screen.queryByText('echo "hi"')).toBeNull()
+    expect(btn.getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('renders only the available section when one of input/output is missing', () => {
+    const store = createTestStore({
+      chat: {
+        messages: [toolMsg()],
+        toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', output: 'only-output', ts: 1 }],
+        slotRunning: false,
+      } as any,
+    })
+    renderWithProviders(<ToolCallLine message={toolMsg()} running={false} />, { store })
+    fireEvent.click(screen.getByRole('button', { name: /Show details/i }))
+    expect(screen.getByText('only-output')).toBeTruthy()
+  })
+
+  it('renders both segments with the missing one disabled', () => {
+    const store = createTestStore({
+      chat: {
+        messages: [toolMsg()],
+        // Output present, no input → Input segment should be disabled, Output active.
+        toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', output: 'only-output', ts: 1 }],
+        slotRunning: false,
+      } as any,
+    })
+    renderWithProviders(<ToolCallLine message={toolMsg()} running={false} />, { store })
+    fireEvent.click(screen.getByRole('button', { name: /Show details/i }))
+    const inputBtn = screen.getByRole('button', { name: 'Input' })
+    const outputBtn = screen.getByRole('button', { name: 'Output' })
+    expect(inputBtn.hasAttribute('disabled')).toBe(true)
+    expect(outputBtn.hasAttribute('disabled')).toBe(false)
+    expect(inputBtn.getAttribute('title')).toBe('Input not yet available')
+    // Clicking the disabled Input segment must not flip the panel
+    fireEvent.click(inputBtn)
+    expect(screen.getByText('only-output')).toBeTruthy()
+  })
+
+  it('shows historical-message message when no toolLog entry exists and no purpose meta', () => {
+    const msg = toolMsg({ meta: { tool_call_id: 'tc_orphan' } })
+    const store = createTestStore({
+      chat: { messages: [msg], toolLog: [], slotRunning: false } as any,
+    })
+    renderWithProviders(<ToolCallLine message={msg} running={false} />, { store })
+    fireEvent.click(screen.getByRole('button', { name: /Show details/i }))
+    expect(screen.getByText('Details unavailable for historical tool calls.')).toBeTruthy()
+  })
+
+  it('falls back to message meta purpose for historical tool calls (raw-label mode)', () => {
+    // simplifiedToolNames OFF → pill shows raw label, meta row shows `→ purpose`.
+    localStorage.setItem(LS_KEY, JSON.stringify({ simplifiedToolNames: false }))
+    const msg = toolMsg({ meta: { tool_call_id: 'tc_orphan', purpose: 'Said hello earlier' } })
+    const store = createTestStore({
+      chat: { messages: [msg], toolLog: [], slotRunning: false } as any,
+    })
+    renderWithProviders(<ToolCallLine message={msg} running={false} />, { store })
+    fireEvent.click(screen.getByRole('button', { name: /Show details/i }))
+    expect(screen.getByText('→ Said hello earlier')).toBeTruthy()
+  })
+
+  it('renders persisted meta.input and meta.output when toolLog is empty (historical reload)', async () => {
+    // Backend persists input/output to message meta (see _tool_meta in chat_runner.py)
+    // so the inline detail panel survives a chat reload after gateway restart.
+    const msg = toolMsg({
+      meta: {
+        tool_call_id: 'tc_persisted',
+        purpose: 'Read a config file',
+        input: '{"path":"/etc/hosts"}',
+        output: '127.0.0.1 localhost\n::1 localhost',
+      },
+    })
+    const store = createTestStore({
+      chat: { messages: [msg], toolLog: [], slotRunning: false } as any,
+    })
+    renderWithProviders(<ToolCallLine message={msg} running={false} />, { store })
+    fireEvent.click(screen.getByRole('button', { name: /Show details/i }))
+    // Default segment is Output → output content visible
+    expect(await screen.findByText(/127\.0\.0\.1 localhost/)).toBeTruthy()
+    // Input segment exists and is enabled (data is available)
+    const inputBtn = screen.getByRole('button', { name: 'Input' })
+    expect(inputBtn.hasAttribute('disabled')).toBe(false)
+    fireEvent.click(inputBtn)
+    // AnimatePresence mode="wait" sequences the exit→enter, so wait for the
+    // Input pre block to mount asynchronously.
+    expect(await screen.findByText(/etc\/hosts/)).toBeTruthy()
+  })
+
+  it('hides redundant purpose row when the pill already shows the purpose', () => {
+    // simplifiedToolNames ON (default) → pill text === purpose. Meta row must not duplicate it.
+    localStorage.setItem(LS_KEY, JSON.stringify({ simplifiedToolNames: true }))
+    const msg = toolMsg({ meta: { tool_call_id: 'tc_orphan', purpose: 'Said hello earlier' } })
+    const store = createTestStore({
+      chat: { messages: [msg], toolLog: [], slotRunning: false } as any,
+    })
+    renderWithProviders(<ToolCallLine message={msg} running={false} />, { store })
+    fireEvent.click(screen.getByRole('button', { name: /Show details/i }))
+    expect(screen.queryByText('→ Said hello earlier')).toBeNull()
+    // The pill itself still shows the purpose label (verifies the user isn't losing info)
+    expect(screen.getAllByText('Said hello earlier').length).toBeGreaterThan(0)
+  })
+
+  it('auto-expands and clears focus when redux focusToolCallId matches', () => {
+    // Stub scrollIntoView (jsdom doesn't implement it) so the auto-scroll branch doesn't throw
+    Element.prototype.scrollIntoView = vi.fn() as any
+    const store = createTestStore({
+      chat: {
+        messages: [toolMsg()],
+        toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', output: 'auto-output-content', ts: 1 }],
+        slotRunning: false,
+        focusToolCallId: 'tc_1',
+      } as any,
+    })
+    renderWithProviders(<ToolCallLine message={toolMsg()} running={false} />, { store })
+    // Auto-expanded → default Output section content visible
+    expect(screen.getByText('auto-output-content')).toBeTruthy()
+    // Focus consumed: redux state cleared
+    expect(store.getState().chat.focusToolCallId).toBeNull()
+  })
+
+  it('does not auto-expand when focusToolCallId targets a different tool', () => {
+    Element.prototype.scrollIntoView = vi.fn() as any
+    const store = createTestStore({
+      chat: {
+        messages: [toolMsg()],
+        toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', output: 'should-not-show', ts: 1 }],
+        slotRunning: false,
+        focusToolCallId: 'tc_OTHER',
+      } as any,
+    })
+    renderWithProviders(<ToolCallLine message={toolMsg()} running={false} />, { store })
+    expect(screen.queryByText('should-not-show')).toBeNull()
+    // Focus is preserved for the other pill that owns it
+    expect(store.getState().chat.focusToolCallId).toBe('tc_OTHER')
+  })
+
+  it('auto-expands when an unresolved permission message exists for the tool, then collapses on resolve', async () => {
+    const msg = toolMsg()
+    const pendingPerm: ChatMessage = {
+      role: 'permission', content: 'Approve?', cls: '',
+      meta: { tool_call_id: 'tc_1', approval_id: 'app-1' },
+    }
+    const store = createTestStore({
+      chat: {
+        messages: [msg, pendingPerm],
+        toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', input: 'echo "hi"', ts: 1 }],
+        slotRunning: true,
+      } as any,
+    })
+    const { rerender } = renderWithProviders(<ToolCallLine message={msg} running={true} />, { store })
+    // Pending → locked open with "Awaiting approval" aria-label
+    let btn = screen.getByRole('button', { name: /Awaiting approval/i })
+    expect(btn.getAttribute('aria-expanded')).toBe('true')
+    // Approval resolves through the proper redux action so the selector picks it up
+    store.dispatch(resolveByApprovalId({ id: 'app-1', decision: 'approved' }))
+    rerender(<ToolCallLine message={msg} running={true} />)
+    // Auto-collapse on resolve is rAF-deferred — wait for the next frame to flush.
+    await waitFor(() => {
+      btn = screen.getByRole('button', { name: /(Show|Hide) details/i })
+      expect(btn.getAttribute('aria-expanded')).toBe('false')
+    })
+  })
+
+  it('locks pending pills open — clicks during pending are no-ops', () => {
+    const msg = toolMsg()
+    const pendingPerm: ChatMessage = {
+      role: 'permission', content: 'Approve?', cls: '',
+      meta: { tool_call_id: 'tc_1', approval_id: 'app-2' },
+    }
+    const store = createTestStore({
+      chat: {
+        messages: [msg, pendingPerm],
+        toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', input: 'echo "hi"', ts: 1 }],
+        slotRunning: true,
+      } as any,
+    })
+    renderWithProviders(<ToolCallLine message={msg} running={true} />, { store })
+    const btn = screen.getByRole('button', { name: /Awaiting approval/i })
+    expect(btn.getAttribute('aria-expanded')).toBe('true')
+    // User can't collapse a pending pill — the input being approved must stay
+    // visible. Click is a no-op while pending.
+    fireEvent.click(btn)
+    expect(btn.getAttribute('aria-expanded')).toBe('true')
+    // Cursor reflects the lock
+    expect(btn.className).toContain('cursor-default')
+  })
+})

@@ -1,0 +1,575 @@
+import { copyToClipboard } from '../utils/clipboard'
+import type { McpApplyChange } from '../types'
+
+export const SEARCH_MIN_CHARS = 2  // backend session search threshold (must match kiro_claw.history.SEARCH_MIN_CHARS)
+
+let _sessionExpiredShown = false
+
+function checkSessionExpired(r: Response): Response {
+  if (r.status === 403 && r.headers.get('X-Auth-Required') === 'true' && !_sessionExpiredShown) {
+    _sessionExpiredShown = true
+    const el = document.createElement('div')
+    el.id = 'mc-session-expired'
+    el.style.cssText =
+      'position:fixed;top:0;left:0;right:0;z-index:99999;background:#b91c1c;color:#fff;' +
+      'padding:12px 20px;text-align:center;font:14px/1.5 system-ui;'
+    const b = document.createElement('b')
+    b.textContent = 'Session expired.'
+    const code = document.createElement('code')
+    code.textContent = 'kiroclaw token'
+    code.style.cssText = 'background:#7f1d1d;padding:2px 6px;border-radius:4px'
+    const input = document.createElement('input')
+    input.type = 'text'
+    input.placeholder = 'Paste token URL or raw token…'
+    input.style.cssText =
+      'margin-left:12px;padding:4px 8px;border-radius:4px;border:1px solid #fca5a5;' +
+      'background:#7f1d1d;color:#fff;font-size:13px;width:280px;cursor:text;caret-color:#fff;' +
+      'outline:2px solid transparent;outline-offset:2px;transition:border-color 0.2s,box-shadow 0.2s;'
+    input.addEventListener('focus', () => { input.style.borderColor = '#fff'; input.style.boxShadow = '0 0 0 3px rgba(255,255,255,0.25),0 0 20px rgba(255,255,255,0.1)' })
+    input.addEventListener('blur', () => { input.style.borderColor = '#fca5a5'; input.style.boxShadow = 'none' })
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const v = input.value.trim()
+        if (!v) return
+        let t: string | null = null
+        try { t = new URL(v).searchParams.get('token') } catch { t = v }
+        if (t) window.location.href = `${window.location.protocol}//${window.location.host}?token=${encodeURIComponent(t)}`
+      }
+    })
+    el.append(b, ' Run ', code, ' then paste URL: ', input)
+    const dismiss = document.createElement('button')
+    dismiss.textContent = '✕'
+    dismiss.style.cssText =
+      'margin-left:12px;background:none;border:none;color:#fca5a5;cursor:pointer;font-size:18px;vertical-align:middle;'
+    dismiss.addEventListener('click', () => {
+      el.remove()
+      _sessionExpiredShown = false
+    })
+    el.append(dismiss)
+    document.body.prepend(el)
+    requestAnimationFrame(() => input.focus())
+  }
+  return r
+}
+
+/**
+ * HTTP error from an API call. Carries the response status so call sites can
+ * branch on specific codes (e.g. 404 = not found, 409 = conflict) without
+ * regex-matching the error message text.
+ *
+ * Extends Error so existing `e instanceof Error ? e.message : String(e)`
+ * fallbacks keep working.
+ */
+export class ApiError extends Error {
+  readonly status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+const j = async (r: Response) => {
+  checkSessionExpired(r)
+  if (!r.ok) {
+    const errText = await r.text()
+    throw new ApiError(r.status, errText || `HTTP ${r.status}`)
+  }
+  return r.json()
+}
+// X-Session-Key ensures the server-side ephemeral gate always runs.
+// Without it, browser requests would skip the `if sk:` check — a fail-open
+// path that an MCP subprocess could exploit by omitting its own header.
+const _sk = { 'X-Session-Key': 'dashboard:ui' }
+const get = (url: string) => fetch(url, { headers: { ..._sk } })
+const post = (url: string, body?: object) =>
+  fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ..._sk }, body: body ? JSON.stringify(body) : undefined })
+const put = (url: string, body: object) =>
+  fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify(body) })
+const del = (url: string, body?: object) =>
+  fetch(url, { method: 'DELETE', headers: body ? { 'Content-Type': 'application/json', ..._sk } : _sk, body: body ? JSON.stringify(body) : undefined })
+const patch = (url: string, body: object) =>
+  fetch(url, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify(body) })
+
+export const api = {
+  status: () => fetch('/api/status').then(j),
+  system: () => fetch('/api/system').then(j),
+  securityStats: () => fetch('/api/security/stats').then(j) as Promise<{ denied_commands: number; suspicious_patterns: number; tool_schemas: number; redaction_paths: number }>,
+  suggestions: (force?: boolean) => fetch(`/api/suggestions${force ? '?force=1' : ''}`).then(j) as Promise<{ suggestions: string[]; generated_at: number; stale: boolean }>,
+  branding: () => fetch('/api/dashboard/branding').then(j) as Promise<{ bot_name: string; avatar: string }>,
+  // Memory
+  memoryPreferences: () => fetch('/api/memory/preferences').then(j),
+  saveMemoryPreferences: (content: string) => put('/api/memory/preferences', { content }),
+  memoryProjects: () => fetch('/api/memory/projects').then(j),
+  saveMemoryProjects: (content: string) => put('/api/memory/projects', { content }),
+  memoryHistory: () => fetch('/api/memory/history').then(j),
+  saveMemoryHistory: (content: string) => put('/api/memory/history', { content }),
+  memorySettings: () => fetch('/api/memory/settings').then(j),
+  saveMemorySettings: (s: {history_idle_hours?: number; history_max_days?: number}) => put('/api/memory/settings', s),
+  // Vector memory
+  vectorSemantic: () => fetch('/api/memory/semantic').then(j),
+  vectorSemanticWrite: (key: string, value: string) => put('/api/memory/semantic', { key, value, source: 'user_explicit' }).then(j),
+  vectorSemanticDelete: (key: string) => del('/api/memory/semantic/' + encodeURIComponent(key)),
+  vectorEpisodic: (limit = 50, offset = 0, tags?: string) => fetch('/api/memory/episodic?limit=' + limit + '&offset=' + offset + (tags ? '&tags=' + encodeURIComponent(tags) : '')).then(j),
+  vectorEpisodicSearch: (q: string, tags?: string) => fetch('/api/memory/episodic/search?q=' + encodeURIComponent(q) + (tags ? '&tags=' + encodeURIComponent(tags) : '')).then(j),
+  vectorEpisodicDelete: (id: string) => del('/api/memory/episodic/' + encodeURIComponent(id)),
+  vectorStats: () => fetch('/api/memory/stats').then(j),
+  vectorEvents: (limit = 50, offset = 0) => fetch('/api/memory/events?limit=' + limit + '&offset=' + offset).then(j),
+  vectorEmbeddingStatus: () => fetch('/api/memory/embedding-status').then(j),
+  vectorEnableEmbeddings: () => post('/api/memory/enable-embeddings').then(j),
+  vectorDisableEmbeddings: () => post('/api/memory/disable-embeddings').then(j),
+  vectorMigrate: () => post('/api/memory/migrate').then(j),
+  vectorImport: (data: object) => post('/api/memory/import', data).then(j),
+  vectorContextPreview: (query?: string) => fetch('/api/memory/context-preview' + (query ? '?q=' + encodeURIComponent(query) : '')).then(j),
+  memoryGraph: () => fetch('/api/memory/graph').then(j),
+  consolidateMemory: (key: string, includeHistory: boolean) => post('/api/memory/consolidate', { key, include_history: includeHistory }).then(j),
+  restartSessions: () => post('/api/sessions/restart').then(j),
+  sessionsContext: () => fetch('/api/sessions/context').then(j),
+  sessionsUsage: () => fetch('/api/sessions/usage').then(j),
+  providerUsage: () => fetch('/api/usage').then(j),
+  mcpProbeCache: () => fetch('/api/mcp/probe').then(j),
+  // Agents
+  agentsInstalled: () => fetch('/api/agents/installed').then(j),
+  agentDetail: (name: string) => fetch('/api/agents/detail/' + encodeURIComponent(name)).then(j),
+  agentPatch: (name: string, body: object) => fetch('/api/agents/detail/' + encodeURIComponent(name), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j),
+  agentDelete: (name: string) => fetch('/api/agents/detail/' + encodeURIComponent(name), { method: 'DELETE' }).then(j),
+  agentMetadata: (name: string) => fetch('/api/agent-metadata/' + encodeURIComponent(name)).then(j),
+  agentMetadataSave: (name: string, content: string) => fetch('/api/agent-metadata/' + encodeURIComponent(name), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }) }).then(j),
+  // KiroClaw agents
+  kiroclawAgents: () => fetch('/api/agents').then(j),
+  syncKiroclawAgents: () => post('/api/agents/sync', {}).then(j),
+  createKiroclawAgent: (body: object) => post('/api/agents', body).then(j),
+  updateKiroclawAgent: (name: string, body: object) =>
+    put('/api/agents/' + encodeURIComponent(name), body).then(j),
+  deleteKiroclawAgent: (name: string) =>
+    del('/api/agents/' + encodeURIComponent(name)).then(j),
+  models: () => fetch('/api/models').then(j),
+  effortLevels: (slot?: string) =>
+    fetch('/api/effort-levels' + (slot ? '?slot=' + encodeURIComponent(slot) : '')).then(j) as Promise<string[]>,
+  slashCommands: () => fetch('/api/slash-commands').then(j),
+  chatSlotAgent: (slot: string, agent: string) =>
+    post('/api/chat/slots/' + encodeURIComponent(slot) + '/agent', { agent }).then(j),
+  chatSlotModel: (slot: string, model: string) =>
+    post('/api/chat/slots/' + encodeURIComponent(slot) + '/model', { model }).then(j),
+  chatSlotReasoningEffort: (slot: string, reasoning_effort: string) =>
+    post('/api/chat/slots/' + encodeURIComponent(slot) + '/reasoning-effort', { reasoning_effort }).then(j),
+  chatSlotWorkspace: (slot: string, workspace: string) =>
+    post('/api/chat/slots/' + encodeURIComponent(slot) + '/workspace', { workspace }).then(j),
+  chatSlotProject: (slot: string, project: string) =>
+    post('/api/chat/slots/' + encodeURIComponent(slot) + '/project', { project }).then(j),
+  recentProjects: () => fetch('/api/recent-projects').then(j) as Promise<{ dirs: string[] }>,
+  browseDirs: (path?: string) => fetch('/api/browse-dirs' + (path ? '?path=' + encodeURIComponent(path) : '')).then(j) as Promise<{ path: string; parent: string; dirs: { name: string; path: string }[] }>,
+  browseFiles: (path?: string) => fetch('/api/browse-files' + (path ? '?path=' + encodeURIComponent(path) : '')).then(j) as Promise<{ path: string; parent: string; dirs: { name: string; path: string }[]; files: { name: string; path: string }[] }>,
+  workspaces: () => fetch('/api/workspaces').then(j),
+  createWorkspace: (body: object) => post('/api/workspaces', body).then(j),
+  updateWorkspace: (name: string, body: object) =>
+    put('/api/workspaces/' + encodeURIComponent(name), body).then(j),
+  deleteWorkspace: (name: string) =>
+    del('/api/workspaces/' + encodeURIComponent(name)).then(j),
+  // Crons
+  crons: () => fetch('/api/crons').then(j),
+  createCron: (body: object) => post('/api/crons', body).then(j),
+  deleteCron: (id: string) => del('/api/crons/' + id).then(j),
+  updateCron: (id: string, body: object) =>
+    fetch('/api/crons/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j),
+  runCron: (id: string) => post('/api/crons/' + id + '/run').then(j),
+  cronToChat: (id: string) => post('/api/crons/' + id + '/to-chat').then(j),
+  toggleCron: (id: string, enabled: boolean) => post('/api/crons/' + id + '/enable', { enabled }).then(j),
+  cronHistory: (jobId: string, offset?: number, limit?: number) => {
+    const p = new URLSearchParams()
+    if (offset != null) p.set('offset', String(offset))
+    if (limit != null) p.set('limit', String(limit))
+    const qs = p.toString()
+    return fetch('/api/crons/' + jobId + '/history' + (qs ? '?' + qs : ''), { headers: { ..._sk } }).then(j)
+  },
+  cronRunDetail: (jobId: string, runId: string) => fetch('/api/crons/' + jobId + '/history/' + encodeURIComponent(runId), { headers: { ..._sk } }).then(j),
+  ackCron: (id: string, summary: string, ts?: string) => post('/api/crons/' + id + '/ack', { summary, ts }).then(j),
+  cronHistoryAll: (opts?: { offset?: number; limit?: number; jobId?: string }) => {
+    const p = new URLSearchParams()
+    if (opts?.offset != null) p.set('offset', String(opts.offset))
+    if (opts?.limit != null) p.set('limit', String(opts.limit))
+    if (opts?.jobId) p.set('job_id', opts.jobId)
+    return fetch('/api/crons/history' + (p.toString() ? '?' + p : ''), { headers: { ..._sk } }).then(j)
+  },
+
+  // Lessons
+  lessons: () => fetch('/api/lessons').then(j),
+  createLesson: (rule: string, category: string) => post('/api/lessons', { rule, category }).then(j),
+  deleteLesson: (rule: string) => del('/api/lessons', { rule }).then(j),
+  // Hooks
+  hooks: () => fetch('/api/hooks').then(j),
+  kiroHooks: () => fetch('/api/kiro-hooks').then(j),
+  createHook: (body: object) => post('/api/hooks', body).then(j),
+  updateHook: (id: string, body: object) => put('/api/hooks/' + id, body).then(j),
+  deleteHook: (id: string) => del('/api/hooks/' + id).then(j),
+  toggleHook: (id: string) => post('/api/hooks/' + id + '/toggle', {}).then(j),
+  testHook: (id: string, context?: string) => post('/api/hooks/' + id + '/test', { context: context || 'test' }).then(j),
+  // Prompts (Agent SOPs)
+  prompts: () => fetch('/api/prompts').then(j),
+  promptDetail: (name: string) => fetch('/api/prompts/' + name.split('/').map(encodeURIComponent).join('/')).then(j),
+  // Skills
+  skills: () => fetch('/api/skills').then(j),
+  skill: (name: string) => fetch('/api/skills/' + name.split('/').map(encodeURIComponent).join('/')).then(j),
+  /** List the file tree under a skill's directory.  The ``/-/`` separator
+   *  disambiguates from a nested skill whose last segment is ``tree``. */
+  skillTree: (name: string) => fetch('/api/skills/' + name.split('/').map(encodeURIComponent).join('/') + '/-/tree').then(j),
+  /** Read a single file inside a skill's directory by relative path. */
+  skillFile: (name: string, relPath: string) =>
+    fetch('/api/skills/' + name.split('/').map(encodeURIComponent).join('/') +
+          '/-/file?path=' + encodeURIComponent(relPath)).then(j),
+  createSkill: (name: string, content: string) => post('/api/skills', { name, content }).then(j),
+  updateSkill: (name: string, content: string) => put('/api/skills/' + name.split('/').map(encodeURIComponent).join('/'), { content }).then(j),
+  deleteSkill: (name: string) => del('/api/skills/' + name.split('/').map(encodeURIComponent).join('/')).then(j),
+  // MCP
+  mcpServers: () => fetch('/api/mcp').then(j),
+  mcpActive: (agent?: string) => fetch('/api/mcp/active' + (agent ? `?agent=${encodeURIComponent(agent)}` : '')).then(j),
+  mcpProbe: () => post('/api/mcp/probe').then(j),
+  mcpSync: () => post('/api/mcp/sync').then(j),
+  mcpApply: (changes: McpApplyChange[]) =>
+    post('/api/mcp/apply', { changes }).then(j),
+  mcpToggle: (name: string, enabled: boolean) => post('/api/mcp/toggle', { name, enabled }).then(j),
+  mcpToggleTool: (server: string, tool: string, enabled: boolean) => post('/api/mcp/toggle-tool', { server, tool, enabled }).then(j),
+  mcpToggleAll: (enabled: boolean) => post('/api/mcp/toggle-all', { enabled }).then(j),
+  mcpRemove: (name: string) => post('/api/mcp/remove', { name }).then(j),
+  // Agent config
+  agentConfig: () => fetch('/api/agent/config').then(j),
+  saveAgentConfig: (config: object) => put('/api/agent/config', { config }).then(j),
+  defaultAgent: () => fetch('/api/config/default-agent').then(j),
+  setDefaultAgent: (agent: string) => put('/api/config/default-agent', { agent }).then(j),
+  kiroclawConfig: () => fetch('/api/config/kiroclaw').then(j),
+  saveKiroclawConfig: (agent: object) => put('/api/config/kiroclaw', { agent }).then(j),
+  patchConfig: (path: string, value: unknown) => fetch('/api/config/kiroclaw', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, value }) }).then(j),
+  // CC Deny Patterns
+  ccDenyPatterns: () => fetch('/api/config/cc-deny-patterns').then(j) as Promise<{ builtin: string[]; user: string[]; total: number }>,
+  saveCcDenyPatterns: (patterns: string[]) => put('/api/config/cc-deny-patterns', { patterns }).then(j),
+  // Claude Code migration (kiro → CC)
+  ccMirrorPreview: () => fetch('/api/cc/mirror/preview').then(j) as Promise<{
+    summary: { agents_total: number; mcp_total: number; skills_total: number; mirrored: number; skipped: number; errors: number }
+    agents: Array<{ name: string; action: string; hint?: string }>
+    mcp: Array<{ name: string; action: string; count?: number }>
+    skills: Array<{ name: string; action: string }>
+    errors: Array<{ source: string; error: string }>
+  }>,
+  ccMirrorRun: (force: boolean) => fetch('/api/cc/mirror/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ force }),
+  }).then(j),
+  // Optional integrations — backend endpoints are graceful no-ops on a public
+  // install (AIM / kiro usage are stubbed). Kept so the UI compiles and
+  // degrades gracefully (panels render empty when the feature is absent).
+  kiroUsage: () => fetch('/api/usage/kiro').then(j),
+  aimMcpList: () => fetch('/api/aim/mcp').then(j),
+  aimMcpInstall: (serverId: string) => post('/api/aim/mcp/install', { server_id: serverId }).then(j),
+  aimMcpUninstall: (serverId: string) => post('/api/aim/mcp/uninstall', { server_id: serverId }).then(j),
+  aimSkillsList: () => fetch('/api/aim/skills').then(j),
+  aimSkillsInstall: (pkg: string, vs?: string) => post('/api/aim/skills/install', { package: pkg, version_set: vs || '' }).then(j),
+  aimSkillsUninstall: (pkg: string) => post('/api/aim/skills/uninstall', { package: pkg }).then(j),
+  aimAgentsList: () => fetch('/api/aim/agents').then(j),
+  aimAgentsInstall: (pkg: string, vs?: string) => post('/api/aim/agents/install', { package: pkg, version_set: vs || '' }).then(j),
+  aimAgentsUninstall: (pkg: string) => post('/api/aim/agents/uninstall', { package: pkg }).then(j),
+  aimUpdate: (kind: string, pkg?: string) => post('/api/aim/update', { kind, package: pkg || '' }).then(j),
+  aimMcpRegistry: () => fetch('/api/aim/mcp/registry').then(j),
+  ccAimMissing: () => fetch('/api/cc/aim/missing').then(j) as Promise<{ missing: string[] }>,
+  ccAimSync: (packages?: string[]) => fetch('/api/cc/aim/sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ packages: packages ?? null }),
+  }).then(j) as Promise<{ installed: string[]; failed: Array<{ package: string; error: string }> }>,
+  // STT
+  sttConfig: () => fetch('/api/config/stt').then(j),
+  saveSttConfig: (body: {
+    enabled?: boolean
+    provider?: string
+    model?: string
+    streaming?: boolean
+    transcribe_region?: string
+    transcribe_profile?: string
+    language_code?: string
+  }) => put('/api/config/stt', body).then(j),
+  sttInstall: () => post('/api/stt/install').then(j),
+  sttTranscribe: (blob: Blob, ext = 'webm') => {
+    const fd = new FormData()
+    fd.append('audio', blob, `recording.${ext}`)
+    return fetch('/api/stt/transcribe', { method: 'POST', body: fd }).then(j)
+  },
+  // Chat
+  chatSlots: () => fetch('/api/chat/slots').then(j),
+  chatSlotDetail: (slot: string, limit?: number, before?: number) => {
+    const p = new URLSearchParams()
+    if (limit) p.set('limit', String(limit))
+    if (before !== undefined) p.set('before', String(before))
+    return fetch('/api/chat/slots/' + encodeURIComponent(slot) + '?' + p).then(j)
+  },
+  createChatSlot: (name?: string, agent?: string, model?: string, mode?: string, memory_mode?: string, title?: string) => post('/api/chat/slots', { ...(name ? { name } : {}), ...(agent ? { agent } : {}), ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(memory_mode ? { memory_mode } : {}), ...(title ? { title } : {}) }).then(j),
+  deleteChatSlot: (slot: string) => del('/api/chat/slots/' + encodeURIComponent(slot)).then(j),
+  cleanupSessions: (maxInactiveDays: number, activeSlot?: string, dryRun?: boolean) => post('/api/chat/slots/cleanup', { max_inactive_days: maxInactiveDays, active_slot: activeSlot || '', dry_run: !!dryRun }).then(j) as Promise<{ ok: boolean; archived: number; keys: string[]; failed: string[]; dry_run?: boolean; count?: number; active_is_stale?: boolean }>,
+  stopChatSlot: (slot: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/stop').then(j),
+  stopChatSlotForce: (slot: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/stop?force=true').then(j),
+  cancelQueuedMessage: (slot: string, queueId: string) => del('/api/chat/slots/' + encodeURIComponent(slot) + '/queue/' + encodeURIComponent(queueId)).then(j),
+  interruptSlot: (slot: string, queueId?: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/interrupt', queueId ? { queue_id: queueId } : {}).then(j),
+  approveChatSlot: (slot: string, action: string, extra?: Record<string, string>) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/approve', { action, ...extra }).then(j),
+  planAction: (slot: string, action: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/plan-action', { action }).then(j),
+  resumeChatSlot: (key: string, title?: string) => post('/api/chat/slots/' + encodeURIComponent(key) + '/resume', { name: key, key, title: title || key }).then(j),
+  forkChatSlot: (slot: string, atIndex?: number, prompt?: string, mode?: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/fork', { ...(atIndex !== undefined ? { at_message_index: atIndex } : {}), ...(prompt ? { prompt } : {}), ...(mode ? { mode } : {}) }).then(j),
+  sideOpen: (slot: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/side/open', {}).then(j) as Promise<{ ok: boolean; open: boolean; messages: number; last_run_id: string; created_at: string }>,
+  sideTurn: (slot: string, question: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/side/turn', { question }).then(j) as Promise<{ ok: boolean; run_id: string; messages: number }>,
+  sideClose: (slot: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/side/close', {}).then(j) as Promise<{ ok: boolean; was_open: boolean }>,
+  chatMode: (mode: string, slot?: string) => post('/api/chat/mode', { mode, slot: slot || '' }).then(j),
+  generateTitle: (slot: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/generate-title').then(j),
+  resolveNavLinks: (links: { url: string; context: string }[]) => post('/api/chat/nav/resolve-links', { links }).then(j) as Promise<{ summaries: string[] }>,
+  renameSlot: (slot: string, title: string) => patch('/api/chat/slots/' + encodeURIComponent(slot) + '/title', { title }).then(j),
+  regenerateSlot: (slot: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/regenerate').then(j),
+  switchVariant: (slot: string, index: number) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/switch-variant', { index }).then(j),
+  editResend: (slot: string, ts: string, content: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/edit-resend', { ts, content }).then(j),
+  rewind: (slot: string, ts: string, content: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/rewind', { ts, content }).then(j),
+  slackLink: (slot: string, channel?: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/slack-link', channel ? { channel } : undefined).then(j),
+  slackChannels: () => fetch('/api/slack/channels').then(j),
+  // Folders
+  chatFolders: () => fetch('/api/chat/folders', { headers: { ..._sk } }).then(j),
+  createChatFolder: (name: string, parentId?: string) => post('/api/chat/folders', { name, parent_id: parentId || '' }).then(j),
+  updateChatFolder: (id: string, body: object) => patch('/api/chat/folders/' + encodeURIComponent(id), body).then(j),
+  deleteChatFolder: (id: string) => del('/api/chat/folders/' + encodeURIComponent(id)).then(j),
+  setSlotFolder: (slot: string, folderId: string | null) => patch('/api/chat/slots/' + encodeURIComponent(slot) + '/folder', { folder_id: folderId || '' }).then(j),
+  setSlotColor: (slot: string, colorIndex: number | null) => patch('/api/chat/slots/' + encodeURIComponent(slot) + '/color', { color_index: colorIndex }).then(j),
+  setSlotPin: (slot: string, pinned: boolean) => patch('/api/chat/slots/' + encodeURIComponent(slot) + '/pin', { pinned }).then(j),
+  // Tags
+  chatTags: () => fetch('/api/chat/tags', { headers: { ..._sk } }).then(j),
+  createChatTag: (name: string, color?: string, status?: boolean) => post('/api/chat/tags', { name, color: color || '', status: !!status }).then(j),
+  updateChatTag: (id: string, body: { name?: string; color?: string; order?: number; status?: boolean }) => patch('/api/chat/tags/' + encodeURIComponent(id), body).then(j),
+  deleteChatTag: (id: string) => del('/api/chat/tags/' + encodeURIComponent(id)).then(j),
+  setSlotTags: (slot: string, tags: string[]) => fetch('/api/chat/slots/' + encodeURIComponent(slot) + '/tags', { method: 'PUT', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ tags }) }).then(j),
+  dropSlotToColumn: (slot: string, columnId: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/drop', { column_id: columnId }).then(j),
+  tagColumns: () => fetch('/api/chat/tag-columns', { headers: { ..._sk } }).then(j),
+  createTagColumn: (body: { name?: string; tag_ids?: string[]; mode?: 'any' | 'all' | 'none'; include_untagged?: boolean }) => post('/api/chat/tag-columns', body).then(j),
+  updateTagColumn: (id: string, body: { name?: string; tag_ids?: string[]; mode?: 'any' | 'all' | 'none'; order?: number; include_untagged?: boolean }) => patch('/api/chat/tag-columns/' + encodeURIComponent(id), body).then(j),
+  deleteTagColumn: (id: string) => del('/api/chat/tag-columns/' + encodeURIComponent(id)).then(j),
+  reorderTagColumns: (ids: string[]) => fetch('/api/chat/tag-columns/order', { method: 'PUT', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ ids }) }).then(j),
+  sendChat: (message: string, slot?: string, colorTheme?: string, signal?: AbortSignal, meta?: Record<string, unknown>, browse?: boolean) =>
+    fetch('/api/chat?ws=1', { method: 'POST', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ message, slot, ...(colorTheme ? { color_theme: colorTheme } : {}), ...(meta ? { meta } : {}), ...(browse ? { browse: true } : {}) }), signal }),
+  sessionsHealth: () => fetch('/api/sessions/health').then(j),
+  // Knowledge
+  knowledgeSearch: (q: string) => get(`/api/knowledge/search-for-context?q=${encodeURIComponent(q)}`).then(j),
+  // Notifications
+  notifications: () => fetch('/api/notifications').then(j),
+  deleteNotification: (ts: string) => del('/api/notifications', { ts }).then(j),
+  clearNotifications: () => post('/api/notifications/clear').then(j),
+  ackNotification: (ts: string) => post('/api/notifications/ack', { ts }).then(j),
+  unackNotification: (ts: string) => post('/api/notifications/unack', { ts }).then(j),
+  ackAllNotifications: () => post('/api/notifications/ack-all').then(j),
+  // Handoff
+  handoffChannels: () => fetch('/api/handoff-channels').then(j) as Promise<Record<string, string> | null>,
+  handoffSlot: (slot: string, channel?: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/handoff', channel ? { channel } : undefined).then(j),
+  // Sessions (history)
+  sessions: (limit = 30, offset = 0) => fetch('/api/sessions?limit=' + limit + '&offset=' + offset).then(j),
+  sessionsSearch: (q: string, limit = 50) => fetch('/api/sessions/search?q=' + encodeURIComponent(q) + '&limit=' + limit).then(j),
+  sessionDetail: (key: string) => fetch('/api/sessions/' + encodeURIComponent(key)).then(j),
+  deleteSession: (key: string) => del('/api/sessions/' + encodeURIComponent(key)).then(j),
+  clearSessions: () => del('/api/sessions').then(j),
+  // Autocomplete
+  autocomplete: (q: string): Promise<{suggestions: string[]}> => fetch('/api/autocomplete?q=' + encodeURIComponent(q)).then(j),
+  // Spawn
+  spawnList: () => fetch('/api/spawn').then(j),
+  spawn: (task: string) => post('/api/spawn', { task }).then(j),
+  spawnStatus: (id: string, opts?: { signal?: AbortSignal }) => fetch('/api/spawn/' + encodeURIComponent(id), opts).then(j),
+  spawnDelete: (id: string) => del('/api/spawn/' + encodeURIComponent(id)).then(j),
+  spawnClear: () => del('/api/spawn').then(j),
+  approvals: (): Promise<{ id: string; source?: string; tool?: string; tool_input?: string; tool_call_id?: string; slot?: string; ts?: number }[]> => fetch('/api/approvals').then(j),
+  resolveApproval: (id: string, action: 'approve' | 'reject') => post('/api/approvals/' + encodeURIComponent(id) + '/' + action, {}).then(j),
+  // Logs
+  logLevel: () => fetch('/api/logs/level').then(j),
+  setLogLevel: (level: string) => post('/api/logs/level', { level }).then(j),
+  // Task runner
+  taskRunnerStatus: () => fetch('/api/taskrunner').then(j),
+  startTaskRunner: (spec: string, agent?: string) => post('/api/taskrunner', { spec, agent: agent || '' }).then(j),
+  cancelTaskRunner: (taskId?: string) => post('/api/taskrunner/cancel', taskId ? { task_id: taskId } : undefined).then(j),
+  pauseTaskRun: (taskId: string) => post('/api/taskrunner/' + encodeURIComponent(taskId) + '/pause').then(j),
+  deleteTaskRun: (taskId: string) => del('/api/taskrunner/' + encodeURIComponent(taskId)).then(j),
+  retryTaskRun: (taskId: string, fromStep: number) => post('/api/taskrunner/' + encodeURIComponent(taskId) + '/retry', { from_step: fromStep }).then(j),
+  renameTaskRun: (taskId: string, name: string) => fetch('/api/taskrunner/' + encodeURIComponent(taskId) + '/name', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }).then(j),
+  updateTask: (taskId: string, index: number, updates: { title?: string; description?: string; depends_on?: number[]; requires_approval?: boolean; force_approval?: boolean }) => fetch('/api/taskrunner/' + encodeURIComponent(taskId) + '/tasks/' + index, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates) }).then(j),
+  taskRunToChat: (taskId: string) => post('/api/taskrunner/' + encodeURIComponent(taskId) + '/to-chat').then(j),
+  revealPath: (path: string) => post('/api/reveal', { path }).then(j).then((r: any) => {
+    if (r.copy) copyToClipboard(r.copy)
+    return r
+  }),
+  refineTaskInput: (input: string) => post('/api/taskrunner/refine', { input }).then(j),
+  refineStatus: () => fetch('/api/taskrunner/refine').then(j),
+  refineCancel: () => post('/api/taskrunner/refine/cancel').then(j),
+  planTask: (input: string, source: string, spec?: string, agent?: string) =>
+    post('/api/taskrunner/plan', { input, source, spec: spec || '', agent: agent || '' }).then(j),
+  cancelPlan: () => post('/api/taskrunner/plan/cancel').then(j),
+  updatePlan: (taskId: string, steps: any[]) =>
+    put('/api/taskrunner/' + encodeURIComponent(taskId) + '/plan', { steps }).then(j),
+  executePlan: (taskId: string, agent?: string) =>
+    post('/api/taskrunner/' + encodeURIComponent(taskId) + '/execute', { agent: agent || '' }).then(j),
+  planFromChat: (steps: any[], taskId?: string, originalInput?: string) =>
+    post('/api/taskrunner/from-chat', { steps, task_id: taskId || '', original_input: originalInput || '' }).then(j),
+  planContext: (taskId: string) =>
+    fetch('/api/taskrunner/' + encodeURIComponent(taskId) + '/plan-context').then(j),
+  // Update
+  checkUpdate: () => fetch('/api/update/check').then(j),
+  changelog: () => fetch('/api/changelog').then(j),
+  applyUpdate: () => post('/api/update').then(j),
+  setAutoUpdate: (enabled: boolean) => post('/api/update/auto', { enabled }).then(j),
+  cancelUpdate: () => post('/api/update/cancel').then(j),
+  simulateUpdate: (opts?: { delay?: number; fail_at?: string }) => post('/api/update/simulate', opts || {}).then(j),
+  pickFiles: () => post('/api/upload').then(j) as Promise<{ paths: string[] }>,
+  /** Fuzzy file search for @-mention picker */
+  fileSearch: (q: string, project?: string, signal?: AbortSignal) => {
+    const p = new URLSearchParams({ q })
+    if (project) p.set('project', project)
+    return fetch(`/api/file-search?${p}`, signal ? { signal } : undefined).then(j) as Promise<{ results: Array<{ path: string; name: string; size: number; mtime: number }>; root: string }>
+  },
+  /** Upload files via browser File API (cross-platform) */
+  uploadFiles: async (files: File[]) => {
+    const fd = new FormData()
+    files.forEach(f => fd.append('file', f))
+    const res = await fetch('/api/upload/file', { method: 'POST', body: fd })
+    checkSessionExpired(res)
+    let body: any
+    try { body = await res.json() } catch { body = {} }
+    if (!res.ok) return { paths: [] as string[], error: body.error || res.statusText }
+    if (!Array.isArray(body.paths)) return { paths: [] as string[], error: 'Unexpected server response' }
+    return body as { paths: string[]; error?: string }
+  },
+  screenshot: () => post('/api/screenshot').then(j) as Promise<{ path: string }>,
+  // Custom Themes
+  themes: () => fetch('/api/themes').then(j),
+  // Dashboard config
+  dashboardConfig: () => fetch('/api/dashboard/config').then(j),
+  updateDashboardConfig: (body: object) => put('/api/dashboard/config', body).then(j),
+  createTheme: (body: object) => post('/api/themes', body).then(j),
+  updateTheme: (slug: string, body: object) => put('/api/themes/' + encodeURIComponent(slug), body).then(j),
+  deleteTheme: (slug: string) => del('/api/themes/' + encodeURIComponent(slug)).then(j),
+  themeDetail: (slug: string) => fetch('/api/themes/' + encodeURIComponent(slug)).then(j),
+  // Voice
+  voiceConfig: () => fetch('/api/voice/config').then(j),
+  updateVoiceConfig: (body: object) => put('/api/voice/config', body).then(j),
+  voiceSynthesize: (slot: string, text: string, opts?: { voice?: string; engine?: string; rate?: string; pitch?: string }) =>
+    post('/api/voice/synthesize', { slot, text, ...opts }).then(j),
+
+  // Channels
+  channelsList: () => fetch('/api/channels').then(j),
+  channelPresets: () => fetch('/api/channels/presets').then(j),
+  channelGet: (id: string) => fetch('/api/channels/' + encodeURIComponent(id)).then(j),
+  channelCreate: (topic: string, agents: object[]) => post('/api/channels', { topic, agents }).then(j),
+  channelClose: (id: string) => del('/api/channels/' + encodeURIComponent(id)).then(j),
+  channelPost: (id: string, content: string, mention?: string | string[], thread_id?: string) => post('/api/channels/' + encodeURIComponent(id) + '/messages', { content, mention, thread_id }).then(j),
+  channelAddAgent: (id: string, agent: object) => post('/api/channels/' + encodeURIComponent(id) + '/agents', agent).then(j),
+  channelUpdateAgent: (id: string, aid: string, updates: object) => patch('/api/channels/' + encodeURIComponent(id) + '/agents/' + encodeURIComponent(aid), updates).then(j),
+  channelDismissAgent: (id: string, aid: string) => del('/api/channels/' + encodeURIComponent(id) + '/agents/' + encodeURIComponent(aid)).then(j),
+  channelWakeAgent: (id: string, aid: string) => post('/api/channels/' + encodeURIComponent(id) + '/agents/' + encodeURIComponent(aid) + '/wake', {}).then(j),
+  channelApproveAgent: (id: string, aid: string, action: string) => post('/api/channels/' + encodeURIComponent(id) + '/agents/' + encodeURIComponent(aid) + '/approve', { action }).then(j),
+  channelClearContext: (id: string, scope: 'all' | 'agent', agentId?: string) => post('/api/channels/' + encodeURIComponent(id) + '/clear-context', scope === 'agent' ? { scope, agent_id: agentId } : { scope }).then(j),
+
+  // --- Apps ---
+  listApps: () => fetch('/api/apps').then(j),
+  getApp: (name: string) => fetch('/api/apps/' + encodeURIComponent(name)).then(j),
+  getAppManifest: (name: string) => fetch('/api/apps/' + encodeURIComponent(name) + '/manifest').then(j),
+  installApp: (source: string) => post('/api/apps/install', { source }).then(j),
+  enableApp: (name: string) => post('/api/apps/' + encodeURIComponent(name) + '/enable').then(j),
+  disableApp: (name: string) => post('/api/apps/' + encodeURIComponent(name) + '/disable').then(j),
+  openApp: (name: string) => post('/api/apps/' + encodeURIComponent(name) + '/open').then(j),
+  uninstallApp: (name: string, keepData?: boolean, keepDependencies?: boolean, keepSpecific?: string[]) =>
+    post('/api/apps/' + encodeURIComponent(name) + '/uninstall', {
+      ...(keepData ? { keep_data: true } : {}),
+      ...(keepDependencies ? { keep_dependencies: true } : {}),
+      ...(keepSpecific?.length ? { keep_specific: keepSpecific } : {}),
+    }).then(j),
+  uninstallPreview: (name: string) =>
+    fetch('/api/apps/' + encodeURIComponent(name) + '/uninstall/preview').then(j) as Promise<{
+      app: string
+      resources: { agents: string[]; skills: string[]; crons: string[] }
+      dependencies: {
+        removable: { id: string; type: string; reason: string }[]
+        shared: { id: string; type: string; usedBy: string[]; reason: string }[]
+        userInstalled: { id: string; type: string; reason: string }[]
+      }
+    }>,
+  updateApp: (name: string, source?: string) => post('/api/apps/' + encodeURIComponent(name) + '/update', source ? { source } : {}).then(j),
+  migrateCleanup: (name: string) => del('/api/apps/' + encodeURIComponent(name) + '/migrate-cleanup').then(j),
+  listRegistry: () => fetch('/api/apps/registry').then(j) as Promise<{ apps: any[]; serverPlatform: { os: string; arch: string } }>,
+  listRegistries: () => fetch('/api/apps/registries').then(j) as Promise<{ registries: { name: string; repo: string; branch: string }[] }>,
+  updateRegistries: (registries: { name: string; repo: string; branch: string }[]) => put('/api/apps/registries', { registries }).then(j),
+  installFromRegistry: (name: string) => post('/api/apps/registry/install', { name }).then(j),
+  /**
+   * Stream install logs via SSE.  Calls `onLog` for each line and resolves
+   * with the final result JSON when the install completes.
+   */
+  installFromRegistryStream: async (
+    name: string,
+    onLog: (line: string) => void,
+    signal?: AbortSignal,
+  ): Promise<any> => {
+    const res = await fetch('/api/apps/registry/install-stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ..._sk },
+      body: JSON.stringify({ name }),
+      signal,
+    })
+    if (!res.ok || !res.body) {
+      const text = await res.text()
+      throw new Error(text || `HTTP ${res.status}`)
+    }
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        // Parse SSE frames: "event: <type>\ndata: <payload>\n\n"
+        const frames = buf.split('\n\n')
+        buf = frames.pop() || ''
+        for (const frame of frames) {
+          if (!frame.trim()) continue
+          let eventType = ''
+          const dataLines: string[] = []
+          for (const line of frame.split('\n')) {
+            if (line.startsWith('event: ')) eventType = line.slice(7)
+            else if (line.startsWith('data: ')) dataLines.push(line.slice(6))
+            else if (line === 'data:') dataLines.push('')
+          }
+          const data = dataLines.join('\n')
+          if (eventType === 'log') {
+            onLog(data)
+          } else if (eventType === 'done') {
+            try { return JSON.parse(data) } catch { return { ok: false, error: data } }
+          }
+        }
+      }
+      return { ok: false, error: 'Stream ended without completion' }
+    } finally {
+      reader.releaseLock()
+    }
+  },
+  registerApp: (body: object) => post('/api/apps/register', body).then(j),
+
+  // Artifacts
+  artifacts: (filters?: { tag?: string; kind?: string; q?: string; source_path?: string }) => {
+    const params = new URLSearchParams()
+    if (filters?.tag) params.set('tag', filters.tag)
+    if (filters?.kind) params.set('kind', filters.kind)
+    if (filters?.q) params.set('q', filters.q)
+    if (filters?.source_path) params.set('source_path', filters.source_path)
+    const s = params.toString()
+    return get(`/api/artifacts${s ? `?${s}` : ''}`).then(j)
+  },
+  artifact: (slug: string) => get(`/api/artifacts/${encodeURIComponent(slug)}`).then(j),
+  artifactVersion: (slug: string, version: number) =>
+    get(`/api/artifacts/${encodeURIComponent(slug)}/versions/${version}`).then(j),
+  artifactVersions: (slug: string) =>
+    get(`/api/artifacts/${encodeURIComponent(slug)}/versions`).then(j),
+  artifactEvents: (slug: string) =>
+    get(`/api/artifacts/${encodeURIComponent(slug)}/events`).then(j),
+  createArtifact: (body: { name: string; content: string; kind?: string; source?: string; description?: string; tags?: string[]; slug?: string; source_path?: string }) =>
+    post('/api/artifacts', body).then(j),
+  updateArtifact: (slug: string, body: { content?: string; name?: string; description?: string; tags?: string[]; actor?: 'user' | 'agent'; event_type?: 'edited' | 'iterated' | 'reverted'; from_version?: number; snapshot?: boolean }) =>
+    patch(`/api/artifacts/${encodeURIComponent(slug)}`, body).then(j),
+  deleteArtifact: (slug: string) => del(`/api/artifacts/${encodeURIComponent(slug)}`).then(j),
+  browserAuthRetry: () => post('/api/browser-auth-retry', {}).then(j),
+  getBrowserConfig: () => get('/api/browser/config').then(j) as Promise<{extension_mode: boolean; token: boolean}>,
+  saveBrowserConfig: (body: {extension_mode: boolean; token: string}) => put('/api/browser/config', body).then(j),
+}
