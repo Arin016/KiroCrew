@@ -182,10 +182,14 @@ Config: `~/.kiroclaw/config.json` — manage via `kiroclaw config get/set/edit`
 {
   "agent": { "provider": "claude_code", "approval_mode": "interactive", "sandbox": "auto" },
   "session": { "timeout_secs": 1800, "pool_size": 0 },
-  "dashboard": { "port": 7777 },
+  "dashboard": { "bot_name": "KiroClaw" },
   "slack": { "command": "kiroclaw" }
 }
 ```
+
+> The dashboard port is set via the `KIROCLAW_PORT` env var (default `7777`) or
+> `kiroclaw gateway --port <n>`, not in config. `dashboard.url` is the
+> externally-advertised URL only.
 
 **Choosing a provider** — set `agent.provider`:
 

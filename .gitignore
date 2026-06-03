@@ -20,6 +20,8 @@ __pycache__/
 
 /doc/_apidoc/
 /build
+# Python build artifacts (wheels / sdists from `python -m build` / `make wheel`)
+/dist/
 
 # Generated agent config — contains machine-specific absolute paths
 .kiro/agents/kiroclaw.json

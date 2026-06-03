@@ -131,7 +131,6 @@ DM KiroClaw in Slack. Each thread gets its own AI session with full tool access.
 - **Open channels** — `slack.open_channels` config bypasses allowlist for specified channels
 - **Slash command system** — `/kiroclaw dashboard`, `/kiroclaw @user`, `/kiroclaw #channel` with configurable command name
 - **Granular unfurl control** — `unfurl_links` and `unfurl_media` params on `send_message`
-- **Secretary emoji reactions** — secretary can react to messages with emojis
 - **Cooperative soft-stop** — graceful session shutdown with SIGTERM + kill fallback
 - **Piper TTS** — local text-to-speech via Piper as alternative to AWS Polly (zero cloud latency)
 - **Steering file auto-load** — workspace `.kiro/steering` files automatically loaded into kiro-cli sessions
@@ -370,32 +369,6 @@ kiroclaw learn list
 
 Lessons are injected into every session context automatically. The task runner also auto-extracts lessons from failed steps.
 
-### Secretary
-
-AI-powered Slack inbox manager. Polls your DMs and channels, classifies messages (needs reply / FYI / noise), and drafts replies for your review.
-
-- **Auto-discovery**: finds all DMs and MPIMs automatically, no manual channel configuration
-- **Classification**: LLM classifies human messages; bots (Slackbot, Asana, Quip, CRUX) auto-classified as noise
-- **Draft replies**: on-demand generation via ✨ Generate button (no auto-drafting to save tokens)
-- **Investigate**: redirects a message to a chat session with full thread context + Slack search for deeper research
-- **Dismiss All**: bulk dismiss pending items
-- **Edit-diff learning**: when you edit a draft before sending, the system learns your style preferences
-- **Keyword hooks**: configurable keyword dispatch with actions (`spawn_session`, `notify`, `auto_reply`); whole-word case-insensitive matching, per-keyword cooldown, channel/sender filtering, status API exposure
-- **Auto-reply hook action**: keyword-triggered LLM-drafted replies posted to Slack without inbox approval; designed for recurring messages (standup prompts, workflow bots) with template placeholder support
-
-Enable in Settings → Secretary, or configure in `~/.kiroclaw/config.json`:
-
-```json
-{
-  "secretary": {
-    "enabled": true,
-    "poll_interval_seconds": 60
-  }
-}
-```
-
-The secretary auto-detects your Slack user ID on first run and filters out your own messages. Requires Slack MCP server (`slack-mcp`) or a user token.
-
 ### Skills System
 
 Markdown skill files teach the LLM which CLI commands exist. Two-tier loading:
@@ -445,7 +418,6 @@ Build and distribute apps that run inside KiroClaw. Apps can be dashboard-hosted
 - **Fix with AI** — failed installs show "Fix with AI" button that sends errors to the agent
 - **Builtin auto-discovery** — frontend automatically discovers and registers routes for builtin apps
 - **App enable/disable metrics** — track app adoption with enable/disable event metrics
-- **Code Reviewer (built-in)** — full Python backend with workspace browsing (`/api/browse`), git revert/reset, AI-review SSE, commit fix engine with `--fixup`/`--autosquash` for amending fixes into specific commits; defaultEnabled: false
 
 See [app-kit/getting-started.md](app-kit/getting-started.md) for the full developer guide.
 
@@ -606,7 +578,6 @@ src/kiro_claw/
 │   │   └── usage.py     # Kiro usage analytics
 │   ├── handlers_channel.py  # channel page API handlers
 │   ├── handlers_project.py  # project page API handlers
-│   ├── handlers_secretary.py # secretary API handlers
 │   └── handlers_system.py   # system metrics API handlers
 
 agents/                  # agent config (edit without rebuilding)
@@ -646,7 +617,6 @@ Config: `~/.kiroclaw/config.json`
     "reactions_enabled": true
   },
   "dashboard": {
-    "port": 7777,
     "bot_name": "KiroClaw",
     "avatar": "",
     "restore_sessions": false,
@@ -661,6 +631,11 @@ Config: `~/.kiroclaw/config.json`
   }
 }
 ```
+
+> **Dashboard port** is **not** a config key — set it with the `KIROCLAW_PORT`
+> environment variable (default `7777`), or per-invocation with
+> `kiroclaw gateway --port <n>`. The `dashboard.url` config key is for the
+> externally-advertised URL only (remote access / CORS origin).
 
 Manage config via CLI: `kiroclaw config get [key]`, `kiroclaw config set <key> <val>`, `kiroclaw config edit`
 
