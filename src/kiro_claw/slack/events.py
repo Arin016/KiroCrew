@@ -95,6 +95,7 @@ from kiro_claw.transcribe import is_available as stt_available
 from kiro_claw.transcribe import transcribe_audio
 
 if TYPE_CHECKING:
+    from kiro_claw.slack.client import SlackClientOps
     from kiro_claw.slack.gateway import GatewayOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -324,23 +325,44 @@ async def _handle_yolo(
         if not result.active:
             await respond("❌ Failed to activate YOLO mode (audit system unavailable).")
             return
-        sel().log_api_access(caller=caller_id, operation="slack.yolo_mode", outcome="allowed", source="slack", resources="yolo_on")
+        sel().log_api_access(
+            caller=caller_id,
+            operation="slack.yolo_mode",
+            outcome="allowed",
+            source="slack",
+            resources="yolo_on",
+        )
         if orch.dashboard_state:
             orch.dashboard_state.push_slots_update()
-        await respond(f"🟢 YOLO mode *ON* (auto-expires in {_YOLO_TTL_SECS // 60}min) — all tools auto-approved.")
+        await respond(
+            f"🟢 YOLO mode *ON* (auto-expires in {_YOLO_TTL_SECS // 60}min) — all tools auto-approved."
+        )
     elif arg == "off":
         from kiro_claw.slack.handler import (
             disable_yolo,  # circular import: handler.py imports events.py for command dispatch registration
         )
+
         disable_yolo()
-        sel().log_api_access(caller=caller_id, operation="slack.yolo_mode", outcome="allowed", source="slack", resources="yolo_off")
+        sel().log_api_access(
+            caller=caller_id,
+            operation="slack.yolo_mode",
+            outcome="allowed",
+            source="slack",
+            resources="yolo_off",
+        )
         if orch.dashboard_state:
             orch.dashboard_state.push_slots_update()
         await respond("🔴 YOLO mode *OFF* — tools require approval.")
     elif arg == "renew":
         renew_result = so.renew("slack")
         if renew_result.renewed:
-            sel().log_api_access(caller=caller_id, operation="slack.yolo_mode", outcome="renewed", source="slack", resources="yolo_renew")
+            sel().log_api_access(
+                caller=caller_id,
+                operation="slack.yolo_mode",
+                outcome="renewed",
+                source="slack",
+                resources="yolo_renew",
+            )
             if orch.dashboard_state:
                 orch.dashboard_state.push_slots_update()
             await respond(f"🟢 YOLO mode *renewed* (auto-expires in {renew_result.ttl // 60}min).")
@@ -349,9 +371,13 @@ async def _handle_yolo(
     else:
         if so.is_active():
             remaining = so.remaining_secs()
-            await respond(f"YOLO mode is currently *ON 🟢* ({remaining // 60}min remaining).\nUsage: `/{orch.slack_command} yolo on|off|renew`")
+            await respond(
+                f"YOLO mode is currently *ON 🟢* ({remaining // 60}min remaining).\nUsage: `/{orch.slack_command} yolo on|off|renew`"
+            )
         else:
-            await respond(f"YOLO mode is currently *OFF 🔴*.\nUsage: `/{orch.slack_command} yolo on|off|renew`")
+            await respond(
+                f"YOLO mode is currently *OFF 🔴*.\nUsage: `/{orch.slack_command} yolo on|off|renew`"
+            )
 
 
 async def _handle_config(
@@ -416,7 +442,9 @@ async def _handle_allowlist_cmd(
     orch: GatewayOrchestrator, caller_id: str, args: str, respond: Callable
 ) -> None:
     """Multi-user access disabled — user management is blocked."""
-    await respond("⛔ Multi-user access is disabled for security. Only the owner can use KiroClaw via Slack.")
+    await respond(
+        "⛔ Multi-user access is disabled for security. Only the owner can use KiroClaw via Slack."
+    )
 
 
 def _get_agent_names() -> list[str]:
@@ -726,8 +754,7 @@ def init_socket_mode(orch: GatewayOrchestrator, seen: SeenCache) -> None:
             event["team"] = outer_team
         elif not event.get("team"):
             logger.warning(
-                "Enterprise Grid: no team_id from event or envelope "
-                "(sender=%s) — rejecting",
+                "Enterprise Grid: no team_id from event or envelope " "(sender=%s) — rejecting",
                 event.get("user", "unknown"),
             )
             sel().log_api_access(
@@ -807,9 +834,7 @@ def _build_usage_status_line() -> str:
             try:
                 if float(covered) >= plan_f - 0.01:
                     total = plan_f + used_f
-                    parts.append(
-                        f"⚠️ {total:.0f} / {plan_f:.0f} credits (over plan)"
-                    )
+                    parts.append(f"⚠️ {total:.0f} / {plan_f:.0f} credits (over plan)")
                 else:
                     parts.append(f"{used_f:.2f} / {plan_f:.0f} credits")
             except (TypeError, ValueError):
@@ -877,9 +902,7 @@ async def _publish_home_tab(orch: GatewayOrchestrator, user_id: str) -> None:
         blocks.append({"type": "divider"})
 
         # ── Capabilities ──
-        blocks.append(
-            {"type": "header", "text": {"type": "plain_text", "text": "🔌 Capabilities"}}
-        )
+        blocks.append({"type": "header", "text": {"type": "plain_text", "text": "🔌 Capabilities"}})
         try:
             servers = list_servers()
             skills = _get_skills_loader().list_skills()
@@ -887,15 +910,11 @@ async def _publish_home_tab(orch: GatewayOrchestrator, user_id: str) -> None:
             if servers:
                 names = ", ".join(s.name for s in servers)
                 raw = f"*MCP Integrations ({len(servers)}):* {names}"
-                cap_lines.append(
-                    redact_credentials(redact_exfiltration_urls(raw)[0])[0]
-                )
+                cap_lines.append(redact_credentials(redact_exfiltration_urls(raw)[0])[0])
             if skills:
                 names = ", ".join(s["name"] for s in skills)
                 raw = f"*Skills ({len(skills)}):* {names}"
-                cap_lines.append(
-                    redact_credentials(redact_exfiltration_urls(raw)[0])[0]
-                )
+                cap_lines.append(redact_credentials(redact_exfiltration_urls(raw)[0])[0])
             if not cap_lines:
                 cap_lines.append("_No MCP servers or skills configured._")
             blocks.append(
@@ -904,7 +923,10 @@ async def _publish_home_tab(orch: GatewayOrchestrator, user_id: str) -> None:
         except Exception:
             logger.error("Failed to load capabilities for home tab", exc_info=True)
             blocks.append(
-                {"type": "section", "text": {"type": "mrkdwn", "text": "_Capabilities unavailable._"}}
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "_Capabilities unavailable._"},
+                }
             )
         blocks.append({"type": "divider"})
 
@@ -948,9 +970,7 @@ async def _publish_home_tab(orch: GatewayOrchestrator, user_id: str) -> None:
         blocks.append({"type": "divider"})
 
         # ── Sessions (main chat + autopilot/task runner) ──
-        blocks.append(
-            {"type": "header", "text": {"type": "plain_text", "text": "🧵 Sessions"}}
-        )
+        blocks.append({"type": "header", "text": {"type": "plain_text", "text": "🧵 Sessions"}})
         # Deny-by-default authorization gate (defense-in-depth).
         #
         # Session JSONLs contain prior conversation contents. The dispatcher
@@ -1001,12 +1021,12 @@ async def _publish_home_tab(orch: GatewayOrchestrator, user_id: str) -> None:
                     source="slack",
                     resources=f"{len(all_rows)} sessions read",
                 )
-                dashboard_rows = [
-                    r for r in all_rows if r["kind"] == _SESSION_KIND_DASHBOARD
-                ][:per_kind]
-                taskrunner_rows = [
-                    r for r in all_rows if r["kind"] == _SESSION_KIND_TASKRUNNER
-                ][:per_kind]
+                dashboard_rows = [r for r in all_rows if r["kind"] == _SESSION_KIND_DASHBOARD][
+                    :per_kind
+                ]
+                taskrunner_rows = [r for r in all_rows if r["kind"] == _SESSION_KIND_TASKRUNNER][
+                    :per_kind
+                ]
                 if dashboard_rows or taskrunner_rows:
                     if dashboard_rows:
                         blocks.append(
@@ -1044,9 +1064,7 @@ async def _publish_home_tab(orch: GatewayOrchestrator, user_id: str) -> None:
                 # "never trust output" rule applied to exception messages.
                 redacted_exc, _ = redact_exfiltration_urls(str(exc))
                 redacted_exc, _ = redact_credentials(redacted_exc)
-                logger.exception(
-                    "home_tab sessions: collector failed for user %s", user_id
-                )
+                logger.exception("home_tab sessions: collector failed for user %s", user_id)
                 # SEL audit must record the access attempt even when the collector
                 # raises, so a failure mode can't silently bypass the audit trail.
                 # The success-path audit at the top of the try is skipped on
@@ -1091,7 +1109,11 @@ async def _publish_home_tab(orch: GatewayOrchestrator, user_id: str) -> None:
                 for entry in all_vs[:5]:
                     try:
                         parsed = json.loads(entry["value_json"])
-                        rule = parsed.get("rule", str(parsed)) if isinstance(parsed, dict) else str(parsed)
+                        rule = (
+                            parsed.get("rule", str(parsed))
+                            if isinstance(parsed, dict)
+                            else str(parsed)
+                        )
                         lesson_lines.append(
                             f"• {redact_credentials(redact_exfiltration_urls(rule)[0])[0][:100]}"
                         )
@@ -1137,9 +1159,7 @@ async def _publish_home_tab(orch: GatewayOrchestrator, user_id: str) -> None:
             version_text += f"  •  🆕 v{remote_ver} available — open Dashboard to update"
         version_text = redact_credentials(redact_exfiltration_urls(version_text)[0])[0]
         blocks.append({"type": "divider"})
-        blocks.append(
-            {"type": "context", "elements": [{"type": "mrkdwn", "text": version_text}]}
-        )
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": version_text}]})
 
         view = {"type": "home", "blocks": blocks}
 
@@ -1225,7 +1245,7 @@ async def _handle_tk_note(orch: GatewayOrchestrator, payload: dict) -> None:
     # Extract optional permalink (last URL in text)
     url_match = re.search(r"(https://\S+)$", text)
     permalink = url_match.group(1) if url_match else None
-    clean_text = text[:url_match.start()].strip() if url_match else text
+    clean_text = text[: url_match.start()].strip() if url_match else text
 
     if not clean_text:
         clean_text = text
@@ -1243,14 +1263,16 @@ async def _handle_tk_note(orch: GatewayOrchestrator, payload: dict) -> None:
                 notes = data if isinstance(data, list) else []
             except (ValueError, OSError):
                 notes = []
-        notes.append({
-            "text": clean_text,
-            "permalink": permalink,
-            "user_id": caller_id,
-            "channel_id": channel_id,
-            "channel": channel_name,
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        })
+        notes.append(
+            {
+                "text": clean_text,
+                "permalink": permalink,
+                "user_id": caller_id,
+                "channel_id": channel_id,
+                "channel": channel_name,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+        )
         # Cap file size: keep most recent notes
         if len(notes) > _TK_MAX_NOTES:
             notes = notes[-_TK_MAX_NOTES:]
@@ -1351,7 +1373,9 @@ async def _handle_slash(orch: GatewayOrchestrator, payload: dict) -> None:
     # Fallback: @user mention — multi-user access disabled for security
     user_match = re.search(r"<@([A-Z0-9]+)(?:\|([^>]+))?>", cmd_text)
     if user_match:
-        asyncio.create_task(_respond("⛔ Multi-user access is disabled. Only the owner can use KiroClaw via Slack."))
+        asyncio.create_task(
+            _respond("⛔ Multi-user access is disabled. Only the owner can use KiroClaw via Slack.")
+        )
         return
 
     # Fallback: #channel mention — Slack sends <#C1234|name> or <#C1234>
@@ -1385,6 +1409,36 @@ def _maybe_prompt_owner(orch: GatewayOrchestrator, event: dict) -> None:
 # ---------------------------------------------------------------------------
 
 _AUDIO_MIMETYPES = {"audio/", "video/webm"}
+
+
+async def _transcribe_with_reaction(
+    slack_client: "SlackClientOps",
+    channel: str,
+    msg_ts: str,
+    orch: "GatewayOrchestrator",
+    files: list[dict],
+) -> list[str]:
+    """Transcribe audio files with a reaction indicator for user feedback."""
+    _stt_reaction_added = False
+    try:
+        await slack_client.add_reaction(channel, msg_ts, "studio_microphone")
+        _stt_reaction_added = True
+    except Exception:
+        logger.debug("Failed to add STT reaction", exc_info=True)
+
+    try:
+        transcripts = await _transcribe_files(orch, files)
+    finally:
+        if _stt_reaction_added:
+            try:
+                await slack_client.remove_reaction(
+                    channel,
+                    msg_ts,
+                    "studio_microphone",
+                )
+            except Exception:
+                logger.debug("Failed to remove STT reaction", exc_info=True)
+    return transcripts
 
 
 async def _transcribe_files(orch: "GatewayOrchestrator", files: list[dict]) -> list[str]:
@@ -1473,7 +1527,9 @@ async def _handle_message_deleted(orch: GatewayOrchestrator, event: dict) -> Non
         if was_queued:
             logger.info(
                 "message_deleted: ts=%s session=%s queued=%s",
-                deleted_ts, _del_session_key, was_queued,
+                deleted_ts,
+                _del_session_key,
+                was_queued,
             )
         sel().log_api_access(
             caller=event.get("previous_message", {}).get("user", "unknown"),
@@ -1721,7 +1777,13 @@ async def _route_message(
     _had_voice_input = False
     if files and orch.slack and _user_authorized:
         if stt_available():
-            transcripts = await _transcribe_files(orch, files)
+            transcripts = await _transcribe_with_reaction(
+                orch.slack,
+                channel,
+                msg_ts,
+                orch,
+                files,
+            )
             if transcripts:
                 raw = "\n".join(transcripts)
                 raw, _ = redact_exfiltration_urls(raw)
@@ -1825,9 +1887,7 @@ async def _route_message(
 
             async def _on_soft() -> None:
                 if orch.slack:
-                    await orch.slack.post_message(
-                        channel, "⏹ Execution stopped.", session_key
-                    )
+                    await orch.slack.post_message(channel, "⏹ Execution stopped.", session_key)
 
             async def _on_hard() -> None:
                 if orch.slack:
@@ -1835,17 +1895,13 @@ async def _route_message(
                         channel, "⛔ Execution stopped — session reset.", session_key
                     )
 
-            outcome = await orch.sessions.stop_turn(
-                session_key, on_soft=_on_soft, on_hard=_on_hard
-            )
+            outcome = await orch.sessions.stop_turn(session_key, on_soft=_on_soft, on_hard=_on_hard)
             if active_task and not active_task.done():
                 active_task.cancel()
             # If stop_turn returned "idle" (no active turn), neither callback
             # fired — dismiss the stale "Stopping…" ephemeral explicitly.
             if outcome == "idle" and orch.slack:
-                await orch.slack.post_message(
-                    channel, "Nothing running.", session_key
-                )
+                await orch.slack.post_message(channel, "Nothing running.", session_key)
             sel().log_tool_invocation(
                 session_key=session_key,
                 source="slack",
@@ -1937,21 +1993,36 @@ async def _route_message(
         # queue first (semaphore-based); fall back to an orchestrator-level
         # pre-session queue when the session object doesn't exist yet.
         _queued = orch.sessions and orch.sessions.enqueue(
-            session_key, msg_ts, clean_text, force=True,
-            channel=channel, thread_ts=thread_ts, sender_id=sender_id,
-            team_id=team_id, agent_override=agent_override,
+            session_key,
+            msg_ts,
+            clean_text,
+            force=True,
+            channel=channel,
+            thread_ts=thread_ts,
+            sender_id=sender_id,
+            team_id=team_id,
+            agent_override=agent_override,
             user_display_name=_sender_display,
         )
         if not _queued:
             # Session object not created yet — stash on orch._pending_queue
             orch._pending_queue.setdefault(session_key, []).append(
-                (msg_ts, clean_text, dict(
-                    channel=channel, thread_ts=thread_ts, sender_id=sender_id,
-                    team_id=team_id, agent_override=agent_override,
-                    user_display_name=_sender_display,
-                ))
+                (
+                    msg_ts,
+                    clean_text,
+                    dict(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        sender_id=sender_id,
+                        team_id=team_id,
+                        agent_override=agent_override,
+                        user_display_name=_sender_display,
+                    ),
+                )
             )
-        logger.info("Message %s queued for busy session %s (session_obj=%s)", msg_ts, session_key, _queued)
+        logger.info(
+            "Message %s queued for busy session %s (session_obj=%s)", msg_ts, session_key, _queued
+        )
         if orch.slack:
             try:
                 await orch.slack.add_reaction(channel, msg_ts, "hourglass_flowing_sand")

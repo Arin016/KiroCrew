@@ -169,9 +169,7 @@ class _ProfileCredentialResolver(CredentialResolver):
 
     async def get_credentials(self) -> Credentials | None:
         loop = asyncio.get_running_loop()
-        creds = await loop.run_in_executor(
-            None, lambda: self._session.get_credentials()
-        )
+        creds = await loop.run_in_executor(None, lambda: self._session.get_credentials())
         if creds is None:
             # Profile name in error is safe — only logged server-side via
             # logger.exception in _transcribe_aws, never exposed in HTTP responses.
@@ -221,8 +219,15 @@ async def _transcribe_aws(audio_path: str, stt_config) -> str | None:  # type: i
         os.close(fd)
         try:
             proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-y", "-i", audio_path, "-c:a", "copy", tmp_ogg,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                "ffmpeg",
+                "-y",
+                "-i",
+                audio_path,
+                "-c:a",
+                "copy",
+                tmp_ogg,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
             try:
                 await asyncio.wait_for(proc.communicate(), timeout=10)
@@ -271,7 +276,9 @@ async def _transcribe_aws(audio_path: str, stt_config) -> str | None:  # type: i
             audio_bytes = Path(actual_path).read_bytes()
             chunk_size = 8192
             for i in range(0, len(audio_bytes), chunk_size):
-                await stream.input_stream.send_audio_event(audio_chunk=audio_bytes[i:i + chunk_size])
+                await stream.input_stream.send_audio_event(
+                    audio_chunk=audio_bytes[i : i + chunk_size]
+                )
             await stream.input_stream.end_stream()
 
         handler = Handler(stream.output_stream)
@@ -296,7 +303,10 @@ async def _transcribe_aws(audio_path: str, stt_config) -> str | None:  # type: i
 
 
 def _collect_whisper_output(
-    returncode: int | None, stderr: bytes | None, out_dir: str, label: str = "whisper",
+    returncode: int | None,
+    stderr: bytes | None,
+    out_dir: str,
+    label: str = "whisper",
 ) -> str | None:
     """Check whisper exit status and read the transcript from *out_dir*."""
     if returncode != 0:
@@ -320,6 +330,12 @@ async def _transcribe_native(audio_path: str, stt_config) -> str | None:  # type
 
     out_dir = tempfile.mkdtemp()
     try:
+        # Build a clean environment for the whisper subprocess to prevent
+        # KiroClaw's bundled Python packages (numpy, torch) from leaking
+        # into whisper's own Python runtime via PYTHONPATH/PYTHONHOME.
+        clean_env = os.environ.copy()
+        clean_env.pop("PYTHONPATH", None)
+        clean_env.pop("PYTHONHOME", None)
         proc = await asyncio.create_subprocess_exec(
             whisper_bin,
             audio_path,
@@ -335,6 +351,7 @@ async def _transcribe_native(audio_path: str, stt_config) -> str | None:  # type
             "False",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=clean_env,
         )
         _stdout, stderr = await asyncio.wait_for(
             proc.communicate(), timeout=stt_config.timeout_secs
