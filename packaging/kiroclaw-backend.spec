@@ -59,6 +59,7 @@ for rel in [
     "py.typed",
     "slack-manifest.yaml",
     "model_tokens.json",
+    "model_registry.json",
     "config/defaults.json",
     "config/prompt.md",
     "config/persona-lumon.md",
