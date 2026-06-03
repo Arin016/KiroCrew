@@ -98,13 +98,20 @@ async def _kill_session(sess: _TerminalSession) -> None:
     if sess.proc is not None and sess.proc.returncode is None:
         try:
             os.killpg(sess.proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            # PermissionError (EPERM): the child made the PTY its controlling
+            # terminal (TIOCSCTTY) and leads a session/group we can't signal.
+            # Fall through to wait()/kill the proc directly.
             pass
         try:
             await asyncio.wait_for(sess.proc.wait(), timeout=5)
         except asyncio.TimeoutError:
             try:
                 os.killpg(sess.proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                sess.proc.kill()
             except ProcessLookupError:
                 pass
             await sess.proc.wait()
@@ -123,15 +130,19 @@ async def api_terminal_ws(request: web.Request) -> web.WebSocketResponse | web.R
     caller = request.get("user")
     if not caller:
         _sel().log_api_access(
-            caller="unknown", operation="terminal.ws.open",
-            outcome="denied", source="dashboard",
+            caller="unknown",
+            operation="terminal.ws.open",
+            outcome="denied",
+            source="dashboard",
             resources=str(request.remote),
         )
         return web.Response(status=401, text="Unauthorized")
     if not _is_enabled(request):
         _sel().log_api_access(
-            caller=caller, operation="terminal.ws.open",
-            outcome="denied", source="dashboard",
+            caller=caller,
+            operation="terminal.ws.open",
+            outcome="denied",
+            source="dashboard",
             resources="feature_disabled",
         )
         return web.Response(status=403, text="Terminal panel disabled")
@@ -139,8 +150,10 @@ async def api_terminal_ws(request: web.Request) -> web.WebSocketResponse | web.R
     session_id = request.match_info.get("session_id", "")
     if not session_id or len(session_id) > 64:
         _sel().log_api_access(
-            caller=caller, operation="terminal.ws.open",
-            outcome="denied", source="dashboard",
+            caller=caller,
+            operation="terminal.ws.open",
+            outcome="denied",
+            source="dashboard",
             resources=f"invalid_session_id={session_id!r}",
         )
         return web.Response(status=400, text="Invalid session_id")
@@ -160,8 +173,10 @@ async def api_terminal_ws(request: web.Request) -> web.WebSocketResponse | web.R
     # Reserve slot synchronously before any await to prevent race condition (#5)
     if not existing and len(registry) >= max_sessions:
         _sel().log_api_access(
-            caller=caller, operation="terminal.ws.open",
-            outcome="denied", source="dashboard",
+            caller=caller,
+            operation="terminal.ws.open",
+            outcome="denied",
+            source="dashboard",
             resources=f"max_sessions={max_sessions}",
         )
         return web.Response(status=429, text=f"Max {max_sessions} terminal sessions")
@@ -185,8 +200,10 @@ async def api_terminal_ws(request: web.Request) -> web.WebSocketResponse | web.R
         existing.last_ws_disconnect = None
         sess = existing
         _sel().log_api_access(
-            caller=caller, operation="terminal.ws.reconnect",
-            outcome="ok", source="dashboard",
+            caller=caller,
+            operation="terminal.ws.reconnect",
+            outcome="ok",
+            source="dashboard",
             resources=f"session={session_id},pid={sess.proc.pid}",
         )
     else:
@@ -194,7 +211,8 @@ async def api_terminal_ws(request: web.Request) -> web.WebSocketResponse | web.R
         master_fd, worker_fd = _pty.openpty()
         try:
             fcntl.ioctl(
-                worker_fd, termios.TIOCSWINSZ,
+                worker_fd,
+                termios.TIOCSWINSZ,
                 struct.pack("HHHH", 24, 80, 0, 0),
             )
             shell = str(cfg.get("shell") or os.environ.get("SHELL", "/bin/bash"))
@@ -208,10 +226,24 @@ async def api_terminal_ws(request: web.Request) -> web.WebSocketResponse | web.R
             # interactive terminal (like SSH), not agent-executed code.
             # Auth is enforced at WS handshake via token_auth_middleware.
             # See CLI_PANEL_DESIGN.md §8 "Security Considerations".
+            # TIOCSCTTY makes the PTY the controlling terminal after
+            # setsid(). Without this, Ctrl+C (SIGINT) doesn't work
+            # because the kernel can't find the foreground process group.
+            tiocsctty = getattr(termios, "TIOCSCTTY", 0x540E)
+
+            def _setup_ctty():
+                # Safe in forked child: single ioctl with pre-resolved int,
+                # no Python allocation or lock acquisition.
+                fcntl.ioctl(0, tiocsctty, 0)
+
             proc = await asyncio.create_subprocess_exec(
-                shell, "-l",
-                stdin=worker_fd, stdout=worker_fd, stderr=worker_fd,
+                shell,
+                "-l",
+                stdin=worker_fd,
+                stdout=worker_fd,
+                stderr=worker_fd,
                 start_new_session=True,
+                preexec_fn=_setup_ctty,
                 cwd=cwd,
                 env=env,
             )
@@ -238,8 +270,10 @@ async def api_terminal_ws(request: web.Request) -> web.WebSocketResponse | web.R
         )
         registry[session_id] = sess
         _sel().log_api_access(
-            caller=caller, operation="terminal.ws.open",
-            outcome="ok", source="dashboard",
+            caller=caller,
+            operation="terminal.ws.open",
+            outcome="ok",
+            source="dashboard",
             resources=f"session={session_id},pid={proc.pid},shell={shell}",
         )
 
@@ -249,7 +283,8 @@ async def api_terminal_ws(request: web.Request) -> web.WebSocketResponse | web.R
             loop = asyncio.get_running_loop()
             while True:
                 data = await loop.run_in_executor(
-                    None, lambda: os.read(sess.master_fd, 4096),
+                    None,
+                    lambda: os.read(sess.master_fd, 4096),
                 )
                 if not data:
                     break
@@ -267,7 +302,10 @@ async def api_terminal_ws(request: web.Request) -> web.WebSocketResponse | web.R
             if msg.type == web.WSMsgType.BINARY:
                 try:
                     await asyncio.get_running_loop().run_in_executor(
-                        None, os.write, sess.master_fd, msg.data,
+                        None,
+                        os.write,
+                        sess.master_fd,
+                        msg.data,
                     )
                 except OSError:
                     break
@@ -286,7 +324,8 @@ async def api_terminal_ws(request: web.Request) -> web.WebSocketResponse | web.R
                     sess.rows = rows
                     try:
                         fcntl.ioctl(
-                            sess.master_fd, termios.TIOCSWINSZ,
+                            sess.master_fd,
+                            termios.TIOCSWINSZ,
                             struct.pack("HHHH", rows, cols, 0, 0),
                         )
                     except OSError:
@@ -301,8 +340,10 @@ async def api_terminal_ws(request: web.Request) -> web.WebSocketResponse | web.R
         sess.ws = None
         sess.last_ws_disconnect = time.monotonic()
         _sel().log_api_access(
-            caller=caller, operation="terminal.ws.disconnect",
-            outcome="ok", source="dashboard",
+            caller=caller,
+            operation="terminal.ws.disconnect",
+            outcome="ok",
+            source="dashboard",
             resources=f"session={session_id}",
         )
 
@@ -314,15 +355,19 @@ async def api_terminal_create(request: web.Request) -> web.Response:
     caller = request.get("user")
     if not caller:
         _sel().log_api_access(
-            caller="unknown", operation="terminal.session.create",
-            outcome="denied", source="dashboard",
+            caller="unknown",
+            operation="terminal.session.create",
+            outcome="denied",
+            source="dashboard",
             resources=str(request.remote),
         )
         return web.Response(status=401, text="Unauthorized")
     if not _is_enabled(request):
         _sel().log_api_access(
-            caller=caller, operation="terminal.session.create",
-            outcome="denied", source="dashboard",
+            caller=caller,
+            operation="terminal.session.create",
+            outcome="denied",
+            source="dashboard",
             resources="feature_disabled",
         )
         return web.Response(status=403, text="Terminal panel disabled")
@@ -333,25 +378,32 @@ async def api_terminal_create(request: web.Request) -> web.Response:
 
     if len(registry) >= max_sessions:
         _sel().log_api_access(
-            caller=caller, operation="terminal.session.create",
-            outcome="denied", source="dashboard",
+            caller=caller,
+            operation="terminal.session.create",
+            outcome="denied",
+            source="dashboard",
             resources=f"max_sessions={max_sessions}",
         )
         return web.json_response(
-            {"error": f"Max {max_sessions} sessions"}, status=429,
+            {"error": f"Max {max_sessions} sessions"},
+            status=429,
         )
 
     session_id = uuid.uuid4().hex[:12]
     shell = cfg.get("shell") or os.environ.get("SHELL", "/bin/bash")
     _sel().log_api_access(
-        caller=caller, operation="terminal.session.create",
-        outcome="ok", source="dashboard",
+        caller=caller,
+        operation="terminal.session.create",
+        outcome="ok",
+        source="dashboard",
         resources=f"session={session_id}",
     )
-    return web.json_response({
-        "session_id": session_id,
-        "shell": shell,
-    })
+    return web.json_response(
+        {
+            "session_id": session_id,
+            "shell": shell,
+        }
+    )
 
 
 async def api_terminal_delete(request: web.Request) -> web.Response:
@@ -359,15 +411,19 @@ async def api_terminal_delete(request: web.Request) -> web.Response:
     caller = request.get("user")
     if not caller:
         _sel().log_api_access(
-            caller="unknown", operation="terminal.session.delete",
-            outcome="denied", source="dashboard",
+            caller="unknown",
+            operation="terminal.session.delete",
+            outcome="denied",
+            source="dashboard",
             resources=str(request.remote),
         )
         return web.Response(status=401, text="Unauthorized")
     if not _is_enabled(request):
         _sel().log_api_access(
-            caller=caller, operation="terminal.session.delete",
-            outcome="denied", source="dashboard",
+            caller=caller,
+            operation="terminal.session.delete",
+            outcome="denied",
+            source="dashboard",
             resources="feature_disabled",
         )
         return web.Response(status=403, text="Terminal panel disabled")
@@ -383,8 +439,10 @@ async def api_terminal_delete(request: web.Request) -> web.Response:
     await _kill_session(sess)
 
     _sel().log_api_access(
-        caller=caller, operation="terminal.session.delete",
-        outcome="ok", source="dashboard",
+        caller=caller,
+        operation="terminal.session.delete",
+        outcome="ok",
+        source="dashboard",
         resources=f"session={session_id}",
     )
     return web.json_response({"deleted": session_id})
@@ -395,15 +453,19 @@ async def api_terminal_list(request: web.Request) -> web.Response:
     caller = request.get("user")
     if not caller:
         _sel().log_api_access(
-            caller="unknown", operation="terminal.session.list",
-            outcome="denied", source="dashboard",
+            caller="unknown",
+            operation="terminal.session.list",
+            outcome="denied",
+            source="dashboard",
             resources=str(request.remote),
         )
         return web.Response(status=401, text="Unauthorized")
     if not _is_enabled(request):
         _sel().log_api_access(
-            caller=caller, operation="terminal.session.list",
-            outcome="denied", source="dashboard",
+            caller=caller,
+            operation="terminal.session.list",
+            outcome="denied",
+            source="dashboard",
             resources="feature_disabled",
         )
         return web.json_response({"enabled": False, "sessions": []})
@@ -413,17 +475,21 @@ async def api_terminal_list(request: web.Request) -> web.Response:
     for sid, sess in registry.items():
         if sess is None:
             continue  # placeholder during ws.prepare()
-        sessions.append({
-            "session_id": sid,
-            "pid": sess.proc.pid if sess.proc else None,
-            "alive": sess.proc.returncode is None if sess.proc else False,
-            "cols": sess.cols,
-            "rows": sess.rows,
-            "connected": sess.ws is not None and not sess.ws.closed,
-        })
+        sessions.append(
+            {
+                "session_id": sid,
+                "pid": sess.proc.pid if sess.proc else None,
+                "alive": sess.proc.returncode is None if sess.proc else False,
+                "cols": sess.cols,
+                "rows": sess.rows,
+                "connected": sess.ws is not None and not sess.ws.closed,
+            }
+        )
     _sel().log_api_access(
-        caller=caller, operation="terminal.session.list",
-        outcome="ok", source="dashboard",
+        caller=caller,
+        operation="terminal.session.list",
+        outcome="ok",
+        source="dashboard",
         resources=f"count={len(sessions)}",
     )
     return web.json_response({"enabled": True, "sessions": sessions})

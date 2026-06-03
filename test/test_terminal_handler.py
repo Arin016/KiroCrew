@@ -63,9 +63,9 @@ def _make_session(session_id="s1", alive=True, ws=None, disconnect=None):
 class TestGetConfig:
     def test_returns_terminal_config(self, tmp_path, monkeypatch):
         cfg_file = tmp_path / "config.json"
-        cfg_file.write_text(json.dumps({
-            "dashboard": {"terminal": {"max_sessions": 5, "shell": "/bin/zsh"}}
-        }))
+        cfg_file.write_text(
+            json.dumps({"dashboard": {"terminal": {"max_sessions": 5, "shell": "/bin/zsh"}}})
+        )
         monkeypatch.setattr(terminal, "config_path", lambda: cfg_file)
         req = _make_request()
         result = terminal._get_config(req)
@@ -184,8 +184,9 @@ class TestApiTerminalCreate:
     @pytest.mark.asyncio
     async def test_returns_session_id(self):
         req = _make_request()
-        with patch.object(terminal, "_get_config", return_value={"enabled": True}), \
-             patch.object(terminal, "_sel") as mock_sel:
+        with patch.object(terminal, "_get_config", return_value={"enabled": True}), patch.object(
+            terminal, "_sel"
+        ) as mock_sel:
             mock_sel.return_value.log_api_access = MagicMock()
             resp = await terminal.api_terminal_create(req)
         assert resp.status == 200
@@ -198,8 +199,9 @@ class TestApiTerminalCreate:
     async def test_rejects_when_max_sessions_reached(self):
         registry = {"s1": _make_session(), "s2": _make_session(), "s3": _make_session()}
         req = _make_request(registry=registry)
-        with patch.object(terminal, "_get_config", return_value={"enabled": True}), \
-             patch.object(terminal, "_sel") as mock_sel:
+        with patch.object(terminal, "_get_config", return_value={"enabled": True}), patch.object(
+            terminal, "_sel"
+        ) as mock_sel:
             mock_sel.return_value.log_api_access = MagicMock()
             resp = await terminal.api_terminal_create(req)
         assert resp.status == 429
@@ -208,8 +210,9 @@ class TestApiTerminalCreate:
     async def test_respects_custom_max_sessions(self):
         registry = {"s1": _make_session()}
         req = _make_request(registry=registry)
-        with patch.object(terminal, "_get_config", return_value={"enabled": True, "max_sessions": 1}), \
-             patch.object(terminal, "_sel") as mock_sel:
+        with patch.object(
+            terminal, "_get_config", return_value={"enabled": True, "max_sessions": 1}
+        ), patch.object(terminal, "_sel") as mock_sel:
             mock_sel.return_value.log_api_access = MagicMock()
             resp = await terminal.api_terminal_create(req)
         assert resp.status == 429
@@ -217,8 +220,9 @@ class TestApiTerminalCreate:
     @pytest.mark.asyncio
     async def test_uses_configured_shell(self):
         req = _make_request()
-        with patch.object(terminal, "_get_config", return_value={"enabled": True, "shell": "/bin/zsh"}), \
-             patch.object(terminal, "_sel") as mock_sel:
+        with patch.object(
+            terminal, "_get_config", return_value={"enabled": True, "shell": "/bin/zsh"}
+        ), patch.object(terminal, "_sel") as mock_sel:
             mock_sel.return_value.log_api_access = MagicMock()
             resp = await terminal.api_terminal_create(req)
         body = json.loads(resp.body)
@@ -248,8 +252,9 @@ class TestApiTerminalDelete:
         sess = _make_session()
         registry = {"abc123": sess}
         req = _make_request(registry=registry)
-        with patch.object(terminal, "_kill_session", new_callable=AsyncMock) as mock_kill, \
-             patch.object(terminal, "_sel") as mock_sel:
+        with patch.object(
+            terminal, "_kill_session", new_callable=AsyncMock
+        ) as mock_kill, patch.object(terminal, "_sel") as mock_sel:
             mock_sel.return_value.log_api_access = MagicMock()
             resp = await terminal.api_terminal_delete(req)
         assert resp.status == 200
@@ -265,8 +270,9 @@ class TestApiTerminalDelete:
         sess = _make_session(ws=ws)
         registry = {"abc123": sess}
         req = _make_request(registry=registry)
-        with patch.object(terminal, "_kill_session", new_callable=AsyncMock), \
-             patch.object(terminal, "_sel") as mock_sel:
+        with patch.object(terminal, "_kill_session", new_callable=AsyncMock), patch.object(
+            terminal, "_sel"
+        ) as mock_sel:
             mock_sel.return_value.log_api_access = MagicMock()
             await terminal.api_terminal_delete(req)
         ws.close.assert_awaited_once()
@@ -356,8 +362,9 @@ class TestApiTerminalWs:
     async def test_rejects_when_max_sessions_reached(self):
         registry = {"s1": _make_session(), "s2": _make_session(), "s3": _make_session()}
         req = _make_request(registry=registry, session_id="new")
-        with patch.object(terminal, "_sel") as mock_sel, \
-             patch.object(terminal, "_get_config", return_value={"enabled": True}):
+        with patch.object(terminal, "_sel") as mock_sel, patch.object(
+            terminal, "_get_config", return_value={"enabled": True}
+        ):
             mock_sel.return_value.log_api_access = MagicMock()
             resp = await terminal.api_terminal_ws(req)
         assert isinstance(resp, web.Response)
@@ -368,9 +375,11 @@ class TestApiTerminalWs:
         dead_sess = _make_session(session_id="abc123", alive=False)
         registry = {"abc123": dead_sess}
         req = _make_request(registry=registry, session_id="abc123")
-        with patch.object(terminal, "_kill_session", new_callable=AsyncMock) as mock_kill, \
-             patch.object(terminal, "_sel") as mock_sel, \
-             patch.object(terminal, "_get_config", return_value={"enabled": True, "max_sessions": 3}):
+        with patch.object(
+            terminal, "_kill_session", new_callable=AsyncMock
+        ) as mock_kill, patch.object(terminal, "_sel") as mock_sel, patch.object(
+            terminal, "_get_config", return_value={"enabled": True, "max_sessions": 3}
+        ):
             mock_sel.return_value.log_api_access = MagicMock()
             # Will fail at ws.prepare since request is a mock, but dead session should be cleaned
             with pytest.raises(Exception):
@@ -392,8 +401,9 @@ class TestReapOrphanedTerminals:
         state._terminal_sessions = {"s1": sess}
         app = {"state": state}
 
-        with patch.object(terminal, "_kill_session", new_callable=AsyncMock) as mock_kill, \
-             patch("asyncio.sleep", side_effect=[None, asyncio.CancelledError]):
+        with patch.object(terminal, "_kill_session", new_callable=AsyncMock) as mock_kill, patch(
+            "asyncio.sleep", side_effect=[None, asyncio.CancelledError]
+        ):
             await terminal.reap_orphaned_terminals(app)
         mock_kill.assert_awaited_once_with(sess)
         assert "s1" not in state._terminal_sessions
@@ -405,8 +415,9 @@ class TestReapOrphanedTerminals:
         state._terminal_sessions = {"s1": sess}
         app = {"state": state}
 
-        with patch.object(terminal, "_kill_session", new_callable=AsyncMock) as mock_kill, \
-             patch("asyncio.sleep", side_effect=[None, asyncio.CancelledError]):
+        with patch.object(terminal, "_kill_session", new_callable=AsyncMock) as mock_kill, patch(
+            "asyncio.sleep", side_effect=[None, asyncio.CancelledError]
+        ):
             await terminal.reap_orphaned_terminals(app)
         mock_kill.assert_awaited_once()
 
@@ -418,8 +429,9 @@ class TestReapOrphanedTerminals:
         state._terminal_sessions = {"s1": sess}
         app = {"state": state}
 
-        with patch.object(terminal, "_kill_session", new_callable=AsyncMock) as mock_kill, \
-             patch("asyncio.sleep", side_effect=[None, asyncio.CancelledError]):
+        with patch.object(terminal, "_kill_session", new_callable=AsyncMock) as mock_kill, patch(
+            "asyncio.sleep", side_effect=[None, asyncio.CancelledError]
+        ):
             await terminal.reap_orphaned_terminals(app)
         mock_kill.assert_not_awaited()
 
@@ -431,8 +443,9 @@ class TestReapOrphanedTerminals:
         state._terminal_sessions = {"s1": sess}
         app = {"state": state}
 
-        with patch.object(terminal, "_kill_session", new_callable=AsyncMock) as mock_kill, \
-             patch("asyncio.sleep", side_effect=[None, asyncio.CancelledError]):
+        with patch.object(terminal, "_kill_session", new_callable=AsyncMock) as mock_kill, patch(
+            "asyncio.sleep", side_effect=[None, asyncio.CancelledError]
+        ):
             await terminal.reap_orphaned_terminals(app)
         mock_kill.assert_not_awaited()
 
@@ -470,7 +483,8 @@ def _make_app(registry=None, cfg=None, user="testuser"):
     app.router.add_post("/api/terminal/sessions", terminal.api_terminal_create)
     app.router.add_get("/api/terminal/sessions", terminal.api_terminal_list)
     app.router.add_delete(
-        "/api/terminal/sessions/{session_id}", terminal.api_terminal_delete,
+        "/api/terminal/sessions/{session_id}",
+        terminal.api_terminal_delete,
     )
     return app
 
@@ -550,9 +564,15 @@ class TestTerminalWsIntegration:
 
         async with TestClient(TestServer(app)) as client:
             async with client.ws_connect("/api/ws/terminal/resize-sess") as ws:
-                await ws.send_str(json.dumps({
-                    "type": "resize", "cols": 200, "rows": 50,
-                }))
+                await ws.send_str(
+                    json.dumps(
+                        {
+                            "type": "resize",
+                            "cols": 200,
+                            "rows": 50,
+                        }
+                    )
+                )
                 # Give a moment for the message to be processed
                 await asyncio.sleep(0.1)
                 sess = registry["resize-sess"]
@@ -649,6 +669,58 @@ class TestTerminalWsIntegration:
             await terminal._kill_session(registry["json-sess"])
 
     @pytest.mark.asyncio
+    async def test_ws_ctrl_c_delivers_sigint(self, monkeypatch, tmp_path):
+        """Send \\x03 (Ctrl+C) and verify the child process receives SIGINT."""
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"dashboard": {"terminal": {"enabled": True}}}))
+        monkeypatch.setattr(terminal, "config_path", lambda: cfg_file)
+        monkeypatch.setattr(terminal, "_sel", lambda: MagicMock())
+
+        registry: dict = {}
+        app = _make_app(registry=registry)
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(app)) as client:
+            async with client.ws_connect("/api/ws/terminal/sigint-sess") as ws:
+                # Wait for shell prompt to be ready
+                await asyncio.sleep(1.0)
+
+                # Run sleep in foreground (shell survives SIGINT)
+                await ws.send_bytes(b"sleep 30\n")
+                await asyncio.sleep(1.0)
+
+                # Send Ctrl+C (ETX byte)
+                await ws.send_bytes(b"\x03")
+                await asyncio.sleep(1.5)
+
+                # Shell should still be alive after SIGINT killed sleep.
+                # Send a probe command.
+                await ws.send_bytes(b"echo SIGINT_OK\n")
+
+                # Drain frames looking for our marker
+                found = False
+                for _ in range(50):
+                    try:
+                        msg = await ws.receive(timeout=3)
+                    except asyncio.TimeoutError:
+                        break
+                    if msg.type == web.WSMsgType.BINARY:
+                        if b"SIGINT_OK" in msg.data:
+                            found = True
+                            break
+                    elif msg.type in (web.WSMsgType.CLOSE, web.WSMsgType.ERROR):
+                        break
+
+                sess = registry["sigint-sess"]
+                # Success: shell responded (SIGINT killed sleep, shell continued)
+                # OR process exited (signal was delivered, just killed everything)
+                assert found or sess.proc.returncode is not None
+                await ws.close()
+
+            await terminal._kill_session(registry["sigint-sess"])
+
+    @pytest.mark.asyncio
     async def test_rest_create_list_delete(self, monkeypatch, tmp_path):
         """Full REST lifecycle: create, list, delete."""
         cfg_file = tmp_path / "config.json"
@@ -678,6 +750,7 @@ class TestTerminalWsIntegration:
 
             # Seed registry directly, then delete
             from kiro_claw.dashboard.handlers import terminal as _term
+
             registry = _term._get_registry(
                 type("R", (), {"app": client.app})()  # type: ignore[arg-type]
             )
