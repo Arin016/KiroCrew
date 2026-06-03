@@ -335,34 +335,20 @@ def _list_tools() -> list[dict[str, Any]]:
         {
             "name": "send_message",
             "description": (
-                "Send a message via Slack and dashboard notification. "
-                "By default sends to the owner's DM. Optionally set 'channel' to "
-                "target a tracked channel the bot is a member of, or 'user' to DM an "
+                "Send a message to the user. By default delivers a dashboard "
+                'notification only. Set session="slack" to also send a Slack DM. '
+                "Set 'channel' to target a tracked channel, or 'user' to DM an "
                 "allowed user — specify at most one, not both. "
                 "Use this whenever you decide someone should be notified — most "
                 "commonly in silent cron jobs, but applicable any time proactive "
                 "notification is needed."
-                "\n\nDelivery contract for cron jobs:"
-                "\n  1. Try the originating dashboard session first (session=\"origin\"),"
-                " so the session agent can react to the message, not just display it."
-                " When injection succeeds, the message appears in the chat UI — no"
-                " extra notification is fired."
-                "\n  2. Fall through to owner Slack DM if origin is unreachable"
-                " (tab closed, history deleted, or cron has no origin — e.g. created"
-                " from the dashboard UI)."
-                "\n  3. On the fallback path (including session=\"slack\" and non-cron"
-                " callers), a dashboard notification also fires so messages that"
-                " couldn't reach their origin still surface. Invariant: messages are"
-                " never silently dropped."
-                "\n\nsession param:"
-                "\n  \"origin\" — inject into the session that spawned this cron."
-                "\n  \"slack\"  — explicitly route to Slack DM, bypassing origin."
-                "\n  omitted + cron caller → auto-applies \"origin\" (you usually"
-                " want this — pick \"slack\" only if the message should specifically"
-                " reach Slack and not the spawning chat)."
-                "\n  omitted + non-cron caller → owner DM (default behavior)."
-                "\n\nExplicit channel=... or user=... always wins and suppresses"
-                " the auto-default."
+                "\n\nsession param (optional):"
+                "\n  omitted  — dashboard notification only (default)."
+                '\n  "slack"  — Slack DM + dashboard notification.'
+                '\n  "origin" — inject into the dashboard session that spawned'
+                " this cron. Falls through to notification-only if origin is"
+                " unreachable (tab closed, history deleted, or cron has no origin)."
+                "\n\nExplicit channel=... or user=... always sends to Slack."
             ),
             "inputSchema": {
                 "type": "object",
@@ -418,13 +404,10 @@ def _list_tools() -> list[dict[str, Any]]:
                         "type": "string",
                         "enum": ["origin", "slack"],
                         "description": (
-                            "Routing opt-in/opt-out for cron messages. "
-                            "\"origin\" injects into the dashboard session that created "
-                            "this cron (auto-applied for cron callers that set neither "
-                            "channel nor user). \"slack\" explicitly routes to owner Slack DM, "
-                            "bypassing origin. Fallback paths (origin unreachable, "
-                            "explicit \"slack\", non-cron caller) also fire a dashboard "
-                            "notification so the message isn't silently dropped."
+                            "Delivery routing. Omit for notification bell only (default). "
+                            '"slack" adds Slack DM delivery. '
+                            '"origin" injects into the dashboard session that spawned '
+                            "this cron (falls back to notification if unreachable)."
                         ),
                     },
                 },
@@ -948,8 +931,12 @@ def _current_session_thread_ts() -> str | None:
 
 def _call_tool(name: str, raw_args: dict[str, Any]) -> str:
     return call_tool_with_logging(
-        name, raw_args, _validate_args, _call_tool_inner,
-        session_key="mcp_core", downstream_service="kiroclaw-core",
+        name,
+        raw_args,
+        _validate_args,
+        _call_tool_inner,
+        session_key="mcp_core",
+        downstream_service="kiroclaw-core",
     )
 
 
@@ -1256,24 +1243,9 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             payload["thread_ts"] = args["thread_ts"]
         if args.get("reply_broadcast"):
             payload["reply_broadcast"] = args["reply_broadcast"]
-        # ───────────────────────────────────────────────────────────────
-        # Cron delivery contract (see messaging.py:api_send_message for the
-        # full version). Default for cron callers that didn't set any of
-        # session/channel/user: auto-apply session="origin" so the message
-        # injects into the spawning chat. Explicit session="slack" opts out
-        # and routes to owner DM. Explicit channel/user always wins.
-        # ───────────────────────────────────────────────────────────────
-        caller_session_env = os.environ.get("KIROCLAW_SESSION_KEY", "")
-        if (
-            not args.get("session")
-            and not args.get("channel")
-            and not args.get("user")
-            and caller_session_env.startswith("cron:")
-        ):
-            args = {**args, "session": "origin"}
         if args.get("session"):
             if args["session"] not in ("origin", "slack"):
-                return "Error: session must be \"origin\" or \"slack\"."
+                return 'Error: session must be "origin" or "slack".'
             payload["session"] = args["session"]
             caller_session = _resolve_session_key()
             if caller_session.startswith("cron:"):
@@ -1283,18 +1255,25 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             return f"Failed: {resp}"
         if resp.get("session"):
             return "Message injected into target session."
-        # Explicit session="slack" is the opt-out, not a failure — surface the
-        # actual outcome (Slack delivery + notification) instead of the
-        # "session unavailable" fallback message.
         if args.get("session") == "slack":
             ts = resp.get("ts", "")
             if resp.get("slack"):
-                return f"Message sent to Slack. ts={ts}" if ts else "Message sent to Slack."
-            return "Message delivered as dashboard notification (Slack unavailable)."
+                return (
+                    f"Message sent to Slack + notification. ts={ts}"
+                    if ts
+                    else "Message sent to Slack + notification."
+                )
+            return "Message delivered as notification (Slack unavailable)."
         if args.get("session"):
-            return "Session injection unavailable — target session not found or caller is not a cron. Message delivered normally."
+            return "Session injection unavailable — delivered as notification."
         ts = resp.get("ts", "")
-        return f"Message sent. ts={ts}" if ts else "Message sent."
+        if resp.get("slack"):
+            return (
+                f"Message sent to Slack + notification. ts={ts}"
+                if ts
+                else "Message sent to Slack + notification."
+            )
+        return "Notification delivered."
 
     if name == "read_slack_profile":
         user_id = args["user"]
@@ -1459,18 +1438,21 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             and target_name.lower() != "widget"
         ):
             try:
-                qs = urlencode({
-                    "kind": "widget",
-                    "source": "chat",
-                    "q": target_name,
-                })
+                qs = urlencode(
+                    {
+                        "kind": "widget",
+                        "source": "chat",
+                        "q": target_name,
+                    }
+                )
                 listing = _get(f"/api/artifacts?{qs}")
                 if listing.get("error"):
                     raise ValueError(listing["error"])
                 candidates = listing.get("artifacts") or []
                 target_norm = unicodedata.normalize("NFC", target_name).lower()
                 conflicts = [
-                    a for a in candidates
+                    a
+                    for a in candidates
                     if isinstance(a, dict)
                     and isinstance(a.get("name"), str)
                     and isinstance(a.get("slug"), str)
@@ -1486,14 +1468,14 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
                     if len(conflicts) > 1:
                         dedup_hint = (
                             "\n\n⚠️  Possible duplicate: a widget artifact named "
-                            f"\"{target_name}\" already exists at "
+                            f'"{target_name}" already exists at '
                             f"slug={existing_slug!r} (and {len(conflicts) - 1} "
                             "other same-named match(es))."
                         )
                     else:
                         dedup_hint = (
                             "\n\n⚠️  Possible duplicate: a widget artifact named "
-                            f"\"{target_name}\" already exists at "
+                            f'"{target_name}" already exists at '
                             f"slug={existing_slug!r}."
                         )
                     dedup_hint += (
@@ -1776,8 +1758,10 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         db_path = Path(config_dir()) / "workspace" / "knowledge" / "knowledge.db"
         if not db_path.exists():
             sel().log_tool_invocation(
-                session_key=_resolve_session_key(), source="mcp",
-                tool_name="local_knowledge_search", outcome="not_configured",
+                session_key=_resolve_session_key(),
+                source="mcp",
+                tool_name="local_knowledge_search",
+                outcome="not_configured",
             )
             return "Knowledge Library is not configured. Ingest documents via the dashboard first."
 
@@ -1802,8 +1786,10 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
 
         if not results:
             sel().log_tool_invocation(
-                session_key=_resolve_session_key(), source="mcp",
-                tool_name="local_knowledge_search", outcome="no_results",
+                session_key=_resolve_session_key(),
+                source="mcp",
+                tool_name="local_knowledge_search",
+                outcome="no_results",
                 metadata={"query": query},
             )
             return "No relevant knowledge found."
@@ -1813,9 +1799,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         for r in results:
             sid = r.get("source")
             if sid and sid not in source_names:
-                row = store.db.execute(
-                    "SELECT name FROM sources WHERE id = ?", (sid,)
-                ).fetchone()
+                row = store.db.execute("SELECT name FROM sources WHERE id = ?", (sid,)).fetchone()
                 source_names[sid] = row["name"] if row else "(unknown)"
 
         # Format output
@@ -1837,8 +1821,10 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         output, _ = redact_exfiltration_urls(output)
         output, _ = redact_credentials(output)
         sel().log_tool_invocation(
-            session_key=_resolve_session_key(), source="mcp",
-            tool_name="local_knowledge_search", outcome="success",
+            session_key=_resolve_session_key(),
+            source="mcp",
+            tool_name="local_knowledge_search",
+            outcome="success",
             metadata={"query": query, "result_count": len(results)},
         )
         return output
@@ -1850,8 +1836,10 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         result, _ = redact_exfiltration_urls(result)
         result, _ = redact_credentials(result)
         sel().log_tool_invocation(
-            session_key=_resolve_session_key(), source="mcp",
-            tool_name="browse_outline", outcome="success",
+            session_key=_resolve_session_key(),
+            source="mcp",
+            tool_name="browse_outline",
+            outcome="success",
         )
         return result
 
@@ -1863,8 +1851,10 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         result, _ = redact_exfiltration_urls(result)
         result, _ = redact_credentials(result)
         sel().log_tool_invocation(
-            session_key=_resolve_session_key(), source="mcp",
-            tool_name="browse_search", outcome="success",
+            session_key=_resolve_session_key(),
+            source="mcp",
+            tool_name="browse_search",
+            outcome="success",
         )
         return result
 

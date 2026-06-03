@@ -107,9 +107,7 @@ class TestFileRead:
         # of plain text) and downstream tooling like jq can be piped
         # directly. Synthetic fixture only.
         f = tmp_path / "fixture.json"
-        f.write_text(
-            '{"a": 1, "label": "中文標籤範例"}', encoding="utf-8"
-        )
+        f.write_text('{"a": 1, "label": "中文標籤範例"}', encoding="utf-8")
         async with TestClient(TestServer(_make_app())) as client:
             resp = await client.get(f"/api/file-read?path={f}")
             assert resp.status == 200
@@ -122,9 +120,7 @@ class TestFileRead:
             assert json.loads(text)["label"] == "中文標籤範例"
 
     @pytest.mark.asyncio
-    async def test_read_jsonl_sets_x_ndjson_content_type(
-        self, tmp_path, mock_sel, home_patch
-    ):
+    async def test_read_jsonl_sets_x_ndjson_content_type(self, tmp_path, mock_sel, home_patch):
         # JSONL is NOT a single JSON document — must use application/x-ndjson
         # so clients don't try to parse the whole body as one JSON value.
         f = tmp_path / "lines.jsonl"
@@ -148,14 +144,12 @@ class TestFileRead:
         async with TestClient(TestServer(_make_app())) as client:
             resp = await client.get(f"/api/file-read?path={f}")
             assert resp.status == 200
-            assert resp.headers["Content-Type"].startswith("text/plain"), (
-                f"HTML files MUST be served as text/plain (got {resp.headers['Content-Type']})"
-            )
+            assert resp.headers["Content-Type"].startswith(
+                "text/plain"
+            ), f"HTML files MUST be served as text/plain (got {resp.headers['Content-Type']})"
 
     @pytest.mark.asyncio
-    async def test_read_md_sets_text_markdown_content_type(
-        self, tmp_path, mock_sel, home_patch
-    ):
+    async def test_read_md_sets_text_markdown_content_type(self, tmp_path, mock_sel, home_patch):
         f = tmp_path / "note.md"
         f.write_text("# title", encoding="utf-8")
         async with TestClient(TestServer(_make_app())) as client:
@@ -177,9 +171,7 @@ class TestFileRead:
             assert resp.headers["Content-Type"].startswith("text/plain")
 
     @pytest.mark.asyncio
-    async def test_read_utf8_multibyte_round_trip(
-        self, tmp_path, mock_sel, home_patch
-    ):
+    async def test_read_utf8_multibyte_round_trip(self, tmp_path, mock_sel, home_patch):
         # Regression: the dashboard file viewer reported "Invalid JSON" for
         # files containing CJK characters. Verify that UTF-8 bytes survive
         # the read pipeline (open + redactors + Response.text) byte-for-byte.
@@ -194,9 +186,7 @@ class TestFileRead:
             "tags": ["測試", "テスト", "테스트", "🐾"],
         }
         f = tmp_path / "fixture.json"
-        f.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        f.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         async with TestClient(TestServer(_make_app())) as client:
             resp = await client.get(f"/api/file-read?path={f}")
             assert resp.status == 200
@@ -287,13 +277,22 @@ class TestSendMessage:
         state = _mock_state(slack_client=slack, owner_id="U123")
         app = _make_send_app(state)
         async with TestClient(TestServer(app)) as client:
-            resp = await client.post("/api/send-message", json={"text": "hello", "title": "Test"})
+            resp = await client.post(
+                "/api/send-message", json={"text": "hello", "title": "Test", "session": "slack"}
+            )
             assert resp.status == 200
             data = await resp.json()
             assert data == {"ok": True, "slack": True, "session": False, "ts": "1712793600.000001"}
             state.notify.assert_called_once_with("agent", "Test", "hello")
             slack.open_dm.assert_called_once_with("U123")
-            slack.post_message.assert_called_once_with("C123", "hello", thread_ts=None, unfurl_links=None, unfurl_media=None, reply_broadcast=None)
+            slack.post_message.assert_called_once_with(
+                "C123",
+                "hello",
+                thread_ts=None,
+                unfurl_links=None,
+                unfurl_media=None,
+                reply_broadcast=None,
+            )
 
     @pytest.mark.asyncio
     async def test_send_message_slack_error(self):
@@ -302,7 +301,9 @@ class TestSendMessage:
         state = _mock_state(slack_client=slack, owner_id="U123")
         app = _make_send_app(state)
         async with TestClient(TestServer(app)) as client:
-            resp = await client.post("/api/send-message", json={"text": "hello"})
+            resp = await client.post(
+                "/api/send-message", json={"text": "hello", "session": "slack"}
+            )
             assert resp.status == 502
             data = await resp.json()
             assert data["ok"] is False
@@ -317,7 +318,9 @@ class TestSendMessage:
         state = _mock_state(slack_client=slack, owner_id="U123")
         app = _make_send_app(state)
         async with TestClient(TestServer(app)) as client:
-            resp = await client.post("/api/send-message", json={"text": "hello"})
+            resp = await client.post(
+                "/api/send-message", json={"text": "hello", "session": "slack"}
+            )
             assert resp.status == 502
             data = await resp.json()
             assert data["ok"] is False
@@ -334,12 +337,20 @@ class TestSendMessage:
         blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "hello"}}]
         async with TestClient(TestServer(app)) as client:
             resp = await client.post(
-                "/api/send-message", json={"text": "fallback", "blocks": blocks}
+                "/api/send-message", json={"text": "fallback", "blocks": blocks, "session": "slack"}
             )
             assert resp.status == 200
             data = await resp.json()
             assert data == {"ok": True, "slack": True, "session": False, "ts": "1712793600.000001"}
-            slack.post_blocks.assert_called_once_with("C123", blocks, "fallback", thread_ts=None, unfurl_links=None, unfurl_media=None, reply_broadcast=None)
+            slack.post_blocks.assert_called_once_with(
+                "C123",
+                blocks,
+                "fallback",
+                thread_ts=None,
+                unfurl_links=None,
+                unfurl_media=None,
+                reply_broadcast=None,
+            )
             slack.post_message.assert_not_called()
 
     @pytest.mark.asyncio
@@ -351,9 +362,18 @@ class TestSendMessage:
         state = _mock_state(slack_client=slack, owner_id="U123")
         app = _make_send_app(state)
         async with TestClient(TestServer(app)) as client:
-            resp = await client.post("/api/send-message", json={"text": "hello"})
+            resp = await client.post(
+                "/api/send-message", json={"text": "hello", "session": "slack"}
+            )
             assert resp.status == 200
-            slack.post_message.assert_called_once_with("C123", "hello", thread_ts=None, unfurl_links=None, unfurl_media=None, reply_broadcast=None)
+            slack.post_message.assert_called_once_with(
+                "C123",
+                "hello",
+                thread_ts=None,
+                unfurl_links=None,
+                unfurl_media=None,
+                reply_broadcast=None,
+            )
             slack.post_blocks.assert_not_called()
 
     @pytest.mark.asyncio
@@ -367,7 +387,7 @@ class TestSendMessage:
         blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "safe text"}}]
         async with TestClient(TestServer(app)) as client:
             resp = await client.post(
-                "/api/send-message", json={"text": "fallback", "blocks": blocks}
+                "/api/send-message", json={"text": "fallback", "blocks": blocks, "session": "slack"}
             )
             assert resp.status == 200
             # Verify blocks were passed (sanitized) — content should survive intact
@@ -394,12 +414,19 @@ class TestSendMessage:
         mock_job.session_key = "dashboard:chat-1-1712793600"
         state.crons.list_jobs = MagicMock(return_value=[mock_job])
         app = _make_send_app(state)
-        with patch("kiro_claw.dashboard.chat_runner._run_chat", new_callable=AsyncMock) as mock_run, \
-             patch("kiro_claw.dashboard.handlers.messaging._rehydrate_slot_from_history") as mock_rehydrate:
+        with patch(
+            "kiro_claw.dashboard.chat_runner._run_chat", new_callable=AsyncMock
+        ) as mock_run, patch(
+            "kiro_claw.dashboard.handlers.messaging._rehydrate_slot_from_history"
+        ) as mock_rehydrate:
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
                     "/api/send-message",
-                    json={"text": "build failed", "session": "origin", "caller_session": "cron:abc12345"},
+                    json={
+                        "text": "build failed",
+                        "session": "origin",
+                        "caller_session": "cron:abc12345",
+                    },
                 )
                 assert resp.status == 200
                 data = await resp.json()
@@ -424,7 +451,9 @@ class TestSendMessage:
         mock_slot = MagicMock()
         mock_slot.running = True
         mock_slot._queue = []
-        mock_slot.queue_append = lambda content: (mock_slot._queue.append({"id": "test", "content": content}) or "test")
+        mock_slot.queue_append = lambda content: (
+            mock_slot._queue.append({"id": "test", "content": content}) or "test"
+        )
         state.get_slot = MagicMock(return_value=mock_slot)
         mock_job = MagicMock()
         mock_job.id = "abc12345"
@@ -432,11 +461,17 @@ class TestSendMessage:
         mock_job.session_key = "dashboard:chat-1-1712793600"
         state.crons.list_jobs = MagicMock(return_value=[mock_job])
         app = _make_send_app(state)
-        with patch("kiro_claw.dashboard.handlers.messaging._rehydrate_slot_from_history") as mock_rehydrate:
+        with patch(
+            "kiro_claw.dashboard.handlers.messaging._rehydrate_slot_from_history"
+        ) as mock_rehydrate:
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
                     "/api/send-message",
-                    json={"text": "build failed", "session": "origin", "caller_session": "cron:abc12345"},
+                    json={
+                        "text": "build failed",
+                        "session": "origin",
+                        "caller_session": "cron:abc12345",
+                    },
                 )
                 assert resp.status == 200
                 data = await resp.json()
@@ -482,8 +517,12 @@ class TestSendMessage:
         mock_job.session_key = "dashboard:chat-1-1712793600"
         state.crons.list_jobs = MagicMock(return_value=[mock_job])
         app = _make_send_app(state)
-        with patch("kiro_claw.dashboard.chat_runner._run_chat", new_callable=AsyncMock) as mock_run, \
-             patch("kiro_claw.dashboard.handlers.messaging._rehydrate_slot_from_history", return_value=mock_slot) as mock_rehydrate:
+        with patch(
+            "kiro_claw.dashboard.chat_runner._run_chat", new_callable=AsyncMock
+        ) as mock_run, patch(
+            "kiro_claw.dashboard.handlers.messaging._rehydrate_slot_from_history",
+            return_value=mock_slot,
+        ) as mock_rehydrate:
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
                     "/api/send-message",
@@ -520,7 +559,9 @@ class TestSendMessage:
         mock_job.session_key = "dashboard:chat-1-1712793600"
         state.crons.list_jobs = MagicMock(return_value=[mock_job])
         app = _make_send_app(state)
-        with patch("kiro_claw.dashboard.handlers.messaging._rehydrate_slot_from_history", return_value=None) as mock_rehydrate:
+        with patch(
+            "kiro_claw.dashboard.handlers.messaging._rehydrate_slot_from_history", return_value=None
+        ) as mock_rehydrate:
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
                     "/api/send-message",
@@ -552,16 +593,57 @@ class TestSendMessage:
             state.notify.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_send_message_session_origin_stateless_cron(self):
+        """Stateless cron (session key 'cron:{id}:{run_id}') resolves the job correctly."""
+        state = _mock_state()
+        mock_slot = MagicMock()
+        mock_slot.running = False
+        mock_slot.task = None
+        mock_slot.key = "chat-1-1712793600"
+        state.get_slot = MagicMock(return_value=mock_slot)
+        state._background_tasks = set()
+        state.push_slots_update = MagicMock()
+        mock_job = MagicMock()
+        mock_job.id = "abc12345"
+        mock_job.name = "stateless-cron"
+        mock_job.session_key = "dashboard:chat-1-1712793600"
+        state.crons.list_jobs = MagicMock(return_value=[mock_job])
+        app = _make_send_app(state)
+        with patch(
+            "kiro_claw.dashboard.chat_runner._run_chat", new_callable=AsyncMock
+        ) as mock_run, patch("kiro_claw.dashboard.handlers.messaging._rehydrate_slot_from_history"):
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post(
+                    "/api/send-message",
+                    json={
+                        "text": "update",
+                        "session": "origin",
+                        "caller_session": "cron:abc12345:f9a1b2c3",
+                    },
+                )
+                assert resp.status == 200
+                data = await resp.json()
+                assert data == {"ok": True, "slack": False, "session": True}
+                state.get_slot.assert_called_once_with("chat-1-1712793600")
+                mock_run.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_send_message_session_rejects_arbitrary_key(self):
         """Arbitrary slot keys are rejected — only 'origin' and 'slack' are valid."""
         state = _mock_state()
         state.get_slot = MagicMock()
         app = _make_send_app(state)
-        with patch("kiro_claw.dashboard.handlers.messaging._rehydrate_slot_from_history") as mock_rehydrate:
+        with patch(
+            "kiro_claw.dashboard.handlers.messaging._rehydrate_slot_from_history"
+        ) as mock_rehydrate:
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
                     "/api/send-message",
-                    json={"text": "update", "session": "chat-1-1712793600", "caller_session": "cron:abc"},
+                    json={
+                        "text": "update",
+                        "session": "chat-1-1712793600",
+                        "caller_session": "cron:abc",
+                    },
                 )
                 assert resp.status == 200
                 data = await resp.json()
@@ -589,11 +671,17 @@ class TestSendMessage:
         mock_job.session_key = "dashboard:chat-1-1712793600"
         state.crons.list_jobs = MagicMock(return_value=[mock_job])
         app = _make_send_app(state)
-        with patch("kiro_claw.dashboard.handlers.messaging._rehydrate_slot_from_history") as mock_rehydrate:
+        with patch(
+            "kiro_claw.dashboard.handlers.messaging._rehydrate_slot_from_history"
+        ) as mock_rehydrate:
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
                     "/api/send-message",
-                    json={"text": "heads up", "session": "slack", "caller_session": "cron:abc12345"},
+                    json={
+                        "text": "heads up",
+                        "session": "slack",
+                        "caller_session": "cron:abc12345",
+                    },
                 )
                 assert resp.status == 200
                 data = await resp.json()

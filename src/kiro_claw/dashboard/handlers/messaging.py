@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 def _sel():
     """Late-binding _sel() for test monkeypatch compatibility."""
     import kiro_claw.dashboard.handlers as _pkg  # noqa: F811
+
     return _pkg.sel()
 
 
@@ -350,7 +351,9 @@ def _sanitize_blocks(
     return _walk(deepcopy(blocks[:_MAX_BLOCKS]))
 
 
-def _resolve_session_target(state: DashboardState, target: str, caller_session: str) -> tuple[str, str] | tuple[None, None]:
+def _resolve_session_target(
+    state: DashboardState, target: str, caller_session: str
+) -> tuple[str, str] | tuple[None, None]:
     """Resolve a session target to a dashboard slot key and job name.
 
     ``target="origin"`` looks up the cron job that owns *caller_session*
@@ -365,10 +368,10 @@ def _resolve_session_target(state: DashboardState, target: str, caller_session: 
     """
     if target != "origin":
         return None, None  # only "origin" is allowed — reject arbitrary slot keys
-    # caller_session is e.g. "cron:abc12345" — extract the job ID
+    # caller_session is "cron:{job_id}" or "cron:{job_id}:{run_id}" (stateless)
     if not caller_session.startswith("cron:"):
         return None, None
-    cron_id = caller_session.removeprefix("cron:")
+    cron_id = caller_session.removeprefix("cron:").split(":")[0]
     jobs = state.crons.list_jobs(include_disabled=True)
     job = next((j for j in jobs if j.id == cron_id), None)
     if not job or not job.session_key:
@@ -418,29 +421,19 @@ async def api_send_message(request: web.Request) -> web.Response:
             )
     reply_broadcast = body.get("reply_broadcast")
     if reply_broadcast is not None and not isinstance(reply_broadcast, bool):
-        return web.json_response(
-            {"error": "reply_broadcast must be a boolean"}, status=400
-        )
+        return web.json_response({"error": "reply_broadcast must be a boolean"}, status=400)
     if reply_broadcast and not thread_ts:
-        return web.json_response(
-            {"error": "reply_broadcast requires thread_ts"}, status=400
-        )
+        return web.json_response({"error": "reply_broadcast requires thread_ts"}, status=400)
 
     # Fail fast: mutual exclusion before any redaction/regex work (#4)
     if target_channel and target_user:
-        return web.json_response(
-            {"error": "specify channel or user, not both"}, status=400
-        )
+        return web.json_response({"error": "specify channel or user, not both"}, status=400)
 
     # Validate format first, then redact (#2)
     if target_channel and not CHANNEL_ID_RE.match(target_channel):
-        return web.json_response(
-            {"error": "invalid channel ID format"}, status=400
-        )
+        return web.json_response({"error": "invalid channel ID format"}, status=400)
     if target_user and not USER_ID_RE.match(target_user):
-        return web.json_response(
-            {"error": "invalid user ID format"}, status=400
-        )
+        return web.json_response({"error": "invalid user ID format"}, status=400)
 
     # Redact after format validation
     if target_channel:
@@ -528,27 +521,17 @@ async def api_send_message(request: web.Request) -> web.Response:
         #   - Cron's caller_session doesn't match any known job
         #
         # session param values (enforced by _resolve_session_target):
-        #   - "origin": route to originating dashboard session as above
-        #   - "slack":  explicitly bypass origin, go straight to Slack DM
-        #               (or channel/user if those are also set). Useful when
-        #               the prompt author wants Slack delivery regardless.
-        #               Treated as a fallback-path call: notification fires.
-        #   - omitted:  for cron callers, auto-defaults to "origin" in
-        #               mcp_core.py. For non-cron callers, goes to owner DM
-        #               as before (also a fallback-path call).
-        #
-        # Security note: caller_session is set by the MCP tool from
-        # KIROCLAW_SESSION_KEY (gateway-injected at process spawn, not LLM
-        # input). The endpoint is HMAC-protected via X-Internal-Secret, so
-        # only our own ACP processes can call it. _resolve_session_target
-        # further restricts session= to "origin"/"slack".
+        #   - "origin": route to originating dashboard session
+        #   - "slack":  Slack DM + notification
+        #   - omitted:  dashboard notification only (default)
         # ───────────────────────────────────────────────────────────────────
+        send_to_slack = target_session == "slack" or bool(target_channel) or bool(target_user)
         if target_session == "slack":
-            # Explicit opt-out: skip origin routing entirely, fall through to
-            # Slack DM (or channel/user if those are also set).
             target_session = None
         if target_session:
-            slot_key, job_name = _resolve_session_target(state, target_session, body.get("caller_session", ""))
+            slot_key, job_name = _resolve_session_target(
+                state, target_session, body.get("caller_session", "")
+            )
             if slot_key:
                 # Resolve the origin slot. get_slot is the hot path (fast,
                 # O(1) dict lookup). On miss, _rehydrate_slot_from_history
@@ -562,7 +545,10 @@ async def api_send_message(request: web.Request) -> web.Response:
                     slot = _rehydrate_slot_from_history(state, slot_key)
                 logger.info(
                     "send_message session=origin resolved slot_key=%s job=%s was_loaded=%s rehydrated=%s",
-                    slot_key, job_name, was_loaded, (slot is not None and not was_loaded),
+                    slot_key,
+                    job_name,
+                    was_loaded,
+                    (slot is not None and not was_loaded),
                 )
                 if slot:
                     label = job_name or "cron"
@@ -576,7 +562,9 @@ async def api_send_message(request: web.Request) -> web.Response:
                     if slot.running:
                         if len(slot._queue) >= 50:
                             evicted = slot.queue_pop(0)
-                            logger.warning("Queue full for slot %s — evicting oldest message", slot_key)
+                            logger.warning(
+                                "Queue full for slot %s — evicting oldest message", slot_key
+                            )
                             _remove_queued_by_id(slot.messages, evicted["id"])
                         qid = slot.queue_append(wrapped)
                         _cls = json.loads(inject_cls)
@@ -605,7 +593,7 @@ async def api_send_message(request: web.Request) -> web.Response:
                 title = f"⏰ {safe_name}"
                 text += "\n\n_(session closed — delivered as notification)_"
             state.notify("agent", title, text)
-            if state.slack_client:
+            if send_to_slack and state.slack_client:
                 try:
                     if target_channel:
                         channel = target_channel
@@ -620,16 +608,21 @@ async def api_send_message(request: web.Request) -> web.Response:
                         slack_attempted = True
                         if blocks:
                             slack_ts = await state.slack_client.post_blocks(
-                                channel, blocks, text,
+                                channel,
+                                blocks,
+                                text,
                                 thread_ts=thread_ts,
-                                unfurl_links=unfurl_links, unfurl_media=unfurl_media,
+                                unfurl_links=unfurl_links,
+                                unfurl_media=unfurl_media,
                                 reply_broadcast=reply_broadcast,
                             )
                         else:
                             slack_ts = await state.slack_client.post_message(
-                                channel, text,
+                                channel,
+                                text,
                                 thread_ts=thread_ts,
-                                unfurl_links=unfurl_links, unfurl_media=unfurl_media,
+                                unfurl_links=unfurl_links,
+                                unfurl_media=unfurl_media,
                                 reply_broadcast=reply_broadcast,
                             )
                         sent_slack = True
@@ -650,8 +643,12 @@ async def api_send_message(request: web.Request) -> web.Response:
             _sel().log_tool_invocation(
                 session_key="dashboard",
                 tool_name="send_message",
-                outcome="completed" if sent_slack or sent_session or not slack_attempted else "error",
-                downstream_service="session" if sent_session else ("slack" if sent_slack else "dashboard"),
+                outcome=(
+                    "completed" if sent_slack or sent_session or not slack_attempted else "error"
+                ),
+                downstream_service=(
+                    "session" if sent_session else ("slack" if sent_slack else "dashboard")
+                ),
                 resources=base_res + thread_hint,
             )
         except Exception:
@@ -693,9 +690,7 @@ async def api_slack_pins(request: web.Request) -> web.Response:
 
     action = body.get("action", "")
     if action not in ("add", "remove", "list"):
-        return web.json_response(
-            {"error": "action must be 'add', 'remove', or 'list'"}, status=400
-        )
+        return web.json_response({"error": "action must be 'add', 'remove', or 'list'"}, status=400)
     channel = body.get("channel", "")
     if not isinstance(channel, str):
         return web.json_response({"error": "invalid channel ID format"}, status=400)
@@ -916,7 +911,9 @@ async def api_slack_profile(request: web.Request) -> web.Response:
             downstream_service="slack",
             resources=f"user={user_id} reason=rate_limit",
         )
-        return web.json_response({"error": "rate limit exceeded — max 5 profile lookups per minute"}, status=429)
+        return web.json_response(
+            {"error": "rate limit exceeded — max 5 profile lookups per minute"}, status=429
+        )
     history.append(now)
     state._profile_lookup_times = history  # type: ignore[attr-defined]
 
@@ -1014,10 +1011,12 @@ async def api_browser_config_get(request: web.Request) -> web.Response:
         outcome="completed",
         downstream_service="browser",
     )
-    return web.json_response({
-        "extension_mode": has_playwright_extension(),
-        "token": get_extension_token() is not None,
-    })
+    return web.json_response(
+        {
+            "extension_mode": has_playwright_extension(),
+            "token": get_extension_token() is not None,
+        }
+    )
 
 
 async def api_browser_config_save(request: web.Request) -> web.Response:

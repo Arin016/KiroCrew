@@ -46,11 +46,14 @@ class TestSendMessageUnfurlForwarding:
         with patch("kiro_claw.mcp_core._post") as mock_post:
             mock_post.return_value = {"ok": True}
 
-            _call_tool("send_message", {
-                "text": "test",
-                "unfurl_links": False,
-                "unfurl_media": False,
-            })
+            _call_tool(
+                "send_message",
+                {
+                    "text": "test",
+                    "unfurl_links": False,
+                    "unfurl_media": False,
+                },
+            )
 
             payload = mock_post.call_args[0][1]
             assert payload["unfurl_links"] is False
@@ -68,76 +71,25 @@ class TestSendMessageUnfurlForwarding:
             assert "unfurl_media" not in payload
 
 
-class TestSendMessageCronAutoOrigin:
-    """Auto-default logic: when the caller is a cron job and the LLM didn't
-    explicitly set session/channel/user, `send_message` auto-applies
-    session="origin" so cron updates inject into the session that spawned
-    them. Explicit channel/user/session values always win.
+class TestSendMessageCronSession:
+    """session param is explicit opt-in only — no auto-default.
+    Default delivery is notification-only; session="slack" adds Slack DM.
     """
 
-    def test_auto_applies_origin_for_cron_caller(self):
-        """Cron caller with bare send_message(text=...) → session=origin injected."""
+    def test_default_notification_only(self):
+        """Bare send_message(text=...) → no session in payload, notification only."""
         with patch("kiro_claw.mcp_core._post") as mock_post, patch.dict(
             "os.environ", {"KIROCLAW_SESSION_KEY": "cron:abc123"}
         ):
             mock_post.return_value = {"ok": True}
-            _call_tool("send_message", {"text": "build passed"})
-
-            payload = mock_post.call_args[0][1]
-            assert payload.get("session") == "origin"
-
-    def test_explicit_channel_suppresses_auto_default(self):
-        """Cron caller with explicit channel=... → no session auto-default."""
-        with patch("kiro_claw.mcp_core._post") as mock_post, patch.dict(
-            "os.environ", {"KIROCLAW_SESSION_KEY": "cron:abc123"}
-        ):
-            mock_post.return_value = {"ok": True}
-            _call_tool("send_message", {"text": "hi", "channel": "C12345"})
+            result = _call_tool("send_message", {"text": "build passed"})
 
             payload = mock_post.call_args[0][1]
             assert "session" not in payload
-            assert payload.get("channel") == "C12345"
+            assert "Notification delivered" in result
 
-    def test_explicit_user_suppresses_auto_default(self):
-        """Cron caller with explicit user=... (intentional Slack DM) → no auto-default."""
-        with patch("kiro_claw.mcp_core._post") as mock_post, patch.dict(
-            "os.environ", {"KIROCLAW_SESSION_KEY": "cron:abc123"}
-        ):
-            mock_post.return_value = {"ok": True}
-            _call_tool("send_message", {"text": "hi", "user": "U05J78ZGYNQ"})
-
-            payload = mock_post.call_args[0][1]
-            assert "session" not in payload
-            assert payload.get("user") == "U05J78ZGYNQ"
-
-    def test_non_cron_session_skips_auto_default(self):
-        """Dashboard (non-cron) caller → no auto-default, sends to owner DM as before."""
-        with patch("kiro_claw.mcp_core._post") as mock_post, patch.dict(
-            "os.environ", {"KIROCLAW_SESSION_KEY": "dashboard:chat-1"}
-        ):
-            mock_post.return_value = {"ok": True}
-            _call_tool("send_message", {"text": "hi"})
-
-            payload = mock_post.call_args[0][1]
-            assert "session" not in payload
-
-    def test_missing_env_var_skips_auto_default(self):
-        """Absent KIROCLAW_SESSION_KEY → no auto-default."""
-        import os
-
-        with patch("kiro_claw.mcp_core._post") as mock_post:
-            env = os.environ.copy()
-            env.pop("KIROCLAW_SESSION_KEY", None)
-            env.pop("KIROCLAW_HOME", None)  # ensure config_dir() uses patched Path.home()
-            with patch.dict("os.environ", env, clear=True):
-                mock_post.return_value = {"ok": True}
-                _call_tool("send_message", {"text": "hi"})
-
-                payload = mock_post.call_args[0][1]
-                assert "session" not in payload
-
-    def test_explicit_session_origin_is_idempotent(self):
-        """LLM explicitly passes session=origin from cron → still origin, no double-application."""
+    def test_explicit_session_origin_passes_through(self):
+        """LLM explicitly passes session=origin → origin in payload."""
         with patch("kiro_claw.mcp_core._post") as mock_post, patch.dict(
             "os.environ", {"KIROCLAW_SESSION_KEY": "cron:abc123"}
         ):
@@ -147,24 +99,23 @@ class TestSendMessageCronAutoOrigin:
             payload = mock_post.call_args[0][1]
             assert payload.get("session") == "origin"
 
-    def test_explicit_session_slack_is_accepted(self):
-        """session='slack' is a valid explicit opt-out value."""
+    def test_explicit_session_slack(self):
+        """session='slack' routes to Slack DM + notification."""
         with patch("kiro_claw.mcp_core._post") as mock_post, patch.dict(
             "os.environ", {"KIROCLAW_SESSION_KEY": "cron:abc123"}
         ):
-            mock_post.return_value = {"ok": True}
-            _call_tool("send_message", {"text": "hi", "session": "slack"})
+            mock_post.return_value = {"ok": True, "slack": True, "ts": "123.456"}
+            result = _call_tool("send_message", {"text": "hi", "session": "slack"})
 
             payload = mock_post.call_args[0][1]
             assert payload.get("session") == "slack"
+            assert "Slack" in result
 
     def test_invalid_session_value_rejected(self):
-        """session must match the ^(origin|slack)$ pattern; other values rejected."""
+        """session must be 'origin' or 'slack'; other values rejected."""
         with patch("kiro_claw.mcp_core._post") as mock_post, patch.dict(
             "os.environ", {"KIROCLAW_SESSION_KEY": "cron:abc123"}
         ):
             result = _call_tool("send_message", {"text": "hi", "session": "bogus"})
-            # Validator-level rejection (pattern mismatch on FieldSpec), not
-            # the handler's post-validation check. Either way, no network call.
             assert "session" in result.lower() or "error" in result.lower()
             mock_post.assert_not_called()
