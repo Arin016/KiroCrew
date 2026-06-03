@@ -564,6 +564,14 @@ def _extract_full_command(tool_title: str) -> str:
     return _normalize_tool_name(tool_title)
 
 
+def _prepare_mirror_msg(raw_user_message: str) -> str:
+    """Prepare user message for Slack mirror: truncate and redact."""
+    msg = raw_user_message[:500]
+    msg, _ = redact_exfiltration_urls(msg)
+    msg, _ = redact_credentials(msg)
+    return msg
+
+
 def _flush_segment(
     state: DashboardState,
     slot: _ChatSlot,
@@ -1150,6 +1158,9 @@ async def _run_chat(
                 failures = slot._pending_subagent_failures[:]
                 slot._pending_subagent_failures.clear()
                 message = "\n\n".join(failures) + "\n\n" + message
+            # Save raw user message before context/persona prepend for Slack
+            # mirror — avoids leaking injected context to the linked thread.
+            _user_msg_for_mirror = message
             # Drain pending context injections (silent background context
             # from apps/subagents).  Expired entries are discarded.
             if slot._pending_context:
@@ -1265,9 +1276,7 @@ async def _run_chat(
             _mirror_thread, _mirror_chan = state.sessions.get_slack_link(session_key)
             if _mirror_thread and _mirror_chan:
                 try:
-                    _mirror_msg = message[:500]
-                    _mirror_msg, _ = redact_exfiltration_urls(_mirror_msg)
-                    _mirror_msg, _ = redact_credentials(_mirror_msg)
+                    _mirror_msg = _prepare_mirror_msg(_user_msg_for_mirror)
                     await state.slack_client.post_message(
                         _mirror_chan, f"💬 _{_mirror_msg}_", _mirror_thread
                     )
