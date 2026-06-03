@@ -35,14 +35,37 @@ logger = logging.getLogger(__name__)
 _REGISTRY_FILE = Path(__file__).resolve().parent / "model_registry.json"
 
 # Hardcoded last-resort default so a corrupt/missing registry can't brick the
-# claude_code provider. The two MUST stay paired: _FALLBACK_CANONICAL is the
-# canonical key default() returns, and _FALLBACK_PROVIDER_ID is the valid
-# Bedrock id to_provider_id falls back to when the (empty) index can't resolve
-# that key — otherwise the bare canonical key "opus-4.8-1m" would reach the
-# adapter/Bedrock as an invalid model id (-32603 / 400). Mirror model_registry
-# .json's opus-4.8-1m entry.
+# claude_code provider. _FALLBACK_CANONICAL is the canonical key default()
+# returns when the registry didn't load. _FALLBACK_PROVIDER_IDS maps every
+# known claude_code canonical key AND alias to its valid Bedrock provider id,
+# so to_provider_id can rescue ANY persisted cc_model (not just the flagship
+# default) when the index is empty — otherwise a bare canonical key like
+# "sonnet-4.6-1m" would reach the adapter/Bedrock as an invalid model id
+# (-32603 / 400). Mirror model_registry.json's claude_code provider ids +
+# aliases; only consulted on the corrupt/missing-registry path.
 _FALLBACK_CANONICAL = "opus-4.8-1m"
 _FALLBACK_PROVIDER_ID = "global.anthropic.claude-opus-4-8[1m]"
+_FALLBACK_PROVIDER_IDS: dict[str, str] = {
+    "opus-4.8-1m": "global.anthropic.claude-opus-4-8[1m]",
+    "opus": "global.anthropic.claude-opus-4-8[1m]",
+    "claude-opus-4.8": "global.anthropic.claude-opus-4-8[1m]",
+    "claude-opus-4.6": "global.anthropic.claude-opus-4-8[1m]",
+    "claude-opus-4.6-1m": "global.anthropic.claude-opus-4-8[1m]",
+    "opus-4.8": "global.anthropic.claude-opus-4-8",
+    "claude-opus-4.5": "global.anthropic.claude-opus-4-8",
+    "opus-4.7-1m": "global.anthropic.claude-opus-4-7[1m]",
+    "claude-opus-4.7": "global.anthropic.claude-opus-4-7[1m]",
+    "claude-opus-4.7-1m": "global.anthropic.claude-opus-4-7[1m]",
+    "sonnet-4.6-1m": "global.anthropic.claude-sonnet-4-6[1m]",
+    "sonnet": "global.anthropic.claude-sonnet-4-6[1m]",
+    "claude-sonnet-4.6": "global.anthropic.claude-sonnet-4-6[1m]",
+    "claude-sonnet-4.6-1m": "global.anthropic.claude-sonnet-4-6[1m]",
+    "claude-sonnet-4.5": "global.anthropic.claude-sonnet-4-6[1m]",
+    "claude-sonnet-4.5-1m": "global.anthropic.claude-sonnet-4-6[1m]",
+    "claude-sonnet-4": "global.anthropic.claude-sonnet-4-6[1m]",
+    "claude-haiku-4.5": "global.anthropic.claude-sonnet-4-6[1m]",
+    "auto": "",
+}
 
 _REGISTRY: dict[str, dict[str, Any]] = {}
 try:
@@ -107,14 +130,17 @@ def to_provider_id(canonical_or_id: str, provider: str) -> str:
     key = _resolve_canonical(canonical_or_id, provider)
     if key is not None:
         return _REGISTRY[key].get("providers", {}).get(provider, "")
-    # Corrupt/missing registry: the index is empty, so even default()'s
-    # _FALLBACK_CANONICAL won't resolve here. Rescue it to the paired valid
-    # provider id rather than passing the bare canonical key through to the
-    # adapter/Bedrock (which would reject it with -32603/400). This keeps the
-    # "a corrupt registry can't brick the provider" guarantee end-to-end, not
-    # just at the default() lookup.
-    if provider == "claude_code" and canonical_or_id == _FALLBACK_CANONICAL:
-        return _FALLBACK_PROVIDER_ID
+    # Corrupt/missing registry: the index is empty, so NO canonical key resolves
+    # above. Rescue every known claude_code canonical key/alias to its paired
+    # valid provider id from the hardcoded fallback table, rather than passing
+    # the bare canonical key through to the adapter/Bedrock (which would reject
+    # it with -32603/400). This keeps the "a corrupt registry can't brick the
+    # provider" guarantee for any persisted cc_model, not just the flagship
+    # default. Only used when _REGISTRY failed to load (normally unreachable).
+    if provider == "claude_code":
+        rescued = _FALLBACK_PROVIDER_IDS.get(canonical_or_id)
+        if rescued is not None:
+            return rescued
     # Unrecognized: pass through unchanged rather than clobbering an explicit
     # choice. Log once so an unexpected value is still diagnosable.
     logger.debug(

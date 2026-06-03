@@ -98,6 +98,7 @@ from kiro_claw.providers.base import (
 from kiro_claw.security import (
     _EXFIL_PATTERNS,
     is_sensitive_path,
+    redact_and_truncate,
     redact_credentials,
     redact_exfiltration_urls,
 )
@@ -342,6 +343,24 @@ _OAUTH_QUERY_PARAMS = frozenset(
 )
 
 
+# Unambiguous credential signatures that NEVER legitimately appear inside an
+# OAuth/OIDC opaque token (state, code_challenge, …). Unlike _EXFIL_PATTERNS,
+# this set excludes the generic base64-blob / heavy-URL-encoding heuristics
+# (which match a real high-entropy PKCE value), so it is safe to apply even to
+# the exempted OAuth params: a real sign-in URL never carries an AWS key, Slack
+# token, or PEM/SSH private-key header in a query value, but a malicious MCP
+# server smuggling a credential out through state= would be caught.
+_OAUTH_PARAM_CREDENTIAL_RE = re.compile(
+    r"(?:"
+    r"(?:AKIA|ASIA)[A-Z0-9]{16}"  # AWS access key ID
+    r"|(?:ssh-rsa|ssh-ed25519)[\s+%]"  # SSH public key
+    r"|BEGIN[\s+%](?:RSA|DSA|EC|OPENSSH)[\s+%]PRIVATE[\s+%]KEY"  # private key header
+    r"|xox[bpas]-[0-9a-zA-Z-]+"  # Slack token
+    r")",
+    re.IGNORECASE,
+)
+
+
 def _oauth_url_contains_credential(url: str) -> bool:
     """True if the URL embeds an *actual* credential or secret.
 
@@ -351,8 +370,9 @@ def _oauth_url_contains_credential(url: str) -> bool:
     here (that rule exists to catch data being smuggled out in query strings,
     and would reject every real OAuth URL).  Instead we reject only when a
     genuine credential pattern is present: any AWS key / Slack token / private
-    key (``redact_credentials``), or a credential-like blob in a query param
-    that is NOT a recognized OAuth parameter.
+    key (``redact_credentials``), the full exfil heuristic on a NON-OAuth query
+    param, or an unambiguous credential signature even inside a recognized OAuth
+    param (a real OAuth opaque token never contains an AWS/Slack/PEM secret).
     """
     if not url:
         return False
@@ -360,16 +380,18 @@ def _oauth_url_contains_credential(url: str) -> bool:
     _, hit_cred = redact_credentials(url)
     if hit_cred:
         return True
-    # Scan query params, exempting the standard OAuth/PKCE set whose values
-    # are legitimately high-entropy.  A secret pattern on any *other* param
-    # (or in the path) is treated as exfil-eligible and rejected.
     try:
         parsed = urlparse(url)
     except ValueError:
         return True  # unparseable → refuse to render
     for key, value in parse_qsl(parsed.query, keep_blank_values=True):
         if key in _OAUTH_QUERY_PARAMS:
+            # High-entropy OAuth/PKCE values are allowed, but a hard credential
+            # signature smuggled into an OAuth param is still exfil — reject it.
+            if _OAUTH_PARAM_CREDENTIAL_RE.search(value):
+                return True
             continue
+        # Non-OAuth param (or path): apply the full exfil heuristic.
         if _EXFIL_PATTERNS.search(value):
             return True
     return False
@@ -507,6 +529,37 @@ _CMD_SPLIT_RE = re.compile(r"\s*(?:\|\||&&|;|&|\n|\|)\s*")
 _CMD_SUBSTITUTION_RE = re.compile(r"\$\(|`|<\(|>\(")
 
 
+def _mask_quoted_separators(text: str) -> tuple[str, dict[str, str]]:
+    """Replace command separators that appear INSIDE quotes with placeholders.
+
+    The split regex (``_CMD_SPLIT_RE``) is quote-unaware, so a separator inside
+    a quoted string — e.g. the ``|`` in ``grep "a|b" file && wc -l`` — would be
+    treated as a command boundary, mis-segmenting a command the user trusted and
+    denying it (fail-closed but a real usability regression). We walk the string
+    tracking single/double quote state and swap any ``| & ; \\n`` that is quoted
+    for a unique placeholder, restoring it inside each segment before matching.
+    Returns ``(masked_text, restore_map)``.
+    """
+    out: list[str] = []
+    restore: dict[str, str] = {}
+    quote: str | None = None
+    n = 0
+    for ch in text:
+        if quote:
+            if ch == quote:
+                quote = None
+            elif ch in "|&;\n":
+                ph = f"\x00SEP{n}\x00"
+                n += 1
+                restore[ph] = ch
+                out.append(ph)
+                continue
+        elif ch in ("'", '"'):
+            quote = ch
+        out.append(ch)
+    return "".join(out), restore
+
+
 def _matches_trusted_pattern(tool_title: str, patterns: set[str]) -> str | None:
     """Return the matched pattern if tool_title matches any trusted pattern.
 
@@ -520,6 +573,10 @@ def _matches_trusted_pattern(tool_title: str, patterns: set[str]) -> str | None:
     normalized = _normalize_tool_name(tool_title)
     if _CMD_SUBSTITUTION_RE.search(normalized):
         return None
+    # First mask separators that live INSIDE quotes (a quoted "a|b" must not be
+    # split on its `|`), so _CMD_SPLIT_RE only ever cuts on real, unquoted
+    # command boundaries. The placeholders are restored in each segment below.
+    quote_masked, sep_restore = _mask_quoted_separators(normalized)
     # Two-pass split: mask known redirect forms (2>&1, &>, &>>) so their &
     # isn't mistaken for a background operator, then split on remaining &.
     # Track masked positions to reconstruct original text in each segment.
@@ -529,7 +586,7 @@ def _matches_trusted_pattern(tool_title: str, patterns: set[str]) -> str | None:
         redirects.append(m.group())
         return _REDIRECT_PLACEHOLDER
 
-    masked = _REDIRECT_RE.sub(_mask, normalized)
+    masked = _REDIRECT_RE.sub(_mask, quote_masked)
     split_parts = _CMD_SPLIT_RE.split(masked)
     # Restore original redirect syntax in each segment for pattern matching.
     redir_iter = iter(redirects)
@@ -540,6 +597,10 @@ def _matches_trusted_pattern(tool_title: str, patterns: set[str]) -> str | None:
         restored = part
         while _REDIRECT_PLACEHOLDER in restored:
             restored = restored.replace(_REDIRECT_PLACEHOLDER, next(redir_iter), 1)
+        # Restore any quoted separators masked before the split.
+        for ph, ch in sep_restore.items():
+            if ph in restored:
+                restored = restored.replace(ph, ch)
         segments.append(restored)
     if len(segments) > 1:
         matched_patterns = []
@@ -584,11 +645,13 @@ def _extract_full_command(tool_title: str) -> str:
 
 
 def _prepare_mirror_msg(raw_user_message: str) -> str:
-    """Prepare user message for Slack mirror: truncate and redact."""
-    msg = raw_user_message[:500]
-    msg, _ = redact_exfiltration_urls(msg)
-    msg, _ = redact_credentials(msg)
-    return msg
+    """Prepare user message for Slack mirror: truncate then redact.
+
+    Delegates to the canonical security.redact_and_truncate so the mirror stays
+    in lockstep with the rest of the app's redaction (any future redaction step
+    added there applies here too).
+    """
+    return redact_and_truncate(raw_user_message, max_chars=500)
 
 
 def _flush_segment(

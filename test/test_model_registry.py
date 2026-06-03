@@ -152,3 +152,40 @@ class TestClaudeCodeConstantsBackedByRegistry:
 
         assert list(_CC_AVAILABLE_MODELS) == mr.available_models("claude_code")
         assert _CC_DEFAULT_MODEL == mr.to_provider_id(mr.default("claude_code"), "claude_code")
+
+
+class TestCorruptRegistryFallback:
+    """The hardcoded _FALLBACK_PROVIDER_IDS table must not drift from the JSON."""
+
+    def test_fallback_table_matches_registry(self):
+        # Every claude_code canonical key + alias in the loaded registry must map
+        # to the SAME provider id in the hardcoded fallback table, so the
+        # corrupt-registry path (empty index) rescues any persisted cc_model to a
+        # valid provider id instead of leaking a bare canonical key to Bedrock.
+        for canonical, entry in mr._REGISTRY.items():
+            pid = entry.get("providers", {}).get("claude_code")
+            if pid is None:
+                continue
+            keys = [canonical, *entry.get("aliases", [])]
+            for k in keys:
+                assert k in mr._FALLBACK_PROVIDER_IDS, (
+                    f"{k!r} missing from _FALLBACK_PROVIDER_IDS (corrupt-registry "
+                    f"rescue would leak the bare key to Bedrock)"
+                )
+                assert mr._FALLBACK_PROVIDER_IDS[k] == pid, (
+                    f"_FALLBACK_PROVIDER_IDS[{k!r}] drifted from the registry "
+                    f"({mr._FALLBACK_PROVIDER_IDS[k]!r} != {pid!r})"
+                )
+
+    def test_fallback_rescues_non_default_key_when_index_empty(self, monkeypatch):
+        # Simulate a corrupt/missing registry: empty index. to_provider_id must
+        # still rescue a NON-default canonical key (not just the flagship).
+        monkeypatch.setattr(mr, "_CANONICAL_INDEX", {})
+        assert (
+            mr.to_provider_id("sonnet-4.6-1m", "claude_code")
+            == "global.anthropic.claude-sonnet-4-6[1m]"
+        )
+        assert (
+            mr.to_provider_id("opus-4.8-1m", "claude_code")
+            == "global.anthropic.claude-opus-4-8[1m]"
+        )

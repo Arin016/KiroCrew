@@ -155,6 +155,19 @@ def config_local_path() -> Path:
     return config_dir() / "config.local.json"
 
 
+def read_local_secret() -> str:
+    """Read ``<config_dir>/.local_secret`` (the gateway IPC secret), or ``""``.
+
+    Single home for the secret-file read that callers (cron scripts, MCP tool
+    bridges, CLI) need to authenticate to the gateway's internal API. Returns
+    empty string if the file is absent/unreadable.
+    """
+    try:
+        return (config_dir() / ".local_secret").read_text().strip()
+    except OSError:
+        return ""
+
+
 def _deep_merge(base: dict, overlay: dict) -> dict:
     """Recursively merge *overlay* into *base*, returning a new dict.
 

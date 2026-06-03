@@ -45,50 +45,50 @@ _MAX_CONTEXT_CHARS = 165_000  # ~55k tokens
 #   "byte index 4096 is not a char boundary; it is inside '—'"
 # Workaround: replace common multi-byte punctuation with ASCII equivalents.
 # TODO: revert when kiro-cli PR #2034 merges (truncate_safe fix).
-_MULTIBYTE_TABLE = str.maketrans({
-    "\u2014": "--",  # em dash
-    "\u2013": "-",   # en dash
-    "\u2018": "'",   # left single quote
-    "\u2019": "'",   # right single quote
-    "\u201c": '"',   # left double quote
-    "\u201d": '"',   # right double quote
-    "\u2026": "...",  # ellipsis
-    "\u00a0": " ",   # non-breaking space
-    "\u2022": "-",   # bullet
-    "\u2192": "->",  # rightwards arrow (→) — caused 5 kiro-cli panics
-    "\u2190": "<-",  # leftwards arrow (←)
-    "\u2194": "<->",  # left right arrow (↔)
-    "\u21d2": "=>",   # rightwards double arrow (⇒)
-    "\u2713": "[x]",  # check mark (✓)
-    "\u2717": "[ ]",  # ballot x (✗)
-    "\u00d7": "x",   # multiplication sign (×)
-    # Known gap: accented chars (e.g. \u00e9) and emoji are not replaced here.
-    # They are legitimate content; stripping them would be lossy. The real fix
-    # is kiro-cli PR #2034 (truncate_safe).
-})
+_MULTIBYTE_TABLE = str.maketrans(
+    {
+        "\u2014": "--",  # em dash
+        "\u2013": "-",  # en dash
+        "\u2018": "'",  # left single quote
+        "\u2019": "'",  # right single quote
+        "\u201c": '"',  # left double quote
+        "\u201d": '"',  # right double quote
+        "\u2026": "...",  # ellipsis
+        "\u00a0": " ",  # non-breaking space
+        "\u2022": "-",  # bullet
+        "\u2192": "->",  # rightwards arrow (→) — caused 5 kiro-cli panics
+        "\u2190": "<-",  # leftwards arrow (←)
+        "\u2194": "<->",  # left right arrow (↔)
+        "\u21d2": "=>",  # rightwards double arrow (⇒)
+        "\u2713": "[x]",  # check mark (✓)
+        "\u2717": "[ ]",  # ballot x (✗)
+        "\u00d7": "x",  # multiplication sign (×)
+        # Known gap: accented chars (e.g. \u00e9) and emoji are not replaced here.
+        # They are legitimate content; stripping them would be lossy. The real fix
+        # is kiro-cli PR #2034 (truncate_safe).
+    }
+)
 
 # Soft per-component caps: each component is individually truncated to its
 # cap, then the assembled context is hard-truncated at _MAX_CONTEXT_CHARS.
 # No single component may exceed 30% of the hard cap to prevent any one
 # category from dominating. The sum of soft caps (~145k) is under the hard
 # cap (165k), so all components can coexist without silent truncation.
-_HISTORY_BUDGET_CHARS = 35_000   # thread history (fallback/truncated)
+_HISTORY_BUDGET_CHARS = 35_000  # thread history (fallback/truncated)
 # Caps below absorbed the 6_000-char budget that the removed cross-tab block
 # used to consume, distributed proportionally across the six memory components
 # (per Bolin's review feedback on CR-273346177).
-_MEMORY_PREFS_CAP = 4_250        # user preferences (+250)
-_MEMORY_PROJECTS_CAP = 6_400     # active projects (+400)
-_MEMORY_HISTORY_CAP = 26_600     # daily history (multi-tier decay) (+1_600)
-_LESSONS_CAP = 37_250            # learned corrections (high priority) (+2_250)
-_SEMANTIC_MEMORY_CAP = 12_750    # structured key-value facts (vector memory) (+750)
-_EPISODIC_MEMORY_CAP = 12_750    # relevant past conversation fragments (vector memory) (+750)
+_MEMORY_PREFS_CAP = 4_250  # user preferences (+250)
+_MEMORY_PROJECTS_CAP = 6_400  # active projects (+400)
+_MEMORY_HISTORY_CAP = 26_600  # daily history (multi-tier decay) (+1_600)
+_LESSONS_CAP = 37_250  # learned corrections (high priority) (+2_250)
+_SEMANTIC_MEMORY_CAP = 12_750  # structured key-value facts (vector memory) (+750)
+_EPISODIC_MEMORY_CAP = 12_750  # relevant past conversation fragments (vector memory) (+750)
 _PER_MESSAGE_CAP = 8_000  # truncate individual messages on fallback path
 
 # Strip Mode Identity blocks from injected context so cross-tab or history
 # content from a different mode doesn't override the current prompt's identity.
-_MODE_IDENTITY_RE = re.compile(
-    r"## 🔒 Mode Identity.*?(?=\n## |\Z)", re.DOTALL
-)
+_MODE_IDENTITY_RE = re.compile(r"## 🔒 Mode Identity.*?(?=\n## |\Z)", re.DOTALL)
 _COMPRESSED_HISTORY_CAP = 45_000  # budget for LLM-compressed thread summary
 
 
@@ -96,9 +96,7 @@ _STOP_EVENT_CAP = 3  # max recent stop events to inject into LLM context
 _STOP_EVENT_RESOLVED_STATES = frozenset({"stopped", "stop_failed_reset"})
 
 
-def _build_stop_event_notes(
-    conversation_log: "ConversationLog", session_key: str
-) -> str:
+def _build_stop_event_notes(conversation_log: "ConversationLog", session_key: str) -> str:
     """Render recent resolved stop_events as short system notes for LLM context."""
     # Bound the scan: only the last _STOP_EVENT_CAP stop events matter,
     # and stop events from hundreds of turns ago are not actionable context.
@@ -241,13 +239,19 @@ def _load_steering_resources() -> str:
                 resolved = p.resolve()
                 if not str(resolved).startswith(home_resolved):
                     continue
-                if resolved.is_file() and p.suffix == ".md" and not is_sensitive_path(str(resolved)):
+                if (
+                    resolved.is_file()
+                    and p.suffix == ".md"
+                    and not is_sensitive_path(str(resolved))
+                ):
                     try:
                         parts.append(safe_read_file(str(p)))
                     except PermissionError:
                         pass
         if parts:
-            logger.debug("loaded %d steering bytes from %d files", sum(len(p) for p in parts), len(parts))
+            logger.debug(
+                "loaded %d steering bytes from %d files", sum(len(p) for p in parts), len(parts)
+            )
         return "\n".join(parts) if parts else ""
     except Exception as exc:
         logger.debug("steering load failed: %s", type(exc).__name__)
@@ -494,7 +498,9 @@ async def compress_thread_history(
 # ── Provider-Agnostic Session Replay ──
 
 
-_REPLAY_BUDGET_CHARS = 80_000  # 80K chars ≈ 20K tokens — fits alongside system context in 200K window
+_REPLAY_BUDGET_CHARS = (
+    80_000  # 80K chars ≈ 20K tokens — fits alongside system context in 200K window
+)
 
 
 def build_session_replay(
@@ -618,7 +624,7 @@ class ContextBuilder:
             widget_block = (
                 "## Inline Widgets\n\n"
                 "You can render rich HTML inline using "
-                "`<mcwidget title=\"Title\">HTML</mcwidget>` tags. Load the `widgets` "
+                '`<mcwidget title="Title">HTML</mcwidget>` tags. Load the `widgets` '
                 "skill for theme variables, format rules, interactive widgets, and "
                 "best practices when emitting one.\n\n"
                 "## Artifacts\n\n"
@@ -689,10 +695,17 @@ class ContextBuilder:
         dashboard/Slack UI contracts (diff blocks, OPTIONS buttons, file links)
         and prior conversation context behave identically across providers.
 
+        *provider_type* no longer branches the assembled context (the prior
+        ``is_cc`` gates were removed for CC parity); it is retained only for
+        call-site symmetry with :meth:`build_message` (which still uses it for
+        the persona-prompt branch) and as a forward-compat hook. Intentionally
+        unused in this method body.
+
         For custom agents (non-kiroclaw), skills and workspace identity
         are skipped — the agent loads its own via kiro-cli. Memory,
         lessons, critical rules, and hooks are injected for all agents.
         """
+        _ = provider_type  # see docstring: retained for API symmetry, not branched on
         is_custom = agent and agent != "kiroclaw"
         parts: list[str] = []
 
@@ -842,9 +855,7 @@ class ContextBuilder:
         # Stop event context — inject notes for recent stop events so the
         # LLM knows prior turns were cancelled by the user.
         if session_key and self.conversation_log:
-            _stop_notes = _build_stop_event_notes(
-                self.conversation_log, session_key
-            )
+            _stop_notes = _build_stop_event_notes(self.conversation_log, session_key)
             if _stop_notes:
                 parts.append(_stop_notes)
 
@@ -1005,9 +1016,7 @@ class ContextBuilder:
                 except OSError:
                     agent_prompt = ""
             if agent_prompt:
-                agent_prompt = self._resolve_prompt_templates(
-                    agent_prompt, session_key or ""
-                )
+                agent_prompt = self._resolve_prompt_templates(agent_prompt, session_key or "")
                 agent_prompt = self._substitute_bot_name(agent_prompt)
                 parts.append(
                     f"[AGENT SYSTEM PROMPT]\n{agent_prompt}\n[END AGENT SYSTEM PROMPT]\n\n"
@@ -1099,7 +1108,8 @@ class ContextBuilder:
             memory = self.get_memory_for(memory_store or workspace)
             if memory.vector_store:
                 episodic_ctx = memory.vector_store.get_episodic_context(
-                    query_text=text, cap=3000,
+                    query_text=text,
+                    cap=3000,
                 )
                 if episodic_ctx:
                     parts.append(episodic_ctx + "\n")

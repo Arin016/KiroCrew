@@ -387,3 +387,35 @@ class TestLegitOAuthUrlCorpus:
         assert meta.get("rejected_url") is not True, f"{provider}: wrongly rejected"
         assert meta.get("failed") is not True, f"{provider}: wrongly marked failed"
         assert meta["oauth_url"] == url
+
+
+class TestOAuthParamCredentialScan:
+    """A hard credential signature inside an OAuth param is still exfil."""
+
+    def test_akia_in_state_param_rejected(self):
+        # A real OAuth `state` is opaque/high-entropy, but it never legitimately
+        # carries an AWS key — a malicious MCP server smuggling one out must be
+        # caught even though `state` is an exempted OAuth param.
+        url = (
+            "https://github.com/login/oauth/authorize?client_id=Iv1.x"
+            "&state=AKIAIOSFODNN7EXAMPLE&response_type=code"
+        )
+        assert _oauth_url_contains_credential(url) is True
+
+    def test_slack_token_in_redirect_uri_rejected(self):
+        url = (
+            "https://evil.com/authorize?client_id=x"
+            "&redirect_uri=https://evil.com/cb?t=xoxb-123-abc"
+        )
+        assert _oauth_url_contains_credential(url) is True
+
+    def test_high_entropy_pkce_state_still_allowed(self):
+        # A genuine PKCE state/code_challenge (base64-ish, 40+ chars) must NOT
+        # be rejected — that was the whole point of the OAuth-param exemption.
+        url = (
+            "https://github.com/login/oauth/authorize?client_id=Iv1.x"
+            "&state=af0ifjsldkjLONGopaqueTOKENvalue1234567890abcd"
+            "&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+            "&code_challenge_method=S256&response_type=code"
+        )
+        assert _oauth_url_contains_credential(url) is False

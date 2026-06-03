@@ -183,9 +183,7 @@ if _unknown_phases:
 del _unknown_phases
 
 
-async def _add_phase_reaction(
-    slack: SlackClientOps, channel: str, ts: str, phase: str
-) -> None:
+async def _add_phase_reaction(slack: SlackClientOps, channel: str, ts: str, phase: str) -> None:
     """Add the reaction for *phase* if the user hasn't suppressed it.
 
     Used by one-shot emoji-ack sites outside ``StatusReactionController``
@@ -243,7 +241,9 @@ class StatusReactionController:
     the agent appears stuck.
     """
 
-    def __init__(self, slack: SlackClientOps, channel: str, ts: str, *, enabled: bool = True) -> None:
+    def __init__(
+        self, slack: SlackClientOps, channel: str, ts: str, *, enabled: bool = True
+    ) -> None:
         self._enabled = enabled
         self._slack = slack
         self._channel = channel
@@ -840,7 +840,9 @@ def set_orch_cfg(cfg: KiroClawConfig) -> None:
     if _provider not in VALID_PROVIDERS:
         logger.warning(
             "voice_reply.provider %r not in %s, defaulting to %r",
-            _provider, sorted(VALID_PROVIDERS), "polly",
+            _provider,
+            sorted(VALID_PROVIDERS),
+            "polly",
         )
         _provider = "polly"
     _vc.provider = _provider
@@ -1029,10 +1031,16 @@ async def _handle_slash_command(
                     source="slack",
                     resources="yolo_on",
                 )
-                await slack.post_message(channel, f"🔓 YOLO mode enabled (auto-expires in {_YOLO_TTL_SECS // 60}min).", reply_ts)
+                await slack.post_message(
+                    channel,
+                    f"🔓 YOLO mode enabled (auto-expires in {_YOLO_TTL_SECS // 60}min).",
+                    reply_ts,
+                )
             else:
                 remaining = safety_override().remaining_secs()
-                await slack.post_message(channel, f"YOLO mode is already on ({remaining // 60}min remaining).", reply_ts)
+                await slack.post_message(
+                    channel, f"YOLO mode is already on ({remaining // 60}min remaining).", reply_ts
+                )
         elif len(parts) >= 2 and parts[1].lower() == "renew":
             result = safety_override().renew("slack")
             if result.renewed:
@@ -1043,9 +1051,15 @@ async def _handle_slash_command(
                     source="slack",
                     resources="yolo_renew",
                 )
-                await slack.post_message(channel, f"🔓 YOLO mode renewed (auto-expires in {result.ttl // 60}min).", reply_ts)
+                await slack.post_message(
+                    channel,
+                    f"🔓 YOLO mode renewed (auto-expires in {result.ttl // 60}min).",
+                    reply_ts,
+                )
             else:
-                await slack.post_message(channel, "YOLO mode is not active. Use `!yolo on` to activate.", reply_ts)
+                await slack.post_message(
+                    channel, "YOLO mode is not active. Use `!yolo on` to activate.", reply_ts
+                )
         else:
             if yolo_active:
                 remaining = safety_override().remaining_secs()
@@ -1053,7 +1067,9 @@ async def _handle_slash_command(
             else:
                 status = "OFF 🔒"
             await slack.post_message(
-                channel, f"YOLO mode: *{status}*. Use `!yolo on` / `!yolo off` / `!yolo renew`.", reply_ts
+                channel,
+                f"YOLO mode: *{status}*. Use `!yolo on` / `!yolo off` / `!yolo renew`.",
+                reply_ts,
             )
         return ""
 
@@ -1088,13 +1104,9 @@ async def _handle_slash_command(
             await slack.post_message(channel, "⏹ Execution stopped.", reply_ts)
 
         async def _on_hard() -> None:
-            await slack.post_message(
-                channel, "⛔ Execution stopped — session reset.", reply_ts
-            )
+            await slack.post_message(channel, "⛔ Execution stopped — session reset.", reply_ts)
 
-        outcome = await sessions.stop_turn(
-            session_key, on_soft=_on_soft, on_hard=_on_hard
-        )
+        outcome = await sessions.stop_turn(session_key, on_soft=_on_soft, on_hard=_on_hard)
         # If stop_turn returned "idle" (no active turn), neither callback
         # fired — dismiss the stale "Stopping…" ephemeral explicitly.
         if outcome == "idle":
@@ -1288,8 +1300,11 @@ async def _handle_slash_command(
     if cmd == "!link-to-dashboard":
         if not is_allowed_user(user_id):
             sel().log_tool_invocation(
-                session_key="", agent="kiroclaw", source="slack",
-                tool_name="link_to_dashboard", tool_kind="command",
+                session_key="",
+                agent="kiroclaw",
+                source="slack",
+                tool_name="link_to_dashboard",
+                tool_kind="command",
                 outcome="denied",
                 metadata={"user_id": user_id, "channel": channel, "reason": "not_allowed_user"},
             )
@@ -1297,8 +1312,11 @@ async def _handle_slash_command(
             return ""
         if not _dashboard_state or not hasattr(_dashboard_state, "get_or_create_slot"):
             sel().log_tool_invocation(
-                session_key="", agent="kiroclaw", source="slack",
-                tool_name="link_to_dashboard", tool_kind="command",
+                session_key="",
+                agent="kiroclaw",
+                source="slack",
+                tool_name="link_to_dashboard",
+                tool_kind="command",
                 outcome="failure",
                 metadata={"user_id": user_id, "channel": channel, "reason": "no_dashboard"},
             )
@@ -1306,30 +1324,47 @@ async def _handle_slash_command(
             return ""
         if reply_ts == msg_ts:
             sel().log_tool_invocation(
-                session_key="", agent="kiroclaw", source="slack",
-                tool_name="link_to_dashboard", tool_kind="command",
+                session_key="",
+                agent="kiroclaw",
+                source="slack",
+                tool_name="link_to_dashboard",
+                tool_kind="command",
                 outcome="failure",
                 metadata={"user_id": user_id, "channel": channel, "reason": "not_in_thread"},
             )
-            await slack.post_message(channel, "Use this command inside a thread to import it.", reply_ts)
+            await slack.post_message(
+                channel, "Use this command inside a thread to import it.", reply_ts
+            )
             return ""
         # Fetch thread history and import to dashboard
         from kiro_claw.slack.interactions import _import_thread_to_slot
+
         slot = await _import_thread_to_slot(slack, _dashboard_state, channel, reply_ts)
         if not slot:
             sel().log_tool_invocation(
-                session_key="", agent="kiroclaw", source="slack",
-                tool_name="link_to_dashboard", tool_kind="command",
+                session_key="",
+                agent="kiroclaw",
+                source="slack",
+                tool_name="link_to_dashboard",
+                tool_kind="command",
                 outcome="failure",
                 metadata={"channel": channel, "thread_ts": reply_ts, "reason": "empty_thread"},
             )
             await slack.post_message(channel, "Could not fetch thread history.", reply_ts)
             return ""
         sel().log_tool_invocation(
-            session_key=slot.key, agent="kiroclaw", source="slack",
-            tool_name="link_to_dashboard", tool_kind="command",
+            session_key=slot.key,
+            agent="kiroclaw",
+            source="slack",
+            tool_name="link_to_dashboard",
+            tool_kind="command",
             outcome="success",
-            metadata={"slot": slot.key, "channel": channel, "thread_ts": reply_ts, "msg_count": len(slot.messages)},
+            metadata={
+                "slot": slot.key,
+                "channel": channel,
+                "thread_ts": reply_ts,
+                "msg_count": len(slot.messages),
+            },
         )
         await slack.post_message(
             channel,
@@ -1508,7 +1543,9 @@ async def _handle_slash_command(
                 try:
                     conversation_log.set_title(session_key, title_text[:80])
                 except Exception:
-                    logger.debug("Failed to set conversation log title for %s", session_key, exc_info=True)
+                    logger.debug(
+                        "Failed to set conversation log title for %s", session_key, exc_info=True
+                    )
             sel().log_api_access(
                 caller=user_id,
                 operation="slack.thread_title",
@@ -1525,7 +1562,9 @@ async def _handle_slash_command(
 
     # Catch-all: unrecognized ! command — post error instead of falling through to LLM
     await slack.post_message(
-        channel, f"❌ Unknown command `{cmd}`. Type `/kiroclaw help` for available commands.", reply_ts
+        channel,
+        f"❌ Unknown command `{cmd}`. Type `/kiroclaw help` for available commands.",
+        reply_ts,
     )
     return ""
 
@@ -1566,7 +1605,11 @@ def build_timing_footer(
     if client is not None:
         try:
             ctx_pct = round(client.context_usage_pct())
-            ctx_icon = "🔴" if ctx_pct >= 70 else "🟠" if ctx_pct >= 50 else "🟡" if ctx_pct >= 30 else "🟢"
+            ctx_icon = (
+                "🔴"
+                if ctx_pct >= 70
+                else "🟠" if ctx_pct >= 50 else "🟡" if ctx_pct >= 30 else "🟢"
+            )
             footer_text = f"Finished in {duration} · {ctx_icon} ctx {ctx_pct}%"
         except Exception:
             logger.debug("Failed to retrieve context usage", exc_info=True)
@@ -1632,6 +1675,7 @@ async def _handle_compact_command(
     result_text: str | None = None
     outcome = "unknown"
     try:
+
         async def _run_compact_stream() -> None:
             nonlocal result_text, outcome
             async for event in provider.stream_command("/compact"):
@@ -1657,9 +1701,7 @@ async def _handle_compact_command(
             cr = await provider.wait_for_compaction(timeout=120.0)
             if cr["type"] == "completed":
                 summary = cr.get("summary", "")
-                result_text = (
-                    f"✅ Compacted: {summary}" if summary else "✅ Context compacted."
-                )
+                result_text = f"✅ Compacted: {summary}" if summary else "✅ Context compacted."
                 outcome = "completed"
             elif cr["type"] == "failed":
                 error = cr.get("summary", "")
@@ -1677,7 +1719,9 @@ async def _handle_compact_command(
         try:
             await sessions.destroy(session_key)
         except Exception:
-            logger.warning("Failed to destroy session %s after compact failure", session_key, exc_info=True)
+            logger.warning(
+                "Failed to destroy session %s after compact failure", session_key, exc_info=True
+            )
         sel().log_tool_invocation(
             session_key=session_key,
             source="slack",
@@ -1772,8 +1816,11 @@ async def handle_message(
             if not is_allowed_user(user_id):
                 logger.warning("Unauthorized user %s in linked thread %s", user_id, session_key)
                 sel().log_tool_invocation(
-                    session_key=session_key, agent="kiroclaw", source="slack",
-                    tool_name="linked_thread_intercept", tool_kind="permission",
+                    session_key=session_key,
+                    agent="kiroclaw",
+                    source="slack",
+                    tool_name="linked_thread_intercept",
+                    tool_kind="permission",
                     outcome="denied",
                     metadata={"user_id": user_id, "reason": "not_allowed_user"},
                 )
@@ -1794,6 +1841,7 @@ async def handle_message(
                 _dashboard_state.broadcast_ws("chat_message", {"slot": _linked_slot_key, "role": "user", "content": _safe_text, "cls": "msg msg-u"})  # type: ignore[attr-defined]
                 if not _linked_slot.running:
                     from kiro_claw.dashboard.chat import _run_chat
+
                     _chat_task = asyncio.create_task(_run_chat(_dashboard_state, _linked_slot, text))  # type: ignore[arg-type]
                     _linked_slot.task = _chat_task
                     _dashboard_state._background_tasks.add(_chat_task)  # type: ignore[attr-defined]
@@ -1802,8 +1850,11 @@ async def handle_message(
                     _linked_slot.queue_append(text)
                 _dashboard_state.push_slots_update()  # type: ignore[attr-defined]
                 sel().log_tool_invocation(
-                    session_key=session_key, agent="kiroclaw", source="slack",
-                    tool_name="linked_thread_intercept", tool_kind="permission",
+                    session_key=session_key,
+                    agent="kiroclaw",
+                    source="slack",
+                    tool_name="linked_thread_intercept",
+                    tool_kind="permission",
                     outcome="allowed",
                     metadata={"user_id": user_id, "slot": _linked_slot_key},
                 )
@@ -1882,7 +1933,12 @@ async def handle_message(
     _cmd_text_stripped, _had_temporary = _strip_temporary_token(_cmd_text)
     if _had_temporary:
         await _apply_temporary_modifier(
-            session_key, user_id, channel, slack, sessions, reply_ts,
+            session_key,
+            user_id,
+            channel,
+            slack,
+            sessions,
+            reply_ts,
         )
         _cmd_text = _cmd_text_stripped
         text = _TEMPORARY_TOKEN_RE.sub("", text)
@@ -1895,7 +1951,12 @@ async def handle_message(
     _cmd_text_stripped, _had_incognito = _strip_incognito_token(_cmd_text)
     if _had_incognito:
         await _apply_incognito_modifier(
-            session_key, user_id, channel, slack, sessions, reply_ts,
+            session_key,
+            user_id,
+            channel,
+            slack,
+            sessions,
+            reply_ts,
         )
         _cmd_text = _cmd_text_stripped
         text = _INCOGNITO_TOKEN_RE.sub("", text)
@@ -2035,7 +2096,10 @@ async def handle_message(
             return
 
     status_ctrl = StatusReactionController(
-        slack, channel, msg_ts, enabled=KiroClawConfig.load().slack.reactions_enabled,
+        slack,
+        channel,
+        msg_ts,
+        enabled=KiroClawConfig.load().slack.reactions_enabled,
     )
     status_ctrl.set_phase("queued")
     _had_error = False
@@ -2193,9 +2257,7 @@ async def handle_message(
             _session.prev_turn_cancelled = False
             from kiro_claw.context import build_cancelled_turn_preamble
 
-            _preamble = build_cancelled_turn_preamble(
-                context_builder.conversation_log, session_key
-            )
+            _preamble = build_cancelled_turn_preamble(context_builder.conversation_log, session_key)
             if _preamble:
                 text = _preamble + "\n\n" + text
 
@@ -2225,8 +2287,17 @@ async def handle_message(
             # High Risk on Amazon Slack). Gracefully degrades — if scope is missing, thread
             # context is simply skipped.
             _thread_meta: str | None = None
-            if is_new and not resumed and thread_ts and not thread_parent_text and not compressed and context_builder:
-                replies = await slack.fetch_thread_replies(channel, thread_ts, limit=1, warn_on_pagination=False)
+            if (
+                is_new
+                and not resumed
+                and thread_ts
+                and not thread_parent_text
+                and not compressed
+                and context_builder
+            ):
+                replies = await slack.fetch_thread_replies(
+                    channel, thread_ts, limit=1, warn_on_pagination=False
+                )
                 if replies:
                     parent = replies[0]
                     reply_count = parent.get("reply_count", 0)
@@ -2236,13 +2307,17 @@ async def handle_message(
                             parent_text = parent_text[:500] + "…[truncated]"
                         if reply_count > 0:
                             _thread_meta = (
-                                f"[Thread has {reply_count} replies. Parent message: \"{parent_text}\"]\n"
+                                f'[Thread has {reply_count} replies. Parent message: "{parent_text}"]\n'
                                 "Use batch_get_thread_replies to read the full thread if needed.\n"
                             )
                         else:
-                            _thread_meta = f"[Parent message: \"{parent_text}\"]\n"
+                            _thread_meta = f'[Parent message: "{parent_text}"]\n'
                 else:
-                    logger.info("Thread fallback returned no replies for %s/%s (missing scope?)", channel, thread_ts)
+                    logger.info(
+                        "Thread fallback returned no replies for %s/%s (missing scope?)",
+                        channel,
+                        thread_ts,
+                    )
 
             full_message, _ = context_builder.build_message(
                 text,
@@ -2500,14 +2575,7 @@ async def handle_message(
                             await _append_stream(stream_buffer)
                             stream_buffer = ""
                 except Exception:
-                    try:
-                        await client.reject_tool(event.request_id)
-                    except Exception:
-                        logger.warning(
-                            "Failed to reject tool %s after stream-prep error",
-                            event.request_id,
-                            exc_info=True,
-                        )
+                    await _reject_orphaned_tool(client, event.request_id)
                     raise
 
                 outcome = await _request_approval(
@@ -2634,7 +2702,9 @@ async def handle_message(
             thinking_accumulated += ("\n\n" if thinking_accumulated else "") + inline_thinking
 
     actually_streamed = use_slack_stream and bool(stream_ts)
-    final_text = to_slack_mrkdwn(accumulated, keep_tables=actually_streamed) if accumulated else _NO_RESPONSE
+    final_text = (
+        to_slack_mrkdwn(accumulated, keep_tables=actually_streamed) if accumulated else _NO_RESPONSE
+    )
 
     # Scan for URL exfiltration before posting to Slack (link previews auto-fetch)
     final_text, exfil_warnings = redact_exfiltration_urls(final_text)
@@ -2669,7 +2739,9 @@ async def handle_message(
         draft = clean_text or _NO_RESPONSE
         draft_key = f"{channel}|{reply_ts}|{uuid.uuid4().hex[:8]}"
         blocks = review_draft_blocks(draft, draft_key)
-        await slack.post_ephemeral(channel, user_id, draft, blocks=blocks, thread_ts=reply_ts if thread_ts else None)
+        await slack.post_ephemeral(
+            channel, user_id, draft, blocks=blocks, thread_ts=reply_ts if thread_ts else None
+        )
         # Store draft for button handlers (requester can act on their own draft)
         _review_drafts_set(draft_key, draft, user_id)
         logger.info("Review mode: ephemeral draft sent to %s in %s", user_id, channel)
@@ -2699,6 +2771,7 @@ async def handle_message(
         # Always finalize with clean accumulated text to strip streaming
         # artifacts (whitespace drops, partial flushes).  (Mesh-509)
         from kiro_claw.slack.format import _convert_tables
+
         final_text = _convert_tables(clean_text) if clean_text else _NO_RESPONSE
         await _safe_final_update(slack, channel, stream_ts, final_text or _NO_RESPONSE, reply_ts)
     else:
@@ -2725,7 +2798,11 @@ async def handle_message(
     elapsed = time.monotonic() - _t0
     footer_blocks, footer_text = build_timing_footer(elapsed, client)
     footer_blocks = _append_footer_actions(
-        footer_blocks, options, thread_ts, linked_session_key, _dashboard_state,
+        footer_blocks,
+        options,
+        thread_ts,
+        linked_session_key,
+        _dashboard_state,
     )
     await slack.post_blocks(channel, footer_blocks, footer_text, reply_ts)
 
@@ -2761,10 +2838,7 @@ async def handle_message(
                         "voice .onnx file."
                     )
                 else:
-                    hint = (
-                        "Run `ada credentials update` and ensure `aws` CLI "
-                        "is on PATH."
-                    )
+                    hint = "Run `ada credentials update` and ensure `aws` CLI " "is on PATH."
                 if voice_auto_reply:
                     intro = "🔇 Received your voice memo. Replying as text — "
                 else:
@@ -2773,8 +2847,7 @@ async def handle_message(
                     await slack.post_ephemeral(
                         channel,
                         user_id,
-                        f"{intro}TTS (provider={_vc.provider}) isn't "
-                        f"configured. {hint}",
+                        f"{intro}TTS (provider={_vc.provider}) isn't " f"configured. {hint}",
                     )
                 except Exception:
                     logger.debug("Failed to post TTS-unavailable ephemeral", exc_info=True)
@@ -2821,8 +2894,12 @@ async def handle_message(
                 slot.append("user", text, "msg msg-u")
                 slot.append("assistant", accumulated, "msg msg-a")
                 if slot._on_message:
-                    slot._on_message(slot.key, {"role": "user", "content": text, "cls": "msg msg-u"})
-                    slot._on_message(slot.key, {"role": "assistant", "content": accumulated, "cls": "msg msg-a"})
+                    slot._on_message(
+                        slot.key, {"role": "user", "content": text, "cls": "msg msg-u"}
+                    )
+                    slot._on_message(
+                        slot.key, {"role": "assistant", "content": accumulated, "cls": "msg msg-a"}
+                    )
                 ds.push_slots_update()  # type: ignore[attr-defined]
         except Exception:
             logger.debug("Failed to mirror Slack message to dashboard", exc_info=True)
@@ -2923,7 +3000,9 @@ async def _maybe_auto_title_slack(
             try:
                 conversation_log.set_title(session_key, title)
             except Exception:
-                logger.debug("Failed to set conversation log title for %s", session_key, exc_info=True)
+                logger.debug(
+                    "Failed to set conversation log title for %s", session_key, exc_info=True
+                )
         sel().log_api_access(
             caller="system",
             operation="slack.thread_auto_title",
@@ -2935,6 +3014,21 @@ async def _maybe_auto_title_slack(
     except Exception:
         _titled_threads.pop(session_key, None)  # allow retry on transient failure
         logger.debug("Slack thread auto-title failed for %s", session_key, exc_info=True)
+
+
+async def _reject_orphaned_tool(provider: LLMProvider, request_id: "str | int") -> None:
+    """Reject a pending ACP permission request that we can no longer surface.
+
+    Both the pre-approval stream-prep and the approval-prompt post happen BEFORE
+    the permission is answered; if either raises, the ACP request would be left
+    unanswered and the agent subprocess wedges forever (every later turn blocks
+    behind it). Callers invoke this on failure, then re-raise. Swallows any
+    reject failure (best-effort) so the original error still propagates.
+    """
+    try:
+        await provider.reject_tool(request_id)
+    except Exception:
+        logger.warning("Failed to reject orphaned tool %s", request_id, exc_info=True)
 
 
 async def _request_approval(
@@ -2957,14 +3051,7 @@ async def _request_approval(
             channel, blocks, "Manual approval required", thread_ts
         )
     except Exception:
-        try:
-            await provider.reject_tool(event.request_id)
-        except Exception:
-            logger.warning(
-                "Failed to reject tool %s after approval post failure",
-                event.request_id,
-                exc_info=True,
-            )
+        await _reject_orphaned_tool(provider, event.request_id)
         raise
 
     key = f"{channel}:{approval_ts}"
@@ -2991,7 +3078,14 @@ async def _request_approval(
     return outcome
 
 
-async def handle_interaction(channel: str, msg_ts: str, action_id: str, user_id: str = "", thread_ts: str = "", slack: SlackClientOps | None = None) -> str | None:
+async def handle_interaction(
+    channel: str,
+    msg_ts: str,
+    action_id: str,
+    user_id: str = "",
+    thread_ts: str = "",
+    slack: SlackClientOps | None = None,
+) -> str | None:
     """Handle a Block Kit button click for tool approval.
 
     Supports four actions:
@@ -3038,7 +3132,9 @@ async def handle_interaction(channel: str, msg_ts: str, action_id: str, user_id:
                 return None
             # Verify clicking user owns this thread (prevents privilege escalation)
             if not slack:
-                logger.warning("Rejecting late trust click: cannot verify thread ownership (no slack client)")
+                logger.warning(
+                    "Rejecting late trust click: cannot verify thread ownership (no slack client)"
+                )
                 sel().log_api_access(
                     caller=user_id,
                     operation="slack.interactive.trust_late",
@@ -3071,13 +3167,18 @@ async def handle_interaction(channel: str, msg_ts: str, action_id: str, user_id:
                 )
                 return None
             from kiro_claw.session import SessionMap
+
             session_key = thread_ts
             try:
                 linked = SessionMap().get_session_for_thread(thread_ts)
                 if linked:
                     session_key = linked
             except Exception:
-                logger.warning("SessionMap lookup failed for thread %s; refusing to grant trust", thread_ts, exc_info=True)
+                logger.warning(
+                    "SessionMap lookup failed for thread %s; refusing to grant trust",
+                    thread_ts,
+                    exc_info=True,
+                )
                 sel().log_api_access(
                     caller=user_id,
                     operation="slack.interactive.trust_late",
@@ -3129,7 +3230,9 @@ async def handle_interaction(channel: str, msg_ts: str, action_id: str, user_id:
                 _trusted_sessions.add(pending.session_key)
                 logger.info("Trust mode ON for session %s", pending.session_key)
             else:
-                logger.warning("No session_key on pending approval %s; approving without trust", key)
+                logger.warning(
+                    "No session_key on pending approval %s; approving without trust", key
+                )
         if pending.provider:
             await pending.provider.approve_tool(pending.request_id)
         if not pending.future.done():
@@ -3471,9 +3574,7 @@ async def _handle_sessions_command(
             resources="0 sessions read (collector failed)",
             error=redacted_exc[:200],
         )
-        logger.exception(
-            "sessions keyword: collector failed for session_key %s", session_key
-        )
+        logger.exception("sessions keyword: collector failed for session_key %s", session_key)
         await slack.post_message(channel, "_Sessions unavailable._", reply_ts)
         return
 

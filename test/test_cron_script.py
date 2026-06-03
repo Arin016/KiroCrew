@@ -947,7 +947,7 @@ class TestResolveInternalSecret:
 
     def test_uses_env_when_set(self, tmp_path):
         with patch.dict(os.environ, {"KIROCLAW_INTERNAL_SECRET": "fromenv"}), patch(
-            "kiro_claw.cron_script.config_dir", return_value=tmp_path
+            "kiro_claw.config.loader.config_dir", return_value=tmp_path
         ):
             (tmp_path / ".local_secret").write_text("fromfile")
             assert _resolve_internal_secret() == "fromenv"
@@ -956,21 +956,21 @@ class TestResolveInternalSecret:
         (tmp_path / ".local_secret").write_text("filesecret\n")
         env = {k: v for k, v in os.environ.items() if k != "KIROCLAW_INTERNAL_SECRET"}
         with patch.dict(os.environ, env, clear=True), patch(
-            "kiro_claw.cron_script.config_dir", return_value=tmp_path
+            "kiro_claw.config.loader.config_dir", return_value=tmp_path
         ):
             assert _resolve_internal_secret() == "filesecret"
 
     def test_empty_when_neither_present(self, tmp_path):
         env = {k: v for k, v in os.environ.items() if k != "KIROCLAW_INTERNAL_SECRET"}
         with patch.dict(os.environ, env, clear=True), patch(
-            "kiro_claw.cron_script.config_dir", return_value=tmp_path
+            "kiro_claw.config.loader.config_dir", return_value=tmp_path
         ):
             assert _resolve_internal_secret() == ""
 
     def test_env_empty_string_falls_back_to_file(self, tmp_path):
         (tmp_path / ".local_secret").write_text("filesecret")
         with patch.dict(os.environ, {"KIROCLAW_INTERNAL_SECRET": ""}), patch(
-            "kiro_claw.cron_script.config_dir", return_value=tmp_path
+            "kiro_claw.config.loader.config_dir", return_value=tmp_path
         ):
             assert _resolve_internal_secret() == "filesecret"
 
@@ -986,7 +986,7 @@ class TestResolveInternalSecret:
 
         env = {k: v for k, v in os.environ.items() if k != "KIROCLAW_INTERNAL_SECRET"}
         with patch.dict(os.environ, env, clear=True), patch(
-            "kiro_claw.cron_script.config_dir", return_value=tmp_path
+            "kiro_claw.config.loader.config_dir", return_value=tmp_path
         ), patch("kiro_claw.cron_script.resolve_script_path", return_value=("/f.py", "run")), patch(
             "kiro_claw.cron_script.wrap_argv", return_value=(["true"], None)
         ), patch(

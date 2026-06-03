@@ -32,7 +32,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kiro_claw.config.loader import config_dir
+from kiro_claw.config.loader import read_local_secret
 from kiro_claw.sandbox import wrap_argv
 from kiro_claw.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
@@ -321,16 +321,12 @@ def _resolve_internal_secret() -> str:
 
     The gateway generates its secret at startup and writes it to
     ``config_dir()/.local_secret``; the ``KIROCLAW_INTERNAL_SECRET`` env var is
-    normally unset, so fall back to the file. Without this the sandbox sends an
-    empty ``X-Internal-Secret`` and every code-cron notify gets HTTP 403.
+    normally unset, so fall back to the file via the shared
+    ``config.loader.read_local_secret`` helper (single home for that read).
+    Without this the sandbox sends an empty ``X-Internal-Secret`` and every
+    code-cron notify gets HTTP 403.
     """
-    env = os.environ.get("KIROCLAW_INTERNAL_SECRET", "")
-    if env:
-        return env
-    try:
-        return (config_dir() / ".local_secret").read_text().strip()
-    except OSError:
-        return ""
+    return os.environ.get("KIROCLAW_INTERNAL_SECRET", "") or read_local_secret()
 
 
 def run_script_sandboxed(

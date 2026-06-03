@@ -877,3 +877,35 @@ class TestMatchesTrustedPatternPiped:
         patterns = {"*"}
         cmd = "Running: cat /etc/hosts | grep foo | wc -l"
         assert _matches_trusted_pattern(cmd, patterns) is not None
+
+
+class TestMatchesTrustedPatternQuoted:
+    """Separators inside quotes must NOT split the command (fail-closed regression)."""
+
+    def test_quoted_pipe_not_split(self):
+        # `grep "a|b"` is a single trusted command; the quoted | must not be
+        # treated as a pipe boundary that mis-segments and denies it.
+        patterns = {'grep "a|b" *'}
+        assert _matches_trusted_pattern('Running: grep "a|b" file.txt', patterns) is not None
+
+    def test_quoted_pipe_with_real_pipe(self):
+        # Quoted | stays literal; the real unquoted | still splits — both
+        # segments must match.
+        patterns = {'grep "x|y" *', "wc *"}
+        cmd = 'Running: grep "x|y" f | wc -l'
+        assert _matches_trusted_pattern(cmd, patterns) is not None
+
+    def test_quoted_ampersand_not_background_split(self):
+        patterns = {'echo "a&b" *'}
+        assert _matches_trusted_pattern('Running: echo "a&b" done', patterns) is not None
+
+    def test_quoted_semicolon_not_split(self):
+        patterns = {"echo *"}
+        # The quoted ; is part of echo's arg; single segment, matches echo.
+        assert _matches_trusted_pattern('Running: echo "a;b"', patterns) is not None
+
+    def test_real_pipe_outside_quotes_still_requires_all_segments(self):
+        # Regression guard: quote-masking must NOT weaken the per-segment rule
+        # for genuinely unquoted pipes — an unmatched segment still denies.
+        patterns = {"cat /etc/*"}
+        assert _matches_trusted_pattern("Running: cat /etc/hosts | rm -rf /", patterns) is None

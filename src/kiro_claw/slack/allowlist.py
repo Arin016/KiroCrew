@@ -203,7 +203,7 @@ async def send_dashboard_link(
     The link is always sent as a DM to prevent token leakage in channels.
 
     The URL must be clicked within 5 minutes. Once opened, the session
-    cookie lasts for *ttl* seconds (capped at 6 hours).
+    cookie lasts for *ttl* seconds (capped at ``MAX_SESSION_TTL_SECS``).
     """
     session_ttl = min(ttl, MAX_SESSION_TTL_SECS)
     cfg = KiroClawConfig.load()

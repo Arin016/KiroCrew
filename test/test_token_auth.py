@@ -27,11 +27,22 @@ from kiro_claw.dashboard.token_auth import (
 
 
 @pytest.fixture(autouse=True)
-def clear_nonces():
-    """Clear nonces before each test to ensure isolation."""
-    revoke_all_sessions()
+def clear_nonces(tmp_path, monkeypatch):
+    """Isolate token state per test.
+
+    Points config_dir at a tmp dir so the persisted revocation-generation file
+    is not written to the real ~/.kiroclaw, resets the in-process gen to 0, and
+    clears the nonce store. Uses _state.clear_all() (not revoke_all_sessions)
+    so the gen isn't bumped between unrelated tests.
+    """
+    import kiro_claw.dashboard.token_auth as _ta
+
+    monkeypatch.setattr("kiro_claw.config.loader.config_dir", lambda: tmp_path)
+    monkeypatch.setattr(_ta, "_REVOCATION_GEN", 0)
+    _ta._state.clear_all()
     yield
-    revoke_all_sessions()
+    monkeypatch.setattr(_ta, "_REVOCATION_GEN", 0)
+    _ta._state.clear_all()
 
 
 URL_SAFE_B64_CHARS = set(string.ascii_letters + string.digits + "-_.")
@@ -602,33 +613,62 @@ def test_concurrent_tokens_within_limit_all_valid() -> None:
 
 
 def test_token_rejected_when_no_nonces_registered() -> None:
-    """Verify deny-by-default: tokens rejected when no nonces are registered."""
+    """Verify deny-by-default: tokens rejected after an explicit revoke.
+
+    revoke_all_sessions() both clears the nonce store AND bumps the persisted
+    revocation generation, so a token minted before it is rejected either as
+    'session revoked' (gen check, which fires first) or 'no active sessions'
+    (nonce check) — both are valid deny-by-default rejections.
+    """
     token = generate_token("user1")
     revoke_all_sessions()
     valid, _, reason = validate_token(token)
     assert not valid
-    assert reason == "no active sessions"
+    assert reason in ("session revoked", "no active sessions")
 
 
 def test_cookie_auth_survives_nonce_store_wipe() -> None:
-    """Regression: an established session cookie must NOT require the nonce.
+    """Regression: an established session cookie must survive a gateway RESTART.
 
-    The nonce is a single-use guard for the one-time LINK click. The in-memory
-    nonce store is wiped on every gateway restart, so requiring the nonce for
-    cookie validation logged every user out after a restart ("token
-    superseded"). Cookie validation (use_session_exp=True) must pass on
-    signature + session_exp alone, while the LINK path still enforces nonce.
+    A restart reloads the persisted signing secret + revocation generation
+    unchanged and re-initializes the in-memory nonce store empty. The cookie
+    path (use_session_exp=True) must pass on signature + session_exp + matching
+    gen alone — requiring the per-process nonce would log everyone out on every
+    restart. The LINK path still enforces the nonce. We model the restart by
+    clearing ONLY the nonce store (gen untouched), not via revoke_all_sessions.
     """
+    from kiro_claw.dashboard.token_auth import _state
+
     token = generate_token("user_cookie")
-    revoke_all_sessions()  # simulate restart: nonce store emptied
+    _state.clear_all()  # simulate restart: in-memory nonce store re-initialized empty
     # LINK click still requires the nonce → rejected.
     link_valid, _, link_reason = validate_token(token, use_session_exp=False)
     assert not link_valid
     assert link_reason in ("no active sessions", "token superseded")
-    # COOKIE re-auth survives the wipe.
+    # COOKIE re-auth survives the restart (gen unchanged).
     cookie_valid, uid, cookie_reason = validate_token(token, use_session_exp=True)
-    assert cookie_valid, f"cookie should survive nonce wipe, got: {cookie_reason}"
+    assert cookie_valid, f"cookie should survive restart, got: {cookie_reason}"
     assert uid == "user_cookie"
+
+
+def test_revoke_all_sessions_kills_established_cookie() -> None:
+    """Explicit revoke (kiroclaw logout) MUST end established cookie sessions.
+
+    Unlike a restart, revoke_all_sessions() bumps the persisted revocation
+    generation, so a cookie minted before the revoke carries a stale gen and is
+    rejected on its next request — even though its HMAC signature and
+    session_exp are still valid. This is the control the nonce store could not
+    provide for cookies (it is per-process and restart-cleared).
+    """
+    token = generate_token("user_cookie")
+    # Cookie is valid before revoke.
+    valid_before, _, _ = validate_token(token, use_session_exp=True)
+    assert valid_before
+    revoke_all_sessions()  # explicit operator logout
+    # Cookie is now rejected as revoked.
+    valid_after, _, reason = validate_token(token, use_session_exp=True)
+    assert not valid_after
+    assert reason == "session revoked"
 
 
 def test_signing_secret_persisted_across_loads(tmp_path, monkeypatch) -> None:

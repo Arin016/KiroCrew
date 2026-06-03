@@ -87,6 +87,52 @@ def _load_or_create_secret() -> bytes:
 
 _SECRET = _load_or_create_secret()
 
+_REVOCATION_FILE = "token_revocation.gen"
+
+
+def _load_revocation_gen() -> int:
+    """Return the persisted revocation generation counter (0 if unset).
+
+    Every minted token embeds the current ``gen``; cookie validation rejects a
+    token whose ``gen`` is below the current value. ``revoke_all_sessions()``
+    bumps and persists it, so an operator ``kiroclaw logout`` invalidates ALL
+    outstanding tokens/cookies — including established browser cookies, which
+    the nonce store (per-process, cleared on restart) could not. Persisting the
+    counter is what lets it survive a gateway restart WITHOUT logging users out:
+    the gen is reloaded unchanged, so previously-issued cookies still match.
+    """
+    from kiro_claw.config.loader import config_dir
+
+    try:
+        p = config_dir() / _REVOCATION_FILE
+        if p.exists():
+            return int(p.read_text(encoding="utf-8").strip() or "0")
+    except (OSError, ValueError):
+        logger.warning("could not read token revocation counter; assuming 0", exc_info=True)
+    return 0
+
+
+def _bump_revocation_gen() -> int:
+    """Increment and persist the revocation counter. Returns the new value.
+
+    Falls back to an in-memory bump if the file is unwritable (revocation still
+    holds for the life of this process, the pre-existing best-effort behaviour).
+    """
+    global _REVOCATION_GEN
+    _REVOCATION_GEN += 1
+    from kiro_claw.config.loader import config_dir
+
+    try:
+        p = config_dir() / _REVOCATION_FILE
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(str(_REVOCATION_GEN), encoding="utf-8")
+    except OSError:
+        logger.warning("could not persist token revocation counter", exc_info=True)
+    return _REVOCATION_GEN
+
+
+_REVOCATION_GEN = _load_revocation_gen()
+
 
 class TokenStateManager:
     """Thread-safe manager for token authentication state.
@@ -325,13 +371,17 @@ def generate_token(
         "session_exp": now + session_ttl,
         "iat": now,
         "nonce": nonce,
+        # Revocation generation: validate_token rejects a token whose gen is
+        # below the current persisted value, so revoke_all_sessions() kills
+        # established cookies (not just the per-process nonce store).
+        "gen": _REVOCATION_GEN,
     }
     if app:
         payload_dict["app"] = app
     if prompt:
         payload_dict["prompt"] = prompt
     if extra:
-        _reserved = {"sub", "exp", "session_exp", "iat", "nonce", "app", "prompt"}
+        _reserved = {"sub", "exp", "session_exp", "iat", "nonce", "gen", "app", "prompt"}
         for k, v in extra.items():
             if k not in _reserved and isinstance(v, str) and v:
                 payload_dict[k] = v
@@ -365,11 +415,21 @@ def validate_token(token: str, *, use_session_exp: bool = False) -> tuple[bool, 
     exp_field = "session_exp" if use_session_exp else "exp"
     if time.time() > data.get(exp_field, data.get("exp", 0)):
         return False, "", "token expired"
+    # Revocation generation: an explicit revoke_all_sessions() (e.g. kiroclaw
+    # logout) bumps the persisted counter. A token minted before that — link OR
+    # cookie — carries a lower gen and is rejected. This is the ONLY check that
+    # invalidates an established cookie (the nonce store is per-process and
+    # restart-cleared; the HMAC secret is persisted, not rotated), so it is what
+    # makes "revoke all sessions" actually revoke cookie sessions. Tokens minted
+    # before this field existed default to gen 0, matching the initial counter.
+    if int(data.get("gen", 0)) < _REVOCATION_GEN:
+        return False, "", "session revoked"
     # Nonce is a single-use guard for the one-time LINK click only. For an
     # established session cookie (use_session_exp=True), a valid HMAC signature
     # plus an unexpired session_exp is sufficient — requiring the in-memory
     # nonce there would invalidate every live cookie on each gateway restart
     # (the nonce store is per-process), locking users out for no security gain.
+    # Cookie revocation is handled by the gen check above, not the nonce.
     if not use_session_exp:
         token_nonce = data.get("nonce", "")
         valid, reason = _state.is_nonce_valid(token_nonce)
@@ -429,8 +489,14 @@ def extract_claims_from_token(token: str, keys: tuple[str, ...]) -> dict[str, st
     empty dict if the token is invalid. Used by the Slack challenge-redirect
     frontend to recover ``channel``/``thread_ts``/``session_key`` so it can
     reconnect to (or auto-link) the correct Slack-linked session.
+
+    Validates against ``session_exp`` (use_session_exp=True), NOT the 5-minute
+    link window: claim recovery happens after the user has clicked through and
+    established a session, so binding it to the link ``exp`` would lose the
+    thread context (channel/thread_ts/session_key) the moment the click window
+    closed, breaking auto-link/reconnect for the rest of the session.
     """
-    valid, _user_id, _reason = validate_token(token)
+    valid, _user_id, _reason = validate_token(token, use_session_exp=True)
     if not valid:
         return {}
     try:
@@ -541,6 +607,10 @@ def revoke_all_sessions() -> None:
         resources="action=revoke_all",
     )
     _state.clear_all()
+    # Bump the persisted revocation generation so already-issued cookies (which
+    # the cleared per-process nonce store cannot touch) are rejected on their
+    # next request. This is what makes logout actually end cookie sessions.
+    _bump_revocation_gen()
 
 
 def parse_duration(s: str) -> int | None:

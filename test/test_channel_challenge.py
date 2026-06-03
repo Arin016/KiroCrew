@@ -426,3 +426,23 @@ class TestChallengeThreadRouting:
         assert claims.get("channel") == "C123"
         assert "thread_ts" not in claims
         assert "session_key" not in claims
+
+
+class TestExtractClaimsAfterLinkWindow:
+    """extract_claims_from_token must survive past the 5-min link window."""
+
+    def test_claims_recoverable_after_link_exp(self):
+        import time as _time
+        from unittest.mock import patch
+
+        # Mint a challenge token (link exp = now+5min, session_exp = now+1h).
+        with patch("kiro_claw.dashboard.token_auth.time") as mock_time:
+            mock_time.time.return_value = 1000.0
+            token = generate_token("U1", 3600, extra={"channel": "C9", "thread_ts": "1700.5"})
+        # Advance past the 5-min link window but within the 1h session.
+        with patch("kiro_claw.dashboard.token_auth.time") as mock_time:
+            mock_time.time.return_value = 1000.0 + 301
+            claims = extract_claims_from_token(token, ("channel", "thread_ts"))
+        # Validated against session_exp, so the thread context is still recoverable.
+        assert claims == {"channel": "C9", "thread_ts": "1700.5"}
+        assert _time  # keep import referenced
