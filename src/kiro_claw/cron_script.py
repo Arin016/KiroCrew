@@ -17,6 +17,7 @@ Usage:
         ctx.notify("Done: " + summary)
         raise Done()  # remove cron job
 """
+
 from __future__ import annotations
 
 import json
@@ -31,6 +32,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kiro_claw.config.loader import config_dir
 from kiro_claw.sandbox import wrap_argv
 from kiro_claw.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
@@ -137,7 +139,11 @@ class ScriptContext:
         """Log tool invocation for audit trail."""
         logger.info(
             "cron_script tool_call: job=%s server=%s tool=%s outcome=%s%s",
-            self.job.id, server, tool, outcome, f" error={error}" if error else "",
+            self.job.id,
+            server,
+            tool,
+            outcome,
+            f" error={error}" if error else "",
         )
         try:
             sel().log_tool_invocation(
@@ -184,7 +190,11 @@ class McpToolClient:
         sandboxed_argv, self._sandbox_cleanup = wrap_argv(list(argv), mode="standard")
         try:
             self._proc = subprocess.Popen(
-                sandboxed_argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+                sandboxed_argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
             )
         except Exception:
             if self._sandbox_cleanup:
@@ -194,11 +204,14 @@ class McpToolClient:
         assert self._proc.stdout is not None
         self._req_id = 0
         try:
-            self._rpc("initialize", {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "kiroclaw-cron-script", "version": "0.1"},
-            })
+            self._rpc(
+                "initialize",
+                {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "kiroclaw-cron-script", "version": "0.1"},
+                },
+            )
             self._send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
         except Exception:
             self.close()
@@ -281,9 +294,7 @@ def resolve_script_path(script_path: str) -> tuple[str, str]:
     Format: "~/.kiroclaw/crons/file.py:function" or "/absolute/path.py:function"
     """
     if ":" not in script_path:
-        raise ValueError(
-            f"Invalid script path '{script_path}': expected 'path.py:func'"
-        )
+        raise ValueError(f"Invalid script path '{script_path}': expected 'path.py:func'")
     module_part, func_name = script_path.rsplit(":", 1)
 
     file_path = Path(os.path.expanduser(module_part)).resolve()
@@ -293,13 +304,30 @@ def resolve_script_path(script_path: str) -> tuple[str, str]:
         raise PermissionError(f"Script path blocked by security policy: {file_path}")
     allowed_dir = (Path.home() / ".kiroclaw" / "crons").resolve()
     if not file_path.is_relative_to(allowed_dir):
-        raise PermissionError(
-            f"Script must be under {allowed_dir}, got: {file_path}"
-        )
+        raise PermissionError(f"Script must be under {allowed_dir}, got: {file_path}")
     return str(file_path), func_name
 
 
-def run_script_sandboxed(script_path: str, job_id: str, job_message: str = "", timeout: int = 30) -> dict:
+def _resolve_internal_secret() -> str:
+    """Internal secret for ScriptContext HTTP calls (e.g. notify -> /api/send-message).
+
+    The gateway generates its secret at startup and writes it to
+    ``config_dir()/.local_secret``; the ``KIROCLAW_INTERNAL_SECRET`` env var is
+    normally unset, so fall back to the file. Without this the sandbox sends an
+    empty ``X-Internal-Secret`` and every code-cron notify gets HTTP 403.
+    """
+    env = os.environ.get("KIROCLAW_INTERNAL_SECRET", "")
+    if env:
+        return env
+    try:
+        return (config_dir() / ".local_secret").read_text().strip()
+    except OSError:
+        return ""
+
+
+def run_script_sandboxed(
+    script_path: str, job_id: str, job_message: str = "", timeout: int = 30
+) -> dict:
     """Run a cron script in a sandboxed subprocess via wrap_argv().
 
     Returns: {"status": "ok"|"skip"|"done"|"error", "message": "...", "error": "..."}
@@ -339,7 +367,7 @@ def run_script_sandboxed(script_path: str, job_id: str, job_message: str = "", t
     # Write secret to temp file for ScriptContext (scrubbed from env)
     secret_fd, secret_path = tempfile.mkstemp(prefix="kiroclaw_secret_")
     try:
-        os.write(secret_fd, os.environ.get("KIROCLAW_INTERNAL_SECRET", "").encode())
+        os.write(secret_fd, _resolve_internal_secret().encode())
     finally:
         os.close(secret_fd)
     os.chmod(secret_path, 0o600)
@@ -357,7 +385,11 @@ def run_script_sandboxed(script_path: str, job_id: str, job_message: str = "", t
         clean_env["_KIROCLAW_SECRET_FILE"] = secret_path
 
         proc = subprocess.run(
-            sandboxed_argv, capture_output=True, text=True, timeout=timeout, env=clean_env,
+            sandboxed_argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=clean_env,
         )
 
         if proc.returncode != 0 and not proc.stdout.strip():
@@ -368,7 +400,10 @@ def run_script_sandboxed(script_path: str, job_id: str, job_message: str = "", t
         try:
             return json.loads(proc.stdout.strip().split("\n")[-1])
         except (json.JSONDecodeError, IndexError):
-            return {"status": "error", "error": f"Bad output: {redact_exfiltration_urls(redact_credentials(proc.stdout[:200])[0])[0]}"}
+            return {
+                "status": "error",
+                "error": f"Bad output: {redact_exfiltration_urls(redact_credentials(proc.stdout[:200])[0])[0]}",
+            }
     except subprocess.TimeoutExpired:
         return {"status": "error", "error": f"Script timed out after {timeout}s"}
     finally:
@@ -391,7 +426,11 @@ def run_command_sandboxed(command: str, timeout: int = 300) -> dict:
     clean_env = {k: v for k, v in os.environ.items() if k != "KIROCLAW_INTERNAL_SECRET"}
     try:
         proc = subprocess.run(
-            sandboxed_argv, capture_output=True, text=True, timeout=timeout, env=clean_env,
+            sandboxed_argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=clean_env,
         )
         output = proc.stdout
         if len(output) > _MAX_COMMAND_OUTPUT:
@@ -406,7 +445,11 @@ def run_command_sandboxed(command: str, timeout: int = 300) -> dict:
             "exit_code": proc.returncode,
         }
     except subprocess.TimeoutExpired:
-        return {"status": "error", "output": f"❌ Command timed out after {timeout}s", "exit_code": -1}
+        return {
+            "status": "error",
+            "output": f"❌ Command timed out after {timeout}s",
+            "exit_code": -1,
+        }
     except Exception as exc:
         return {"status": "error", "output": f"❌ Command failed: {exc}", "exit_code": -1}
     finally:
