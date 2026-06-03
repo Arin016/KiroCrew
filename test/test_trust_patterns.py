@@ -40,6 +40,7 @@ def _make_app(state: DashboardState) -> web.Application:
     app.router.add_post("/api/chat/slots/{slot}/approve", api_chat_slot_approve)
     return app
 
+
 # ── Pattern matching tests ──
 
 
@@ -103,7 +104,10 @@ class TestMatchesTrustedPattern:
 
     def test_reading_prefix(self):
         patterns = {"/home/user/file.txt"}
-        assert _matches_trusted_pattern("Reading /home/user/file.txt", patterns) == "/home/user/file.txt"
+        assert (
+            _matches_trusted_pattern("Reading /home/user/file.txt", patterns)
+            == "/home/user/file.txt"
+        )
 
 
 # ── Extraction helpers tests ──
@@ -179,11 +183,13 @@ class TestGetPatternFromPending:
         from kiro_claw.dashboard.state import _ChatSlot
 
         slot = _ChatSlot(key="test-slot")
-        meta = json.dumps({
-            "request_id": "req-123",
-            "full_command": "ls /tmp",
-            "base_command": "ls",
-        })
+        meta = json.dumps(
+            {
+                "request_id": "req-123",
+                "full_command": "ls /tmp",
+                "base_command": "ls",
+            }
+        )
         slot.messages.append({"role": "permission", "content": "Running: ls /tmp", "cls": meta})
         assert _get_pattern_from_pending(slot, "req-123", "full_command") == "ls /tmp"
 
@@ -192,12 +198,16 @@ class TestGetPatternFromPending:
         from kiro_claw.dashboard.state import _ChatSlot
 
         slot = _ChatSlot(key="test-slot")
-        meta = json.dumps({
-            "request_id": "req-456",
-            "full_command": "grep -r foo .",
-            "base_command": "grep",
-        })
-        slot.messages.append({"role": "permission", "content": "Running: grep -r foo .", "cls": meta})
+        meta = json.dumps(
+            {
+                "request_id": "req-456",
+                "full_command": "grep -r foo .",
+                "base_command": "grep",
+            }
+        )
+        slot.messages.append(
+            {"role": "permission", "content": "Running: grep -r foo .", "cls": meta}
+        )
         assert _get_pattern_from_pending(slot, "req-456", "base_command") == "grep"
 
     def test_returns_empty_for_missing_request_id(self):
@@ -283,7 +293,10 @@ class TestHandlerTrustCommand:
 
         slot = _ChatSlot(key="test-slot")
         slot._trusted_patterns.add("grep -r foo .")
-        assert _matches_trusted_pattern("Running: grep -r foo .", slot._trusted_patterns) == "grep -r foo ."
+        assert (
+            _matches_trusted_pattern("Running: grep -r foo .", slot._trusted_patterns)
+            == "grep -r foo ."
+        )
         assert _matches_trusted_pattern("Running: grep -r bar .", slot._trusted_patterns) is None
 
     def test_trust_command_mcp_tool(self):
@@ -324,7 +337,9 @@ class TestHandlerTrustBase:
                 slot._trusted_patterns.add(p[:-2])
         assert slot._trusted_patterns == {"cat *", "cat", "wc *", "wc"}
         # Verify matching
-        assert _matches_trusted_pattern("Running: cat /etc/passwd", slot._trusted_patterns) is not None
+        assert (
+            _matches_trusted_pattern("Running: cat /etc/passwd", slot._trusted_patterns) is not None
+        )
         assert _matches_trusted_pattern("Running: wc -l file", slot._trusted_patterns) is not None
         assert _matches_trusted_pattern("Running: cat", slot._trusted_patterns) == "cat"
         assert _matches_trusted_pattern("Running: wc", slot._trusted_patterns) == "wc"
@@ -335,12 +350,16 @@ class TestHandlerTrustBase:
         from kiro_claw.dashboard.state import _ChatSlot
 
         slot = _ChatSlot(key="test-slot")
-        meta = json.dumps({
-            "request_id": "req-multi",
-            "full_command": "cat /etc/hosts | wc -l",
-            "base_command": "cat,wc",
-        })
-        slot.messages.append({"role": "permission", "content": "Running: cat /etc/hosts | wc -l", "cls": meta})
+        meta = json.dumps(
+            {
+                "request_id": "req-multi",
+                "full_command": "cat /etc/hosts | wc -l",
+                "base_command": "cat,wc",
+            }
+        )
+        slot.messages.append(
+            {"role": "permission", "content": "Running: cat /etc/hosts | wc -l", "cls": meta}
+        )
         base = _get_pattern_from_pending(slot, "req-multi", "base_command")
         assert base == "cat,wc"
         # Handler would build "cat *,wc *"
@@ -456,7 +475,10 @@ class TestEdgeCases:
 
     def test_pattern_with_path_separators(self):
         patterns = {"/usr/bin/python3 *"}
-        assert _matches_trusted_pattern("Running: /usr/bin/python3 script.py", patterns) == "/usr/bin/python3 *"
+        assert (
+            _matches_trusted_pattern("Running: /usr/bin/python3 script.py", patterns)
+            == "/usr/bin/python3 *"
+        )
 
     def test_multiple_pipes_extract_all(self):
         title = "Running: cat file | grep foo | sort | uniq -c"
@@ -509,11 +531,13 @@ class TestApproveHandlerTrustCommand:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[str] = loop.create_future()
         slot._approval_futures["req-100"] = fut
-        meta = json.dumps({
-            "request_id": "req-100",
-            "full_command": "ls /tmp",
-            "base_command": "ls",
-        })
+        meta = json.dumps(
+            {
+                "request_id": "req-100",
+                "full_command": "ls /tmp",
+                "base_command": "ls",
+            }
+        )
         slot.messages.append({"role": "permission", "content": "Running: ls /tmp", "cls": meta})
 
         app = _make_app(state)
@@ -534,12 +558,16 @@ class TestApproveHandlerTrustCommand:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[str] = loop.create_future()
         slot._approval_futures["req-200"] = fut
-        meta = json.dumps({
-            "request_id": "req-200",
-            "full_command": "grep -r foo .",
-            "base_command": "grep",
-        })
-        slot.messages.append({"role": "permission", "content": "Running: grep -r foo .", "cls": meta})
+        meta = json.dumps(
+            {
+                "request_id": "req-200",
+                "full_command": "grep -r foo .",
+                "base_command": "grep",
+            }
+        )
+        slot.messages.append(
+            {"role": "permission", "content": "Running: grep -r foo .", "cls": meta}
+        )
 
         app = _make_app(state)
         async with TestClient(TestServer(app)) as client:
@@ -558,12 +586,16 @@ class TestApproveHandlerTrustCommand:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[str] = loop.create_future()
         slot._approval_futures["req-300"] = fut
-        meta = json.dumps({
-            "request_id": "req-300",
-            "full_command": "cat /etc/hosts",
-            "base_command": "cat",
-        })
-        slot.messages.append({"role": "permission", "content": "Running: cat /etc/hosts", "cls": meta})
+        meta = json.dumps(
+            {
+                "request_id": "req-300",
+                "full_command": "cat /etc/hosts",
+                "base_command": "cat",
+            }
+        )
+        slot.messages.append(
+            {"role": "permission", "content": "Running: cat /etc/hosts", "cls": meta}
+        )
 
         app = _make_app(state)
         async with TestClient(TestServer(app)) as client:
@@ -584,12 +616,16 @@ class TestApproveHandlerTrustCommand:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[str] = loop.create_future()
         slot._approval_futures["req-400"] = fut
-        meta = json.dumps({
-            "request_id": "req-400",
-            "full_command": "cat /etc/hosts | wc -l",
-            "base_command": "cat,wc",
-        })
-        slot.messages.append({"role": "permission", "content": "Running: cat /etc/hosts | wc -l", "cls": meta})
+        meta = json.dumps(
+            {
+                "request_id": "req-400",
+                "full_command": "cat /etc/hosts | wc -l",
+                "base_command": "cat,wc",
+            }
+        )
+        slot.messages.append(
+            {"role": "permission", "content": "Running: cat /etc/hosts | wc -l", "cls": meta}
+        )
 
         app = _make_app(state)
         async with TestClient(TestServer(app)) as client:
@@ -611,11 +647,13 @@ class TestApproveHandlerTrustCommand:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[str] = loop.create_future()
         slot._approval_futures["req-500"] = fut
-        meta = json.dumps({
-            "request_id": "req-500",
-            "full_command": "ls /tmp",
-            "base_command": "ls",
-        })
+        meta = json.dumps(
+            {
+                "request_id": "req-500",
+                "full_command": "ls /tmp",
+                "base_command": "ls",
+            }
+        )
         slot.messages.append({"role": "permission", "content": "Running: ls /tmp", "cls": meta})
 
         app = _make_app(state)
@@ -679,3 +717,163 @@ class TestApproveHandlerTrustCommand:
             assert resp.status == 200
         assert slot._trust is True
         assert fut.result() == "approved"
+
+
+class TestMatchesTrustedPatternPiped:
+    """Piped commands: each segment checked independently, ALL must match."""
+
+    def test_all_segments_match(self):
+        patterns = {"cat /etc/*", "grep /Users/n*"}
+        cmd = "Running: cat /etc/hosts | grep /Users/nikhim"
+        assert _matches_trusted_pattern(cmd, patterns) is not None
+
+    def test_one_segment_fails(self):
+        patterns = {"cat /etc/*", "grep /Users/n*"}
+        cmd = "Running: cat /etc/hosts | grep /Users/zoozoo"
+        assert _matches_trusted_pattern(cmd, patterns) is None
+
+    def test_first_segment_fails(self):
+        patterns = {"cat /etc/*", "grep /Users/n*"}
+        cmd = "Running: cat /var/log/syslog | grep /Users/nikhim"
+        assert _matches_trusted_pattern(cmd, patterns) is None
+
+    def test_both_segments_fail(self):
+        patterns = {"cat /etc/*", "grep /Users/n*"}
+        cmd = "Running: cat /var/log/syslog | grep /Users/zoozoo"
+        assert _matches_trusted_pattern(cmd, patterns) is None
+
+    def test_single_command_still_works(self):
+        patterns = {"cat /etc/*"}
+        cmd = "Running: cat /etc/hosts"
+        assert _matches_trusted_pattern(cmd, patterns) == "cat /etc/*"
+
+    def test_glob_patterns_per_segment(self):
+        patterns = {"cat *", "wc *"}
+        cmd = "Running: cat /anything | wc -l"
+        assert _matches_trusted_pattern(cmd, patterns) is not None
+
+    def test_glob_one_side_missing(self):
+        patterns = {"cat *"}
+        cmd = "Running: cat /etc/hosts | wc -l"
+        assert _matches_trusted_pattern(cmd, patterns) is None
+
+    def test_three_segments_all_match(self):
+        patterns = {"cat *", "grep *", "wc *"}
+        cmd = "Running: cat /etc/hosts | grep foo | wc -l"
+        assert _matches_trusted_pattern(cmd, patterns) is not None
+
+    def test_three_segments_one_fails(self):
+        patterns = {"cat *", "grep *"}
+        cmd = "Running: cat /etc/hosts | grep foo | wc -l"
+        assert _matches_trusted_pattern(cmd, patterns) is None
+
+    def test_and_chain_all_match(self):
+        patterns = {"make *", "echo *"}
+        cmd = "Running: make build && echo done"
+        assert _matches_trusted_pattern(cmd, patterns) is not None
+
+    def test_and_chain_one_fails(self):
+        patterns = {"make *"}
+        cmd = "Running: make build && rm -rf dist"
+        assert _matches_trusted_pattern(cmd, patterns) is None
+
+    def test_semicolon_chain(self):
+        patterns = {"mkdir *", "cp *"}
+        cmd = "Running: mkdir /tmp/out ; cp file.txt /tmp/out/"
+        assert _matches_trusted_pattern(cmd, patterns) is not None
+
+    def test_independent_patterns_per_segment(self):
+        # cat trusted for .z* paths, grep trusted for /Users/n* paths
+        patterns = {"cat /Users/nikhim/.z*", "grep /Users/n*"}
+        good = "Running: cat /Users/nikhim/.zshrc | grep /Users/nikhim"
+        bad = "Running: cat /Users/nikhim/.zshrc | grep /Users/zoozoo"
+        assert _matches_trusted_pattern(good, patterns) is not None
+        assert _matches_trusted_pattern(bad, patterns) is None
+
+    def test_background_operator_split(self):
+        patterns = {"cat *"}
+        cmd = "Running: cat foo & rm -rf /"
+        assert _matches_trusted_pattern(cmd, patterns) is None
+
+    def test_background_operator_both_match(self):
+        patterns = {"cat *", "echo *"}
+        cmd = "Running: cat foo & echo done"
+        assert _matches_trusted_pattern(cmd, patterns) is not None
+
+    def test_redirect_ampersand_not_split(self):
+        patterns = {"ls *", "grep *"}
+        cmd = "Running: ls /tmp 2>&1 | grep foo"
+        assert _matches_trusted_pattern(cmd, patterns) is not None
+
+    def test_redirect_stderr_to_file_not_split(self):
+        patterns = {"ls *"}
+        cmd = "Running: ls /tmp 2>&1"
+        assert _matches_trusted_pattern(cmd, patterns) == "ls *"
+
+    def test_redirect_1_to_2_not_split(self):
+        patterns = {"echo *"}
+        cmd = "Running: echo error 1>&2"
+        assert _matches_trusted_pattern(cmd, patterns) == "echo *"
+
+    def test_background_no_space_after(self):
+        patterns = {"cat *"}
+        cmd = "Running: cat foo &rm -rf /"
+        assert _matches_trusted_pattern(cmd, patterns) is None
+
+    def test_background_no_space_disown(self):
+        patterns = {"cat *"}
+        cmd = "Running: cat foo &disown"
+        assert _matches_trusted_pattern(cmd, patterns) is None
+
+    def test_redirect_then_background(self):
+        patterns = {"cat *"}
+        cmd = "Running: cat foo 2>&1& rm -rf /"
+        assert _matches_trusted_pattern(cmd, patterns) is None
+
+    def test_redirect_stdout_stderr_not_split(self):
+        patterns = {"ls *"}
+        cmd = "Running: ls /tmp &> /dev/null"
+        assert _matches_trusted_pattern(cmd, patterns) == "ls *"
+
+    def test_redirect_append_both_not_split(self):
+        patterns = {"ls *"}
+        cmd = "Running: ls /tmp &>> /var/log/out"
+        assert _matches_trusted_pattern(cmd, patterns) == "ls *"
+
+    def test_newline_split(self):
+        patterns = {"ls *"}
+        cmd = "Running: ls /tmp\nrm -rf /"
+        assert _matches_trusted_pattern(cmd, patterns) is None
+
+    def test_newline_both_match(self):
+        patterns = {"ls *", "echo *"}
+        cmd = "Running: ls /tmp\necho done"
+        assert _matches_trusted_pattern(cmd, patterns) is not None
+
+    def test_returns_matched_patterns_for_audit(self):
+        patterns = {"cat *", "grep *"}
+        cmd = "Running: cat /etc/hosts | grep foo"
+        result = _matches_trusted_pattern(cmd, patterns)
+        assert result is not None
+        assert "cat *" in result
+        assert "grep *" in result
+
+    def test_command_substitution_dollar_paren_denied(self):
+        patterns = {"cat *"}
+        cmd = "Running: cat $(echo /etc/passwd)"
+        assert _matches_trusted_pattern(cmd, patterns) is None
+
+    def test_command_substitution_backtick_denied(self):
+        patterns = {"cat *"}
+        cmd = "Running: cat `echo /etc/passwd`"
+        assert _matches_trusted_pattern(cmd, patterns) is None
+
+    def test_process_substitution_denied(self):
+        patterns = {"diff *"}
+        cmd = "Running: diff <(cat /etc/hosts) <(cat /tmp/hosts)"
+        assert _matches_trusted_pattern(cmd, patterns) is None
+
+    def test_wildcard_star_matches_all_segments(self):
+        patterns = {"*"}
+        cmd = "Running: cat /etc/hosts | grep foo | wc -l"
+        assert _matches_trusted_pattern(cmd, patterns) is not None

@@ -377,12 +377,8 @@ def _mark_mcp_oauth_completed(
         if safe_err:
             new_meta["error"] = safe_err
     label = safe_name or "MCP server"
-    new_content = (
-        f"🔓 {label} authenticated." if success else f"🚫 {label} authentication failed."
-    )
-    updated = slot.update_message(
-        target.get("ts", ""), content=new_content, meta=new_meta
-    )
+    new_content = f"🔓 {label} authenticated." if success else f"🚫 {label} authentication failed."
+    updated = slot.update_message(target.get("ts", ""), content=new_content, meta=new_meta)
     if updated is None:
         return
     state.broadcast_ws(
@@ -414,9 +410,65 @@ def _tool_meta(event: "LLMEvent") -> dict[str, str] | None:
     }
 
 
+# Known redirect forms where & is NOT a command separator:
+# N>&M (e.g. 2>&1), &> file, &>> file, >&N
+_REDIRECT_PLACEHOLDER = "\x00REDIR\x00"
+_REDIRECT_RE = re.compile(r"[0-9]*>&[0-9]*|&>>?")
+# After redirects are masked, split on remaining separators.
+_CMD_SPLIT_RE = re.compile(r"\s*(?:\|\||&&|;|&|\n|\|)\s*")
+# Command substitution forms that split-then-fnmatch cannot safely reach:
+# $(...), backticks, and process substitution <(...)/>(...). Deny-by-default
+# when any are present — the pattern match would operate on the outer shell
+# syntax, not the embedded sub-command, giving a false sense of authorization.
+_CMD_SUBSTITUTION_RE = re.compile(r"\$\(|`|<\(|>\(")
+
+
 def _matches_trusted_pattern(tool_title: str, patterns: set[str]) -> str | None:
-    """Return the matched pattern if tool_title matches any trusted pattern."""
+    """Return the matched pattern if tool_title matches any trusted pattern.
+
+    For piped/chained commands, splits into segments and checks each
+    independently — ALL segments must match for the command to be trusted.
+    Returns comma-joined matched patterns for audit provenance.
+
+    Deny-by-default for commands containing command substitution ($(...),
+    backticks, process substitution) — fnmatch cannot reach sub-commands.
+    """
     normalized = _normalize_tool_name(tool_title)
+    if _CMD_SUBSTITUTION_RE.search(normalized):
+        return None
+    # Two-pass split: mask known redirect forms (2>&1, &>, &>>) so their &
+    # isn't mistaken for a background operator, then split on remaining &.
+    # Track masked positions to reconstruct original text in each segment.
+    redirects: list[str] = []
+
+    def _mask(m: "re.Match") -> str:
+        redirects.append(m.group())
+        return _REDIRECT_PLACEHOLDER
+
+    masked = _REDIRECT_RE.sub(_mask, normalized)
+    split_parts = _CMD_SPLIT_RE.split(masked)
+    # Restore original redirect syntax in each segment for pattern matching.
+    redir_iter = iter(redirects)
+    segments = []
+    for part in split_parts:
+        if not part.strip():
+            continue
+        restored = part
+        while _REDIRECT_PLACEHOLDER in restored:
+            restored = restored.replace(_REDIRECT_PLACEHOLDER, next(redir_iter), 1)
+        segments.append(restored)
+    if len(segments) > 1:
+        matched_patterns = []
+        for seg in segments:
+            seg_matched = None
+            for pattern in patterns:
+                if _tool_matches(pattern, seg) or _tool_matches(pattern, f"Running: {seg}"):
+                    seg_matched = pattern
+                    break
+            if seg_matched is None:
+                return None
+            matched_patterns.append(seg_matched)
+        return ",".join(matched_patterns)
     for pattern in patterns:
         if _tool_matches(pattern, tool_title) or _tool_matches(pattern, normalized):
             return pattern
@@ -455,6 +507,7 @@ def _flush_segment(
     broadcast: bool = True,
 ) -> None:
     """Finalize current text block as a segment and persist it."""
+
     # Remove trailing chunk messages (they belong to this segment).
     # Also pull aside any stop_event interleaved with this segment's chunks
     # so it lands AFTER the finalized assistant message. Historical
@@ -468,6 +521,7 @@ def _flush_segment(
             return isinstance(parsed, dict) and parsed.get("kind") == "stop_event"
         except (json.JSONDecodeError, ValueError):
             return False
+
     # Walk backwards to find the start of the trailing chunk/stop_event run.
     boundary = len(slot.messages)
     for i in range(len(slot.messages) - 1, -1, -1):
@@ -479,7 +533,9 @@ def _flush_segment(
     head = slot.messages[:boundary]
     tail = slot.messages[boundary:]
     trailing_stop_events = [m for m in tail if _is_stop_event(m)]
-    slot.messages = head  # drops chunks AND trailing stop_events; tail.non-chunk-non-stop stays in head
+    slot.messages = (
+        head  # drops chunks AND trailing stop_events; tail.non-chunk-non-stop stays in head
+    )
     # Redact the accumulated text
     redacted, exfil_warnings = redact_exfiltration_urls(assistant_text)
     for w in exfil_warnings:
@@ -496,8 +552,12 @@ def _flush_segment(
     # If a regenerate is pending, attach the stashed variants to this fresh assistant message.
     if slot._pending_variants:
         pending_list = [
-            {**v, "content": redact_credentials(redact_exfiltration_urls(v.get("content", ""))[0])[0]}
-            for v in slot._pending_variants if isinstance(v, dict)
+            {
+                **v,
+                "content": redact_credentials(redact_exfiltration_urls(v.get("content", ""))[0])[0],
+            }
+            for v in slot._pending_variants
+            if isinstance(v, dict)
         ]
         pending_list.append({"content": redacted, "ts": last_msg.get("ts", "")})
         last_msg["variants"] = pending_list
@@ -679,9 +739,7 @@ async def _run_chat(
     # ── Slash commands: detect early, before session acquisition ──
     first_word = message.split()[0] if message.strip() else ""
     _is_cc_provider = KiroClawConfig.load().agent.provider == "claude_code"
-    is_slash = (
-        first_word.startswith("/") and _is_cc_provider
-    ) or first_word in _SLASH_COMMANDS
+    is_slash = (first_word.startswith("/") and _is_cc_provider) or first_word in _SLASH_COMMANDS
 
     # Block dangerous/local-only commands before acquiring a session
     if first_word in _BLOCKED_SLASH_COMMANDS:
@@ -848,7 +906,9 @@ async def _run_chat(
         )
         slot.model = _normalize_model(slot.model or "") or ""
         client, is_new, resumed = await state.sessions.get_or_create(
-            session_key, agent=kiro_agent or slot.agent or None, model=slot.model or None,
+            session_key,
+            agent=kiro_agent or slot.agent or None,
+            model=slot.model or None,
             cwd=slot.project or None,
             reasoning_effort_override=slot.reasoning_effort or None,
         )
@@ -977,6 +1037,7 @@ async def _run_chat(
                 from kiro_claw.providers.acp import (
                     AcpProvider,  # circular: providers -> session -> chat_runner
                 )
+
                 if isinstance(client, AcpProvider) and client.client.resumed:
                     _provider_has_history = True
             if is_new and not _provider_has_history and state.context_builder.conversation_log:
@@ -1005,9 +1066,7 @@ async def _run_chat(
             # SessionManager.stop_turn), consumed one-shot here. Use getattr
             # for prev_turn_cancelled so test doubles don't raise on access.
             _session = getattr(state.sessions, "_sessions", {}).get(session_key)
-            if _session is not None and getattr(
-                _session, "prev_turn_cancelled", False
-            ):
+            if _session is not None and getattr(_session, "prev_turn_cancelled", False):
                 _session.prev_turn_cancelled = False
                 if state.context_builder and state.context_builder.conversation_log:
                     from kiro_claw.context import (
@@ -1107,13 +1166,8 @@ async def _run_chat(
                 history_key = _history_key_for(slot.key)
                 disk_count = 0
                 if state.conversation_log:
-                    disk_count = len(
-                        state.conversation_log.read_messages(history_key)
-                    )
-                mem_count = sum(
-                    1 for m in slot.messages
-                    if m.get("role") in ("user", "assistant")
-                )
+                    disk_count = len(state.conversation_log.read_messages(history_key))
+                mem_count = sum(1 for m in slot.messages if m.get("role") in ("user", "assistant"))
                 if mem_count > disk_count:
                     history = _build_history_prefix(slot)
                     if history:
@@ -1153,9 +1207,12 @@ async def _run_chat(
                         _mirror_chan, f"💬 _{_mirror_msg}_", _mirror_thread
                     )
                     # Start a stream for real-time tool animations
-                    _mirror_stream_ts = await state.slack_client.start_stream(
-                        _mirror_chan, _mirror_thread, initial_text="Thinking…"
-                    ) or ""
+                    _mirror_stream_ts = (
+                        await state.slack_client.start_stream(
+                            _mirror_chan, _mirror_thread, initial_text="Thinking…"
+                        )
+                        or ""
+                    )
                 except Exception:
                     logger.debug("Failed to mirror user message to Slack", exc_info=True)
 
@@ -1167,7 +1224,7 @@ async def _run_chat(
                 last_heartbeat = time.time()
 
             # Security: tool_call_id originates from LLM — redact before any use
-            if hasattr(event, 'tool_call_id') and event.tool_call_id:
+            if hasattr(event, "tool_call_id") and event.tool_call_id:
                 _tcid, _ = redact_exfiltration_urls(event.tool_call_id)
                 _tcid, _ = redact_credentials(_tcid)
                 event.tool_call_id = _tcid
@@ -1191,7 +1248,10 @@ async def _run_chat(
                             m.setdefault("meta", {})["done"] = True
                             tcid = m.get("meta", {}).get("tool_call_id", "")
                             if tcid:
-                                state.broadcast_ws("tool_result", {"slot": slot.key, "tool_call_id": tcid, "output": ""})
+                                state.broadcast_ws(
+                                    "tool_result",
+                                    {"slot": slot.key, "tool_call_id": tcid, "output": ""},
+                                )
                         elif m.get("role") not in ("tool", "permission", "chunk"):
                             break
                 in_tool_group = False
@@ -1278,7 +1338,13 @@ async def _run_chat(
                             "question_card",
                             {"slot": slot.key, "questions": _questions},
                         )
-                    except (json.JSONDecodeError, TypeError, KeyError, AttributeError, ValidationError) as exc:
+                    except (
+                        json.JSONDecodeError,
+                        TypeError,
+                        KeyError,
+                        AttributeError,
+                        ValidationError,
+                    ) as exc:
                         logger.warning("AskUserQuestion validation failed: %s", exc)
                 # Fire PreToolUse hooks for auto-approved tools.
                 # NOTE: For EVENT_TOOL_CALL, hooks are informational only - the tool
@@ -1295,8 +1361,11 @@ async def _run_chat(
                     try:
                         if _mirror_active_task:
                             await state.slack_client.append_task(
-                                _mirror_chan, _mirror_stream_ts,
-                                _mirror_active_task, _mirror_active_task_title, "complete",
+                                _mirror_chan,
+                                _mirror_stream_ts,
+                                _mirror_active_task,
+                                _mirror_active_task_title,
+                                "complete",
                             )
                         _mirror_task_counter += 1
                         _mirror_active_task = f"tool_{_mirror_task_counter}"
@@ -1306,8 +1375,11 @@ async def _run_chat(
                         _task_title = _task_title[:75]
                         _mirror_active_task_title = _task_title
                         await state.slack_client.append_task(
-                            _mirror_chan, _mirror_stream_ts,
-                            _mirror_active_task, _task_title, "in_progress",
+                            _mirror_chan,
+                            _mirror_stream_ts,
+                            _mirror_active_task,
+                            _task_title,
+                            "in_progress",
                         )
                     except Exception:
                         logger.debug("Mirror tool task failed", exc_info=True)
@@ -1412,7 +1484,8 @@ async def _run_chat(
                 except Exception:
                     logger.warning(
                         "EVENT_TOOL_CALL_UPDATE handler failed for tool_call_id=%s",
-                        event.tool_call_id, exc_info=True,
+                        event.tool_call_id,
+                        exc_info=True,
                     )
             elif event.kind == EVENT_TOOL_RESULT:
                 _out = _redact_tool_field(event.tool_output)
@@ -1438,7 +1511,10 @@ async def _run_chat(
                 # tool_call_id, and both pills should reflect the same output.
                 if _tcid:
                     for m in slot.messages:
-                        if m.get("role") == "tool" and m.get("meta", {}).get("tool_call_id") == _tcid:
+                        if (
+                            m.get("role") == "tool"
+                            and m.get("meta", {}).get("tool_call_id") == _tcid
+                        ):
                             _meta = m.setdefault("meta", {})
                             _meta["done"] = True
                             _meta["output"] = _out
@@ -1542,7 +1618,8 @@ async def _run_chat(
                         _parsed_input = None
                     try:
                         pre_hook_results = await _fire(
-                            HOOK_EVENT_PRE_TOOL_USE, tool_name=validated_tool,
+                            HOOK_EVENT_PRE_TOOL_USE,
+                            tool_name=validated_tool,
                             tool_input=_parsed_input,
                         )
                     except Exception as hook_exc:
@@ -1589,7 +1666,11 @@ async def _run_chat(
                         _tp_check_title = event.title
                     else:
                         _tp_check_title = None
-                    matched = _matches_trusted_pattern(_tp_check_title, slot._trusted_patterns) if _tp_check_title is not None else None
+                    matched = (
+                        _matches_trusted_pattern(_tp_check_title, slot._trusted_patterns)
+                        if _tp_check_title is not None
+                        else None
+                    )
                     if matched:
                         try:
                             validated_tool = _validate_tool_name(event.title, event.tool_kind)
@@ -1621,7 +1702,18 @@ async def _run_chat(
                             "tool",
                             f"🔧 {_tool_title}",
                             "msg msg-tool",
-                            meta={"tool_call_id": event.tool_call_id, "purpose": redact_credentials(redact_exfiltration_urls((event.tool_purpose or "")[:200])[0])[0]} if event.tool_call_id else None,
+                            meta=(
+                                {
+                                    "tool_call_id": event.tool_call_id,
+                                    "purpose": redact_credentials(
+                                        redact_exfiltration_urls((event.tool_purpose or "")[:200])[
+                                            0
+                                        ]
+                                    )[0],
+                                }
+                                if event.tool_call_id
+                                else None
+                            ),
                         )
                         sel().log_tool_invocation(
                             session_key=session_key,
@@ -1689,12 +1781,15 @@ async def _run_chat(
                         continue
                     if not _pre_tool_hooks_fired:
                         try:
-                            _parsed_input = json.loads(event.tool_input) if event.tool_input else None
+                            _parsed_input = (
+                                json.loads(event.tool_input) if event.tool_input else None
+                            )
                         except Exception:
                             _parsed_input = None
                         try:
                             pre_hook_results = await _fire(
-                                HOOK_EVENT_PRE_TOOL_USE, tool_name=validated_tool,
+                                HOOK_EVENT_PRE_TOOL_USE,
+                                tool_name=validated_tool,
                                 tool_input=_parsed_input,
                             )
                         except Exception as hook_exc:
@@ -1740,14 +1835,19 @@ async def _run_chat(
                     )
                     continue
                 # Auto-reject remaining tools after one rejection in a batch
-                if getattr(slot, '_batch_rejected', False):
+                if getattr(slot, "_batch_rejected", False):
                     await client.reject_tool(event.request_id)
                     _title, _ = redact_exfiltration_urls(event.title)
                     _title, _ = redact_credentials(_title)
-                    slot.append("tool", f"🚫 {_title} (rejected)", "msg msg-tool",
-                                meta=_tool_meta(event))
+                    slot.append(
+                        "tool", f"🚫 {_title} (rejected)", "msg msg-tool", meta=_tool_meta(event)
+                    )
                     # Mark the permission as resolved so UI shows rejection
-                    perm_meta: dict[str, str] = {"request_id": str(event.request_id), "tool_call_id": event.tool_call_id or "", "resolved": "rejected"}
+                    perm_meta: dict[str, str] = {
+                        "request_id": str(event.request_id),
+                        "tool_call_id": event.tool_call_id or "",
+                        "resolved": "rejected",
+                    }
                     slot.append("permission", _title, json.dumps(perm_meta))
                     sel().log_tool_invocation(
                         session_key=session_key,
@@ -1762,7 +1862,10 @@ async def _run_chat(
                     logger.warning("AUTO-REJECTED tool=%r (batch rejection)", event.title)
                     continue
                 # Interactive approval — send to frontend, wait for decision
-                perm_meta = {"request_id": str(event.request_id), "tool_call_id": event.tool_call_id or ""}
+                perm_meta = {
+                    "request_id": str(event.request_id),
+                    "tool_call_id": event.tool_call_id or "",
+                }
                 if event.tool_input:
                     # Security: scan for exfiltration URLs and credentials
                     sanitized, _ = redact_exfiltration_urls(event.tool_input)
@@ -1829,7 +1932,8 @@ async def _run_chat(
                         _parsed_input = None
                     try:
                         pre_hook_results = await _fire(
-                            HOOK_EVENT_PRE_TOOL_USE, tool_name=validated_tool,
+                            HOOK_EVENT_PRE_TOOL_USE,
+                            tool_name=validated_tool,
                             tool_input=_parsed_input,
                         )
                     except Exception as hook_exc:
@@ -1864,8 +1968,9 @@ async def _run_chat(
                         await client.approve_tool(event.request_id)
                         _approved_title, _ = redact_exfiltration_urls(event.title)
                         _approved_title, _ = redact_credentials(_approved_title)
-                        slot.append("tool", f"✅ {_approved_title}", "msg msg-tool",
-                                    meta=_tool_meta(event))
+                        slot.append(
+                            "tool", f"✅ {_approved_title}", "msg msg-tool", meta=_tool_meta(event)
+                        )
                         sel().log_tool_invocation(
                             session_key=session_key,
                             agent=slot.agent or "kiroclaw",
@@ -1894,7 +1999,11 @@ async def _run_chat(
                     # mark batch_rejected as true and continue loop instead of breaking
                     # This will allow for marking other batched approval requests as rejected too
                     slot._batch_rejected = True
-                    logger.warning("PERM REJECTED tool=%r outcome=%r — auto-rejecting remaining batch", event.title, outcome)
+                    logger.warning(
+                        "PERM REJECTED tool=%r outcome=%r — auto-rejecting remaining batch",
+                        event.title,
+                        outcome,
+                    )
                     continue
             elif event.kind == EVENT_COMPACTION_STATUS:
                 logger.debug("Main loop: compaction event text=%r", event.text)
@@ -1968,19 +2077,11 @@ async def _run_chat(
                     # with a blank model for CC sessions.
                     _record_model = slot.model
                     if not _record_model:
-                        _prov_model = getattr(
-                            getattr(client, "client", None), "_model", ""
-                        ) or ""
-                        if (
-                            isinstance(_prov_model, str)
-                            and _prov_model
-                            and _prov_model != "auto"
-                        ):
+                        _prov_model = getattr(getattr(client, "client", None), "_model", "") or ""
+                        if isinstance(_prov_model, str) and _prov_model and _prov_model != "auto":
                             slot.model = _prov_model
                             _record_model = _prov_model
-                    persist_token_record(
-                        slot.key, _record_model, event, provider=_provider_name
-                    )
+                    persist_token_record(slot.key, _record_model, event, provider=_provider_name)
                 _stop_reason = event.stop_reason
                 if (
                     _stop_reason
@@ -2126,8 +2227,8 @@ async def _run_chat(
                     _reset_auto_run_for_new_plan(slot)
                     assistant_text = ensure_go_all_option(assistant_text)
                     # Store stage count for _stage_loop
-                    slot._stage_titles, slot._plan_goal, slot._stage_descriptions = _extract_and_redact_plan_metadata(
-                        assistant_text
+                    slot._stage_titles, slot._plan_goal, slot._stage_descriptions = (
+                        _extract_and_redact_plan_metadata(assistant_text)
                     )
             _flush_segment(state, slot, assistant_text, broadcast=False)
         # Attach accumulated file changes to last assistant message before persist
@@ -2191,9 +2292,7 @@ async def _run_chat(
                 _mirror_text, _mirror_options = extract_options(_mirror_text)
 
                 for _part in split_message(_mirror_text):
-                    await state.slack_client.post_message(
-                        _mirror_chan, _part, _mirror_thread
-                    )
+                    await state.slack_client.post_message(_mirror_chan, _part, _mirror_thread)
                 if _mirror_options:
                     await state.slack_client.post_blocks(
                         _mirror_chan,
@@ -2206,13 +2305,21 @@ async def _run_chat(
     except asyncio.CancelledError:
         if assistant_text:
             slot.messages = [m for m in slot.messages if m.get("role") != "chunk"]
-            slot.append("assistant", redact_credentials(redact_exfiltration_urls(assistant_text)[0])[0], "msg msg-a")
+            slot.append(
+                "assistant",
+                redact_credentials(redact_exfiltration_urls(assistant_text)[0])[0],
+                "msg msg-a",
+            )
     except AcpProcessDied as exc:
         logger.warning("ACP process died in slot %s: %s — resetting session", slot.key, exc)
         needs_session_reset = True
         if assistant_text:
             slot.messages = [m for m in slot.messages if m.get("role") != "chunk"]
-            slot.append("assistant", redact_credentials(redact_exfiltration_urls(assistant_text)[0])[0], "msg msg-a")
+            slot.append(
+                "assistant",
+                redact_credentials(redact_exfiltration_urls(assistant_text)[0])[0],
+                "msg msg-a",
+            )
         slot._acp_pipe_death_retries += 1
         if _prompt_depth == 0 and slot._acp_pipe_death_retries <= 3:
             slot.queue_insert(0, message)
@@ -2227,7 +2334,11 @@ async def _run_chat(
         needs_session_reset = True  # checked in finally block
         if assistant_text:
             slot.messages = [m for m in slot.messages if m.get("role") != "chunk"]
-            slot.append("assistant", redact_credentials(redact_exfiltration_urls(assistant_text)[0])[0], "msg msg-a")
+            slot.append(
+                "assistant",
+                redact_credentials(redact_exfiltration_urls(assistant_text)[0])[0],
+                "msg msg-a",
+            )
         slot._prompt_busy_retries += 1
         if _prompt_depth == 0 and slot._prompt_busy_retries <= 3:
             slot.queue_insert(0, message)
@@ -2243,14 +2354,13 @@ async def _run_chat(
         # (and dashboard messages) get executed on a fresh provider instead of
         # surfacing a bare ❌ error card with no work done.
         _retry_eligible = (
-            "already in progress" in _msg
-            or "process exited" in _msg
-            or "not running" in _msg
+            "already in progress" in _msg or "process exited" in _msg or "not running" in _msg
         )
         if _retry_eligible and _prompt_depth == 0:
             logger.info(
                 "ACP transient (%s) in slot %s — resetting session and re-queuing",
-                _msg[:80], slot.key,
+                _msg[:80],
+                slot.key,
             )
             needs_session_reset = True  # checked in finally block
             if assistant_text:
@@ -2291,8 +2401,11 @@ async def _run_chat(
             try:
                 if _mirror_active_task:
                     await state.slack_client.append_task(
-                        _mirror_chan, _mirror_stream_ts,
-                        _mirror_active_task, _mirror_active_task_title, "complete",
+                        _mirror_chan,
+                        _mirror_stream_ts,
+                        _mirror_active_task,
+                        _mirror_active_task_title,
+                        "complete",
                     )
             except Exception:
                 logger.debug("Task append cleanup failed", exc_info=True)
@@ -2322,7 +2435,9 @@ async def _run_chat(
                 _cfg = KiroClawConfig.load()
                 merge = _cfg.dashboard.merge_queued_messages
             except Exception:
-                logger.warning("Failed to load config; falling back to sequential dequeue", exc_info=True)
+                logger.warning(
+                    "Failed to load config; falling back to sequential dequeue", exc_info=True
+                )
                 merge = False
             next_msg, consumed = _dequeue_next_message(slot, merge_enabled=merge)
             # Notify frontend to remove each consumed queued card
@@ -2330,7 +2445,9 @@ async def _run_chat(
                 _c, _ = redact_exfiltration_urls(item["content"])
                 _c, _ = redact_credentials(_c)
                 _redacted = _redact_for_display(_c)
-                state.broadcast_ws("queue_pop", {"slot": slot.key, "content": _redacted, "queue_id": item["id"]})
+                state.broadcast_ws(
+                    "queue_pop", {"slot": slot.key, "content": _redacted, "queue_id": item["id"]}
+                )
                 _remove_queued_by_id(slot.messages, item["id"])
             # Redact merged message before storing in slot
             next_msg, _ = redact_exfiltration_urls(next_msg)
