@@ -82,9 +82,7 @@ ALLOWED_SOURCES = frozenset({"chat", "cron", "subagent", "manual", "import"})
 #: Allowed lifecycle event types. ``referenced`` is reserved for chat-mention
 #: scanning (added in a follow-up CR); the in-line save/update path emits
 #: ``created`` / ``edited`` / ``iterated`` / ``reverted``.
-ALLOWED_EVENT_TYPES = frozenset(
-    {"created", "edited", "iterated", "referenced", "reverted"}
-)
+ALLOWED_EVENT_TYPES = frozenset({"created", "edited", "iterated", "referenced", "reverted"})
 
 #: Max lifecycle events retained per artifact. FIFO eviction keeps meta.json
 #: bounded — at ~150 bytes per event entry, this caps each meta file at
@@ -111,11 +109,11 @@ class ArtifactError(Exception):
     """Base exception for artifact store failures."""
 
 
-class ArtifactNotFound(ArtifactError):
+class ArtifactNotFoundError(ArtifactError):
     """Raised when an artifact slug does not resolve to a stored artifact."""
 
 
-class ArtifactAlreadyExists(ArtifactError):
+class ArtifactAlreadyExistsError(ArtifactError):
     """Raised when ``create()`` is called with an explicit slug that already exists.
 
     Distinct from the base ``ArtifactError`` so HTTP handlers can return 409
@@ -223,9 +221,7 @@ def slugify(name: str) -> str:
 
 def _validate_slug(slug: str) -> str:
     if not isinstance(slug, str) or not _SLUG_RE.match(slug):
-        raise ArtifactValidationError(
-            f"invalid slug {slug!r}: must match {_SLUG_RE.pattern}"
-        )
+        raise ArtifactValidationError(f"invalid slug {slug!r}: must match {_SLUG_RE.pattern}")
     return slug
 
 
@@ -255,9 +251,7 @@ def _validate_tags(tags: list[str] | None) -> _List[str]:
     cleaned: _List[str] = []
     for t in tags:
         if not isinstance(t, str) or not _TAG_RE.match(t):
-            raise ArtifactValidationError(
-                f"invalid tag {t!r}: must match {_TAG_RE.pattern}"
-            )
+            raise ArtifactValidationError(f"invalid tag {t!r}: must match {_TAG_RE.pattern}")
         if t not in cleaned:  # preserve order, drop dupes
             cleaned.append(t)
     return cleaned
@@ -278,26 +272,18 @@ def _validate_description(description: str | None) -> str:
     if description is None:
         return ""
     if not isinstance(description, str):
-        raise ArtifactValidationError(
-            f"description must be str, got {type(description).__name__}"
-        )
+        raise ArtifactValidationError(f"description must be str, got {type(description).__name__}")
     if len(description) > MAX_DESCRIPTION_LEN:
-        raise ArtifactValidationError(
-            f"description exceeds {MAX_DESCRIPTION_LEN} chars"
-        )
+        raise ArtifactValidationError(f"description exceeds {MAX_DESCRIPTION_LEN} chars")
     return description
 
 
 def _validate_content(content: str) -> str:
     if not isinstance(content, str):
-        raise ArtifactValidationError(
-            f"content must be str, got {type(content).__name__}"
-        )
+        raise ArtifactValidationError(f"content must be str, got {type(content).__name__}")
     encoded = content.encode("utf-8")
     if len(encoded) > MAX_CONTENT_BYTES:
-        raise ArtifactValidationError(
-            f"content exceeds {MAX_CONTENT_BYTES} bytes ({len(encoded)})"
-        )
+        raise ArtifactValidationError(f"content exceeds {MAX_CONTENT_BYTES} bytes ({len(encoded)})")
     return content
 
 
@@ -318,9 +304,7 @@ class ArtifactStore:
         # symlink resolution, so resolve() before checking.
         resolved = self._root.resolve(strict=False)
         if is_sensitive_path(str(resolved)):
-            raise ArtifactError(
-                f"refusing to use sensitive path as artifact root: {resolved}"
-            )
+            raise ArtifactError(f"refusing to use sensitive path as artifact root: {resolved}")
         self._root.mkdir(parents=True, exist_ok=True)
 
     # ── public API ────────────────────────────────────────────────────────
@@ -366,7 +350,7 @@ class ArtifactStore:
             else:
                 slug = _validate_slug(slug)
                 if self._artifact_dir(slug).exists():
-                    raise ArtifactAlreadyExists(f"artifact already exists: {slug}")
+                    raise ArtifactAlreadyExistsError(f"artifact already exists: {slug}")
 
             now = _now_iso()
             art = Artifact(
@@ -423,13 +407,12 @@ class ArtifactStore:
                 self._write_meta(meta)
             if version is not None:
                 if version < 1 or version > meta.version:
-                    raise ArtifactNotFound(
-                        f"version {version} not found for {slug} "
-                        f"(have 1..{meta.version})"
+                    raise ArtifactNotFoundError(
+                        f"version {version} not found for {slug} " f"(have 1..{meta.version})"
                     )
                 vfile = self._artifact_dir(slug) / "versions" / f"v{version}.html"
                 if not vfile.exists():
-                    raise ArtifactNotFound(
+                    raise ArtifactNotFoundError(
                         f"version {version} pruned for {slug} (oldest retained "
                         f"version may be higher; check list_versions)"
                     )
@@ -453,9 +436,7 @@ class ArtifactStore:
             # which is the whole point of round 6's "snapshot anytime"
             # request. If versions/vN.html is missing (legacy artifact
             # before snapshots existed), default to not-dirty.
-            latest_vfile = (
-                self._artifact_dir(slug) / "versions" / f"v{meta.version}.html"
-            )
+            latest_vfile = self._artifact_dir(slug) / "versions" / f"v{meta.version}.html"
             if latest_vfile.exists():
                 latest_snapshot = self._read_text(latest_vfile)
                 meta.live_dirty = (meta.content or "") != latest_snapshot
@@ -496,9 +477,7 @@ class ArtifactStore:
                 raw = f.read(MAX_CONTENT_BYTES + 1)
             oversize = len(raw) > MAX_CONTENT_BYTES
             if oversize:
-                logger.warning(
-                    "source file %s exceeds MAX_CONTENT_BYTES; truncating", p
-                )
+                logger.warning("source file %s exceeds MAX_CONTENT_BYTES; truncating", p)
                 raw = raw[:MAX_CONTENT_BYTES]
             # errors='replace' keeps the artifact viewable even when the
             # file contains malformed UTF-8 sequences. The byte-level
@@ -600,13 +579,9 @@ class ArtifactStore:
                     if live is not None:
                         art.content = live
                     else:
-                        art.content = self._read_text(
-                            self._artifact_dir(slug) / "current.html"
-                        )
+                        art.content = self._read_text(self._artifact_dir(slug) / "current.html")
                 else:
-                    art.content = self._read_text(
-                        self._artifact_dir(slug) / "current.html"
-                    )
+                    art.content = self._read_text(self._artifact_dir(slug) / "current.html")
                 changed_content = True  # treat as a change for the snapshot path
 
             if changed_content:
@@ -641,7 +616,8 @@ class ArtifactStore:
                     # (revert flow uses 'reverted'); otherwise actor-based
                     # default: agent → iterated, user → edited.
                     resolved_event_type = (
-                        event_type if event_type is not None
+                        event_type
+                        if event_type is not None
                         else ("iterated" if actor == "agent" else "edited")
                     )
                     self._append_event(
@@ -670,7 +646,7 @@ class ArtifactStore:
         with self._lock:
             adir = self._artifact_dir(slug)
             if not adir.exists():
-                raise ArtifactNotFound(f"artifact not found: {slug}")
+                raise ArtifactNotFoundError(f"artifact not found: {slug}")
             self._rmtree(adir)
             logger.info("artifact deleted: slug=%s", slug)
 
@@ -723,9 +699,7 @@ class ArtifactStore:
             # the POST — the frontend's sessionStorage debounce is per-tab
             # and cleared on reload — so the store is the source of truth
             # for the one-breadcrumb-per-session invariant.
-            if session_id and any(
-                e.get("session_id") == session_id for e in meta.events
-            ):
+            if session_id and any(e.get("session_id") == session_id for e in meta.events):
                 return meta, False
             metadata: dict[str, Any] = {}
             if message_ts:
@@ -789,10 +763,7 @@ class ArtifactStore:
                 continue
             if source and art.source != source:
                 continue
-            if (
-                name_contains
-                and name_contains.lower() not in art.name.lower()
-            ):
+            if name_contains and name_contains.lower() not in art.name.lower():
                 continue
             if source_path is not None and art.source_path != source_path:
                 continue
@@ -841,7 +812,7 @@ class ArtifactStore:
         with self._lock:
             adir = self._artifact_dir(slug)
             if not adir.exists():
-                raise ArtifactNotFound(f"artifact not found: {slug}")
+                raise ArtifactNotFoundError(f"artifact not found: {slug}")
             versions_dir = adir / "versions"
             stored: _List[int] = []
             if versions_dir.exists():
@@ -944,9 +915,7 @@ class ArtifactStore:
                 if not isinstance(k, str) or len(cleaned) >= 8:
                     continue
                 if isinstance(v, (str, int, float, bool)) or v is None:
-                    cleaned[k[:64]] = (
-                        v[:256] if isinstance(v, str) else v
-                    )
+                    cleaned[k[:64]] = v[:256] if isinstance(v, str) else v
             if cleaned:
                 entry["metadata"] = cleaned
         art.events.append(entry)
@@ -969,28 +938,32 @@ class ArtifactStore:
             # events were tracked from the start — nothing to do.
             return False
         if art.created_at:
-            art.events.append({
-                "ts": art.created_at,
-                "type": "created",
-                "by": art.source if art.source != "chat" else "agent",
-                "version": 1,
-            })
+            art.events.append(
+                {
+                    "ts": art.created_at,
+                    "type": "created",
+                    "by": art.source if art.source != "chat" else "agent",
+                    "version": 1,
+                }
+            )
         if art.version > 1 and art.updated_at and art.updated_at != art.created_at:
             # We can't reconstruct per-version timestamps; collapse the gap
             # into a single edited event at updated_at.
-            art.events.append({
-                "ts": art.updated_at,
-                "type": "edited",
-                "by": "unknown",
-                "version": art.version,
-            })
+            art.events.append(
+                {
+                    "ts": art.updated_at,
+                    "type": "edited",
+                    "by": "unknown",
+                    "version": art.version,
+                }
+            )
         art.events_backfilled = True
         return True
 
     def _load_meta(self, slug: str) -> Artifact:
         path = self._artifact_dir(slug) / "meta.json"
         if not path.exists():
-            raise ArtifactNotFound(f"artifact not found: {slug}")
+            raise ArtifactNotFoundError(f"artifact not found: {slug}")
         return self._read_meta_file(path)
 
     def _read_meta_file(self, path: Path) -> Artifact:

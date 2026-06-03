@@ -12,7 +12,7 @@ from kiro_claw.artifacts import (
     MAX_VERSIONS,
     Artifact,
     ArtifactError,
-    ArtifactNotFound,
+    ArtifactNotFoundError,
     ArtifactStore,
     ArtifactValidationError,
     slugify,
@@ -162,7 +162,7 @@ class TestGet:
         assert art.content == "hello"
 
     def test_missing_raises(self, store: ArtifactStore) -> None:
-        with pytest.raises(ArtifactNotFound):
+        with pytest.raises(ArtifactNotFoundError):
             store.get("does-not-exist")
 
     def test_get_specific_version(self, store: ArtifactStore) -> None:
@@ -176,9 +176,9 @@ class TestGet:
 
     def test_out_of_range_version(self, store: ArtifactStore) -> None:
         store.create(name="x", content="v1")
-        with pytest.raises(ArtifactNotFound):
+        with pytest.raises(ArtifactNotFoundError):
             store.get("x", version=5)
-        with pytest.raises(ArtifactNotFound):
+        with pytest.raises(ArtifactNotFoundError):
             store.get("x", version=0)
 
 
@@ -227,7 +227,7 @@ class TestUpdate:
         assert art.tags == []
 
     def test_missing_raises(self, store: ArtifactStore) -> None:
-        with pytest.raises(ArtifactNotFound):
+        with pytest.raises(ArtifactNotFoundError):
             store.update("nope", content="x", snapshot=True)
 
     def test_update_oversized_content(self, store: ArtifactStore) -> None:
@@ -324,7 +324,7 @@ class TestVersions:
         assert store.list_versions("x") == [1, 2, 3]
 
     def test_missing_raises(self, store: ArtifactStore) -> None:
-        with pytest.raises(ArtifactNotFound):
+        with pytest.raises(ArtifactNotFoundError):
             store.list_versions("nope")
 
 
@@ -352,7 +352,7 @@ class TestDelete:
         assert not (store.root / "x").exists()
 
     def test_missing_raises(self, store: ArtifactStore) -> None:
-        with pytest.raises(ArtifactNotFound):
+        with pytest.raises(ArtifactNotFoundError):
             store.delete("nope")
 
 
@@ -480,7 +480,9 @@ class TestLifecycleEvents:
 
     def test_agent_update_emits_iterated_event(self, store: ArtifactStore) -> None:
         store.create(name="brd", content="# v1")
-        art = store.update("brd", content="# v2", actor="agent", session_id="slot-abc", snapshot=True)
+        art = store.update(
+            "brd", content="# v2", actor="agent", session_id="slot-abc", snapshot=True
+        )
         iterated = [e for e in art.events if e["type"] == "iterated"]
         assert len(iterated) == 1
         assert iterated[0]["by"] == "agent"
@@ -508,6 +510,7 @@ class TestLifecycleEvents:
         # Cap is 500 (MAX_EVENTS_PER_ARTIFACT). Force-write 510 events to
         # confirm the oldest 10 get dropped.
         from kiro_claw.artifacts import MAX_EVENTS_PER_ARTIFACT
+
         art = store.create(name="brd", content="# v1")
         for i in range(MAX_EVENTS_PER_ARTIFACT + 10):
             store._append_event(art, type="referenced", by="agent", session_id=f"s{i}")
@@ -529,7 +532,10 @@ class TestLifecycleEvents:
         # Revert to v1 (using the dashboard's PATCH path semantics — revert
         # is treated as a meaningful state change so we always snapshot).
         art = store.update(
-            "brd", content="# v1", event_type="reverted", from_version=1,
+            "brd",
+            content="# v1",
+            event_type="reverted",
+            from_version=1,
             snapshot=True,
         )
         revert_events = [e for e in art.events if e["type"] == "reverted"]
@@ -606,9 +612,7 @@ class TestSourcePath:
         store.create(name="a", content="x", source_path="/p/a.md")
         assert store.find_by_source_path("/p/missing.md") is None
 
-    def test_find_by_source_path_empty_string_returns_none(
-        self, store: ArtifactStore
-    ) -> None:
+    def test_find_by_source_path_empty_string_returns_none(self, store: ArtifactStore) -> None:
         # Empty source_path is the default for chat-backed artifacts; we
         # don't want callers accidentally hitting a chat artifact when they
         # pass an empty path.
@@ -635,7 +639,9 @@ class TestLivePointer:
         src = tmp_path / "live.md"
         src.write_text("# v1 content", encoding="utf-8")
         store.create(
-            name="live", content="# v1 content", source_path=str(src),
+            name="live",
+            content="# v1 content",
+            source_path=str(src),
             kind="markdown",
         )
         # Change the file on disk (e.g. user edits via MarkdownPanel).
@@ -643,15 +649,15 @@ class TestLivePointer:
         loaded = store.get("live")
         assert loaded.content == "# v2 content from disk edit"
 
-    def test_update_writes_back_to_source_path(
-        self, store: ArtifactStore, tmp_path: Path
-    ) -> None:
+    def test_update_writes_back_to_source_path(self, store: ArtifactStore, tmp_path: Path) -> None:
         # Editing the artifact in the dashboard should also update the
         # source file so MarkdownPanel sees the same content.
         src = tmp_path / "synced.md"
         src.write_text("initial", encoding="utf-8")
         store.create(
-            name="synced", content="initial", source_path=str(src),
+            name="synced",
+            content="initial",
+            source_path=str(src),
             kind="markdown",
         )
         store.update("synced", content="edited via dashboard", snapshot=True)
@@ -666,16 +672,16 @@ class TestLivePointer:
         src = tmp_path / "vanishing.md"
         src.write_text("original content", encoding="utf-8")
         store.create(
-            name="vanishing", content="original content",
-            source_path=str(src), kind="markdown",
+            name="vanishing",
+            content="original content",
+            source_path=str(src),
+            kind="markdown",
         )
         src.unlink()  # source file deleted
         loaded = store.get("vanishing")
         assert loaded.content == "original content"  # falls back to snapshot
 
-    def test_chat_backed_artifact_unaffected_by_live_pointer(
-        self, store: ArtifactStore
-    ) -> None:
+    def test_chat_backed_artifact_unaffected_by_live_pointer(self, store: ArtifactStore) -> None:
         # Widgets and other chat-backed artifacts have no source_path, so
         # they keep using artifact storage as the source of truth.
         store.create(name="widget", content="<p>hello</p>", kind="widget")
@@ -697,8 +703,10 @@ class TestLivePointer:
         store._write_meta(meta)
         # Pretend the path is sensitive.
         from kiro_claw import artifacts as artifacts_mod
+
         monkeypatch.setattr(
-            artifacts_mod, "is_sensitive_path",
+            artifacts_mod,
+            "is_sensitive_path",
             lambda p: str(sensitive) in p,
         )
         loaded = store.get("ok")
@@ -765,8 +773,11 @@ class TestExplicitSnapshotModel:
         # is present). Confirms agent iterations are versioned.
         store.create(name="x", content="v1", slug="x")
         art = store.update(
-            "x", content="agent revision", actor="agent",
-            session_id="slot-abc", snapshot=True,
+            "x",
+            content="agent revision",
+            actor="agent",
+            session_id="slot-abc",
+            snapshot=True,
         )
         assert art.version == 2
         iter_events = [e for e in art.events if e["type"] == "iterated"]
@@ -779,9 +790,7 @@ class TestLiveDirtyAndSnapshotAnytime:
     """Mesh-1654 round 6: snapshot button works whenever live differs
     from the latest version, not just when there are unsaved edits."""
 
-    def test_live_dirty_false_immediately_after_create(
-        self, store: ArtifactStore
-    ) -> None:
+    def test_live_dirty_false_immediately_after_create(self, store: ArtifactStore) -> None:
         store.create(name="x", content="v1", slug="x")
         loaded = store.get("x")
         assert loaded.live_dirty is False
@@ -793,9 +802,7 @@ class TestLiveDirtyAndSnapshotAnytime:
         # Live differs from versions/v1.html ("v1") → dirty.
         assert loaded.live_dirty is True
 
-    def test_live_dirty_false_after_explicit_snapshot(
-        self, store: ArtifactStore
-    ) -> None:
+    def test_live_dirty_false_after_explicit_snapshot(self, store: ArtifactStore) -> None:
         store.create(name="x", content="v1", slug="x")
         store.update("x", content="silent edit")
         store.update("x", content="silent edit", snapshot=True)  # capture
@@ -803,9 +810,7 @@ class TestLiveDirtyAndSnapshotAnytime:
         # Live now equals versions/v2.html → not dirty.
         assert loaded.live_dirty is False
 
-    def test_live_dirty_false_for_historical_version_view(
-        self, store: ArtifactStore
-    ) -> None:
+    def test_live_dirty_false_for_historical_version_view(self, store: ArtifactStore) -> None:
         # Historical reads should never report live_dirty (the field is
         # meaningless for non-live views).
         store.create(name="x", content="v1", slug="x")
@@ -813,9 +818,7 @@ class TestLiveDirtyAndSnapshotAnytime:
         v1 = store.get("x", version=1)
         assert v1.live_dirty is False
 
-    def test_snapshot_without_content_captures_current_live(
-        self, store: ArtifactStore
-    ) -> None:
+    def test_snapshot_without_content_captures_current_live(self, store: ArtifactStore) -> None:
         # User saved silently (no version bump), then clicks Snapshot
         # at a later time without making any new edits. Snapshot should
         # capture the current live state as the next version.
@@ -840,8 +843,11 @@ class TestLiveDirtyAndSnapshotAnytime:
         f = tmp_path / "tracked.md"
         f.write_text("initial", encoding="utf-8")
         store.create(
-            name="tracked", content="initial", kind="markdown",
-            source_path=str(f), slug="tracked",
+            name="tracked",
+            content="initial",
+            kind="markdown",
+            source_path=str(f),
+            slug="tracked",
         )
         # Simulate external edit to the source file.
         f.write_text("externally edited", encoding="utf-8")
@@ -856,9 +862,7 @@ class TestLiveDirtyAndSnapshotAnytime:
         v2 = store.get("tracked", version=2)
         assert v2.content == "externally edited"
 
-    def test_snapshot_without_content_emits_edited_event(
-        self, store: ArtifactStore
-    ) -> None:
+    def test_snapshot_without_content_emits_edited_event(self, store: ArtifactStore) -> None:
         store.create(name="x", content="v1", slug="x")
         store.update("x", content="silent")  # silent save
         art = store.update("x", snapshot=True, actor="user")
@@ -889,9 +893,11 @@ class TestSourcePathSecurityHardening:
         # (NOT the traversal string), simulating the real-world semantics
         # where the check inspects the canonical filesystem location.
         from kiro_claw import artifacts as artifacts_mod
+
         resolved = str(sensitive.resolve())
         monkeypatch.setattr(
-            artifacts_mod, "is_sensitive_path",
+            artifacts_mod,
+            "is_sensitive_path",
             lambda p: p == resolved,
         )
         assert store._try_read_source_path(traversal) is None
@@ -907,9 +913,11 @@ class TestSourcePathSecurityHardening:
         link = tmp_path / "innocent.md"
         link.symlink_to(sensitive)
         from kiro_claw import artifacts as artifacts_mod
+
         resolved = str(sensitive.resolve())
         monkeypatch.setattr(
-            artifacts_mod, "is_sensitive_path",
+            artifacts_mod,
+            "is_sensitive_path",
             lambda p: p == resolved,
         )
         # Read should fall through to None (refused).
@@ -957,6 +965,7 @@ class TestRoundThirteenFixes:
         # to fail loudly if anyone calls it (the new code uses open('rb')
         # + bounded read instead).
         from kiro_claw import artifacts as artifacts_mod
+
         monkeypatch.setattr(artifacts_mod, "MAX_CONTENT_BYTES", 50)
         f = tmp_path / "big.txt"
         f.write_text("x" * 5000, encoding="utf-8")
@@ -986,7 +995,9 @@ class TestRoundThirteenFixes:
         before_versions = list((store.root / "x" / "versions").iterdir())
         with pytest.raises(ArtifactValidationError):
             store.update(
-                "x", content="v2", snapshot=True,
+                "x",
+                content="v2",
+                snapshot=True,
                 event_type="not-a-valid-type",
             )
         after_versions = list((store.root / "x" / "versions").iterdir())
@@ -997,9 +1008,7 @@ class TestRoundThirteenFixes:
         loaded = store.get("x")
         assert loaded.version == 1
 
-    def test_live_dirty_not_persisted_in_meta_json(
-        self, store: ArtifactStore
-    ) -> None:
+    def test_live_dirty_not_persisted_in_meta_json(self, store: ArtifactStore) -> None:
         # Round 13: live_dirty is computed at GET time and must not be
         # written to meta.json. Persisting would create staleness bugs.
         store.create(name="x", content="v1", slug="x")
@@ -1012,9 +1021,7 @@ class TestRoundThirteenFixes:
         on_disk = json.loads(meta_path.read_text())
         assert "live_dirty" not in on_disk
 
-    def test_live_dirty_still_present_in_api_response(
-        self, store: ArtifactStore
-    ) -> None:
+    def test_live_dirty_still_present_in_api_response(self, store: ArtifactStore) -> None:
         # Even though live_dirty isn't persisted, it MUST still appear
         # on the get() return value (computed fresh) and on to_dict()
         # responses for API consumers.
@@ -1067,9 +1074,9 @@ class TestRecordImpression:
         assert store.get("x").content == "<div>orig</div>"
 
     def test_unknown_slug_raises(self, store):
-        from kiro_claw.artifacts import ArtifactNotFound
+        from kiro_claw.artifacts import ArtifactNotFoundError
 
-        with pytest.raises(ArtifactNotFound):
+        with pytest.raises(ArtifactNotFoundError):
             store.record_impression("no-such-thing", by="user")
 
     def test_metadata_omitted_when_no_coordinates(self, store):
@@ -1089,10 +1096,18 @@ class TestRecordImpression:
         # reloaded. A different session is a distinct breadcrumb. This is
         # the Mesh-1715 fix — the same session was piling up duplicates.
         store.create(name="X", content="<div>x</div>", slug="x", kind="widget")
-        _, a1 = store.record_impression("x", by="user", session_id="s", message_ts="m1", widget_index=0)
-        _, a2 = store.record_impression("x", by="user", session_id="s", message_ts="m2", widget_index=1)
-        _, a3 = store.record_impression("x", by="user", session_id="s", message_ts="m1", widget_index=0)
-        _, a4 = store.record_impression("x", by="user", session_id="s2", message_ts="m1", widget_index=0)
+        _, a1 = store.record_impression(
+            "x", by="user", session_id="s", message_ts="m1", widget_index=0
+        )
+        _, a2 = store.record_impression(
+            "x", by="user", session_id="s", message_ts="m2", widget_index=1
+        )
+        _, a3 = store.record_impression(
+            "x", by="user", session_id="s", message_ts="m1", widget_index=0
+        )
+        _, a4 = store.record_impression(
+            "x", by="user", session_id="s2", message_ts="m1", widget_index=0
+        )
         assert (a1, a2, a3, a4) == (True, False, False, True)
         ref = [e for e in store.get("x").events if e["type"] == "referenced"]
         assert len(ref) == 2  # one per session: s, s2
@@ -1107,10 +1122,14 @@ class TestRecordImpression:
         # duplicate-`referenced`-on-widget-update bug.
         store.create(name="X", content="<div>x</div>", slug="x", kind="widget")
         store.update("x", content="<div>v2</div>", session_id="s1", actor="agent", snapshot=True)
-        _, appended = store.record_impression("x", by="user", session_id="s1", message_ts="t", widget_index=0)
+        _, appended = store.record_impression(
+            "x", by="user", session_id="s1", message_ts="t", widget_index=0
+        )
         assert appended is False
         assert [e for e in store.get("x").events if e["type"] == "referenced"] == []
-        _, appended2 = store.record_impression("x", by="user", session_id="s2", message_ts="t", widget_index=0)
+        _, appended2 = store.record_impression(
+            "x", by="user", session_id="s2", message_ts="t", widget_index=0
+        )
         assert appended2 is True
         ref = [e for e in store.get("x").events if e["type"] == "referenced"]
         assert len(ref) == 1

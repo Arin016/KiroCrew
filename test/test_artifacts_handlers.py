@@ -146,27 +146,21 @@ class TestCreate:
         assert (isolated_store.root / "hello" / "current.html").exists()
 
     @pytest.mark.asyncio
-    async def test_validation_error_returns_400(
-        self, isolated_store, patch_restricted
-    ) -> None:
+    async def test_validation_error_returns_400(self, isolated_store, patch_restricted) -> None:
         body = {"name": "", "content": "x"}
         resp = await api_artifacts_create(_request(body=body))
         assert resp.status == 400
         assert "name" in _json_body(resp)["error"]
 
     @pytest.mark.asyncio
-    async def test_duplicate_slug_returns_409(
-        self, isolated_store, patch_restricted
-    ) -> None:
+    async def test_duplicate_slug_returns_409(self, isolated_store, patch_restricted) -> None:
         body = {"name": "x", "content": "a", "slug": "taken"}
         await api_artifacts_create(_request(body=body))
         resp = await api_artifacts_create(_request(body=body))
         assert resp.status == 409
 
     @pytest.mark.asyncio
-    async def test_restricted_session_denied(
-        self, isolated_store, patch_restricted
-    ) -> None:
+    async def test_restricted_session_denied(self, isolated_store, patch_restricted) -> None:
         body = {"name": "x", "content": "a"}
         resp = await api_artifacts_create(_request(body=body, restricted=True))
         assert resp.status == 403
@@ -189,7 +183,7 @@ class TestCreate:
         # Regression: store.create() raising the base ArtifactError (e.g. a
         # sensitive-path refusal from _write_text() that fires after the
         # duplicate-slug check passes) used to be caught by the same except
-        # branch as ArtifactAlreadyExists, returning a misleading 409. Now
+        # branch as ArtifactAlreadyExistsError, returning a misleading 409. Now
         # the two are distinguished — duplicates are 409, all other store
         # errors are 500.
         from kiro_claw.artifacts import ArtifactError
@@ -208,8 +202,13 @@ class TestCreate:
     async def test_first_save_with_source_path_creates_201(
         self, isolated_store, patch_restricted
     ) -> None:
-        body = {"name": "brd", "content": "# v1", "kind": "markdown",
-                "source": "manual", "source_path": "/p/brd.md"}
+        body = {
+            "name": "brd",
+            "content": "# v1",
+            "kind": "markdown",
+            "source": "manual",
+            "source_path": "/p/brd.md",
+        }
         resp = await api_artifacts_create(_request(body=body))
         assert resp.status == 201
         result = _json_body(resp)
@@ -219,8 +218,13 @@ class TestCreate:
     async def test_resave_with_same_source_path_silently_bumps_to_200(
         self, isolated_store, patch_restricted
     ) -> None:
-        body = {"name": "brd", "content": "# v1", "kind": "markdown",
-                "source": "manual", "source_path": "/p/brd.md"}
+        body = {
+            "name": "brd",
+            "content": "# v1",
+            "kind": "markdown",
+            "source": "manual",
+            "source_path": "/p/brd.md",
+        }
         first = await api_artifacts_create(_request(body=body))
         assert first.status == 201
         slug = _json_body(first)["slug"]
@@ -239,11 +243,21 @@ class TestCreate:
     async def test_resave_with_different_source_path_creates_new(
         self, isolated_store, patch_restricted
     ) -> None:
-        body1 = {"name": "a", "content": "x", "kind": "markdown",
-                 "source": "manual", "source_path": "/p/a.md"}
+        body1 = {
+            "name": "a",
+            "content": "x",
+            "kind": "markdown",
+            "source": "manual",
+            "source_path": "/p/a.md",
+        }
         await api_artifacts_create(_request(body=body1))
-        body2 = {"name": "b", "content": "y", "kind": "markdown",
-                 "source": "manual", "source_path": "/p/b.md"}
+        body2 = {
+            "name": "b",
+            "content": "y",
+            "kind": "markdown",
+            "source": "manual",
+            "source_path": "/p/b.md",
+        }
         resp = await api_artifacts_create(_request(body=body2))
         assert resp.status == 201  # different path → new artifact
         assert _json_body(resp)["version"] == 1
@@ -259,8 +273,7 @@ class TestCreate:
         # bug nrb hit where a markdown file's "Add to artifacts" was
         # matching a previously-saved widget because the lookup degraded
         # to "first artifact in list".
-        body = {"name": "widget", "content": "<p>hi</p>", "kind": "widget",
-                "source": "chat"}
+        body = {"name": "widget", "content": "<p>hi</p>", "kind": "widget", "source": "chat"}
         first = await api_artifacts_create(_request(body=body))
         second = await api_artifacts_create(_request(body=body))
         assert first.status == 201
@@ -275,14 +288,22 @@ class TestCreate:
         # MCP-driven re-saves silently appeared on the activity timeline as
         # 'edited by user' instead of 'iterated by agent'. Now the handler
         # infers actor from X-Internal-Secret like api_artifact_update.
-        body = {"name": "brd", "content": "# v1", "kind": "markdown",
-                "source": "manual", "source_path": "/p/brd.md"}
+        body = {
+            "name": "brd",
+            "content": "# v1",
+            "kind": "markdown",
+            "source": "manual",
+            "source_path": "/p/brd.md",
+        }
         first = await api_artifacts_create(_request(body=body))
         assert first.status == 201
         body2 = {**body, "content": "# v2 from agent"}
-        second = await api_artifacts_create(_request(
-            body=body2, extra_headers={"X-Internal-Secret": "fake"},
-        ))
+        second = await api_artifacts_create(
+            _request(
+                body=body2,
+                extra_headers={"X-Internal-Secret": "fake"},
+            )
+        )
         assert second.status == 200
         slug = _json_body(second)["slug"]
         # Latest event should be 'iterated' (agent), not 'edited' (user).
@@ -305,9 +326,7 @@ class TestDetail:
         assert body["content"] == "<x/>"
 
     @pytest.mark.asyncio
-    async def test_missing_returns_404(
-        self, isolated_store, patch_restricted
-    ) -> None:
+    async def test_missing_returns_404(self, isolated_store, patch_restricted) -> None:
         resp = await api_artifact_detail(_request(match={"slug": "nope"}))
         assert resp.status == 404
 
@@ -334,18 +353,14 @@ class TestUpdate:
         # dashboard PATCH with no snapshot flag updates the live state but
         # does NOT bump version. Versioning becomes deliberate.
         isolated_store.create(name="x", content="v1", slug="x")
-        resp = await api_artifact_update(
-            _request(body={"content": "v2"}, match={"slug": "x"})
-        )
+        resp = await api_artifact_update(_request(body={"content": "v2"}, match={"slug": "x"}))
         assert resp.status == 200
         body = _json_body(resp)
         assert body["version"] == 1  # version unchanged
         assert body["content"] == "v2"  # live state updated
 
     @pytest.mark.asyncio
-    async def test_mcp_update_auto_snapshots(
-        self, isolated_store, patch_restricted
-    ) -> None:
+    async def test_mcp_update_auto_snapshots(self, isolated_store, patch_restricted) -> None:
         # MCP-originated requests (X-Internal-Secret header) auto-snapshot
         # because each agent iteration is a meaningful state change worth
         # versioning.
@@ -362,9 +377,7 @@ class TestUpdate:
         assert body["version"] == 2  # MCP call → auto-snapshot
 
     @pytest.mark.asyncio
-    async def test_metadata_change_no_version_bump(
-        self, isolated_store, patch_restricted
-    ) -> None:
+    async def test_metadata_change_no_version_bump(self, isolated_store, patch_restricted) -> None:
         isolated_store.create(name="x", content="v1", slug="x")
         resp = await api_artifact_update(
             _request(body={"description": "updated"}, match={"slug": "x"})
@@ -374,18 +387,12 @@ class TestUpdate:
         assert body["description"] == "updated"
 
     @pytest.mark.asyncio
-    async def test_missing_returns_404(
-        self, isolated_store, patch_restricted
-    ) -> None:
-        resp = await api_artifact_update(
-            _request(body={"content": "x"}, match={"slug": "nope"})
-        )
+    async def test_missing_returns_404(self, isolated_store, patch_restricted) -> None:
+        resp = await api_artifact_update(_request(body={"content": "x"}, match={"slug": "nope"}))
         assert resp.status == 404
 
     @pytest.mark.asyncio
-    async def test_restricted_session_denied(
-        self, isolated_store, patch_restricted
-    ) -> None:
+    async def test_restricted_session_denied(self, isolated_store, patch_restricted) -> None:
         isolated_store.create(name="x", content="v1", slug="x")
         resp = await api_artifact_update(
             _request(body={"content": "v2"}, match={"slug": "x"}, restricted=True)
@@ -393,9 +400,7 @@ class TestUpdate:
         assert resp.status == 403
 
     @pytest.mark.asyncio
-    async def test_invalid_field_returns_400(
-        self, isolated_store, patch_restricted
-    ) -> None:
+    async def test_invalid_field_returns_400(self, isolated_store, patch_restricted) -> None:
         isolated_store.create(name="x", content="v1", slug="x")
         # over-long description
         resp = await api_artifact_update(
@@ -419,9 +424,7 @@ class TestUpdate:
             raise ArtifactError("refusing to write sensitive path: ~/.aws/credentials")
 
         monkeypatch.setattr(isolated_store, "update", _boom)
-        resp = await api_artifact_update(
-            _request(body={"content": "v2"}, match={"slug": "x"})
-        )
+        resp = await api_artifact_update(_request(body={"content": "v2"}, match={"slug": "x"}))
         assert resp.status == 500
         assert "sensitive path" in _json_body(resp)["error"]
 
@@ -443,9 +446,7 @@ class TestDelete:
     @pytest.mark.asyncio
     async def test_restricted_denied(self, isolated_store, patch_restricted) -> None:
         isolated_store.create(name="x", content="a", slug="x")
-        resp = await api_artifact_delete(
-            _request(match={"slug": "x"}, restricted=True)
-        )
+        resp = await api_artifact_delete(_request(match={"slug": "x"}, restricted=True))
         assert resp.status == 403
 
     @pytest.mark.asyncio
@@ -473,9 +474,7 @@ class TestDelete:
 
 class TestVersions:
     @pytest.mark.asyncio
-    async def test_lists_versions(
-        self, isolated_store, patch_restricted
-    ) -> None:
+    async def test_lists_versions(self, isolated_store, patch_restricted) -> None:
         isolated_store.create(name="x", content="v1", slug="x")
         isolated_store.update("x", content="v2", snapshot=True)
         resp = await api_artifact_versions(_request(match={"slug": "x"}))
@@ -483,35 +482,23 @@ class TestVersions:
         assert _json_body(resp) == {"slug": "x", "versions": [1, 2]}
 
     @pytest.mark.asyncio
-    async def test_specific_version(
-        self, isolated_store, patch_restricted
-    ) -> None:
+    async def test_specific_version(self, isolated_store, patch_restricted) -> None:
         isolated_store.create(name="x", content="v1", slug="x")
         isolated_store.update("x", content="v2")
-        resp = await api_artifact_version_detail(
-            _request(match={"slug": "x", "version": "1"})
-        )
+        resp = await api_artifact_version_detail(_request(match={"slug": "x", "version": "1"}))
         body = _json_body(resp)
         assert body["content"] == "v1"
 
     @pytest.mark.asyncio
-    async def test_invalid_version_returns_400(
-        self, isolated_store, patch_restricted
-    ) -> None:
+    async def test_invalid_version_returns_400(self, isolated_store, patch_restricted) -> None:
         isolated_store.create(name="x", content="v1", slug="x")
-        resp = await api_artifact_version_detail(
-            _request(match={"slug": "x", "version": "abc"})
-        )
+        resp = await api_artifact_version_detail(_request(match={"slug": "x", "version": "abc"}))
         assert resp.status == 400
 
     @pytest.mark.asyncio
-    async def test_out_of_range_404(
-        self, isolated_store, patch_restricted
-    ) -> None:
+    async def test_out_of_range_404(self, isolated_store, patch_restricted) -> None:
         isolated_store.create(name="x", content="v1", slug="x")
-        resp = await api_artifact_version_detail(
-            _request(match={"slug": "x", "version": "99"})
-        )
+        resp = await api_artifact_version_detail(_request(match={"slug": "x", "version": "99"}))
         assert resp.status == 404
 
 
@@ -577,9 +564,7 @@ class TestRecordEvent:
         assert _json_body(resp)["event"]["by"] == "agent"
 
     @pytest.mark.asyncio
-    async def test_dashboard_ui_session_dropped(
-        self, isolated_store, patch_restricted
-    ) -> None:
+    async def test_dashboard_ui_session_dropped(self, isolated_store, patch_restricted) -> None:
         # Browser dashboard sends X-Session-Key="dashboard:ui" as a default
         # for non-chat-scoped requests. That literal isn't a real slot key
         # and would mislead the activity timeline if recorded — the handler
@@ -599,9 +584,7 @@ class TestRecordEvent:
         assert "session_id" not in _json_body(resp)["event"]
 
     @pytest.mark.asyncio
-    async def test_real_session_key_recorded(
-        self, isolated_store, patch_restricted
-    ) -> None:
+    async def test_real_session_key_recorded(self, isolated_store, patch_restricted) -> None:
         from kiro_claw.dashboard.handlers.artifacts import api_artifact_record_event
 
         isolated_store.create(name="X", content="<div>x</div>", slug="x", kind="widget")
@@ -629,14 +612,10 @@ class TestRecordEvent:
                     body={"type": bad_type},
                 )
             )
-            assert resp.status == 400, (
-                f"expected 400 for type={bad_type!r}, got {resp.status}"
-            )
+            assert resp.status == 400, f"expected 400 for type={bad_type!r}, got {resp.status}"
 
     @pytest.mark.asyncio
-    async def test_unknown_slug_returns_404(
-        self, isolated_store, patch_restricted
-    ) -> None:
+    async def test_unknown_slug_returns_404(self, isolated_store, patch_restricted) -> None:
         from kiro_claw.dashboard.handlers.artifacts import api_artifact_record_event
 
         resp = await api_artifact_record_event(
@@ -648,9 +627,7 @@ class TestRecordEvent:
         assert resp.status == 404
 
     @pytest.mark.asyncio
-    async def test_restricted_session_forbidden(
-        self, isolated_store, patch_restricted
-    ) -> None:
+    async def test_restricted_session_forbidden(self, isolated_store, patch_restricted) -> None:
         # Appending events mutates meta.json, so a restricted session must
         # be rejected with 403 like the other mutation endpoints — it must
         # not be able to flood an artifact's event log.
@@ -680,8 +657,11 @@ class TestRecordEvent:
 
         isolated_store.create(name="X", content="<div>x</div>", slug="x", kind="widget")
         isolated_store.update(
-            "x", content="<div>v2</div>", session_id="chat-9-1779995123",
-            actor="agent", snapshot=True,
+            "x",
+            content="<div>v2</div>",
+            session_id="chat-9-1779995123",
+            actor="agent",
+            snapshot=True,
         )
         resp = await api_artifact_record_event(
             _request(

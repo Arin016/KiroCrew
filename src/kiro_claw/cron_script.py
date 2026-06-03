@@ -43,11 +43,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class Skip(Exception):
+class SkipError(Exception):
     """Abort this tick silently. Cron fires again next interval."""
 
 
-class Done(Exception):
+class DoneError(Exception):
     """Complete the cron job. Job is removed from the schedule.
 
     Use ctx.notify() before raising Done() to deliver a message.
@@ -58,7 +58,7 @@ class Done(Exception):
         super().__init__(message)
 
 
-class Report(Exception):
+class ReportError(Exception):
     """Deliver a message but keep the job running.
 
     Use for long-lived monitors that need to report multiple times.
@@ -67,6 +67,14 @@ class Report(Exception):
     def __init__(self, message: str = ""):
         self.message = message
         super().__init__(message)
+
+
+# Backward-compat aliases: Skip/Done/Report are the public API used by
+# user-authored cron scripts. Renamed to *Error for flake8 N818; aliases
+# preserve the existing import/raise surface with zero behavior change.
+Skip = SkipError
+Done = DoneError
+Report = ReportError
 
 
 @dataclass

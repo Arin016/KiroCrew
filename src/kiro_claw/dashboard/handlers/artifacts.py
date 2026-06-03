@@ -30,9 +30,9 @@ from aiohttp import web
 
 from kiro_claw import sel as _sel_mod
 from kiro_claw.artifacts import (
-    ArtifactAlreadyExists,
+    ArtifactAlreadyExistsError,
     ArtifactError,
-    ArtifactNotFound,
+    ArtifactNotFoundError,
     ArtifactValidationError,
     get_default_store,
 )
@@ -66,9 +66,7 @@ async def _read_json_body(request: web.Request) -> dict[str, Any]:
     """Read a JSON body, capped at ``_MAX_BODY_BYTES``."""
     raw = await request.read()
     if len(raw) > _MAX_BODY_BYTES:
-        raise ArtifactValidationError(
-            f"request body exceeds {_MAX_BODY_BYTES} bytes"
-        )
+        raise ArtifactValidationError(f"request body exceeds {_MAX_BODY_BYTES} bytes")
     if not raw:
         return {}
     try:
@@ -150,8 +148,11 @@ async def api_artifacts_list(request: web.Request) -> web.Response:
     source_path = request.query.get("source_path") or None
     try:
         items = get_default_store().list(
-            tag=tag, kind=kind, name_contains=q,
-            source=source, source_path=source_path,
+            tag=tag,
+            kind=kind,
+            name_contains=q,
+            source=source,
+            source_path=source_path,
         )
     except (ArtifactError, OSError) as exc:
         logger.warning("artifact list failed: %s", exc)
@@ -256,7 +257,7 @@ async def api_artifacts_create(request: web.Request) -> web.Response:
             error=str(exc),
         )
         return _err(str(exc))
-    except ArtifactAlreadyExists as exc:
+    except ArtifactAlreadyExistsError as exc:
         # Explicit slug collision — semantically a 409 Conflict (the resource
         # already exists). Distinct from base ArtifactError fallback below
         # which catches store-level refusals (sensitive-path, write failure)
@@ -298,7 +299,7 @@ async def api_artifact_detail(request: web.Request) -> web.Response:
     slug = request.match_info.get("slug", "")
     try:
         art = get_default_store().get(slug)
-    except ArtifactNotFound as exc:
+    except ArtifactNotFoundError as exc:
         return _err(str(exc), status=404)
     except ArtifactValidationError as exc:
         return _err(str(exc))
@@ -385,7 +386,7 @@ async def api_artifact_update(request: web.Request) -> web.Response:
         # tool / dashboard caller always sees a populated content field.
         if art.content is None:
             art = get_default_store().get(slug)
-    except ArtifactNotFound as exc:
+    except ArtifactNotFoundError as exc:
         _audit(
             tool="artifact_update",
             request=request,
@@ -404,7 +405,7 @@ async def api_artifact_update(request: web.Request) -> web.Response:
     except ArtifactError as exc:
         # Catches the base class fallback — store._write_text() raises
         # ArtifactError("refusing to write sensitive path: ...") which is
-        # neither ArtifactNotFound nor ArtifactValidationError. Without this
+        # neither ArtifactNotFoundError nor ArtifactValidationError. Without this
         # branch the request would 500 with no audit trail.
         _audit(
             tool="artifact_update",
@@ -437,7 +438,7 @@ async def api_artifact_delete(request: web.Request) -> web.Response:
     slug = request.match_info.get("slug", "")
     try:
         get_default_store().delete(slug)
-    except ArtifactNotFound as exc:
+    except ArtifactNotFoundError as exc:
         _audit(
             tool="artifact_delete",
             request=request,
@@ -483,7 +484,7 @@ async def api_artifact_versions(request: web.Request) -> web.Response:
     slug = request.match_info.get("slug", "")
     try:
         versions = get_default_store().list_versions(slug)
-    except ArtifactNotFound as exc:
+    except ArtifactNotFoundError as exc:
         return _err(str(exc), status=404)
     except ArtifactValidationError as exc:
         return _err(str(exc))
@@ -499,7 +500,7 @@ async def api_artifact_version_detail(request: web.Request) -> web.Response:
         return _err(f"invalid version: {version_str}")
     try:
         art = get_default_store().get(slug, version=version)
-    except ArtifactNotFound as exc:
+    except ArtifactNotFoundError as exc:
         return _err(str(exc), status=404)
     except ArtifactValidationError as exc:
         return _err(str(exc))
@@ -520,7 +521,7 @@ async def api_artifact_events(request: web.Request) -> web.Response:
     slug = request.match_info.get("slug", "")
     try:
         art = get_default_store().get(slug)
-    except ArtifactNotFound as exc:
+    except ArtifactNotFoundError as exc:
         return _err(str(exc), status=404)
     except ArtifactValidationError as exc:
         return _err(str(exc))
@@ -601,7 +602,7 @@ async def api_artifact_record_event(request: web.Request) -> web.Response:
             message_ts=message_ts,
             widget_index=widget_index,
         )
-    except ArtifactNotFound as exc:
+    except ArtifactNotFoundError as exc:
         return _err(str(exc), status=404)
     except ArtifactValidationError as exc:
         return _err(str(exc))
