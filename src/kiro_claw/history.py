@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kiro_claw.config.loader import config_dir
+from kiro_claw.llm_helpers import ToolApprovalPolicy, stream_and_collect_json
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
 from kiro_claw.session import BACKGROUND_KEY
@@ -1539,14 +1540,20 @@ class HistoryConsolidator:
             logger.warning("LLM consolidation skipped — no session manager")
             return None
 
-        from kiro_claw.llm_helpers import stream_and_collect_json
-
         session_key = BACKGROUND_KEY
         try:
             client, _is_new, _resumed = await self._sessions.get_or_create(
                 session_key, agent="kiroclaw-lite"
             )
-            return await stream_and_collect_json(client, prompt)
+            # Reject all tools: this is a text/JSON-only generation turn. kiro
+            # scopes the kiroclaw-lite session to tools:[] via set_mode, but the
+            # Claude Code backend skips set_mode and injects the full
+            # kiroclaw-core/cron toolset — without REJECT_ALL a background
+            # consolidation turn could fire side-effecting tools (send_message,
+            # learn_add, spawn_run). REJECT_ALL keeps both providers tool-free.
+            return await stream_and_collect_json(
+                client, prompt, approval_policy=ToolApprovalPolicy.REJECT_ALL
+            )
         except Exception:
             logger.warning("LLM consolidation call failed", exc_info=True)
             return None

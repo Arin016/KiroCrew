@@ -683,15 +683,16 @@ class ContextBuilder:
         truncation of thread history.  Callers obtain it by awaiting
         ``compress_thread_history()`` before calling this method.
 
-        When ``provider_type="claude_code"``, thread history and critical
-        rules are skipped (CC manages its own context and output formatting).
-        Memory, skills, and lessons are still injected (KiroClaw-specific).
+        All providers — including ``provider_type="claude_code"`` — receive the
+        same injected context (critical rules, steering files, thread history,
+        memory, skills, lessons). This keeps Claude Code at parity with kiro so
+        dashboard/Slack UI contracts (diff blocks, OPTIONS buttons, file links)
+        and prior conversation context behave identically across providers.
 
         For custom agents (non-kiroclaw), skills and workspace identity
         are skipped — the agent loads its own via kiro-cli. Memory,
         lessons, critical rules, and hooks are injected for all agents.
         """
-        is_cc = provider_type == "claude_code"
         is_custom = agent and agent != "kiroclaw"
         parts: list[str] = []
 
@@ -703,10 +704,13 @@ class ContextBuilder:
         else:
             logger.debug("Building session context for kiroclaw agent")
 
-        # Critical rules: inject for ACP agents (diff rendering, OPTIONS buttons).
-        # CC provider handles its own output formatting via CLAUDE.md.
-        if not is_cc:
-            parts.append(_CRITICAL_RULES)
+        # Critical rules (diff rendering, OPTIONS buttons, absolute-path file
+        # links). These are dashboard/Slack UI contracts and apply to ALL
+        # providers — including Claude Code. The dashboard renders clickable
+        # input-box options only from the [OPTIONS: ...] text tag (see
+        # dashboard/state.py and the frontend AssistantMessage), so CC must be
+        # told to emit it too or the options never render.
+        parts.append(_CRITICAL_RULES)
 
         # Current date/time — inject for ALL agents so the LLM knows "today".
         # Honour KiroClawConfig.timezone (e.g. "Asia/Tokyo") so the LLM sees
@@ -764,17 +768,19 @@ class ContextBuilder:
                 parts.append(docs_ctx)
 
         # Steering files from agent config resources.
-        # kiro-cli injects these natively; dashboard must load explicitly.
-        # Skip for CC provider (manages its own context via CLAUDE.md).
-        if not is_custom and not is_cc:
+        # kiro-cli injects these natively; dashboard/CC must load explicitly.
+        # Inject for CC too so it sees the same .kiro/steering rules kiro does.
+        if not is_custom:
             steering_ctx = _load_steering_resources()
             if steering_ctx:
                 parts.append(steering_ctx)
 
         # Thread conversation history — highest priority context.
         # Use pre-computed LLM compression when available; fall back to truncation.
-        # Skip for CC provider (CC manages its own context natively).
-        if session_key and self.conversation_log and not resumed and not is_cc:
+        # Inject for CC too: a fresh dashboard/Slack session maps to a new CC
+        # subprocess with no in-process history, so the thread transcript must
+        # be supplied for parity with kiro (which gets it natively).
+        if session_key and self.conversation_log and not resumed:
             _history_header = (
                 "[THREAD CONVERSATION HISTORY — this is the PRIMARY context.\n"
                 "When the user says 'just now', 'earlier', 'the task', 'try again', "
@@ -974,15 +980,13 @@ class ContextBuilder:
             # Agent prompt goes BEFORE session context wrapper
             # so the LLM treats it as its identity, not background info.
             if is_cc:
-                # CC gets the KiroClaw persona prompt (identity, capabilities)
-                # but NOT the output format rules or kiro-specific references.
+                # CC gets the SAME KiroClaw persona prompt as kiro — including
+                # the Output Format rules (diff blocks, image embeds, OPTIONS)
+                # which are dashboard UI contracts, not kiro-specific. Only the
+                # kiro-cli *branding* references are rewritten to claude code.
                 try:
                     pp = _prompt_path(mode=mode)
                     agent_prompt = pp.read_text(encoding="utf-8")
-                    # Strip output format section — CC handles this itself
-                    agent_prompt = re.sub(
-                        r"## Output Format.*?(?=\n## |\Z)", "", agent_prompt, flags=re.DOTALL
-                    )
                     # Replace kiro-cli references with claude code equivalents
                     agent_prompt = agent_prompt.replace("kiro-cli", "claude code")
                     agent_prompt = re.sub(r"\bKiro\b", "Claude", agent_prompt)
@@ -1147,18 +1151,15 @@ class ContextBuilder:
         else:
             parts.append(text)
 
-        # Lightweight reminder for interactive choices — tool differs by provider
+        # Lightweight reminder for interactive choices. ALL providers (incl.
+        # Claude Code) use the [OPTIONS: ...] text tag — the dashboard/Slack UI
+        # renders clickable option buttons only from that tag. Steering CC to
+        # the AskUserQuestion tool instead left CC options unrendered.
         if interactive:
-            if provider_type == "claude_code":
-                parts.append(
-                    "\n\n(If presenting choices, use the AskUserQuestion tool to render interactive option buttons. "
-                    "Users can select an option or type a custom answer.)"
-                )
-            else:
-                parts.append(
-                    "\n\n(If presenting choices, end with [OPTIONS: choice1 | choice2 | choice3]. "
-                    "Users can select multiple options before submitting.)"
-                )
+            parts.append(
+                "\n\n(If presenting choices, end with [OPTIONS: choice1 | choice2 | choice3]. "
+                "Users can select multiple options before submitting.)"
+            )
 
         # Widget instructions live in the bundled `widgets` skill.
 

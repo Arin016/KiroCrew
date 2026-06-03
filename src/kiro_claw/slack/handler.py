@@ -2482,17 +2482,33 @@ async def handle_message(
                 logger.info("Permission request: tool=%s req_id=%s", event.title, event.request_id)
                 status_ctrl.pause_stall_watchdog()
                 task.await_approval()
-                await _ensure_stream_started()
-                if use_slack_stream:
-                    await slack.set_thread_status(channel, reply_ts, "Waiting for approval…")
-                    _status_dirty = True
-                    # Flush buffered text before approval pause
-                    if stream_buffer:
-                        stream_buffer, _ = strip_thinking_tags(
-                            stream_buffer, strip_whitespace=False
+                # The stream-prep Slack calls below run BEFORE _request_approval
+                # answers the permission. If any raises (rate-limit, network),
+                # the ACP permission request would be orphaned and the
+                # subprocess would wedge — reject it before propagating so the
+                # turn unblocks. _request_approval guards its own post failure.
+                try:
+                    await _ensure_stream_started()
+                    if use_slack_stream:
+                        await slack.set_thread_status(channel, reply_ts, "Waiting for approval…")
+                        _status_dirty = True
+                        # Flush buffered text before approval pause
+                        if stream_buffer:
+                            stream_buffer, _ = strip_thinking_tags(
+                                stream_buffer, strip_whitespace=False
+                            )
+                            await _append_stream(stream_buffer)
+                            stream_buffer = ""
+                except Exception:
+                    try:
+                        await client.reject_tool(event.request_id)
+                    except Exception:
+                        logger.warning(
+                            "Failed to reject tool %s after stream-prep error",
+                            event.request_id,
+                            exc_info=True,
                         )
-                        await _append_stream(stream_buffer)
-                        stream_buffer = ""
+                    raise
 
                 outcome = await _request_approval(
                     slack,
@@ -2932,7 +2948,24 @@ async def _request_approval(
 ) -> str:
     """Post approval buttons, wait for click, return 'approved' or 'rejected'."""
     blocks = _build_approval_blocks(event, is_dm=is_dm)
-    approval_ts = await slack.post_blocks(channel, blocks, "Manual approval required", thread_ts)
+    # If posting the approval prompt fails, the ACP permission request would
+    # otherwise be left unanswered — the subprocess blocks forever and every
+    # later turn wedges behind it. Reject the tool before re-raising so the
+    # turn unblocks and the caller's error path can run.
+    try:
+        approval_ts = await slack.post_blocks(
+            channel, blocks, "Manual approval required", thread_ts
+        )
+    except Exception:
+        try:
+            await provider.reject_tool(event.request_id)
+        except Exception:
+            logger.warning(
+                "Failed to reject tool %s after approval post failure",
+                event.request_id,
+                exc_info=True,
+            )
+        raise
 
     key = f"{channel}:{approval_ts}"
     pending = _PendingApproval(provider, event.request_id, session_key)
@@ -3145,13 +3178,19 @@ def _build_approval_blocks(event: LLMEvent, is_dm: bool = True, source: str = ""
     to limit blast radius — it escalates permissions for the session).
     YOLO is owner-only via ``!yolo on`` command — no button.
     """
+    # Slack Block Kit requires button `value` to be a string. ACP backends
+    # (e.g. claude-agent-acp) issue integer JSON-RPC request ids, so coerce —
+    # an int value makes Slack reject the whole post with `invalid_blocks`.
+    # The interactive handler matches on channel:msg_ts and acts on the stored
+    # `_PendingApproval.request_id`, so the button value itself is display-only.
+    req_value = str(event.request_id)
     buttons: list[dict] = [
         {
             "type": "button",
             "text": {"type": "plain_text", "text": "Approve"},
             "style": "primary",
             "action_id": _ACTION_APPROVE,
-            "value": event.request_id,
+            "value": req_value,
         },
     ]
     if is_dm:
@@ -3160,7 +3199,7 @@ def _build_approval_blocks(event: LLMEvent, is_dm: bool = True, source: str = ""
                 "type": "button",
                 "text": {"type": "plain_text", "text": "Trust session"},
                 "action_id": _ACTION_TRUST,
-                "value": event.request_id,
+                "value": req_value,
             },
         )
     buttons.append(
@@ -3169,7 +3208,7 @@ def _build_approval_blocks(event: LLMEvent, is_dm: bool = True, source: str = ""
             "text": {"type": "plain_text", "text": "Reject"},
             "style": "danger",
             "action_id": _ACTION_REJECT,
-            "value": event.request_id,
+            "value": req_value,
         },
     )
 

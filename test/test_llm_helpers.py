@@ -56,6 +56,43 @@ class TestParseLlmJson:
         text = '  \n  {"a": 1}  \n  '
         assert parse_llm_json(text) == {"a": 1}
 
+    def test_leading_prose_before_json(self) -> None:
+        # CC's chatty/un-scoped background session may prepend prose. The parser
+        # must still extract the JSON object — otherwise consolidation silently
+        # no-ops under the Claude Code provider (kiro's no-tools lite agent emits
+        # bare JSON, CC does not).
+        text = 'Sure! Here is the consolidated memory:\n{"key": "value"}'
+        assert parse_llm_json(text) == {"key": "value"}
+
+    def test_trailing_prose_after_json(self) -> None:
+        text = '{"key": "value"}\nLet me know if you need anything else.'
+        assert parse_llm_json(text) == {"key": "value"}
+
+    def test_prose_then_fenced_json(self) -> None:
+        text = 'Here you go:\n```json\n{"key": "value"}\n```'
+        assert parse_llm_json(text) == {"key": "value"}
+
+    def test_nested_object_with_surrounding_prose(self) -> None:
+        text = 'Result:\n{"a": {"b": [1, 2]}, "c": "x"}\nDone.'
+        assert parse_llm_json(text) == {"a": {"b": [1, 2]}, "c": "x"}
+
+    def test_brace_inside_string_not_confused(self) -> None:
+        text = 'Note:\n{"msg": "use {curly} braces"}\nthanks'
+        assert parse_llm_json(text) == {"msg": "use {curly} braces"}
+
+    def test_stray_structural_brace_in_prose_skipped(self) -> None:
+        # A non-JSON brace span in the preamble must NOT defeat extraction of
+        # the real trailing JSON (the first-match-only scanner regressed here).
+        assert parse_llm_json('Use {placeholder} then: {"a": 1}') == {"a": 1}
+        assert parse_llm_json(
+            'schema is {field: value}. Here:\n{"prefs": ["x"]}'
+        ) == {"prefs": ["x"]}
+
+    def test_dict_request_does_not_dig_into_array(self) -> None:
+        # dict expected but only an array-of-objects present → None, NOT the
+        # nested object dug out of the array.
+        assert parse_llm_json('here [1, {"a": 2}] done') is None
+
 
 class TestParseLlmJsonList:
     def test_valid_list(self) -> None:

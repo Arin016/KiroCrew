@@ -660,6 +660,108 @@ class TestToolApproval:
         # Total length should not exceed limit (plus markdown fences)
         assert len(text) <= _SLACK_SECTION_TEXT_LIMIT + 10  # allow for ```
 
+    @pytest.mark.asyncio
+    async def test_approval_blocks_int_request_id_value_is_string(self):
+        """ACP backends issue integer JSON-RPC request ids; Slack Block Kit
+        requires button ``value`` to be a string. Coerce so the post is not
+        rejected with ``invalid_blocks``."""
+        from kiro_claw.slack.handler import _build_approval_blocks
+
+        # claude-agent-acp issues integer request ids (req=0, 1, ...)
+        event = LLMEvent(
+            kind="permission_request",
+            request_id=0,
+            title="Bash",
+            options=[],
+        )
+        blocks = _build_approval_blocks(event, is_dm=True)
+        actions = next(b for b in blocks if b["type"] == "actions")
+        # Every button value MUST be a string (Slack rejects ints)
+        for button in actions["elements"]:
+            assert isinstance(button["value"], str), (
+                f"button {button['action_id']} value is "
+                f"{type(button['value']).__name__}, not str"
+            )
+        # And it must round-trip to the original id
+        assert all(b["value"] == "0" for b in actions["elements"])
+
+    @pytest.mark.asyncio
+    async def test_request_approval_rejects_tool_when_post_fails(self):
+        """If posting the approval message fails, the pending ACP permission
+        request MUST be rejected — otherwise the subprocess stays blocked on
+        the unanswered request and every later turn wedges behind it."""
+        from kiro_claw.slack.handler import _request_approval
+
+        provider = FakeProvider()
+
+        class _FailingSlack(MockSlackClient):
+            async def post_blocks(self, *a, **k):
+                raise RuntimeError("invalid_blocks")
+
+        slack = _FailingSlack()
+        event = LLMEvent(
+            kind="permission_request",
+            request_id=0,  # ACP integer id
+            title="Bash",
+            options=[],
+        )
+
+        # Posting fails; the call must not leak the exception untreated AND
+        # must reject the tool so the ACP turn is unblocked.
+        with pytest.raises(RuntimeError):
+            await _request_approval(slack, provider, "D1", "ts1", event, "sess1")
+
+        assert provider.rejected == [0], (
+            "tool was not rejected after approval post failed — "
+            "ACP subprocess would wedge"
+        )
+
+    @pytest.mark.asyncio
+    async def test_permission_rejected_when_stream_prep_fails(self):
+        """If a Slack API call BETWEEN the permission event and _request_approval
+        raises (e.g. set_thread_status), the in-flight ACP permission request
+        MUST still be rejected — otherwise the subprocess wedges on the
+        unanswered request and every later turn on the thread stalls."""
+        set_owner_id("U1")
+        set_allowed_users({"U1"})
+
+        class _StreamPrepFailSlack(MockSlackClient):
+            async def set_thread_status(self, channel, ts, status):
+                # Fail ONLY the approval-prep status call (between the
+                # permission event and _request_approval), isolating the
+                # orphan-permission path — not the initial "working" indicator
+                # or the final cleanup.
+                if "approval" in status.lower():
+                    raise RuntimeError("slack rate limited")
+                await super().set_thread_status(channel, ts, status)
+
+        slack = _StreamPrepFailSlack()
+        # Enable streaming so the "Waiting for approval…" set_thread_status call
+        # (the guarded pre-approval path) actually runs and raises.
+        slack._stream_enabled = True
+        provider = FakeProvider(
+            [
+                LLMEvent(
+                    kind="permission_request",
+                    request_id=7,
+                    title="Bash",
+                    options=[],
+                ),
+            ]
+        )
+        sessions = FakeSessionManager(provider)
+
+        # handle_message swallows the error internally (generic except), so we
+        # don't assert a raise here — we assert the permission was answered.
+        await handle_message(
+            slack, sessions, "D1", "run it", None, "msg1", "U1", approval_mode="interactive"
+        )
+
+        assert 7 in provider.rejected, (
+            "permission request was orphaned when stream-prep failed — "
+            "ACP subprocess would wedge until timeout"
+        )
+
 
 class TestAllowedUsers:
     """Tests for allowed-user authorization in handle_interaction."""

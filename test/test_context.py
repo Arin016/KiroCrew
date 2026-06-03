@@ -84,6 +84,49 @@ class TestContextBuilder:
         ctx = builder.build_session_context()
         assert "[CRITICAL RULES" in ctx
         assert "diff" in ctx
+        # ACP agents get the OPTIONS-button UI contract too
+        assert "[OPTIONS:" in ctx
+
+    def test_cc_provider_has_full_parity_with_kiro(self, tmp_path):
+        """Full parity: anything injected for kiro ACP must also be injected for
+        the Claude Code provider. The original bug — CC's clickable input-box
+        options never rendered — was caused by CC being steered to the
+        AskUserQuestion tool and skipping _CRITICAL_RULES, so the [OPTIONS: ...]
+        tag (the only thing the dashboard/Slack UI renders) was never emitted.
+        CC must get the SAME critical rules as kiro.
+        """
+        builder = ContextBuilder(
+            memory=MemoryStore(workspace=tmp_path / "ws"),
+            skills=SkillsLoader(skills_path=tmp_path / "skills", install_builtins=False),
+            lessons=LessonStore(base_dir=tmp_path),
+        )
+        cc_ctx = builder.build_session_context(provider_type="claude_code")
+        acp_ctx = builder.build_session_context(provider_type="acp")
+        # CC gets the SAME critical-rules block as kiro (OPTIONS, diff, paths)
+        assert "[CRITICAL RULES" in cc_ctx, "CC missing critical rules"
+        assert "[OPTIONS:" in cc_ctx, "CC missing OPTIONS-button instruction"
+        assert "diff" in cc_ctx, "CC missing diff-block instruction"
+        assert "absolute path" in cc_ctx, "CC missing absolute-path file-link rule"
+        # Parity: both providers carry the critical-rules block.
+        assert ("[CRITICAL RULES" in cc_ctx) == ("[CRITICAL RULES" in acp_ctx)
+
+    def test_cc_interactive_reminder_uses_options_tag(self, tmp_path):
+        """The interactive-choices reminder must tell CC to use [OPTIONS: ...]
+        (the rendered tag), NOT the AskUserQuestion tool (which the UI does not
+        render as clickable input-box options)."""
+        builder = ContextBuilder(
+            memory=MemoryStore(workspace=tmp_path / "ws"),
+            skills=SkillsLoader(skills_path=tmp_path / "skills", install_builtins=False),
+            lessons=LessonStore(base_dir=tmp_path),
+        )
+        msg, _ = builder.build_message(
+            "pick one",
+            is_new_session=False,
+            interactive=True,
+            provider_type="claude_code",
+        )
+        assert "[OPTIONS:" in msg, "CC interactive reminder must use the [OPTIONS:] tag"
+        assert "AskUserQuestion" not in msg, "CC must not be steered to AskUserQuestion for options"
 
     def test_memory_injected(self, tmp_path):
         ws = tmp_path / "ws"

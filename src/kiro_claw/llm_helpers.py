@@ -214,8 +214,58 @@ async def _resolve_permission(
 # ── JSON Parsing ──
 
 
+_JSON_DECODER = json.JSONDecoder()
+
+
+def _extract_json_of_type(text: str, expected_type: type) -> dict | list | None:
+    """Extract the first top-level JSON value of *expected_type* embedded in prose.
+
+    Scans successive ``{`` (dict) or ``[`` (list) offsets and uses the stdlib
+    ``raw_decode`` to parse a complete JSON value at each — this validates the
+    full JSON grammar and correctly handles nesting and string escapes. Returns
+    the first value that matches *expected_type*, or None.
+
+    Scanning successive offsets (rather than committing to the first delimiter)
+    is what makes this robust to a stray structural brace in the prose preamble
+    (e.g. ``"use {placeholder}: {\\"a\\": 1}"``). Only TOP-LEVEL matches count: a
+    ``{`` nested inside an earlier-starting ``[ ... ]`` is consumed by that
+    array's decode, so a dict request never digs a nested object out of a
+    surrounding array.
+    """
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        # Only attempt a decode at a JSON container start. Scanning BOTH
+        # delimiters in positional order (not just the expected one) is what
+        # prevents digging a nested object out of a surrounding array: a
+        # leading "[ ... ]" is decoded as a list, found to be the wrong type,
+        # and skipped past in full — so a dict request on "[1, {\\"a\\":2}]"
+        # returns None rather than the inner {"a":2}.
+        if ch not in "{[":
+            i += 1
+            continue
+        try:
+            data, end = _JSON_DECODER.raw_decode(text, i)
+        except json.JSONDecodeError:
+            i += 1
+            continue
+        if isinstance(data, expected_type):
+            return data  # type: ignore[return-value]
+        # Valid JSON of the wrong type — skip past its full extent.
+        i = end
+    return None
+
+
 def _parse_llm(text: str, expected_type: type) -> dict | list | None:
-    """Parse JSON from LLM output, stripping markdown fences if present."""
+    """Parse JSON from LLM output, tolerating fences and surrounding prose.
+
+    Background turns (e.g. memory consolidation) run on a shared lite session.
+    On the Claude Code backend that session is not tool/persona-scoped the way
+    kiro's no-tools lite agent is, so the model may wrap the JSON in prose. To
+    keep consolidation from silently no-opping, fall back to extracting the
+    first top-level JSON value of the expected type when a strict parse fails.
+    """
     text = text.strip()
     if not text:
         return None
@@ -227,8 +277,12 @@ def _parse_llm(text: str, expected_type: type) -> dict | list | None:
             return data  # type: ignore[return-value]
         return None
     except json.JSONDecodeError:
-        logger.debug("Failed to parse LLM JSON: %.200s", text)
-        return None
+        # Fallback: extract the first top-level JSON value of the expected type
+        # embedded in prose (scans successive delimiters, validates via stdlib).
+        result = _extract_json_of_type(text, expected_type)
+        if result is None:
+            logger.debug("Failed to parse LLM JSON: %.200s", text)
+        return result
 
 
 def parse_llm_json(text: str) -> dict | None:

@@ -776,8 +776,23 @@ class TestRehydrateSlotFromHistory:
 
     def test_rehydrates_slot_with_metadata_and_messages(self, tmp_path, monkeypatch):
         """Rehydrate restores title, agent, model, memory_mode and message history
-        from the persisted JSONL — not just an empty shell."""
+        from the persisted JSONL — not just an empty shell.
+
+        Pin the config provider so the assertion is deterministic: rehydration
+        canonicalizes the stored model per-provider via
+        ``model_registry.canonicalize_for_provider`` (so a raw provider id like
+        ``claude-opus-4.7`` maps back to the canonical dropdown key for CC). On
+        a kiro provider it is a no-op; previously this test read the ambient
+        on-disk config and so passed or failed depending on the dev machine.
+        """
+        from kiro_claw.config.loader import KiroClawConfig
+
         monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        # Force a kiro (acp) provider so canonicalize_for_provider is a no-op and
+        # the stored model round-trips unchanged, independent of the dev config.
+        _acp_cfg = KiroClawConfig()
+        _acp_cfg.agent.provider = "acp"
+        monkeypatch.setattr(KiroClawConfig, "load", classmethod(lambda cls: _acp_cfg))
         _write_session(
             tmp_path,
             "dashboard_originchat",
@@ -801,6 +816,29 @@ class TestRehydrateSlotFromHistory:
         assert slot.messages[1]["content"] == "reply"
         # Registered in _slots so subsequent send_message calls hit the hot path.
         assert state._slots["originchat"] is slot
+
+    def test_rehydrate_canonicalizes_model_for_claude_code(self, tmp_path, monkeypatch):
+        """For a claude_code session, a stored raw provider id is mapped back to
+        the canonical registry key so it matches the canonical-keyed dropdown."""
+        from kiro_claw.config.loader import KiroClawConfig
+
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        _cc_cfg = KiroClawConfig()
+        _cc_cfg.agent.provider = "claude_code"
+        monkeypatch.setattr(KiroClawConfig, "load", classmethod(lambda cls: _cc_cfg))
+        _write_session(
+            tmp_path,
+            "dashboard_ccchat",
+            [{"role": "user", "content": "hi", "ts": "2026-03-23T10:00:00"}],
+            meta={"title": "CC", "model": "claude-opus-4.7"},
+        )
+        from kiro_claw.dashboard.chat import _rehydrate_slot_from_history
+
+        state = _make_state(tmp_path)
+        slot = _rehydrate_slot_from_history(state, "ccchat")
+        assert slot is not None
+        # Raw provider id canonicalized to the registry key for CC.
+        assert slot.model == "opus-4.7-1m"
 
     def test_rehydrates_incognito_memory_mode(self, tmp_path, monkeypatch):
         """Rehydrated slot preserves non-persistent memory_mode from metadata.

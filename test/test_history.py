@@ -1027,6 +1027,45 @@ class TestArchiveOnlyDropped:
 # ---------------------------------------------------------------------------
 
 
+class TestConsolidationToolPolicy:
+    """The background consolidation LLM turn must run tool-free on ALL providers.
+
+    kiro scopes the kiroclaw-lite session to tools:[] via set_mode, but the
+    Claude Code backend skips set_mode and injects the full kiroclaw-core/cron
+    toolset (auto-approved). To keep parity — and prevent a background turn from
+    firing side-effecting tools like send_message/learn_add — _call_llm must
+    reject all tools regardless of provider.
+    """
+
+    @pytest.mark.asyncio
+    async def test_call_llm_rejects_tools(self):
+        from kiro_claw.llm_helpers import ToolApprovalPolicy
+
+        provider = MagicMock()
+        sessions = MagicMock()
+        sessions.get_or_create = AsyncMock(return_value=(provider, False, False))
+        sessions.release = MagicMock()
+        sessions.recycle_background = AsyncMock()
+
+        consolidator = HistoryConsolidator(log=MagicMock(), memory=MagicMock(), sessions=sessions)
+
+        captured = {}
+
+        async def _fake_scj(prov, prompt, *, approval_policy=None, **kw):
+            captured["approval_policy"] = approval_policy
+            return {"ok": True}
+
+        # Patch where it is USED — history.py imports the symbol at module top.
+        with patch("kiro_claw.history.stream_and_collect_json", side_effect=_fake_scj):
+            result = await consolidator._call_llm("some prompt")
+
+        assert result == {"ok": True}
+        assert captured["approval_policy"] == ToolApprovalPolicy.REJECT_ALL, (
+            "background consolidation turn must reject tools (parity with kiro's "
+            "tool-free lite agent; CC injects the full toolset otherwise)"
+        )
+
+
 class TestConsolidationOffset:
     """Verify _prefs_offset only advances when _consolidate succeeds (Mesh-611)."""
 
