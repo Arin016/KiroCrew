@@ -94,9 +94,7 @@ def _doctor_ollama_install(issues: list[str]) -> None:
                 print("  brew:        ⚠️  timed out checking formula")
             else:
                 if brew_formula_ok:
-                    print(
-                        "  brew:        ✅ (enable will run: brew install ollama)"
-                    )
+                    print("  brew:        ✅ (enable will run: brew install ollama)")
                 else:
                     print("  brew:        ⚠️  formula not available; will try curl fallback")
         if not brew_formula_ok:
@@ -142,7 +140,9 @@ def _doctor() -> None:
         try:
             r = subprocess.run(
                 [KIRO_CLI_BIN, "whoami"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if r.returncode == 0:
                 print("  kiro login:  ✅")
@@ -334,7 +334,8 @@ def _doctor() -> None:
             try:
                 subprocess.run(
                     [str(venv_py), "-c", "import websockets, slack_sdk, aiohttp"],
-                    capture_output=True, timeout=5,
+                    capture_output=True,
+                    timeout=5,
                 ).check_returncode()
                 print("  deps:        ✅ websockets, slack_sdk, aiohttp available")
             except Exception:
@@ -353,6 +354,22 @@ def _doctor() -> None:
             print("  deps:        ❌ missing modules (websockets/slack_sdk/aiohttp)")
             print("               Fix: pip install -e .")
             issues.append("python deps")
+
+    # SQLite FTS5 — required by memory + knowledge full-text search. On macOS
+    # and Linux aarch64 we rely on the host sqlite3 build (pysqlite3-binary is
+    # x86_64-Linux only); a build without FTS5 breaks memory init.
+    try:
+        from kiro_claw._sqlite_compat import fts5_available
+
+        if fts5_available():
+            print("  sqlite fts5: ✅ available")
+        else:
+            print("  sqlite fts5: ❌ missing (memory/knowledge search will fail)")
+            print("               Fix: pip install pysqlite3-binary, or use a")
+            print("               Python whose SQLite was built with FTS5.")
+            issues.append("sqlite fts5")
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"  sqlite fts5: ⚠️  could not check ({exc})")
 
     # ── Ollama / Vector Memory ──
     print("\nVector Memory (Ollama)")

@@ -17,11 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-try:
-    import pysqlite3 as sqlite3
-except ImportError:
-    import sqlite3
-
+from kiro_claw._sqlite_compat import FTS5_UNAVAILABLE_HINT, fts5_available, sqlite3
 from kiro_claw.config.loader import config_dir
 
 if TYPE_CHECKING:
@@ -288,13 +284,17 @@ class MemoryStore:
 
         # Semantic memory (structured key-value pairs from vector_memory.py)
         if self._vector_store:
-            semantic_ctx = self._vector_store.get_semantic_context(query_text=query, cap=semantic_cap)
+            semantic_ctx = self._vector_store.get_semantic_context(
+                query_text=query, cap=semantic_cap
+            )
             if semantic_ctx:
                 parts.append(semantic_ctx)
 
             # Episodic memory (relevant past conversation fragments)
             if query:
-                episodic_ctx = self._vector_store.get_episodic_context(query_text=query, cap=episodic_cap)
+                episodic_ctx = self._vector_store.get_episodic_context(
+                    query_text=query, cap=episodic_cap
+                )
                 if episodic_ctx:
                     parts.append(episodic_ctx)
 
@@ -315,6 +315,10 @@ class MemoryStore:
         try:
             return self._try_create_db()
         except Exception as e:
+            # If FTS5 itself is missing from this sqlite3 build, deleting and
+            # retrying loops on the same failure — fail loudly with a fix hint.
+            if not fts5_available():
+                raise RuntimeError(FTS5_UNAVAILABLE_HINT) from e
             # Self-healing: delete corrupted DB and retry
             logger.warning("FTS index init failed (%s), deleting and retrying", e)
             for suffix in ("", "-wal", "-shm"):

@@ -33,6 +33,32 @@ electron-builder configuration lives in
 - mac target: `dmg` (category `public.app-category.developer-tools`)
 - linux target: `AppImage` (category `Development`)
 
+### Builds are host-architecture-only — one build per target arch
+
+> **Important:** `make desktop` produces an installer for the **host OS *and*
+> host CPU architecture only.** It is not a universal/fat binary.
+
+The PyInstaller spec uses `target_arch=None` (honors the host arch) and the
+electron-builder config sets no `arch` key (defaults to the host arch). The
+frozen backend's architecture is therefore **coupled** to the installer's — you
+cannot mix (e.g. an arm64 DMG carrying an x86_64 backend). To cover all four
+supported targets you must run the build on a machine of each architecture:
+
+| Target | Build host | Produces |
+|--------|-----------|----------|
+| macOS arm64 (Apple Silicon) | Apple Silicon Mac | arm64 `.dmg` |
+| macOS x86_64 (Intel) | Intel Mac (or `arch -x86_64` under Rosetta with an x86_64 toolchain) | x86_64 `.dmg` |
+| Linux x86_64 | x86_64 Linux | x86_64 `.AppImage` |
+| Linux aarch64 (Graviton/ARM) | aarch64 Linux | aarch64 `.AppImage` |
+
+A maintainer on an Apple-Silicon Mac who runs `make desktop` ships an
+**arm64-only** DMG; Intel-Mac users cannot run it. For a public release, build
+each artifact on its own runner (e.g. a CI matrix of `macos-14` (arm64),
+`macos-13` (x86_64), `ubuntu-latest` (x86_64), and an arm64 Linux runner).
+There is intentionally no `universal2` macOS target — it would require
+universal2 wheels for every native dependency (numpy, aiohttp, lxml, PyYAML),
+which not all publish.
+
 ## Build pipeline
 
 `make desktop` runs `bash packaging/build-desktop.sh`, which executes the

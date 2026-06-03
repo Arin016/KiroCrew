@@ -11,14 +11,23 @@
 # The result is a double-clickable app that embeds the whole Python backend +
 # dashboard — no system Python, pip, npm, or node required by the end user.
 #
+# ARCHITECTURE: this builds for the HOST OS *and* HOST CPU ARCH only (not a
+# universal binary). PyInstaller (target_arch=None) and electron-builder (no
+# arch key) both follow the host. To ship macOS arm64 + x86_64 and Linux
+# x86_64 + aarch64 you must run this once per architecture. See
+# docs/DESKTOP_APP.md -> "Builds are host-architecture-only".
+#
 # Usage:
-#   bash packaging/build-desktop.sh            # build for the host OS
+#   bash packaging/build-desktop.sh            # build for the host OS + arch
 #   SKIP_FRONTEND=1 bash packaging/...         # reuse an already-staged dist
 #   SKIP_ELECTRON=1 bash packaging/...         # stop after the backend binary
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+
+printf '\n\033[1;33m▶ Building for host arch only: %s/%s. Universal binaries are NOT produced — run once per target arch (see docs/DESKTOP_APP.md).\033[0m\n' \
+  "$(uname -s)" "$(uname -m)"
 
 PY="${PYTHON:-python3}"
 ELECTRON_DIR="$ROOT/website/electron"
