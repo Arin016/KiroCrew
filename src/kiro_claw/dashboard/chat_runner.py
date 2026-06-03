@@ -9,6 +9,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlparse
 
 from kiro_claw.acp.client import AcpError, AcpProcessDied, _is_safe_oauth_url
 from kiro_claw.acp.types import (
@@ -93,7 +94,12 @@ from kiro_claw.providers.base import (
     EVENT_TOOL_RESULT,
     LLMEvent,
 )
-from kiro_claw.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
+from kiro_claw.security import (
+    _EXFIL_PATTERNS,
+    is_sensitive_path,
+    redact_credentials,
+    redact_exfiltration_urls,
+)
 from kiro_claw.sel import sel
 from kiro_claw.stats import Stats
 from kiro_claw.validation import ValidationError, validate_ask_user_question
@@ -277,18 +283,77 @@ def _redact_acp_string(s: str) -> str:
     return s
 
 
-def _oauth_url_contains_credential(url: str) -> bool:
-    """True if the URL embeds a credential or exfil-eligible host.
+# Query params that are a normal, expected part of an OAuth 2.0 / OIDC
+# consent URL (incl. PKCE).  Their values are high-entropy by design
+# (``state``, ``code_challenge``, ``nonce`` …) and must NOT be treated as
+# leaked credentials — otherwise every real GitHub/Google sign-in URL is
+# rejected.  Anything *outside* this set is still scanned for real secrets.
+_OAUTH_QUERY_PARAMS = frozenset(
+    {
+        # RFC 6749 / OIDC core
+        "client_id",
+        "redirect_uri",
+        "response_type",
+        "response_mode",
+        "scope",
+        "state",
+        "nonce",
+        "code_challenge",
+        "code_challenge_method",
+        "prompt",
+        "login_hint",
+        "access_type",
+        "audience",
+        "resource",
+        "display",
+        "id_token_hint",
+        "max_age",
+        "ui_locales",
+        "acr_values",
+        "request_uri",
+        # Provider-specific but standard & benign (GitHub: login/allow_signup;
+        # Microsoft: domain_hint; Slack: user_scope/team).  Kept in sync with the
+        # legit-URL corpus in test/test_mcp_oauth_banner.py.
+        "login",
+        "allow_signup",
+        "domain_hint",
+        "user_scope",
+        "team",
+    }
+)
 
-    Legitimate OAuth consent URLs carry only state + code_challenge + client_id;
-    if redact_credentials/redact_exfiltration_urls would scrub anything, the URL
-    is not safe to render as <a href> regardless of scheme.
+
+def _oauth_url_contains_credential(url: str) -> bool:
+    """True if the URL embeds an *actual* credential or secret.
+
+    Legitimate OAuth consent URLs carry high-entropy params (``state``,
+    ``code_challenge``, ``client_id``) and are frequently >200 chars — so we
+    deliberately do NOT apply the generic long-query exfiltration heuristic
+    here (that rule exists to catch data being smuggled out in query strings,
+    and would reject every real OAuth URL).  Instead we reject only when a
+    genuine credential pattern is present: any AWS key / Slack token / private
+    key (``redact_credentials``), or a credential-like blob in a query param
+    that is NOT a recognized OAuth parameter.
     """
     if not url:
         return False
+    # Hard reject: an actual embedded credential anywhere in the URL.
     _, hit_cred = redact_credentials(url)
-    _, hit_exfil = redact_exfiltration_urls(url)
-    return bool(hit_cred or hit_exfil)
+    if hit_cred:
+        return True
+    # Scan query params, exempting the standard OAuth/PKCE set whose values
+    # are legitimately high-entropy.  A secret pattern on any *other* param
+    # (or in the path) is treated as exfil-eligible and rejected.
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return True  # unparseable → refuse to render
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        if key in _OAUTH_QUERY_PARAMS:
+            continue
+        if _EXFIL_PATTERNS.search(value):
+            return True
+    return False
 
 
 def _emit_mcp_oauth_request(

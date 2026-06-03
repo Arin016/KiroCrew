@@ -15,11 +15,15 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+from oauth_url_corpus import LEGIT_OAUTH_URLS
+
 from kiro_claw.dashboard.chat_persistence import _redact_meta_for_role
 from kiro_claw.dashboard.chat_runner import (
     _emit_mcp_oauth_request,
     _is_safe_oauth_url,
     _mark_mcp_oauth_completed,
+    _oauth_url_contains_credential,
 )
 from kiro_claw.dashboard.state import _ChatSlot
 
@@ -172,6 +176,48 @@ class TestEmitMcpOAuthRequest:
         assert "AKIAIOSFODNN7EXAMPLE" not in m["content"]
         assert "credential" in m["meta"].get("error", "")
 
+    def test_accepts_real_github_oauth_pkce_url(self):
+        """Regression: a legitimate GitHub OAuth + PKCE consent URL must be
+        rendered, not rejected.  These URLs carry high-entropy params
+        (``state``, ``code_challenge``) and routinely exceed 200 chars, which
+        previously tripped the generic long-query *exfiltration* heuristic and
+        broke every real sign-in flow ("github authentication failed: URL
+        contained credential or exfiltration pattern")."""
+        slot = _ChatSlot("s1")
+        state = MagicMock()
+        url = (
+            "https://github.com/login/oauth/authorize"
+            "?client_id=Iv1.b507a08c87ecfe98"
+            "&redirect_uri=http%3A%2F%2F127.0.0.1%3A33418%2Fcallback"
+            "&scope=repo%20read%3Aorg"
+            "&state=af0ifjsldkj"
+            "&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+            "&code_challenge_method=S256&response_type=code"
+        )
+        _emit_mcp_oauth_request(state, slot, "github", url)
+        m = slot.messages[0]
+        assert m["role"] == "mcp_oauth"
+        # Accepted → the auth-request banner with the live URL, NOT a rejection.
+        assert m["meta"].get("rejected_url") is not True
+        assert m["meta"].get("failed") is not True
+        assert m["meta"]["oauth_url"] == url
+
+    def test_rejects_secret_in_non_oauth_param(self):
+        """A credential-like blob in a param that is NOT a standard OAuth
+        parameter is still treated as exfil and rejected."""
+        slot = _ChatSlot("s1")
+        state = MagicMock()
+        _emit_mcp_oauth_request(
+            state,
+            slot,
+            "sneaky",
+            "https://evil.com/authorize?client_id=x&exfil=" + ("A" * 60),
+        )
+        m = slot.messages[0]
+        assert m["meta"]["failed"] is True
+        assert m["meta"]["rejected_url"] is True
+        assert "oauth_url" not in m["meta"]
+
     def test_redacts_server_name_in_content_and_meta(self):
         """server_name comes from kiro-cli (untrusted): scrub creds before it
         reaches the banner content (which is broadcast live to the dashboard)
@@ -193,12 +239,12 @@ class TestEmitMcpOAuthRequest:
         """error string is also kiro-cli-controlled and lands in the live WS
         broadcast — must be redacted on entry."""
         slot = _ChatSlot("s1")
-        _emit_mcp_oauth_request(
-            MagicMock(), slot, "linear", "https://mcp.linear.app/a"
-        )
+        _emit_mcp_oauth_request(MagicMock(), slot, "linear", "https://mcp.linear.app/a")
         state = MagicMock()
         _mark_mcp_oauth_completed(
-            state, slot, "linear",
+            state,
+            slot,
+            "linear",
             success=False,
             error="leaked AKIAIOSFODNN7EXAMPLE in error",
         )
@@ -286,9 +332,7 @@ class TestSlotUpdateMessage:
         slot = _ChatSlot("s1")
         slot.append("mcp_oauth", "old", "msg msg-info", ts="2024-01-01T00:00:00Z", meta={"a": 1})
         slot._dirty = False
-        out = slot.update_message(
-            "2024-01-01T00:00:00Z", content="new", meta={"a": 2, "b": 3}
-        )
+        out = slot.update_message("2024-01-01T00:00:00Z", content="new", meta={"a": 2, "b": 3})
         assert out is not None
         assert slot.messages[0]["content"] == "new"
         assert slot.messages[0]["meta"] == {"a": 2, "b": 3}
@@ -314,3 +358,32 @@ class TestSlotUpdateMessage:
         slot.append("mcp_oauth", "x", "msg", ts="t1")
         out = slot.update_message("", content="y")
         assert out is None
+
+
+# ── Legit-URL corpus: these provider OAuth URLs must NEVER be rejected ──
+
+
+class TestLegitOAuthUrlCorpus:
+    """Contract: every real provider authorization URL in oauth_url_corpus
+    must pass the banner safety check.  A failure here means we've broken
+    sign-in for that provider — the exact class of regression that motivated
+    this corpus (GitHub OAuth+PKCE URLs rejected as 'credential or
+    exfiltration pattern')."""
+
+    @pytest.mark.parametrize("provider,url", LEGIT_OAUTH_URLS, ids=[p for p, _ in LEGIT_OAUTH_URLS])
+    def test_corpus_url_not_flagged_as_credential(self, provider: str, url: str):
+        assert (
+            _oauth_url_contains_credential(url) is False
+        ), f"{provider}: legit OAuth URL wrongly flagged as containing a credential"
+
+    @pytest.mark.parametrize("provider,url", LEGIT_OAUTH_URLS, ids=[p for p, _ in LEGIT_OAUTH_URLS])
+    def test_corpus_url_renders_banner(self, provider: str, url: str):
+        """End-to-end: the URL is rendered as a live auth banner (with the
+        clickable oauth_url), not a rejection banner."""
+        slot = _ChatSlot("s1")
+        _emit_mcp_oauth_request(MagicMock(), slot, provider, url)
+        assert len(slot.messages) == 1
+        meta = slot.messages[0]["meta"]
+        assert meta.get("rejected_url") is not True, f"{provider}: wrongly rejected"
+        assert meta.get("failed") is not True, f"{provider}: wrongly marked failed"
+        assert meta["oauth_url"] == url
