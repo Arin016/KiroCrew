@@ -34,6 +34,7 @@ def _async_iter(items):
     async def _gen():
         for it in items:
             yield it
+
     return _gen()
 
 
@@ -44,9 +45,7 @@ class TestStreamCommandRouting:
         provider._client.stream_command = MagicMock(
             return_value=_async_iter([AcpEvent(kind="text_chunk", text="ok")])
         )
-        provider._client.stream_events = MagicMock(
-            return_value=_async_iter([])
-        )
+        provider._client.stream_events = MagicMock(return_value=_async_iter([]))
 
         events = await _drain(provider.stream_command("/compact"))
 
@@ -61,9 +60,7 @@ class TestStreamCommandRouting:
         provider._client.stream_events = MagicMock(
             return_value=_async_iter([AcpEvent(kind="text_chunk", text="ok")])
         )
-        provider._client.stream_command = MagicMock(
-            return_value=_async_iter([])
-        )
+        provider._client.stream_command = MagicMock(return_value=_async_iter([]))
 
         events = await _drain(provider.stream_command("/compact"))
 
@@ -78,9 +75,7 @@ class TestCompactRouting:
     async def test_kiro_backend_uses_send_command(self):
         provider = _build_provider(backend="")
         provider._client.send_command = AsyncMock(return_value="")
-        provider._client.stream_events = MagicMock(
-            return_value=_async_iter([])
-        )
+        provider._client.stream_events = MagicMock(return_value=_async_iter([]))
 
         await provider.compact()
 
@@ -115,9 +110,7 @@ class TestCompactRouting:
     @pytest.mark.asyncio
     async def test_claude_backend_truncates_long_context(self):
         provider = _build_provider(backend=ACP_BACKEND_CLAUDE)
-        provider._client.stream_events = MagicMock(
-            return_value=_async_iter([])
-        )
+        provider._client.stream_events = MagicMock(return_value=_async_iter([]))
 
         await provider.compact("a" * 5000)
 
@@ -148,9 +141,7 @@ class TestEffortControl:
         with patch("kiro_claw.providers.acp._write_cli_overlay") as wco:
             ok = await provider.change_effort("xhigh")
         assert ok is True
-        provider._client.send_command.assert_awaited_once_with(
-            "/effort", args={"level": "xhigh"}
-        )
+        provider._client.send_command.assert_awaited_once_with("/effort", args={"level": "xhigh"})
         # kiro uses the overlay, never set_config_option
         provider._client.set_config_option.assert_not_awaited()
         wco.assert_called_once()
@@ -174,9 +165,7 @@ class TestEffortControl:
         # the whole change (which would reset the session and lose state).
         from kiro_claw.acp.client import AcpError
 
-        provider = self._effort_provider(
-            backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7"
-        )
+        provider = self._effort_provider(backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7")
 
         async def _reject_max(config_id, value):
             if value == "max":
@@ -198,18 +187,15 @@ class TestEffortControl:
         # swallowed by the ladder; it propagates so the caller rolls back.
         from kiro_claw.acp.client import AcpError
 
-        provider = self._effort_provider(
-            backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7"
-        )
-        provider._client.set_config_option = AsyncMock(
-            side_effect=AcpError("transport died")
-        )
+        provider = self._effort_provider(backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7")
+        provider._client.set_config_option = AsyncMock(side_effect=AcpError("transport died"))
         with pytest.raises(AcpError, match="transport died"):
             await provider.change_effort("high")
 
     @pytest.mark.asyncio
     async def test_change_effort_noop_on_incapable_model(self):
-        provider = self._effort_provider(backend="", model="claude-haiku-4.5")
+        # 'auto' is genuinely effort-incapable (no concrete model selected).
+        provider = self._effort_provider(backend="", model="auto")
         ok = await provider.change_effort("high")
         assert ok is False
         provider._client.send_command.assert_not_awaited()
@@ -223,9 +209,7 @@ class TestEffortControl:
 
     @pytest.mark.asyncio
     async def test_claude_apply_initial_effort_pushes_resolved_level(self):
-        provider = self._effort_provider(
-            backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7"
-        )
+        provider = self._effort_provider(backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7")
         provider._effort_per_model = {"claude-opus-4.7": "max"}
         await provider._apply_initial_effort()
         provider._client.set_config_option.assert_awaited_once_with("effort", "max")
@@ -240,9 +224,7 @@ class TestEffortControl:
 
     @pytest.mark.asyncio
     async def test_claude_apply_initial_effort_swallows_adapter_error(self):
-        provider = self._effort_provider(
-            backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7"
-        )
+        provider = self._effort_provider(backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7")
         provider._effort_per_model = {"claude-opus-4.7": "max"}
         provider._client.set_config_option = AsyncMock(side_effect=RuntimeError("bad"))
         # Must not raise — a rejected effort cannot break session start.
@@ -253,9 +235,7 @@ class TestEffortControl:
         # Older claude-agent-acp builds advertise no 'effort' config option;
         # the initial-effort push must be a silent no-op (no set_config_option,
         # no error) rather than spamming 'Unknown config option' every spawn.
-        provider = self._effort_provider(
-            backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7"
-        )
+        provider = self._effort_provider(backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7")
         provider._effort_per_model = {"claude-opus-4.7": "max"}
         provider._client.supports_config_option = MagicMock(return_value=False)
         await provider._apply_initial_effort()
@@ -265,9 +245,7 @@ class TestEffortControl:
     async def test_claude_change_effort_returns_false_when_option_unsupported(self):
         # change_effort must report unsupported (False) instead of attempting a
         # push that fails with 'Unknown config option' and resets the session.
-        provider = self._effort_provider(
-            backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7"
-        )
+        provider = self._effort_provider(backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7")
         provider._client.supports_config_option = MagicMock(return_value=False)
         ok = await provider.change_effort("high")
         assert ok is False
@@ -282,9 +260,7 @@ class TestEffortControl:
         # from the adapter must be skipped, not re-raised (which resets).
         from kiro_claw.acp.client import AcpError
 
-        provider = self._effort_provider(
-            backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7"
-        )
+        provider = self._effort_provider(backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7")
         # Force the guard open so the ladder runs and hits the adapter error.
         provider._client.supports_config_option = MagicMock(return_value=True)
         provider._client.set_config_option = AsyncMock(
@@ -315,9 +291,7 @@ class TestEffortControl:
     async def test_claude_clear_effort_returns_false_for_reset(self):
         # claude-agent-acp has no "reset to default" config value, so clearing
         # must return False to trigger a session reset; it must NOT push.
-        provider = self._effort_provider(
-            backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7"
-        )
+        provider = self._effort_provider(backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7")
         provider._effort_per_model = {"claude-opus-4.7": "max"}
         ok = await provider.clear_effort()
         assert ok is False
@@ -328,9 +302,7 @@ class TestEffortControl:
     async def test_change_effort_rolls_back_on_push_failure(self):
         # A failed live push must not leave a poisoned override/overlay that
         # would re-push the rejected level on every respawn.
-        provider = self._effort_provider(
-            backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7"
-        )
+        provider = self._effort_provider(backend=ACP_BACKEND_CLAUDE, model="claude-opus-4.7")
         provider._client.set_config_option = AsyncMock(side_effect=RuntimeError("rejected"))
         with pytest.raises(RuntimeError):
             await provider.change_effort("xhigh")
@@ -339,4 +311,8 @@ class TestEffortControl:
 
     def test_supports_effort_reflects_model(self):
         assert self._effort_provider(backend="", model="claude-opus-4.7").supports_effort()
+        # 'auto' is genuinely effort-incapable (no concrete model selected). A raw
+        # kiro 'claude-haiku-4.5' is also incapable — the haiku guard wins over
+        # the registry's Sonnet fold (see test_effort.py).
+        assert not self._effort_provider(backend="", model="auto").supports_effort()
         assert not self._effort_provider(backend="", model="claude-haiku-4.5").supports_effort()

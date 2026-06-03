@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
-def _make_cfg(pool_size: int = 2, pool_agent: str = "kiroclaw", pool_ttl_secs: int = 1800) -> MagicMock:
+def _make_cfg(
+    pool_size: int = 2, pool_agent: str = "kiroclaw", pool_ttl_secs: int = 1800
+) -> MagicMock:
     cfg = MagicMock()
     cfg.session.pool_size = pool_size
     cfg.session.pool_agent = pool_agent
@@ -38,7 +40,9 @@ def _make_manager(pool_size: int = 2, pool_agent: str = "kiroclaw", pool_ttl_sec
 
     cfg = _make_cfg(pool_size, pool_agent, pool_ttl_secs)
     factory = MagicMock(side_effect=lambda *a, **kw: _make_provider())
-    with patch("kiro_claw.session.default_project_dir", return_value="/home/user/.kiroclaw/workspace"):
+    with patch(
+        "kiro_claw.session.default_project_dir", return_value="/home/user/.kiroclaw/workspace"
+    ):
         mgr = SessionManager(cfg, provider_factory=factory)
     return mgr, factory
 
@@ -46,6 +50,7 @@ def _make_manager(pool_size: int = 2, pool_agent: str = "kiroclaw", pool_ttl_sec
 # ---------------------------------------------------------------------------
 # _fill_warm_pool
 # ---------------------------------------------------------------------------
+
 
 class TestFillWarmPool:
     @pytest.mark.asyncio
@@ -112,6 +117,7 @@ class TestFillWarmPool:
 # Liveness drain loop
 # ---------------------------------------------------------------------------
 
+
 class TestLivenessDrainLoop:
     @pytest.mark.asyncio
     async def test_dead_provider_discarded_healthy_used(self):
@@ -152,6 +158,7 @@ class TestLivenessDrainLoop:
 # ---------------------------------------------------------------------------
 # _claim_from_pool
 # ---------------------------------------------------------------------------
+
 
 class TestClaimFromPool:
     def test_claim_matching_agent(self):
@@ -207,6 +214,7 @@ class TestClaimFromPool:
 # _schedule_replenish
 # ---------------------------------------------------------------------------
 
+
 class TestScheduleReplenish:
     @pytest.mark.asyncio
     async def test_replenish_creates_background_task(self):
@@ -228,6 +236,7 @@ class TestScheduleReplenish:
 # Pool drain on shutdown (close_all)
 # ---------------------------------------------------------------------------
 
+
 class TestPoolDrainOnShutdown:
     @pytest.mark.asyncio
     async def test_close_all_shuts_down_pool_providers(self):
@@ -246,6 +255,7 @@ class TestPoolDrainOnShutdown:
 # ---------------------------------------------------------------------------
 # Config wiring
 # ---------------------------------------------------------------------------
+
 
 class TestConfigWiring:
     def test_pool_size_from_config(self):
@@ -278,6 +288,7 @@ class TestConfigWiring:
 # get_or_create integration with pool
 # ---------------------------------------------------------------------------
 
+
 class TestGetOrCreatePoolIntegration:
     @pytest.mark.asyncio
     async def test_claims_from_pool_when_agent_matches(self):
@@ -293,7 +304,9 @@ class TestGetOrCreatePoolIntegration:
         mgr._drain_and_claim = AsyncMock(return_value=pooled)
         mgr._schedule_replenish = MagicMock()
 
-        provider, is_new, _ = await mgr.get_or_create("test-key", agent="kiroclaw", channel_id="ch-1")
+        provider, is_new, _ = await mgr.get_or_create(
+            "test-key", agent="kiroclaw", channel_id="ch-1"
+        )
 
         assert provider is pooled
         pooled.client.rekey.assert_called_once_with("test-key", "ch-1")
@@ -357,7 +370,9 @@ class TestGetOrCreatePoolIntegration:
         mgr._schedule_replenish = MagicMock()
 
         with patch.object(type(mgr), "_resolve_agent_model", return_value="default-model"):
-            provider, is_new, _ = await mgr.get_or_create("test-key", agent="kiroclaw", model="custom-model")
+            provider, is_new, _ = await mgr.get_or_create(
+                "test-key", agent="kiroclaw", model="custom-model"
+            )
 
         assert provider is pooled
         mgr._drain_and_claim.assert_awaited_once()
@@ -368,6 +383,7 @@ class TestGetOrCreatePoolIntegration:
 # ---------------------------------------------------------------------------
 # TTL expiration
 # ---------------------------------------------------------------------------
+
 
 class TestTTLExpiration:
     @pytest.mark.asyncio
@@ -425,6 +441,7 @@ class TestTTLExpiration:
 # Model-matches-pool-default bypass (effective_model normalization)
 # ---------------------------------------------------------------------------
 
+
 class TestModelMatchesPoolDefault:
     """When the dashboard sends model == pool agent's default, treat as None
     so the pool isn't bypassed unnecessarily."""
@@ -480,15 +497,62 @@ class TestModelMatchesPoolDefault:
         pooled.client.set_model.assert_awaited_once_with("claude-sonnet-4.6")
 
     @pytest.mark.asyncio
+    async def test_pool_claude_backend_translates_canonical_key_on_switch(self):
+        """On the claude backend, a canonical wire key (e.g. opus-4.8-1m) is
+        translated to a provider id before set_model — else the adapter
+        mis-resolves it. kiro/acp backends still pass the value through."""
+        from kiro_claw.providers.acp import AcpProvider
+
+        mgr, factory = _make_manager(pool_agent="kiroclaw")
+        pooled = _make_provider()
+        pooled.__class__ = AcpProvider
+        pooled.client = MagicMock()
+        pooled.client.backend = "claude"  # marks this an AcpProvider(claude)
+        pooled.client.set_model = AsyncMock()
+        pooled.client.resumed = False
+        pooled.client._session_id = "fake-sid"
+        mgr._drain_and_claim = AsyncMock(return_value=pooled)
+        mgr._schedule_replenish = MagicMock()
+
+        with patch.object(type(mgr), "_resolve_agent_model", return_value="default-model"):
+            await mgr.get_or_create("test-key", agent="kiroclaw", model="opus-4.8-1m")
+
+        pooled.client.set_model.assert_awaited_once_with("global.anthropic.claude-opus-4-8[1m]")
+
+    @pytest.mark.asyncio
+    async def test_pool_claude_backend_skips_redundant_switch_cross_namespace(self):
+        """The short-circuit must work ACROSS namespaces: a canonical wire key
+        and the pool agent's kiro model slot that resolve to the SAME provider id
+        must NOT trigger a redundant set_model. Requested 'opus-4.8-1m' vs pool
+        agent kiro 'claude-opus-4.6' both → the flagship provider id."""
+        from kiro_claw.providers.acp import AcpProvider
+
+        mgr, factory = _make_manager(pool_agent="kiroclaw")
+        pooled = _make_provider()
+        pooled.__class__ = AcpProvider
+        pooled.client = MagicMock()
+        pooled.client.backend = "claude"
+        pooled.client.set_model = AsyncMock()
+        pooled.client.resumed = False
+        pooled.client._session_id = "fake-sid"
+        mgr._drain_and_claim = AsyncMock(return_value=pooled)
+        mgr._schedule_replenish = MagicMock()
+
+        # pool agent's kiro model 'claude-opus-4.6' translates to the SAME
+        # flagship provider id as the requested canonical 'opus-4.8-1m'.
+        with patch.object(type(mgr), "_resolve_agent_model", return_value="claude-opus-4.6"):
+            await mgr.get_or_create("test-key", agent="kiroclaw", model="opus-4.8-1m")
+
+        pooled.client.set_model.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_pool_skipped_when_model_set_but_pool_disabled(self):
         """pool_size=0 → no model comparison, straight to cold start."""
         mgr, factory = _make_manager(pool_size=0, pool_agent="kiroclaw")
         mgr._drain_and_claim = AsyncMock()
 
         with patch.object(type(mgr), "_resolve_agent_model", return_value="claude-opus-4.6"):
-            await mgr.get_or_create(
-                "test-key", agent="kiroclaw", model="claude-opus-4.6"
-            )
+            await mgr.get_or_create("test-key", agent="kiroclaw", model="claude-opus-4.6")
 
         mgr._drain_and_claim.assert_not_awaited()
 
@@ -500,9 +564,7 @@ class TestModelMatchesPoolDefault:
         mgr._session_map.get = MagicMock(return_value="existing-sid")
 
         with patch.object(type(mgr), "_resolve_agent_model", return_value="claude-opus-4.6"):
-            await mgr.get_or_create(
-                "test-key", agent="kiroclaw", model="claude-opus-4.6"
-            )
+            await mgr.get_or_create("test-key", agent="kiroclaw", model="claude-opus-4.6")
 
         mgr._drain_and_claim.assert_not_awaited()
 
@@ -520,9 +582,7 @@ class TestModelMatchesPoolDefault:
         mgr._drain_and_claim = AsyncMock(return_value=pooled)
         mgr._schedule_replenish = MagicMock()
 
-        provider, is_new, _ = await mgr.get_or_create(
-            "test-key", agent="kiroclaw", model=None
-        )
+        provider, is_new, _ = await mgr.get_or_create("test-key", agent="kiroclaw", model=None)
 
         assert provider is pooled
         mgr._drain_and_claim.assert_awaited_once()
@@ -543,9 +603,7 @@ class TestModelMatchesPoolDefault:
         mgr._schedule_replenish = MagicMock()
 
         with patch.object(type(mgr), "_resolve_agent_model") as mock_resolve:
-            await mgr.get_or_create(
-                "test-key", agent=None, model="claude-opus-4.6"
-            )
+            await mgr.get_or_create("test-key", agent=None, model="claude-opus-4.6")
 
         mock_resolve.assert_not_called()
         # model provided but no pool_agent → pool_model is None → skip set_model
@@ -556,6 +614,7 @@ class TestModelMatchesPoolDefault:
 # ---------------------------------------------------------------------------
 # Stateless sessions must not claim from pool
 # ---------------------------------------------------------------------------
+
 
 class TestStatelessSkipsPool:
     @pytest.mark.asyncio
@@ -587,6 +646,7 @@ class TestStatelessSkipsPool:
 # pool_size=0 must not attempt pool claim
 # ---------------------------------------------------------------------------
 
+
 class TestPoolDisabledSkipsClaim:
     @pytest.mark.asyncio
     async def test_pool_size_zero_skips_drain_and_claim(self):
@@ -603,6 +663,7 @@ class TestPoolDisabledSkipsClaim:
 # ---------------------------------------------------------------------------
 # _pool_health_loop
 # ---------------------------------------------------------------------------
+
 
 class TestPoolHealthLoop:
     @pytest.mark.asyncio
@@ -623,6 +684,7 @@ class TestPoolHealthLoop:
             call_count += 1
             if call_count > 1:
                 raise asyncio.CancelledError
+
         with patch("asyncio.sleep", side_effect=_sleep_once):
             with pytest.raises(asyncio.CancelledError):
                 await mgr._pool_health_loop()
@@ -646,6 +708,7 @@ class TestPoolHealthLoop:
             call_count += 1
             if call_count > 1:
                 raise asyncio.CancelledError
+
         with patch("asyncio.sleep", side_effect=_sleep_once):
             with pytest.raises(asyncio.CancelledError):
                 await mgr._pool_health_loop()
@@ -669,6 +732,7 @@ class TestPoolHealthLoop:
             call_count += 1
             if call_count > 1:
                 raise asyncio.CancelledError
+
         with patch("asyncio.sleep", side_effect=_sleep_once):
             with pytest.raises(asyncio.CancelledError):
                 await mgr._pool_health_loop()
@@ -690,6 +754,7 @@ class TestPoolHealthLoop:
             call_count += 1
             if call_count > 1:
                 raise asyncio.CancelledError
+
         with patch("asyncio.sleep", side_effect=_sleep_once):
             with pytest.raises(asyncio.CancelledError):
                 await mgr._pool_health_loop()
@@ -716,6 +781,7 @@ class TestPoolHealthLoop:
             call_count += 1
             if call_count > 1:
                 raise asyncio.CancelledError
+
         with patch("asyncio.sleep", side_effect=_sleep_once):
             with pytest.raises(asyncio.CancelledError):
                 await mgr._pool_health_loop()
@@ -730,6 +796,7 @@ class TestPoolHealthLoop:
 # ---------------------------------------------------------------------------
 # _pool_pids
 # ---------------------------------------------------------------------------
+
 
 class TestPoolPids:
     def test_returns_pids_from_pool(self):
@@ -832,7 +899,9 @@ class TestReloadProviderFactoryRefillsPool:
 
         with patch("kiro_claw.session.KiroClawConfig.load") as mock_load:
             new_cfg = _make_cfg(pool_size=1)
-            new_cfg.create_provider_factory = MagicMock(return_value=MagicMock(side_effect=lambda *a, **kw: _make_provider()))
+            new_cfg.create_provider_factory = MagicMock(
+                return_value=MagicMock(side_effect=lambda *a, **kw: _make_provider())
+            )
             new_cfg.agent.provider = "acp"
             mock_load.return_value = new_cfg
 
@@ -845,12 +914,14 @@ class TestReloadProviderFactoryRefillsPool:
 # default_project_dir
 # ---------------------------------------------------------------------------
 
+
 class TestDefaultProjectDir:
     def test_returns_realpath_of_workspace_dir(self, tmp_path):
         ws = tmp_path / "workspace"
         ws.mkdir()
         with patch("kiro_claw.config.loader.workspace_dir_for", return_value=ws):
             from kiro_claw.config.loader import default_project_dir
+
             result = default_project_dir("default")
         assert result == str(ws.resolve())
 
@@ -858,21 +929,25 @@ class TestDefaultProjectDir:
         missing = tmp_path / "nonexistent"
         with patch("kiro_claw.config.loader.workspace_dir_for", return_value=missing):
             from kiro_claw.config.loader import default_project_dir
+
             result = default_project_dir("default")
         assert result == ""
 
     def test_returns_empty_when_sensitive(self, tmp_path):
         ws = tmp_path / "workspace"
         ws.mkdir()
-        with patch("kiro_claw.config.loader.workspace_dir_for", return_value=ws), \
-             patch("kiro_claw.security.is_sensitive_path", return_value=True):
+        with patch("kiro_claw.config.loader.workspace_dir_for", return_value=ws), patch(
+            "kiro_claw.security.is_sensitive_path", return_value=True
+        ):
             from kiro_claw.config.loader import default_project_dir
+
             result = default_project_dir("default")
         assert result == ""
 
     def test_returns_empty_on_exception(self):
         with patch("kiro_claw.config.loader.workspace_dir_for", side_effect=RuntimeError("boom")):
             from kiro_claw.config.loader import default_project_dir
+
             result = default_project_dir("default")
         assert result == ""
 
@@ -880,6 +955,7 @@ class TestDefaultProjectDir:
 # ---------------------------------------------------------------------------
 # _pool_cwd initialization and bypass logic
 # ---------------------------------------------------------------------------
+
 
 class TestPoolCwd:
     def test_pool_cwd_set_from_default_project_dir(self):
@@ -915,7 +991,8 @@ class TestPoolCwd:
         mgr._schedule_replenish = MagicMock()
 
         provider, is_new, _ = await mgr.get_or_create(
-            "test-key", agent="kiroclaw",
+            "test-key",
+            agent="kiroclaw",
             cwd="/home/user/.kiroclaw/workspace",  # same as _pool_cwd
         )
 
@@ -938,7 +1015,9 @@ class TestPoolCwd:
         mgr._drain_and_claim = AsyncMock(return_value=pooled)
 
         provider, is_new, _ = await mgr.get_or_create(
-            "test-key", agent="kiroclaw", cwd="/some/project",
+            "test-key",
+            agent="kiroclaw",
+            cwd="/some/project",
         )
 
         mgr._drain_and_claim.assert_not_awaited()

@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 import logging
 
+from kiro_claw import model_registry
+
 logger = logging.getLogger(__name__)
 
 # Concrete effort levels, ordered low→high.  ``""`` is NOT a level — it means
@@ -51,12 +53,32 @@ def model_supports_effort(model: str | None) -> bool:
 
     Matches both naming conventions: kiro-cli (``claude-opus-4.7``) and the
     Bedrock/claude-agent-acp form (``global.anthropic.claude-opus-4-8[1m]``).
+
+    Prefers the registry's declared ``supports_effort`` flag when the model is in
+    the registry, so a future model whose canonical key lacks the ``opus``/
+    ``sonnet`` substring (or a capable model the heuristic would miss) is honored;
+    falls back to the substring heuristic for ids the registry doesn't list.
     """
     if not model:
         return False
     m = model.lower()
+    # Haiku NEVER supports effort — a hard rule that must win even over the
+    # registry. A kiro Haiku id (``claude-haiku-4.5``) is registered as a
+    # claude_code ALIAS of Sonnet (the cheapest VALID Bedrock fold), so a naive
+    # registry consult would let it inherit Sonnet's ``supports_effort`` flag and
+    # wrongly report a kiro Haiku agent as effort-capable. On the claude_code
+    # path the haiku->Sonnet fold already happened at the translation boundary
+    # (config.loader factory), so the value reaching here is the Sonnet provider
+    # id (no "haiku" substring) and stays capable; only the raw kiro spelling —
+    # which the kiro/acp path passes untranslated — is gated here.
     if "haiku" in m:
         return False
+    try:
+        declared = model_registry.supports_effort(model)
+        if declared is not None:
+            return declared
+    except Exception:
+        pass  # fall back to the heuristic
     return "opus" in m or "sonnet" in m
 
 

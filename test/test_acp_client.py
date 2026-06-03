@@ -297,9 +297,7 @@ class TestAcpClientBackendSelection:
         with patch(
             "kiro_claw.acp.client._resolve_claude_acp_bin",
             return_value=["/usr/local/bin/node", "/usr/local/lib/claude-agent-acp/index.js"],
-        ), patch(
-            "kiro_claw.acp.client._resolve_kiro_bin", return_value="/usr/bin/kiro-cli"
-        ), patch(
+        ), patch("kiro_claw.acp.client._resolve_kiro_bin", return_value="/usr/bin/kiro-cli"), patch(
             "kiro_claw.acp.client.wrap_argv",
             side_effect=lambda argv, mode: (argv, None),
         ), patch(
@@ -317,9 +315,10 @@ class TestAcpClientBackendSelection:
             await client._spawn()
 
             argv = list(mock_exec.call_args.args)
-            assert argv == ["/usr/local/bin/node", "/usr/local/lib/claude-agent-acp/index.js"], (
-                "claude backend must spawn node + script explicitly"
-            )
+            assert argv == [
+                "/usr/local/bin/node",
+                "/usr/local/lib/claude-agent-acp/index.js",
+            ], "claude backend must spawn node + script explicitly"
 
     @pytest.mark.asyncio
     async def test_spawn_claude_backend_writes_settings_local(self, tmp_path):
@@ -355,9 +354,7 @@ class TestAcpClientBackendSelection:
     @pytest.mark.asyncio
     async def test_spawn_claude_backend_missing_bin_raises(self, tmp_path):
         client = AcpClient(work_dir=tmp_path, acp_backend=ACP_BACKEND_CLAUDE)
-        with patch(
-            "kiro_claw.acp.client._resolve_claude_acp_bin", return_value=None
-        ), patch(
+        with patch("kiro_claw.acp.client._resolve_claude_acp_bin", return_value=None), patch(
             "asyncio.create_subprocess_exec", new_callable=AsyncMock
         ):
             with pytest.raises(AcpError, match="claude-agent-acp not found"):
@@ -496,8 +493,13 @@ class TestResolveClaudeAcpBin:
         node_bin.write_text("#!/bin/sh\nexit 0\n")
         node_bin.chmod(0o755)
         script = (
-            mise_node / "lib" / "node_modules"
-            / "@agentclientprotocol" / "claude-agent-acp" / "dist" / "index.js"
+            mise_node
+            / "lib"
+            / "node_modules"
+            / "@agentclientprotocol"
+            / "claude-agent-acp"
+            / "dist"
+            / "index.js"
         )
         script.parent.mkdir(parents=True)
         script.write_text("#!/usr/bin/env node\nconsole.log('hi')\n")
@@ -604,9 +606,7 @@ class TestResolveClaudeCodeExecutable:
 
         monkeypatch.delenv("CLAUDE_CODE_EXECUTABLE", raising=False)
         monkeypatch.setattr(client_mod, "_mise_which", lambda tool: "/mise/bin/claude")
-        monkeypatch.setattr(
-            client_mod.shutil, "which", lambda name, path=None: "/usr/bin/claude"
-        )
+        monkeypatch.setattr(client_mod.shutil, "which", lambda name, path=None: "/usr/bin/claude")
         assert client_mod._resolve_claude_code_executable() == "/mise/bin/claude"
 
     def test_path_lookup(self, monkeypatch):
@@ -617,14 +617,9 @@ class TestResolveClaudeCodeExecutable:
         monkeypatch.setattr(
             client_mod.shutil,
             "which",
-            lambda name, path=None: "/home/u/.toolbox/bin/claude"
-            if name == "claude"
-            else None,
+            lambda name, path=None: "/home/u/.toolbox/bin/claude" if name == "claude" else None,
         )
-        assert (
-            client_mod._resolve_claude_code_executable()
-            == "/home/u/.toolbox/bin/claude"
-        )
+        assert client_mod._resolve_claude_code_executable() == "/home/u/.toolbox/bin/claude"
 
     def test_none_when_absent(self, monkeypatch):
         from kiro_claw.acp import client as client_mod
@@ -645,12 +640,11 @@ class TestMiseWhich:
         script.chmod(0o755)
 
         monkeypatch.setattr(
-            client_mod.shutil, "which",
+            client_mod.shutil,
+            "which",
             lambda name: str(tmp_path / "mise") if name == "mise" else None,
         )
-        mock_run = MagicMock(return_value=MagicMock(
-            returncode=0, stdout=str(script) + "\n"
-        ))
+        mock_run = MagicMock(return_value=MagicMock(returncode=0, stdout=str(script) + "\n"))
         monkeypatch.setattr(client_mod, "subprocess_mod", MagicMock(run=mock_run))
         assert _mise_which("claude-agent-acp") == str(script)
 
@@ -666,7 +660,8 @@ class TestMiseWhich:
         from kiro_claw.acp.client import _mise_which
 
         monkeypatch.setattr(
-            client_mod.shutil, "which",
+            client_mod.shutil,
+            "which",
             lambda name: str(tmp_path / "mise") if name == "mise" else None,
         )
         mock_run = MagicMock(return_value=MagicMock(returncode=1, stdout=""))
@@ -680,7 +675,8 @@ class TestMiseWhich:
         from kiro_claw.acp.client import _mise_which
 
         monkeypatch.setattr(
-            client_mod.shutil, "which",
+            client_mod.shutil,
+            "which",
             lambda name: str(tmp_path / "mise") if name == "mise" else None,
         )
         mock_sub = MagicMock()
@@ -1606,8 +1602,7 @@ class TestStreamEventsExtension:
                     "sessionUpdate": UPDATE_AGENT_MESSAGE_CHUNK,
                     "content": {
                         "type": "text",
-                        "text": "Tool uses were interrupted, "
-                        "waiting for the next user prompt",
+                        "text": "Tool uses were interrupted, " "waiting for the next user prompt",
                     },
                 }
             },
@@ -1643,8 +1638,7 @@ class TestStreamEventsExtension:
         warns = [
             r
             for r in caplog.records
-            if r.levelno == logging.WARNING
-            and "kiro-cli cancelled tool use" in r.getMessage()
+            if r.levelno == logging.WARNING and "kiro-cli cancelled tool use" in r.getMessage()
         ]
         assert len(warns) == 1, (
             f"entry_point={entry_point} expected 1 WARNING, got {len(warns)}: "
@@ -1806,9 +1800,7 @@ class TestStopReasonPopulated:
         from kiro_claw.acp.types import EVENT_COMPLETE, JsonRpcMessage
 
         client = AcpClient()
-        complete_msg = JsonRpcMessage(
-            id=1, result={"stopReason": "cancelled"}
-        )
+        complete_msg = JsonRpcMessage(id=1, result={"stopReason": "cancelled"})
 
         async def fake_prompt_loop(req_id, timeout):
             yield "complete", complete_msg
@@ -1831,9 +1823,7 @@ class TestStopReasonPopulated:
         from kiro_claw.acp.types import EVENT_COMPLETE, JsonRpcMessage
 
         client = AcpClient()
-        complete_msg = JsonRpcMessage(
-            id=1, result={"stopReason": "end_turn"}
-        )
+        complete_msg = JsonRpcMessage(id=1, result={"stopReason": "end_turn"})
 
         async def fake_prompt_loop(req_id, timeout):
             yield "complete", complete_msg
@@ -1883,9 +1873,7 @@ class TestWaitTurnDone:
         from kiro_claw.acp.types import JsonRpcMessage
 
         client = AcpClient()
-        complete_msg = JsonRpcMessage(
-            id=1, result={"stopReason": "cancelled"}
-        )
+        complete_msg = JsonRpcMessage(id=1, result={"stopReason": "cancelled"})
 
         async def fake_prompt_loop(req_id, timeout):
             yield "complete", complete_msg
@@ -1953,9 +1941,7 @@ class TestCancelledGraceWindow:
 
         mock_process = MagicMock()
         mock_stdout = AsyncMock()
-        mock_stdout.readline = AsyncMock(
-            return_value=json.dumps(msg_data).encode() + b"\n"
-        )
+        mock_stdout.readline = AsyncMock(return_value=json.dumps(msg_data).encode() + b"\n")
         mock_process.stdout = mock_stdout
         mock_process.returncode = None
         client._process = mock_process
@@ -2312,9 +2298,10 @@ class TestSendPipeErrors:
 
         # Stale detection should still fire despite the passive update
         kinds = [e.kind for e in events]
-        assert kinds == [EVENT_TEXT_CHUNK, EVENT_COMPLETE], (
-            f"Expected stale detection to synthesize complete after passive update, got {kinds}"
-        )
+        assert kinds == [
+            EVENT_TEXT_CHUNK,
+            EVENT_COMPLETE,
+        ], f"Expected stale detection to synthesize complete after passive update, got {kinds}"
         assert events[-1].stop_reason == STOP_REASON_END_TURN
 
 
@@ -2352,10 +2339,9 @@ class TestKillProcess:
         client._pid = 12345
         client._child_pids = {}
 
-        with patch("os.killpg") as mock_killpg, \
-             patch("os.getpgid", return_value=12345), \
-             patch("kiro_claw.acp.client._get_child_pids", return_value=[]), \
-             patch("kiro_claw.acp.client._kill_escaped_children") as mock_esc:
+        with patch("os.killpg") as mock_killpg, patch("os.getpgid", return_value=12345), patch(
+            "kiro_claw.acp.client._get_child_pids", return_value=[]
+        ), patch("kiro_claw.acp.client._kill_escaped_children") as mock_esc:
             await client._kill_process()
             mock_killpg.assert_called_once_with(12345, signal.SIGTERM)
             mock_esc.assert_called_once()
@@ -2380,10 +2366,11 @@ class TestKillProcess:
         def fake_killpg(pgid, sig):
             killpg_calls.append(sig)
 
-        with patch("os.killpg", side_effect=fake_killpg), \
-             patch("os.getpgid", return_value=99), \
-             patch("kiro_claw.acp.client._get_child_pids", return_value=[]), \
-             patch("kiro_claw.acp.client._kill_escaped_children"):
+        with patch("os.killpg", side_effect=fake_killpg), patch(
+            "os.getpgid", return_value=99
+        ), patch("kiro_claw.acp.client._get_child_pids", return_value=[]), patch(
+            "kiro_claw.acp.client._kill_escaped_children"
+        ):
             await client._kill_process()
 
         assert signal.SIGTERM in killpg_calls
@@ -2409,10 +2396,11 @@ class TestKillProcess:
         def fake_killpg(pgid, sig):
             killpg_sigs.append(sig)
 
-        with patch("os.killpg", side_effect=fake_killpg), \
-             patch("os.getpgid", return_value=55), \
-             patch("kiro_claw.acp.client._get_child_pids", return_value=[]), \
-             patch("kiro_claw.acp.client._kill_escaped_children"):
+        with patch("os.killpg", side_effect=fake_killpg), patch(
+            "os.getpgid", return_value=55
+        ), patch("kiro_claw.acp.client._get_child_pids", return_value=[]), patch(
+            "kiro_claw.acp.client._kill_escaped_children"
+        ):
             await client._kill_process(force=True)
 
         assert signal.SIGTERM not in killpg_sigs
@@ -2433,10 +2421,11 @@ class TestKillProcess:
         client._pid = 77
         client._child_pids = {}
 
-        with patch("os.killpg", side_effect=ProcessLookupError()), \
-             patch("os.getpgid", return_value=77), \
-             patch("kiro_claw.acp.client._get_child_pids", return_value=[]), \
-             patch("kiro_claw.acp.client._kill_escaped_children"):
+        with patch("os.killpg", side_effect=ProcessLookupError()), patch(
+            "os.getpgid", return_value=77
+        ), patch("kiro_claw.acp.client._get_child_pids", return_value=[]), patch(
+            "kiro_claw.acp.client._kill_escaped_children"
+        ):
             await client._kill_process(force=True)
 
         proc.kill.assert_called_once()
@@ -2475,9 +2464,9 @@ class TestResetStateExtended:
         client._pid = 1234
         client._child_pids = {5678: None, 9012: None}
 
-        with patch("kiro_claw.session._untrack_child_pids") as mock_uc, \
-             patch("kiro_claw.session._untrack_pid") as mock_up, \
-             patch("kiro_claw.session._untrack_session_pid") as mock_usp:
+        with patch("kiro_claw.session._untrack_child_pids") as mock_uc, patch(
+            "kiro_claw.session._untrack_pid"
+        ) as mock_up, patch("kiro_claw.session._untrack_session_pid") as mock_usp:
             client._reset_state()
 
         mock_uc.assert_called_once_with({5678: None, 9012: None})
@@ -2628,8 +2617,7 @@ class TestInitializeSession:
         async def fake_wait(req_id, timeout=50.0):
             call_idx[0] += 1
             if call_idx[0] == 1:
-                return {"protocolVersion": "2025-08-22",
-                        "agentCapabilities": {"loadSession": True}}
+                return {"protocolVersion": "2025-08-22", "agentCapabilities": {"loadSession": True}}
             # session/load must NOT be called; the next request is session/new.
             return {"sessionId": "fresh-sess"}
 
@@ -2660,8 +2648,7 @@ class TestInitializeSession:
         transcript.write_text("{}")
 
         responses = {
-            1: {"protocolVersion": "2025-08-22",
-                "agentCapabilities": {"loadSession": True}},
+            1: {"protocolVersion": "2025-08-22", "agentCapabilities": {"loadSession": True}},
             2: {"modes": ["chat"]},  # load success
         }
 
@@ -3029,7 +3016,12 @@ class TestPromptLoop:
         from kiro_claw.acp.types import JsonRpcMessage
 
         msgs = [
-            JsonRpcMessage(method="session/update", params={"update": {"sessionUpdate": "agent_message_chunk", "content": {"text": "hi"}}}),
+            JsonRpcMessage(
+                method="session/update",
+                params={
+                    "update": {"sessionUpdate": "agent_message_chunk", "content": {"text": "hi"}}
+                },
+            ),
             JsonRpcMessage(id=1, result={"status": "ok"}),
         ]
         idx = [0]
@@ -3184,7 +3176,9 @@ class TestDispatchEventsExtended:
         client._read_new_tool_results_sync = lambda: []
 
         events = []
-        async for ev in client._dispatch_events(req_id=1, timeout=5.0, extract_agent_from_result=True):
+        async for ev in client._dispatch_events(
+            req_id=1, timeout=5.0, extract_agent_from_result=True
+        ):
             events.append(ev)
 
         kinds = [e.kind for e in events]
@@ -3269,9 +3263,7 @@ class TestSendCommand:
         ) as mock_redact:
             result = await client.send_command("/test")
 
-        mock_redact.assert_called_once_with(
-            "visit https://evil.com/exfil?data=secret"
-        )
+        mock_redact.assert_called_once_with("visit https://evil.com/exfil?data=secret")
         assert result == "[redacted]"
 
 
@@ -3470,7 +3462,12 @@ class TestExtractToolEvent:
                     "title": "write",
                     "kind": "tool_use",
                     "toolCallId": "tc-3",
-                    "input": {"command": "strReplace", "oldStr": "a", "newStr": "b", "path": "x.py"},
+                    "input": {
+                        "command": "strReplace",
+                        "oldStr": "a",
+                        "newStr": "b",
+                        "path": "x.py",
+                    },
                 }
             },
         )
@@ -3838,7 +3835,23 @@ class TestReadNewToolResultsSync:
 
         lines = [
             json.dumps({"kind": "Message", "data": {"text": "hi"}}) + "\n",
-            json.dumps({"kind": "ToolResults", "data": {"content": [{"kind": "toolResult", "data": {"toolUseId": "tu-3", "content": [{"kind": "text", "data": "result"}]}}]}}) + "\n",
+            json.dumps(
+                {
+                    "kind": "ToolResults",
+                    "data": {
+                        "content": [
+                            {
+                                "kind": "toolResult",
+                                "data": {
+                                    "toolUseId": "tu-3",
+                                    "content": [{"kind": "text", "data": "result"}],
+                                },
+                            }
+                        ]
+                    },
+                }
+            )
+            + "\n",
         ]
         jsonl_path.write_text("".join(lines))
 
@@ -3859,7 +3872,25 @@ class TestReadNewToolResultsSync:
         jsonl_path = session_dir / "test-sess-4.jsonl"
 
         # Write a complete line + partial line (no trailing newline)
-        complete = json.dumps({"kind": "ToolResults", "data": {"content": [{"kind": "toolResult", "data": {"toolUseId": "tu-ok", "content": [{"kind": "text", "data": "done"}]}}]}}) + "\n"
+        complete = (
+            json.dumps(
+                {
+                    "kind": "ToolResults",
+                    "data": {
+                        "content": [
+                            {
+                                "kind": "toolResult",
+                                "data": {
+                                    "toolUseId": "tu-ok",
+                                    "content": [{"kind": "text", "data": "done"}],
+                                },
+                            }
+                        ]
+                    },
+                }
+            )
+            + "\n"
+        )
         partial = '{"kind": "ToolResults", "data": {"content": [{"kind": "toolRes'
         jsonl_path.write_text(complete + partial)
 
@@ -3878,9 +3909,7 @@ class TestFormatCommandResult:
     """Tests for _format_command_result."""
 
     def test_structured_data_with_message(self):
-        result = AcpClient._format_command_result(
-            {"data": {"key": "value"}, "message": "Done"}
-        )
+        result = AcpClient._format_command_result({"data": {"key": "value"}, "message": "Done"})
         assert "Done" in result
         assert "```json" in result
         assert '"key"' in result
@@ -3963,11 +3992,15 @@ class TestReadPromptResponse:
         client = AcpClient()
         text_msg = JsonRpcMessage(
             method="session/update",
-            params={"update": {"sessionUpdate": "agent_message_chunk", "content": {"text": "hello "}}},
+            params={
+                "update": {"sessionUpdate": "agent_message_chunk", "content": {"text": "hello "}}
+            },
         )
         text_msg2 = JsonRpcMessage(
             method="session/update",
-            params={"update": {"sessionUpdate": "agent_message_chunk", "content": {"text": "world"}}},
+            params={
+                "update": {"sessionUpdate": "agent_message_chunk", "content": {"text": "world"}}
+            },
         )
         complete_msg = JsonRpcMessage(id=1, result={"stopReason": "end_turn"})
 
@@ -4061,7 +4094,8 @@ class TestPromptLoopReleasesTurnDone:
 
         client = AcpClient()
         perm_msg = JsonRpcMessage(
-            id=99, method="session/requestPermission",
+            id=99,
+            method="session/requestPermission",
             params={"toolCall": {"title": "shell"}, "options": []},
         )
         complete_msg = JsonRpcMessage(id=1, result={})
@@ -4170,10 +4204,9 @@ class TestKillProcessPipeClose:
         client._pid = 100
         client._child_pids = {}
 
-        with patch("os.killpg"), \
-             patch("os.getpgid", return_value=100), \
-             patch("kiro_claw.acp.client._get_child_pids", return_value=[]), \
-             patch("kiro_claw.acp.client._kill_escaped_children"):
+        with patch("os.killpg"), patch("os.getpgid", return_value=100), patch(
+            "kiro_claw.acp.client._get_child_pids", return_value=[]
+        ), patch("kiro_claw.acp.client._kill_escaped_children"):
             await client._kill_process()
 
         stdin_mock.close.assert_called_once()
@@ -4194,10 +4227,9 @@ class TestKillProcessPipeClose:
         client._pid = 101
         client._child_pids = {}
 
-        with patch("os.killpg"), \
-             patch("os.getpgid", return_value=101), \
-             patch("kiro_claw.acp.client._get_child_pids", return_value=[]), \
-             patch("kiro_claw.acp.client._kill_escaped_children"):
+        with patch("os.killpg"), patch("os.getpgid", return_value=101), patch(
+            "kiro_claw.acp.client._get_child_pids", return_value=[]
+        ), patch("kiro_claw.acp.client._kill_escaped_children"):
             await client._kill_process()  # should not raise
 
 
@@ -4209,6 +4241,7 @@ class TestExtractToolCallUpdate:
 
     def _make_msg(self, update):
         from kiro_claw.acp.types import JsonRpcMessage
+
         return JsonRpcMessage(params={"update": update})
 
     def _client(self):
@@ -4216,6 +4249,7 @@ class TestExtractToolCallUpdate:
 
     def test_ignores_non_tool_call_update(self):
         from kiro_claw.acp.types import JsonRpcMessage
+
         client = self._client()
         msg = JsonRpcMessage(params={"update": {"sessionUpdate": "other"}})
         assert client._extract_tool_call_update(msg) is None
@@ -4227,13 +4261,15 @@ class TestExtractToolCallUpdate:
 
     def test_content_blocks_path(self):
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-1",
-            "content": [
-                {"content": {"type": "text", "text": "hello world"}},
-            ],
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-1",
+                "content": [
+                    {"content": {"type": "text", "text": "hello world"}},
+                ],
+            }
+        )
         event = client._extract_tool_call_update(msg)
         assert event is not None
         assert event.kind == "tool_result"
@@ -4242,108 +4278,127 @@ class TestExtractToolCallUpdate:
 
     def test_raw_output_stdout_path(self):
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-2",
-            "rawOutput": {
-                "items": [{"Json": {"stdout": "ls output here"}}],
-            },
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-2",
+                "rawOutput": {
+                    "items": [{"Json": {"stdout": "ls output here"}}],
+                },
+            }
+        )
         event = client._extract_tool_call_update(msg)
         assert event is not None
         assert "ls output here" in event.tool_output
 
     def test_raw_output_json_fallback(self):
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-3",
-            "rawOutput": {
-                "items": [{"Json": {"key": "value"}}],
-            },
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-3",
+                "rawOutput": {
+                    "items": [{"Json": {"key": "value"}}],
+                },
+            }
+        )
         event = client._extract_tool_call_update(msg)
         assert event is not None
         assert "key" in event.tool_output
 
     def test_content_takes_priority_over_raw(self):
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-4",
-            "content": [{"content": {"type": "text", "text": "from content"}}],
-            "rawOutput": {"items": [{"Json": {"stdout": "from raw"}}]},
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-4",
+                "content": [{"content": {"type": "text", "text": "from content"}}],
+                "rawOutput": {"items": [{"Json": {"stdout": "from raw"}}]},
+            }
+        )
         event = client._extract_tool_call_update(msg)
         assert "from content" in event.tool_output
         assert "from raw" not in event.tool_output
 
     def test_empty_content_falls_through_to_raw(self):
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-5",
-            "content": [],
-            "rawOutput": {"items": [{"Json": {"stdout": "fallback"}}]},
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-5",
+                "content": [],
+                "rawOutput": {"items": [{"Json": {"stdout": "fallback"}}]},
+            }
+        )
         event = client._extract_tool_call_update(msg)
         assert "fallback" in event.tool_output
 
     def test_no_output_returns_none(self):
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-6",
-            "content": [],
-            "rawOutput": {"items": []},
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-6",
+                "content": [],
+                "rawOutput": {"items": []},
+            }
+        )
         assert client._extract_tool_call_update(msg) is None
 
     def test_output_truncated_to_8000(self):
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-7",
-            "content": [
-                {"content": {"type": "text", "text": "x" * 5000}},
-                {"content": {"type": "text", "text": "y" * 5000}},
-            ],
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-7",
+                "content": [
+                    {"content": {"type": "text", "text": "x" * 5000}},
+                    {"content": {"type": "text", "text": "y" * 5000}},
+                ],
+            }
+        )
         event = client._extract_tool_call_update(msg)
         assert len(event.tool_output) <= 8000
 
     def test_redaction_applied(self):
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-8",
-            "content": [
-                {"content": {"type": "text", "text": "key=AKIAIOSFODNN7EXAMPLE secret"}},
-            ],
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-8",
+                "content": [
+                    {"content": {"type": "text", "text": "key=AKIAIOSFODNN7EXAMPLE secret"}},
+                ],
+            }
+        )
         event = client._extract_tool_call_update(msg)
         assert "AKIAIOSFODNN7EXAMPLE" not in event.tool_output
 
     def test_ignores_non_dict_content_blocks(self):
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-9",
-            "content": ["not a dict", None, 42],
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-9",
+                "content": ["not a dict", None, 42],
+            }
+        )
         assert client._extract_tool_call_update(msg) is None
 
     def test_ignores_non_text_content_type(self):
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-10",
-            "content": [{"content": {"type": "image", "url": "http://x"}}],
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-10",
+                "content": [{"content": {"type": "image", "url": "http://x"}}],
+            }
+        )
         assert client._extract_tool_call_update(msg) is None
 
     def test_none_params(self):
         from kiro_claw.acp.types import JsonRpcMessage
+
         client = self._client()
         msg = JsonRpcMessage(params=None)
         assert client._extract_tool_call_update(msg) is None
@@ -4358,6 +4413,7 @@ class TestExtractToolCallRefinement:
 
     def _make_msg(self, update):
         from kiro_claw.acp.types import JsonRpcMessage
+
         return JsonRpcMessage(params={"update": update})
 
     def _client(self):
@@ -4365,6 +4421,7 @@ class TestExtractToolCallRefinement:
 
     def test_ignores_non_tool_call_update(self):
         from kiro_claw.acp.types import JsonRpcMessage
+
         client = self._client()
         msg = JsonRpcMessage(params={"update": {"sessionUpdate": "other"}})
         assert client._extract_tool_call_refinement(msg) is None
@@ -4378,22 +4435,26 @@ class TestExtractToolCallRefinement:
         # tool_call_update carrying ONLY content (no title/kind/rawInput) is
         # the result-only path handled by _extract_tool_call_update.
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-1",
-            "content": [{"content": {"type": "text", "text": "out"}}],
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-1",
+                "content": [{"content": {"type": "text", "text": "out"}}],
+            }
+        )
         assert client._extract_tool_call_refinement(msg) is None
 
     def test_refines_title_and_kind(self):
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-2",
-            "title": "ls /tmp",
-            "kind": "execute",
-            "rawInput": {"command": "ls /tmp"},
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-2",
+                "title": "ls /tmp",
+                "kind": "execute",
+                "rawInput": {"command": "ls /tmp"},
+            }
+        )
         event = client._extract_tool_call_refinement(msg)
         assert event is not None
         assert event.kind == "tool_call_update"
@@ -4407,16 +4468,18 @@ class TestExtractToolCallRefinement:
         # is the human-readable purpose ("List KiroClaw dashboard module
         # files"), and that's what we surface on the pill.
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-2b",
-            "title": "ls /workplace/.../dashboard/",
-            "kind": "execute",
-            "rawInput": {
-                "command": "ls /workplace/.../dashboard/",
-                "description": "List KiroClaw dashboard module files",
-            },
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-2b",
+                "title": "ls /workplace/.../dashboard/",
+                "kind": "execute",
+                "rawInput": {
+                    "command": "ls /workplace/.../dashboard/",
+                    "description": "List KiroClaw dashboard module files",
+                },
+            }
+        )
         event = client._extract_tool_call_refinement(msg)
         assert event is not None
         assert event.title == "List KiroClaw dashboard module files"
@@ -4424,24 +4487,28 @@ class TestExtractToolCallRefinement:
     def test_blank_description_falls_back_to_title(self):
         # Whitespace-only description shouldn't override a useful title.
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-2c",
-            "title": "ls /tmp",
-            "rawInput": {"command": "ls /tmp", "description": "   "},
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-2c",
+                "title": "ls /tmp",
+                "rawInput": {"command": "ls /tmp", "description": "   "},
+            }
+        )
         event = client._extract_tool_call_refinement(msg)
         assert event is not None
         assert event.title == "ls /tmp"
 
     def test_caches_input_for_permission_lookup(self):
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-3",
-            "title": "grep foo",
-            "rawInput": {"pattern": "foo"},
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-3",
+                "title": "grep foo",
+                "rawInput": {"pattern": "foo"},
+            }
+        )
         event = client._extract_tool_call_refinement(msg)
         assert event is not None
         # The refined input is also cached so a later permission request
@@ -4452,21 +4519,23 @@ class TestExtractToolCallRefinement:
         # Edit-style tools send the diff in content; the refinement should
         # surface the unified diff instead of the raw input dict.
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-4",
-            "title": "Edit foo.py",
-            "kind": "edit",
-            "rawInput": {"old_string": "old", "new_string": "new", "file_path": "foo.py"},
-            "content": [
-                {
-                    "type": "diff",
-                    "path": "foo.py",
-                    "oldText": "old",
-                    "newText": "new",
-                },
-            ],
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-4",
+                "title": "Edit foo.py",
+                "kind": "edit",
+                "rawInput": {"old_string": "old", "new_string": "new", "file_path": "foo.py"},
+                "content": [
+                    {
+                        "type": "diff",
+                        "path": "foo.py",
+                        "oldText": "old",
+                        "newText": "new",
+                    },
+                ],
+            }
+        )
         event = client._extract_tool_call_refinement(msg)
         assert event is not None
         # _make_unified_diff prefixes file headers
@@ -4474,12 +4543,14 @@ class TestExtractToolCallRefinement:
 
     def test_redacts_credentials_in_input(self):
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-5",
-            "title": "Bash",
-            "rawInput": {"command": "echo AKIAIOSFODNN7EXAMPLE"},
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-5",
+                "title": "Bash",
+                "rawInput": {"command": "echo AKIAIOSFODNN7EXAMPLE"},
+            }
+        )
         event = client._extract_tool_call_refinement(msg)
         assert event is not None
         assert "AKIAIOSFODNN7EXAMPLE" not in event.tool_input
@@ -4487,21 +4558,25 @@ class TestExtractToolCallRefinement:
     def test_no_refinement_fields_returns_none(self):
         # Empty update with just tool_call_id should not emit a refinement.
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-6",
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-6",
+            }
+        )
         assert client._extract_tool_call_refinement(msg) is None
 
     def test_kind_only_emits_refinement(self):
         # Even a lone `kind` update is worth surfacing — avoids losing the
         # Bash/Edit distinction if the upstream renders it without a title.
         client = self._client()
-        msg = self._make_msg({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-7",
-            "kind": "search",
-        })
+        msg = self._make_msg(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-7",
+                "kind": "search",
+            }
+        )
         event = client._extract_tool_call_refinement(msg)
         assert event is not None
         assert event.tool_kind == "search"
@@ -4512,12 +4587,16 @@ class TestClaudeAcpMcpServers:
 
     def test_reads_registry_and_reshapes(self, tmp_path):
         reg = tmp_path / "kiroclaw.mcp.json"
-        reg.write_text(json.dumps({
-            "mcpServers": {
-                "builder-mcp": {"command": "/bin/b", "args": ["--x"], "type": "stdio"},
-                "deepwiki": {"url": "https://mcp.deepwiki.com/mcp"},
-            }
-        }))
+        reg.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "builder-mcp": {"command": "/bin/b", "args": ["--x"], "type": "stdio"},
+                        "deepwiki": {"url": "https://mcp.deepwiki.com/mcp"},
+                    }
+                }
+            )
+        )
         with patch("kiro_claw.acp.client._CC_MCP_FILE", reg):
             servers = _claude_acp_mcp_servers()
         by_name = {s["name"]: s for s in servers}
@@ -4549,9 +4628,11 @@ class TestClaudeAcpMcpServers:
         # The on-disk registry may carry a dead gateway HTTP-MCP url for the
         # managed servers; it must be overwritten with the stdio command.
         reg = tmp_path / "kiroclaw.mcp.json"
-        reg.write_text(json.dumps({
-            "mcpServers": {"kiroclaw-core": {"url": "http://localhost:7777/api/mcp/core"}}
-        }))
+        reg.write_text(
+            json.dumps(
+                {"mcpServers": {"kiroclaw-core": {"url": "http://localhost:7777/api/mcp/core"}}}
+            )
+        )
         with patch("kiro_claw.acp.client._CC_MCP_FILE", reg):
             servers = _claude_acp_mcp_servers()
         core = next(s for s in servers if s["name"] == "kiroclaw-core")
@@ -4565,12 +4646,16 @@ class TestClaudeAcpMcpServers:
         # servers that all carry their required array, or session/new fails the
         # whole batch with -32602 Invalid params.
         reg = tmp_path / "kiroclaw.mcp.json"
-        reg.write_text(json.dumps({
-            "mcpServers": {
-                "builder-mcp": {"command": "/bin/b", "args": ["--x"], "type": "stdio"},
-                "deepwiki": {"url": "https://mcp.deepwiki.com/mcp"},
-            }
-        }))
+        reg.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "builder-mcp": {"command": "/bin/b", "args": ["--x"], "type": "stdio"},
+                        "deepwiki": {"url": "https://mcp.deepwiki.com/mcp"},
+                    }
+                }
+            )
+        )
         with patch("kiro_claw.acp.client._CC_MCP_FILE", reg):
             servers = _claude_acp_mcp_servers()
         for s in servers:
@@ -4588,16 +4673,18 @@ class TestCaptureAvailableModels:
 
     def test_captures_versioned_models(self):
         c = self._client()
-        c._capture_available_models({
-            "sessionId": "s",
-            "models": {
-                "currentModelId": "claude-opus-4-8-1m",
-                "availableModels": [
-                    {"modelId": "claude-opus-4-8-1m", "name": "Opus 4.8", "description": "new"},
-                    {"modelId": "claude-sonnet-4-6", "name": "Sonnet 4.6"},
-                ],
-            },
-        })
+        c._capture_available_models(
+            {
+                "sessionId": "s",
+                "models": {
+                    "currentModelId": "claude-opus-4-8-1m",
+                    "availableModels": [
+                        {"modelId": "claude-opus-4-8-1m", "name": "Opus 4.8", "description": "new"},
+                        {"modelId": "claude-sonnet-4-6", "name": "Sonnet 4.6"},
+                    ],
+                },
+            }
+        )
         am = c.available_models()
         assert [m["modelId"] for m in am] == ["claude-opus-4-8-1m", "claude-sonnet-4-6"]
         assert am[1]["description"] == ""  # missing description -> empty string
@@ -4609,15 +4696,17 @@ class TestCaptureAvailableModels:
 
     def test_entries_without_modelid_skipped(self):
         c = self._client()
-        c._capture_available_models({
-            "models": {"availableModels": [{"name": "x"}, {"modelId": "ok", "name": "OK"}]}
-        })
+        c._capture_available_models(
+            {"models": {"availableModels": [{"name": "x"}, {"modelId": "ok", "name": "OK"}]}}
+        )
         assert [m["modelId"] for m in c.available_models()] == ["ok"]
 
     def test_value_field_accepted_as_model_id(self):
         # ACP config-option shape uses "value" rather than "modelId".
         c = self._client()
-        c._capture_available_models({"models": {"availableModels": [{"value": "m1", "name": "M1"}]}})
+        c._capture_available_models(
+            {"models": {"availableModels": [{"value": "m1", "name": "M1"}]}}
+        )
         assert c.available_models()[0]["modelId"] == "m1"
 
 
@@ -4672,9 +4761,7 @@ class TestWaitForResponseDeferral:
         resp = {"jsonrpc": "2.0", "id": 7, "result": {"ok": True}}
         client._process = _scripted_process([perm, resp])
 
-        result = await asyncio.wait_for(
-            client._wait_for_response(7, timeout=5.0), timeout=10.0
-        )
+        result = await asyncio.wait_for(client._wait_for_response(7, timeout=5.0), timeout=10.0)
         assert result == {"ok": True}
         # Permission request must be re-injected (not dropped, not spun).
         assert len(client._buffer) == 1
@@ -4689,9 +4776,7 @@ class TestWaitForResponseDeferral:
         resp = {"jsonrpc": "2.0", "id": 3, "result": {"ok": True}}
         client._process = _scripted_process([foreign, resp])
 
-        result = await asyncio.wait_for(
-            client._wait_for_response(3, timeout=5.0), timeout=10.0
-        )
+        result = await asyncio.wait_for(client._wait_for_response(3, timeout=5.0), timeout=10.0)
         assert result == {"ok": True}
         assert len(client._buffer) == 1
         assert client._buffer.popleft().id == 99
@@ -4703,9 +4788,7 @@ class TestWaitForResponseDeferral:
         resp = {"jsonrpc": "2.0", "id": 5, "result": {"ok": True}}
         client._process = _scripted_process([notif, resp])
 
-        result = await asyncio.wait_for(
-            client._wait_for_response(5, timeout=5.0), timeout=10.0
-        )
+        result = await asyncio.wait_for(client._wait_for_response(5, timeout=5.0), timeout=10.0)
         assert result == {"ok": True}
         # Notification buffered for drain, NOT re-injected into _buffer.
         assert len(client._buffer) == 0
@@ -4727,9 +4810,7 @@ class TestWaitForResponseDeferral:
         client._process = _scripted_process([first, second])
 
         with pytest.raises(AcpError):
-            await asyncio.wait_for(
-                client._wait_for_response(7, timeout=1.0), timeout=10.0
-            )
+            await asyncio.wait_for(client._wait_for_response(7, timeout=1.0), timeout=10.0)
         assert len(client._buffer) == 2
         m0 = client._buffer.popleft()
         m1 = client._buffer.popleft()
@@ -4773,9 +4854,7 @@ class TestWaitForResponseActivityDeadline:
 
         monkeypatch.setattr("kiro_claw.acp.client.time.monotonic", fake_monotonic)
 
-        result = await asyncio.wait_for(
-            client._wait_for_response(4, timeout=0.1), timeout=10.0
-        )
+        result = await asyncio.wait_for(client._wait_for_response(4, timeout=0.1), timeout=10.0)
         assert result == {"loaded": True}
         # All 20 notifications were drained while the deadline kept extending.
         assert len(client._mcp_notifications) == 20
@@ -4806,9 +4885,7 @@ class TestWaitForResponseActivityDeadline:
         monkeypatch.setattr("kiro_claw.acp.client.time.monotonic", fake_monotonic)
 
         with pytest.raises(AcpError):
-            await asyncio.wait_for(
-                client._wait_for_response(1, timeout=0.1), timeout=10.0
-            )
+            await asyncio.wait_for(client._wait_for_response(1, timeout=0.1), timeout=10.0)
 
 
 class TestProcessMessageUnknownServerRequest:
@@ -4819,9 +4896,7 @@ class TestProcessMessageUnknownServerRequest:
         from kiro_claw.acp.types import JsonRpcMessage
 
         client = AcpClient(work_dir=tmp_path)
-        msg = JsonRpcMessage(
-            id=12, method="fs/read_text_file", params={"path": "/x"}
-        )
+        msg = JsonRpcMessage(id=12, method="fs/read_text_file", params={"path": "/x"})
         assert client._process_message(msg, req_id=1) == "server_request_unknown"
 
     def test_terminal_create_classified(self, tmp_path):
@@ -5037,3 +5112,48 @@ class TestFormatAcpError:
         warnings = [r for r in caplog.records if "sensitive content" in r.getMessage()]
         assert warnings, "expected a redaction warning to be logged"
         assert "AKIAIOSFODNN7EXAMPLE" not in warnings[0].getMessage()
+
+
+class TestSettingsLocalModelInjection:
+    """The per-session settings.local.json must carry the full availableModels
+    allowlist so the adapter resolves the [1m] id (1M window) even over a
+    polluted user ~/.claude (availableModels=['opus','sonnet'])."""
+
+    def test_settings_local_has_available_models(self, tmp_path):
+        import json
+
+        from kiro_claw import model_registry as mr
+        from kiro_claw.acp.client import AcpClient
+        from kiro_claw.acp.types import ACP_BACKEND_CLAUDE
+
+        client = AcpClient(
+            work_dir=tmp_path,
+            model="global.anthropic.claude-opus-4-8[1m]",
+            agent="kiroclaw",
+            acp_backend=ACP_BACKEND_CLAUDE,
+        )
+        client._write_claude_local_settings()
+
+        data = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
+        assert data["permissions"]["defaultMode"] == "default"
+        for pid in mr.available_models("claude_code"):
+            assert pid in data["availableModels"]
+        assert data["model"] == "global.anthropic.claude-opus-4-8[1m]"
+
+    def test_settings_local_omits_model_when_auto(self, tmp_path):
+        import json
+
+        from kiro_claw.acp.client import AcpClient
+        from kiro_claw.acp.types import ACP_BACKEND_CLAUDE
+
+        # DEFAULT_MODEL ("auto") must NOT be written as a literal model value.
+        client = AcpClient(
+            work_dir=tmp_path,
+            model=None,
+            agent="kiroclaw",
+            acp_backend=ACP_BACKEND_CLAUDE,
+        )
+        client._write_claude_local_settings()
+        data = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
+        assert "model" not in data
+        assert data["availableModels"]  # allowlist still present

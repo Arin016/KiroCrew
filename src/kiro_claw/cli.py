@@ -990,6 +990,26 @@ Examples:
         "--force", action="store_true", help="Overwrite existing files in ~/.claude/"
     )
 
+    # cc (Claude Code provider maintenance)
+    cc_parser = sub.add_parser(
+        "cc",
+        help="Claude Code provider maintenance",
+        epilog="""
+Examples:
+  kiroclaw cc revert-settings            # Remove KiroClaw-written model keys from ~/.claude
+  kiroclaw cc revert-settings --dry-run  # Preview without writing
+""",
+        formatter_class=_fmt,
+    )
+    cc_sub = cc_parser.add_subparsers(dest="cc_action")
+    cc_revert = cc_sub.add_parser(
+        "revert-settings",
+        help="Remove KiroClaw-written model keys from ~/.claude/settings.json (deny kept)",
+    )
+    cc_revert.add_argument(
+        "--dry-run", action="store_true", help="Show what would change without writing"
+    )
+
     # config
     cfg_parser = sub.add_parser(
         "config",
@@ -1013,7 +1033,8 @@ The dashboard port is set with the KIROCLAW_PORT env var, not a config key.
     cfg_set.add_argument("value", nargs="?", help="Value to set")
     cfg_set.add_argument("--file", "-f", dest="file", help="Load full config from a JSON file")
     cfg_set.add_argument(
-        "--local", action="store_true",
+        "--local",
+        action="store_true",
         help="Save to config.local.json (persists across upgrades)",
     )
     cfg_sub.add_parser("edit", help="Open config in $EDITOR")
@@ -1198,6 +1219,8 @@ Examples:
         _handle_aim(args)
     elif args.command == "mirror":
         _handle_mirror(args)
+    elif args.command == "cc":
+        _handle_cc(args)
     else:
         print(BANNER)
         parser.print_help()
@@ -1213,6 +1236,7 @@ from kiro_claw.cli_commands import (  # noqa: E402
     _handle_agent,
     _handle_aim,
     _handle_app,
+    _handle_cc,
     _handle_mirror,
     _handle_workspace,
     _learn,

@@ -16,6 +16,7 @@ from typing import Any
 
 from aiohttp import web
 
+from kiro_claw import model_registry
 from kiro_claw.aim_agents import (
     install_cc_plugin,
     installed_kiro_packages_missing_from_cc,
@@ -36,18 +37,13 @@ from kiro_claw.mirror import mirror_kiro_to_cc
 
 _VALID_PACKAGE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$")
 
-try:
-    from kiro_claw.providers.claude_code import _CC_CURATED_MODELS, _CC_VALID_MODELS
-except ImportError:
-    _CC_VALID_MODELS: list = []  # type: ignore[no-redef]
-    _CC_CURATED_MODELS: list = []  # type: ignore[no-redef]
-
 logger = logging.getLogger(__name__)
 
 
 def _sel():
     """Late-binding _sel() for test monkeypatch compatibility."""
     import kiro_claw.dashboard.handlers as _pkg  # noqa: F811
+
     return _pkg.sel()
 
 
@@ -360,6 +356,7 @@ async def api_agent_config(request: web.Request) -> web.Response:
     if the installed config doesn't exist yet.
     """
     import kiro_claw.dashboard.handlers as _h  # noqa: F811
+
     installed_path = _h._installed_agent_config()
     defaults_path = _h._find_agent_config()
     # Prefer installed config (what kiro-cli reads); fall back to defaults
@@ -396,7 +393,11 @@ async def api_agent_config(request: web.Request) -> web.Response:
                     removed_per_key[key] = diff
             mc_cfg_path = _h.config_path()  # type: ignore[operator]
             try:
-                mc_cfg = json.loads(mc_cfg_path.read_text(encoding="utf-8")) if mc_cfg_path.exists() else {}
+                mc_cfg = (
+                    json.loads(mc_cfg_path.read_text(encoding="utf-8"))
+                    if mc_cfg_path.exists()
+                    else {}
+                )
             except Exception:
                 mc_cfg = {}
             if removed_per_key:
@@ -421,6 +422,7 @@ async def api_agent_config(request: web.Request) -> web.Response:
 async def api_default_agent(request: web.Request) -> web.Response:
     """GET/PUT /api/config/default-agent — read or set the default agent."""
     import kiro_claw.dashboard.handlers as _h  # noqa: F811
+
     if request.method == "PUT":
         try:
             body = await request.json()
@@ -567,6 +569,7 @@ async def api_aim_mcp_install(request: web.Request) -> web.Response:
         from kiro_claw.dashboard.handlers.mcp import (  # noqa: E402 circular: mcp imports agents
             _sync_mcp_to_agent,
         )
+
         async with _get_config_lock():
             _sync_mcp_to_agent(server_id, True)
         state: DashboardState = request.app["state"]
@@ -592,6 +595,7 @@ async def api_aim_mcp_uninstall(request: web.Request) -> web.Response:
         from kiro_claw.dashboard.handlers.mcp import (  # noqa: E402 circular: mcp imports agents
             _sync_mcp_to_agent,
         )
+
         async with _get_config_lock():
             _sync_mcp_to_agent(server_id, False, remove=True)
         state: DashboardState = request.app["state"]
@@ -695,7 +699,11 @@ def _advertised_cc_models(request: web.Request) -> list[dict]:
     """Map the first active CC provider's advertised models to the API shape.
 
     claude-agent-acp captures its real versioned list at session init (see
-    AcpClient._capture_available_models). Returns ``[]`` when no session has
+    AcpClient._capture_available_models). Backend provider ids are mapped back to
+    canonical registry keys (``from_provider_id``) so they dedup cleanly against
+    the registry rows in :func:`_cc_models` and the wire value stays canonical.
+    A provider id with no registry entry passes through unchanged (forward-compat
+    for models the registry doesn't list yet). Returns ``[]`` when no session has
     initialized or the backend advertised nothing.
     """
     try:
@@ -714,7 +722,9 @@ def _advertised_cc_models(request: web.Request) -> list[dict]:
         if advertised:
             return [
                 {
-                    "model_name": m.get("modelId", ""),
+                    "model_name": model_registry.from_provider_id(
+                        m.get("modelId", ""), "claude_code"
+                    ),
                     "display_name": m.get("name", "") or m.get("modelId", ""),
                     "description": m.get("description", ""),
                 }
@@ -725,27 +735,23 @@ def _advertised_cc_models(request: web.Request) -> list[dict]:
 
 
 def _cc_models(request: web.Request, configured_default: str = "") -> list[dict]:
-    """Assemble the CC model dropdown: curated set first, then adapter extras.
+    """Assemble the CC model dropdown: canonical registry first, then adapter extras.
 
     Merge order (deduped by model_name, first wins):
-      1. The KiroClaw-curated list (_CC_CURATED_MODELS: Opus 4.8 1M/200k, Opus
-         4.7, Sonnet 4.6, Haiku 4.5) — shown FIRST so users always see clean,
-         current defaults ahead of whatever the adapter advertises.
+      1. The canonical model registry (model_registry.display_list) — canonical
+         versioned+capability keys (opus-4.8-1m, …) with registry display names,
+         shown FIRST so users always see clean, current defaults. These are the
+         wire values; the backend translates them to provider ids at the factory.
       2. The live backend's advertised models NOT already covered — appended,
-         de-duped, so nothing the adapter offers is hidden. The adapter's set
-         can be stale (older builds list Opus 4.1 / Sonnet 4.5).
-      3. The static catalog fallback only when nothing has initialized yet AND
-         the curated list somehow came up empty.
+         de-duped, so nothing the adapter offers is hidden (its set can be stale).
     The configured default is force-included so the active model is always
     selectable even if neither source lists it.
     """
     advertised = _advertised_cc_models(request)
-    # Curated entries lead; adapter-advertised extras (or the static fallback)
-    # follow so they are never hidden but never displace the curated defaults.
-    extras = advertised if advertised else list(_CC_VALID_MODELS)
+    registry_rows = model_registry.display_list("claude_code")
     merged: list[dict] = []
     seen: set[str] = set()
-    for entry in (*_CC_CURATED_MODELS, *extras):
+    for entry in (*registry_rows, *advertised):
         name = entry.get("model_name", "")
         key = _normalize_model_key(name)
         if not key or key in seen:
@@ -753,21 +759,37 @@ def _cc_models(request: web.Request, configured_default: str = "") -> list[dict]
         seen.add(key)
         merged.append(entry)
     # Guarantee the configured default is present (e.g. a custom cc_model the
-    # backend doesn't advertise) so the selected model never vanishes.
-    if configured_default and _normalize_model_key(configured_default) not in seen:
-        merged.insert(0, {
-            "model_name": configured_default,
-            "display_name": configured_default,
-            "description": "Configured default",
-        })
+    # backend doesn't advertise) so the selected model never vanishes. Resolve it
+    # to its canonical key first (it may be stored as a provider id or alias) so a
+    # default that already maps to a registry row does NOT produce a duplicate.
+    if configured_default:
+        canonical_default = model_registry.from_provider_id(
+            model_registry.to_provider_id(configured_default, "claude_code"), "claude_code"
+        )
+        # Skip a blank canonical key: cc_model="auto" round-trips to "" (auto's
+        # provider id is empty), and _normalize_model_key("")=="" is never in
+        # `seen` (which holds "auto"), so without the `if key` guard — the same
+        # one the merge loop above uses — a blank-named row would be inserted as
+        # the first/selected dropdown option. The "auto" registry row already
+        # covers this case.
+        key = _normalize_model_key(canonical_default)
+        if key and key not in seen:
+            merged.insert(
+                0,
+                {
+                    "model_name": canonical_default,
+                    "display_name": canonical_default,
+                    "description": "Configured default",
+                },
+            )
     return merged
 
 
 async def api_models(request: web.Request) -> web.Response:
     """GET /api/models — list available models (provider-aware).
 
-    For claude_code provider: prefer models reported by an active ACP session
-    (live from ACP configOptions), fallback to static _CC_VALID_MODELS.
+    For claude_code provider: the canonical model registry leads, merged with
+    any models reported by an active ACP session (live from ACP configOptions).
     """
     cfg = KiroClawConfig.load()
     if cfg.agent.provider == "claude_code":
@@ -817,9 +839,12 @@ async def api_models(request: web.Request) -> web.Response:
         models = data.get("models", [])
         try:
             from kiro_claw.dashboard.chat import is_deprecated_model  # noqa: F811
+
             models = [m for m in models if not is_deprecated_model(m.get("model_name", ""))]
         except ImportError:
-            logger.warning("Failed to import is_deprecated_model; serving unfiltered model list", exc_info=True)
+            logger.warning(
+                "Failed to import is_deprecated_model; serving unfiltered model list", exc_info=True
+            )
         return web.json_response(models)
     except Exception:
         return web.json_response([])
@@ -862,8 +887,14 @@ async def api_slash_commands(request: web.Request) -> web.Response:
                 break
         if not cc_commands:
             cc_commands = [
-                "compact", "clear", "context", "help", "init",
-                "review", "security-review", "usage",
+                "compact",
+                "clear",
+                "context",
+                "help",
+                "init",
+                "review",
+                "security-review",
+                "usage",
             ]
         result = [{"name": f"/{c}", "description": ""} for c in cc_commands]
         result.append({"name": "/side", "description": "Open side conversation panel"})
@@ -904,6 +935,8 @@ async def api_agent_detail(request: web.Request) -> web.Response:
                     async with _get_config_lock():
                         data = json.loads(f.read_text(encoding="utf-8"))
                         if "model" in patch_body:
+                            # Stored verbatim (canonical key); translated to a
+                            # provider id at the config.loader factory boundary.
                             data["model"] = patch_body["model"] or None
                             if data["model"] is None:
                                 data.pop("model", None)
@@ -1091,8 +1124,16 @@ async def api_aim_update(request: web.Request) -> web.Response:
         # For agents/plugins updates, update ALL types to converge versions
         if kind == "agents":
             other = "agents" if _aim_cap_type() == "plugins" else "plugins"
-            rc_o, _ = await _run_aim(other, "update", *([package] if package else []), "--non-interactive", timeout=120)
-            rc_s, _ = await _run_aim("skills", "update", *([package] if package else []), "--non-interactive", timeout=120)
+            rc_o, _ = await _run_aim(
+                other, "update", *([package] if package else []), "--non-interactive", timeout=120
+            )
+            rc_s, _ = await _run_aim(
+                "skills",
+                "update",
+                *([package] if package else []),
+                "--non-interactive",
+                timeout=120,
+            )
             try:
                 _sel().log_api_access(
                     caller="dashboard",
@@ -1150,13 +1191,15 @@ async def api_aim_mcp_registry(request: web.Request) -> web.Response:
                 tier = tier_match.group(1)
                 name_str = name_str[: tier_match.start()].strip()
 
-            entries.append({
-                "id": item.get("bundleId", ""),
-                "installed": "yes" if item.get("isInstalled") else "",
-                "title": name_str,
-                "tier": tier,
-                "description": item.get("description", ""),
-            })
+            entries.append(
+                {
+                    "id": item.get("bundleId", ""),
+                    "installed": "yes" if item.get("isInstalled") else "",
+                    "title": name_str,
+                    "tier": tier,
+                    "description": item.get("description", ""),
+                }
+            )
         return web.json_response({"servers": entries})
     except Exception as exc:
         return web.json_response({"error": str(exc)[:500]}, status=500)
@@ -1417,7 +1460,13 @@ async def api_agent_metadata_put(request: web.Request) -> web.Response:
     caller = request.get("user", "")
     if not caller:
         try:
-            _sel().log_api_access(caller="anonymous", operation="agent_metadata.put", outcome="denied", source="dashboard", resources="unauthenticated")
+            _sel().log_api_access(
+                caller="anonymous",
+                operation="agent_metadata.put",
+                outcome="denied",
+                source="dashboard",
+                resources="unauthenticated",
+            )
         except Exception:
             logger.warning("SEL logging failed", exc_info=True)
         return web.json_response({"error": "authentication required"}, status=401)
@@ -1447,7 +1496,13 @@ async def api_agent_metadata_delete(request: web.Request) -> web.Response:
     caller = request.get("user", "")
     if not caller:
         try:
-            _sel().log_api_access(caller="anonymous", operation="agent_metadata.delete", outcome="denied", source="dashboard", resources="unauthenticated")
+            _sel().log_api_access(
+                caller="anonymous",
+                operation="agent_metadata.delete",
+                outcome="denied",
+                source="dashboard",
+                resources="unauthenticated",
+            )
         except Exception:
             logger.warning("SEL logging failed", exc_info=True)
         return web.json_response({"error": "authentication required"}, status=401)
@@ -1533,9 +1588,7 @@ async def api_cc_mirror_run(request: web.Request) -> web.Response:
             operation="cc_mirror.run",
             outcome="ok" if not result["errors"] else "partial",
             source="dashboard",
-            resources=(
-                f"force={force} mirrored={summary['mirrored']} errors={summary['errors']}"
-            ),
+            resources=(f"force={force} mirrored={summary['mirrored']} errors={summary['errors']}"),
         )
     except Exception:
         logger.warning("SEL logging failed for cc_mirror.run", exc_info=True)

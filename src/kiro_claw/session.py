@@ -77,7 +77,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from kiro_claw import shutdown_event
+from kiro_claw import model_registry, shutdown_event
 from kiro_claw.agent import _enforce_denied_commands
 from kiro_claw.config import KiroClawConfig
 from kiro_claw.config.loader import default_project_dir
@@ -959,16 +959,32 @@ class SessionManager:
 
                 if isinstance(provider, AcpProvider):
                     provider.client.rekey(key, channel_id)
-                    # Switch model post-claim if caller requested non-default
+                    # Switch model post-claim if caller requested non-default.
                     if model:
                         _pool_model = (
                             self._resolve_agent_model(self._pool_agent)
                             if self._pool_agent
                             else None
                         )
-                        if model and _pool_model and model != _pool_model:
-                            await provider.client.set_model(model)
-                            logger.info("Pool post-claim: switched model to %s", model)
+                        # The requested `model` is a canonical/wire value while
+                        # `_pool_model` is the pool agent's raw kiro model slot —
+                        # two namespaces. For the claude backend, normalize BOTH
+                        # to provider ids before the equality check so an
+                        # already-equivalent pooled process is not needlessly
+                        # re-switched, and the value sent to set_model is a
+                        # provider id (kiro/acp ids pass through unchanged).
+                        _switch_model = model
+                        _cmp_pool = _pool_model
+                        if _is_claude_backend(provider):
+                            _switch_model = model_registry.to_provider_id(model, "claude_code")
+                            _cmp_pool = (
+                                model_registry.to_provider_id(_pool_model, "claude_code")
+                                if _pool_model
+                                else _pool_model
+                            )
+                        if _pool_model and _switch_model != _cmp_pool:
+                            await provider.client.set_model(_switch_model)
+                            logger.info("Pool post-claim: switched model to %s", _switch_model)
                 logger.info(
                     "Claimed warm-pool process for %s (agent=%s)", key, agent or self._pool_agent
                 )

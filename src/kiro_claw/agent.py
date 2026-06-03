@@ -43,6 +43,7 @@ from kiro_claw.cc_agent import (
     generate_mcp_json,
     install_cc_agent,
     install_cc_global_deny_settings,
+    revert_user_model_settings,
     seed_isolated_cc_config,
 )
 from kiro_claw.config import KiroClawConfig
@@ -591,9 +592,7 @@ def _autoimport_kiro_hooks(hooks_dir: Path) -> dict[str, list[dict[str, str]]]:
         # Emit SEL audit so an auditor sees a distinct "hooks_dir
         # unresolvable" signal — same symmetry principle as the
         # per-entry ``cannot resolve entry`` branch below.
-        logger.debug(
-            "kiro_hooks_autoimport: cannot resolve %s, skipping", hooks_dir, exc_info=True
-        )
+        logger.debug("kiro_hooks_autoimport: cannot resolve %s, skipping", hooks_dir, exc_info=True)
         _sel_hook_rejected("autoimport", str(hooks_dir), "cannot resolve hooks_dir")
         return result
     try:
@@ -785,9 +784,11 @@ def _merge_kiro_hooks(hooks: dict, user_hooks: dict) -> dict:
                 # configured 10 and all loaded".
                 _sel_hook_rejected(
                     event,
-                    str(entry.get("command", ""))[:200]
-                    if isinstance(entry, dict)
-                    else str(entry)[:200],
+                    (
+                        str(entry.get("command", ""))[:200]
+                        if isinstance(entry, dict)
+                        else str(entry)[:200]
+                    ),
                     "per-event limit exceeded",
                 )
                 break
@@ -803,9 +804,11 @@ def _merge_kiro_hooks(hooks: dict, user_hooks: dict) -> dict:
                 # loaded".
                 _sel_hook_rejected(
                     event,
-                    str(entry.get("command", ""))[:200]
-                    if isinstance(entry, dict)
-                    else str(entry)[:200],
+                    (
+                        str(entry.get("command", ""))[:200]
+                        if isinstance(entry, dict)
+                        else str(entry)[:200]
+                    ),
                     "global limit exceeded",
                 )
                 break
@@ -965,9 +968,7 @@ def _apply_user_kiro_hooks(config: dict, mc_cfg: dict) -> None:
     discovered: dict[str, list[dict[str, str]]] = {}
     if autoimport_enabled:
         discovered = _autoimport_kiro_hooks(hooks_dir)
-        requested_autoimport = sum(
-            len(v) for v in discovered.values() if isinstance(v, list)
-        )
+        requested_autoimport = sum(len(v) for v in discovered.values() if isinstance(v, list))
 
     if requested_explicit == 0 and requested_autoimport == 0:
         # Nothing to merge; keep config["hooks"] untouched (or create empty
@@ -1137,11 +1138,7 @@ def _refresh_dynamic_fields(config: dict) -> None:
     # ``.kiro/steering/**/*.md`` and friends from auto-loading.  If the user
     # has explicitly listed their own resources, leave them alone.
     bundled_resources = bundled.get("resources")
-    if (
-        isinstance(bundled_resources, list)
-        and bundled_resources
-        and not config.get("resources")
-    ):
+    if isinstance(bundled_resources, list) and bundled_resources and not config.get("resources"):
         config["resources"] = list(bundled_resources)
 
     # tools/allowedTools: intentionally not modified on existing configs.
@@ -1474,8 +1471,7 @@ def _install_knowledge_agent() -> None:
     config: dict[str, object] = {
         "name": "kiroclaw-knowledge",
         "description": (
-            "Dedicated agent for knowledge extraction, categorization, "
-            "and summarization."
+            "Dedicated agent for knowledge extraction, categorization, " "and summarization."
         ),
         "model": "claude-haiku-4.5",
         "includeMcpJson": False,
@@ -1608,12 +1604,22 @@ def repair_agent_configs() -> None:
     _enforce_denied_commands()
     _sanitize_agent_hooks()
     try:
-        # Re-assert deny + 1M model allowlist into the user-global ~/.claude
-        # (keeps the operator's interactive `claude` 1M window; also the seed
-        # SOURCE for the isolated dir).
+        # Re-assert security deny patterns + managed marker into the user-global
+        # ~/.claude. Model config is NOT written here (it lives in the per-session
+        # settings.local.json) so KiroClaw never mutates the user's model config.
         install_cc_global_deny_settings()
     except Exception:
         logger.debug("CC global deny settings install failed", exc_info=True)
+    try:
+        # Idempotent cleanup: un-pollute the user's ~/.claude of model keys
+        # KiroClaw wrote in earlier versions (model config now lives in the
+        # KiroClaw-owned per-session settings.local.json). On boot we run
+        # MARKER-GATED so we never delete a value the operator set themselves
+        # that merely matches our constant — legacy pollution (no marker) is left
+        # for the explicit `kiroclaw cc revert-settings` command.
+        revert_user_model_settings(require_marker=True)
+    except Exception:
+        logger.debug("CC user model-settings revert failed", exc_info=True)
     try:
         # Seed the isolated CC config dir so the spawned claude-agent-acp
         # subprocess reads creds/models/deny (plugins stripped) on first spawn.

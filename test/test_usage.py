@@ -1,4 +1,5 @@
 """Tests for kiro_claw.dashboard.handlers.usage."""
+
 from __future__ import annotations
 
 import json
@@ -39,8 +40,9 @@ class TestParseSessions:
     def test_iterdir_oserror(self, tmp_path):
         d = tmp_path / "cli"
         d.mkdir()
-        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
-             patch("pathlib.Path.iterdir", side_effect=OSError("boom")):
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), patch(
+            "pathlib.Path.iterdir", side_effect=OSError("boom")
+        ):
             result = _parse_sessions()
             assert "error" in result
             assert "boom" in result["error"]
@@ -58,8 +60,9 @@ class TestParseSessions:
         d = tmp_path / "cli"
         d.mkdir()
         _write_session(d / "s1.jsonl", [{"kind": "Prompt"}])
-        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
-             patch.object(usage_mod, "validate_file_path", return_value=None):
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), patch.object(
+            usage_mod, "validate_file_path", return_value=None
+        ):
             r = _parse_sessions()
             assert r["total_sessions"] == 0
 
@@ -74,9 +77,10 @@ class TestParseSessions:
             if self_.name == f.name:
                 raise OSError("stat fail")
             return orig_stat(self_, *a, **kw)
-        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
-             patch.object(usage_mod, "validate_file_path", return_value=str(f)), \
-             patch.object(Path, "stat", stat_side_effect):
+
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), patch.object(
+            usage_mod, "validate_file_path", return_value=str(f)
+        ), patch.object(Path, "stat", stat_side_effect):
             r = _parse_sessions()
             assert r["all_time_sessions"] == 0
 
@@ -86,8 +90,9 @@ class TestParseSessions:
         f = d / "old.jsonl"
         old_mtime = time.time() - (60 * 86400)  # 60 days ago
         _write_session(f, [{"kind": "Prompt"}], mtime=old_mtime)
-        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
-             patch.object(usage_mod, "validate_file_path", return_value=str(f)):
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), patch.object(
+            usage_mod, "validate_file_path", return_value=str(f)
+        ):
             r = _parse_sessions()
             assert r["all_time_sessions"] == 1
             assert r["total_sessions"] == 0
@@ -104,8 +109,9 @@ class TestParseSessions:
             {"kind": "Other"},
         ]
         _write_session(f, lines)
-        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
-             patch.object(usage_mod, "validate_file_path", return_value=str(f)):
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), patch.object(
+            usage_mod, "validate_file_path", return_value=str(f)
+        ):
             r = _parse_sessions()
             assert r["total_sessions"] == 1
             assert r["total_messages"] == 2
@@ -120,8 +126,9 @@ class TestParseSessions:
         d.mkdir()
         f = d / "s1.jsonl"
         f.write_text('{"kind":"Prompt"}\nNOT_JSON\n{"kind":"ToolResults"}\n')
-        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
-             patch.object(usage_mod, "validate_file_path", return_value=str(f)):
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), patch.object(
+            usage_mod, "validate_file_path", return_value=str(f)
+        ):
             r = _parse_sessions()
             assert r["total_messages"] == 1
             assert r["total_tool_calls"] == 1
@@ -131,8 +138,9 @@ class TestParseSessions:
         d.mkdir()
         f = d / "s1.jsonl"
         f.write_text('"just a string"\n42\nnull\n[1,2]\n{"kind":"Prompt"}\n')
-        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
-             patch.object(usage_mod, "validate_file_path", return_value=str(f)):
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), patch.object(
+            usage_mod, "validate_file_path", return_value=str(f)
+        ):
             r = _parse_sessions()
             assert r["total_messages"] == 1
 
@@ -148,9 +156,9 @@ class TestParseSessions:
                 raise OSError("read fail")
             return orig_open(self_, *a, **kw)
 
-        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
-             patch.object(usage_mod, "validate_file_path", return_value=str(f)), \
-             patch.object(Path, "open", open_raises):
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), patch.object(
+            usage_mod, "validate_file_path", return_value=str(f)
+        ), patch.object(Path, "open", open_raises):
             r = _parse_sessions()
             assert r["all_time_sessions"] == 1
             assert r["total_sessions"] == 0  # not counted when file read fails
@@ -162,8 +170,9 @@ class TestParseSessions:
         now = time.time()
         f = d / "today.jsonl"
         _write_session(f, [{"kind": "Prompt"}, {"kind": "ToolResults"}], mtime=now)
-        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
-             patch.object(usage_mod, "validate_file_path", return_value=str(f)):
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), patch.object(
+            usage_mod, "validate_file_path", return_value=str(f)
+        ):
             r = _parse_sessions()
             assert r["today"]["sessions"] == 1
             assert r["today"]["messages"] == 1
@@ -181,8 +190,9 @@ class TestParseSessions:
         ]
         # mtime is today, but timestamp says April 20
         _write_session(f, lines)
-        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
-             patch.object(usage_mod, "validate_file_path", return_value=str(f)):
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), patch.object(
+            usage_mod, "validate_file_path", return_value=str(f)
+        ):
             r = _parse_sessions()
             assert r["total_sessions"] == 1
             assert r["daily_history"][0]["date"] == "2026-04-20"
@@ -198,8 +208,9 @@ class TestParseSessions:
             {"kind": "ToolResults"},
         ]
         _write_session(f, lines)
-        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
-             patch.object(usage_mod, "validate_file_path", return_value=str(f)):
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), patch.object(
+            usage_mod, "validate_file_path", return_value=str(f)
+        ):
             r = _parse_sessions()
             assert r["total_sessions"] == 1
             # Messages still counted despite bad timestamp
@@ -215,8 +226,9 @@ class TestParseSessions:
             {"kind": "AssistantMessage"},
         ]
         _write_session(f, lines)
-        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
-             patch.object(usage_mod, "validate_file_path", return_value=str(f)):
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), patch.object(
+            usage_mod, "validate_file_path", return_value=str(f)
+        ):
             r = _parse_sessions()
             assert r["total_sessions"] == 1
             # Z suffix parsed and converted to local TZ via .astimezone()
@@ -235,21 +247,20 @@ class TestParseSessions:
 class TestGetUsageCache:
     def test_returns_cache(self):
         mock_cache = {"credits_used": 42}
-        with patch.dict("sys.modules", {
-            "kiro_claw.dashboard.handlers.sessions": MagicMock(_usage_cache=mock_cache)
-        }):
+        with patch.dict(
+            "sys.modules",
+            {"kiro_claw.dashboard.handlers.sessions": MagicMock(_usage_cache=mock_cache)},
+        ):
             assert get_usage_cache() == {"credits_used": 42}
 
     def test_empty_cache(self):
-        with patch.dict("sys.modules", {
-            "kiro_claw.dashboard.handlers.sessions": MagicMock(_usage_cache={})
-        }):
+        with patch.dict(
+            "sys.modules", {"kiro_claw.dashboard.handlers.sessions": MagicMock(_usage_cache={})}
+        ):
             assert get_usage_cache() == {}
 
     def test_import_error(self):
-        with patch.dict("sys.modules", {
-            "kiro_claw.dashboard.handlers.sessions": None
-        }):
+        with patch.dict("sys.modules", {"kiro_claw.dashboard.handlers.sessions": None}):
             assert get_usage_cache() == {}
 
 
@@ -283,9 +294,20 @@ class TestApiKiroUsage:
         d.mkdir()
         f = d / "s.jsonl"
         _write_session(f, [{"kind": "Prompt"}])
-        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
-             patch.object(usage_mod, "validate_file_path", return_value=str(f)), \
-             patch.object(usage_mod, "get_usage_cache", return_value={"credits_used": 10, "credits_plan": 100, "cost_usd": 0, "resets": "May 1", "plan": "Pro", "overage_rate": 0.01}):
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), patch.object(
+            usage_mod, "validate_file_path", return_value=str(f)
+        ), patch.object(
+            usage_mod,
+            "get_usage_cache",
+            return_value={
+                "credits_used": 10,
+                "credits_plan": 100,
+                "cost_usd": 0,
+                "resets": "May 1",
+                "plan": "Pro",
+                "overage_rate": 0.01,
+            },
+        ):
             app = web.Application()
             app.router.add_get("/api/usage/kiro", api_kiro_usage)
             async with TestClient(TestServer(app)) as client:
@@ -299,8 +321,9 @@ class TestApiKiroUsage:
 
     @pytest.mark.asyncio
     async def test_error_not_cached(self, tmp_path):
-        with patch.object(usage_mod, "_SESSIONS_DIR", tmp_path / "nope"), \
-             patch.object(usage_mod, "get_usage_cache", return_value={}):
+        with patch.object(usage_mod, "_SESSIONS_DIR", tmp_path / "nope"), patch.object(
+            usage_mod, "get_usage_cache", return_value={}
+        ):
             app = web.Application()
             app.router.add_get("/api/usage/kiro", api_kiro_usage)
             async with TestClient(TestServer(app)) as client:
@@ -334,9 +357,7 @@ def _patch_shard_layout(monkeypatch, tmp_path):
 
 
 def _write_shard(shard_dir: Path, day: str, records):
-    (shard_dir / f"{day}.jsonl").write_text(
-        "\n".join(json.dumps(r) for r in records) + "\n"
-    )
+    (shard_dir / f"{day}.jsonl").write_text("\n".join(json.dumps(r) for r in records) + "\n")
 
 
 class TestParseTokenHistory:
@@ -364,8 +385,24 @@ class TestParseTokenHistory:
         ts1 = (now - timedelta(minutes=30)).isoformat()
         ts2 = (now - timedelta(minutes=15)).isoformat()
         records = [
-            {"_type": "tokens", "ts": ts1, "input": 100, "output": 50, "cache_create": 10, "cache_read": 5, "cost": 0.01},
-            {"_type": "tokens", "ts": ts2, "input": 200, "output": 100, "cache_create": 20, "cache_read": 10, "cost": 0.02},
+            {
+                "_type": "tokens",
+                "ts": ts1,
+                "input": 100,
+                "output": 50,
+                "cache_create": 10,
+                "cache_read": 5,
+                "cost": 0.01,
+            },
+            {
+                "_type": "tokens",
+                "ts": ts2,
+                "input": 200,
+                "output": 100,
+                "cache_create": 20,
+                "cache_read": 10,
+                "cost": 0.02,
+            },
         ]
         _write_shard(shard_dir, now.strftime("%Y-%m-%d"), records)
         result = _parse_token_history()
@@ -390,8 +427,7 @@ class TestParseTokenHistory:
         _write_shard(
             shard_dir,
             now.strftime("%Y-%m-%d"),
-            [{"_type": "tokens", "ts": now.isoformat(),
-              "input": 100, "output": 75}],
+            [{"_type": "tokens", "ts": now.isoformat(), "input": 100, "output": 75}],
         )
         result = _parse_token_history()
         assert result["total_input"] == 150
@@ -476,9 +512,7 @@ class TestPersistTokenRecord:
         event.output_tokens = 50
 
         # Point the shard dir at an unwritable location; persist must swallow.
-        monkeypatch.setattr(
-            usage_mod, "_TOKEN_USAGE_DIR", Path("/proc/nonexistent/usage/tokens")
-        )
+        monkeypatch.setattr(usage_mod, "_TOKEN_USAGE_DIR", Path("/proc/nonexistent/usage/tokens"))
         # Should not raise
         persist_token_record(slot_key, model, event)
 
@@ -572,8 +606,12 @@ class TestPersistTokenRecord:
         history = usage_mod._parse_token_history()
 
         assert sorted(history["providers"]) == ["claude_code", "opencode"]
+        # Non-claude_code provider models keep their raw namespace verbatim.
         assert "claude-sonnet-4" in history["models"]
-        assert "opus" in history["models"]
+        # claude_code models are canonicalized so pre/post-migration records
+        # aggregate into one bucket: bare 'opus' -> canonical 'opus-4.8-1m'.
+        assert "opus-4.8-1m" in history["models"]
+        assert "opus" not in history["models"]
         # The day entry should carry both providers + models sub-maps.
         day = history["daily_history"][0]
         assert "providers" in day
@@ -586,7 +624,7 @@ class TestPersistTokenRecord:
         # the model dropdown safely.
         pm = history["provider_models"]
         assert sorted(pm["opencode"]) == ["claude-haiku-3", "claude-sonnet-4"]
-        assert pm["claude_code"] == ["opus"]
+        assert pm["claude_code"] == ["opus-4.8-1m"]  # canonicalized for claude_code
         # opus must NOT appear under opencode — that would be the bug.
         assert "opus" not in pm["opencode"]
 
@@ -595,6 +633,6 @@ class TestPersistTokenRecord:
         day_pm = day["provider_models"]
         assert day_pm["opencode"]["claude-sonnet-4"]["input"] == 100
         assert day_pm["opencode"]["claude-haiku-3"]["input"] == 30
-        assert day_pm["claude_code"]["opus"]["input"] == 200
+        assert day_pm["claude_code"]["opus-4.8-1m"]["input"] == 200
         # Invalid pair (opencode + opus) is absent from the cross-tab.
         assert "opus" not in day_pm["opencode"]

@@ -123,9 +123,7 @@ class TestApiChatDrainOnDisconnect:
             sl.append("chunk", "partial answer", "chunk")
             await asyncio.sleep(60)
 
-        monkeypatch.setattr(
-            "kiro_claw.dashboard.chat_handlers._run_chat", fake_run_chat
-        )
+        monkeypatch.setattr("kiro_claw.dashboard.chat_handlers._run_chat", fake_run_chat)
 
         async with TestClient(TestServer(_make_app(state))) as client:
             resp = await client.post(
@@ -1667,9 +1665,7 @@ class TestTokenPersistenceBackfill:
         return state
 
     @pytest.mark.asyncio
-    async def test_late_backfill_populates_model_for_cc_session(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_late_backfill_populates_model_for_cc_session(self, tmp_path, monkeypatch):
         """When slot.model is empty at EVENT_COMPLETE but the provider has
         learned its model (CC init event), persist_token_record receives the
         provider model and slot.model is updated.
@@ -1694,6 +1690,17 @@ class TestTokenPersistenceBackfill:
         state = self._make_state_for_run_chat(tmp_path, monkeypatch)
         slot = state.get_or_create_slot("s1")
         slot.model = ""  # CC has not yet emitted init when _run_chat begins
+
+        # This simulates a claude_code session, so the backfill must run under
+        # provider=claude_code for canonicalize_for_provider to map 'opus' ->
+        # 'opus-4.8-1m'. The default test config is provider=acp, under which the
+        # backfill (correctly) leaves a kiro/acp model unchanged — so force a CC
+        # config here. _run_chat reads only cfg.agent.provider (+ dashboard.
+        # merge_queued_messages) on this path, so a MagicMock cfg suffices.
+        _cc_cfg = MagicMock()
+        _cc_cfg.agent.provider = "claude_code"
+        _cc_cfg.dashboard.merge_queued_messages = False
+        monkeypatch.setattr("kiro_claw.dashboard.chat_runner.KiroClawConfig.load", lambda: _cc_cfg)
 
         # Build a mock whose inner._model starts EMPTY so the early backfill
         # branch (chat_runner.py:471-476) finds nothing and leaves slot.model
@@ -1721,9 +1728,7 @@ class TestTokenPersistenceBackfill:
         def _fake_persist(slot_key, model, event, provider=""):
             captured.append((slot_key, model, provider))
 
-        monkeypatch.setattr(
-            "kiro_claw.dashboard.chat_runner.persist_token_record", _fake_persist
-        )
+        monkeypatch.setattr("kiro_claw.dashboard.chat_runner.persist_token_record", _fake_persist)
 
         from kiro_claw.dashboard.chat import _run_chat
 
@@ -1732,9 +1737,11 @@ class TestTokenPersistenceBackfill:
         assert len(captured) == 1
         slot_key, model, provider = captured[0]
         assert slot_key == "s1"
-        assert model == "opus", "late backfill should populate model from client._model"
+        # The backfill canonicalizes the provider's model via from_provider_id so
+        # it matches the canonical-keyed dropdown: 'opus' alias -> 'opus-4.8-1m'.
+        assert model == "opus-4.8-1m", "late backfill should populate canonical model"
         # slot.model should also be updated so subsequent turns reuse it
-        assert slot.model == "opus"
+        assert slot.model == "opus-4.8-1m"
 
     @pytest.mark.asyncio
     async def test_late_backfill_skips_auto_sentinel(self, tmp_path, monkeypatch):
@@ -1890,7 +1897,9 @@ class TestRuntimeWiring:
         mock_bindings.memory_store_name = "oncall-mem"
 
         monkeypatch.setattr("kiro_claw.dashboard.chat.KiroClawConfig.load", lambda: mock_cfg)
-        monkeypatch.setattr("kiro_claw.dashboard.chat_handlers.KiroClawConfig.load", lambda: mock_cfg)
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.KiroClawConfig.load", lambda: mock_cfg
+        )
         monkeypatch.setattr(
             "kiro_claw.dashboard.chat.resolve_agent_bindings",
             lambda cfg, name: mock_bindings,
@@ -1954,9 +1963,9 @@ class TestRuntimeWiring:
             assert data["agent"] == "new-agent"
 
         meta = state.conversation_log.get_metadata(history_key)
-        assert meta.get("agent") == "new-agent", (
-            f"expected new-agent in metadata, got {meta.get('agent')!r}"
-        )
+        assert (
+            meta.get("agent") == "new-agent"
+        ), f"expected new-agent in metadata, got {meta.get('agent')!r}"
 
     @pytest.mark.asyncio
     async def test_api_chat_slot_create_response_includes_workspace(self, tmp_path, monkeypatch):
@@ -1980,7 +1989,9 @@ class TestRuntimeWiring:
         mock_bindings.memory_store_name = "default"
 
         monkeypatch.setattr("kiro_claw.dashboard.chat.KiroClawConfig.load", lambda: mock_cfg)
-        monkeypatch.setattr("kiro_claw.dashboard.chat_handlers.KiroClawConfig.load", lambda: mock_cfg)
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.KiroClawConfig.load", lambda: mock_cfg
+        )
         monkeypatch.setattr(
             "kiro_claw.dashboard.chat.resolve_agent_bindings",
             lambda cfg, name: mock_bindings,
@@ -2231,10 +2242,16 @@ class TestRunChatToolCallUpdate:
         )
 
         events = [
-            LLMEvent(kind=EVENT_TOOL_CALL, title="Terminal", tool_kind="execute",
-                     tool_call_id="tc-1"),
-            LLMEvent(kind=EVENT_TOOL_CALL_UPDATE, title="ls /tmp", tool_kind="execute",
-                     tool_input='{"command": "ls /tmp"}', tool_call_id="tc-1"),
+            LLMEvent(
+                kind=EVENT_TOOL_CALL, title="Terminal", tool_kind="execute", tool_call_id="tc-1"
+            ),
+            LLMEvent(
+                kind=EVENT_TOOL_CALL_UPDATE,
+                title="ls /tmp",
+                tool_kind="execute",
+                tool_input='{"command": "ls /tmp"}',
+                tool_call_id="tc-1",
+            ),
             LLMEvent(kind=EVENT_COMPLETE),
         ]
 
@@ -2245,6 +2262,7 @@ class TestRunChatToolCallUpdate:
         state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
 
         from kiro_claw.dashboard.chat import _run_chat
+
         await _run_chat(state, slot, "hello")
 
         tool_msgs = [m for m in slot.messages if m.get("role") == "tool"]
@@ -2267,10 +2285,16 @@ class TestRunChatToolCallUpdate:
         )
 
         events = [
-            LLMEvent(kind=EVENT_TOOL_CALL, title="Terminal", tool_kind="execute",
-                     tool_call_id="tc-2"),
-            LLMEvent(kind=EVENT_TOOL_CALL_UPDATE, title="ls /tmp", tool_kind="execute",
-                     tool_input='{"command":"ls /tmp"}', tool_call_id="tc-2"),
+            LLMEvent(
+                kind=EVENT_TOOL_CALL, title="Terminal", tool_kind="execute", tool_call_id="tc-2"
+            ),
+            LLMEvent(
+                kind=EVENT_TOOL_CALL_UPDATE,
+                title="ls /tmp",
+                tool_kind="execute",
+                tool_input='{"command":"ls /tmp"}',
+                tool_call_id="tc-2",
+            ),
             LLMEvent(kind=EVENT_COMPLETE),
         ]
         state = self._make_state_for_run_chat(tmp_path, monkeypatch)
@@ -2279,6 +2303,7 @@ class TestRunChatToolCallUpdate:
         state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
 
         from kiro_claw.dashboard.chat import _run_chat
+
         await _run_chat(state, slot, "hello")
 
         ws_calls = [(c.args[0], c.args[1]) for c in state.broadcast_ws.call_args_list]
@@ -2316,14 +2341,20 @@ class TestRunChatToolCallUpdate:
         slot.append("tool", "✅ Terminal", "msg msg-tool", meta={"tool_call_id": "tc-3"})
 
         events = [
-            LLMEvent(kind=EVENT_TOOL_CALL_UPDATE, title="ls /tmp", tool_kind="execute",
-                     tool_input='{"command":"ls /tmp"}', tool_call_id="tc-3"),
+            LLMEvent(
+                kind=EVENT_TOOL_CALL_UPDATE,
+                title="ls /tmp",
+                tool_kind="execute",
+                tool_input='{"command":"ls /tmp"}',
+                tool_call_id="tc-3",
+            ),
             LLMEvent(kind=EVENT_COMPLETE),
         ]
         client = self._make_mock_client(events)
         state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
 
         from kiro_claw.dashboard.chat import _run_chat
+
         await _run_chat(state, slot, "hello")
 
         tool_msgs = [m for m in slot.messages if m.get("role") == "tool"]
@@ -2347,14 +2378,19 @@ class TestRunChatToolCallUpdate:
         slot.append("tool", "✅ Terminal", "msg msg-tool", meta={"tool_call_id": "tc-4"})
 
         events = [
-            LLMEvent(kind=EVENT_TOOL_CALL_UPDATE, title="ls /tmp", tool_kind="execute",
-                     tool_call_id="tc-4"),
+            LLMEvent(
+                kind=EVENT_TOOL_CALL_UPDATE,
+                title="ls /tmp",
+                tool_kind="execute",
+                tool_call_id="tc-4",
+            ),
             LLMEvent(kind=EVENT_COMPLETE),
         ]
         client = self._make_mock_client(events)
         state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
 
         from kiro_claw.dashboard.chat import _run_chat
+
         await _run_chat(state, slot, "hello")
 
         tool_msgs = [m for m in slot.messages if m.get("role") == "tool"]
@@ -2377,10 +2413,19 @@ class TestRunChatToolCallUpdate:
         )
 
         events = [
-            LLMEvent(kind=EVENT_TOOL_CALL, title="Running: stub", tool_kind="execute",
-                     tool_call_id="tc-5"),
-            LLMEvent(kind=EVENT_TOOL_CALL_UPDATE, title="Running: ls /tmp", tool_kind="execute",
-                     tool_input='{"command":"ls /tmp"}', tool_call_id="tc-5"),
+            LLMEvent(
+                kind=EVENT_TOOL_CALL,
+                title="Running: stub",
+                tool_kind="execute",
+                tool_call_id="tc-5",
+            ),
+            LLMEvent(
+                kind=EVENT_TOOL_CALL_UPDATE,
+                title="Running: ls /tmp",
+                tool_kind="execute",
+                tool_input='{"command":"ls /tmp"}',
+                tool_call_id="tc-5",
+            ),
             LLMEvent(kind=EVENT_COMPLETE),
         ]
         state = self._make_state_for_run_chat(tmp_path, monkeypatch)
@@ -2396,6 +2441,7 @@ class TestRunChatToolCallUpdate:
         # refinement broadcasts the refined title without the "Running: "
         # prefix on the handler's local copy.
         from kiro_claw.dashboard.chat import _run_chat
+
         await _run_chat(state, slot, "hello")
 
         # Indirectly verify via the persisted message — the title displayed on
@@ -2427,8 +2473,13 @@ class TestRunChatToolCallUpdate:
         monkeypatch.setattr("kiro_claw.dashboard.chat_runner.sel", lambda: _FakeSel())
 
         events = [
-            LLMEvent(kind=EVENT_TOOL_CALL_UPDATE, title="ls /tmp", tool_kind="execute",
-                     tool_input='{"command":"ls /tmp"}', tool_call_id="tc-6"),
+            LLMEvent(
+                kind=EVENT_TOOL_CALL_UPDATE,
+                title="ls /tmp",
+                tool_kind="execute",
+                tool_input='{"command":"ls /tmp"}',
+                tool_call_id="tc-6",
+            ),
             LLMEvent(kind=EVENT_COMPLETE),
         ]
         state = self._make_state_for_run_chat(tmp_path, monkeypatch)
@@ -2437,6 +2488,7 @@ class TestRunChatToolCallUpdate:
         state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
 
         from kiro_claw.dashboard.chat import _run_chat
+
         await _run_chat(state, slot, "hello")
 
         refined = [c for c in captured if c.get("outcome") == "refined"]
@@ -2465,6 +2517,7 @@ class TestRunChatToolCallUpdate:
         state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
 
         from kiro_claw.dashboard.chat import _run_chat
+
         await _run_chat(state, slot, "hello")
 
         # No tool messages should have been added.
@@ -2475,7 +2528,9 @@ class TestRunChatToolCallUpdate:
         assert "chat_message_update" not in kinds
 
     @pytest.mark.asyncio
-    async def test_refinement_no_matching_message_no_chat_message_update(self, tmp_path, monkeypatch):
+    async def test_refinement_no_matching_message_no_chat_message_update(
+        self, tmp_path, monkeypatch
+    ):
         """When no persisted tool message matches the tool_call_id, the
         handler still broadcasts the tool_call merge but skips
         chat_message_update (nothing to patch)."""
@@ -2486,8 +2541,13 @@ class TestRunChatToolCallUpdate:
         )
 
         events = [
-            LLMEvent(kind=EVENT_TOOL_CALL_UPDATE, title="ls /tmp", tool_kind="execute",
-                     tool_input='{"command":"ls /tmp"}', tool_call_id="tc-orphan"),
+            LLMEvent(
+                kind=EVENT_TOOL_CALL_UPDATE,
+                title="ls /tmp",
+                tool_kind="execute",
+                tool_input='{"command":"ls /tmp"}',
+                tool_call_id="tc-orphan",
+            ),
             LLMEvent(kind=EVENT_COMPLETE),
         ]
         state = self._make_state_for_run_chat(tmp_path, monkeypatch)
@@ -2496,6 +2556,7 @@ class TestRunChatToolCallUpdate:
         state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
 
         from kiro_claw.dashboard.chat import _run_chat
+
         await _run_chat(state, slot, "hello")
 
         kinds = [c.args[0] for c in state.broadcast_ws.call_args_list]
@@ -2520,15 +2581,20 @@ class TestRunChatToolCallUpdate:
         slot.append("tool", "🔧 Terminal", "msg msg-tool", meta={"tool_call_id": "tc-cred"})
 
         events = [
-            LLMEvent(kind=EVENT_TOOL_CALL_UPDATE, title="echo secret", tool_kind="execute",
-                     tool_input='{"command":"echo AKIAIOSFODNN7EXAMPLE"}',
-                     tool_call_id="tc-cred"),
+            LLMEvent(
+                kind=EVENT_TOOL_CALL_UPDATE,
+                title="echo secret",
+                tool_kind="execute",
+                tool_input='{"command":"echo AKIAIOSFODNN7EXAMPLE"}',
+                tool_call_id="tc-cred",
+            ),
             LLMEvent(kind=EVENT_COMPLETE),
         ]
         client = self._make_mock_client(events)
         state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
 
         from kiro_claw.dashboard.chat import _run_chat
+
         await _run_chat(state, slot, "hello")
 
         tool_msgs = [m for m in slot.messages if m.get("role") == "tool"]
@@ -2565,8 +2631,12 @@ class TestRunChatToolCallUpdate:
         state.broadcast_ws = MagicMock(side_effect=_raising_then_normal)
 
         events = [
-            LLMEvent(kind=EVENT_TOOL_CALL_UPDATE, title="ls /tmp", tool_kind="execute",
-                     tool_call_id="tc-boom"),
+            LLMEvent(
+                kind=EVENT_TOOL_CALL_UPDATE,
+                title="ls /tmp",
+                tool_kind="execute",
+                tool_call_id="tc-boom",
+            ),
             LLMEvent(kind=EVENT_TEXT_CHUNK, text="after the boom"),
             LLMEvent(kind=EVENT_COMPLETE),
         ]
@@ -2613,6 +2683,7 @@ class TestApiChatModePropagation:
     async def test_normal_mode_clears_policy(self, tmp_path, monkeypatch):
         monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
         from kiro_claw.safety_override import safety_override
+
         safety_override().activate("test")
         state = _make_state(tmp_path)
         state.enable_yolo()
@@ -2720,7 +2791,9 @@ class TestApiChatModePropagation:
         state.push_slots_update = MagicMock()
 
         async with TestClient(TestServer(_make_app(state))) as client:
-            resp = await client.post("/api/chat/mode", json={"mode": "trust", "slot": "nonexistent"})
+            resp = await client.post(
+                "/api/chat/mode", json={"mode": "trust", "slot": "nonexistent"}
+            )
             assert resp.status == 400
             assert (await resp.json())["error"] == "unknown slot"
 
@@ -2732,7 +2805,9 @@ class TestApiChatModePropagation:
         state.push_slots_update = MagicMock()
 
         async with TestClient(TestServer(_make_app(state))) as client:
-            resp = await client.post("/api/chat/mode", json={"mode": "normal", "slot": "nonexistent"})
+            resp = await client.post(
+                "/api/chat/mode", json={"mode": "normal", "slot": "nonexistent"}
+            )
             assert resp.status == 400
             assert (await resp.json())["error"] == "unknown slot"
 
@@ -2809,7 +2884,9 @@ class TestApiChatModePropagation:
         assert state.is_yolo_active() is False
         assert s1._trust is True  # per-slot trust survives expiry
 
-        cleared = [c[0][0] for c in state.sessions.set_approval_policy.call_args_list if c[0][1] == ""]
+        cleared = [
+            c[0][0] for c in state.sessions.set_approval_policy.call_args_list if c[0][1] == ""
+        ]
         assert "dashboard:s2" in cleared
         assert "dashboard:s1" not in cleared
 
@@ -3128,13 +3205,14 @@ class TestPlanExecutionViaButton:
     """Simulate Go/Go All button clicks on a fake plan and verify the Python
     orchestration code drives stage advancement correctly."""
 
-    def _make_slot(self, key="plan-exec", max_stages=2, auto_run=False,
-                   titles=None, goal="Sample goal"):
+    def _make_slot(
+        self, key="plan-exec", max_stages=2, auto_run=False, titles=None, goal="Sample goal"
+    ):
         slot = _ChatSlot(key, mode="orchestrator")
         slot._auto_run = auto_run
-        slot._stage_titles = titles if titles is not None else [
-            f"Step {i}" for i in range(1, max_stages + 1)
-        ]
+        slot._stage_titles = (
+            titles if titles is not None else [f"Step {i}" for i in range(1, max_stages + 1)]
+        )
         slot._plan_goal = goal
         slot._orch_tracker = None  # fresh — will be created by _stage_loop
         return slot
@@ -3155,7 +3233,9 @@ class TestPlanExecutionViaButton:
         monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
         state = _make_state(tmp_path)
         slot = state.get_or_create_slot("go-btn", mode="orchestrator")
-        slot.append("assistant", "📋 Plan for: test\n\nStage 1: A\n\n[OPTION: Go | Go All | Cancel]")
+        slot.append(
+            "assistant", "📋 Plan for: test\n\nStage 1: A\n\n[OPTION: Go | Go All | Cancel]"
+        )
         mock_loop = AsyncMock()
         with pytest.MonkeyPatch.context() as m:
             m.setattr("kiro_claw.dashboard.chat_orchestrator._stage_loop", mock_loop)
@@ -3175,7 +3255,10 @@ class TestPlanExecutionViaButton:
         monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
         state = _make_state(tmp_path)
         slot = state.get_or_create_slot("goall-btn", mode="orchestrator")
-        slot.append("assistant", "📋 Plan for: test\n\nStage 1: A\nStage 2: B\n\n[OPTION: Go | Go All | Cancel]")
+        slot.append(
+            "assistant",
+            "📋 Plan for: test\n\nStage 1: A\nStage 2: B\n\n[OPTION: Go | Go All | Cancel]",
+        )
         mock_loop = AsyncMock()
         with pytest.MonkeyPatch.context() as m:
             m.setattr("kiro_claw.dashboard.chat_orchestrator._stage_loop", mock_loop)
@@ -3200,9 +3283,9 @@ class TestPythonStageLoop:
     def _make_slot(self, key="loop-test", max_stages=3, titles=None, goal="Test goal"):
         slot = _ChatSlot(key, mode="orchestrator")
         slot._auto_run = False
-        slot._stage_titles = titles if titles is not None else [
-            f"Step {i}" for i in range(1, max_stages + 1)
-        ]
+        slot._stage_titles = (
+            titles if titles is not None else [f"Step {i}" for i in range(1, max_stages + 1)]
+        )
         slot._plan_goal = goal
         slot._orch_tracker = None
         return slot
@@ -3317,6 +3400,7 @@ class TestPythonStageLoop:
 
         # Pre-create tracker with timeout
         from kiro_claw.context_management import OrchestrationTracker
+
         tracker = OrchestrationTracker(stage_timeout_seconds=1)
         slot._orch_tracker = tracker
         # Force timeout on first check
@@ -3362,7 +3446,10 @@ class TestPythonStageLoop:
         monkeypatch.setattr("kiro_claw.dashboard.chat.config_dir", lambda: tmp_path)
         state = _make_state(tmp_path)
         slot = state.get_or_create_slot("go-loop", mode="orchestrator")
-        slot.append("assistant", "📋 Plan for: test\n\nStage 1: A\nStage 2: B\n\n[OPTION: Go | Go All | Cancel]")
+        slot.append(
+            "assistant",
+            "📋 Plan for: test\n\nStage 1: A\nStage 2: B\n\n[OPTION: Go | Go All | Cancel]",
+        )
         slot._stage_titles = ["A", "B"]
         slot._plan_goal = "test"
 
@@ -3370,9 +3457,7 @@ class TestPythonStageLoop:
         monkeypatch.setattr("kiro_claw.dashboard.chat_orchestrator._stage_loop", stage_loop_mock)
 
         async with TestClient(TestServer(_make_app(state))) as client:
-            resp = await client.post(
-                "/api/chat/slots/go-loop/plan-action", json={"action": "go"}
-            )
+            resp = await client.post("/api/chat/slots/go-loop/plan-action", json={"action": "go"})
             assert resp.status == 200
 
         stage_loop_mock.assert_called_once()
@@ -3389,7 +3474,10 @@ class TestPythonStageLoop:
         monkeypatch.setattr("kiro_claw.dashboard.chat.config_dir", lambda: tmp_path)
         state = _make_state(tmp_path)
         slot = state.get_or_create_slot("goall-loop", mode="orchestrator")
-        slot.append("assistant", "📋 Plan for: test\n\nStage 1: A\nStage 2: B\n\n[OPTION: Go | Go All | Cancel]")
+        slot.append(
+            "assistant",
+            "📋 Plan for: test\n\nStage 1: A\nStage 2: B\n\n[OPTION: Go | Go All | Cancel]",
+        )
         slot._stage_titles = ["A", "B"]
         slot._plan_goal = "test"
 
@@ -3444,7 +3532,9 @@ class TestPythonStageLoop:
         from kiro_claw.context_management import OrchestrationTracker
         from kiro_claw.dashboard.chat import _build_stage_context
 
-        slot = self._make_slot(max_stages=3, titles=["Research", "Implement", "Test"], goal="Build feature X")
+        slot = self._make_slot(
+            max_stages=3, titles=["Research", "Implement", "Test"], goal="Build feature X"
+        )
         tracker = OrchestrationTracker()
         slot._orch_tracker = tracker
 
@@ -3509,7 +3599,9 @@ class TestPythonStageLoop:
         await _stage_loop(state, slot, auto_run=True)
 
         # Should emit error message
-        err_msgs = [m for m in slot.messages if "failed due to an internal error" in m.get("content", "")]
+        err_msgs = [
+            m for m in slot.messages if "failed due to an internal error" in m.get("content", "")
+        ]
         assert len(err_msgs) == 1
         # Should NOT run remaining stages
         sep_msgs = [m for m in slot.messages if "stage-sep" in m.get("cls", "")]
@@ -3638,7 +3730,12 @@ class TestPythonStageLoop:
         result_file = result_dir / "stage_1_result.md"
         head_marker = "HEAD_MARKER_START"
         tail_marker = "TAIL_MARKER_END"
-        large_content = head_marker + "x" * 4000 + tail_marker + "y" * (5000 - len(head_marker) - 4000 - len(tail_marker))
+        large_content = (
+            head_marker
+            + "x" * 4000
+            + tail_marker
+            + "y" * (5000 - len(head_marker) - 4000 - len(tail_marker))
+        )
         result_file.write_text(large_content)
         tracker.record_stage_result(1, str(result_file))
 
@@ -4156,6 +4253,8 @@ class TestHistoryKeyFor:
         from kiro_claw.dashboard.chat import _history_key_for
 
         assert _history_key_for("chat-1-100") == "dashboard:chat-1-100"
+
+
 # ── Folder CRUD tests ──
 
 
@@ -4193,7 +4292,9 @@ class TestFolderCRUD:
         async with TestClient(TestServer(app)) as client:
             resp = await client.post("/api/chat/folders", json={"name": "Parent"})
             parent = await resp.json()
-            resp = await client.post("/api/chat/folders", json={"name": "Child", "parent_id": parent["id"]})
+            resp = await client.post(
+                "/api/chat/folders", json={"name": "Child", "parent_id": parent["id"]}
+            )
             child = await resp.json()
             assert child["parent_id"] == parent["id"]
 
@@ -4203,7 +4304,9 @@ class TestFolderCRUD:
         state = _make_state(tmp_path)
         app = _make_folder_app(state)
         async with TestClient(TestServer(app)) as client:
-            resp = await client.post("/api/chat/folders", json={"name": "Orphan", "parent_id": "nonexistent"})
+            resp = await client.post(
+                "/api/chat/folders", json={"name": "Orphan", "parent_id": "nonexistent"}
+            )
             assert resp.status == 400
 
     @pytest.mark.asyncio
@@ -4248,7 +4351,9 @@ class TestFolderCRUD:
         async with TestClient(TestServer(app)) as client:
             resp = await client.post("/api/chat/folders", json={"name": "MS&AD"})
             folder = await resp.json()
-            resp = await client.patch(f"/api/chat/folders/{folder['id']}", json={"default_agent": "msad"})
+            resp = await client.patch(
+                f"/api/chat/folders/{folder['id']}", json={"default_agent": "msad"}
+            )
             data = await resp.json()
             assert data["default_agent"] == "msad"
             # Verify persistence
@@ -4258,7 +4363,9 @@ class TestFolderCRUD:
     async def test_update_folder_clear_default_agent(self, tmp_path, monkeypatch):
         monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
         state = _make_state(tmp_path)
-        state._folders = [{"id": "f1", "name": "Test", "order": 0, "collapsed": False, "default_agent": "nissay"}]
+        state._folders = [
+            {"id": "f1", "name": "Test", "order": 0, "collapsed": False, "default_agent": "nissay"}
+        ]
         app = _make_folder_app(state)
         async with TestClient(TestServer(app)) as client:
             resp = await client.patch("/api/chat/folders/f1", json={"default_agent": ""})
@@ -4367,7 +4474,9 @@ class TestFolderCRUD:
         state.get_or_create_slot("myslot")
         app = _make_folder_app(state)
         async with TestClient(TestServer(app)) as client:
-            resp = await client.patch("/api/chat/slots/myslot/folder", json={"folder_id": "nonexistent"})
+            resp = await client.patch(
+                "/api/chat/slots/myslot/folder", json={"folder_id": "nonexistent"}
+            )
             assert resp.status == 400
 
     @pytest.mark.asyncio
@@ -4425,7 +4534,9 @@ class TestFolderPersistence:
         monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
         import json
 
-        (tmp_path / "folders.json").write_text(json.dumps([{"id": "f1", "name": "Test", "order": 0}]))
+        (tmp_path / "folders.json").write_text(
+            json.dumps([{"id": "f1", "name": "Test", "order": 0}])
+        )
         state = _make_state(tmp_path)
         state.load_folders()
         assert len(state._folders) == 1
@@ -4578,8 +4689,11 @@ class TestGenerateFolderIcon:
         state.save_folders = MagicMock()
         state.push_slots_update = MagicMock()
 
-        with patch("kiro_claw.dashboard.chat_folders.redact_exfiltration_urls", return_value=("🔥", False)) as mock_url, \
-             patch("kiro_claw.dashboard.chat_folders.redact_credentials", return_value=("🔥", False)) as mock_cred:
+        with patch(
+            "kiro_claw.dashboard.chat_folders.redact_exfiltration_urls", return_value=("🔥", False)
+        ) as mock_url, patch(
+            "kiro_claw.dashboard.chat_folders.redact_credentials", return_value=("🔥", False)
+        ) as mock_cred:
             folder = {"id": "f1", "name": "Oncall"}
             state._folders = [folder]
             await _generate_folder_icon(state, folder)
@@ -4598,7 +4712,7 @@ class TestGenerateFolderIcon:
 
         mock_event = MagicMock()
         mock_event.kind = "text_chunk"
-        mock_event.text = "\u2764\uFE0F"  # ❤️
+        mock_event.text = "\u2764\ufe0f"  # ❤️
         done_event = MagicMock()
         done_event.kind = "complete"
         monkeypatch.setattr("kiro_claw.providers.base.EVENT_TEXT_CHUNK", "text_chunk")
@@ -4616,7 +4730,7 @@ class TestGenerateFolderIcon:
         state._folders = [folder]
         await _generate_folder_icon(state, folder)
 
-        assert folder["icon"] == "\u2764\uFE0F"
+        assert folder["icon"] == "\u2764\ufe0f"
         state.save_folders.assert_called_once()
 
     @pytest.mark.asyncio
@@ -4730,9 +4844,7 @@ class TestFolderAssignmentPersistence:
         slot._resumed_count = len(slot.messages)
         app = _make_folder_app(state)
         async with TestClient(TestServer(app)) as client:
-            resp = await client.patch(
-                "/api/chat/slots/pinslot/pin", json={"pinned": True}
-            )
+            resp = await client.patch("/api/chat/slots/pinslot/pin", json={"pinned": True})
             assert resp.status == 200
             path = tmp_path / "dashboard_pinslot.jsonl"
             assert path.exists(), "pinned save must reach disk on resumed session"
@@ -4789,6 +4901,8 @@ class TestNewPlanResetsAutoRun:
 
         assert slot._auto_run is False, "_auto_run must be reset for new plan"
         assert slot._orch_tracker is None
+
+
 # ── Regenerate + variant switching ──
 
 
@@ -5089,9 +5203,7 @@ class TestRegenerateAndVariants:
         slot.append("assistant", "v1")
         slot.messages[-1]["variants"] = [{"content": "v1"}]
         async with TestClient(TestServer(_make_app(state))) as client:
-            resp = await client.post(
-                "/api/chat/slots/s1/switch-variant", data="not-json"
-            )
+            resp = await client.post("/api/chat/slots/s1/switch-variant", data="not-json")
             assert resp.status == 400
 
     @pytest.mark.asyncio
@@ -5102,9 +5214,7 @@ class TestRegenerateAndVariants:
         slot.append("assistant", "v1")
         slot.messages[-1]["variants"] = [{"content": "v1"}]
         async with TestClient(TestServer(_make_app(state))) as client:
-            resp = await client.post(
-                "/api/chat/slots/s1/switch-variant", json={"index": "abc"}
-            )
+            resp = await client.post("/api/chat/slots/s1/switch-variant", json={"index": "abc"})
             assert resp.status == 400
 
     @pytest.mark.asyncio
@@ -5127,9 +5237,7 @@ class TestRegenerateAndVariants:
                 # Let the failing task propagate through done_callback
                 for _ in range(5):
                     await asyncio.sleep(0)
-        assert slot._pending_variants == [], (
-            "pending variants must be cleared when task errors"
-        )
+        assert slot._pending_variants == [], "pending variants must be cleared when task errors"
 
     @pytest.mark.asyncio
     async def test_flush_segment_attaches_pending_variants(self, tmp_path, monkeypatch):
@@ -5250,9 +5358,9 @@ class TestRegenerateAndVariants:
                 slot.task.cancel()
                 for _ in range(5):
                     await asyncio.sleep(0)
-        assert slot._pending_variants == [], (
-            "pending variants must be cleared when task is cancelled"
-        )
+        assert (
+            slot._pending_variants == []
+        ), "pending variants must be cleared when task is cancelled"
 
     @pytest.mark.asyncio
     async def test_prepare_messages_redacts_variant_content(self, tmp_path, monkeypatch):
@@ -5353,9 +5461,7 @@ class TestForkSlot:
 
         app = _make_app(state)
         async with TestClient(TestServer(app)) as client:
-            resp = await client.post(
-                "/api/chat/slots/src/fork", json={"at_message_index": 1}
-            )
+            resp = await client.post("/api/chat/slots/src/fork", json={"at_message_index": 1})
             assert resp.status == 200
             data = await resp.json()
             assert data["messages"] == 2
@@ -5374,12 +5480,14 @@ class TestForkSlot:
         state = _make_state(tmp_path)
         slot = state.get_or_create_slot("src")
         slot.append(
-            "user", "find me a citation",
+            "user",
+            "find me a citation",
             "msg msg-u",
             meta={"paste_refs": ["ref-abc123"]},
         )
         slot.append(
-            "assistant", "Here you go",
+            "assistant",
+            "Here you go",
             "msg msg-a",
             meta={"knowledge_chips": [{"id": "kb-42", "title": "Cite-X"}]},
         )
@@ -5398,9 +5506,9 @@ class TestForkSlot:
 
         # User message: meta.paste_refs survived
         assert visible[0]["role"] == "user"
-        assert visible[0].get("meta") == {"paste_refs": ["ref-abc123"]}, (
-            f"Fork dropped user meta. Got: {visible[0].get('meta')!r}"
-        )
+        assert visible[0].get("meta") == {
+            "paste_refs": ["ref-abc123"]
+        }, f"Fork dropped user meta. Got: {visible[0].get('meta')!r}"
 
         # Assistant message: meta.knowledge_chips survived
         assert visible[1]["role"] == "assistant"
@@ -5430,9 +5538,9 @@ class TestForkSlot:
         visible = [m for m in new_slot.messages if m["role"] in ("user", "assistant")]
         # No spurious "meta" key should appear when the parent had none.
         for m in visible:
-            assert "meta" not in m, (
-                f"Fork added spurious meta to a message without meta. Got: {m!r}"
-            )
+            assert (
+                "meta" not in m
+            ), f"Fork added spurious meta to a message without meta. Got: {m!r}"
 
     @pytest.mark.asyncio
     async def test_fork_not_found(self, tmp_path):
@@ -5516,7 +5624,8 @@ class TestForkSlot:
         app = _make_app(state)
         async with TestClient(TestServer(app)) as client:
             resp = await client.post(
-                "/api/chat/slots/src/fork", json={"prompt": "fix the bug"},
+                "/api/chat/slots/src/fork",
+                json={"prompt": "fix the bug"},
             )
             data = await resp.json()
             assert data["ok"] is True
@@ -5581,9 +5690,7 @@ class TestForkSlot:
 
         app = _make_app(state)
         async with TestClient(TestServer(app)) as client:
-            resp = await client.post(
-                "/api/chat/slots/src/fork", json={"at_message_index": True}
-            )
+            resp = await client.post("/api/chat/slots/src/fork", json={"at_message_index": True})
             assert resp.status == 400
 
     @pytest.mark.asyncio
@@ -5595,9 +5702,7 @@ class TestForkSlot:
 
         app = _make_app(state)
         async with TestClient(TestServer(app)) as client:
-            resp = await client.post(
-                "/api/chat/slots/src/fork", json={"at_message_index": -1}
-            )
+            resp = await client.post("/api/chat/slots/src/fork", json={"at_message_index": -1})
             assert resp.status == 400
 
     @pytest.mark.asyncio
@@ -5640,12 +5745,8 @@ class TestForkSlot:
         hk = _history_key_for(new_key)
         meta = state.conversation_log.get_metadata(hk)
         disk_msgs = state.conversation_log.read_messages(hk)
-        assert meta.get("forked_from") == "dashboard:src", (
-            f"forked_from not persisted; meta={meta}"
-        )
-        assert len(disk_msgs) == 2, (
-            f"forked messages not persisted (got {len(disk_msgs)})"
-        )
+        assert meta.get("forked_from") == "dashboard:src", f"forked_from not persisted; meta={meta}"
+        assert len(disk_msgs) == 2, f"forked messages not persisted (got {len(disk_msgs)})"
 
     @pytest.mark.asyncio
     async def test_fork_rejects_oversized_prompt(self, tmp_path):
@@ -5672,9 +5773,7 @@ class TestForkSlot:
 
         app = _make_app(state)
         async with TestClient(TestServer(app)) as client:
-            resp = await client.post(
-                "/api/chat/slots/src/fork", json={"at_message_index": 5}
-            )
+            resp = await client.post("/api/chat/slots/src/fork", json={"at_message_index": 5})
             assert resp.status == 400
 
     @pytest.mark.asyncio
@@ -5689,6 +5788,7 @@ class TestForkSlot:
         class _FakeTask:
             def done(self):
                 return False
+
         slot.task = _FakeTask()  # type: ignore[assignment]
         assert slot.running is True
 
@@ -5767,9 +5867,10 @@ class TestForkSlot:
 
         recent = state.conversation_log.recent(_history_key_for(new_key))
         visible = [m for m in recent if m.get("role") in ("user", "assistant")]
-        assert [m["content"] for m in visible] == ["parent question", "parent answer"], (
-            f"fork history not readable as new-session context: {visible}"
-        )
+        assert [m["content"] for m in visible] == [
+            "parent question",
+            "parent answer",
+        ], f"fork history not readable as new-session context: {visible}"
 
     @pytest.mark.asyncio
     async def test_fork_does_not_clone_parent_kiro_session_id(self, tmp_path, monkeypatch):
@@ -5800,12 +5901,12 @@ class TestForkSlot:
         # Inspect _data directly to skip SessionMap.get()'s kiro-session file
         # existence check (we don't spawn real kiro processes in unit tests).
         reloaded = SessionMap()
-        assert reloaded._data.get("dashboard:src", {}).get("sid") == "parent-kiro-sid-abc123", (
-            "parent's kiro sid should survive fork unchanged"
-        )
-        assert f"dashboard:{new_key}" not in reloaded._data, (
-            "forked slot must NOT inherit parent's kiro sid"
-        )
+        assert (
+            reloaded._data.get("dashboard:src", {}).get("sid") == "parent-kiro-sid-abc123"
+        ), "parent's kiro sid should survive fork unchanged"
+        assert (
+            f"dashboard:{new_key}" not in reloaded._data
+        ), "forked slot must NOT inherit parent's kiro sid"
 
     @pytest.mark.asyncio
     async def test_fork_of_fork_chains_forked_from(self, tmp_path):
@@ -5835,9 +5936,9 @@ class TestForkSlot:
 
         leaf = state._slots.get(d2["key"])
         assert d2["title"] == "Fork of Fork of Original"
-        assert leaf.forked_from == f"dashboard:{mid_key}", (
-            f"leaf forked_from should point to intermediate, got {leaf.forked_from}"
-        )
+        assert (
+            leaf.forked_from == f"dashboard:{mid_key}"
+        ), f"leaf forked_from should point to intermediate, got {leaf.forked_from}"
         assert leaf.forked_from != "dashboard:root"
         visible = [m for m in leaf.messages if m["role"] in ("user", "assistant")]
         assert [m["content"] for m in visible] == ["q1", "a1", "q2", "a2"]
@@ -5851,6 +5952,7 @@ class TestForkSlot:
             slot.append("user" if i % 2 == 0 else "assistant", f"m{i}", "msg")
         slot.drain()
         from kiro_claw.dashboard.chat import _save_slot_to_history
+
         _save_slot_to_history(state, slot)
         # Simulate restore cap: keep only last 50 in memory.
         # Clear _dirty so the endpoint's flush-if-dirty path doesn't overwrite disk.
@@ -5863,9 +5965,9 @@ class TestForkSlot:
             assert resp.status == 200
             data = await resp.json()
 
-        assert data["messages"] == 250, (
-            f"fork should read full history from disk, got {data['messages']}"
-        )
+        assert (
+            data["messages"] == 250
+        ), f"fork should read full history from disk, got {data['messages']}"
         new_slot = state._slots.get(data["key"])
         visible = [m for m in new_slot.messages if m["role"] in ("user", "assistant")]
         assert len(visible) == 250
@@ -5881,6 +5983,7 @@ class TestForkSlot:
             slot.append("user" if i % 2 == 0 else "assistant", f"m{i}", "msg")
         slot.drain()
         from kiro_claw.dashboard.chat import _save_slot_to_history
+
         _save_slot_to_history(state, slot)
         # Simulate restore with cap: real path caps messages then sets
         # _resumed_count to the capped length. User then sends new messages.
@@ -5898,9 +6001,9 @@ class TestForkSlot:
             data = await resp.json()
 
         # Full 250 on disk + 2 new dirty messages = 252 total.
-        assert data["messages"] == 252, (
-            f"fork must preserve full disk history + dirty tail, got {data['messages']}"
-        )
+        assert (
+            data["messages"] == 252
+        ), f"fork must preserve full disk history + dirty tail, got {data['messages']}"
         new_slot = state._slots.get(data["key"])
         visible = [m for m in new_slot.messages if m["role"] in ("user", "assistant")]
         assert visible[0]["content"] == "m0"
@@ -5913,6 +6016,7 @@ class TestForkSlot:
         identical visible-message counts. Each fork produces an independent new
         slot; no messages lost or duplicated."""
         import asyncio
+
         state = _make_state(tmp_path)
         slot = state.get_or_create_slot("src")
         slot.append("user", "q1", "msg msg-u")
@@ -5931,9 +6035,9 @@ class TestForkSlot:
             d1, d2 = await r1.json(), await r2.json()
 
         assert d1["key"] != d2["key"], "concurrent forks must produce distinct slot keys"
-        assert d1["messages"] == d2["messages"] == 4, (
-            f"both forks must copy all 4 visible messages, got {d1['messages']}/{d2['messages']}"
-        )
+        assert (
+            d1["messages"] == d2["messages"] == 4
+        ), f"both forks must copy all 4 visible messages, got {d1['messages']}/{d2['messages']}"
         for key in (d1["key"], d2["key"]):
             new_slot = state._slots.get(key)
             visible = [m for m in new_slot.messages if m["role"] in ("user", "assistant")]
@@ -5943,6 +6047,7 @@ class TestForkSlot:
     async def test_fork_audits_denied_on_ephemeral(self, tmp_path, monkeypatch):
         """M-1 regression: ephemeral rejection must emit a denied SEL event."""
         from unittest.mock import MagicMock
+
         mock_sel = MagicMock()
         monkeypatch.setattr("kiro_claw.dashboard.chat_fork.sel", lambda: mock_sel)
 
@@ -5967,6 +6072,7 @@ class TestForkSlot:
     async def test_fork_app_isolation_rejects_cross_app(self, tmp_path, monkeypatch):
         """M-2 regression: app A cannot fork a slot owned by app B."""
         from unittest.mock import MagicMock
+
         mock_sel = MagicMock()
         monkeypatch.setattr("kiro_claw.dashboard.chat_fork.sel", lambda: mock_sel)
 
@@ -5991,8 +6097,9 @@ class TestForkSlot:
             assert "does not own" in data["error"]
 
         # denied event logged
-        denied_calls = [c for c in mock_sel.log_api_access.call_args_list
-                        if c[1].get("outcome") == "denied"]
+        denied_calls = [
+            c for c in mock_sel.log_api_access.call_args_list if c[1].get("outcome") == "denied"
+        ]
         assert len(denied_calls) == 1
         assert denied_calls[0][1]["source"] == "app_isolation"
 
@@ -6018,12 +6125,15 @@ class TestForkSlot:
             data = await resp.json()
 
         new_slot = state._slots.get(data["key"])
-        assert new_slot._app == "app-X", f"forked slot must inherit caller's app, got {new_slot._app!r}"
+        assert (
+            new_slot._app == "app-X"
+        ), f"forked slot must inherit caller's app, got {new_slot._app!r}"
 
     @pytest.mark.asyncio
     async def test_fork_rejects_when_slot_cap_reached(self, tmp_path, monkeypatch):
         """zejiangg rev 3 #46: fork must return 429 + denied audit when slot cap hit."""
         from unittest.mock import MagicMock
+
         mock_sel = MagicMock()
         monkeypatch.setattr("kiro_claw.dashboard.chat_fork.sel", lambda: mock_sel)
         # Lower the cap so we don't need to create hundreds of slots.
@@ -6045,8 +6155,9 @@ class TestForkSlot:
             data = await resp.json()
             assert "cap" in data["error"].lower()
 
-        denied = [c for c in mock_sel.log_api_access.call_args_list
-                  if c[1].get("outcome") == "denied"]
+        denied = [
+            c for c in mock_sel.log_api_access.call_args_list if c[1].get("outcome") == "denied"
+        ]
         assert len(denied) == 1
         assert denied[0][1]["source"] == "rate_limit"
 
@@ -6114,7 +6225,12 @@ class TestForkSlot:
         assert new_slot is not None
         visible = [m for m in new_slot.messages if m["role"] in ("user", "assistant")]
         assert [m["content"] for m in visible] == [
-            "old-q1", "old-a1", "old-q2", "old-a2", "new-q1", "new-a1",
+            "old-q1",
+            "old-a1",
+            "old-q2",
+            "old-a2",
+            "new-q1",
+            "new-a1",
         ]
 
 
@@ -6200,6 +6316,7 @@ class TestLumonPersonaInjection:
 
     def setup_method(self):
         from kiro_claw.dashboard import chat
+
         if hasattr(chat, "_cached_lumon_persona"):
             chat._cached_lumon_persona.cache_clear()
 
@@ -6207,7 +6324,9 @@ class TestLumonPersonaInjection:
         from kiro_claw.dashboard.chat import _maybe_inject_persona
 
         fake_persona = "Use a light Lumon-inspired persona."
-        with patch("kiro_claw.dashboard.chat_utils._cached_lumon_persona", return_value=fake_persona):
+        with patch(
+            "kiro_claw.dashboard.chat_utils._cached_lumon_persona", return_value=fake_persona
+        ):
             result = _maybe_inject_persona("hello", "lumon", True)
 
         assert "[LUMON PERSONA]" in result
@@ -6228,7 +6347,9 @@ class TestLumonPersonaInjection:
     def test_persona_survives_cache_error(self):
         from kiro_claw.dashboard.chat import _maybe_inject_persona
 
-        with patch("kiro_claw.dashboard.chat_utils._cached_lumon_persona", side_effect=ImportError("boom")):
+        with patch(
+            "kiro_claw.dashboard.chat_utils._cached_lumon_persona", side_effect=ImportError("boom")
+        ):
             result = _maybe_inject_persona("hello", "lumon", True)
         assert result == "hello"
 
@@ -6337,9 +6458,7 @@ class TestStopReasonCancelled:
         state.consolidator.maybe_consolidate.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_handler_stop_reason_cancelled_flushes_partial_text(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_handler_stop_reason_cancelled_flushes_partial_text(self, tmp_path, monkeypatch):
         """Partial text chunks before cancel must be flushed to the slot."""
         from kiro_claw.acp.types import STOP_REASON_CANCELLED
         from kiro_claw.dashboard.chat import _run_chat
@@ -6384,9 +6503,7 @@ class TestStopTurnSlotState:
         )
 
     @pytest.mark.asyncio
-    async def test_stop_turn_slot_state_transitions_soft(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_stop_turn_slot_state_transitions_soft(self, tmp_path, monkeypatch):
         """POST stop → idle→soft_pending; after on_soft → idle."""
         state = self._make_state(tmp_path, monkeypatch)
         slot = state.get_or_create_slot("s1")
@@ -6412,9 +6529,7 @@ class TestStopTurnSlotState:
         slot.task.cancel()
 
     @pytest.mark.asyncio
-    async def test_stop_turn_slot_state_transitions_hard(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_stop_turn_slot_state_transitions_hard(self, tmp_path, monkeypatch):
         """POST stop with hard outcome → idle→soft_pending→idle after on_hard."""
         state = self._make_state(tmp_path, monkeypatch)
         slot = state.get_or_create_slot("s1")
@@ -6463,9 +6578,7 @@ class TestStopTurnSlotState:
         slot.task.cancel()
 
     @pytest.mark.asyncio
-    async def test_stop_turn_second_press_escalates_without_force_flag(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_stop_turn_second_press_escalates_without_force_flag(self, tmp_path, monkeypatch):
         """A second stop press while soft_pending hard-kills even when the
         client did NOT send force=true. The client derives force from the
         WS-echoed stop_state, which lags on a slow connection; the backend's
@@ -6498,9 +6611,7 @@ class TestStopTurnSlotState:
         slot.task.cancel()
 
     @pytest.mark.asyncio
-    async def test_stop_turn_first_press_clears_queue(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_stop_turn_first_press_clears_queue(self, tmp_path, monkeypatch):
         """Queue populated; POST stop; queue empty (via stop_turn side effect)."""
         state = self._make_state(tmp_path, monkeypatch)
         slot = state.get_or_create_slot("s1")
@@ -6525,9 +6636,7 @@ class TestStopTurnSlotState:
         slot.task.cancel()
 
     @pytest.mark.asyncio
-    async def test_stop_event_appears_in_transcript(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_stop_event_appears_in_transcript(self, tmp_path, monkeypatch):
         """After stop, slot messages contain a stop_event entry."""
         import json
 
@@ -6635,12 +6744,14 @@ class TestStopHistoryBanner:
         slot.append("user", "hello")
         slot.append("assistant", "hi there")
         # cls must be a JSON-encoded dict (same format api_chat_slot_stop uses)
-        cls_json = json.dumps({
-            "kind": "stop_event",
-            "id": "stop-abc",
-            "state": "stopped",
-            "outcome": "soft",
-        })
+        cls_json = json.dumps(
+            {
+                "kind": "stop_event",
+                "id": "stop-abc",
+                "state": "stopped",
+                "outcome": "soft",
+            }
+        )
         slot.append("system", cls_json, cls_json)
         assert self._last_stop_soft(slot) is True
 
@@ -6651,12 +6762,14 @@ class TestStopHistoryBanner:
         slot = _ChatSlot("s1")
         slot.append("user", "hello")
         slot.append("assistant", "hi there")
-        cls_json = json.dumps({
-            "kind": "stop_event",
-            "id": "stop-abc",
-            "state": "stop_failed_reset",
-            "outcome": "hard",
-        })
+        cls_json = json.dumps(
+            {
+                "kind": "stop_event",
+                "id": "stop-abc",
+                "state": "stop_failed_reset",
+                "outcome": "hard",
+            }
+        )
         slot.append("system", cls_json, cls_json)
         assert self._last_stop_soft(slot) is False
 
@@ -6757,7 +6870,9 @@ class TestAcpProcessDiedRecovery:
         state, slot, client, _run_chat = self._make_state_and_slot(tmp_path)
 
         async def _stream_then_die(msg):
-            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="partial output with AKIA1234567890ABCDEF secret")
+            yield LLMEvent(
+                kind=EVENT_TEXT_CHUNK, text="partial output with AKIA1234567890ABCDEF secret"
+            )
             raise AcpProcessDied("pipe broken")
 
         client.stream = _stream_then_die

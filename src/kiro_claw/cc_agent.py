@@ -40,6 +40,8 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
+from kiro_claw import model_registry
+
 logger = logging.getLogger(__name__)
 
 CC_AGENTS_DIR = Path.home() / ".claude" / "agents"
@@ -106,31 +108,22 @@ def cc_config_root() -> Path:
     return _USER_CC_ROOT
 
 
-# Default CC model — Opus 4.8 with the 1M context window. Must match the
-# frontend CC_DEFAULT_MODEL and providers/claude_code._CC_DEFAULT_MODEL.
-_CC_DEFAULT_MODEL = "global.anthropic.claude-opus-4-8[1m]"
-
-# Model IDs written to ~/.claude/settings.json `availableModels`. This is the
-# allowlist the claude-agent-acp adapter resolves a session's model against:
-# it builds session.modelInfos = (SDK model list) ∩ availableModels, then
-# resolveModelPreference() can only return an entry IN that set. With a default
-# allowlist of (["opus","sonnet"]) the explicit Bedrock id
-# `global.anthropic.claude-opus-4-8[1m]` fuzzy-collapses to the `opus` alias
-# (Opus 4.6, 200k) — verified live. Listing the full versioned ids here lets
-# resolveModelPreference match `[1m]` EXACTLY, which serves the real 1M window
-# (also verified live: 200k → 1,000,000). Full ids, not aliases, so the 1M
-# variant is reachable. The Claude CLI may overwrite this file on startup, so
-# install_cc_global_deny_settings re-asserts it (see repair_agent_configs).
-# Full Bedrock inference-profile ids only — a bare versioned id like
-# "claude-opus-4-7" is NOT a valid Bedrock identifier and is rejected with a
-# 400 once it lands in availableModels (the adapter passes it through verbatim).
-# [1m] unlocks the 1M window where supported (verified live).
-_CC_AVAILABLE_MODELS: list[str] = [
-    "global.anthropic.claude-opus-4-8[1m]",
-    "global.anthropic.claude-opus-4-8",
-    "global.anthropic.claude-opus-4-7[1m]",
-    "global.anthropic.claude-sonnet-4-6[1m]",
-]
+# Default CC model + the `availableModels` allowlist written to the isolated
+# config dir. SOURCED FROM THE REGISTRY (model_registry) so there is a single
+# source of truth — editing model_registry.json updates the isolated-dir seed,
+# the per-session settings.local.json (acp/client.py), and the revert matcher
+# together. A guard test (test_model_registry) asserts they stay in sync.
+#
+# Why the allowlist matters: the claude-agent-acp adapter builds
+# session.modelInfos = (SDK model list) ∩ availableModels, then
+# resolveModelPreference() can only return an entry IN that set. With the
+# default ["opus","sonnet"] the explicit `[1m]` id fuzzy-collapses to
+# the `opus` alias (200k). Listing the full versioned ids lets it match `[1m]`
+# EXACTLY → the real 1M window. Full Bedrock inference-profile ids only.
+_CC_DEFAULT_MODEL = model_registry.to_provider_id(
+    model_registry.default("claude_code"), "claude_code"
+)
+_CC_AVAILABLE_MODELS: list[str] = model_registry.available_models("claude_code")
 
 # ── Translation tables: kiro → Claude Code ──
 
@@ -312,10 +305,12 @@ def _build_cc_hooks(kiro_hooks: dict[str, Any]) -> dict[str, list[dict[str, Any]
             }
             if timeout != 30:
                 hook_def["timeout"] = timeout
-            cc_entries.append({
-                "matcher": matcher,
-                "hooks": [hook_def],
-            })
+            cc_entries.append(
+                {
+                    "matcher": matcher,
+                    "hooks": [hook_def],
+                }
+            )
         if cc_entries:
             cc_hooks[cc_event] = cc_entries
     return cc_hooks
@@ -405,9 +400,7 @@ def generate_cc_agent_markdown(
 
     # Resolve prompt body
     if not prompt_body:
-        prompt_body = _resolve_prompt_content(
-            agent_config.get("prompt", ""), name
-        )
+        prompt_body = _resolve_prompt_content(agent_config.get("prompt", ""), name)
     lines.append(prompt_body)
     lines.append("")
     return "\n".join(lines)
@@ -588,9 +581,7 @@ def acp_servers_from_cc_map(cc_servers: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         env = spec.get("env")
         env_list = (
-            [{"name": k, "value": str(v)} for k, v in env.items()]
-            if isinstance(env, dict)
-            else []
+            [{"name": k, "value": str(v)} for k, v in env.items()] if isinstance(env, dict) else []
         )
         entry = {
             "name": name,
@@ -740,16 +731,23 @@ _CC_DENY_PATTERNS: list[str] = [
 ]
 
 
-def _atomic_settings_write(path: Path, data: dict[str, Any]) -> None:
-    """Write JSON settings atomically via tmp+rename. Preserves file mode."""
+def _atomic_settings_write(path: Path, data: dict[str, Any], mode: int | None = None) -> None:
+    """Write JSON settings atomically via tmp+rename with fsync.
+
+    Preserves the existing file mode (defaulting to 0o644 for a new file) unless
+    ``mode`` is given, in which case the file is created with exactly that mode
+    from the start (no brief default-umask window). The randomly-named tmp file
+    is unlinked on any error, so no ``.tmp`` is ever orphaned.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            try:
-                mode = stat.S_IMODE(path.stat().st_mode)
-            except FileNotFoundError:
-                mode = 0o644
+            if mode is None:
+                try:
+                    mode = stat.S_IMODE(path.stat().st_mode)
+                except FileNotFoundError:
+                    mode = 0o644
             os.fchmod(f.fileno(), mode)
             json.dump(data, f, indent=2, ensure_ascii=False)
             f.write("\n")
@@ -764,48 +762,114 @@ def _atomic_settings_write(path: Path, data: dict[str, Any]) -> None:
         raise
 
 
-def _apply_deny_and_models(data: dict[str, Any]) -> None:
-    """Layer the deny patterns + 1M model allowlist + default model onto ``data``.
+def _apply_deny_and_marker(data: dict[str, Any]) -> None:
+    """Layer the security deny patterns + managed marker onto ``data``.
 
-    Mutates ``data`` in place (the in-memory settings dict). Shared by
-    :func:`install_cc_global_deny_settings` (after reading its target) and
-    :func:`seed_isolated_cc_config` (on the freshly-stripped seed dict) so the
-    layering lives in one place and the seed can apply it before a SINGLE write.
+    Used for the USER-global ``~/.claude/settings.json``. Writes ONLY the deny
+    patterns (a safety control, kept regardless of isolation) and a marker so a
+    later revert is precise. Does NOT write model keys (``availableModels`` /
+    ``model``) — those are injected via the KiroClaw-owned per-session
+    ``<work_dir>/.claude/settings.local.json`` (see acp/client.py
+    ``_write_claude_local_settings``) so we never mutate the operator's model
+    config in their real ~/.claude.
       - ``permissions.deny`` ← _CC_DENY_PATTERNS (applies to ALL sessions).
-      - ``availableModels`` ← _CC_AVAILABLE_MODELS (unlocks the real 1M window).
-      - ``model`` ← _CC_DEFAULT_MODEL only when unset (never clobber the user's).
+      - ``_kiroclaw_managed`` ← records the keys KiroClaw owns here.
     """
     permissions = data.setdefault("permissions", {})
     permissions["deny"] = list(_CC_DENY_PATTERNS)
-    # Re-assert the model allowlist so the 1M Opus 4.8 id stays selectable even
-    # after the Claude CLI resets it to ["opus","sonnet"].
+    managed = data.get("_kiroclaw_managed")
+    keys = set(managed) if isinstance(managed, list) else set()
+    keys.add("permissions.deny")
+    data["_kiroclaw_managed"] = sorted(keys)
+
+
+def _apply_deny_and_models_for_isolated(data: dict[str, Any]) -> None:
+    """Layer deny + marker + model allowlist + default onto the KiroClaw-OWNED
+    isolated config dir (allowed by the file-scope decision — it is not the
+    user's ~/.claude). Mirrors the old ``_apply_deny_and_models`` so a spawn
+    still resolves the 1M window even if the per-session ``settings.local.json``
+    is somehow absent.
+      - ``permissions.deny`` ← _CC_DENY_PATTERNS.
+      - ``availableModels`` ← _CC_AVAILABLE_MODELS (unlocks the real 1M window).
+      - ``model`` ← _CC_DEFAULT_MODEL only when unset (never clobber).
+    """
+    _apply_deny_and_marker(data)
     data["availableModels"] = list(_CC_AVAILABLE_MODELS)
-    # Seed the default model only when the user hasn't set one — never clobber
-    # an explicit operator choice.
     if not data.get("model"):
         data["model"] = _CC_DEFAULT_MODEL
 
 
-def install_cc_global_deny_settings(target_path: Path | None = None) -> Path:
-    """Write CC settings.json: global deny patterns + model allowlist + default.
+def revert_user_model_settings(
+    target_path: Path | None = None, dry_run: bool = False, require_marker: bool = False
+) -> bool:
+    """Remove KiroClaw-written MODEL keys from the user's ~/.claude/settings.json.
 
-    Three things, all global (no per-agent frontmatter / CLI args needed):
+    Earlier KiroClaw versions wrote ``availableModels`` + ``model`` into the
+    user's real ``~/.claude/settings.json``. Model config now lives in the
+    KiroClaw-owned per-session ``settings.local.json``, so this un-pollutes the
+    user file. Removal is value-matched against the historical constants:
+      - ``availableModels``: removed iff it exactly equals :data:`_CC_AVAILABLE_MODELS`.
+      - ``model``: removed iff it equals :data:`_CC_DEFAULT_MODEL`.
+      - ``permissions.deny`` and the ``_kiroclaw_managed`` marker: always kept.
+
+    ``require_marker`` controls the safety/coverage tradeoff (value-match alone
+    cannot tell a value KiroClaw wrote from the identical value an operator chose):
+      - ``True`` (the unattended BOOT path): only act if ``_kiroclaw_managed``
+        records the model key, so we NEVER delete a value the operator set
+        themselves. Old pollution has no such marker, so boot leaves it for the
+        explicit command — boot's job is just to avoid clobbering.
+      - ``False`` (the explicit ``kiroclaw cc revert-settings`` CLI): value-match
+        with no marker requirement, so it cleans legacy pollution the operator
+        asked to remove.
+
+    Returns True if a change was (or, in ``dry_run``, would be) made. Atomic
+    write; preserves all other keys; idempotent; never creates the file.
+    """
+    settings_path = target_path or CC_SETTINGS_PATH
+    if not settings_path.is_file():
+        return False
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    managed = data.get("_kiroclaw_managed")
+    managed_keys = set(managed) if isinstance(managed, list) else set()
+    changed = False
+    if data.get("availableModels") == list(_CC_AVAILABLE_MODELS) and (
+        not require_marker or "availableModels" in managed_keys
+    ):
+        if not dry_run:
+            data.pop("availableModels", None)
+        changed = True
+    if data.get("model") == _CC_DEFAULT_MODEL and (not require_marker or "model" in managed_keys):
+        if not dry_run:
+            data.pop("model", None)
+        changed = True
+    if changed and not dry_run:
+        _atomic_settings_write(settings_path, data)
+        logger.info("Reverted KiroClaw model keys from %s", settings_path)
+    return changed
+
+
+def install_cc_global_deny_settings(target_path: Path | None = None) -> Path:
+    """Write CC settings.json: global security deny patterns + managed marker.
+
+    Writes ONLY the security control to the user-global ``~/.claude`` (no per-agent
+    frontmatter / CLI args needed):
       - ``permissions.deny`` ← _CC_DENY_PATTERNS (applies to ALL sessions).
-      - ``availableModels`` ← _CC_AVAILABLE_MODELS. The claude-agent-acp adapter
-        only lets a session resolve to a model IN this allowlist; a default
-        allowlist of (["opus","sonnet"]) silently caps the 1M Opus 4.8 id down
-        to Opus 4.6 (200k). Listing the full versioned ids unlocks the real 1M
-        window. The Claude CLI may rewrite this file on startup, so this is
-        re-asserted on every repair_agent_configs pass.
-      - ``model`` ← _CC_DEFAULT_MODEL only when unset, so we seed the 1M default
-        for a fresh install without clobbering a user's explicit choice.
+      - ``_kiroclaw_managed`` ← records ``permissions.deny`` as KiroClaw-owned so
+        a later ``revert_user_model_settings`` is precise.
+    Model config (``availableModels`` / ``model``) is intentionally NOT written
+    here — it is injected via the KiroClaw-owned per-session
+    ``<work_dir>/.claude/settings.local.json`` (acp/client.py), so KiroClaw never
+    mutates the operator's model config in their real ~/.claude. The isolated dir
+    still gets the model allowlist via :func:`seed_isolated_cc_config` (a
+    KiroClaw-owned dir).
     Atomic write preserves all other keys. Idempotent.
 
-    Default target is ``CC_SETTINGS_PATH`` (the user-global ``~/.claude``) — the
-    boot re-assert keeps the user's interactive 1M window alive and provides the
-    seed SOURCE for the isolated dir. The isolated dir gets the same deny + model
-    allowlist via :func:`seed_isolated_cc_config`, which applies the same layering
-    in memory before its single write.
+    Default target is ``CC_SETTINGS_PATH`` (the user-global ``~/.claude``).
     """
     settings_path = target_path or CC_SETTINGS_PATH
     existing: dict[str, Any] = {}
@@ -817,12 +881,11 @@ def install_cc_global_deny_settings(target_path: Path | None = None) -> Path:
                 "Could not parse existing settings at %s; will overwrite permissions.deny",
                 settings_path,
             )
-    _apply_deny_and_models(existing)
+    _apply_deny_and_marker(existing)
     _atomic_settings_write(settings_path, existing)
     logger.info(
-        "Installed %d deny patterns + %d model allowlist entries to %s",
+        "Installed %d deny patterns to %s (model config NOT written to user file)",
         len(_CC_DENY_PATTERNS),
-        len(_CC_AVAILABLE_MODELS),
         settings_path,
     )
     return settings_path
@@ -840,12 +903,12 @@ def install_cc_global_deny_settings(target_path: Path | None = None) -> Path:
 # silently downgrade effort below the user's configured level (e.g. xhigh), so
 # the user's effortLevel is preserved into the isolated config.
 _CC_SEED_STRIP_KEYS: tuple[str, ...] = (
-    "enabledPlugins",          # user-installed CC plugins → duplicate MCP servers + agents + skills
+    "enabledPlugins",  # user-installed CC plugins → duplicate MCP servers + agents + skills
     "extraKnownMarketplaces",  # plugin marketplace registration
-    "enabledMcpjsonServers",   # absent on this host today; pop is a safe no-op
+    "enabledMcpjsonServers",  # absent on this host today; pop is a safe no-op
     "disabledMcpjsonServers",
-    "statusLine",              # cosmetic; irrelevant to a headless subprocess
-    "theme",                   # cosmetic
+    "statusLine",  # cosmetic; irrelevant to a headless subprocess
+    "theme",  # cosmetic
 )
 
 
@@ -872,15 +935,15 @@ def seed_isolated_cc_config(root: Path | None = None) -> Path:
     Copies the user's literal ``~/.claude/settings.json`` into
     ``<root>/settings.json`` with the plugin/marketplace/cosmetic keys
     (:data:`_CC_SEED_STRIP_KEYS`) removed, then layers KiroClaw's deny patterns +
-    1M model allowlist (:func:`_apply_deny_and_models`) onto the in-memory dict
-    before a SINGLE atomic write. This drops the token bloat
+    1M model allowlist (:func:`_apply_deny_and_models_for_isolated`) onto the
+    in-memory dict before a SINGLE atomic write. This drops the token bloat
     (plugins/agents/skills) while preserving:
 
       - ``awsCredentialExport`` — consumed by the native ``claude`` binary to
         refresh Bedrock creds. Copied verbatim; dropping it is what broke auth
         when we tried ``settingSources: []``.
       - ``availableModels`` / ``model`` — the 1M window; re-asserted with the
-        full ``[1m]`` ids by ``_apply_deny_and_models``.
+        full ``[1m]`` ids by ``_apply_deny_and_models_for_isolated``.
       - ``effortLevel`` — the user's configured reasoning effort (see
         :data:`_CC_SEED_STRIP_KEYS`).
       - ``env`` (e.g. ``AWS_REGION``) and top-level ``permissions`` (minus
@@ -918,8 +981,7 @@ def seed_isolated_cc_config(root: Path | None = None) -> Path:
         # strip-and-overwrite seed — skip instead. Proceeding could overwrite the
         # user's genuine settings.json (data loss).
         logger.warning(
-            "Could not resolve CC isolation root %s; skipping seed to avoid "
-            "potential data loss",
+            "Could not resolve CC isolation root %s; skipping seed to avoid " "potential data loss",
             root,
             exc_info=True,
         )
@@ -972,19 +1034,19 @@ def seed_isolated_cc_config(root: Path | None = None) -> Path:
         perms.pop("ask", None)
         data["permissions"] = perms
 
-    # Layer deny patterns + 1M availableModels + default model onto the in-memory
-    # dict, then write ONCE (avoids a second read+write via
-    # install_cc_global_deny_settings).
-    _apply_deny_and_models(data)
+    # Layer deny + marker + 1M availableModels + default model onto the in-memory
+    # dict, then write ONCE. This is the KiroClaw-OWNED isolated dir (not the
+    # user's ~/.claude), so writing the model allowlist here is allowed and keeps
+    # the 1M window working even if per-session settings.local.json is absent.
+    _apply_deny_and_models_for_isolated(data)
 
     root.mkdir(parents=True, exist_ok=True)
-    _atomic_settings_write(seeded, data)
-    # The seed carries awsCredentialExport; force 0o600 so a freshly-created file
-    # (0o644 default) is not group/world-readable. Only enforced on the isolated
-    # seed, not on _atomic_settings_write's other callers.
-    try:
-        os.chmod(seeded, 0o600)
-    except OSError:
-        logger.warning("Could not chmod 0o600 on %s", seeded, exc_info=True)
+    # The seed carries awsCredentialExport; create it 0o600 AT WRITE TIME (via the
+    # atomic writer's mode= param, which fchmods the tmp file before the rename)
+    # so the credential-bearing file is never briefly group/world-readable at the
+    # 0o644 default — a post-write os.chmod would leave that race window open.
+    # Only the isolated seed forces this; _atomic_settings_write's other callers
+    # keep their existing (mode-preserving) behavior.
+    _atomic_settings_write(seeded, data, mode=0o600)
     logger.info("Seeded isolated CC config at %s (plugins stripped, creds kept)", root)
     return root

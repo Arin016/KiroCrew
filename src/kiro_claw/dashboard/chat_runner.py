@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
+from kiro_claw import model_registry
 from kiro_claw.acp.client import AcpError, AcpProcessDied, _is_safe_oauth_url
 from kiro_claw.acp.types import (
     EVENT_AGENT_SWITCHED,
@@ -105,6 +106,24 @@ from kiro_claw.stats import Stats
 from kiro_claw.validation import ValidationError, validate_ask_user_question
 
 logger = logging.getLogger(__name__)
+
+
+def _backfill_canonical_model(client: Any, provider: str) -> str:
+    """Read the provider's resolved model (``client.client._model``) and map it
+    to its canonical registry key for the dropdown, or ``""`` if unavailable.
+
+    AcpProvider stores a provider id on ``_model``. ``canonicalize_for_provider``
+    maps it back to the canonical key ONLY for ``claude_code`` (the canonical-
+    keyed dropdown); for kiro/acp it is a no-op so a kiro dotted id that happens
+    to be spelled like a claude_code alias (e.g. ``claude-sonnet-4.6``,
+    ``claude-haiku-4.5``) is NOT rewritten to a claude_code canonical key.
+    Skips the ``"auto"`` sentinel. Single home for the slot.model backfill so the
+    early (pre-turn) and late (mid-turn init) sites agree.
+    """
+    prov_model = getattr(getattr(client, "client", None), "_model", "") or ""
+    if isinstance(prov_model, str) and prov_model and prov_model != "auto":
+        return model_registry.canonicalize_for_provider(prov_model, provider)
+    return ""
 
 
 def _context_usage_payload(slot_key: str, client: Any) -> dict[str, Any]:
@@ -987,11 +1006,14 @@ async def _run_chat(
         )
         _acquired = True
         # Backfill slot.model from provider if user didn't explicitly set one.
-        # AcpProvider stores the resolved model on client._model.
+        # AcpProvider stores the resolved model on client._model. For claude_code
+        # that is a provider id; map it back to the canonical registry key so it
+        # matches the canonical-keyed dropdown rows (else the active row won't
+        # highlight and the header shows the raw provider id). Gated on the real
+        # provider so a kiro/acp dotted id (which collides with a claude_code
+        # alias spelling) is left as-is.
         if not slot.model:
-            _prov_model = getattr(getattr(client, "client", None), "_model", "") or ""
-            if isinstance(_prov_model, str) and _prov_model and _prov_model != "auto":
-                slot.model = _prov_model
+            slot.model = _backfill_canonical_model(client, cfg.agent.provider) or slot.model
         agent_label = kiro_agent or slot.agent or "default"
         model_label = slot.model or "auto"
         if resumed:
@@ -2151,10 +2173,10 @@ async def _run_chat(
                     # with a blank model for CC sessions.
                     _record_model = slot.model
                     if not _record_model:
-                        _prov_model = getattr(getattr(client, "client", None), "_model", "") or ""
-                        if isinstance(_prov_model, str) and _prov_model and _prov_model != "auto":
-                            slot.model = _prov_model
-                            _record_model = _prov_model
+                        _canonical = _backfill_canonical_model(client, _provider_name)
+                        if _canonical:
+                            slot.model = _canonical
+                            _record_model = _canonical
                     persist_token_record(slot.key, _record_model, event, provider=_provider_name)
                 _stop_reason = event.stop_reason
                 if (

@@ -65,7 +65,9 @@ class TestGenerateMarkdown:
 
 class TestGenerateMcpJson:
     def test_includes_kiroclaw_servers(self):
-        cfg = {"mcpServers": {"kiroclaw-core": {"command": "mc", "args": ["mcp-core"]}, "other": {}}}
+        cfg = {
+            "mcpServers": {"kiroclaw-core": {"command": "mc", "args": ["mcp-core"]}, "other": {}}
+        }
         r, _, _ = generate_mcp_json(cfg)
         assert "kiroclaw-core" in r["mcpServers"]
         assert "kiroclaw-cron" in r["mcpServers"]
@@ -225,7 +227,9 @@ class TestInstallCcAgentConfigRenderer:
             self._set_cc_provider(stack)
             stack.enter_context(patch("kiro_claw.agent.CC_MCP_FILE", mcp_file))
             stack.enter_context(patch("kiro_claw.cc_agent.CC_AGENTS_DIR", claude_agents))
-            stack.enter_context(patch("kiro_claw.agent._toolbox_cc_defaults_dir", return_value=None))
+            stack.enter_context(
+                patch("kiro_claw.agent._toolbox_cc_defaults_dir", return_value=None)
+            )
             install_cc_agent_config(merged)
 
         assert mcp_file.exists(), "CC MCP registry must be written"
@@ -254,12 +258,14 @@ class TestInstallCcAgentConfigRenderer:
             self._set_cc_provider(stack)
             stack.enter_context(patch("kiro_claw.agent.CC_MCP_FILE", mcp_file))
             stack.enter_context(patch("kiro_claw.cc_agent.CC_AGENTS_DIR", claude_agents))
-            stack.enter_context(patch("kiro_claw.agent._toolbox_cc_defaults_dir", return_value=None))
+            stack.enter_context(
+                patch("kiro_claw.agent._toolbox_cc_defaults_dir", return_value=None)
+            )
             install_cc_agent_config(merged)
 
-        assert canary.read_text() == '{"touched": "by-someone-else"}', (
-            "Renderer must not touch ~/.mcp.json"
-        )
+        assert (
+            canary.read_text() == '{"touched": "by-someone-else"}'
+        ), "Renderer must not touch ~/.mcp.json"
         assert mcp_file.exists()
 
     def test_renders_regardless_of_active_provider(self, tmp_path):
@@ -281,7 +287,9 @@ class TestInstallCcAgentConfigRenderer:
         with ExitStack() as stack:
             stack.enter_context(patch("kiro_claw.agent.CC_MCP_FILE", mcp_file))
             stack.enter_context(patch("kiro_claw.cc_agent.CC_AGENTS_DIR", claude_agents))
-            stack.enter_context(patch("kiro_claw.agent._toolbox_cc_defaults_dir", return_value=None))
+            stack.enter_context(
+                patch("kiro_claw.agent._toolbox_cc_defaults_dir", return_value=None)
+            )
             result = install_cc_agent_config(merged)
 
         # Even though no provider check fires, artifacts are written.
@@ -363,12 +371,8 @@ class TestHookTranslation:
         cfg = {
             "name": "test",
             "hooks": {
-                "preToolUse": [
-                    {"matcher": "execute_bash", "command": "echo pre", "timeout": 10}
-                ],
-                "postToolUse": [
-                    {"matcher": "*", "command": "echo post"}
-                ],
+                "preToolUse": [{"matcher": "execute_bash", "command": "echo pre", "timeout": 10}],
+                "postToolUse": [{"matcher": "*", "command": "echo post"}],
             },
         }
         md = generate_cc_agent_markdown(cfg)
@@ -397,9 +401,7 @@ class TestHookTranslation:
         cfg = {
             "name": "test",
             "hooks": {
-                "userPromptSubmit": [
-                    {"command": "echo submit", "timeout": 60}
-                ],
+                "userPromptSubmit": [{"command": "echo submit", "timeout": 60}],
             },
         }
         md = generate_cc_agent_markdown(cfg)
@@ -409,9 +411,7 @@ class TestHookTranslation:
         cfg = {
             "name": "test",
             "hooks": {
-                "userPromptSubmit": [
-                    {"command": "echo submit", "timeout": 30}
-                ],
+                "userPromptSubmit": [{"command": "echo submit", "timeout": 30}],
             },
         }
         md = generate_cc_agent_markdown(cfg)
@@ -577,40 +577,41 @@ class TestInstallCcGlobalDenySettings:
         install_cc_global_deny_settings(target)
         assert target.exists()
 
-    def test_writes_model_allowlist(self, tmp_path: Path):
-        # availableModels must carry the full versioned ids (incl. the 1M
-        # Opus 4.8 id) so the adapter can resolve [1m] exactly → real 1M
-        # window, instead of collapsing to an alias capped at 200k.
+    def test_does_not_write_model_keys_to_user_file(self, tmp_path: Path):
+        # Model config is injected via the KiroClaw-owned per-session
+        # settings.local.json — NOT the user's ~/.claude. install_cc_global_deny
+        # must write deny + marker only.
         target = tmp_path / "settings.json"
         install_cc_global_deny_settings(target)
         data = json.loads(target.read_text())
-        assert data["availableModels"] == list(_CC_AVAILABLE_MODELS)
-        assert "global.anthropic.claude-opus-4-8[1m]" in data["availableModels"]
+        assert "availableModels" not in data
+        assert "model" not in data
+        assert "permissions.deny" in data.get("_kiroclaw_managed", [])
 
-    def test_seeds_default_model_when_unset(self, tmp_path: Path):
+    def test_does_not_touch_existing_user_model(self, tmp_path: Path):
+        # An operator's explicit model is left exactly as-is (not removed, not
+        # clobbered) — install writes only deny + marker.
         target = tmp_path / "settings.json"
-        install_cc_global_deny_settings(target)
-        data = json.loads(target.read_text())
-        assert data["model"] == _CC_DEFAULT_MODEL
-
-    def test_preserves_explicit_user_model(self, tmp_path: Path):
-        # Never clobber an operator's explicit model choice.
-        target = tmp_path / "settings.json"
-        target.write_text(json.dumps({"model": "claude-opus-4-7"}))
+        target.write_text(json.dumps({"model": "claude-opus-4-7", "availableModels": ["opus"]}))
         install_cc_global_deny_settings(target)
         data = json.loads(target.read_text())
         assert data["model"] == "claude-opus-4-7"
-        # but the allowlist is still re-asserted
-        assert data["availableModels"] == list(_CC_AVAILABLE_MODELS)
+        assert data["availableModels"] == ["opus"]
+        assert data["permissions"]["deny"] == list(_CC_DENY_PATTERNS)
 
-    def test_reasserts_allowlist_over_toolbox_reset(self, tmp_path: Path):
-        # The toolbox resets availableModels to ["opus","sonnet"] on startup;
-        # the repair pass must restore the full curated set.
-        target = tmp_path / "settings.json"
-        target.write_text(json.dumps({"availableModels": ["opus", "sonnet"]}))
-        install_cc_global_deny_settings(target)
-        data = json.loads(target.read_text())
+    def test_isolated_seed_layer_writes_model_allowlist(self):
+        # The KiroClaw-OWNED isolated dir DOES get the full allowlist (1M ids)
+        # + default model + deny + marker, so a spawn resolves 1M even without
+        # per-session settings.local.json.
+        from kiro_claw.cc_agent import _apply_deny_and_models_for_isolated
+
+        data: dict = {}
+        _apply_deny_and_models_for_isolated(data)
         assert data["availableModels"] == list(_CC_AVAILABLE_MODELS)
+        assert "global.anthropic.claude-opus-4-8[1m]" in data["availableModels"]
+        assert data["model"] == _CC_DEFAULT_MODEL
+        assert data["permissions"]["deny"] == list(_CC_DENY_PATTERNS)
+        assert "permissions.deny" in data["_kiroclaw_managed"]
 
 
 class TestCcConfigRoot:
@@ -713,9 +714,7 @@ class TestSeedIsolatedCcConfig:
         assert data["availableModels"] == list(_CC_AVAILABLE_MODELS)
         assert data["permissions"]["deny"] == list(_CC_DENY_PATTERNS)
 
-    def test_strips_allow_and_ask_so_host_gate_is_authoritative(
-        self, monkeypatch, tmp_path
-    ):
+    def test_strips_allow_and_ask_so_host_gate_is_authoritative(self, monkeypatch, tmp_path):
         """Inherited permissions.allow/ask must NOT reach the isolated seed.
 
         CC's native permission engine auto-approves any tool matched by an
@@ -763,9 +762,7 @@ class TestSeedIsolatedCcConfig:
         seeded = iso_root / "settings.json"
         assert oct(stat.S_IMODE(os.stat(seeded).st_mode)) == "0o600"
 
-    def test_data_loss_guard_skips_when_root_is_user_claude(
-        self, monkeypatch, tmp_path
-    ):
+    def test_data_loss_guard_skips_when_root_is_user_claude(self, monkeypatch, tmp_path):
         """If the isolation root resolves to the operator's real ~/.claude, the
         seed must SKIP entirely rather than strip+overwrite the genuine
         settings.json (which would destroy enabledPlugins etc.)."""
@@ -820,3 +817,59 @@ class TestSeedIsolatedCcConfig:
         cc_agent.seed_isolated_cc_config(root=iso_root)
         post = json.loads((iso_root / "settings.json").read_text())
         assert post["awsCredentialExport"] == "/bin/claude default-credential-export"
+
+
+class TestRevertUserModelSettings:
+    def test_revert_removes_kiroclaw_written_model_keys(self, tmp_path: Path):
+        from kiro_claw.cc_agent import (
+            _CC_AVAILABLE_MODELS,
+            _CC_DEFAULT_MODEL,
+            revert_user_model_settings,
+        )
+
+        target = tmp_path / "settings.json"
+        target.write_text(
+            json.dumps(
+                {
+                    "model": _CC_DEFAULT_MODEL,
+                    "availableModels": list(_CC_AVAILABLE_MODELS),
+                    "permissions": {"deny": ["Bash(x)"]},
+                    "env": {"AWS_REGION": "us-west-2"},
+                }
+            )
+        )
+        changed = revert_user_model_settings(target_path=target, dry_run=False)
+        data = json.loads(target.read_text())
+        assert changed is True
+        assert "availableModels" not in data  # KiroClaw-written -> removed
+        assert "model" not in data  # equals default -> removed
+        assert data["permissions"]["deny"]  # deny kept (security)
+        assert data["env"]["AWS_REGION"] == "us-west-2"  # unrelated kept
+
+    def test_revert_leaves_user_customized_values(self, tmp_path: Path):
+        from kiro_claw.cc_agent import revert_user_model_settings
+
+        target = tmp_path / "settings.json"
+        target.write_text(
+            json.dumps(
+                {
+                    "model": "my-custom-model",
+                    "availableModels": ["my", "list"],
+                }
+            )
+        )
+        changed = revert_user_model_settings(target_path=target, dry_run=False)
+        data = json.loads(target.read_text())
+        assert changed is False
+        assert data["model"] == "my-custom-model"
+        assert data["availableModels"] == ["my", "list"]
+
+    def test_revert_dry_run_does_not_write(self, tmp_path: Path):
+        from kiro_claw.cc_agent import _CC_DEFAULT_MODEL, revert_user_model_settings
+
+        target = tmp_path / "settings.json"
+        original = json.dumps({"model": _CC_DEFAULT_MODEL})
+        target.write_text(original)
+        changed = revert_user_model_settings(target_path=target, dry_run=True)
+        assert changed is True  # would change
+        assert target.read_text() == original  # but did not write

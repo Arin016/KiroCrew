@@ -31,6 +31,7 @@ from kiro_claw.apps.manager import (
     uninstall_app,
 )
 from kiro_claw.apps.scaffold import scaffold_app
+from kiro_claw.cc_agent import CC_SETTINGS_PATH, revert_user_model_settings
 from kiro_claw.config import config_dir
 from kiro_claw.config.loader import (
     DASHBOARD_PORT,
@@ -168,9 +169,7 @@ def _spawn_run(args: argparse.Namespace, base: str) -> None:
     secret = _internal_secret()
     while True:
         _time.sleep(2)
-        poll_req = urllib.request.Request(
-            poll_url, headers={"X-Internal-Secret": secret}
-        )
+        poll_req = urllib.request.Request(poll_url, headers={"X-Internal-Secret": secret})
         try:
             with urllib.request.urlopen(poll_req, timeout=5) as resp:
                 status = json.loads(resp.read())
@@ -531,7 +530,8 @@ def _handle_app(args: argparse.Namespace) -> None:
         include_ui = getattr(args, "ui", False)
         include_cron = getattr(args, "cron", False)
         app_dir = scaffold_app(
-            output, args.name,
+            output,
+            args.name,
             include_backend=include_backend,
             include_ui=include_ui,
             include_cron=include_cron,
@@ -634,23 +634,33 @@ def _cron(args: argparse.Namespace) -> None:
         agent = (getattr(args, "agent", "") or "").strip()
         silent = getattr(args, "silent", False)
         if agent and not _AGENT_NAME_RE.match(agent):
-            print("Error: invalid agent name (alphanumeric, hyphens, underscores; 1-64 chars)",
-                  file=sys.stderr)
+            print(
+                "Error: invalid agent name (alphanumeric, hyphens, underscores; 1-64 chars)",
+                file=sys.stderr,
+            )
             sys.exit(1)
         if channel:
 
             if len(channel) > CHANNEL_MAX_LEN or not CHANNEL_ID_RE.match(channel):
-                print(f"Error: invalid channel ID format (expected {CHANNEL_ID_RE.pattern.strip('^$')})")
+                print(
+                    f"Error: invalid channel ID format (expected {CHANNEL_ID_RE.pattern.strip('^$')})"
+                )
                 return
         if cron_expr:
             job = svc.add_job(
-                name=args.name, message=args.message, cron_expr=cron_expr,
-                channel=channel, approval_mode=approval_mode,
+                name=args.name,
+                message=args.message,
+                cron_expr=cron_expr,
+                channel=channel,
+                approval_mode=approval_mode,
             )
         elif every:
             job = svc.add_job(
-                name=args.name, message=args.message, every_secs=every,
-                channel=channel, approval_mode=approval_mode,
+                name=args.name,
+                message=args.message,
+                every_secs=every,
+                channel=channel,
+                approval_mode=approval_mode,
             )
         else:
             print("Provide --every or --cron")
@@ -667,8 +677,10 @@ def _cron(args: argparse.Namespace) -> None:
         sched_desc = _format_schedule(job.schedule)
 
         sel().log_api_access(
-            caller="cli", operation="cron.add",
-            outcome="allowed", source="cli",
+            caller="cli",
+            operation="cron.add",
+            outcome="allowed",
+            source="cli",
             resources=(
                 f"job_id={job.id} approval_mode={approval_mode or 'default'} "
                 f"agent={agent or 'default'} silent={silent}"
@@ -687,14 +699,18 @@ def _cron(args: argparse.Namespace) -> None:
                     if val is None:
                         continue
                     if len(val) > CHANNEL_MAX_LEN or not CHANNEL_ID_RE.match(val):
-                        print(f"Error: invalid channel ID format (expected {CHANNEL_ID_RE.pattern.strip('^$')})")
+                        print(
+                            f"Error: invalid channel ID format (expected {CHANNEL_ID_RE.pattern.strip('^$')})"
+                        )
                         return
                 kwargs[field] = val
         if getattr(args, "agent", None) is not None:
             agent_val = args.agent.strip()
             if agent_val and not _AGENT_NAME_RE.match(agent_val):
-                print("Error: invalid agent name (alphanumeric, hyphens, underscores; 1-64 chars)",
-                      file=sys.stderr)
+                print(
+                    "Error: invalid agent name (alphanumeric, hyphens, underscores; 1-64 chars)",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
             kwargs["agent_id"] = agent_val
         if getattr(args, "approval_mode", None) is not None:
@@ -714,16 +730,20 @@ def _cron(args: argparse.Namespace) -> None:
                 # subprocess, so the value belongs in the audit trail.
                 audit_resources += f" agent={kwargs['agent_id'] or 'default'}"
             sel().log_api_access(
-                caller="cli", operation="cron.update",
-                outcome="allowed", source="cli",
+                caller="cli",
+                operation="cron.update",
+                outcome="allowed",
+                source="cli",
                 resources=audit_resources,
             )
             print(f"Updated job: {updated.id} ({updated.name})")
         else:
 
             sel().log_api_access(
-                caller="cli", operation="cron.update",
-                outcome="not_found", source="cli",
+                caller="cli",
+                operation="cron.update",
+                outcome="not_found",
+                source="cli",
                 resources=f"job_id={args.job_id} reason=not_found",
             )
             print(f"Job not found: {args.job_id}")
@@ -752,8 +772,10 @@ def _cron(args: argparse.Namespace) -> None:
         ok, msg = trigger_cron_job(args.job_id, port, secret_path)
         print(msg)
         sel().log_api_access(
-            caller="cli", operation="cron.trigger",
-            outcome="allowed" if ok else "error", source="cli",
+            caller="cli",
+            operation="cron.trigger",
+            outcome="allowed" if ok else "error",
+            source="cli",
             resources=f"job_id={args.job_id}",
         )
 
@@ -852,7 +874,9 @@ async def _run_eval(args: argparse.Namespace) -> None:
                     break
             if resolved is None:
                 available = sorted(
-                    f.stem for f in scenarios_dir.iterdir() if f.suffix in (".json", ".yaml", ".yml")
+                    f.stem
+                    for f in scenarios_dir.iterdir()
+                    if f.suffix in (".json", ".yaml", ".yml")
                 )
                 print(f"Error: scenario '{name}' not found.")
                 print(f"Available scenarios: {', '.join(available)}")
@@ -868,7 +892,9 @@ async def _run_eval(args: argparse.Namespace) -> None:
     config = KiroClawConfig.load()
     provider_factory = config.create_provider_factory()
 
-    runner = EvalRunner(provider_factory=provider_factory, judge_enabled=getattr(args, "judge", False))
+    runner = EvalRunner(
+        provider_factory=provider_factory, judge_enabled=getattr(args, "judge", False)
+    )
     results = await runner.run_scenarios(scenarios)
 
     # LLM Judge scoring
@@ -889,12 +915,13 @@ async def _run_eval(args: argparse.Namespace) -> None:
                                         tr.user_message,
                                         tr.agent_response,
                                     )
-                                    tr.assertion_results[idx] = (a, verdict.score >= judge.pass_threshold)
+                                    tr.assertion_results[idx] = (
+                                        a,
+                                        verdict.score >= judge.pass_threshold,
+                                    )
                                     reason, _ = redact_exfiltration_urls(verdict.reason)
                                     reason, _ = redact_credentials(reason)
-                                    print(
-                                        f"  🧑‍⚖️ Judge: {verdict.score}/5 — {reason}"
-                                    )
+                                    print(f"  🧑‍⚖️ Judge: {verdict.score}/5 — {reason}")
                                 except Exception as exc:
                                     print(f"  ⚠️ Judge failed for turn: {exc}")
                                     tr.assertion_results[idx] = (a, False)
@@ -1027,8 +1054,12 @@ def _memory_cmd(args: argparse.Namespace) -> None:
 
         elif action == "stats":
             stats = store.memory_stats()
-            print(f"  Semantic: {stats['semantic_active']} active, {stats['semantic_deleted']} deleted")
-            print(f"  Episodic: {stats['episodic_active']} active, {stats['episodic_deleted']} deleted")
+            print(
+                f"  Semantic: {stats['semantic_active']} active, {stats['semantic_deleted']} deleted"
+            )
+            print(
+                f"  Episodic: {stats['episodic_active']} active, {stats['episodic_deleted']} deleted"
+            )
             print(f"  FAISS index: {stats['faiss_index_size']} vectors")
             print(f"  Audit events: {stats['events_count']}")
 
@@ -1131,7 +1162,9 @@ def _artifact(args: argparse.Namespace) -> None:
             return args.content
         if not sys.stdin.isatty():
             return sys.stdin.read()
-        print("Error: provide --content, --content-file, or pipe content via stdin", file=sys.stderr)
+        print(
+            "Error: provide --content, --content-file, or pipe content via stdin", file=sys.stderr
+        )
         sys.exit(1)
 
     def _parse_tags(s: str | None) -> list[str]:
@@ -1307,6 +1340,29 @@ def _handle_mirror(args: argparse.Namespace) -> None:
         print(f"\nSummary: {mirrored} mirrored, {skipped} skipped, {errors} errors")
     else:
         print("Usage: kiroclaw mirror {kiro-to-cc}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _handle_cc(args: argparse.Namespace) -> None:
+    """Dispatch cc subcommands: revert-settings."""
+    action = getattr(args, "cc_action", None)
+    if action == "revert-settings":
+        dry_run = getattr(args, "dry_run", False)
+        changed = revert_user_model_settings(dry_run=dry_run)
+        if not changed:
+            print(
+                f"No KiroClaw-written model keys found in {CC_SETTINGS_PATH} "
+                f"(nothing to revert)."
+            )
+        elif dry_run:
+            print(
+                f"[dry-run] Would remove KiroClaw model keys from {CC_SETTINGS_PATH} "
+                f"(deny patterns kept)."
+            )
+        else:
+            print(f"Removed KiroClaw model keys from {CC_SETTINGS_PATH} " f"(deny patterns kept).")
+    else:
+        print("Usage: kiroclaw cc {revert-settings}", file=sys.stderr)
         sys.exit(2)
 
 

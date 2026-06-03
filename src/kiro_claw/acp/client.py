@@ -31,6 +31,7 @@ from collections import deque
 from pathlib import Path
 from typing import AsyncIterator
 
+from kiro_claw import model_registry
 from kiro_claw.acp.types import (
     ACP_BACKEND_CLAUDE,
     EVENT_AGENT_SWITCHED,
@@ -154,7 +155,9 @@ def _claude_acp_mcp_servers() -> list[dict]:
             "CC MCP registry not found at %s; loading kiroclaw core/cron only", _CC_MCP_FILE
         )
     except (json.JSONDecodeError, AttributeError):
-        logger.warning("CC MCP registry at %s is not valid JSON; loading core/cron only", _CC_MCP_FILE)
+        logger.warning(
+            "CC MCP registry at %s is not valid JSON; loading core/cron only", _CC_MCP_FILE
+        )
 
     # circular import: cc_agent transitively reaches config.loader →
     # providers.acp → this module, so a module-top import would cycle.
@@ -204,7 +207,9 @@ def _mise_which(tool: str) -> str | None:
     try:
         result = subprocess_mod.run(
             [mise_bin, "which", tool],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0 and result.stdout.strip():
             path = result.stdout.strip()
@@ -539,9 +544,7 @@ def _format_acp_error(error: object) -> str:
         haystack = f"{data} {message}"
 
         req_id_match = re.search(r"request_id:\s*([0-9a-fA-F-]+)", data)
-        req_id_suffix = (
-            f" (request_id: {req_id_match.group(1)})" if req_id_match else ""
-        )
+        req_id_suffix = f" (request_id: {req_id_match.group(1)})" if req_id_match else ""
 
         # Bedrock model alias resolved to a version that is currently
         # unavailable (capacity throttle, region rollout in progress,
@@ -677,7 +680,18 @@ def _is_our_child(pid: int, expected_start: int | None = None) -> bool:
     matches known ACP adapter/MCP runtime names. Returns False for anything else,
     including recycled PIDs.
     """
-    allowed_prefixes = (b"kiro", b"claude", b"node", b"npx", b"python", b"ruby", b"builder", b"aim", b"arcc", b"deep-research")
+    allowed_prefixes = (
+        b"kiro",
+        b"claude",
+        b"node",
+        b"npx",
+        b"python",
+        b"ruby",
+        b"builder",
+        b"aim",
+        b"arcc",
+        b"deep-research",
+    )
     allowed_exact = (b"uv",)
     try:
         if sys.platform == "linux":
@@ -692,7 +706,11 @@ def _is_our_child(pid: int, expected_start: int | None = None) -> bool:
             )
             exe = out.strip().rsplit(b"/", 1)[-1]
         # Match runtime prefixes, exact names, or any binary with "mcp" in the name
-        if not (any(exe.startswith(tok) for tok in allowed_prefixes) or exe in allowed_exact or b"mcp" in exe):
+        if not (
+            any(exe.startswith(tok) for tok in allowed_prefixes)
+            or exe in allowed_exact
+            or b"mcp" in exe
+        ):
             return False
         # Start-time check: definitive PID recycling detection (always required)
         actual_start = _get_start_time(pid)
@@ -916,11 +934,13 @@ class AcpClient:
             model_id = m.get("modelId") or m.get("value") or ""
             if not model_id:
                 continue
-            captured.append({
-                "modelId": str(model_id),
-                "name": str(m.get("name") or model_id),
-                "description": str(m.get("description") or ""),
-            })
+            captured.append(
+                {
+                    "modelId": str(model_id),
+                    "name": str(m.get("name") or model_id),
+                    "description": str(m.get("description") or ""),
+                }
+            )
         if captured:
             self._available_models = captured
 
@@ -977,6 +997,7 @@ class AcpClient:
         if levels:
             # circular import: chat_persistence → dashboard → session → acp.client
             from kiro_claw.dashboard.chat_persistence import update_reasoning_effort_values
+
             update_reasoning_effort_values(levels)
 
     @property
@@ -1000,8 +1021,7 @@ class AcpClient:
         if not self._acp_config_options:
             return True
         return any(
-            isinstance(opt, dict) and opt.get("id") == config_id
-            for opt in self._acp_config_options
+            isinstance(opt, dict) and opt.get("id") == config_id for opt in self._acp_config_options
         )
 
     def get_valid_effort_levels(self) -> list[str]:
@@ -1016,10 +1036,7 @@ class AcpClient:
             if opt.get("id") == "effort":
                 options = opt.get("options", [])
                 if isinstance(options, list):
-                    return [
-                        o["value"] for o in options
-                        if isinstance(o, dict) and "value" in o
-                    ]
+                    return [o["value"] for o in options if isinstance(o, dict) and "value" in o]
         return []
 
     def _next_req_id(self) -> int:
@@ -1028,6 +1045,45 @@ class AcpClient:
         return rid
 
     # ── Process Management ──
+
+    def _write_claude_local_settings(self) -> None:
+        """Write the per-session ``<work_dir>/.claude/settings.local.json``.
+
+        Highest-precedence project source the claude-agent-acp adapter reads.
+        Carries (1) ``permissions.defaultMode='default'`` so every tool routes
+        through the host canUseTool gate, and (2) the full ``availableModels``
+        allowlist + resolved ``model`` so the adapter resolves the versioned
+        ``[1m]`` id (1M window) by EXACT match — even when the user's
+        ``~/.claude`` is polluted with ``['opus','sonnet']`` (the adapter merges
+        availableModels union+dedup across sources). KiroClaw-owned; removed on
+        session cleanup (providers/acp.py). Never touches the user's ~/.claude.
+        """
+        settings_dir = self._work_dir / ".claude"
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        local_settings = settings_dir / "settings.local.json"
+        data: dict = {"permissions": {"defaultMode": "default"}}
+        allowlist = model_registry.available_models("claude_code")
+        # circular import: cc_agent → agent → … → acp.client would cycle at module top
+        from kiro_claw.cc_agent import _atomic_settings_write
+
+        if allowlist:
+            data["availableModels"] = allowlist
+        else:
+            # Only reachable if model_registry.json is corrupt/missing (which the
+            # registry already warns about at import). Without the allowlist the
+            # adapter can collapse the [1m] id to 200k — surface it so it's
+            # diagnosable rather than silently degrading.
+            logger.warning(
+                "model registry availableModels empty (corrupt/missing registry?); "
+                "settings.local.json written without an allowlist — 1M window may not resolve",
+            )
+        # self._model is a resolved provider id (translated at the factory).
+        if self._model and self._model != DEFAULT_MODEL:
+            data["model"] = self._model
+        # Reuse the shared atomic writer (tmp+fsync+os.replace, random tmp name
+        # unlinked on error → no orphaned .tmp, no torn read). Force 0o600 so the
+        # file is created restrictive from the start.
+        _atomic_settings_write(local_settings, data, mode=0o600)
 
     async def _spawn(self) -> None:
         """Start the ACP backend subprocess (kiro-cli or claude-agent-acp) with stdio pipes."""
@@ -1041,24 +1097,11 @@ class AcpClient:
             # "bypassPermissions"; "default" preserves its canUseTool callback,
             # which forwards to the ACP host as session/request_permission.
             # KiroClaw still enforces deny-pattern hooks on top of this.
-            _settings_dir = self._work_dir / ".claude"
-            _settings_dir.mkdir(parents=True, exist_ok=True)
-            _local_settings = _settings_dir / "settings.local.json"
-            _local_settings.write_text(
-                json.dumps({
-                    "permissions": {
-                        "defaultMode": "default",
-                    }
-                }, indent=2),
-                encoding="utf-8",
-            )
-            _local_settings.chmod(0o600)
+            self._write_claude_local_settings()
 
             global _claude_acp_argv_cache  # noqa: PLW0603
             if _claude_acp_argv_cache is _UNRESOLVED:
-                _claude_acp_argv_cache = await asyncio.to_thread(
-                    _resolve_claude_acp_bin
-                )
+                _claude_acp_argv_cache = await asyncio.to_thread(_resolve_claude_acp_bin)
             claude_argv = _claude_acp_argv_cache
             if not isinstance(claude_argv, list) or not claude_argv:
                 raise AcpError(
@@ -1129,7 +1172,9 @@ class AcpClient:
         )
         self._pid = self._process.pid
         self._start_time = _get_start_time(self._pid)
-        _spawn_label = "claude-agent-acp" if self._is_claude else f"{KIRO_CLI_BIN} {KIRO_CLI_SUBCMD}"
+        _spawn_label = (
+            "claude-agent-acp" if self._is_claude else f"{KIRO_CLI_BIN} {KIRO_CLI_SUBCMD}"
+        )
         logger.info("Spawned %s (PID %d)", _spawn_label, self._pid)
         # Track root PID and do an early descendant scan.  kiro-cli forks
         # child processes quickly after launch.  Recording them here means
@@ -1371,11 +1416,7 @@ class AcpClient:
                         "mcpServers": _claude_acp_mcp_servers() if self._is_claude else [],
                     }
                     if self._is_claude:
-                        load_params["_meta"] = {
-                            "claudeCode": {
-                                "options": {}
-                            }
-                        }
+                        load_params["_meta"] = {"claudeCode": {"options": {}}}
                     else:
                         load_params["_meta"] = {"_kiro.dev/session_file": session_file}
                     load_id = await self._send_request(METHOD_SESSION_LOAD, load_params)
@@ -1402,11 +1443,7 @@ class AcpClient:
                 "mcpServers": _claude_acp_mcp_servers() if self._is_claude else [],
             }
             if self._is_claude:
-                new_params["_meta"] = {
-                    "claudeCode": {
-                        "options": {}
-                    }
-                }
+                new_params["_meta"] = {"claudeCode": {"options": {}}}
             session_id = await self._send_request(METHOD_SESSION_NEW, new_params)
             session_resp = await self._wait_for_response(session_id, timeout=_INIT_TIMEOUT)
             self._session_id = session_resp.get("sessionId")
@@ -1716,9 +1753,7 @@ class AcpClient:
                 logger.debug("ACP: dropping duplicate MCP OAuth request for %s", server_name)
                 return
             self._oauth_emitted_servers.add(server_name)
-            self._pending_oauth_requests.append(
-                {"serverName": server_name, "oauthUrl": oauth_url}
-            )
+            self._pending_oauth_requests.append({"serverName": server_name, "oauthUrl": oauth_url})
             logger.info("ACP: MCP OAuth request for %s", server_name)
 
         def _capture_config_update(msg: JsonRpcMessage) -> None:
@@ -1755,7 +1790,9 @@ class AcpClient:
                 if "mcp" in (read_msg.method or ""):
                     name = ""
                     if isinstance(read_msg.params, dict):
-                        name = read_msg.params.get("name") or read_msg.params.get("serverName") or ""
+                        name = (
+                            read_msg.params.get("name") or read_msg.params.get("serverName") or ""
+                        )
                     mcp_servers.append(name or read_msg.method)
             except AcpError:
                 break
@@ -1853,11 +1890,15 @@ class AcpClient:
                         raise AcpProcessDied(f"Process exited during prompt (exit code {rc})")
                     # Staleness check: if caller set _stale_eligible (text was
                     # streamed) and kiro-cli has gone silent, exit early.
-                    if self._stale_eligible and (time.monotonic() - last_data_ts) > _STALE_TURN_TIMEOUT:
+                    if (
+                        self._stale_eligible
+                        and (time.monotonic() - last_data_ts) > _STALE_TURN_TIMEOUT
+                    ):
                         logger.warning(
                             "Stale turn detected for req %d — no data for %.0fs after text was streamed. "
                             "Treating as complete.",
-                            req_id, time.monotonic() - last_data_ts,
+                            req_id,
+                            time.monotonic() - last_data_ts,
                         )
                         return
                     continue
@@ -2049,9 +2090,7 @@ class AcpClient:
                         # (_emit_tool_interrupted_sel logs + audits the cancellation.)
                         self._emit_tool_interrupted_sel("_dispatch_events")
                         got_complete = True
-                        for tr_event in await asyncio.to_thread(
-                            self._read_new_tool_results_sync
-                        ):
+                        for tr_event in await asyncio.to_thread(self._read_new_tool_results_sync):
                             yield tr_event
                         yield AcpEvent(kind=EVENT_COMPLETE)
                         return
@@ -2165,8 +2204,10 @@ class AcpClient:
             # but never sent `result`).  Yield a synthetic complete so callers
             # finalize normally instead of showing a timeout error.
             if self._stale_eligible:
-                logger.info("Synthesizing EVENT_COMPLETE after stale turn (chunks=%d)",
-                            self.last_prompt_stats.text_chunks)
+                logger.info(
+                    "Synthesizing EVENT_COMPLETE after stale turn (chunks=%d)",
+                    self.last_prompt_stats.text_chunks,
+                )
                 yield AcpEvent(kind=EVENT_COMPLETE, stop_reason=STOP_REASON_END_TURN)
                 return
             raise AcpTimeoutError()
@@ -2342,11 +2383,7 @@ class AcpClient:
         before the agent acknowledges the cancel. Callers that need to force
         a kill regardless of cancel state should skip this check.
         """
-        return (
-            not self._cancelled
-            and not self._turn_done.is_set()
-            and self._is_process_alive()
-        )
+        return not self._cancelled and not self._turn_done.is_set() and self._is_process_alive()
 
     # ── Private Helpers ──
 
@@ -2453,9 +2490,7 @@ class AcpClient:
         if msg.id is None:
             return
         logger.warning("ACP: rejecting unknown server request: method=%s id=%s", msg.method, msg.id)
-        await self._send_error(
-            msg.id, _JSONRPC_METHOD_NOT_FOUND, f"Method not found: {msg.method}"
-        )
+        await self._send_error(msg.id, _JSONRPC_METHOD_NOT_FOUND, f"Method not found: {msg.method}")
 
     def _extract_text_chunk(self, msg: JsonRpcMessage) -> tuple[str | None, bool]:
         """Extract text from an agent_message_chunk or agent_thought_chunk update.
@@ -2525,9 +2560,7 @@ class AcpClient:
                 metadata={"site": site, "reason": "tool_interrupted_marker"},
             )
         except Exception:
-            logger.warning(
-                "SEL audit failed for tool_interrupted at %s", site, exc_info=True
-            )
+            logger.warning("SEL audit failed for tool_interrupted at %s", site, exc_info=True)
 
     def _track_tool_call(self, msg: JsonRpcMessage) -> None:
         """Track tool calls in stats (used by send_message/send_message_stream)."""
@@ -2575,7 +2608,11 @@ class AcpClient:
                             found_diff = True
                         break
             # Fallback for strReplace when no diff content block was found
-            if not found_diff and isinstance(raw_input, dict) and raw_input.get("command") == "strReplace":
+            if (
+                not found_diff
+                and isinstance(raw_input, dict)
+                and raw_input.get("command") == "strReplace"
+            ):
                 old = raw_input.get("oldStr") or ""
                 new = raw_input.get("newStr") or ""
                 path = raw_input.get("path") or ""

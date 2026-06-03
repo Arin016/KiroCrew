@@ -1,4 +1,5 @@
 """Kiro usage handlers — local session analytics + kiro-cli billing."""
+
 from __future__ import annotations
 
 import asyncio
@@ -13,6 +14,7 @@ from typing import Any
 
 from aiohttp import web
 
+from kiro_claw import model_registry
 from kiro_claw.config.loader import KiroClawConfig
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.hooks import validate_file_path
@@ -71,9 +73,7 @@ def _shards_in_window(days: int) -> list[Path]:
     return paths
 
 
-def persist_token_record(
-    slot_key: str, model: str, event: object, provider: str = ""
-) -> None:
+def persist_token_record(slot_key: str, model: str, event: object, provider: str = "") -> None:
     """Append a token usage record to today's shard under
     ``~/.kiroclaw/usage/tokens/YYYY-MM-DD.jsonl``.
 
@@ -133,9 +133,7 @@ def _parse_token_history() -> dict[str, Any]:
     cache_key: tuple[tuple[str, float, int], ...] | None
     try:
         cache_key = tuple(
-            sorted(
-                (str(p), p.stat().st_mtime, p.stat().st_size) for p in shard_paths
-            )
+            sorted((str(p), p.stat().st_mtime, p.stat().st_size) for p in shard_paths)
         )
     except OSError:
         cache_key = None
@@ -203,16 +201,24 @@ def _parse_token_history() -> dict[str, Any]:
                     daily_cache_create[day] += cc
                     daily_cache_read[day] += cr
                     daily_cost[day] = daily_cost.get(day, 0.0) + cost
-                    # Per-model aggregation
-                    model = obj.get("model", "")
+                    provider = obj.get("provider", "")
+                    # Per-model aggregation. For claude_code records, canonicalize
+                    # the stored model string so pre/post-migration records (raw
+                    # provider id vs canonical key) aggregate into ONE bucket.
+                    # canonicalize_for_provider no-ops for other providers, so
+                    # opencode/kiro model namespaces are never rewritten.
+                    model = model_registry.canonicalize_for_provider(obj.get("model", ""), provider)
                     if model:
                         seen_models.add(model)
                         if day not in daily_models:
                             daily_models[day] = {}
                         if model not in daily_models[day]:
                             daily_models[day][model] = {
-                                "input": 0, "output": 0,
-                                "cache_create": 0, "cache_read": 0, "cost_usd": 0.0,
+                                "input": 0,
+                                "output": 0,
+                                "cache_create": 0,
+                                "cache_read": 0,
+                                "cost_usd": 0.0,
                             }
                         m = daily_models[day][model]
                         m["input"] += inp
@@ -221,15 +227,17 @@ def _parse_token_history() -> dict[str, Any]:
                         m["cache_read"] += cr
                         m["cost_usd"] += cost
                     # Per-provider aggregation
-                    provider = obj.get("provider", "")
                     if provider:
                         seen_providers.add(provider)
                         if day not in daily_providers:
                             daily_providers[day] = {}
                         if provider not in daily_providers[day]:
                             daily_providers[day][provider] = {
-                                "input": 0, "output": 0,
-                                "cache_create": 0, "cache_read": 0, "cost_usd": 0.0,
+                                "input": 0,
+                                "output": 0,
+                                "cache_create": 0,
+                                "cache_read": 0,
+                                "cost_usd": 0.0,
                             }
                         p = daily_providers[day][provider]
                         p["input"] += inp
@@ -246,8 +254,13 @@ def _parse_token_history() -> dict[str, Any]:
                         pm_prov = pm_day.setdefault(provider, {})
                         pm_bucket = pm_prov.setdefault(
                             model,
-                            {"input": 0, "output": 0,
-                             "cache_create": 0, "cache_read": 0, "cost_usd": 0.0},
+                            {
+                                "input": 0,
+                                "output": 0,
+                                "cache_create": 0,
+                                "cache_read": 0,
+                                "cost_usd": 0.0,
+                            },
                         )
                         pm_bucket["input"] += inp
                         pm_bucket["output"] += out
@@ -306,9 +319,7 @@ def _parse_token_history() -> dict[str, Any]:
         "daily_history": daily_history,
         "providers": sorted(seen_providers),
         "models": sorted(seen_models),
-        "provider_models": {
-            p: sorted(ms) for p, ms in sorted(seen_provider_models.items())
-        },
+        "provider_models": {p: sorted(ms) for p, ms in sorted(seen_provider_models.items())},
     }
     if cache_key is not None:
         _TOKEN_CACHE = result
@@ -371,11 +382,7 @@ def _parse_sessions() -> dict:
                             ts_str = obj["timestamp"]
                             if ts_str.endswith("Z"):
                                 ts_str = ts_str[:-1] + "+00:00"
-                            day = (
-                                datetime.fromisoformat(ts_str)
-                                .astimezone()
-                                .strftime("%Y-%m-%d")
-                            )
+                            day = datetime.fromisoformat(ts_str).astimezone().strftime("%Y-%m-%d")
                         except (ValueError, TypeError, AttributeError):
                             pass
                     kind = obj.get("kind", "")
@@ -400,17 +407,17 @@ def _parse_sessions() -> dict:
     all_days = sorted(set(daily.keys()))
     history = []
     for d in all_days:
-        history.append({
-            "date": d,
-            "sessions": daily[d],
-            "messages": daily_msgs[d],
-            "tool_calls": daily_tools[d],
-        })
+        history.append(
+            {
+                "date": d,
+                "sessions": daily[d],
+                "messages": daily_msgs[d],
+                "tool_calls": daily_tools[d],
+            }
+        )
 
     # Compute period summaries
-    week_start = (
-        now_dt - timedelta(days=now_dt.weekday())
-    ).strftime("%Y-%m-%d")
+    week_start = (now_dt - timedelta(days=now_dt.weekday())).strftime("%Y-%m-%d")
     month_start = now_dt.strftime("%Y-%m-01")
 
     today = [h for h in history if h["date"] == today_str]
@@ -438,12 +445,8 @@ def _parse_sessions() -> dict:
             "messages": sum(h["messages"] for h in month),
             "tool_calls": sum(h["tool_calls"] for h in month),
         },
-        "avg_msgs_per_session": round(
-            total_msgs / max(total_sessions, 1), 1
-        ),
-        "avg_tools_per_session": round(
-            total_tools / max(total_sessions, 1), 1
-        ),
+        "avg_msgs_per_session": round(total_msgs / max(total_sessions, 1), 1),
+        "avg_tools_per_session": round(total_tools / max(total_sessions, 1), 1),
     }
 
 
@@ -451,6 +454,7 @@ def get_usage_cache() -> dict:
     """Public accessor for billing usage cache from sessions handler."""
     try:
         from kiro_claw.dashboard.handlers.sessions import _usage_cache
+
         return dict(_usage_cache) if _usage_cache else {}
     except (ImportError, TypeError):
         logger.debug("Failed to read billing cache", exc_info=True)
@@ -553,14 +557,18 @@ async def api_usage(request: web.Request) -> web.Response:
 
     response = {
         "username": getpass.getuser(),
-        "sessions": sessions if isinstance(sessions, dict) and "error" not in sessions else {
-            "total_sessions": stats.get("sessions_created", 0),
-            "today": {"sessions": 0, "messages": 0, "tool_calls": 0},
-            "this_week": {"sessions": 0, "messages": 0, "tool_calls": 0},
-            "this_month": {"sessions": 0, "messages": 0, "tool_calls": 0},
-            "avg_msgs_per_session": 0,
-            "daily_history": [],
-        },
+        "sessions": (
+            sessions
+            if isinstance(sessions, dict) and "error" not in sessions
+            else {
+                "total_sessions": stats.get("sessions_created", 0),
+                "today": {"sessions": 0, "messages": 0, "tool_calls": 0},
+                "this_week": {"sessions": 0, "messages": 0, "tool_calls": 0},
+                "this_month": {"sessions": 0, "messages": 0, "tool_calls": 0},
+                "avg_msgs_per_session": 0,
+                "daily_history": [],
+            }
+        ),
         "tokens": {
             "total_input": input_tokens,
             "total_output": output_tokens,

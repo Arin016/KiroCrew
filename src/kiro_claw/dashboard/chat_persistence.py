@@ -8,6 +8,7 @@ import re
 import time
 import uuid
 
+from kiro_claw import model_registry
 from kiro_claw.agent import KIRO_AGENTS_DIR
 from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import KiroClawConfig
@@ -118,7 +119,9 @@ def update_reasoning_effort_values(acp_levels: list[str]) -> None:
     live provider is available.
     """
     global _reasoning_effort_values, _reasoning_effort_ordered
-    safe_levels = [level for level in acp_levels if isinstance(level, str) and _SAFE_EFFORT_RE.match(level)]
+    safe_levels = [
+        level for level in acp_levels if isinstance(level, str) and _SAFE_EFFORT_RE.match(level)
+    ]
     level_set = set(safe_levels)
     # Union-only: never drop a previously-valid level (BSC1 persistence safety).
     merged = _reasoning_effort_values | set(_REASONING_EFFORT_FALLBACK) | level_set | {""}
@@ -156,8 +159,12 @@ def _attach_variants(slot: _ChatSlot, m: dict) -> None:
     """Copy variant history from a persisted message onto the slot's last message, with redaction."""
     if m.get("variants"):
         slot.messages[-1]["variants"] = [  # type: ignore[assignment]
-            {**v, "content": redact_credentials(redact_exfiltration_urls(v.get("content", ""))[0])[0]}
-            for v in m["variants"] if isinstance(v, dict)
+            {
+                **v,
+                "content": redact_credentials(redact_exfiltration_urls(v.get("content", ""))[0])[0],
+            }
+            for v in m["variants"]
+            if isinstance(v, dict)
         ]
         slot.messages[-1]["variant_idx"] = m.get("variant_idx", 0)
 
@@ -229,7 +236,14 @@ def _rehydrate_slot_from_history(state: DashboardState, slot_name: str) -> _Chat
     if meta.get("agent"):
         slot.agent = meta["agent"]
     if meta.get("model"):
-        slot.model = _normalize_model(meta["model"])
+        # _normalize_model handles deprecation renames. For claude_code sessions,
+        # also map a pre-migration raw provider id back to the canonical key so it
+        # matches the canonical-keyed dropdown (no-op for other providers). Reuse
+        # the already-loaded _restore_cfg provider — no second config load.
+        _prov = _restore_cfg.agent.provider if _restore_cfg else ""
+        slot.model = model_registry.canonicalize_for_provider(
+            _normalize_model(meta["model"]), _prov
+        )
     elif slot.agent:
         try:
             mc = _restore_cfg.agents.get(slot.agent) if _restore_cfg else None
@@ -270,7 +284,15 @@ def _rehydrate_slot_from_history(state: DashboardState, slot_name: str) -> _Chat
         if role != "user":
             content, _ = redact_exfiltration_urls(content)
             content, _ = redact_credentials(content)
-        slot.append(role, content, cls, ts=m.get("ts", ""), meta=_redact_meta_for_role(role, m["meta"]) if isinstance(m.get("meta"), dict) else None)
+        slot.append(
+            role,
+            content,
+            cls,
+            ts=m.get("ts", ""),
+            meta=(
+                _redact_meta_for_role(role, m["meta"]) if isinstance(m.get("meta"), dict) else None
+            ),
+        )
         _attach_variants(slot, m)
     slot.drain()
     slot._resumed_count = len(slot.messages)
@@ -279,7 +301,9 @@ def _rehydrate_slot_from_history(state: DashboardState, slot_name: str) -> _Chat
     return slot
 
 
-def restore_recent_sessions(state: DashboardState, window_minutes: int = 30, *, folders_only: bool = False) -> int:
+def restore_recent_sessions(
+    state: DashboardState, window_minutes: int = 30, *, folders_only: bool = False
+) -> int:
     """Restore sessions as chat slots."""
     if not state.conversation_log:
         return 0
@@ -338,7 +362,13 @@ def restore_recent_sessions(state: DashboardState, window_minutes: int = 30, *, 
         if meta.get("agent"):
             slot.agent = meta["agent"]
         if meta.get("model"):
-            slot.model = _normalize_model(meta["model"])
+            # Canonicalize a pre-migration claude_code provider id to the
+            # canonical dropdown key (no-op for other providers); reuse the
+            # already-loaded _restore_cfg provider.
+            _prov = _restore_cfg.agent.provider if _restore_cfg else ""
+            slot.model = model_registry.canonicalize_for_provider(
+                _normalize_model(meta["model"]), _prov
+            )
         elif slot.agent:
             try:
                 mc = _restore_cfg.agents.get(slot.agent) if _restore_cfg else None
@@ -389,7 +419,17 @@ def restore_recent_sessions(state: DashboardState, window_minutes: int = 30, *, 
             if role != "user":
                 content, _ = redact_exfiltration_urls(content)
                 content, _ = redact_credentials(content)
-            slot.append(role, content, cls, ts=m.get("ts", ""), meta=_redact_meta_for_role(role, m["meta"]) if isinstance(m.get("meta"), dict) else None)
+            slot.append(
+                role,
+                content,
+                cls,
+                ts=m.get("ts", ""),
+                meta=(
+                    _redact_meta_for_role(role, m["meta"])
+                    if isinstance(m.get("meta"), dict)
+                    else None
+                ),
+            )
             _attach_variants(slot, m)
         slot.drain()
         slot._resumed_count = len(slot.messages)

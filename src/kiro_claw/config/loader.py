@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from kiro_claw import __version__
+from kiro_claw import __version__, model_registry
 from kiro_claw.acp.types import ACP_BACKEND_CLAUDE
 from kiro_claw.effort import is_valid_effort, model_supports_effort
 
@@ -329,11 +329,12 @@ class AgentConfig:
     )
     # Claude Code specific (only used when provider="claude_code")
     cc_model: str = field(
-        default="global.anthropic.claude-opus-4-8[1m]",
+        default="opus-4.8-1m",
         metadata=_meta(
             "CC Model",
-            "Claude Code model. Default 'global.anthropic.claude-opus-4-8[1m]' "
-            "(Opus 4.8, 1M context window). Aliases: opus, sonnet, haiku, auto (empty).",
+            "Claude Code model — a canonical registry key (default 'opus-4.8-1m', "
+            "Opus 4.8 with the 1M context window). Translated to a provider id at "
+            "the config.loader factory. Aliases: opus, sonnet, auto (empty).",
         ),
     )
     cc_connection_mode: str = field(
@@ -1171,7 +1172,10 @@ class ChannelConfig:
     )
     thread_follow: bool = field(
         default=True,
-        metadata=_meta("Thread Follow", "Respond to all messages in threads where bot was previously @mentioned."),
+        metadata=_meta(
+            "Thread Follow",
+            "Respond to all messages in threads where bot was previously @mentioned.",
+        ),
     )
 
     @classmethod
@@ -1823,7 +1827,7 @@ class KiroClawConfig:
                 soft_stop_budget_secs=max(
                     0.5, min(60.0, float(agent_data.get("soft_stop_budget_secs", 10.0)))
                 ),
-                cc_model=agent_data.get("cc_model", "global.anthropic.claude-opus-4-8[1m]"),
+                cc_model=agent_data.get("cc_model", "opus-4.8-1m"),
                 cc_connection_mode=agent_data.get("cc_connection_mode", "per_session"),
                 cc_max_turns=int(agent_data.get("cc_max_turns", 0)),
                 cc_max_budget_usd=float(agent_data.get("cc_max_budget_usd", 0.0)),
@@ -1843,7 +1847,9 @@ class KiroClawConfig:
             cron_history=CronHistoryConfig(
                 cron_summary_cap=int(cron_history_data.get("cron_summary_cap", 200)),
                 cron_trace_cap_kb=int(cron_history_data.get("cron_trace_cap_kb", 50)),
-                cron_max_records_per_job=int(cron_history_data.get("cron_max_records_per_job", 100)),
+                cron_max_records_per_job=int(
+                    cron_history_data.get("cron_max_records_per_job", 100)
+                ),
                 cron_max_index_records=int(cron_history_data.get("cron_max_index_records", 2000)),
             ),
             memory=MemoryConfig(
@@ -2161,23 +2167,21 @@ class KiroClawConfig:
         resolved here and threaded into the provider.
 
         Prefers an explicit ``cc_model`` field, falling back to the agent's
-        ``model``. Both are translated through ``_CC_MODEL_ALIASES`` because a
-        kiro dotted id (e.g. ``claude-opus-4.6`` / ``claude-sonnet-4.6``) is NOT
-        a valid claude-agent-acp / Bedrock model: sent verbatim to
-        ``session/set_config_option("model", …)`` the backend rejects the whole
-        session with ``-32603 Invalid value for config option model`` (e.g. the
-        AIM-managed ``kiroclaw-lite`` agent ships only ``model:
-        claude-opus-4.6``). The map collapses such ids to a CC-valid alias
-        (``opus`` / ``sonnet``); ids already CC-valid (full ``global.anthropic.…``
-        profiles or bare aliases) are not keys and pass through unchanged.
-        Returns ``""`` when no per-agent model is found so the caller can fall
-        back to the global ``cc_model``.
+        ``model``. Returns the RAW stored value (a canonical registry key, a kiro
+        dotted id like ``claude-opus-4.6``, or an already-resolved provider id);
+        the ``_claude_code`` factory translates it to a provider id exactly once
+        via ``model_registry.to_provider_id`` (the translation boundary). This is
+        necessary because a kiro dotted id is NOT a valid claude-agent-acp /
+        Bedrock model — sent verbatim to ``set_config_option("model", …)`` the
+        backend rejects the session with ``-32603`` — and the registry's alias
+        map resolves it (e.g. the AIM-managed ``kiroclaw-lite`` agent's
+        ``claude-sonnet-4.6`` → the Sonnet provider id). Returns ``""`` when no
+        per-agent model is found so the caller can fall back to global ``cc_model``.
         """
         try:
             from kiro_claw.agent import (
                 KIRO_AGENTS_DIR,  # circular import: agent imports config.loader
             )
-            from kiro_claw.providers.claude_code import _CC_MODEL_ALIASES
         except Exception:
             return ""
         for af in KIRO_AGENTS_DIR.glob("*.json"):
@@ -2186,8 +2190,9 @@ class KiroClawConfig:
             except (ValueError, OSError):
                 continue
             if ad.get("name") == agent or af.stem == agent:
-                raw = ad.get("cc_model") or ad.get("model") or ""
-                return _CC_MODEL_ALIASES.get(raw, raw)
+                # Return the raw stored value (canonical key or provider id);
+                # the factory's to_provider_id translates it at the boundary.
+                return ad.get("cc_model") or ad.get("model") or ""
         return ""
 
     def load_credentials(self) -> dict[str, str]:
@@ -2247,19 +2252,17 @@ class KiroClawConfig:
             return _bedrock
 
         if self.agent.provider == "claude_code":
+            # An empty/unset cc_model must NOT be passed through as "" — the
+            # claude-agent-acp adapter then falls back to its own models[0],
+            # which on current builds is an OLD Opus (4.1). Resolve to the
+            # KiroClaw default (canonical key) so an unconfigured user still gets
+            # the intended flagship model; it is translated to a provider id at
+            # the boundary below.
             from kiro_claw.providers.acp import (
                 AcpProvider,  # circular: acp -> client -> session -> config.loader
             )
 
-            # An empty/unset cc_model must NOT be passed through as "" — the
-            # claude-agent-acp adapter then falls back to its own models[0],
-            # which on current builds is an OLD Opus (4.1). Resolve to the
-            # KiroClaw default (Opus 4.8 1M) so an unconfigured user still gets
-            # the intended flagship model.
-            # circular import: claude_code -> acp.client -> session -> config.loader
-            from kiro_claw.providers.claude_code import _CC_DEFAULT_MODEL
-
-            cc_model = self.agent.cc_model or _CC_DEFAULT_MODEL
+            cc_model = self.agent.cc_model or model_registry.default("claude_code")
             sandbox = self.agent.sandbox
 
             def _claude_code(
@@ -2314,10 +2317,18 @@ class KiroClawConfig:
                     _cc_m = self._resolve_agent_cc_model(agent) or cc_model or ""
                 else:
                     _cc_m = cc_model or ""
+                # Translation boundary: cc_model / overrides may be a canonical
+                # registry key (e.g. "opus-4.8-1m") OR an already-resolved
+                # provider id. Translate to a provider id exactly here; every
+                # consumer below (AcpProvider, settings.local.json) uses ids.
+                _cc_m = model_registry.to_provider_id(_cc_m, "claude_code") if _cc_m else ""
                 _eff_per_model: dict[str, str] = {}
-                if _cc_m and reasoning_effort_override \
-                        and is_valid_effort(reasoning_effort_override) \
-                        and model_supports_effort(_cc_m):
+                if (
+                    _cc_m
+                    and reasoning_effort_override
+                    and is_valid_effort(reasoning_effort_override)
+                    and model_supports_effort(_cc_m)
+                ):
                     _eff_per_model[_cc_m] = reasoning_effort_override
                 # Seed the isolated config dir before spawn so the subprocess
                 # reads creds/models/deny at startup (before Bedrock cred
@@ -2329,9 +2340,7 @@ class KiroClawConfig:
                 if _cc_agent.cc_isolation_enabled():
                     _seed_root = cc_env.get("CLAUDE_CONFIG_DIR")
                     try:
-                        _cc_agent.seed_isolated_cc_config(
-                            Path(_seed_root) if _seed_root else None
-                        )
+                        _cc_agent.seed_isolated_cc_config(Path(_seed_root) if _seed_root else None)
                     except Exception:
                         logger.warning("CC isolation seed failed; continuing", exc_info=True)
                 return AcpProvider(
@@ -2384,9 +2393,12 @@ class KiroClawConfig:
             # pick up effort already recovered from a pre-existing overlay,
             # never the freshly-set slot value. Mirrors the _claude_code path.
             _eff_per_model: dict[str, str] = {}
-            if m and reasoning_effort_override \
-                    and is_valid_effort(reasoning_effort_override) \
-                    and model_supports_effort(m):
+            if (
+                m
+                and reasoning_effort_override
+                and is_valid_effort(reasoning_effort_override)
+                and model_supports_effort(m)
+            ):
                 _eff_per_model[m] = reasoning_effort_override
             return AcpProvider(
                 work_dir=wdir,

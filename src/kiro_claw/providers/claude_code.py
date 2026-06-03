@@ -36,6 +36,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from kiro_claw import model_registry
 from kiro_claw.acp.client import (
     _get_child_pids,
     _get_start_time,
@@ -91,74 +92,19 @@ _CC_MODEL_ALIASES: dict[str, str] = {
     "auto": "",
 }
 
-_CC_VALID_MODELS = [
-    {"model_name": "opus", "display_name": "Claude Opus (default)", "description": "Most capable, 1M context, maximum thinking"},
-    {"model_name": "sonnet", "display_name": "Claude Sonnet", "description": "Balanced speed and quality"},
-    {"model_name": "haiku", "display_name": "Claude Haiku", "description": "Fastest, most efficient"},
-    {"model_name": "auto", "display_name": "Auto", "description": "Let Claude Code pick the model"},
-]
-
-# Opus 4.8 is enabled on Bedrock and is KiroClaw's default cc_model, but
-# claude-agent-acp does not yet advertise it in its session model list — so the
-# dashboard injects it explicitly. These are the exact IDs the picker accepts
-# (``/model global.anthropic.claude-opus-4-8[1m]``). Remove once the adapter
-# lists 4.8 natively.
-_CC_OPUS_48_MODELS = [
-    {
-        "model_name": "global.anthropic.claude-opus-4-8[1m]",
-        "display_name": "Opus 4.8 (1M context)",
-        "description": "Most capable, 1M context window",
-    },
-    {
-        "model_name": "global.anthropic.claude-opus-4-8",
-        "display_name": "Opus 4.8 (200K context)",
-        "description": "Most capable, 200K context window",
-    },
-]
-
 # KiroClaw's resolved default CC model. The adapter, given an empty/unset
 # model, falls back to its own ``models[0]`` — which on current claude-agent
 # builds is an OLD Opus (4.1). So an empty ``cc_model`` must resolve to this
 # explicit ID rather than being passed through as "" (see config.loader
-# _claude_code factory and dashboard resolveModel).
-_CC_DEFAULT_MODEL = "global.anthropic.claude-opus-4-8[1m]"
-
-# KiroClaw-curated CC model list, shown FIRST in the dashboard dropdown ahead of
-# whatever the adapter advertises (its set can be stale — e.g. listing Opus 4.1
-# / Sonnet 4.5 on older claude-agent builds). Adapter-advertised models not
-# covered here are appended after, de-duped, so nothing is hidden. Keep this
-# current as new Bedrock models land.
+# _claude_code factory and dashboard resolveModel). Sourced from the canonical
+# model registry (single source of truth) so it never drifts.
 #
-# Ordered most-capable first, mirroring the set the `claude` CLI actually
-# offers (Opus 4.8 1M, Opus 4.7 1M, Opus 4.6, Sonnet 4.6 1M).
-#
-# Model IDs MUST be full Bedrock inference-profile ids (``global.anthropic.…``),
-# NOT bare versioned strings like ``claude-opus-4-7``. The bare form is NOT a
-# valid Bedrock identifier: when it lands in settings.json ``availableModels``
-# the adapter resolves it to itself and passes it straight to Bedrock, which
-# rejects it with "400 The provided model identifier is invalid". (It only
-# appeared to work before this list existed, because the older
-# ``["opus","sonnet"]`` allowlist fuzzy-collapsed it to the valid ``opus``
-# alias.) The ``[1m]`` suffix unlocks the 1M context window where the model
-# supports it (Opus 4.7/4.8, Sonnet 4.6) — verified live against Bedrock.
-#
-# Opus 4.6 is intentionally omitted: neither ``global.anthropic.claude-opus-4-6``
-# nor its ``[1m]`` form resolves on the shared Bedrock role (400 invalid / no
-# modelUsage). The ``opus`` alias already resolves to the current flagship Opus
-# at 1M, so a dedicated 4.6 row would only add a broken entry.
-_CC_CURATED_MODELS = [
-    *_CC_OPUS_48_MODELS,
-    {
-        "model_name": "global.anthropic.claude-opus-4-7[1m]",
-        "display_name": "Opus 4.7 (1M context)",
-        "description": "Most capable for complex work, 1M context",
-    },
-    {
-        "model_name": "global.anthropic.claude-sonnet-4-6[1m]",
-        "display_name": "Sonnet 4.6 (1M context)",
-        "description": "Best for everyday tasks, 1M context",
-    },
-]
+# NOTE: the dropdown model lists (formerly _CC_VALID_MODELS / _CC_OPUS_48_MODELS
+# / _CC_CURATED_MODELS) now live in model_registry.json, surfaced via
+# model_registry.display_list — see dashboard/handlers/agents._cc_models.
+_CC_DEFAULT_MODEL = model_registry.to_provider_id(
+    model_registry.default("claude_code"), "claude_code"
+)
 
 
 class ClaudeCodeProviderError(Exception):
@@ -201,7 +147,9 @@ class ClaudeCodeProvider(LLMProvider):
         self._work_dir = Path(work_dir) if work_dir else Path.cwd()
         self._model = model
         self._agent = agent
-        self._connection_mode = connection_mode if connection_mode in ("per_session", "ephemeral") else "per_session"
+        self._connection_mode = (
+            connection_mode if connection_mode in ("per_session", "ephemeral") else "per_session"
+        )
         self._permission_mode = permission_mode
         self._max_turns = max_turns
         self._max_budget_usd = max_budget_usd
@@ -226,7 +174,9 @@ class ClaudeCodeProvider(LLMProvider):
             # widened by ACP-reported levels, so it is always a superset of the
             # static vocabulary — no separate hardcoded allowlist needed.
             if _effort not in get_reasoning_effort_values():
-                logger.warning("Rejecting invalid reasoning_effort %r at subprocess boundary", _effort)
+                logger.warning(
+                    "Rejecting invalid reasoning_effort %r at subprocess boundary", _effort
+                )
                 _effort = ""
         self._reasoning_effort = _effort
 
@@ -455,7 +405,9 @@ class ClaudeCodeProvider(LLMProvider):
                 if self._child_pids and new_count:
                     logger.debug(
                         "CC child tracking: %d total (%d new) descendants of PID %d",
-                        len(self._child_pids), new_count, self._proc.pid,
+                        len(self._child_pids),
+                        new_count,
+                        self._proc.pid,
                     )
             except Exception:
                 logger.debug("CC child discovery failed", exc_info=True)
@@ -533,8 +485,8 @@ class ClaudeCodeProvider(LLMProvider):
         # Kill escaped children (builder-mcp, otelcol-contrib) that survived
         # killpg because they set their own PGID.
         # Fresh scan + merge with stored snapshot (same as Kiro/ACP).
-        if hasattr(self, '_child_pids'):
-            if hasattr(self, '_proc_pid'):
+        if hasattr(self, "_child_pids"):
+            if hasattr(self, "_proc_pid"):
                 fresh = _get_child_pids(self._proc_pid)
                 for p in fresh:
                     if p not in self._child_pids:
@@ -545,7 +497,7 @@ class ClaudeCodeProvider(LLMProvider):
                 self._child_pids = {}
 
         # Untrack session PID
-        if hasattr(self, '_proc_pid'):
+        if hasattr(self, "_proc_pid"):
             _untrack_session_pid(self._proc_pid)
 
         if self._sandbox_cleanup:
@@ -589,7 +541,9 @@ class ClaudeCodeProvider(LLMProvider):
                 await self._reconnect()
                 logger.info("Eager reconnect succeeded (session=%s)", self._session_id)
             except Exception:
-                logger.warning("Eager reconnect failed (session=%s)", self._session_id, exc_info=True)
+                logger.warning(
+                    "Eager reconnect failed (session=%s)", self._session_id, exc_info=True
+                )
 
     async def _stream_persistent(self, message: str) -> AsyncIterator[LLMEvent]:
         """Send message to long-lived process and yield response events."""
@@ -952,13 +906,21 @@ class ClaudeCodeProvider(LLMProvider):
                     if raw:
                         cleaned, _ = redact_exfiltration_urls(raw)
                         cleaned, _ = redact_credentials(cleaned)
-                        return LLMEvent(kind=EVENT_TEXT_CHUNK, text=cleaned, context_usage_pct=self._last_context_pct)
+                        return LLMEvent(
+                            kind=EVENT_TEXT_CHUNK,
+                            text=cleaned,
+                            context_usage_pct=self._last_context_pct,
+                        )
                 elif delta_type == "thinking_delta":
                     raw = delta.get("thinking", "")
                     if raw:
                         cleaned, _ = redact_exfiltration_urls(raw)
                         cleaned, _ = redact_credentials(cleaned)
-                        return LLMEvent(kind=EVENT_THINKING_CHUNK, text=cleaned, context_usage_pct=self._last_context_pct)
+                        return LLMEvent(
+                            kind=EVENT_THINKING_CHUNK,
+                            text=cleaned,
+                            context_usage_pct=self._last_context_pct,
+                        )
             return None
 
         if event_type == "assistant":
@@ -990,9 +952,7 @@ class ClaudeCodeProvider(LLMProvider):
             cache_read = usage.get("cache_read_input_tokens", 0) or 0
             total_ctx = input_tokens + cache_creation + cache_read
             if total_ctx > 0 and self._context_window_tokens > 0:
-                self._last_context_pct = min(
-                    (total_ctx / self._context_window_tokens) * 100, 99.0
-                )
+                self._last_context_pct = min((total_ctx / self._context_window_tokens) * 100, 99.0)
 
         events: list[LLMEvent] = []
         for block in content_blocks:
@@ -1003,14 +963,26 @@ class ClaudeCodeProvider(LLMProvider):
                     if raw:
                         cleaned, _ = redact_exfiltration_urls(raw)
                         cleaned, _ = redact_credentials(cleaned)
-                        events.append(LLMEvent(kind=EVENT_THINKING_CHUNK, text=cleaned, context_usage_pct=self._last_context_pct))
+                        events.append(
+                            LLMEvent(
+                                kind=EVENT_THINKING_CHUNK,
+                                text=cleaned,
+                                context_usage_pct=self._last_context_pct,
+                            )
+                        )
             elif block_type == "text":
                 if not skip_text:
                     raw = block.get("text", "")
                     if raw:
                         cleaned, _ = redact_exfiltration_urls(raw)
                         cleaned, _ = redact_credentials(cleaned)
-                        events.append(LLMEvent(kind=EVENT_TEXT_CHUNK, text=cleaned, context_usage_pct=self._last_context_pct))
+                        events.append(
+                            LLMEvent(
+                                kind=EVENT_TEXT_CHUNK,
+                                text=cleaned,
+                                context_usage_pct=self._last_context_pct,
+                            )
+                        )
             elif block_type == "tool_use":
                 tid = block.get("id", "")
                 name = block.get("name", "")
@@ -1027,13 +999,15 @@ class ClaudeCodeProvider(LLMProvider):
                     outcome=f"auto_approved:{self._permission_mode}",
                     request_id=tid,
                 )
-                events.append(LLMEvent(
-                    kind=EVENT_TOOL_CALL,
-                    tool_call_id=tid,
-                    title=name,
-                    tool_kind=name,
-                    tool_input=cleaned_input,
-                ))
+                events.append(
+                    LLMEvent(
+                        kind=EVENT_TOOL_CALL,
+                        tool_call_id=tid,
+                        title=name,
+                        tool_kind=name,
+                        tool_input=cleaned_input,
+                    )
+                )
             elif block_type == "tool_result":
                 tid = block.get("tool_use_id", "")
                 output = block.get("content", "")
@@ -1041,7 +1015,9 @@ class ClaudeCodeProvider(LLMProvider):
                     output = json.dumps(output)
                 cleaned, _ = redact_exfiltration_urls(output)
                 cleaned, _ = redact_credentials(cleaned)
-                events.append(LLMEvent(kind=EVENT_TOOL_RESULT, tool_call_id=tid, tool_output=cleaned))
+                events.append(
+                    LLMEvent(kind=EVENT_TOOL_RESULT, tool_call_id=tid, tool_output=cleaned)
+                )
 
         return events
 
@@ -1085,7 +1061,9 @@ class ClaudeCodeProvider(LLMProvider):
             duration_ms=duration_ms,
         )
 
-    async def _read_events_from_proc(self, proc: asyncio.subprocess.Process) -> AsyncIterator[LLMEvent]:
+    async def _read_events_from_proc(
+        self, proc: asyncio.subprocess.Process
+    ) -> AsyncIterator[LLMEvent]:
         """Parse NDJSON from a short-lived process stdout (ephemeral mode)."""
         assert proc.stdout is not None
         _streamed_partial = False
@@ -1176,8 +1154,7 @@ class ClaudeCodeProvider(LLMProvider):
             all_paths = img_paths + file_paths
             message += (
                 "\n\n[SYSTEM: The user attached files. "
-                "Use the Read tool to view them: "
-                + ", ".join(all_paths) + "]"
+                "Use the Read tool to view them: " + ", ".join(all_paths) + "]"
             )
         return message
 
@@ -1202,7 +1179,9 @@ class ClaudeCodeProvider(LLMProvider):
         if model in _CONTEXT_WINDOWS:
             return _CONTEXT_WINDOWS[model]
         model_lower = model.lower()
-        for key, tokens in sorted(_CONTEXT_WINDOWS.items(), key=lambda kv: len(kv[0]), reverse=True):
+        for key, tokens in sorted(
+            _CONTEXT_WINDOWS.items(), key=lambda kv: len(kv[0]), reverse=True
+        ):
             if model_lower in key.lower() or key.lower() in model_lower:
                 return tokens
         return _DEFAULT_CONTEXT_WINDOW

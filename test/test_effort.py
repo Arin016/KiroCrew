@@ -54,10 +54,33 @@ class TestModelSupportsEffort:
 
     @pytest.mark.parametrize(
         "model",
-        [None, "", "auto", "claude-haiku-4.5", "amazon.nova-pro-v1:0", "deepseek-3.2"],
+        [None, "", "auto", "amazon.nova-pro-v1:0", "deepseek-3.2"],
     )
     def test_unsupported(self, model: str | None):
         assert not model_supports_effort(model)
+
+    def test_raw_haiku_id_never_supports_effort_even_with_registry_fold(self):
+        # The registry has no Haiku Bedrock profile, so claude-haiku-4.5 (a kiro
+        # id) is registered as a claude_code ALIAS of Sonnet 4.6 1M (the cheapest
+        # VALID Bedrock fold — passing it through verbatim would crash a CC
+        # session with -32603). But "Haiku never supports effort" is a HARD rule
+        # that must win over the registry: model_supports_effort is provider-
+        # agnostic, and a kiro/acp Haiku agent reaches it with the RAW
+        # "claude-haiku-4.5" spelling (the kiro path does NOT translate). So the
+        # raw id must report False, NOT inherit Sonnet's supports_effort flag.
+        from kiro_claw import model_registry as mr
+
+        # The fold itself is unchanged — claude_code translation -> Sonnet id.
+        assert mr.to_provider_id("claude-haiku-4.5", "claude_code") == (
+            "global.anthropic.claude-sonnet-4-6[1m]"
+        )
+        # The raw kiro Haiku id is correctly effort-INCAPABLE (haiku guard wins).
+        assert model_supports_effort("claude-haiku-4.5") is False
+        # On the claude_code path the value reaching here is the FOLDED Sonnet
+        # provider id (translated at the factory boundary), which IS capable.
+        assert model_supports_effort("global.anthropic.claude-sonnet-4-6[1m]") is True
+        # A model the registry does NOT list still uses the substring heuristic.
+        assert model_supports_effort("some-haiku-thing") is False
 
 
 class TestResolveEffortForModel:
@@ -73,9 +96,7 @@ class TestResolveEffortForModel:
 
     def test_falls_back_to_defaults(self):
         assert (
-            resolve_effort_for_model(
-                "claude-opus-4.7", defaults={"claude-opus-4.7": "high"}
-            )
+            resolve_effort_for_model("claude-opus-4.7", defaults={"claude-opus-4.7": "high"})
             == "high"
         )
 
@@ -83,14 +104,15 @@ class TestResolveEffortForModel:
         # Frontend setVariable only stores strings, so defaults may arrive
         # JSON-encoded.
         assert (
-            resolve_effort_for_model(
-                "claude-opus-4.7", defaults='{"claude-opus-4.7": "xhigh"}'
-            )
+            resolve_effort_for_model("claude-opus-4.7", defaults='{"claude-opus-4.7": "xhigh"}')
             == "xhigh"
         )
 
     def test_none_when_model_incapable(self):
-        assert resolve_effort_for_model("claude-haiku-4.5", slot_overrides={"claude-haiku-4.5": "max"}) is None
+        # 'auto' is genuinely effort-incapable (registry maps it to ""). (Haiku
+        # folds to Sonnet and IS effort-capable — see
+        # TestModelSupportsEffort.test_haiku_4_5_folds_to_sonnet_and_supports_effort.)
+        assert resolve_effort_for_model("auto", slot_overrides={"auto": "max"}) is None
 
     def test_none_when_no_level(self):
         assert resolve_effort_for_model("claude-opus-4.7") is None
@@ -113,8 +135,14 @@ class TestCliOverlay:
         settings_dir = tmp_path / ".kiro" / "settings"
         settings_dir.mkdir(parents=True)
         (settings_dir / "cli.json").write_text(
-            json.dumps({"chat.enableNotifications": True,
-                        "chat.modelDefaults": {"claude-opus-4.6": {"output_config": {"effort": "high"}}}})
+            json.dumps(
+                {
+                    "chat.enableNotifications": True,
+                    "chat.modelDefaults": {
+                        "claude-opus-4.6": {"output_config": {"effort": "high"}}
+                    },
+                }
+            )
         )
         _write_cli_overlay(tmp_path, "claude-opus-4.7", "max")
         data = json.loads((settings_dir / "cli.json").read_text())
@@ -163,22 +191,33 @@ class TestFactoryEffortThreading:
             assert mock_provider.called, "factory did not construct AcpProvider"
             return mock_provider.call_args.kwargs
 
-    @pytest.mark.parametrize("provider_name", ["acp", "claude_code"])
-    def test_valid_effort_on_opus_threads_per_model(self, provider_name):
+    @pytest.mark.parametrize(
+        "provider_name,expected_key",
+        [
+            # kiro (acp) threads the raw model; claude_code translates the model
+            # to a provider id at the factory boundary, so the effort key is the
+            # translated id.
+            ("acp", "claude-opus-4.7"),
+            ("claude_code", "global.anthropic.claude-opus-4-7[1m]"),
+        ],
+    )
+    def test_valid_effort_on_opus_threads_per_model(self, provider_name, expected_key):
         kwargs = self._capture_provider_kwargs(
             provider_name,
             session_key="dashboard:1",
             model_override="claude-opus-4.7",
             reasoning_effort_override="xhigh",
         )
-        assert kwargs.get("effort_per_model") == {"claude-opus-4.7": "xhigh"}
+        assert kwargs.get("effort_per_model") == {expected_key: "xhigh"}
 
     @pytest.mark.parametrize("provider_name", ["acp", "claude_code"])
     def test_effort_on_incapable_model_not_threaded(self, provider_name):
+        # 'auto' supports no effort on either backend (kiro errors on auto; the
+        # CC registry maps auto -> "" which model_supports_effort rejects).
         kwargs = self._capture_provider_kwargs(
             provider_name,
             session_key="dashboard:1",
-            model_override="claude-haiku-4.5",
+            model_override="auto",
             reasoning_effort_override="high",
         )
         assert kwargs.get("effort_per_model") == {}
@@ -294,14 +333,21 @@ class TestFactoryPerAgentCcModel:
             return dict(mock_provider.call_args.kwargs)
 
     def test_lite_agent_resolves_own_cc_model(self):
-        with patch.object(KiroClawConfig, "_resolve_agent_cc_model", return_value="claude-sonnet-4.6"):
+        # The factory now translates the per-agent kiro dotted id to a provider
+        # id via the registry; the intent (sonnet, NOT the flagship opus) holds.
+        with patch.object(
+            KiroClawConfig, "_resolve_agent_cc_model", return_value="claude-sonnet-4.6"
+        ):
             kwargs = self._capture(session_key="bg", agent="kiroclaw-lite")
-        assert kwargs.get("model") == "claude-sonnet-4.6"
+        assert kwargs.get("model") == "global.anthropic.claude-sonnet-4-6[1m]"
         assert kwargs.get("model") != "global.anthropic.claude-opus-4-8[1m]"
 
     def test_default_agent_keeps_global_cc_model(self):
+        from kiro_claw import model_registry as mr
+
         cfg = KiroClawConfig()
-        expected = cfg.agent.cc_model
+        # cc_model is a canonical key; the factory threads the TRANSLATED id.
+        expected = mr.to_provider_id(cfg.agent.cc_model, "claude_code")
         for ag in ("kiroclaw", None):
             with patch.object(KiroClawConfig, "_resolve_agent_cc_model") as resolver:
                 kwargs = self._capture(session_key="dash:1", agent=ag)
@@ -309,15 +355,21 @@ class TestFactoryPerAgentCcModel:
                 resolver.assert_not_called()  # default agent never consults per-agent resolver
 
     def test_model_override_wins_for_custom_agent(self):
-        with patch.object(KiroClawConfig, "_resolve_agent_cc_model", return_value="claude-sonnet-4.6"):
+        with patch.object(
+            KiroClawConfig, "_resolve_agent_cc_model", return_value="claude-sonnet-4.6"
+        ):
             kwargs = self._capture(
                 session_key="bg", agent="kiroclaw-lite", model_override="claude-opus-4.7"
             )
-        assert kwargs.get("model") == "claude-opus-4.7"
+        # model_override wins over the per-agent resolve, then is translated.
+        assert kwargs.get("model") == "global.anthropic.claude-opus-4-7[1m]"
 
     def test_lite_falls_back_to_global_when_no_per_agent_model(self):
+        from kiro_claw import model_registry as mr
+
         cfg = KiroClawConfig()
-        expected = cfg.agent.cc_model
+        # Falls back to global cc_model (canonical), threaded as the translated id.
+        expected = mr.to_provider_id(cfg.agent.cc_model, "claude_code")
         with patch.object(KiroClawConfig, "_resolve_agent_cc_model", return_value=""):
             kwargs = self._capture(session_key="bg", agent="kiroclaw-lite")
         assert kwargs.get("model") == expected
@@ -337,6 +389,19 @@ class TestFactoryPerAgentCcModel:
             factory(session_key="dash:1", agent="kiroclaw")
             kwargs = mock_provider.call_args.kwargs
         assert kwargs.get("model") == _CC_DEFAULT_MODEL
+
+    def test_canonical_cc_model_translated_to_provider_id(self):
+        # A canonical key persisted in cc_model is translated to a provider id
+        # at the factory boundary (the wire/persisted value is canonical).
+        cfg = KiroClawConfig()
+        cfg.agent.provider = "claude_code"
+        cfg.agent.cc_model = "opus-4.8-1m"
+        with patch("kiro_claw.providers.acp.AcpProvider") as mock_provider:
+            mock_provider.return_value = MagicMock()
+            factory = cfg.create_provider_factory()
+            factory(session_key="dash:1", agent="kiroclaw")
+            kwargs = mock_provider.call_args.kwargs
+        assert kwargs.get("model") == "global.anthropic.claude-opus-4-8[1m]"
         assert kwargs.get("model")  # never blank
 
 
@@ -344,30 +409,42 @@ class TestResolveAgentCcModel:
     """_resolve_agent_cc_model reads a custom agent's CC model from its kiro json."""
 
     def test_prefers_cc_model_then_model(self, tmp_path, monkeypatch):
-        # cc_model wins over model; a kiro dotted id is translated to a
-        # CC-valid alias (claude-sonnet-4.6 → sonnet) so the backend accepts it.
+        # cc_model wins over model. _resolve_agent_cc_model now returns the RAW
+        # stored value; translation to a provider id happens at the factory
+        # boundary. End-to-end, claude-sonnet-4.6 -> the sonnet provider id.
         import kiro_claw.agent as agent_mod
+        from kiro_claw import model_registry as mr
+
         monkeypatch.setattr(agent_mod, "KIRO_AGENTS_DIR", tmp_path)
         (tmp_path / "a.json").write_text(
-            json.dumps({"name": "lite-x", "model": "claude-opus-4.6", "cc_model": "claude-sonnet-4.6"})
+            json.dumps(
+                {"name": "lite-x", "model": "claude-opus-4.6", "cc_model": "claude-sonnet-4.6"}
+            )
         )
-        assert KiroClawConfig._resolve_agent_cc_model("lite-x") == "sonnet"
+        raw = KiroClawConfig._resolve_agent_cc_model("lite-x")
+        assert raw == "claude-sonnet-4.6"
+        assert mr.to_provider_id(raw, "claude_code") == "global.anthropic.claude-sonnet-4-6[1m]"
 
     def test_falls_back_to_model_translated_when_no_cc_model(self, tmp_path, monkeypatch):
         # The AIM-managed kiroclaw-lite agent ships only `model: claude-opus-4.6`
         # (no cc_model). That kiro dotted id is NOT a valid claude-agent-acp
         # model — sent verbatim the backend rejects the session with -32603.
-        # Translate the fallback through _CC_MODEL_ALIASES so it resolves to the
-        # CC-valid `opus` alias instead.
+        # _resolve_agent_cc_model returns it raw; the factory translates it to a
+        # CC-valid provider id via the registry alias map.
         import kiro_claw.agent as agent_mod
+        from kiro_claw import model_registry as mr
+
         monkeypatch.setattr(agent_mod, "KIRO_AGENTS_DIR", tmp_path)
         (tmp_path / "b.json").write_text(json.dumps({"name": "lite-y", "model": "claude-opus-4.6"}))
-        assert KiroClawConfig._resolve_agent_cc_model("lite-y") == "opus"
+        raw = KiroClawConfig._resolve_agent_cc_model("lite-y")
+        assert raw == "claude-opus-4.6"
+        assert mr.to_provider_id(raw, "claude_code") == "global.anthropic.claude-opus-4-8[1m]"
 
     def test_cc_valid_id_passes_through_untranslated(self, tmp_path, monkeypatch):
         # A model id that is already CC-valid (full Bedrock inference profile) is
         # not a key in the alias map and must pass through unchanged.
         import kiro_claw.agent as agent_mod
+
         monkeypatch.setattr(agent_mod, "KIRO_AGENTS_DIR", tmp_path)
         (tmp_path / "c.json").write_text(
             json.dumps({"name": "lite-z", "cc_model": "global.anthropic.claude-sonnet-4-6[1m]"})
@@ -379,5 +456,6 @@ class TestResolveAgentCcModel:
 
     def test_empty_when_agent_not_found(self, tmp_path, monkeypatch):
         import kiro_claw.agent as agent_mod
+
         monkeypatch.setattr(agent_mod, "KIRO_AGENTS_DIR", tmp_path)
         assert KiroClawConfig._resolve_agent_cc_model("nope") == ""
