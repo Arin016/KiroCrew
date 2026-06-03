@@ -127,9 +127,15 @@ async def prompt_allowlist(
         deny_label = "🚫 Deny"
 
     await _send_prompt(
-        slack, owner_id, text, approve_label, deny_label,
-        ACTION_ALLOWLIST_APPROVE, ACTION_ALLOWLIST_DENY,
-        f"{user_id}:", "Allowlist prompt",
+        slack,
+        owner_id,
+        text,
+        approve_label,
+        deny_label,
+        ACTION_ALLOWLIST_APPROVE,
+        ACTION_ALLOWLIST_DENY,
+        f"{user_id}:",
+        "Allowlist prompt",
     )
 
 
@@ -165,9 +171,15 @@ async def prompt_track_channel(
         deny_label = "🚫 Ignore"
 
     await _send_prompt(
-        slack, owner_id, text, approve_label, deny_label,
-        ACTION_TRACK_APPROVE, ACTION_TRACK_DENY,
-        f"{channel_id}:{channel_name}", "Track channel — prompt",
+        slack,
+        owner_id,
+        text,
+        approve_label,
+        deny_label,
+        ACTION_TRACK_APPROVE,
+        ACTION_TRACK_DENY,
+        f"{channel_id}:{channel_name}",
+        "Track channel — prompt",
     )
 
 
@@ -252,6 +264,10 @@ async def send_channel_challenge(
     channel_id: str,
     user_id: str,
     prompt_text: str,
+    ttl: int = 3600,
+    *,
+    thread_ts: str = "",
+    session_key: str = "",
 ) -> str:
     """Send an ephemeral challenge-and-redirect to the user in a channel.
 
@@ -262,6 +278,20 @@ async def send_channel_challenge(
     The prompt is NOT included as a separate query parameter — the frontend
     extracts it from the validated token payload to prevent tampering.
 
+    The link must be clicked within ``LINK_WINDOW_SECS`` (the ``exp`` claim),
+    but the resulting session lasts *ttl* seconds (the ``session_exp`` claim,
+    capped at ``MAX_SESSION_TTL_SECS``). These are independent: passing the
+    link window as the session TTL would expire the session the instant the
+    click window closes.
+
+    *thread_ts* and *session_key* carry Slack thread context into the signed
+    token so the dashboard reconnects to the correct session instead of always
+    spawning a fresh one. When *session_key* is set (an existing session is
+    already linked to this thread), the dashboard reopens that session. When
+    only *thread_ts*/*channel_id* are set, the dashboard auto-links the newly
+    created session back to the originating Slack thread so agent responses
+    flow into it.
+
     Returns the generated URL, or empty string on failure.
     """
     cfg = KiroClawConfig.load()
@@ -269,12 +299,22 @@ async def send_channel_challenge(
     local_only = is_local_only(configured_host, True)
     host = resolve_dashboard_host(local_only, configured_host)
 
-    # Generate token with prompt included in HMAC signature
-    token = generate_token(user_id, LINK_WINDOW_SECS, prompt=prompt_text)
+    # Generate token with prompt included in HMAC signature.
+    # session_ttl governs session_exp; the 5-min link window (exp) is applied
+    # separately inside generate_token via LINK_WINDOW_SECS.
+    session_ttl = min(ttl, MAX_SESSION_TTL_SECS)
+    extra: dict[str, str] = {}
+    if channel_id:
+        extra["channel"] = channel_id
+    if thread_ts:
+        extra["thread_ts"] = thread_ts
+    if session_key:
+        extra["session_key"] = session_key
+    token = generate_token(user_id, session_ttl, prompt=prompt_text, extra=extra)
 
-    # Build URL — tunnel only when slack.use_tunnel_url is explicitly enabled.
-    # Prompt is only inside the signed token, not as a separate query param
-    # (prevents tampering).
+    # Build URL — tunnel only when slack.use_tunnel_url is explicitly enabled
+    # (KiroClaw keeps the tunnel mechanism opt-in). Prompt is only inside the
+    # signed token, not as a separate query param (prevents tampering).
     tunnel_url = get_tunnel_url() if cfg.slack.use_tunnel_url else ""
     if tunnel_url:
         url = f"{tunnel_url}/?token={token}"
@@ -284,10 +324,7 @@ async def send_channel_challenge(
         url = f"{base}/?token={token}"
 
     link_mins = LINK_WINDOW_SECS // 60
-    text = (
-        f"🔐 <{url}|Open a session to continue>\n"
-        f"_(Link expires in {link_mins} minutes)_"
-    )
+    text = f"🔐 <{url}|Open a session to continue>\n" f"_(Link expires in {link_mins} minutes)_"
 
     try:
         # DMs: regular message (already private; ephemeral has rendering issues).

@@ -12,6 +12,7 @@ Property-based tests (Hypothesis) and unit tests for:
 - Tombstone pruning with session file cleanup
 - Startup sweep processing
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -47,9 +48,7 @@ def agent_root(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def _mock_memory_ok(monkeypatch):
     """Prevent memory guard from refusing spawns on low-RAM build machines."""
-    monkeypatch.setattr(
-        "kiro_claw.subagent.check_memory_available", lambda **_kw: (True, 8.0)
-    )
+    monkeypatch.setattr("kiro_claw.subagent.check_memory_available", lambda **_kw: (True, 8.0))
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -648,9 +647,7 @@ class TestStartupSweep:
             await manager._reconcile_orphans()
 
         # Verify cleanup was called for each session_id
-        called_sids = [
-            call[0][0] for call in mock_cleanup.call_args_list
-        ]
+        called_sids = [call[0][0] for call in mock_cleanup.call_args_list]
         for sid in session_ids:
             assert sid in called_sids, f"Session {sid} not cleaned up"
 
@@ -690,3 +687,57 @@ class TestStartupSweep:
 
         # Both should have been attempted despite the first one failing
         assert call_count == 2
+
+
+class TestStartingPidGuard:
+    """Regression: a provider that has start()ed but isn't registered yet must
+    not be swept as an orphan during the start()->register window.
+
+    A slow ACP cold-start writes its PID to kiro_session_pids.txt before the
+    session is in self._sessions; the periodic sweep would otherwise SIGKILL it
+    mid-init (observed as 'ACP init failed (code=-9), retrying' loops and a
+    permanently 'processing' session).
+    """
+
+    def _make_manager(self):
+        from kiro_claw.session import SessionManager
+
+        cfg = MagicMock()
+        cfg.session.pool_size = 0
+        cfg.session.pool_agent = ""
+        cfg.session.pool_ttl_secs = 0
+        return SessionManager(cfg=cfg, provider_factory=None)
+
+    def test_in_flight_pid_reported_and_isolated(self):
+        manager = self._make_manager()
+        assert manager._in_flight_pids() == set()
+        manager._starting_pids.add(4242)
+        assert 4242 in manager._in_flight_pids()
+        # Returned set is a copy — mutating it must not affect the guard.
+        snapshot = manager._in_flight_pids()
+        snapshot.discard(4242)
+        assert 4242 in manager._starting_pids
+
+    def test_starting_pid_not_swept_as_orphan(self):
+        """The active set the sweep checks against must include in-flight PIDs,
+        even when the PID is absent from self._sessions."""
+        from kiro_claw.session_pid import _collect_active_pids
+
+        manager = self._make_manager()
+        starting_pid = 99991
+        manager._starting_pids.add(starting_pid)
+
+        # Mirror the sweep's active-set construction (session.py periodic sweep).
+        active, ok = _collect_active_pids(manager._sessions)  # empty -> no live sessions
+        active.update(manager._pool_pids())
+        active.update(manager._in_flight_pids())
+
+        assert ok is True
+        assert starting_pid in active, "in-flight PID must be protected from the orphan sweep"
+
+    def test_pid_dropped_after_registration(self):
+        manager = self._make_manager()
+        manager._starting_pids.add(777)
+        # Simulate the finally-block cleanup after registration completes.
+        manager._starting_pids.discard(777)
+        assert 777 not in manager._in_flight_pids()

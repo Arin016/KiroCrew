@@ -67,6 +67,46 @@ class TestSlackLink:
             assert data["ok"] is True
             assert data["thread_ts"] == "ts123"
 
+    @pytest.mark.asyncio
+    async def test_link_to_existing_thread_no_new_post(self, tmp_path, monkeypatch):
+        """challenge-redirect auto-link: link to an existing thread_ts.
+
+        Must NOT post a new root thread message and must NOT replay context
+        (the thread already has it), but MUST register the reverse link so a
+        later reply in that thread routes back to this session.
+        """
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        slot.append("user", "hello")
+        slot.append("assistant", "hi there")
+        slot.drain()
+        state.slack_client = MagicMock()
+        state.slack_client.open_dm = AsyncMock(return_value="C123")
+        state.slack_client.post_message = AsyncMock(return_value="newts")
+        state.owner_id = "U123"
+        state.sessions.get_slack_link = MagicMock(return_value=(None, None))
+        state.sessions.set_slack_link = MagicMock()
+        state.push_slots_update = MagicMock()
+        async with TestClient(TestServer(_make_slack_app(state))) as client:
+            resp = await client.post(
+                "/api/chat/slots/s1/slack-link",
+                json={"channel": "C999", "thread_ts": "1700.42"},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["ok"] is True
+            # Links to the supplied thread, not a freshly posted one.
+            assert data["thread_ts"] == "1700.42"
+            assert data["channel"] == "C999"
+        # No message posted (neither a new root thread nor replayed context).
+        assert state.slack_client.post_message.await_count == 0
+        # Reverse link registered so future thread replies find this session.
+        state.sessions.set_slack_link.assert_called_once()
+        args = state.sessions.set_slack_link.call_args.args
+        assert args[1] == "1700.42"
+        assert args[2] == "C999"
+
 
 class TestSlackChannels:
     @pytest.mark.asyncio
@@ -96,9 +136,11 @@ class TestSlackChannels:
         monkeypatch.setattr("kiro_claw.config.loader.KiroClawConfig.load", lambda: mock_cfg)
         state = _make_state(tmp_path)
         state.slack_client = MagicMock()
-        state.slack_client.conversations_list = AsyncMock(return_value=[
-            {"id": "C0AU38Q0E4B", "name": "pcn-orchestrator-interest"},
-        ])
+        state.slack_client.conversations_list = AsyncMock(
+            return_value=[
+                {"id": "C0AU38Q0E4B", "name": "pcn-orchestrator-interest"},
+            ]
+        )
         async with TestClient(TestServer(_make_slack_app(state))) as client:
             resp = await client.get("/api/slack/channels")
             assert resp.status == 200

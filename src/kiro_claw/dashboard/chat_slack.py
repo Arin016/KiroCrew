@@ -56,34 +56,47 @@ async def api_chat_slot_slack_link(request: web.Request) -> web.Response:
 
     body = await request.json() if request.content_length else {}
     raw_channel = body.get("channel", "")
+    # When the caller supplies an existing thread_ts (challenge-and-redirect
+    # auto-link from a Slack thread the user replied in), link to THAT thread
+    # rather than posting a new one — this is what makes a thread reply route
+    # back to its dashboard session bidirectionally.
+    existing_thread = str(body.get("thread_ts", "") or "")
     if not raw_channel or raw_channel == "dm":
         target_channel = await state.slack_client.open_dm(owner_id)
     else:
         target_channel = raw_channel
 
-    # redact_and_truncate applies both redact_exfiltration_urls + redact_credentials
-    title = redact_and_truncate(slot.title or name, max_chars=200)
-    thread_ts = await state.slack_client.post_message(
-        target_channel, f"\U0001f9f5 *{title}*\nSession linked from dashboard."
-    )
-    if not thread_ts:
-        return web.json_response({"error": "failed to create thread"}, status=500)
+    if existing_thread:
+        thread_ts = existing_thread
+    else:
+        # redact_and_truncate applies both redact_exfiltration_urls + redact_credentials
+        title = redact_and_truncate(slot.title or name, max_chars=200)
+        thread_ts = await state.slack_client.post_message(
+            target_channel, f"\U0001f9f5 *{title}*\nSession linked from dashboard."
+        )
+        if not thread_ts:
+            return web.json_response({"error": "failed to create thread"}, status=500)
 
     state.sessions.set_slack_link(session_key, thread_ts, target_channel)
     slot._slack_linked = True
     slot._slack_channel = target_channel
     slot._slack_thread_ts = thread_ts
 
-    # Post last 5 messages as context
-    for m in slot.messages[-5:]:
-        role = m.get("role", "")
-        txt = redact_and_truncate(m.get("content") or "", max_chars=2000)
-        if role in ("user", "assistant") and txt:
-            icon = "\U0001f9d1" if role == "user" else "\U0001f916"
-            try:
-                await state.slack_client.post_message(target_channel, f"{icon} {txt}", thread_ts)
-            except Exception:
-                pass
+    # Post last 5 messages as context — only when we created a NEW thread.
+    # Linking to an existing thread (challenge-and-redirect) would duplicate
+    # messages the thread already contains.
+    if not existing_thread:
+        for m in slot.messages[-5:]:
+            role = m.get("role", "")
+            txt = redact_and_truncate(m.get("content") or "", max_chars=2000)
+            if role in ("user", "assistant") and txt:
+                icon = "\U0001f9d1" if role == "user" else "\U0001f916"
+                try:
+                    await state.slack_client.post_message(
+                        target_channel, f"{icon} {txt}", thread_ts
+                    )
+                except Exception:
+                    pass
 
     sel().log_api_access(
         caller="dashboard",

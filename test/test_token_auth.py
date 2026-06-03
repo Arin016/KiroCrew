@@ -428,9 +428,7 @@ async def test_internal_path_non_loopback_cookie_auth_when_not_local_only() -> N
     mw = token_auth_middleware(
         internal_paths=frozenset({"/api/spawn"}), internal_secret="s", local_only=False
     )
-    req = _make_request(
-        path="/api/spawn", remote="10.0.0.1", cookies={"mc_token_7777": token}
-    )
+    req = _make_request(path="/api/spawn", remote="10.0.0.1", cookies={"mc_token_7777": token})
     resp = await mw(req, _ok_handler)
     assert resp.status == 200
 
@@ -454,7 +452,8 @@ async def test_internal_path_non_loopback_wrong_secret_denied() -> None:
         internal_paths=frozenset({"/api/spawn"}), internal_secret="real", local_only=False
     )
     req = _make_request(
-        path="/api/spawn", remote="10.0.0.1",
+        path="/api/spawn",
+        remote="10.0.0.1",
         headers={"X-Internal-Secret": "wrong"},
         cookies={"mc_token_7777": token},
     )
@@ -470,7 +469,8 @@ async def test_internal_path_non_loopback_valid_secret_and_cookie_granted() -> N
         internal_paths=frozenset({"/api/spawn"}), internal_secret="real", local_only=False
     )
     req = _make_request(
-        path="/api/spawn", remote="10.0.0.1",
+        path="/api/spawn",
+        remote="10.0.0.1",
         headers={"X-Internal-Secret": "real"},
         cookies={"mc_token_7777": token},
     )
@@ -485,7 +485,8 @@ async def test_internal_path_non_loopback_valid_secret_no_cookie_denied() -> Non
         internal_paths=frozenset({"/api/spawn"}), internal_secret="real", local_only=False
     )
     req = _make_request(
-        path="/api/spawn", remote="10.0.0.1",
+        path="/api/spawn",
+        remote="10.0.0.1",
         headers={"X-Internal-Secret": "real"},
     )
     resp = await mw(req, _ok_handler)
@@ -544,9 +545,7 @@ async def test_mixed_path_non_loopback_with_valid_cookie_granted() -> None:
     token = generate_token("dcvuser", ttl_seconds=300)
     bind_token_ip(token, "10.0.0.1")
     mark_consumed(token)
-    req = _make_request(
-        path="/api/spawn", remote="10.0.0.1", cookies={"mc_token_7777": token}
-    )
+    req = _make_request(path="/api/spawn", remote="10.0.0.1", cookies={"mc_token_7777": token})
     resp = await mw(req, _ok_handler)
     assert resp.status == 200
 
@@ -609,6 +608,50 @@ def test_token_rejected_when_no_nonces_registered() -> None:
     valid, _, reason = validate_token(token)
     assert not valid
     assert reason == "no active sessions"
+
+
+def test_cookie_auth_survives_nonce_store_wipe() -> None:
+    """Regression: an established session cookie must NOT require the nonce.
+
+    The nonce is a single-use guard for the one-time LINK click. The in-memory
+    nonce store is wiped on every gateway restart, so requiring the nonce for
+    cookie validation logged every user out after a restart ("token
+    superseded"). Cookie validation (use_session_exp=True) must pass on
+    signature + session_exp alone, while the LINK path still enforces nonce.
+    """
+    token = generate_token("user_cookie")
+    revoke_all_sessions()  # simulate restart: nonce store emptied
+    # LINK click still requires the nonce → rejected.
+    link_valid, _, link_reason = validate_token(token, use_session_exp=False)
+    assert not link_valid
+    assert link_reason in ("no active sessions", "token superseded")
+    # COOKIE re-auth survives the wipe.
+    cookie_valid, uid, cookie_reason = validate_token(token, use_session_exp=True)
+    assert cookie_valid, f"cookie should survive nonce wipe, got: {cookie_reason}"
+    assert uid == "user_cookie"
+
+
+def test_signing_secret_persisted_across_loads(tmp_path, monkeypatch) -> None:
+    """Regression: the HMAC signing secret must persist across processes.
+
+    Previously _SECRET was os.urandom(32) per import, so every restart rotated
+    the key and invalidated all outstanding tokens/cookies ("invalid
+    signature"). The secret is now loaded-or-created from a 0600 key file.
+    """
+    from kiro_claw.dashboard import token_auth as ta
+
+    monkeypatch.setattr(ta, "config_dir", lambda: tmp_path, raising=False)
+    # First load creates the key file.
+    monkeypatch.setattr("kiro_claw.config.loader.config_dir", lambda: tmp_path)
+    s1 = ta._load_or_create_secret()
+    key_file = tmp_path / ta._SECRET_KEY_FILE
+    assert key_file.exists()
+    assert len(s1) >= 32
+    # Owner-only permissions.
+    assert (key_file.stat().st_mode & 0o777) == 0o600
+    # Second load returns the SAME secret (persistence).
+    s2 = ta._load_or_create_secret()
+    assert s1 == s2
 
 
 def test_evict_expired_removes_old_entries() -> None:
@@ -903,6 +946,7 @@ async def test_dashboard_sel_log(duration_arg: str, expected_ttl: int) -> None:
         outcome="ok",
         resources=f"ttl={expected_ttl}",
     )
+
 
 # -- Property 17: Port-specific cookie names prevent multi-server collision --
 

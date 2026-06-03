@@ -26,7 +26,66 @@ from kiro_claw.sel import sel as _sel_fn
 
 logger = logging.getLogger(__name__)
 
-_SECRET = os.urandom(32)
+_SECRET_KEY_FILE = "token_signing.key"
+
+
+def _load_or_create_secret() -> bytes:
+    """Return the HMAC signing secret, persisted across restarts.
+
+    The secret is stored at ``<config_dir>/token_signing.key`` (owner-only
+    0600). Persisting it is required for correctness: tokens and session
+    cookies are HMAC-signed with this key, so a fresh random secret on every
+    process start would invalidate every outstanding Slack link and cookie,
+    locking users out after any gateway restart.
+    """
+    # Local import: config.loader pulls in modules that import token_auth,
+    # so a top-level import here risks a circular import. Matches the other
+    # config_dir() call sites in this module.
+    from kiro_claw.config.loader import config_dir
+
+    try:
+        key_path = config_dir() / _SECRET_KEY_FILE
+        if key_path.exists():
+            existing = key_path.read_bytes()
+            if len(existing) >= 32:
+                # Re-enforce 0600 at load time, not just at creation: perms may
+                # have been relaxed since (backup restore, manual edit, migration)
+                # and this key signs all auth tokens/cookies.
+                try:
+                    os.chmod(key_path, 0o600)
+                except OSError:
+                    logger.warning(
+                        "failed to enforce 0600 permissions on token signing key %s; "
+                        "file may be readable by other users",
+                        key_path,
+                        exc_info=True,
+                    )
+                return existing
+        key = os.urandom(32)
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        key_path.write_bytes(key)
+        try:
+            os.chmod(key_path, 0o600)
+        except OSError:
+            # Security-sensitive: this key signs all auth tokens/cookies, so a
+            # world-readable key file is a real exposure. Warn loudly rather
+            # than failing — the secret still works for signing this session.
+            logger.warning(
+                "failed to set 0600 permissions on token signing key %s; "
+                "file may be readable by other users",
+                key_path,
+                exc_info=True,
+            )
+        return key
+    except OSError:
+        # Fall back to an ephemeral secret if the key file is unwritable.
+        # Tokens still work within this process; they just won't survive a
+        # restart (the pre-existing behaviour).
+        logger.warning("token signing key not persisted; using ephemeral secret", exc_info=True)
+        return os.urandom(32)
+
+
+_SECRET = _load_or_create_secret()
 
 
 class TokenStateManager:
@@ -41,7 +100,7 @@ class TokenStateManager:
     is minimal (dict operations only), so blocking the event loop is negligible.
     """
 
-    def __init__(self, max_concurrent_nonces: int = 5) -> None:
+    def __init__(self, max_concurrent_nonces: int = 50) -> None:
         self._lock = threading.Lock()
         self._max_nonces = max_concurrent_nonces
         # OrderedDict maintains insertion order for O(1) oldest eviction
@@ -130,8 +189,10 @@ class TokenStateManager:
             self._consumed.clear()
 
 
-# Maximum concurrent valid tokens before oldest is evicted
-MAX_CONCURRENT_NONCES = 5
+# Maximum concurrent valid tokens before oldest is evicted.
+# Raised from 5 to 50 so pending Slack challenge links aren't evicted
+# by other token minting activity (crons, dashboard links, etc.).
+MAX_CONCURRENT_NONCES = 50
 
 # Module-level singleton instance
 _state: TokenStateManager = TokenStateManager(max_concurrent_nonces=MAX_CONCURRENT_NONCES)
@@ -212,7 +273,14 @@ def _sign(payload: bytes) -> str:
     return _b64url_encode(hmac.new(_SECRET, payload, hashlib.sha256).digest())
 
 
-def generate_token(user_id: str, ttl_seconds: int = 3600, *, app: str = "", prompt: str = "") -> str:
+def generate_token(
+    user_id: str,
+    ttl_seconds: int = 3600,
+    *,
+    app: str = "",
+    prompt: str = "",
+    extra: dict[str, str] | None = None,
+) -> str:
     """Return ``base64url(payload).base64url(signature)``.
 
     The token carries two expiry times:
@@ -225,6 +293,13 @@ def generate_token(user_id: str, ttl_seconds: int = 3600, *, app: str = "", prom
     When *prompt* is provided, it is included in the signed payload so the
     dashboard can auto-submit the user's original Slack message. The prompt
     is covered by the HMAC signature to prevent tampering.
+
+    *extra* adds further string claims to the signed payload — used by the
+    Slack challenge-and-redirect flow to carry ``channel``, ``thread_ts`` and
+    an existing linked ``session_key`` so the dashboard can reconnect to (or
+    auto-link) the correct Slack-linked session instead of always spawning a
+    fresh, disconnected one. Reserved keys (sub/exp/session_exp/iat/nonce/app/
+    prompt) cannot be overridden.
 
     Up to ``_MAX_CONCURRENT_NONCES`` tokens can be valid concurrently.
     When the limit is exceeded, the oldest nonce is evicted (O(1) via OrderedDict).
@@ -255,6 +330,11 @@ def generate_token(user_id: str, ttl_seconds: int = 3600, *, app: str = "", prom
         payload_dict["app"] = app
     if prompt:
         payload_dict["prompt"] = prompt
+    if extra:
+        _reserved = {"sub", "exp", "session_exp", "iat", "nonce", "app", "prompt"}
+        for k, v in extra.items():
+            if k not in _reserved and isinstance(v, str) and v:
+                payload_dict[k] = v
     payload = json.dumps(payload_dict, separators=(",", ":")).encode()
     encoded_payload = _b64url_encode(payload)
     signature = _sign(payload)
@@ -285,11 +365,16 @@ def validate_token(token: str, *, use_session_exp: bool = False) -> tuple[bool, 
     exp_field = "session_exp" if use_session_exp else "exp"
     if time.time() > data.get(exp_field, data.get("exp", 0)):
         return False, "", "token expired"
-    # Validate nonce is still in the valid set (not evicted due to limit)
-    token_nonce = data.get("nonce", "")
-    valid, reason = _state.is_nonce_valid(token_nonce)
-    if not valid:
-        return False, "", reason
+    # Nonce is a single-use guard for the one-time LINK click only. For an
+    # established session cookie (use_session_exp=True), a valid HMAC signature
+    # plus an unexpired session_exp is sufficient — requiring the in-memory
+    # nonce there would invalidate every live cookie on each gateway restart
+    # (the nonce store is per-process), locking users out for no security gain.
+    if not use_session_exp:
+        token_nonce = data.get("nonce", "")
+        valid, reason = _state.is_nonce_valid(token_nonce)
+        if not valid:
+            return False, "", reason
     return True, data.get("sub", ""), ""
 
 
@@ -330,8 +415,37 @@ def extract_prompt_from_token(token: str) -> str:
         data = json.loads(payload_bytes)
         return data.get("prompt", "")
     except Exception as exc:
-        logger.warning("extract_prompt_from_token: post-validation decode failed (%s)", type(exc).__name__)
+        logger.warning(
+            "extract_prompt_from_token: post-validation decode failed (%s)", type(exc).__name__
+        )
         return ""
+
+
+def extract_claims_from_token(token: str, keys: tuple[str, ...]) -> dict[str, str]:
+    """Extract selected string claims from a validated token payload.
+
+    Validates the token first (deny-by-default). Returns a dict containing
+    only the requested *keys* that are present and string-typed; returns an
+    empty dict if the token is invalid. Used by the Slack challenge-redirect
+    frontend to recover ``channel``/``thread_ts``/``session_key`` so it can
+    reconnect to (or auto-link) the correct Slack-linked session.
+    """
+    valid, _user_id, _reason = validate_token(token)
+    if not valid:
+        return {}
+    try:
+        data = json.loads(_b64url_decode(token.split(".")[0]))
+    except Exception as exc:
+        logger.warning(
+            "extract_claims_from_token: post-validation decode failed (%s)", type(exc).__name__
+        )
+        return {}
+    out: dict[str, str] = {}
+    for k in keys:
+        v = data.get(k)
+        if isinstance(v, str) and v:
+            out[k] = v
+    return out
 
 
 def generate_app_secret() -> str:
@@ -470,9 +584,7 @@ def token_auth_middleware(
 
     """
 
-    def _extract_and_validate_token(
-        request: web.Request, _port: int
-    ) -> tuple[bool, str, str]:
+    def _extract_and_validate_token(request: web.Request, _port: int) -> tuple[bool, str, str]:
         """Extract token from query param or cookie and validate it.
 
         Used by internal-path browser auth (no secret header).  The main
@@ -493,8 +605,7 @@ def token_auth_middleware(
         # If the secret is missing (browser request), fall through to
         # normal cookie auth so dashboard pages can call these routes.
         _matches_strict = internal_paths and (
-            path in internal_paths
-            or any(path.startswith(p + "/") for p in internal_paths)
+            path in internal_paths or any(path.startswith(p + "/") for p in internal_paths)
         )
         _matches_mixed = mixed_internal_paths and (
             path in mixed_internal_paths
@@ -513,17 +624,37 @@ def token_auth_middleware(
                 # Secret header present — validate it strictly
                 if not internal_secret:
                     _sel = _sel_fn()
-                    _sel.log_api_access(caller=request.remote or "", operation="internal_auth", outcome="denied", source="token_auth", resources=path, error="no internal secret configured")
+                    _sel.log_api_access(
+                        caller=request.remote or "",
+                        operation="internal_auth",
+                        outcome="denied",
+                        source="token_auth",
+                        resources=path,
+                        error="no internal secret configured",
+                    )
                     _log_auth(request, "internal", "denied", "no internal secret configured")
                     return _deny(request, "Forbidden")
                 if hmac.compare_digest(internal_secret, _provided_secret):
                     _sel = _sel_fn()
-                    _sel.log_api_access(caller=request.remote or "", operation="internal_auth", outcome="granted", source="token_auth", resources=path)
+                    _sel.log_api_access(
+                        caller=request.remote or "",
+                        operation="internal_auth",
+                        outcome="granted",
+                        source="token_auth",
+                        resources=path,
+                    )
                     _log_auth(request, "internal", "granted", "")
                     return await handler(request)  # type: ignore[operator]
                 # Wrong secret → deny (don't fall through)
                 _sel = _sel_fn()
-                _sel.log_api_access(caller=request.remote or "", operation="internal_auth", outcome="denied", source="token_auth", resources=path, error="wrong secret")
+                _sel.log_api_access(
+                    caller=request.remote or "",
+                    operation="internal_auth",
+                    outcome="denied",
+                    source="token_auth",
+                    resources=path,
+                    error="wrong secret",
+                )
                 _log_auth(request, "internal", "denied", "wrong secret")
                 return _deny(request, "Forbidden")
             # No secret header (browser request) → verify cookie/query-param auth
@@ -534,11 +665,25 @@ def token_auth_middleware(
             _valid, _uid, _reason = _extract_and_validate_token(request, port)
             if not _valid:
                 _sel = _sel_fn()
-                _sel.log_api_access(caller=request.remote or "", operation="internal_auth", outcome="denied", source="token_auth", resources=path, error=f"cookie auth failed: {_reason}")
+                _sel.log_api_access(
+                    caller=request.remote or "",
+                    operation="internal_auth",
+                    outcome="denied",
+                    source="token_auth",
+                    resources=path,
+                    error=f"cookie auth failed: {_reason}",
+                )
                 _log_auth(request, "internal", "denied", f"cookie auth failed: {_reason}")
                 return _deny(request, "Forbidden")
             _sel = _sel_fn()
-            _sel.log_api_access(caller=request.remote or "", operation="internal_auth", outcome="granted", source="token_auth", resources=path, error="cookie auth (no secret header)")
+            _sel.log_api_access(
+                caller=request.remote or "",
+                operation="internal_auth",
+                outcome="granted",
+                source="token_auth",
+                resources=path,
+                error="cookie auth (no secret header)",
+            )
             _log_auth(request, "internal", "granted", f"cookie auth for {_uid}")
             return await handler(request)  # type: ignore[operator]
         elif _matches_internal:
@@ -551,20 +696,52 @@ def token_auth_middleware(
                 # If X-Internal-Secret header is present, validate it first
                 # (defense-in-depth: wrong secret = deny, even with valid cookie)
                 if "X-Internal-Secret" in request.headers:
-                    if not internal_secret or not hmac.compare_digest(internal_secret, request.headers["X-Internal-Secret"]):
+                    if not internal_secret or not hmac.compare_digest(
+                        internal_secret, request.headers["X-Internal-Secret"]
+                    ):
                         _sel = _sel_fn()
-                        _sel.log_api_access(caller=request.remote or "", operation="internal_auth", outcome="denied", source="token_auth", resources=path, error="wrong secret (non-loopback mixed)")
-                        _log_auth(request, "internal", "denied", "wrong secret (non-loopback mixed)")
+                        _sel.log_api_access(
+                            caller=request.remote or "",
+                            operation="internal_auth",
+                            outcome="denied",
+                            source="token_auth",
+                            resources=path,
+                            error="wrong secret (non-loopback mixed)",
+                        )
+                        _log_auth(
+                            request, "internal", "denied", "wrong secret (non-loopback mixed)"
+                        )
                         return _deny(request, "Forbidden")
                 _valid, _uid, _reason = _extract_and_validate_token(request, port)
                 if not _valid:
                     _sel = _sel_fn()
-                    _sel.log_api_access(caller=request.remote or "", operation="internal_auth", outcome="denied", source="token_auth", resources=path, error=f"mixed non-loopback cookie auth failed: {_reason}")
-                    _log_auth(request, "internal", "denied", f"mixed non-loopback cookie auth failed: {_reason}")
+                    _sel.log_api_access(
+                        caller=request.remote or "",
+                        operation="internal_auth",
+                        outcome="denied",
+                        source="token_auth",
+                        resources=path,
+                        error=f"mixed non-loopback cookie auth failed: {_reason}",
+                    )
+                    _log_auth(
+                        request,
+                        "internal",
+                        "denied",
+                        f"mixed non-loopback cookie auth failed: {_reason}",
+                    )
                     return _deny(request, "Forbidden")
                 _sel = _sel_fn()
-                _sel.log_api_access(caller=request.remote or "", operation="internal_auth", outcome="granted", source="token_auth", resources=path, error="mixed non-loopback cookie auth")
-                _log_auth(request, "internal", "granted", f"mixed non-loopback cookie auth for {_uid}")
+                _sel.log_api_access(
+                    caller=request.remote or "",
+                    operation="internal_auth",
+                    outcome="granted",
+                    source="token_auth",
+                    resources=path,
+                    error="mixed non-loopback cookie auth",
+                )
+                _log_auth(
+                    request, "internal", "granted", f"mixed non-loopback cookie auth for {_uid}"
+                )
                 return await handler(request)  # type: ignore[operator]
             else:
                 # INVARIANT: non-loopback access to strict internal paths is
@@ -573,7 +750,14 @@ def token_auth_middleware(
                 # normal cookie auth, defeating the machine-to-machine
                 # isolation that the internal-secret design provides.
                 _sel = _sel_fn()
-                _sel.log_api_access(caller=request.remote or "", operation="internal_auth", outcome="denied", source="token_auth", resources=path, error="non-loopback source")
+                _sel.log_api_access(
+                    caller=request.remote or "",
+                    operation="internal_auth",
+                    outcome="denied",
+                    source="token_auth",
+                    resources=path,
+                    error="non-loopback source",
+                )
                 _log_auth(request, "internal", "denied", "non-loopback source")
                 return _deny(request, "Forbidden")
 
@@ -612,7 +796,9 @@ def token_auth_middleware(
             _log_auth(request, "", "denied", "Token required")
             return _deny(request, "Token required")
 
-        valid, user_id, reason, app_name = validate_token_with_app(token, use_session_exp=from_cookie)
+        valid, user_id, reason, app_name = validate_token_with_app(
+            token, use_session_exp=from_cookie
+        )
         if not valid:
             _log_auth(request, "", "denied", reason)
             return _deny(request, reason)

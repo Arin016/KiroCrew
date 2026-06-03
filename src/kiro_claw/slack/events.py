@@ -1935,11 +1935,28 @@ async def _route_message(
             send_channel_challenge,  # circular import: allowlist imports handler.is_allowed_user
         )
 
+        # Resolve the thread this challenge should bind to. If the message is
+        # already in a thread, use that; otherwise root a new thread at the
+        # triggering message itself (its ts) so a fresh @mention becomes the
+        # thread the dashboard session mirrors into. This is what lets dashboard
+        # turns (user + agent) flow back into the originating Slack thread.
+        challenge_thread_ts = thread_ts or msg_ts or ""
+
+        # If that thread is already linked to a dashboard session, carry its
+        # session key so the challenge reopens the SAME session instead of
+        # spawning a disconnected one. Otherwise the dashboard auto-links the
+        # new session to challenge_thread_ts.
+        linked_session_key = ""
+        if challenge_thread_ts and orch.sessions:
+            linked_session_key = orch.sessions.get_session_for_thread(challenge_thread_ts) or ""
+
         url = await send_channel_challenge(
             orch.slack,  # type: ignore[arg-type]
             channel,
             sender_id,
             clean_text,
+            thread_ts=challenge_thread_ts,
+            session_key=linked_session_key,
         )
         if url:
             # Ack the message with a lock emoji so the user knows it was received
