@@ -68,11 +68,11 @@ When disabled, the REST API returns 503 and the UI popover surfaces the error.
 # 1. Exchange the local-machine secret for a user token (loopback only).
 SECRET=$(cat ~/.kiroclaw/.local_secret)
 TOKEN=$(curl -sf -H "X-Local-Secret: $SECRET" \
-  "http://127.0.0.1:7777/api/token/local?ttl=1h" \
+  "http://127.0.0.1:8765/api/token/local?ttl=1h" \
   | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
 
 # 2. Arm the loop with ?token=$TOKEN (query param; cookie also works in browsers).
-curl -sf -X POST "http://127.0.0.1:7777/api/autonudge?token=$TOKEN" \
+curl -sf -X POST "http://127.0.0.1:8765/api/autonudge?token=$TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "slot_key": "chat-3-1777089677",

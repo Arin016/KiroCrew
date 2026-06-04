@@ -60,7 +60,7 @@ run the gateway directly from `src/`:
 
 ```bash
 make build                                   # npm build + editable backend install into .venv
-PYTHONPATH=src python -m kiro_claw gateway   # → http://localhost:7777
+PYTHONPATH=src python -m kiro_claw gateway   # → http://localhost:8765
 ```
 
 `make build` runs two steps:
@@ -82,7 +82,7 @@ that has Python:
 ```bash
 make wheel                # builds the frontend, then python -m build --wheel → dist/
 pip install dist/*.whl    # → installs the kiroclaw / kiroclaw-browse commands onto PATH
-kiroclaw gateway          # → http://localhost:7777
+kiroclaw gateway          # → http://localhost:8765
 ```
 
 The wheel is `dist/kiroclaw-0.1.0-*.whl`. The dashboard is bundled into the
@@ -146,7 +146,7 @@ After installing (any of the three methods), set up and verify:
 ```bash
 kiroclaw setup            # interactive wizard: data dir, agent, credentials
 kiroclaw doctor           # verify everything is wired up
-kiroclaw gateway          # start the server → open http://localhost:7777
+kiroclaw gateway          # start the server → open http://localhost:8765
 ```
 
 From a source checkout, prefix with `PYTHONPATH=src python -m kiro_claw` instead
@@ -157,7 +157,7 @@ of `kiroclaw`.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `KIROCLAW_HOME` | `~/.kiroclaw` | Data directory (config, credentials, databases) |
-| `KIROCLAW_PORT` | `7777` | Port the gateway / dashboard listens on |
+| `KIROCLAW_PORT` | `8765` | Port the gateway / dashboard listens on |
 
 - Config file: `~/.kiroclaw/config.json` (manage via `kiroclaw config get/set/edit`).
 - Credentials: `~/.kiroclaw/.env` (`SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, `KIROCLAW_OWNER_ID`).

@@ -84,8 +84,8 @@ class TestGenerateMcpJson:
         # silently fail to load.
         cfg = {
             "mcpServers": {
-                "kiroclaw-core": {"url": "http://localhost:7777/api/mcp/core"},
-                "kiroclaw-cron": {"url": "http://localhost:7777/api/mcp/cron"},
+                "kiroclaw-core": {"url": "http://localhost:8765/api/mcp/core"},
+                "kiroclaw-cron": {"url": "http://localhost:8765/api/mcp/cron"},
             }
         }
         r, _, _ = generate_mcp_json(cfg)

@@ -154,7 +154,7 @@ All dashboard pages MUST follow this consistent layout pattern. Do NOT invent cu
 - **Types**: `src/types/index.ts` — shared interfaces (`ChatSlot`, `SessionInfo`, `ChatMessage`, `StatusData`, `Notification`, etc.)
 - **Diff rendering**: `MarkdownRenderer` auto-detects diff code blocks (standard `+`/`-` format and kiro-cli `+N:`/`-N:` format) and renders with colored lines (green additions, red deletions, blue hunks)
 - **Build output**: `vite.config.ts` outputs to `KiroClaw/src/kiro_claw/static/dist/`; `build-frontend.sh` runs the production build
-- **Dev mode**: `./dev-frontend.sh` runs Vite dev server on port 3000 with API proxy to backend on 7777
+- **Dev mode**: `./dev-frontend.sh` runs Vite dev server on port 3000 with API proxy to backend on 8765
 
 ## New Features
 

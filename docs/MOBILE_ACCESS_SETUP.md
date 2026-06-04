@@ -1,12 +1,12 @@
 # Mobile Dashboard Access (Tunnels)
 
 Access the KiroClaw dashboard from your phone by exposing the local
-dashboard port (7777) through a secure named tunnel and pointing the
+dashboard port (8765) through a secure named tunnel and pointing the
 Slack bot's presigned links at the tunnel URL.
 
 ## How It Works
 
-The dashboard binds to `localhost:7777` on whatever host runs KiroClaw.
+The dashboard binds to `localhost:8765` on whatever host runs KiroClaw.
 To reach it from a phone, you put a tunnel in front of that local port.
 A tunneling service (e.g. [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/),
 [ngrok](https://ngrok.com/), or [Tailscale Funnel](https://tailscale.com/kb/1223/funnel))
@@ -41,15 +41,15 @@ restarts. With cloudflared, for example:
 cloudflared tunnel login
 cloudflared tunnel create kiroclaw
 
-# Route a hostname you control to the tunnel, then run it pointed at port 7777
+# Route a hostname you control to the tunnel, then run it pointed at port 8765
 cloudflared tunnel route dns kiroclaw kiroclaw.example.com
-cloudflared tunnel --url http://localhost:7777 run kiroclaw
+cloudflared tunnel --url http://localhost:8765 run kiroclaw
 # → https://kiroclaw.example.com
 ```
 
-With ngrok the equivalent is `ngrok http --domain=kiroclaw.example.com 7777`.
+With ngrok the equivalent is `ngrok http --domain=kiroclaw.example.com 8765`.
 Whatever tool you use, the goal is the same: a stable HTTPS URL that
-proxies to your local KiroClaw dashboard port (7777).
+proxies to your local KiroClaw dashboard port (8765).
 
 ### 2. Configure the dashboard URL
 
@@ -72,7 +72,7 @@ tmux session, as a background process, or as a systemd service:
 
 ```bash
 tmux new -s tunnel
-cloudflared tunnel --url http://localhost:7777 run kiroclaw
+cloudflared tunnel --url http://localhost:8765 run kiroclaw
 # Ctrl+B, D to detach
 ```
 

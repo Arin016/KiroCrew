@@ -52,7 +52,7 @@ function buildRemoteTokenCommand(binPath, candidates = REMOTE_BIN_CANDIDATES) {
 }
 
 // Extract the JWT from a `kiroclaw token` URL. The command prints:
-//   http://localhost:7777?token=eyJ...
+//   http://localhost:8765?token=eyJ...
 // or in some configurations `https://.../?token=...&foo=bar` — match either.
 function parseTokenFromStdout(stdout) {
   const match = stdout.trim().match(/[?&]token=([^\s&]+)/);

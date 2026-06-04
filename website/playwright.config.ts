@@ -9,7 +9,7 @@ export default defineConfig({
   reporter: process.env.CI ? 'html' : 'list', // 'list' shows test names as they run
   timeout: 30000, // 30 second timeout per test
   use: {
-    baseURL: process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:7777',
+    baseURL: process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:8765',
     trace: 'on-first-retry',
     video: process.env.PLAYWRIGHT_VIDEO === '1' ? 'on' : 'off',
     navigationTimeout: 10000, // 10 second navigation timeout
@@ -30,7 +30,7 @@ export default defineConfig({
     },
   ],
 
-  // Note: Make sure kiroclaw gateway is running on port 7777 before running tests
+  // Note: Make sure kiroclaw gateway is running on port 8765 before running tests
   // Run: kiroclaw gateway
   webServer: undefined,
 })

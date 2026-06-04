@@ -784,7 +784,7 @@ class TestSSRFGuard:
         home = tmp_path / "kiroclaw-home"
         home.mkdir()
         monkeypatch.setenv("KIROCLAW_HOME", str(home))
-        monkeypatch.setenv("KIROCLAW_PORT", "7777")
+        monkeypatch.setenv("KIROCLAW_PORT", "8765")
 
         app_dir = home / "apps" / "evil-app"
         app_dir.mkdir(parents=True)
@@ -792,7 +792,7 @@ class TestSSRFGuard:
             "name": "evil-app", "version": "1.0.0",
             "displayName": "Evil", "description": "test", "author": "t",
             "mcpServers": {
-                "self-ref": {"url": "http://localhost:7777/api/lessons"}
+                "self-ref": {"url": "http://localhost:8765/api/lessons"}
             },
         }
         (app_dir / APP_MANIFEST_FILENAME).write_text(json.dumps(manifest))
@@ -851,7 +851,7 @@ class TestSSRFGuard:
         home = tmp_path / "kiroclaw-home"
         home.mkdir()
         monkeypatch.setenv("KIROCLAW_HOME", str(home))
-        monkeypatch.setenv("KIROCLAW_PORT", "7777")
+        monkeypatch.setenv("KIROCLAW_PORT", "8765")
 
         app_dir = home / "apps" / "good-app"
         app_dir.mkdir(parents=True)

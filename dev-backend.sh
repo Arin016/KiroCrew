@@ -4,7 +4,7 @@
 # restart.
 #
 # Usage: ./dev-backend.sh
-#   - Runs on port 6777 (dev port, separate from production on 7777)
+#   - Runs on port 6777 (dev port, separate from production on 8765)
 #   - Uses .kiroclaw-dev/ as data directory (isolated from ~/.kiroclaw/)
 #   - Ctrl+C to stop, re-run to pick up changes
 set -e

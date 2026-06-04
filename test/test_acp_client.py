@@ -4630,7 +4630,7 @@ class TestClaudeAcpMcpServers:
         reg = tmp_path / "kiroclaw.mcp.json"
         reg.write_text(
             json.dumps(
-                {"mcpServers": {"kiroclaw-core": {"url": "http://localhost:7777/api/mcp/core"}}}
+                {"mcpServers": {"kiroclaw-core": {"url": "http://localhost:8765/api/mcp/core"}}}
             )
         )
         with patch("kiro_claw.acp.client._CC_MCP_FILE", reg):

@@ -31,7 +31,7 @@ User → CLI / Slack / Dashboard → KiroClaw
 | `config/` | Dataclass config, `~/.kiroclaw/config.json` loader |
 | `providers/` | LLMProvider ABC, AcpProvider, BedrockProvider |
 | `slack/` | Socket Mode gateway + handler |
-| `dashboard/` | Web dashboard backend (aiohttp + SSE + WebSocket) at localhost:7777 |
+| `dashboard/` | Web dashboard backend (aiohttp + SSE + WebSocket) at localhost:8765 |
 | `session.py` | Thread-keyed provider pool with idle expiry + compaction |
 | `memory.py` | Structured memory files + FTS5 search |
 | `history.py` | JSONL conversation log + LLM consolidation + title persistence |

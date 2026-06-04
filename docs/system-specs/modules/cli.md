@@ -77,7 +77,7 @@ The saved project dir enables running `kiroclaw` from any directory.
 
 ### Custom Domain
 
-After credentials, `kiroclaw setup` offers to add `127.0.0.1 kiroclaw.localhost` to the system hosts file so the dashboard is accessible at `http://kiroclaw.localhost:7777`:
+After credentials, `kiroclaw setup` offers to add `127.0.0.1 kiroclaw.localhost` to the system hosts file so the dashboard is accessible at `http://kiroclaw.localhost:8765`:
 
 - **macOS/Linux**: Uses `sudo tee -a /etc/hosts` for safe append
 
@@ -129,7 +129,7 @@ CLI compaction is blocking (single-user, acceptable).
 | Variable | Purpose |
 |----------|---------|
 | `KIROCLAW_HOME` | Override config/data directory (default `~/.kiroclaw`) |
-| `KIROCLAW_PORT` | Override dashboard port (default `7777`, validated as int at CLI startup) |
+| `KIROCLAW_PORT` | Override dashboard port (default `8765`, validated as int at CLI startup) |
 | `KIROCLAW_PROJECT_DIR` | Override agent config/skills directory |
 | `KIROCLAW_WORKSPACE` | Override workspace root directory |
 

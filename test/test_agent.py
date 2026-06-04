@@ -2988,10 +2988,10 @@ class TestRefreshDynamicFieldsStripsStaleUrl:
         config = {
             "mcpServers": {
                 "kiroclaw-core": {
-                    "url": "http://localhost:7777/api/mcp/core",
+                    "url": "http://localhost:8765/api/mcp/core",
                     "headers": {"X-Stale": "1"},
                 },
-                "kiroclaw-cron": {"url": "http://localhost:7777/api/mcp/cron"},
+                "kiroclaw-cron": {"url": "http://localhost:8765/api/mcp/cron"},
             }
         }
         _refresh_dynamic_fields(config)

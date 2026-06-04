@@ -34,7 +34,7 @@ KIROCLAW_APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 KIROCLAW_DATA_DIR="$HOME/.kiroclaw"
 NODE_VERSION="20"
 PYTHON_VERSION="3.12"
-KIROCLAW_PORT="${KIROCLAW_PORT:-7777}"
+KIROCLAW_PORT="${KIROCLAW_PORT:-8765}"
 ACP_NPM_PKG="@agentclientprotocol/claude-agent-acp"
 
 # ── Colors & Formatting ──

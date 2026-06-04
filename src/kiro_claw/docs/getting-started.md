@@ -64,7 +64,7 @@ This interactive wizard:
 2. Saves the project directory for future use
 3. Installs the agent config to `~/.kiro/agents/kiroclaw.json`
 4. Prompts for Slack credentials (app token, bot token, owner ID)
-5. Optionally sets up `http://kiroclaw.localhost:7777` custom domain
+5. Optionally sets up `http://kiroclaw.localhost:8765` custom domain
 
 ### Slack Credentials
 
@@ -88,7 +88,7 @@ kiroclaw gateway
 
 This starts the full server: Slack Socket Mode listener, web dashboard, cron
 scheduler, heartbeat, and auto-update checker. The dashboard opens at
-`http://localhost:7777`.
+`http://localhost:8765`.
 
 ### Chat Mode (CLI only)
 

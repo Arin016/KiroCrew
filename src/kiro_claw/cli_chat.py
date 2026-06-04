@@ -30,7 +30,7 @@ BANNER = r"""
 def _tui(args: argparse.Namespace) -> None:
     """Launch the Ink TUI, replacing the current process."""
     cfg = KiroClawConfig.load()
-    port = getattr(args, "port", None) or cfg.to_dict().get("dashboard", {}).get("port", 7777)
+    port = getattr(args, "port", None) or cfg.to_dict().get("dashboard", {}).get("port", 8765)
 
     # Find TUI — prefer self-contained bundle, fall back to source tree
     base = Path(__file__).resolve().parent.parent.parent

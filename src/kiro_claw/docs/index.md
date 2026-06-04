@@ -23,7 +23,7 @@ for development) in the project root.
 kiroclaw gateway
 ```
 
-Then open `http://localhost:7777`.
+Then open `http://localhost:8765`.
 
 See [Getting Started](getting-started.md) for the full setup, including the
 agent backend and Slack credentials.

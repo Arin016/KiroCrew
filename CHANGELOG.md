@@ -2,6 +2,12 @@
 
 All notable changes to KiroClaw are documented in this file.
 
+## [Unreleased]
+
+### Changes
+
+- **Default dashboard port is now 8765** (was 7777) — The gateway, CLI, dashboard, and frontend dev proxy now default to port `8765`, avoiding clashes with other tools that commonly grab 7777. If you relied on the old port, set `KIROCLAW_PORT=7777` (or pass `--port 7777`) to keep it, and update any bookmarks, SSH tunnels (`ssh -NL 8765:localhost:8765 <host>`), and `dashboard.url` config entries. The auth cookie name follows the port, so existing sessions on the old port are re-issued automatically on first load.
+
 ## [2.6.0] — 2026-05-31
 
 287 commits across 2 packages (182 KiroClaw + 105 KiroClawWebsite), 99 contributors since v2.5.0.

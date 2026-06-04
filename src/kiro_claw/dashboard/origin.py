@@ -22,7 +22,7 @@ from aiohttp import web
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_PORT = 7777
+_DEFAULT_PORT = 8765
 
 _BIND_LOCAL = "127.0.0.1"
 _BIND_ALL = "0.0.0.0"
@@ -305,7 +305,7 @@ def check_origin(
     if origin_base in allowed:
         return True
     # Trust any loopback origin regardless of port — SSH tunnels commonly
-    # forward a different local port (e.g. -L 8777:localhost:7777) causing
+    # forward a different local port (e.g. -L 8777:localhost:8765) causing
     # the browser to send an Origin with a port not in the allowed set.
     # Token auth is the real security boundary; CSRF from localhost is not
     # a realistic threat.

@@ -59,4 +59,4 @@ echo "scp $USERNAME@$HOSTNAME:$SCRIPT_DIR/com.kiroclaw.tunnel.plist ~/Library/La
 echo "sed -i '' 's|ALIAS@DEV_DESKTOP_HOSTNAME|$USERNAME@$HOSTNAME|g' ~/Library/LaunchAgents/com.kiroclaw.tunnel.plist"
 echo "launchctl load ~/Library/LaunchAgents/com.kiroclaw.tunnel.plist"
 echo ""
-echo "Done! Dashboard: http://localhost:7777"
+echo "Done! Dashboard: http://localhost:8765"

@@ -254,15 +254,15 @@ alias sync-claw='rsync -avz ~/.kiroclaw/workspace/memory/ user@your-host.example
 
 ## Access Dashboard via SSH Tunnel
 
-The dashboard binds to `localhost:7777` on the remote host. Don't expose
+The dashboard binds to `localhost:8765` on the remote host. Don't expose
 that port publicly — instead, forward it to your local machine over an
 SSH tunnel and open it in your local browser:
 
 ```bash
-ssh -L 7777:localhost:7777 user@your-host.example.com
+ssh -L 8765:localhost:8765 user@your-host.example.com
 ```
 
-Then open `http://localhost:7777` in your local browser.
+Then open `http://localhost:8765` in your local browser.
 
 **Custom port** — if you configured a non-default port (set via the
 `KIROCLAW_PORT` environment variable on the remote host, e.g. when you
@@ -280,7 +280,7 @@ To make this automatic on every SSH connection, add to `~/.ssh/config` on your l
 
 ```
 Host your-host.example.com
-    LocalForward 7777 localhost:7777
+    LocalForward 8765 localhost:8765
 ```
 
 Now a plain `ssh your-host.example.com` will always set up the tunnel.
@@ -305,7 +305,7 @@ cat > ~/Library/LaunchAgents/com.kiroclaw.tunnel.plist << EOF
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <string>while true; do echo "\$(date): Connecting..." >> /tmp/kiroclaw-tunnel.log; ssh -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -L 7777:localhost:7777 $REMOTE_HOST 2>> /tmp/kiroclaw-tunnel.log; echo "\$(date): Disconnected (exit \$?)" >> /tmp/kiroclaw-tunnel.log; sleep 15; done</string>
+        <string>while true; do echo "\$(date): Connecting..." >> /tmp/kiroclaw-tunnel.log; ssh -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -L 8765:localhost:8765 $REMOTE_HOST 2>> /tmp/kiroclaw-tunnel.log; echo "\$(date): Disconnected (exit \$?)" >> /tmp/kiroclaw-tunnel.log; sleep 15; done</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -348,12 +348,12 @@ If you use Raycast scripts, you can use the below snippet to start an SSH tunnel
 # Documentation:
 # @raycast.description Get token and start KiroClaw
 REMOTE_HOST="user@your-host.example.com"
-if lsof -i :7777 -sTCP:LISTEN > /dev/null 2>&1; then
+if lsof -i :8765 -sTCP:LISTEN > /dev/null 2>&1; then
   echo "Tunnel already opened, accessing KiroClaw"
   URL="$(ssh "${REMOTE_HOST}" 'source ~/.zshrc; kiroclaw token')"
   open "$URL"
 else
-  ssh -fNT -L 7777:localhost:7777 "${REMOTE_HOST}"
+  ssh -fNT -L 8765:localhost:8765 "${REMOTE_HOST}"
   echo "Tunnel opened, accessing KiroClaw!"
   URL="$(ssh "${REMOTE_HOST}" 'source ~/.zshrc; kiroclaw token')"
   open "$URL"
@@ -368,7 +368,7 @@ fi
 | Agent backend errors / timeouts | Confirm `claude-agent-acp` is installed (`npm ls -g @agentclientprotocol/claude-agent-acp`) and provider credentials are set in `~/.kiroclaw/.env` |
 | Service won't start | `sudo journalctl -u kiroclaw -n 50` to check logs |
 | Service keeps restarting | Check `systemctl status kiroclaw` for exit code, then check logs |
-| SSH tunnel refuses connection | Confirm the gateway is running on the remote host and listening on the expected port (`ss -ltnp \| grep 7777`) |
+| SSH tunnel refuses connection | Confirm the gateway is running on the remote host and listening on the expected port (`ss -ltnp \| grep 8765`) |
 | Dashboard shows Ollama offline (✗) but it was working before | The `ollama.com` install script creates a systemd service (`User=ollama`) that conflicts with KiroClaw's own process management. The systemd user can't find models in your `~/.ollama/models/`. Fix: `sudo systemctl disable --now ollama` — KiroClaw manages Ollama itself via `ollama serve` subprocess |
 | `ollama list` shows no models but files exist in `~/.ollama/` | Same systemd user mismatch. The `ollama` system user looks in `/usr/share/ollama/.ollama/models/` instead of your home directory. Either disable the systemd service (recommended) or set `Environment="OLLAMA_MODELS=/home/YOUR_USER/.ollama/models"` in `/etc/systemd/system/ollama.service` |
 

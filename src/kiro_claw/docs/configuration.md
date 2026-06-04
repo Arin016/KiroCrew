@@ -137,7 +137,7 @@ Set via `kiroclaw config set sandbox.mode auto`.
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `KIROCLAW_HOME` | Override config/data directory | `~/.kiroclaw` |
-| `KIROCLAW_PORT` | Override dashboard port | `7777` |
+| `KIROCLAW_PORT` | Override dashboard port | `8765` |
 | `KIROCLAW_PROJECT_DIR` | Override agent config/skills directory | Auto-detected |
 | `KIROCLAW_WORKSPACE` | Override workspace root directory | Platform default |
 

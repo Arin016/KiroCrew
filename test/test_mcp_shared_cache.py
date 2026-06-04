@@ -74,9 +74,9 @@ def patch_session_setup(monkeypatch, tmp_path):
     """Patch the gateway-config plumbing so the resolver only depends on
     what the test wants to exercise."""
     cfg = MagicMock()
-    cfg.dashboard.url = "http://localhost:7777/"
+    cfg.dashboard.url = "http://localhost:8765/"
     monkeypatch.setattr(mcp_shared.KiroClawConfig, "load", classmethod(lambda cls: cfg))
-    monkeypatch.setattr(mcp_shared, "parse_dashboard_url", lambda url: ("localhost", 7777))
+    monkeypatch.setattr(mcp_shared, "parse_dashboard_url", lambda url: ("localhost", 8765))
     # Provide a writeable config_dir() with a .local_secret.
     monkeypatch.setattr(mcp_shared, "config_dir", lambda: tmp_path)
     (tmp_path / ".local_secret").write_text("test-secret")

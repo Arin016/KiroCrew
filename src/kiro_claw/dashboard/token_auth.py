@@ -631,7 +631,7 @@ def token_auth_middleware(
     internal_paths: frozenset[str] = frozenset(),
     mixed_internal_paths: frozenset[str] = frozenset(),
     internal_secret: str = "",
-    port: int = 7777,
+    port: int = 8765,
     local_only: bool = True,
 ) -> Callable[..., Any]:
     """Factory returning aiohttp middleware for token-based dashboard auth.

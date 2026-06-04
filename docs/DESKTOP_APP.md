@@ -158,7 +158,7 @@ The function is pure — `fs`, `os`, `path`, `process.resourcesPath`, and
 - Ensures `KIROCLAW_HOME` (default `~/.kiroclaw`, overridable via the
   `KIROCLAW_HOME` env var) exists, then spawns the backend with
   `["gateway", "--no-open"]`.
-- Honors the **`KIROCLAW_PORT`** env var for the dashboard port (default `7777`,
+- Honors the **`KIROCLAW_PORT`** env var for the dashboard port (default `8765`,
   validated to `1–65535`). `BACKEND_URL` / health checks target that port.
 - Sets `KIROCLAW_PROJECT_DIR` to the Electron app's parent directory so the
   bundled `agents/` and `skills/` are discovered.

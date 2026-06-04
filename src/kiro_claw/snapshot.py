@@ -561,7 +561,7 @@ def _is_gateway_running() -> bool:
         from kiro_claw.config.loader import DASHBOARD_PORT
         port = DASHBOARD_PORT
     except Exception:
-        port = int(os.environ.get("KIROCLAW_PORT", 7777))
+        port = int(os.environ.get("KIROCLAW_PORT", 8765))
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=1):
             return True

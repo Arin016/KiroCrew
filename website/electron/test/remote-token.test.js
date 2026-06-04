@@ -88,7 +88,7 @@ describe("buildRemoteTokenCommand", () => {
 
 describe("parseTokenFromStdout", () => {
   it("extracts token from standard URL", () => {
-    const url = "http://localhost:7777?token=eyJhbGciOiJIUzI1NiJ9";
+    const url = "http://localhost:8765?token=eyJhbGciOiJIUzI1NiJ9";
     assert.equal(parseTokenFromStdout(url), "eyJhbGciOiJIUzI1NiJ9");
   });
 

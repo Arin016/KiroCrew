@@ -136,11 +136,11 @@ Install via the KiroClaw dashboard REST API or the App Store UI:
 
 ```bash
 # Via curl (REST API)
-curl -X POST http://localhost:7777/api/apps/install \
+curl -X POST http://localhost:8765/api/apps/install \
   -H 'Content-Type: application/json' \
   -d '{"source": "/path/to/my-dashboard"}'
 
-curl -X POST http://localhost:7777/api/apps/my-dashboard/enable
+curl -X POST http://localhost:8765/api/apps/my-dashboard/enable
 ```
 
 Or open the KiroClaw dashboard → App Store → install from local path.
@@ -155,7 +155,7 @@ During development:
 2. Run `cd ui && npm run build`
 3. Update the installed app:
    ```bash
-   curl -X POST http://localhost:7777/api/apps/my-dashboard/update
+   curl -X POST http://localhost:8765/api/apps/my-dashboard/update
    ```
 4. Refresh the dashboard — changes are live
 

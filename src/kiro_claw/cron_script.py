@@ -82,11 +82,11 @@ class ScriptContext:
     """Passed to script functions. Provides delivery and tool access."""
 
     job: CronJob
-    _port: int = 7777
+    _port: int = 8765
     _secret: str = ""
 
     def __post_init__(self) -> None:
-        self._port = int(os.environ.get("KIROCLAW_PORT", "7777"))
+        self._port = int(os.environ.get("KIROCLAW_PORT", "8765"))
         # Secret injected via temp file (not inherited env) to prevent privilege escalation.
         # Pop env var and unlink file immediately so fn(ctx) cannot access the secret directly.
         secret_file = os.environ.pop("_KIROCLAW_SECRET_FILE", "")

@@ -8,7 +8,7 @@ assets are emitted to `dist/` and copied into the Python package at
 
 ```bash
 npm install          # install dependencies (public npm registry)
-npm run dev          # Vite dev server on http://localhost:3000 (proxies API to the gateway on :7777)
+npm run dev          # Vite dev server on http://localhost:3000 (proxies API to the gateway on :8765)
 ```
 
 ## Build

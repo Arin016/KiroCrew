@@ -12,7 +12,7 @@ KiroClaw implements defense-in-depth security across multiple layers: OS-level p
 |--------|--------|------------|
 | XPIA credential theft | LLM reads `~/.aws`, `~/.ssh` via `fs_read` or `cat` | Hook-layer path blocking + OS sandbox |
 | XPIA data exfiltration | LLM embeds secrets in URLs posted to Slack/dashboard | Output scanning + URL redaction |
-| Cross-origin WebSocket hijack | Malicious page connects to `ws://127.0.0.1:7777/api/ws` | Origin header validation |
+| Cross-origin WebSocket hijack | Malicious page connects to `ws://127.0.0.1:8765/api/ws` | Origin header validation |
 | Cross-origin mutation (CSRF) | Malicious page POSTs to dashboard API | Origin/Referer validation on non-safe methods |
 | Unauthenticated remote access | Dashboard bound to `0.0.0.0` | Loopback-only by default (`127.0.0.1`); when user opts in via `dashboard.url`, token auth middleware requires HMAC-SHA256 signed, IP-pinned, single-use tokens on every request |
 | Unauthenticated remote access (AEA tunnel) | `tunnel.enabled` exposes dashboard via public HTTPS URL | Double auth: Tunnels validates Midway OIDC at edge + KiroClaw token auth middleware. Security gate refuses tunnel start without token auth active. Owner-only access (Tunnels restricts by username). SEL audit on connect/disconnect/denial |
@@ -151,7 +151,7 @@ Centralized validation for all 12 MCP tool handlers (SDO-183):
 
 ### Dashboard Authentication & Authorization
 
-**Dashboard URL config** — single `dashboard.url` field in `config.json` (e.g. `http://my-host.corp.amazon.com:8080`). Hostname, port, local-only mode, and allowed origins are all derived from this URL. When not set, defaults to `localhost:7777`. `KIROCLAW_PORT` env var overrides the port (dev mode).
+**Dashboard URL config** — single `dashboard.url` field in `config.json` (e.g. `http://my-host.corp.amazon.com:8080`). Hostname, port, local-only mode, and allowed origins are all derived from this URL. When not set, defaults to `localhost:8765`. `KIROCLAW_PORT` env var overrides the port (dev mode).
 
 **SSH tunnel instructions** — All SSH tunnel commands printed by `kiroclaw gateway` and `kiroclaw doctor` now use the `-N` flag (`ssh -NL ...`) to suppress remote shell allocation. The tunnel purely forwards the port without opening an interactive session on the remote host.
 

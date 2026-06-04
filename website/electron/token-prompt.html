@@ -53,7 +53,7 @@
     function go() {
       const v = document.getElementById('url').value.trim();
       if (!v) return;
-      const port = new URLSearchParams(window.location.search).get('port') || '7777';
+      const port = new URLSearchParams(window.location.search).get('port') || '8765';
       let t;
       try { t = new URL(v).searchParams.get('token'); } catch (_) { t = v; }
       if (t) {

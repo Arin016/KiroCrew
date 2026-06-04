@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test'
 /**
  * E2E test for the "Fork session" feature.
  *
- * Runs against a real gateway on localhost:7777. Exercises the full round-trip:
+ * Runs against a real gateway on localhost:8765. Exercises the full round-trip:
  * send message → wait for assistant reply → click fork button → verify new tab.
  *
  * Skipped gracefully if no assistant reply arrives within the timeout, since

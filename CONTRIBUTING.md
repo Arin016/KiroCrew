@@ -36,7 +36,7 @@ kiroclaw doctor              # verify everything works
 kiroclaw gateway             # start server (dashboard + Slack)
 ```
 
-The dashboard is at `http://localhost:7777`.
+The dashboard is at `http://localhost:8765`.
 
 **Dashboard-only mode**: skip Slack tokens during `kiroclaw setup` to run
 without Slack.
@@ -82,7 +82,7 @@ Browse at `http://localhost:6777`. The backend serves the built frontend assets 
 | Env var | Purpose | Default |
 |---------|---------|---------|
 | `KIROCLAW_HOME` | Config/data directory override | `~/.kiroclaw` |
-| `KIROCLAW_PORT` | Dashboard port override | `7777` |
+| `KIROCLAW_PORT` | Dashboard port override | `8765` |
 
 If you don't need to run production and dev side by side, omit `KIROCLAW_PORT` —
 just stop your production gateway first.
