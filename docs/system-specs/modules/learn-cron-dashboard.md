@@ -297,10 +297,12 @@ Searches the Knowledge Library for relevant content. Escalated from App Store to
 
 Sends a message to the user via Slack DM and dashboard notification. Exposed as MCP tool in `mcp_core.py`, backed by `POST /api/send-message` in `handlers.py`.
 
-- **Parameters**: `text` (required), `title` (optional, defaults to "Agent Message"), `blocks` (optional, Slack Block Kit array, max 50)
-- **Delivery**: dashboard notification via `state.notify()` (text only) + Slack DM via `post_blocks()` when blocks provided, otherwise `post_message()` (requires `DashboardState.slack_client` and `owner_id`)
+- **Parameters**: `text` (required), `title` (optional), `blocks` (optional), `session` (optional: `"origin"` or `"slack"`), `channel` (optional), `user` (optional)
+- **Delivery** (default, no session/channel/user): dashboard notification only via `state.notify()`
+- **session="slack"**: Slack DM + dashboard notification
+- **session="origin"**: inject into the dashboard session that spawned this cron. Falls through to notification-only if origin is unreachable.
 - **Security**: blocks content is deep-walked through `redact_exfiltration_urls()` and `redact_credentials()` via `_sanitize_blocks()`, truncated to 50 blocks with recursion depth limit
-- **Response**: `{ok: true, slack: bool}` — `slack` indicates whether Slack delivery succeeded
+- **Response**: `{ok: true, slack: bool, session: bool}`
 - **Primary use case**: silent cron jobs where the agent controls notification timing
 
 #### Silent Cron Flow
@@ -310,7 +312,7 @@ Sends a message to the user via Slack DM and dashboard notification. Exposed as 
 3. Gateway skips auto-delivery (no Slack post, no dashboard notification)
 4. Agent processes the result, applies judgment (e.g. "nothing changed, skip")
 5. When the agent decides the user should know, it calls `send_message` with the relevant output
-6. `send_message` → `POST /api/send-message` → dashboard notification + Slack DM
+6. `send_message` → `POST /api/send-message` → dashboard notification (default) or Slack DM (if `session="slack"`)
 - Toggle syncs to `kiroclaw.json` `tools`/`allowedTools` for consistency
 - ACP `session/new` passes `mcpServers: []` (required field); `set_mode` activates the agent
 - MCP server init drain: 10s after `set_mode`/`set_model` to wait for all servers to load
