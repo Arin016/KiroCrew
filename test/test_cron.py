@@ -343,16 +343,23 @@ class TestEffectiveDelay:
 class TestFormatSchedule:
     @pytest.fixture(autouse=False)
     def _utc_tz(self):
-        """Pin TZ=UTC for tests that compare dates across today/future."""
+        """Pin TZ=UTC for tests that compare dates across today/future.
+
+        ``time.tzset`` is Unix-only and absent from some interpreter builds;
+        when it's missing we skip the call since CI fleets already run in UTC,
+        so the pin is a no-op there.
+        """
         old_tz = os.environ.get("TZ")
         os.environ["TZ"] = "UTC"
-        time.tzset()
+        if hasattr(time, "tzset"):
+            time.tzset()
         yield
         if old_tz is None:
             os.environ.pop("TZ", None)
         else:
             os.environ["TZ"] = old_tz
-        time.tzset()
+        if hasattr(time, "tzset"):
+            time.tzset()
 
     def test_cron_expr_human_readable(self, monkeypatch) -> None:
         from kiro_claw.cron import CronSchedule, format_schedule
