@@ -2,7 +2,21 @@
 
 from __future__ import annotations
 
+import pytest
+
+from kiro_claw.config.loader import KiroClawConfig, SkillsConfig
 from kiro_claw.skills import SkillsLoader
+
+
+@pytest.fixture(autouse=True)
+def _isolate_extra_paths(monkeypatch):
+    """SkillsLoader.__init__ reads global config for ``skills.extra_paths``;
+    isolate it so a developer's local ~/.kiroclaw extra_paths don't bleed into
+    these hermetic loader tests. Tests that need extra_paths pass ``config=``."""
+    monkeypatch.setattr(
+        KiroClawConfig, "load",
+        classmethod(lambda cls: KiroClawConfig(skills=SkillsConfig(extra_paths=[]))),
+    )
 
 
 def _create_skill(skills_dir, name, content):
@@ -755,3 +769,93 @@ class TestUpdateAutoSkillPreservesCreatedAt:
         # Session key from the refine provenance was honored (provenance
         # fields other than created_at update normally).
         assert "session_key: dashboard:chat-2" in content
+
+
+def _cfg_with_extra(paths):
+    """Build a config with skills.extra_paths set (isolated, no disk read)."""
+    return KiroClawConfig(skills=SkillsConfig(extra_paths=paths))
+
+
+class TestSkillsLoaderExtraPaths:
+    def test_extra_path_skill_listed(self, tmp_path):
+        local = tmp_path / "local"
+        local.mkdir()
+        extra = tmp_path / "extra"
+        _create_skill(extra, "roaring", "---\nname: roaring\ndescription: Roaring ops\n---\n# Roaring\n")
+        loader = SkillsLoader(
+            skills_path=local, install_builtins=False, config=_cfg_with_extra([str(extra)]),
+        )
+        names = {s["name"] for s in loader.list_skills()}
+        assert "roaring" in names
+
+    def test_local_takes_precedence(self, tmp_path):
+        local = tmp_path / "local"
+        extra = tmp_path / "extra"
+        _create_skill(local, "dup", "---\nname: dup\ndescription: LOCAL\n---\n# Local\n")
+        _create_skill(extra, "dup", "---\nname: dup\ndescription: EXTRA\n---\n# Extra\n")
+        loader = SkillsLoader(
+            skills_path=local, install_builtins=False, config=_cfg_with_extra([str(extra)]),
+        )
+        dup = [s for s in loader.list_skills() if s["name"] == "dup"]
+        assert len(dup) == 1
+        assert dup[0]["description"] == "LOCAL"
+
+    def test_load_skill_from_extra_path(self, tmp_path):
+        local = tmp_path / "local"
+        local.mkdir()
+        extra = tmp_path / "extra"
+        _create_skill(extra, "contributing", "---\nname: contributing\n---\n# Contributing\nGuide.")
+        loader = SkillsLoader(
+            skills_path=local, install_builtins=False, config=_cfg_with_extra([str(extra)]),
+        )
+        content = loader.load_skill("contributing")
+        assert content is not None
+        assert "Contributing" in content
+
+    def test_local_skill_shadows_extra_on_load(self, tmp_path):
+        local = tmp_path / "local"
+        extra = tmp_path / "extra"
+        _create_skill(local, "dup", "---\nname: dup\n---\n# LocalBody\n")
+        _create_skill(extra, "dup", "---\nname: dup\n---\n# ExtraBody\n")
+        loader = SkillsLoader(
+            skills_path=local, install_builtins=False, config=_cfg_with_extra([str(extra)]),
+        )
+        assert "LocalBody" in loader.load_skill("dup")
+
+    def test_nonexistent_extra_path_ignored(self, tmp_path):
+        local = tmp_path / "local"
+        local.mkdir()
+        loader = SkillsLoader(
+            skills_path=local, install_builtins=False,
+            config=_cfg_with_extra([str(tmp_path / "missing")]),
+        )
+        assert loader._extra_paths == []
+
+    def test_sensitive_extra_path_skipped(self, tmp_path, monkeypatch):
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        monkeypatch.setattr("kiro_claw.skills.is_sensitive_path", lambda p: True)
+        loader = SkillsLoader(
+            skills_path=tmp_path / "local", install_builtins=False,
+            config=_cfg_with_extra([str(extra)]),
+        )
+        assert loader._extra_paths == []
+
+    def test_sensitive_skill_file_skipped(self, tmp_path, monkeypatch):
+        # Extra dir is allowed, but an individual SKILL.md is flagged sensitive:
+        # it must be excluded from listing AND refused on load.
+        local = tmp_path / "local"
+        local.mkdir()
+        extra = tmp_path / "extra"
+        _create_skill(extra, "x", "---\nname: x\n---\n# X\n")
+        # Both listing (_iter) and load_skill route extra-path reads through
+        # validate_file_path — flagging it there blocks both.
+        monkeypatch.setattr(
+            "kiro_claw.skills.validate_file_path",
+            lambda p: None if str(p).endswith("SKILL.md") else p,
+        )
+        loader = SkillsLoader(
+            skills_path=local, install_builtins=False, config=_cfg_with_extra([str(extra)]),
+        )
+        assert "x" not in {s["name"] for s in loader.list_skills()}
+        assert loader.load_skill("x") is None

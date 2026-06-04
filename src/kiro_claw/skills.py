@@ -11,7 +11,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from kiro_claw.config.loader import config_dir
+from kiro_claw.config.loader import KiroClawConfig, config_dir
+from kiro_claw.hooks import validate_file_path
 from kiro_claw.security import is_sensitive_path
 
 logger = logging.getLogger(__name__)
@@ -252,16 +253,45 @@ class SkillsLoader:
             └── mcp-debug/SKILL.md
     """
 
-    def __init__(self, skills_path: Path | None = None, install_builtins: bool = True):
+    def __init__(
+        self,
+        skills_path: Path | None = None,
+        install_builtins: bool = True,
+        config: KiroClawConfig | None = None,
+    ):
         self._dir = skills_path or skills_dir()
         if install_builtins:
             _ensure_builtin_skills(self._dir)
         # Cache: path → (mtime, parsed_frontmatter)
         self._fm_cache: dict[str, tuple[float, dict[str, str]]] = {}
+        # Extra skill paths from config (config injectable for testing)
+        cfg = config or KiroClawConfig.load()
+        self._extra_paths: list[Path] = []
+        for p in cfg.skills.extra_paths:
+            resolved = Path(p).expanduser().resolve()
+            if is_sensitive_path(str(resolved)):
+                logger.warning("Skipping sensitive extra skill path: %s", p)
+            elif resolved.is_dir():
+                self._extra_paths.append(resolved)
+            else:
+                logger.debug("Extra skill path does not exist: %s", p)
 
     def _iter(self) -> list[tuple[str, Path]]:
-        """Return all ``(name, skill_file)`` pairs."""
-        return _iter_skill_files(self._dir)
+        """Return all ``(name, skill_file)`` pairs. Local skills take precedence."""
+        results = _iter_skill_files(self._dir)
+        seen = {name for name, _ in results}
+        for root in self._extra_paths:
+            for name, skill_file in _iter_skill_files(root):
+                if name in seen:
+                    continue
+                # Route through hooks validation (resolves symlinks + sensitive
+                # check) so files read later during trigger matching are vetted.
+                resolved = validate_file_path(str(skill_file))
+                if resolved is None:
+                    continue
+                results.append((name, Path(resolved)))
+                seen.add(name)
+        return results
 
     def _cached_frontmatter(self, path: Path) -> dict[str, str]:
         """Parse frontmatter with mtime-based caching."""
@@ -306,6 +336,15 @@ class SkillsLoader:
         skill_file = self._dir / name / "SKILL.md"
         if skill_file.exists():
             return skill_file.read_text(encoding="utf-8")
+        # Check extra paths
+        for extra in self._extra_paths:
+            skill_file = extra / name / "SKILL.md"
+            if skill_file.exists():
+                resolved = validate_file_path(str(skill_file))
+                if resolved is None:
+                    logger.warning("Refusing to load skill from sensitive path: %s", skill_file)
+                    continue
+                return Path(resolved).read_text(encoding="utf-8")
         return None
 
     def create_skill(self, name: str, content: str) -> bool:

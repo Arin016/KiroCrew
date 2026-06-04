@@ -22,7 +22,7 @@
         "bedrock_region": "us-west-2",
         "default_agent": "",
         "sandbox": "auto",
-        "cc_model": "global.anthropic.claude-opus-4-8[1m]",
+        "cc_model": "opus-4.8-1m",
         "cc_connection_mode": "per_session",
         "cc_max_turns": 0,
         "cc_max_budget_usd": 0.0,
@@ -177,10 +177,10 @@
       "sensitive": false,
       "tags": [],
       "label": "CC Model",
-      "help": "Claude Code model. Default 'global.anthropic.claude-opus-4-8[1m]' (Opus 4.8, 1M context window). Aliases: opus, sonnet, haiku, auto (empty).",
+      "help": "Claude Code model — a canonical registry key (default 'opus-4.8-1m', Opus 4.8 with the 1M context window). Translated to a provider id at the config.loader factory. Aliases: opus, sonnet, auto (empty).",
       "hasChildren": false,
       "enumValues": null,
-      "defaultValue": "global.anthropic.claude-opus-4-8[1m]"
+      "defaultValue": "opus-4.8-1m"
     },
     {
       "path": "agent.cc_connection_mode",
@@ -998,7 +998,8 @@
         "auto_create_from_sessions": false,
         "auto_refine_on_deviation": false,
         "auto_min_tool_calls": 5,
-        "auto_similarity_threshold": 0.85
+        "auto_similarity_threshold": 0.85,
+        "extra_paths": []
       }
     },
     {
@@ -1070,6 +1071,34 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": 0.85
+    },
+    {
+      "path": "skills.extra_paths",
+      "kind": "core",
+      "type": "array",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Extra Skill Paths",
+      "help": "Additional directories to scan for skills. Supports ~ expansion. Skills from extra_paths are read-only (trigger matching + loading). Local ~/.kiroclaw/skills/ takes precedence for duplicate names.",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": []
+    },
+    {
+      "path": "skills.extra_paths.*",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "*",
+      "help": "",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": null
     },
     {
       "path": "stt",

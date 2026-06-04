@@ -941,6 +941,15 @@ class SkillsConfig:
             "near-duplicate skills.",
         ),
     )
+    extra_paths: list[str] = field(
+        default_factory=list,
+        metadata=_meta(
+            "Extra Skill Paths",
+            "Additional directories to scan for skills. Supports ~ expansion. "
+            "Skills from extra_paths are read-only (trigger matching + loading). "
+            "Local ~/.kiroclaw/skills/ takes precedence for duplicate names.",
+        ),
+    )
 
     def __post_init__(self) -> None:
         if self.max_triggered < 1:
@@ -2002,6 +2011,7 @@ class KiroClawConfig:
                 auto_refine_on_deviation=bool(skills_data.get("auto_refine_on_deviation", False)),
                 auto_min_tool_calls=int(skills_data.get("auto_min_tool_calls", 5)),
                 auto_similarity_threshold=float(skills_data.get("auto_similarity_threshold", 0.85)),
+                extra_paths=list(skills_data.get("extra_paths", [])),
             ),
             slack_channels={
                 ch_id: ChannelConfig.from_dict(ch_data)
