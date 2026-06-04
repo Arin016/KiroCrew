@@ -91,9 +91,11 @@ def _save_screenshot(data: str, media_type: str) -> str:
             if img.width > max_width:
                 ratio = max_width / img.width
                 resample = getattr(Image, "LANCZOS", getattr(Image, "ANTIALIAS", None))
-                img = img.resize((max_width, int(img.height * ratio)), resample)
+                resized = img.resize((max_width, int(img.height * ratio)), resample)
+            else:
+                resized = img
             buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=70)
+            resized.save(buf, format="JPEG", quality=70)
             img_bytes = buf.getvalue()
             filepath = filepath.rsplit(".", 1)[0] + ".jpeg"
         except Exception:

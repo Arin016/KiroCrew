@@ -740,7 +740,7 @@ class AppManifest:
             minKiroClawVersion=str(data.get("minKiroClawVersion", "")),  # noqa: N815
             agents=[str(a) for a in data.get("agents", []) if a],
             skills=[
-                (s.get("path", s.get("name", "")) if isinstance(s, dict) else str(s))
+                str(s.get("path", s.get("name", "")) if isinstance(s, dict) else s)
                 for s in data.get("skills", [])
                 if s
             ],

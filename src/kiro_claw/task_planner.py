@@ -162,6 +162,9 @@ def parse_tasks(text: str) -> list[Task]:
     else:
         return []
 
+    if not isinstance(data, list):
+        return []
+
     tasks: list[Task] = []
     for i, item in enumerate(data, 1):
         if isinstance(item, dict) and "title" in item:
@@ -172,8 +175,8 @@ def parse_tasks(text: str) -> list[Task]:
             tasks.append(
                 Task(
                     index=i,
-                    title=item["title"],
-                    description=item.get("description", item["title"]),
+                    title=str(item["title"]),
+                    description=str(item.get("description", item["title"])),
                     requires_approval=bool(item.get("requires_approval")),
                     force_approval=bool(item.get("force_approval")),
                     depends_on=valid_deps,
