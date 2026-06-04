@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -4371,6 +4372,74 @@ class TestFolderCRUD:
             resp = await client.patch("/api/chat/folders/f1", json={"default_agent": ""})
             data = await resp.json()
             assert data["default_agent"] == ""
+
+    @pytest.mark.asyncio
+    async def test_create_folder_with_project_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        app = _make_folder_app(state)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/chat/folders", json={"name": "P", "project_dir": str(proj)}
+            )
+            assert resp.status == 201
+            data = await resp.json()
+            assert data["project_dir"] == os.path.realpath(str(proj))
+
+    @pytest.mark.asyncio
+    async def test_create_folder_relative_project_dir_rejected(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        app = _make_folder_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/chat/folders", json={"name": "P", "project_dir": "relative/path"}
+            )
+            assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_create_folder_nonexistent_project_dir_rejected(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        app = _make_folder_app(state)
+        missing = tmp_path / "does-not-exist"
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/chat/folders", json={"name": "P", "project_dir": str(missing)}
+            )
+            assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_create_folder_sensitive_project_dir_rejected(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        app = _make_folder_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/chat/folders", json={"name": "P", "project_dir": "~/.ssh"}
+            )
+            assert resp.status == 400
+            data = await resp.json()
+            assert "sensitive" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_update_folder_project_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        app = _make_folder_app(state)
+        proj = tmp_path / "proj2"
+        proj.mkdir()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/chat/folders", json={"name": "P"})
+            folder = await resp.json()
+            resp = await client.patch(
+                f"/api/chat/folders/{folder['id']}", json={"project_dir": str(proj)}
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["project_dir"] == os.path.realpath(str(proj))
 
     @pytest.mark.asyncio
     async def test_update_folder_empty_name_rejected(self, tmp_path, monkeypatch):

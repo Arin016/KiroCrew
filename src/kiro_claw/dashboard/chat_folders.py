@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import unicodedata
 import uuid
 
@@ -12,7 +13,7 @@ from aiohttp import web
 from kiro_claw.dashboard.chat_persistence import _save_slot_to_history
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.providers.base import EVENT_COMPLETE, EVENT_PERMISSION_REQUEST, EVENT_TEXT_CHUNK
-from kiro_claw.security import redact_credentials, redact_exfiltration_urls
+from kiro_claw.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
 from kiro_claw.session import BACKGROUND_KEY
 
@@ -78,6 +79,24 @@ async def api_chat_folders(request: web.Request) -> web.Response:
     return web.json_response(state._folders)
 
 
+def _validate_project_dir(raw: str) -> tuple[str, str | None]:
+    """Validate and normalize project_dir. Returns (resolved_path, error_msg)."""
+    if not raw:
+        return "", None
+    if not os.path.isabs(raw) and not raw.startswith("~"):
+        return "", "project_dir must be an absolute path"
+    resolved = os.path.realpath(os.path.expanduser(raw))
+    if is_sensitive_path(resolved):
+        sel().log_api_access(
+            caller="dashboard", operation="chat.folder_project_dir",
+            outcome="denied", resources=resolved, error="sensitive path",
+        )
+        return "", "project_dir refers to a sensitive path"
+    if not os.path.isdir(resolved):
+        return "", "project_dir must be an existing directory"
+    return resolved, None
+
+
 async def api_chat_folder_create(request: web.Request) -> web.Response:
     """POST /api/chat/folders — create a project folder."""
     state: DashboardState = request.app["state"]
@@ -91,12 +110,17 @@ async def api_chat_folder_create(request: web.Request) -> web.Response:
     parent_id = str(body.get("parent_id") or "")
     if parent_id and not any(f["id"] == parent_id for f in state._folders):
         return web.json_response({"error": "parent folder not found"}, status=400)
+    project_dir = str(body.get("project_dir") or "").strip()
+    project_dir, err = _validate_project_dir(project_dir)
+    if err:
+        return web.json_response({"error": err}, status=400)
     folder = {
         "id": uuid.uuid4().hex[:12],
         "name": name,
         "order": len(state._folders),
         "collapsed": False,
         "parent_id": parent_id,
+        "project_dir": project_dir,
     }
     state._folders.append(folder)
     state.save_folders()
@@ -135,6 +159,11 @@ async def api_chat_folder_update(request: web.Request) -> web.Response:
     if "default_agent" in body:
         val = body["default_agent"]
         folder["default_agent"] = str(val).strip() if val is not None else ""
+    if "project_dir" in body:
+        pd, err = _validate_project_dir(str(body["project_dir"] or "").strip())
+        if err:
+            return web.json_response({"error": err}, status=400)
+        folder["project_dir"] = pd
     state.save_folders()
     state.push_slots_update()
     sel().log_api_access(
