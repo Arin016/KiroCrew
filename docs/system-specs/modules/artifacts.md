@@ -167,7 +167,7 @@ via a follow-up `update()`.
 
 `list_versions(slug)` returns the sorted set of stored version numbers.
 `get(slug, version=N)` reads a specific version. After pruning, lower-numbered
-versions may be unavailable; callers must handle `ArtifactNotFound` for
+versions may be unavailable; callers must handle `ArtifactNotFoundError` for
 out-of-range versions.
 
 ## Roadmap
