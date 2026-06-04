@@ -17,8 +17,12 @@ from kiro_claw.snapshot import restore_main, snapshot_main
 
 @pytest.fixture(autouse=True)
 def _no_gateway(monkeypatch):
-    """Prevent gateway-running check from blocking restore in tests."""
-    monkeypatch.setattr("kiro_claw.snapshot._is_gateway_running", lambda: False)
+    """Prevent gateway-running check from blocking restore in tests.
+
+    Uses the deterministic env seam (not a function patch) so refusal tests can
+    override it with ``=1`` and the result never depends on a real socket probe.
+    """
+    monkeypatch.setenv("KIROCLAW_ASSUME_GATEWAY_RUNNING", "0")
 
 
 def _setup_fake_kiroclaw(d: Path) -> None:
@@ -727,8 +731,7 @@ class TestGatewayRunningRefusal:
         fresh = tmp_path / "fresh_gw"
         fresh.mkdir()
         monkeypatch.setenv("KIROCLAW_HOME", str(fresh))
-        import kiro_claw.snapshot as _snap
-        monkeypatch.setattr(_snap, "_is_gateway_running", lambda: True)
+        monkeypatch.setenv("KIROCLAW_ASSUME_GATEWAY_RUNNING", "1")
         ret = restore_main([str(tarball), "--mode", "replace"])
         assert ret == 1
         assert "Gateway is running" in capsys.readouterr().out
@@ -739,8 +742,7 @@ class TestGatewayRunningRefusal:
         fresh = tmp_path / "fresh_gw_force"
         fresh.mkdir()
         monkeypatch.setenv("KIROCLAW_HOME", str(fresh))
-        import kiro_claw.snapshot as _snap
-        monkeypatch.setattr(_snap, "_is_gateway_running", lambda: True)
+        monkeypatch.setenv("KIROCLAW_ASSUME_GATEWAY_RUNNING", "1")
         ret = restore_main([str(tarball), "--mode", "replace", "--force"])
         assert ret == 0
 

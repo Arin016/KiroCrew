@@ -18,6 +18,11 @@ try:
 except ImportError:
     import sqlite3
 
+try:
+    from kiro_claw.config.loader import DASHBOARD_PORT as _DASHBOARD_PORT
+except Exception:  # pragma: no cover - optional during early/standalone import
+    _DASHBOARD_PORT = int(os.environ.get("KIROCLAW_PORT", 8765))
+
 VALID_COMPONENTS = ("memory", "crons", "config", "skills", "workspace", "notifications", "security")
 
 
@@ -557,11 +562,12 @@ def _do_merge(snap: Path, mc: Path, components: list[str] | None) -> None:
 
 def _is_gateway_running() -> bool:
     """Check if the KiroClaw gateway is listening on its dashboard port."""
-    try:
-        from kiro_claw.config.loader import DASHBOARD_PORT
-        port = DASHBOARD_PORT
-    except Exception:
-        port = int(os.environ.get("KIROCLAW_PORT", 8765))
+    # Deterministic override (used by tests / scripted restores) — avoids a real
+    # socket probe whose result is environment-dependent.
+    override = os.environ.get("KIROCLAW_ASSUME_GATEWAY_RUNNING")
+    if override is not None:
+        return override.strip().lower() not in ("", "0", "false", "no")
+    port = _DASHBOARD_PORT
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=1):
             return True
