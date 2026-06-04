@@ -1,0 +1,17 @@
+{
+  "name": "auto-research",
+  "version": "0.1.0",
+  "displayName": "Research Lab",
+  "description": "Autonomous research campaigns powered by autonudge — pre-flight validation, live findings, stagnation detection, and lifecycle controls.",
+  "author": "zejiangg",
+  "tags": ["research", "autonomy", "autonudge"],
+  "defaultEnabled": false,
+  "permissions": {
+    "api": ["/api/apps/auto-research"]
+  },
+  "ui": {
+    "pages": [
+      {"route": "/auto-research", "label": "Research Lab", "icon": "FlaskConical"}
+    ]
+  }
+}

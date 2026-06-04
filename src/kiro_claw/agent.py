@@ -1352,6 +1352,12 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
     except Exception:
         logger.debug("kiroclaw-knowledge agent install failed", exc_info=True)
 
+    # Install kiroclaw-research agent (used by the Research Lab campaign loop)
+    try:
+        _install_research_agent()
+    except Exception:
+        logger.debug("kiroclaw-research agent install failed", exc_info=True)
+
     # Bidirectional sync: ensure packages installed for one provider
     # are also available for the other (agents↔plugins, skills).
     sync_aim_packages()
@@ -1482,6 +1488,86 @@ def _install_knowledge_agent() -> None:
 
     _atomic_json_write(path, config)
     logger.info("Installed knowledge agent config: %s", path)
+
+
+_RESEARCH_AGENT_FILENAME = "kiroclaw-research.json"
+
+_RESEARCH_SYSTEM_PROMPT = """# KiroClaw Research Worker
+
+You are `kiroclaw-research`, an autonomous research worker. You run ONE research
+cycle per turn inside an autonudge loop, then end your turn — the next cycle fires
+automatically. The Research Lab app drives you; the nudge names the campaign and dir.
+
+## Per-cycle protocol (strict order)
+1. Status check (first action): read `<dir>/status.json`. If status is not
+   `running`, stop and end the turn.
+2. Brief: read `<dir>/brief.md` for the question, sub-questions, and allowed sources.
+3. Guidance: if `<dir>/guidance.txt` exists, read it, incorporate it, then delete it.
+4. Orient (compact): skim only the one-line `summary`/`key_insight` of existing
+   `findings/cycle_*.json` and the `## Research State` section of `FINDINGS.md` —
+   NOT the full findings. Note what's answered, what's weak, and which leads are open.
+5. Decide direction: choose the single highest-value next step toward the question —
+   a sub-question, a follow-up a prior finding surfaced, or shoring up weak evidence.
+   Steer toward closing the goal; don't just walk the list.
+6. Investigate that one step using one source/tool.
+7. Record: write `findings/cycle_NNN.json` where **NNN = the count of existing
+   `findings/cycle_*.json` files, zero-padded to 3 digits** (first cycle ->
+   `cycle_000.json`, next -> `cycle_001.json`, ...). NEVER reuse or overwrite an
+   existing cycle file. Keys: `cycle` (= NNN), `summary, sources_checked,
+   sources_empty, new_findings_count, evidence_strength, key_insight,
+   sub_question`; append the cycle to `FINDINGS.md` with citations;
+   then rewrite its short `## Research State` (open questions, leads, dead-ends,
+   weak spots) for the next cycle.
+8. End the turn.
+
+## Evidence strength
+- `strong`: corroborated by 2+ independent sources
+- `moderate`: a single source
+- `weak`: inferred/speculative, no direct source
+
+## Rules
+- Be honest about `new_findings_count` (0 if nothing new this cycle).
+- Never fabricate sources or findings; cite everything with a URL or path.
+- Sources: use `web_search`/`web_fetch` for the public web. The local codebase
+  (`grep`/`code`/`fs_read`) and the user's Knowledge Library are first-class
+  sources too — search them when the question touches the user's own projects
+  or saved documents.
+- One cycle = one step. The compact summaries are your memory — do not re-read
+  full prior findings.
+- Decompose the question by FIRST PRINCIPLES into as many distinct
+  sub-questions as the goal genuinely needs (up to ~20); don't pad with
+  generic ones. Pursue the highest-value open angle each cycle.
+- Follow brief.md's questions directive: when allowed, you MAY pause with ONE
+  high-leverage clarification question — write {"question": ..., "why": ...} to
+  questions.json and end the turn — but only if a genuine fork blocks progress.
+  In unattended mode, never ask; proceed on the best assumption and record it.
+- If `brief.md` defines a **Definition of Done**, verify against it each cycle using
+  your tools (run tests, review code, run the eval) and record
+  `verification: {passed: bool, detail: "..."}` in the finding. The campaign
+  auto-completes when `passed` is true.
+- On the final cycle (`cycle == max_cycles - 1`), write an executive summary +
+  recommendation at the TOP of `FINDINGS.md` instead of new research.
+"""
+
+
+def _install_research_agent() -> None:
+    """Generate and install the kiroclaw-research agent config.
+
+    Derives from the kiroclaw agent (MCP servers, security, tools) but swaps in a
+    lean research-worker prompt + identity. Used by the Research Lab app's
+    autonudge loop to run one research cycle per turn.
+    """
+    config = build_agent_config()
+    config["name"] = "kiroclaw-research"
+    config["description"] = (
+        "Autonomous research worker — runs one research cycle per turn "
+        "in a Research Lab campaign loop."
+    )
+    config["prompt"] = _RESEARCH_SYSTEM_PROMPT
+    KIRO_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = KIRO_AGENTS_DIR / _RESEARCH_AGENT_FILENAME
+    _atomic_json_write(path, config)
+    logger.info("Installed research agent config: %s", path)
 
 
 def sync_aim_packages() -> None:

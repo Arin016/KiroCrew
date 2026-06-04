@@ -666,6 +666,7 @@ class _ChatSlot:
             "memory_mode": self.memory_mode,
             "forked_from": self.forked_from,
             "linked_session_key": self.linked_session_key,
+            "app": self._app,
         }
 
 

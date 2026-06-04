@@ -1,3 +1,3 @@
 # Built-in apps package.
 
-BUILTIN_NAMES: list[str] = []
+BUILTIN_NAMES: list[str] = ["auto_research"]
