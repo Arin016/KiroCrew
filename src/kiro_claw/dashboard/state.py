@@ -291,6 +291,7 @@ class _ChatSlot:
         "_slack_channel",
         "_slack_thread_ts",
         "folder_id",
+        "_folder_changed",
         "pinned",
         "tags",
         "_pending_subagent_failures",
@@ -368,6 +369,7 @@ class _ChatSlot:
         self._slack_channel: str = ""
         self._slack_thread_ts: str = ""
         self.folder_id: str = ""  # project folder assignment
+        self._folder_changed: bool = False  # re-inject [FOLDER] breadcrumb next turn after move
         self.pinned: bool = False  # pinned to top of sidebar
         self.tags: list[str] = []  # assigned tag ids (see DashboardState._tags)
         self._pending_subagent_failures: list[str] = []
@@ -1253,6 +1255,28 @@ class DashboardState:
         """Persist folder definitions to disk (atomic write)."""
         path = config_dir() / self._FOLDERS_FILE
         self._atomic_write_json(path, self._folders)
+
+    def folder_breadcrumb(self, folder_id: str, sep: str = " › ") -> str:
+        """Render a folder's ancestry root→leaf as a breadcrumb string.
+
+        Walks the ``parent_id`` chain up to the root, then joins names with
+        *sep*. Cycle-safe (a visited set bounds the walk) and tolerant of
+        dangling ``parent_id`` references. Returns "" for an empty or unknown
+        folder id.
+        """
+        if not folder_id:
+            return ""
+        by_id = {f["id"]: f for f in self._folders}
+        names: list[str] = []
+        seen: set[str] = set()
+        fid = folder_id
+        while fid and fid in by_id and fid not in seen:
+            seen.add(fid)
+            folder = by_id[fid]
+            names.append(str(folder.get("name", "")))
+            fid = str(folder.get("parent_id") or "")
+        names.reverse()
+        return sep.join(n for n in names if n)
 
     def load_tags(self) -> None:
         """Load tag vocabulary and sidebar columns from disk; seed defaults if missing.

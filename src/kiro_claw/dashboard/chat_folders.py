@@ -212,6 +212,8 @@ async def api_chat_slot_folder(request: web.Request) -> web.Response:
     folder_id = str(body.get("folder_id") or "")
     if folder_id and not any(f["id"] == folder_id for f in state._folders):
         return web.json_response({"error": "folder not found"}, status=400)
+    if folder_id != slot.folder_id:
+        slot._folder_changed = True  # re-inject [FOLDER] breadcrumb on next turn
     slot.folder_id = folder_id
     _save_slot_to_history(state, slot, force=True)
     state.push_slots_update()

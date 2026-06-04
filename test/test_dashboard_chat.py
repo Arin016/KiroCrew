@@ -4516,6 +4516,24 @@ class TestFolderCRUD:
             assert state._slots["myslot"].folder_id == "f1"
 
     @pytest.mark.asyncio
+    async def test_slot_folder_change_sets_reinject_flag(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("myslot")
+        state._folders = [{"id": "f1", "name": "Test", "order": 0, "collapsed": False}]
+        app = _make_folder_app(state)
+        async with TestClient(TestServer(app)) as client:
+            # Moving into a folder flags the slot for a one-shot [FOLDER] re-inject.
+            resp = await client.patch("/api/chat/slots/myslot/folder", json={"folder_id": "f1"})
+            assert resp.status == 200
+            assert slot._folder_changed is True
+            # A no-op PATCH (same folder) must not re-flag.
+            slot._folder_changed = False
+            resp = await client.patch("/api/chat/slots/myslot/folder", json={"folder_id": "f1"})
+            assert resp.status == 200
+            assert slot._folder_changed is False
+
+    @pytest.mark.asyncio
     async def test_unassign_slot_from_folder(self, tmp_path, monkeypatch):
         monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
         state = _make_state(tmp_path)

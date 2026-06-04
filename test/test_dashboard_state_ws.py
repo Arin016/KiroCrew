@@ -270,3 +270,38 @@ class TestCompactCallbackWiring:
             await cb("dashboard:chat-1", 92.0, success=True)
 
         assert slot.messages[-1]["role"] == "assistant"
+
+
+def test_folder_breadcrumb_walks_full_ancestry(state):
+    state._folders = [
+        {"id": "a", "name": "KiroClaw", "parent_id": ""},
+        {"id": "b", "name": "Backend", "parent_id": "a"},
+        {"id": "c", "name": "auth-refactor", "parent_id": "b"},
+    ]
+    assert state.folder_breadcrumb("c") == "KiroClaw › Backend › auth-refactor"
+
+
+def test_folder_breadcrumb_single_root(state):
+    state._folders = [{"id": "a", "name": "KiroClaw", "parent_id": ""}]
+    assert state.folder_breadcrumb("a") == "KiroClaw"
+
+
+def test_folder_breadcrumb_empty_or_unknown_id(state):
+    state._folders = [{"id": "a", "name": "KiroClaw", "parent_id": ""}]
+    assert state.folder_breadcrumb("") == ""
+    assert state.folder_breadcrumb("missing") == ""
+
+
+def test_folder_breadcrumb_dangling_parent(state):
+    # parent_id points at a folder that no longer exists — walk stops gracefully.
+    state._folders = [{"id": "b", "name": "Backend", "parent_id": "gone"}]
+    assert state.folder_breadcrumb("b") == "Backend"
+
+
+def test_folder_breadcrumb_cycle_safe(state):
+    state._folders = [
+        {"id": "a", "name": "A", "parent_id": "b"},
+        {"id": "b", "name": "B", "parent_id": "a"},
+    ]
+    # No infinite loop; each visited once.
+    assert state.folder_breadcrumb("a") == "B › A"

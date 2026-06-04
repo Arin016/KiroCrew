@@ -965,6 +965,7 @@ class ContextBuilder:
         provider_type: str = "acp",
         *,
         exclude_last_n: int = 0,
+        folder_path: str | None = None,
     ) -> tuple[str, HookResult]:
         """Build the full message with context and hook processing.
 
@@ -1128,6 +1129,16 @@ class ContextBuilder:
                 "File search, @-mentions, and code references are scoped to "
                 "this directory. Prefer files and patterns from this project "
                 "when answering questions.\n\n"
+            )
+
+        # Folder breadcrumb — the session's sidebar folder ancestry (root→leaf).
+        # Injected when the caller supplies folder_path (once per session, and
+        # again after a folder move). Kept lightweight — not re-sent every turn.
+        if folder_path:
+            parts.append(
+                f"[FOLDER] This session lives in the folder hierarchy: {folder_path}\n"
+                "Folders group related sessions by project or topic. Sessions in "
+                "the same folder are likely about the same work.\n\n"
             )
 
         # Triggered skills (on-demand, any message) — skip for custom agents

@@ -166,6 +166,22 @@ class TestContextBuilder:
         assert "lobsters" in msg
         assert "hello" in msg
 
+    def test_build_message_injects_folder_breadcrumb(self, tmp_path):
+        builder = ContextBuilder(
+            memory=MemoryStore(workspace=tmp_path / "ws"),
+            skills=SkillsLoader(skills_path=tmp_path / "skills", install_builtins=False),
+        )
+        # build_message injects whenever the caller supplies folder_path
+        # (is_new_session=False here proves the block is not gated to new sessions).
+        msg, _ = builder.build_message(
+            "hello", is_new_session=False, folder_path="KiroClaw › Backend"
+        )
+        assert "[FOLDER]" in msg
+        assert "KiroClaw › Backend" in msg
+        # Absent when no folder path is supplied.
+        msg_none, _ = builder.build_message("hello", is_new_session=False)
+        assert "[FOLDER]" not in msg_none
+
     def test_build_message_existing_session(self, tmp_path):
         ws = tmp_path / "ws"
         store = MemoryStore(workspace=ws)

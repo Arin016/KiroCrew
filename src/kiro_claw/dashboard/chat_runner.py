@@ -1271,6 +1271,12 @@ async def _run_chat(
             # correctly identifies kiroclaw sessions and enables skills.
             # Lumon persona injection — prepend to message so build_message
             # accounts for it in context budget calculations.
+            # Folder breadcrumb: inject once per session, and again after a
+            # folder move (no session reset — it's just a label refresh).
+            folder_path = None
+            if is_new or slot._folder_changed:
+                folder_path = state.folder_breadcrumb(slot.folder_id) or None
+                slot._folder_changed = False
             message = _maybe_inject_persona(message, getattr(slot, "color_theme", ""), is_new)
             full_message, _ = state.context_builder.build_message(
                 message,
@@ -1286,6 +1292,7 @@ async def _run_chat(
                 blocks_reads=slot.blocks_reads,
                 provider_type=cfg.agent.provider,
                 exclude_last_n=1,
+                folder_path=folder_path,
             )
             full_message = _apply_incognito_prefix(slot, full_message)
             if is_new:
