@@ -8,12 +8,14 @@ backend is configured.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import json
 import logging
 import os
 import tempfile
+import time
 
 from aiohttp import web
 
@@ -181,3 +183,61 @@ async def api_voice_synthesize(request: web.Request) -> web.Response:
         for p in chunk_paths:
             with contextlib.suppress(OSError):
                 os.unlink(p)
+
+
+# ── Voices list (cached) ──
+
+_voices_cache: list[dict] | None = None
+_voices_cache_ts: float = 0.0
+_VOICES_CACHE_TTL = 3600  # 1 hour
+
+
+async def api_voice_voices(request: web.Request) -> web.Response:
+    """GET /api/voice/voices — list available Polly voices (cached 1h)."""
+    global _voices_cache, _voices_cache_ts
+
+    now = time.time()
+    if _voices_cache is not None and (now - _voices_cache_ts) < _VOICES_CACHE_TTL:
+        return web.json_response({"voices": _voices_cache})
+
+    # Call aws polly describe-voices
+    cmd = ["aws", "polly", "describe-voices", "--output", "json"]
+    if _vc.aws_profile:
+        cmd += ["--profile", _vc.aws_profile]
+    if _vc.region:
+        cmd += ["--region", _vc.region]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        if proc.returncode != 0:
+            err = stderr.decode().strip()
+            logger.error("describe-voices failed: %s", err)
+            return web.json_response({"error": "Failed to retrieve voices"}, status=502)
+
+        data = json.loads(stdout)
+        voices = [
+            {
+                "id": v["Id"],
+                "name": v["Name"],
+                "language": v["LanguageName"],
+                "languageCode": v["LanguageCode"],
+                "gender": v["Gender"],
+                "engines": v["SupportedEngines"],
+            }
+            for v in data.get("Voices", [])
+        ]
+        voices.sort(key=lambda v: (v["languageCode"], v["name"]))
+        _voices_cache = voices
+        _voices_cache_ts = now
+        return web.json_response({"voices": voices})
+    except asyncio.TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
+        return web.json_response({"error": "timeout"}, status=504)
+    except Exception:
+        logger.exception("describe-voices error")
+        return web.json_response({"error": "Failed to retrieve voices"}, status=500)

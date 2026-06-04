@@ -131,6 +131,8 @@ def strip_markdown(text: str) -> str:
         return " (code block) "
 
     t = re.sub(r"```[\s\S]*?```", _code_block, t)
+    # Remove HTML/XML tags and their content for block-level elements
+    t = re.sub(r"<mcwidget[^>]*>[\s\S]*?</mcwidget>", " (widget) ", t)
     # Replace markdown tables with spoken placeholder
 
     def _table(m):
@@ -152,6 +154,8 @@ def strip_markdown(text: str) -> str:
     # Slack links: <url|label> → label, bare <url> → ""
     t = re.sub(r"<([^|>]+)\|([^>]+)>", r"\2", t)
     t = re.sub(r"<https?://[^>]+>", " (link) ", t)
+    # Remove remaining HTML/XML tags (after Slack links are processed)
+    t = re.sub(r"</?[a-zA-Z][^>]*>", "", t)
     # Markdown links: [label](url) → label
     t = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", t)
     # Bold / italic / strikethrough markers

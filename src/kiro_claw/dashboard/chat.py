@@ -146,6 +146,10 @@ from kiro_claw.dashboard.chat_utils import (  # noqa: F401
     _validate_tool_name,
     is_deprecated_model,
 )
-from kiro_claw.dashboard.chat_voice import api_voice_config, api_voice_synthesize  # noqa: F401
+from kiro_claw.dashboard.chat_voice import (  # noqa: F401
+    api_voice_config,
+    api_voice_synthesize,
+    api_voice_voices,
+)
 from kiro_claw.security import is_sensitive_path  # noqa: F401
 from kiro_claw.sel import sel  # noqa: F401

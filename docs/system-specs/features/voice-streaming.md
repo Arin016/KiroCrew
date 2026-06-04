@@ -86,6 +86,10 @@ etc.). To use a specific profile, set `aws_profile` in the config:
 - `GET /api/voice/config` — returns current settings + `autoSpeak` flag
 - `PUT /api/voice/config` — update settings (partial patch), persists to config.json
 - `POST /api/voice/synthesize` — `{ slot, text, voice?, engine?, rate?, pitch? }`
+- `GET /api/voice/voices` — list available Polly voices via `aws polly
+  describe-voices` (respects `aws_profile`/`region`), cached in-process for 1
+  hour. Each entry: `{ id, name, language, languageCode, gender, engines }`,
+  sorted by `languageCode` then `name`
 
 ## Content Filtering for Speech
 
@@ -97,6 +101,8 @@ placeholders so listeners know content exists without hearing raw syntax.
 |-------------|----------|
 | Fenced code blocks | Replaced with "(code block)" |
 | Diff blocks | Replaced with "(diff block)" |
+| `<mcwidget>` blocks | Replaced with "(widget)" |
+| Residual HTML/XML tags | Stripped (after Slack-link handling) |
 | Markdown tables | Replaced with "(table with N rows)" |
 | Long inline code (>30 chars or paths) | Replaced with "(file path)" |
 | Short inline code (≤30 chars, no `/`) | Kept as spoken text |

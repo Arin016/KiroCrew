@@ -544,6 +544,7 @@ async def start_dashboard(
     app.router.add_post("/api/voice/synthesize", chat.api_voice_synthesize)
     app.router.add_get("/api/voice/config", chat.api_voice_config)
     app.router.add_put("/api/voice/config", chat.api_voice_config)
+    app.router.add_get("/api/voice/voices", chat.api_voice_voices)
     app.router.add_post("/api/chat/slots/{slot}/handoff", chat.api_chat_slot_handoff)
     app.router.add_get("/api/handoff-channels", chat.api_handoff_channels)
     app.router.add_post("/api/chat/slots/{slot}/slack-link", chat.api_chat_slot_slack_link)

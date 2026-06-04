@@ -134,3 +134,134 @@ class TestVoiceSynthesize:
         call_args = state.broadcast_ws.call_args
         assert call_args[0][0] == "voice_error"
         assert call_args[0][1]["slot"] == "s1"
+
+
+class TestVoiceVoices:
+    @pytest.mark.asyncio
+    async def test_voices_returns_list(self, tmp_path, monkeypatch):
+        """Test successful voice listing."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        mock_vc = MagicMock(aws_profile="polly", region="us-east-1")
+        monkeypatch.setattr("kiro_claw.dashboard.chat_voice._vc", mock_vc)
+        # Reset cache
+        monkeypatch.setattr("kiro_claw.dashboard.chat_voice._voices_cache", None)
+        monkeypatch.setattr("kiro_claw.dashboard.chat_voice._voices_cache_ts", 0)
+
+        mock_data = json.dumps({"Voices": [
+            {"Id": "Takumi", "Name": "Takumi", "LanguageName": "Japanese",
+             "LanguageCode": "ja-JP", "Gender": "Male", "SupportedEngines": ["neural", "standard"]},
+            {"Id": "Mizuki", "Name": "Mizuki", "LanguageName": "Japanese",
+             "LanguageCode": "ja-JP", "Gender": "Female", "SupportedEngines": ["standard"]},
+        ]})
+
+        async def mock_exec(*args, **kwargs):
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def comm():
+                return mock_data.encode(), b""
+            proc.communicate = comm
+            return proc
+
+        monkeypatch.setattr("asyncio.create_subprocess_exec", mock_exec)
+
+        from kiro_claw.dashboard.chat_voice import api_voice_voices
+        app = web.Application()
+        app["state"] = _make_state(tmp_path)
+        app.router.add_get("/api/voice/voices", api_voice_voices)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/voice/voices")
+            assert resp.status == 200
+            data = await resp.json()
+            assert len(data["voices"]) == 2
+            assert data["voices"][0]["id"] == "Mizuki"  # sorted by languageCode+name
+            assert "engines" in data["voices"][0]
+
+    @pytest.mark.asyncio
+    async def test_voices_uses_cache(self, tmp_path, monkeypatch):
+        """Test that cached voices are returned without subprocess call."""
+        import time
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        mock_vc = MagicMock(aws_profile="", region="")
+        monkeypatch.setattr("kiro_claw.dashboard.chat_voice._vc", mock_vc)
+        cached = [
+            {"id": "Ruth", "name": "Ruth", "language": "English",
+             "languageCode": "en-US", "gender": "Female", "engines": ["neural"]}
+        ]
+        monkeypatch.setattr("kiro_claw.dashboard.chat_voice._voices_cache", cached)
+        monkeypatch.setattr("kiro_claw.dashboard.chat_voice._voices_cache_ts", time.time())
+
+        from kiro_claw.dashboard.chat_voice import api_voice_voices
+        app = web.Application()
+        app["state"] = _make_state(tmp_path)
+        app.router.add_get("/api/voice/voices", api_voice_voices)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/voice/voices")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["voices"] == cached
+
+    @pytest.mark.asyncio
+    async def test_voices_cli_failure(self, tmp_path, monkeypatch):
+        """Test error handling when aws cli fails."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        mock_vc = MagicMock(aws_profile="", region="")
+        monkeypatch.setattr("kiro_claw.dashboard.chat_voice._vc", mock_vc)
+        monkeypatch.setattr("kiro_claw.dashboard.chat_voice._voices_cache", None)
+        monkeypatch.setattr("kiro_claw.dashboard.chat_voice._voices_cache_ts", 0)
+
+        async def mock_exec(*args, **kwargs):
+            proc = MagicMock()
+            proc.returncode = 1
+
+            async def comm():
+                return b"", b"AccessDenied"
+            proc.communicate = comm
+            return proc
+
+        monkeypatch.setattr("asyncio.create_subprocess_exec", mock_exec)
+
+        from kiro_claw.dashboard.chat_voice import api_voice_voices
+        app = web.Application()
+        app["state"] = _make_state(tmp_path)
+        app.router.add_get("/api/voice/voices", api_voice_voices)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/voice/voices")
+            assert resp.status == 502
+
+    @pytest.mark.asyncio
+    async def test_voices_timeout(self, tmp_path, monkeypatch):
+        """Test timeout handling."""
+        import asyncio
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        mock_vc = MagicMock(aws_profile="", region="")
+        monkeypatch.setattr("kiro_claw.dashboard.chat_voice._vc", mock_vc)
+        monkeypatch.setattr("kiro_claw.dashboard.chat_voice._voices_cache", None)
+        monkeypatch.setattr("kiro_claw.dashboard.chat_voice._voices_cache_ts", 0)
+
+        async def mock_exec(*args, **kwargs):
+            proc = MagicMock()
+
+            async def comm():
+                raise asyncio.TimeoutError()
+            proc.communicate = comm
+            proc.kill = MagicMock()
+
+            async def _wait():
+                return 0
+            proc.wait = _wait
+            return proc
+
+        monkeypatch.setattr("asyncio.create_subprocess_exec", mock_exec)
+
+        from kiro_claw.dashboard.chat_voice import api_voice_voices
+        app = web.Application()
+        app["state"] = _make_state(tmp_path)
+        app.router.add_get("/api/voice/voices", api_voice_voices)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/voice/voices")
+            assert resp.status == 504
