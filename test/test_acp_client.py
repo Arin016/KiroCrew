@@ -3723,6 +3723,34 @@ class TestApproveTool:
         )
         assert client._permission_options[46] == {"once": "allow", "always": "allow_always"}
 
+    @pytest.mark.asyncio
+    async def test_reject_only_recorded_falls_back_to_literal_on_approve(self, tmp_path):
+        """A request that advertised only a reject option records {"reject": ...}
+        with no "once"/"always" keys. Approving it must fall back to the canonical
+        allow id rather than KeyError-ing on the missing key."""
+        from kiro_claw.acp.types import (
+            OPTION_ALLOW_ALWAYS,
+            OPTION_ALLOW_ONCE,
+            OUTCOME_SELECTED,
+        )
+
+        client = AcpClient(work_dir=tmp_path)
+        client._permission_options[47] = {"reject": "reject_once"}
+        client._send_response = AsyncMock()
+        await client.approve_tool(47)
+        client._send_response.assert_awaited_with(
+            47,
+            {"outcome": {"outcome": OUTCOME_SELECTED, "optionId": OPTION_ALLOW_ONCE}},
+        )
+        assert 47 not in client._permission_options
+
+        client._permission_options[48] = {"reject": "reject_once"}
+        await client.approve_tool(48, always=True)
+        client._send_response.assert_awaited_with(
+            48,
+            {"outcome": {"outcome": OUTCOME_SELECTED, "optionId": OPTION_ALLOW_ALWAYS}},
+        )
+
 
 class TestRejectTool:
     """Tests for reject_tool clean-reject vs cancelled dispatch."""

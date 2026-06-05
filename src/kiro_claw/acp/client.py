@@ -2230,9 +2230,11 @@ class AcpClient:
         resolved_id = option_id
         if resolved_id is None:
             recorded = self._permission_options.pop(request_id, None)
-            if recorded:
-                resolved_id = recorded["always" if always else "once"]
-            else:
+            # A recorded entry may carry only a "reject" id (a request that
+            # advertised a reject option but no allow option), so use .get and
+            # fall back to the canonical allow id rather than KeyError-ing.
+            resolved_id = (recorded or {}).get("always" if always else "once")
+            if resolved_id is None:
                 resolved_id = OPTION_ALLOW_ALWAYS if always else OPTION_ALLOW_ONCE
         await self._send_response(
             request_id,
