@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,12 +15,19 @@ from pathlib import Path
 from kiro_claw.config.loader import KiroClawConfig, config_dir
 from kiro_claw.hooks import validate_file_path
 from kiro_claw.security import is_sensitive_path
+from kiro_claw.sel import sel
 
 logger = logging.getLogger(__name__)
 
 
 SKILLS_DIR_NAME = "skills"
 _MIN_TRIGGER_OVERLAP = 0.7
+# Cache the discovered skill-file list for this long. get_triggered_skills runs
+# on EVERY message; without this it os.walk()s the skills dir + every extra
+# path per message. Skills change rarely (add/remove via setup or sync), so a
+# short TTL keeps trigger matching off the per-message filesystem hot path
+# while still picking up new skills within a few seconds.
+_ITER_CACHE_TTL_SECS = 5.0
 
 # ── Auto skill creation (Mesh-677, Hermes loop) ──
 
@@ -264,8 +272,17 @@ class SkillsLoader:
             _ensure_builtin_skills(self._dir)
         # Cache: path → (mtime, parsed_frontmatter)
         self._fm_cache: dict[str, tuple[float, dict[str, str]]] = {}
+        # TTL cache of the discovered (name, path) list — avoids an os.walk per
+        # message in get_triggered_skills. (monotonic_deadline, results)
+        self._iter_cache: tuple[float, list[tuple[str, Path]]] | None = None
         # Extra skill paths from config (config injectable for testing)
         cfg = config or KiroClawConfig.load()
+        # Snapshot the per-message trigger cap here so get_triggered_skills (the
+        # only caller, run on EVERY message) doesn't re-load + re-validate the
+        # whole config just to read one int. Matches the eventual-consistency of
+        # _extra_paths below — both are resolved once from the construction-time
+        # config and refreshed when the loader is rebuilt (per gateway).
+        self._max_triggered = cfg.skills.max_triggered
         self._extra_paths: list[Path] = []
         for p in cfg.skills.extra_paths:
             resolved = Path(p).expanduser().resolve()
@@ -277,7 +294,22 @@ class SkillsLoader:
                 logger.debug("Extra skill path does not exist: %s", p)
 
     def _iter(self) -> list[tuple[str, Path]]:
-        """Return all ``(name, skill_file)`` pairs. Local skills take precedence."""
+        """Return all ``(name, skill_file)`` pairs, TTL-cached.
+
+        Local skills take precedence over extra paths. The underlying os.walk
+        is cached for ``_ITER_CACHE_TTL_SECS`` because this runs on every
+        message via ``get_triggered_skills`` — re-walking the skills tree (plus
+        every extra path) per message was a per-message latency cost.
+        """
+        cached = self._iter_cache
+        if cached is not None and time.monotonic() < cached[0]:
+            return cached[1]
+        results = self._iter_uncached()
+        self._iter_cache = (time.monotonic() + _ITER_CACHE_TTL_SECS, results)
+        return results
+
+    def _iter_uncached(self) -> list[tuple[str, Path]]:
+        """Walk the skills dir + extra paths once (no caching)."""
         results = _iter_skill_files(self._dir)
         seen = {name for name, _ in results}
         for root in self._extra_paths:
@@ -292,6 +324,10 @@ class SkillsLoader:
                 results.append((name, Path(resolved)))
                 seen.add(name)
         return results
+
+    def _invalidate_iter_cache(self) -> None:
+        """Drop the cached skill-file list (after create/remove/refresh)."""
+        self._iter_cache = None
 
     def _cached_frontmatter(self, path: Path) -> dict[str, str]:
         """Parse frontmatter with mtime-based caching."""
@@ -488,6 +524,7 @@ class SkillsLoader:
         )
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+        self._invalidate_iter_cache()  # new skill visible to trigger matching now
         logger.info("Created auto skill: %s", name)
         return name
 
@@ -575,14 +612,12 @@ class SkillsLoader:
 
         Returns up to ``max_triggered`` skills sorted by best overlap score.
         """
-        from kiro_claw.config.loader import KiroClawConfig
-        from kiro_claw.sel import sel
-
-        cfg = KiroClawConfig.load()
         text_words = set(re.findall(r"\w+", text.lower()))
-        text_hash = hashlib.sha256(text.encode()).hexdigest()[:16]
 
         scored: list[tuple[str, float]] = []
+        # Skills a negative trigger actively excluded — a permission DENY that
+        # must still be audited (see the audit event below).
+        negated_skills: list[str] = []
         for name, skill_file in self._iter():
             meta = self._cached_frontmatter(skill_file)
             if meta.get("always", "").lower() == "true":
@@ -598,12 +633,16 @@ class SkillsLoader:
                 trigger = trigger.strip().lower()
                 if not trigger:
                     continue
-                # Negative trigger: "!search" excludes if "search" words match
+                # Negative trigger: "!search" excludes if "search" words match.
+                # Don't break — keep scoring the remaining positive triggers so
+                # best_overlap is correct regardless of trigger order; the DENY
+                # audit below needs it to know the skill would otherwise have
+                # triggered (e.g. "!test, shorten url" must still compute the
+                # "shorten url" overlap).
                 if trigger.startswith("!"):
                     neg_words = set(re.findall(r"\w+", trigger[1:]))
                     if neg_words and neg_words <= text_words:
                         negated = True
-                        break
                 else:
                     trigger_words = set(re.findall(r"\w+", trigger))
                     if not trigger_words:
@@ -611,33 +650,39 @@ class SkillsLoader:
                     overlap = len(trigger_words & text_words) / len(trigger_words)
                     best_overlap = max(best_overlap, overlap)
 
-            if negated:
-                sel().log_tool_invocation(
-                    session_key="skills",
-                    tool_name="skill_trigger",
-                    tool_kind="permission",
-                    outcome="not_triggered",
-                    metadata={"skill": name, "reason": "negative_trigger", "text_hash": text_hash},
-                )
-                continue
+            # Only record a negation as a DENY when the skill would otherwise
+            # have triggered (positive overlap met the threshold) — that's the
+            # case where the negative trigger actually changed the outcome.
+            if negated and best_overlap >= _MIN_TRIGGER_OVERLAP:
+                negated_skills.append(name)
+            elif not negated and best_overlap >= _MIN_TRIGGER_OVERLAP:
+                scored.append((name, best_overlap))
 
-            outcome = "triggered" if best_overlap >= _MIN_TRIGGER_OVERLAP else "not_triggered"
+        scored.sort(key=lambda x: x[1], reverse=True)
+        triggered = [name for name, _ in scored[: self._max_triggered]]
+
+        # Emit ONE audit event for the matched + denied sets rather than one per
+        # skill. Previously this wrote a SEL entry for every skill (incl. every
+        # non-match) on every message — N synchronous writes per message that
+        # dominated the per-message cost. The security-relevant signals are which
+        # skills were injected (permission grant) and which were excluded by a
+        # negative trigger (permission deny); both are captured here. Skipped
+        # entirely only when nothing triggered and nothing was denied (the
+        # common case).
+        if triggered or negated_skills:
+            metadata = {"text_hash": hashlib.sha256(text.encode()).hexdigest()[:16]}
+            if triggered:
+                metadata["skills"] = ",".join(triggered)
+            if negated_skills:
+                metadata["negated"] = ",".join(negated_skills)
             sel().log_tool_invocation(
                 session_key="skills",
                 tool_name="skill_trigger",
                 tool_kind="permission",
-                outcome=outcome,
-                metadata={
-                    "skill": name,
-                    "overlap": round(best_overlap, 2),
-                    "text_hash": text_hash,
-                },
+                outcome="triggered" if triggered else "denied",
+                metadata=metadata,
             )
-            if best_overlap >= _MIN_TRIGGER_OVERLAP:
-                scored.append((name, best_overlap))
-
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return [name for name, _ in scored[: cfg.skills.max_triggered]]
+        return triggered
 
     def get_context(self) -> str:
         """Build skills context for prompt injection.

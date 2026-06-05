@@ -13,6 +13,8 @@ Structure:
 from __future__ import annotations
 
 import logging
+import time
+from datetime import date as _date
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -35,6 +37,14 @@ PROJECTS_FILE = "projects.md"
 
 _DEFAULT_PREFERENCES = "# User Preferences\n\n<!-- Learned from conversations -->\n"
 _DEFAULT_PROJECTS = "# Active Projects\n\n<!-- Current work context -->\n"
+
+# read_recent_history runs on every message turn (context build) and statting +
+# reading up to 181 daily files synchronously on the event loop is a per-message
+# cost. The assembled string changes only when a day's history file is written
+# (append_history) or pruned, so a short TTL keeps it off the hot path while
+# staying fresh; the cache key includes the day so the decay window shifting at
+# midnight invalidates naturally, and append/prune invalidate explicitly.
+_HISTORY_CACHE_TTL_SECS = 5.0
 
 
 def workspace_dir() -> Path:
@@ -64,6 +74,10 @@ class MemoryStore:
         self._projects_file = self._memory_dir / PROJECTS_FILE
         self._index_db = (workspace or config_dir()) / "memory_index.db"
         self._vector_store: "VectorMemoryStore | None" = None
+        # TTL cache for read_recent_history, keyed by `days` so callers using
+        # different windows (context build=14, suggestions=2, dashboard=30) don't
+        # evict each other. Value: (monotonic_deadline, day_iso, result).
+        self._history_cache: dict[int, tuple[float, str, str]] = {}
 
     @property
     def vector_store(self) -> "VectorMemoryStore | None":
@@ -171,6 +185,7 @@ class MemoryStore:
         content += f"\n#### {timestamp}\n{entry.strip()}\n"
         path.write_text(content, encoding="utf-8")
         self._index_file(path, content)
+        self._invalidate_history_cache()  # today's window changed
 
     def prune_history(self, keep_days: int = 365) -> int:
         """Delete daily history files older than *keep_days*. Returns count deleted."""
@@ -188,17 +203,41 @@ class MemoryStore:
                 continue
         if deleted:
             logger.info("Pruned %d history files older than %d days", deleted, keep_days)
+            self._invalidate_history_cache()
         return deleted
 
     def read_recent_history(self, days: int = 14) -> str:
-        """Load daily history with natural decay: recent=full, older=summary."""
+        """Load daily history with natural decay: recent=full, older=summary.
+
+        TTL-cached (keyed on ``days`` + today's date) because this runs on every
+        message turn and otherwise stats + reads up to 181 files synchronously.
+        ``append_history``/``prune_history`` invalidate the cache on write.
+        """
         if days <= 0:
             return ""
-        parts: list[str] = []
         today = datetime.now().date()
+        today_iso = today.strftime("%Y-%m-%d")
+        cached = self._history_cache.get(days)
+        if cached is not None and time.monotonic() < cached[0] and cached[1] == today_iso:
+            return cached[2]
+        result = self._read_recent_history_uncached(days, today)
+        self._history_cache[days] = (
+            time.monotonic() + _HISTORY_CACHE_TTL_SECS,
+            today_iso,
+            result,
+        )
+        return result
+
+    def _invalidate_history_cache(self) -> None:
+        """Drop all cached recent-history windows (after append/prune)."""
+        self._history_cache.clear()
+
+    def _read_recent_history_uncached(self, days: int, today: _date) -> str:
+        """Assemble the decayed recent-history string (no caching)."""
+        parts: list[str] = []
         for i in range(181):
-            date = today - timedelta(days=i)
-            path = self._history_dir / f"{date.strftime('%Y-%m-%d')}.md"
+            day = today - timedelta(days=i)
+            path = self._history_dir / f"{day.strftime('%Y-%m-%d')}.md"
             if not path.exists():
                 continue
             content = path.read_text(encoding="utf-8").strip()
@@ -211,7 +250,7 @@ class MemoryStore:
                 parts.append(self._summarize_day(content))
             else:
                 n = content.count("####")
-                parts.append(f"# {date.strftime('%Y-%m-%d')}\n_{n} conversation(s)_")
+                parts.append(f"# {day.strftime('%Y-%m-%d')}\n_{n} conversation(s)_")
         return "\n\n".join(parts)
 
     @staticmethod

@@ -15,11 +15,13 @@ from aiohttp.test_utils import TestClient, TestServer
 
 import kiro_claw.dashboard.handlers.usage as usage_mod
 from kiro_claw.dashboard.handlers.usage import (
+    _cached_parse_sessions,
     _parse_sessions,
     _parse_token_history,
     api_kiro_usage,
     get_usage_cache,
     persist_token_record,
+    persist_token_record_async,
 )
 
 # ── _parse_sessions ─────────────────────────────────────────────────────
@@ -636,3 +638,108 @@ class TestPersistTokenRecord:
         assert day_pm["claude_code"]["opus-4.8-1m"]["input"] == 200
         # Invalid pair (opencode + opus) is absent from the cross-tab.
         assert "opus" not in day_pm["opencode"]
+
+
+# ── persist_token_record_async / _cached_parse_sessions (event-loop hygiene) ──
+
+
+def _reset_sessions_cache():
+    usage_mod._SESSIONS_CACHE = None
+    usage_mod._SESSIONS_CACHE_TS = 0.0
+
+
+class TestPersistTokenRecordAsync:
+    @pytest.mark.asyncio
+    async def test_async_writes_same_record_as_sync(self, tmp_path, monkeypatch):
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+        event = MagicMock()
+        event.input_tokens = 7
+        event.output_tokens = 3
+        event.cache_creation_tokens = 0
+        event.cache_read_tokens = 0
+        event.cost_usd = 0.01
+        event.num_turns = 1
+        event.duration_ms = 42
+
+        await persist_token_record_async("slot-a", "opus", event, provider="claude_code")
+
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
+        record = json.loads((shard_dir / f"{today}.jsonl").read_text().strip())
+        assert record["slot"] == "slot-a"
+        assert record["provider"] == "claude_code"
+        assert record["input"] == 7
+
+    @pytest.mark.asyncio
+    async def test_async_no_crash_on_error(self, monkeypatch):
+        event = MagicMock()
+        event.input_tokens = 1
+        event.output_tokens = 1
+        monkeypatch.setattr(
+            usage_mod, "_TOKEN_USAGE_DIR", Path("/proc/nonexistent/usage/tokens")
+        )
+        await persist_token_record_async("s", "m", event)  # must not raise
+
+
+class TestCachedParseSessions:
+    @pytest.mark.asyncio
+    async def test_returns_empty_without_dir(self, tmp_path, monkeypatch):
+        _reset_sessions_cache()
+        monkeypatch.setattr(usage_mod, "_SESSIONS_DIR", tmp_path / "nope")
+        assert await _cached_parse_sessions() == {}
+
+    @pytest.mark.asyncio
+    async def test_offloads_and_caches(self, tmp_path, monkeypatch):
+        _reset_sessions_cache()
+        sessions_dir = tmp_path / "cli"
+        sessions_dir.mkdir()
+        monkeypatch.setattr(usage_mod, "_SESSIONS_DIR", sessions_dir)
+
+        calls = {"n": 0}
+
+        def _fake_parse():
+            calls["n"] += 1
+            return {"total_sessions": 1, "daily_history": []}
+
+        monkeypatch.setattr(usage_mod, "_parse_sessions", _fake_parse)
+        first = await _cached_parse_sessions()
+        second = await _cached_parse_sessions()
+        assert first == {"total_sessions": 1, "daily_history": []}
+        assert second == first
+        # Second call served from the TTL cache — parse ran once.
+        assert calls["n"] == 1
+        _reset_sessions_cache()
+
+    @pytest.mark.asyncio
+    async def test_error_result_not_cached(self, tmp_path, monkeypatch):
+        _reset_sessions_cache()
+        sessions_dir = tmp_path / "cli"
+        sessions_dir.mkdir()
+        monkeypatch.setattr(usage_mod, "_SESSIONS_DIR", sessions_dir)
+        monkeypatch.setattr(usage_mod, "_parse_sessions", lambda: {"error": "boom"})
+        result = await _cached_parse_sessions()
+        assert result == {"error": "boom"}
+        # An error result must not poison the cache (stays unpopulated).
+        assert usage_mod._SESSIONS_CACHE is None
+        _reset_sessions_cache()
+
+    @pytest.mark.asyncio
+    async def test_empty_result_is_cached(self, tmp_path, monkeypatch):
+        """A valid-but-empty {} parse must be cached and served from the fast
+        path (sentinel check), not re-parsed on every call."""
+        _reset_sessions_cache()
+        sessions_dir = tmp_path / "cli"
+        sessions_dir.mkdir()
+        monkeypatch.setattr(usage_mod, "_SESSIONS_DIR", sessions_dir)
+
+        calls = {"n": 0}
+
+        def _fake_parse():
+            calls["n"] += 1
+            return {}  # valid, but empty (dir present, no session files)
+
+        monkeypatch.setattr(usage_mod, "_parse_sessions", _fake_parse)
+        assert await _cached_parse_sessions() == {}
+        assert await _cached_parse_sessions() == {}
+        # Empty dict is cached (sentinel is None, so {} is a hit) — parse once.
+        assert calls["n"] == 1
+        _reset_sessions_cache()

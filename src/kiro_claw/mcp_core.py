@@ -15,6 +15,7 @@ Tools:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import mimetypes
 import os
@@ -22,6 +23,7 @@ import platform
 import re as _re
 import subprocess
 import tempfile
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -785,6 +787,78 @@ def _get_ppid(pid: int) -> int:
     except Exception:
         pass
     return 0
+
+
+# ── Knowledge-search store/embedder cache ──
+#
+# local_knowledge_search runs per LLM tool call in a long-lived MCP server.
+# Rebuilding KnowledgeStore every call re-runs the schema DDL, an orphan-cleanup
+# DELETE transaction, and a full SELECT of all entities/relations into the
+# in-memory graph; rebuilding the embedder re-runs Ollama's /api/tags probe
+# (up to 3s when configured). We cache both, keyed on a signature of the DB
+# files (main + -wal, since WAL commits land in -wal) and config.json, so
+# out-of-band dashboard ingestion or config edits trigger a rebuild on the next
+# call. The MCP stdio loop services calls serially, but a lock keeps this safe
+# if that ever changes.
+_KNOWLEDGE_CACHE_LOCK = threading.Lock()
+# (signature_tuple, KnowledgeStore, embedder_or_None)
+_KNOWLEDGE_CACHE: tuple[tuple, Any, Any] | None = None
+
+
+def _knowledge_db_signature(db_path: Path, cfg_path: Path) -> tuple:
+    """Cheap fingerprint of the knowledge DB (+WAL) and config files.
+
+    Any ingestion (which writes the main DB or its -wal sidecar) or config edit
+    changes this, busting the cache so a fresh search sees new data / embedder.
+    """
+    sig: list = []
+    wal_path = db_path.with_name(db_path.name + "-wal")
+    for p in (db_path, wal_path, cfg_path):
+        try:
+            st = p.stat()
+            sig.append((str(p), st.st_mtime_ns, st.st_size))
+        except OSError:
+            sig.append((str(p), None))
+    return tuple(sig)
+
+
+def _get_knowledge_search(db_path: Path, cfg_path: Path) -> tuple[Any, Any]:
+    """Return a cached ``(KnowledgeStore, embedder)`` pair, rebuilding on change.
+
+    Rebuilds (and closes the prior connection) only when the DB/WAL/config
+    signature changes; otherwise reuses the live store + embedder, avoiding the
+    per-call schema/migrate/graph-load and Ollama availability probe.
+    """
+    global _KNOWLEDGE_CACHE
+    sig = _knowledge_db_signature(db_path, cfg_path)
+    with _KNOWLEDGE_CACHE_LOCK:
+        if _KNOWLEDGE_CACHE is not None and _KNOWLEDGE_CACHE[0] == sig:
+            return _KNOWLEDGE_CACHE[1], _KNOWLEDGE_CACHE[2]
+        # Rebuild. Build the new store FIRST; only close the stale connection
+        # after the build succeeds. If KnowledgeStore.__init__ raises (locked or
+        # corrupt DB, disk-full during the migrate DELETE), we leave the existing
+        # cache entry — and its still-open connection — intact rather than
+        # stranding a closed connection in the cache for the next caller.
+        prev = _KNOWLEDGE_CACHE
+        store = KnowledgeStore(str(db_path))
+        try:
+            cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+        except Exception:
+            cfg = {}
+        embedder = create_embedder_from_config(cfg)
+        # Close the stale connection only AFTER the full rebuild (store + cfg +
+        # embedder) succeeds. If any step above raised, the existing cache entry
+        # — and its open connection — is left intact and usable for the next call.
+        if prev is not None:
+            with contextlib.suppress(Exception):
+                prev[1].db.close()
+        # Re-fingerprint AFTER building: KnowledgeStore.__init__ creates/migrates
+        # the DB (writing the file + -wal), so the pre-build signature no longer
+        # matches the on-disk state. Caching under the post-build signature lets
+        # the next idle call hit the cache instead of rebuilding every time.
+        post_sig = _knowledge_db_signature(db_path, cfg_path)
+        _KNOWLEDGE_CACHE = (post_sig, store, embedder)
+        return store, embedder
 
 
 def _resolve_session_key() -> str:
@@ -1765,16 +1839,12 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             )
             return "Knowledge Library is not configured. Ingest documents via the dashboard first."
 
-        store = KnowledgeStore(str(db_path))
-
-        # Detect embedder
+        # Reuse a cached store + embedder across calls; rebuilt only when the
+        # knowledge DB (or its -wal) or config.json changes (see
+        # _get_knowledge_search). Avoids the per-call schema/migrate/graph-load
+        # and the Ollama availability probe.
         cfg_path = Path(config_dir()) / "config.json"
-        try:
-            cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
-        except Exception:
-            cfg = {}
-
-        embedder = create_embedder_from_config(cfg)
+        store, embedder = _get_knowledge_search(db_path, cfg_path)
         embed_fn = embedder.embed if embedder and embedder.is_available() else None
         retriever = HybridRetriever(store, embedder=embed_fn)
 

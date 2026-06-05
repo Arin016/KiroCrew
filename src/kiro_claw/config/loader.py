@@ -10,11 +10,13 @@ timeouts, hook rules, and the dashboard URL via the config file. (The dashboard
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
 import re as _re
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1094,6 +1096,79 @@ def _apply_field_default(data: dict, dot_path: str) -> None:
             section.pop(parts[1], None)
 
 
+# ── Validated-data cache ──
+#
+# KiroClawConfig.load() is called on per-message / per-request hot paths (skill
+# triggering, context build, dashboard handlers). The expensive part is NOT the
+# dataclass construction — it is reading config.json (+ config.local.json),
+# json.loads, _deep_merge, and the full jsonschema.validate against the whole
+# config schema. We cache ONLY that validated, merged dict, keyed on a cheap
+# fingerprint (path + st_mtime_ns + st_size + st_mode) of both files. On a cache
+# hit load() still builds fresh dataclasses from a deep copy, so the 100+ callers
+# that mutate the returned config in place (settings handlers, the write-back
+# migration) never corrupt the shared cache. mtime-keying (not a blind TTL)
+# means a runtime edit — e.g. via the dashboard settings handler that calls
+# save() — is reflected on the very next load(); save() also invalidates eagerly.
+_CONFIG_CACHE_LOCK = threading.Lock()
+# (fingerprint, deep-copyable validated data dict)
+_CONFIG_CACHE: tuple[tuple, dict] | None = None
+
+
+def _config_fingerprint() -> tuple:
+    """Cheap signature of the config files — changes whenever either is edited.
+
+    Uses st_mtime_ns + st_size + st_mode for both config.json and
+    config.local.json so any edit, truncation, or replacement busts the cache.
+    A missing file contributes a sentinel so create/delete also busts it.
+    """
+    sig: list = []
+    for p in (config_path(), config_local_path()):
+        try:
+            st = p.stat()
+            sig.append((str(p), st.st_mtime_ns, st.st_size, st.st_mode))
+        except OSError:
+            sig.append((str(p), None))
+    return tuple(sig)
+
+
+def _cached_validated_data() -> dict | None:
+    """Return a deep copy of the cached validated config dict, or None on miss.
+
+    The deep copy is mandatory: load() and its callers mutate the returned
+    structure (the write-back migration adds a default agent; settings handlers
+    assign nested fields), so the cached original must never be handed out.
+    """
+    global _CONFIG_CACHE
+    fp = _config_fingerprint()
+    with _CONFIG_CACHE_LOCK:
+        if _CONFIG_CACHE is not None and _CONFIG_CACHE[0] == fp:
+            return copy.deepcopy(_CONFIG_CACHE[1])
+    return None
+
+
+def _store_validated_data(data: dict, fp: tuple) -> None:
+    """Cache a deep copy of *data* under fingerprint *fp*.
+
+    *fp* MUST be the fingerprint captured BEFORE the files were read (by
+    ``load()``), not a fresh stat. If a write lands between the read and this
+    store, *fp* describes the pre-write file, so it won't match the post-write
+    on-disk stat — the next ``load()`` misses and re-reads rather than serving
+    the stale content we just read. Re-statting here instead would cache old
+    content under the new file's fingerprint (a read->store TOCTOU) and serve
+    it as a false hit until the file changed again.
+    """
+    global _CONFIG_CACHE
+    with _CONFIG_CACHE_LOCK:
+        _CONFIG_CACHE = (fp, copy.deepcopy(data))
+
+
+def _invalidate_config_cache() -> None:
+    """Drop the cached validated config (called after save()/write-back)."""
+    global _CONFIG_CACHE
+    with _CONFIG_CACHE_LOCK:
+        _CONFIG_CACHE = None
+
+
 def _validate_config_data(data: dict) -> dict:
     """Validate *data* against the config JSON Schema.
 
@@ -1707,61 +1782,82 @@ class KiroClawConfig:
         ``save()`` — only the base config is written to ``config.json``.
         """
         path = config_path()
-        data: dict = {}
-        loaded_base = False
-        if path.exists():
-            try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(raw, dict):
-                    data = raw
-                    loaded_base = True
-                else:
-                    logger.warning("Config is not a JSON object, using defaults")
-            except (json.JSONDecodeError, OSError) as e:
-                logger.warning("Failed to load config from %s: %s", path, e)
 
-        # Deep-merge config.local.json overlay (user-owned, never touched by setup)
-        local_data: dict = {}
-        local_path = config_local_path()
-        if local_path.is_file():
-            try:
-                st_mode = local_path.stat().st_mode
-                if st_mode & 0o002:
-                    logger.warning(
-                        "config.local.json is world-writable (%o); "
-                        "consider running: chmod 600 %s",
-                        st_mode & 0o777,
-                        local_path,
-                    )
-                raw_local = json.loads(local_path.read_text(encoding="utf-8"))
-                if isinstance(raw_local, dict):
-                    local_data = raw_local
-                else:
-                    logger.warning("config.local.json is not a JSON object, ignoring")
-            except (json.JSONDecodeError, OSError) as e:
-                logger.warning("Failed to load config.local.json: %s", e)
+        # Hot-path cache: reuse the validated, merged dict when neither config
+        # file has changed since the last load. Skips read + json.loads +
+        # _deep_merge + the full jsonschema.validate. A deep copy is returned so
+        # in-place mutation by callers (and the write-back migration below) can
+        # never corrupt the cached original.
+        cached_data = _cached_validated_data()
+        if cached_data is not None:
+            data = cached_data
+        else:
+            # Capture the fingerprint BEFORE reading so a write landing during
+            # the read is detected: we cache under this pre-read fp, which won't
+            # match the post-write on-disk stat, so the next load() re-reads
+            # instead of serving the content we read mid-write (read->store
+            # TOCTOU). _store_validated_data documents this contract.
+            pre_read_fp = _config_fingerprint()
+            data = {}
+            loaded_base = False
+            if path.exists():
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        data = raw
+                        loaded_base = True
+                    else:
+                        logger.warning("Config is not a JSON object, using defaults")
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning("Failed to load config from %s: %s", path, e)
 
-        if local_data:
-            data = _deep_merge(data, local_data)
+            # Deep-merge config.local.json overlay (user-owned, never touched by setup)
+            local_data: dict = {}
+            local_path = config_local_path()
+            if local_path.is_file():
+                try:
+                    st_mode = local_path.stat().st_mode
+                    if st_mode & 0o002:
+                        logger.warning(
+                            "config.local.json is world-writable (%o); "
+                            "consider running: chmod 600 %s",
+                            st_mode & 0o777,
+                            local_path,
+                        )
+                    raw_local = json.loads(local_path.read_text(encoding="utf-8"))
+                    if isinstance(raw_local, dict):
+                        local_data = raw_local
+                    else:
+                        logger.warning("config.local.json is not a JSON object, ignoring")
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning("Failed to load config.local.json: %s", e)
 
-        # Return defaults only if neither file was successfully loaded. Seed
-        # the default "kiroclaw" agent in-memory (matching the on-disk
-        # migration below) so a never-setup home still lists the default agent
-        # — but do NOT persist: a plain read (e.g. `agent list`) must not
-        # create config files as a side effect.
-        if not loaded_base and not local_data:
-            cfg = cls()
-            kiro = cfg.agent.default_agent or "kiroclaw"
-            cfg.agents["default"] = KiroClawAgentConfig(
-                kiro_agent=kiro,
-                workspace="default",
-                memory_store="default",
-            )
-            cfg.default_agent = "default"
-            return cfg
+            if local_data:
+                data = _deep_merge(data, local_data)
 
-        # Validate against JSON Schema (advisory — never fatal)
-        _validate_config_data(data)
+            # Return defaults only if neither file was successfully loaded. Seed
+            # the default "kiroclaw" agent in-memory (matching the on-disk
+            # migration below) so a never-setup home still lists the default
+            # agent — but do NOT persist: a plain read (e.g. `agent list`) must
+            # not create config files as a side effect. Not cached — there's no
+            # file to invalidate against, and the path is already cheap
+            # (existence checks only, no read/parse/validate).
+            if not loaded_base and not local_data:
+                cfg = cls()
+                kiro = cfg.agent.default_agent or "kiroclaw"
+                cfg.agents["default"] = KiroClawAgentConfig(
+                    kiro_agent=kiro,
+                    workspace="default",
+                    memory_store="default",
+                )
+                cfg.default_agent = "default"
+                return cfg
+
+            # Validate against JSON Schema (advisory — never fatal)
+            _validate_config_data(data)
+            # Cache the validated, merged dict under the PRE-read fingerprint so
+            # a mid-read write self-heals (next load misses and re-reads).
+            _store_validated_data(data, pre_read_fp)
 
         agent_data = data.get("agent", {})
         if not isinstance(agent_data, dict):
@@ -2179,6 +2275,10 @@ class KiroClawConfig:
         p = config_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(d, indent=2) + "\n", encoding="utf-8")
+        # Drop the validated-data cache so the next load() re-reads this write.
+        # mtime-keying already detects the change; this makes it immediate even
+        # if the filesystem mtime resolution is coarse.
+        _invalidate_config_cache()
 
     @staticmethod
     def _resolve_agent_model() -> str:

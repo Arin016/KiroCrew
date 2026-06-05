@@ -159,7 +159,7 @@ class TestSelForwardCallback:
         SecurityEventLog._instance = None
         SecurityEventLog._initialized = False
 
-        sel = SecurityEventLog(base_dir=Path(str(tmp_path)))
+        sel = SecurityEventLog(base_dir=Path(str(tmp_path)), sync=True)
         events: list[dict] = []
         sel.set_forward_callback(events.append)
 
@@ -184,7 +184,7 @@ class TestSelForwardCallback:
         SecurityEventLog._instance = None
         SecurityEventLog._initialized = False
 
-        sel = SecurityEventLog(base_dir=Path(str(tmp_path)))
+        sel = SecurityEventLog(base_dir=Path(str(tmp_path)), sync=True)
         sel.set_forward_callback(lambda e: (_ for _ in ()).throw(RuntimeError("boom")))
 
         sel.log_api_access(
@@ -205,7 +205,7 @@ class TestSelForwardCallback:
         SecurityEventLog._instance = None
         SecurityEventLog._initialized = False
 
-        sel = SecurityEventLog(base_dir=Path(str(tmp_path)))
+        sel = SecurityEventLog(base_dir=Path(str(tmp_path)), sync=True)
         events: list[dict] = []
         sel.set_forward_callback(events.append)
 

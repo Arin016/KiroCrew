@@ -61,7 +61,7 @@ from kiro_claw.dashboard.chat_utils import (
     _validate_tool_name,
 )
 from kiro_claw.dashboard.handlers import MAX_PROMPT_BYTES, _find_prompt, _list_aim_prompts
-from kiro_claw.dashboard.handlers.usage import persist_token_record
+from kiro_claw.dashboard.handlers.usage import persist_token_record_async
 from kiro_claw.dashboard.state import (
     CRON_NOTIFY_PREFIX,
     CRON_NOTIFY_RE,
@@ -2247,7 +2247,9 @@ async def _run_chat(
                         if _canonical:
                             slot.model = _canonical
                             _record_model = _canonical
-                    persist_token_record(slot.key, _record_model, event, provider=_provider_name)
+                    await persist_token_record_async(
+                        slot.key, _record_model, event, provider=_provider_name
+                    )
                 _stop_reason = event.stop_reason
                 if (
                     _stop_reason

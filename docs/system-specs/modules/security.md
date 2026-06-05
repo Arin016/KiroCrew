@@ -254,6 +254,10 @@ Trust patterns are stored per-slot as session-scoped fnmatch globs (`slot._trust
 
 See `docs/system-specs/modules/sel.md` for full spec. Integrated across 8 surfaces: Slack handler, dashboard chat, task runner, subagent, background tasks, MCP core, MCP cron, API middleware.
 
+**What counts as an auditable permission decision.** A SEL event is emitted when a decision has a *subject* — a tool/capability that was granted or denied. The audit records grants and denies, not the absence of any decision:
+
+- **Skill triggering** (`skills.py:get_triggered_skills`, runs per message) emits **one** event per call when at least one skill was injected (`outcome="triggered"`, grant) or actively excluded by a negative trigger that would otherwise have matched (`outcome="denied"`, with the excluded skills in `metadata.negated`). When no skill matched and none was negated — the overwhelmingly common case — **no event is emitted**: nothing was granted or injected into LLM context, so there is no permission decision with a subject to record (analogous to not auditing an authz check that had nothing to authorize). This is a deliberate, threat-model-reviewed choice: the prior per-skill "not_triggered" logging was a per-message synchronous-write hot-path cost, and a per-message "matched nothing" event would dwarf the real grant/deny signals and *reduce* the audit trail's usefulness rather than improve it. The message text is already captured in conversation history; skill names are not secret.
+
 ### Frontend Security
 
 - **No `dangerouslySetInnerHTML` with unsanitized content** — all HTML content sanitized via DOMPurify
@@ -274,7 +278,7 @@ When writing new code, these rules MUST be followed:
 4. **Deny-by-default for authorization** — reject unless positively confirmed. Never use `if x and y and z` guards where any falsy value skips the check
 5. **Sandbox all agent subprocesses** — new subprocess spawning must go through `AcpClient._spawn()` which applies OS-level sandbox
 6. **Enforce denied commands** — new CLI-facing tools must be covered by `deniedCommands` patterns
-7. **Log security events** — all tool invocations and permission decisions must emit SEL events
+7. **Log security events** — all tool invocations and permission *decisions* (a capability granted or denied) must emit SEL events. The absence of a decision — e.g. skill-trigger matching that injected and excluded nothing — is not itself an auditable event (see "What counts as an auditable permission decision" above)
 
 ### Frontend
 1. **Never use `dangerouslySetInnerHTML`** without DOMPurify sanitization

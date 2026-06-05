@@ -28,6 +28,13 @@ History context uses natural decay — recent days in full detail, older days co
 
 Total output capped at `history_cap = 25_000` chars in `get_context()`. Timestamps use local timezone.
 
+`read_recent_history` runs on every message turn (context build) and otherwise
+stats + reads up to 181 daily files synchronously. The assembled string is
+TTL-cached (`_HISTORY_CACHE_TTL_SECS = 5.0`) on the `MemoryStore` instance,
+keyed on `(days, today)` so the decay window shifting at midnight invalidates
+naturally; `append_history` and `prune_history` call `_invalidate_history_cache()`
+so a new or pruned entry is visible immediately.
+
 ### History Pruning
 
 `prune_history(keep_days)` deletes daily files older than `keep_days` (default 365). Runs once per day via heartbeat (`_PRUNE_TICKS = 1440`). Parses `YYYY-MM-DD.md` filenames, skips non-date files.
@@ -259,6 +266,18 @@ Supports nested directories (e.g. `skills/utils/tiny-url/SKILL.md`). The skill n
 2. **On-demand**: skill summaries (name + description + dir path) in session context; LLM can `cat` the file when relevant
 
 Skills with auxiliary files (scripts, assets) include `dir` path so the LLM can `cd` and run them.
+
+**Trigger matching (`get_triggered_skills`) — per-message hot path.** Runs on
+every non-custom-agent message via the context builder, scoring word-overlap of
+the message against each skill's `triggers` (negative `!`-prefixed triggers
+exclude). To keep it off the per-message filesystem/config hot path:
+- the discovered skill-file list is TTL-cached (`_iter`, `_ITER_CACHE_TTL_SECS`),
+  invalidated by `create_auto_skill`;
+- the `max_triggered` cap is snapshotted on the loader in `__init__`
+  (`self._max_triggered`) — no `KiroClawConfig.load()` per message — refreshed
+  when the loader is rebuilt (per gateway), matching `extra_paths` semantics;
+- exactly **one** SEL audit event is emitted for the matched set (skipped
+  entirely when nothing matched, the common case), not one per skill scanned.
 
 **CRUD operations** (via `SkillsLoader`):
 - `create_skill(name, content)` — creates `{name}/SKILL.md`, supports nested paths

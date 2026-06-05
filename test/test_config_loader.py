@@ -17,6 +17,7 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
+import kiro_claw.config.loader as loader_module
 from kiro_claw.config.loader import (
     _HAS_JSONSCHEMA,
     AgentConfig,
@@ -2175,3 +2176,152 @@ class TestArchiveRetentionDays:
             cfg.save()
             loaded = KiroClawConfig.load()
         assert loaded.session.archive_retention_days == 60
+
+
+class TestConfigCache:
+    """Validated-data cache keyed on file mtime/size (hot-path load())."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_cache(self):
+        # Each test starts with a clean module-level cache and leaves one behind.
+        from kiro_claw.config.loader import _invalidate_config_cache
+
+        _invalidate_config_cache()
+        yield
+        _invalidate_config_cache()
+
+    # Canonical scaffold so the one-shot write-back migration (which calls
+    # save() and would invalidate the cache mid-test) does not fire.
+    _CANON = {
+        "agents": {"default": {"kiro_agent": "kiroclaw"}},
+        "default_agent": "default",
+        "workspaces": {"default": {"dir": "~/workspace"}},
+    }
+
+    def _write(self, path: Path, data: dict) -> None:
+        merged = {**self._CANON, **data}
+        path.write_text(json.dumps(merged), encoding="utf-8")
+
+    def test_second_load_skips_validation(self, tmp_path: Path) -> None:
+        """A cache hit must not re-run jsonschema validation."""
+        from unittest.mock import patch
+
+        cfg_file = tmp_path / "config.json"
+        # _write merges a canonical scaffold so the one-shot write-back migration
+        # (which calls save() and would invalidate the cache) does not fire.
+        self._write(cfg_file, {"agent": {"provider": "acp"}})
+        calls = {"n": 0}
+        real_validate = loader_module._validate_config_data
+
+        def _counting(data):
+            calls["n"] += 1
+            return real_validate(data)
+
+        with patch("kiro_claw.config.loader.config_path", return_value=cfg_file), patch(
+            "kiro_claw.config.loader.config_local_path", return_value=tmp_path / "config.local.json"
+        ), patch("kiro_claw.config.loader._validate_config_data", _counting):
+            KiroClawConfig.load()
+            KiroClawConfig.load()
+            KiroClawConfig.load()
+        # Validated once; subsequent loads served from cache.
+        assert calls["n"] == 1
+
+    def test_edit_busts_cache(self, tmp_path: Path) -> None:
+        """A changed file (new mtime/size) must be re-read, not served stale."""
+        import os as _os
+        from unittest.mock import patch
+
+        cfg_file = tmp_path / "config.json"
+        local = tmp_path / "config.local.json"
+        with patch("kiro_claw.config.loader.config_path", return_value=cfg_file), patch(
+            "kiro_claw.config.loader.config_local_path", return_value=local
+        ):
+            self._write(cfg_file, {"agent": {"provider": "acp"}})
+            first = KiroClawConfig.load()
+            assert first.agent.provider == "acp"
+            # Rewrite with different content (provider value differs in length, so
+            # the size component of the fingerprint changes); also force a distinct
+            # mtime so the change is detected on coarse-resolution filesystems too.
+            self._write(cfg_file, {"agent": {"provider": "bedrock"}})
+            st = cfg_file.stat()
+            _os.utime(cfg_file, ns=(st.st_atime_ns + 1_000_000_000, st.st_mtime_ns + 1_000_000_000))
+            second = KiroClawConfig.load()
+        assert second.agent.provider == "bedrock"
+
+    def test_save_invalidates_cache(self, tmp_path: Path) -> None:
+        """save() must drop the cache so the next load sees the written value."""
+        from unittest.mock import patch
+
+        cfg_file = tmp_path / "config.json"
+        local = tmp_path / "config.local.json"
+        with patch("kiro_claw.config.loader.config_path", return_value=cfg_file), patch(
+            "kiro_claw.config.loader.config_local_path", return_value=local
+        ):
+            self._write(cfg_file, {"agent": {"yolo": False}})
+            cfg = KiroClawConfig.load()
+            assert cfg.agent.yolo is False
+            cfg.agent.yolo = True
+            cfg.save()
+            reloaded = KiroClawConfig.load()
+        assert reloaded.agent.yolo is True
+
+    def test_returned_config_is_independent(self, tmp_path: Path) -> None:
+        """Mutating a loaded config must not corrupt the cached data for the next
+        load — each load() returns freshly-constructed dataclasses."""
+        from unittest.mock import patch
+
+        cfg_file = tmp_path / "config.json"
+        local = tmp_path / "config.local.json"
+        with patch("kiro_claw.config.loader.config_path", return_value=cfg_file), patch(
+            "kiro_claw.config.loader.config_local_path", return_value=local
+        ):
+            self._write(cfg_file, {"agent": {"model": "orig-model"}})
+            first = KiroClawConfig.load()
+            assert first.agent.model == "orig-model"
+            # In-place mutation, as settings handlers do.
+            first.agents["injected"] = KiroClawAgentConfig(kiro_agent="x")
+            first.agent.model = "MUTATED"
+            second = KiroClawConfig.load()
+        assert "injected" not in second.agents
+        assert second.agent.model == "orig-model"
+
+    def test_mid_read_write_does_not_cache_stale(self, tmp_path: Path) -> None:
+        """A write landing during the read->store window must NOT be served as a
+        false cache hit: the cache is keyed on the PRE-read fingerprint, which
+        won't match the post-write on-disk stat, so the next load re-reads."""
+        import os as _os
+        from unittest.mock import patch
+
+        cfg_file = tmp_path / "config.json"
+        local = tmp_path / "config.local.json"
+        self._write(cfg_file, {"agent": {"model": "v0"}})
+
+        real_read_text = Path.read_text
+        injected = {"done": False}
+
+        def _read_then_write(self_path, *a, **k):
+            # Read the OLD content, then simulate a concurrent writer landing
+            # before _store_validated_data stamps the cache.
+            content = real_read_text(self_path, *a, **k)
+            if not injected["done"] and self_path == cfg_file:
+                injected["done"] = True
+                self._write(cfg_file, {"agent": {"model": "v1"}})
+                st = cfg_file.stat()
+                _os.utime(
+                    cfg_file,
+                    ns=(st.st_atime_ns + 1_000_000_000, st.st_mtime_ns + 1_000_000_000),
+                )
+            return content
+
+        with patch("kiro_claw.config.loader.config_path", return_value=cfg_file), patch(
+            "kiro_claw.config.loader.config_local_path", return_value=local
+        ), patch.object(Path, "read_text", _read_then_write):
+            first = KiroClawConfig.load()  # reads v0, writer swaps to v1 mid-read
+            # First load returns the v0 it actually read (acceptable).
+            assert first.agent.model == "v0"
+        # Next load must re-read and see v1 — NOT serve stale v0 from a poisoned cache.
+        with patch("kiro_claw.config.loader.config_path", return_value=cfg_file), patch(
+            "kiro_claw.config.loader.config_local_path", return_value=local
+        ):
+            second = KiroClawConfig.load()
+        assert second.agent.model == "v1", "stale config served from poisoned cache"

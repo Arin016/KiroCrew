@@ -15,16 +15,18 @@ Retention: configurable, default 365 days per Amazon Security Event Logging Stan
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import hmac
 import json
 import logging
 import os
+import queue
 import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,12 @@ _SEL_FILE = "security_events.jsonl"
 _RETENTION_DAYS = 365
 _HMAC_KEY_FILE = "sel_hmac.key"
 _MAX_ARG_LEN = 500
+# Background-writer tuning. The queue is unbounded so callers never block; a
+# crash/kill can lose at most the events still queued (audit log is
+# eventually-durable, not synchronously-durable). flush() drains it before any
+# read so read-after-write stays consistent.
+_QUEUE_DRAIN_BATCH = 256  # max events appended per open() in the writer loop
+_FLUSH_TIMEOUT_SECS = 5.0  # bound on flush() so a stuck writer can't hang reads
 
 
 @dataclass
@@ -68,7 +76,7 @@ class SecurityEventLog:
     _init_lock = threading.Lock()
     _initialized: bool = False
 
-    def __new__(cls, base_dir: Path | None = None) -> SecurityEventLog:
+    def __new__(cls, base_dir: Path | None = None, sync: bool = False) -> SecurityEventLog:
         if cls._instance is None:
             with cls._init_lock:
                 if cls._instance is None:
@@ -77,21 +85,162 @@ class SecurityEventLog:
                     cls._instance = inst
         return cls._instance
 
-    def __init__(self, base_dir: Path | None = None) -> None:
+    def __init__(self, base_dir: Path | None = None, sync: bool = False) -> None:
         if self._initialized:
             return
+        # sync=True writes each event inline (no background thread). Used by
+        # tests that read the raw log file immediately after logging; production
+        # uses the async writer for off-hot-path appends.
+        self._sync = sync
         self._dir = base_dir or _DEFAULT_DIR
         self._path = self._dir / _SEL_FILE
+        # _lock guards _last_hash + the file append (held only inside the writer
+        # thread and by synchronous fallbacks / prune, never by enqueuing callers).
         self._lock = threading.Lock()
         self._hmac_key = self._load_or_create_hmac_key()
         self._last_hash = self._read_last_hash()
         self._forward_callback: Callable[[dict], None] | None = None
+        # Background writer: callers enqueue (non-blocking) and one daemon thread
+        # maintains the HMAC chain + batches appends off the hot path. Lazily
+        # started on first log() so importing/constructing SEL stays side-effect
+        # free (tests that never log don't spawn a thread).
+        self._queue: queue.Queue[SecurityEvent | None] = queue.Queue()
+        self._writer: threading.Thread | None = None
+        self._writer_lock = threading.Lock()
+        # Pending-event counter guarded by a Condition: log() increments BEFORE
+        # enqueuing, the writer decrements AFTER each event is written, and
+        # flush() waits for it to reach 0. This is race-free (unlike a bare
+        # "queue empty" flag, which a writer could set between a logger's
+        # clear and its put).
+        self._pending = 0
+        self._pending_cond = threading.Condition()
         self._initialized = True
 
     def set_forward_callback(self, callback: Callable[[dict], None] | None) -> None:
         """Register an optional callback to forward events to a centralized log system."""
         with self._lock:
             self._forward_callback = callback
+
+    def _ensure_writer(self) -> None:
+        """Start the background writer thread once, on first use."""
+        if self._writer is not None and self._writer.is_alive():
+            return
+        with self._writer_lock:
+            if self._writer is not None and self._writer.is_alive():
+                return
+            self._writer = threading.Thread(
+                target=self._writer_loop, name="sel-writer", daemon=True
+            )
+            self._writer.start()
+            # Flush queued events on interpreter exit (best-effort; daemon thread
+            # would otherwise be killed mid-queue).
+            atexit.register(self.flush)
+
+    def _writer_loop(self) -> None:
+        """Drain the queue, maintaining the HMAC chain and batching appends.
+
+        Blocks on the queue when idle (no busy-wait). Wakes per event, then
+        opportunistically batches any already-queued events into a single
+        open()+write so a per-message burst is one file operation, not N.
+        """
+        while True:
+            event = self._queue.get()
+            if event is None:  # shutdown sentinel — no _pending credit to drop
+                return
+            batch = [event]
+            stop = False
+            while len(batch) < _QUEUE_DRAIN_BATCH:
+                try:
+                    nxt = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if nxt is None:  # sentinel mid-batch: write batch, then stop
+                    stop = True
+                    break
+                batch.append(nxt)
+            # Always decrement _pending, even if _flush_batch raises (e.g. mkdir
+            # PermissionError outside its OSError guard, or a json.dumps failure):
+            # otherwise the writer thread would die with _pending > 0 and every
+            # later flush() would block until timeout. The except keeps the
+            # thread alive so subsequent events still drain.
+            try:
+                self._flush_batch(batch)
+            except Exception:
+                logger.warning("SEL writer batch failed for %d events", len(batch), exc_info=True)
+            finally:
+                self._decr_pending(len(batch))
+            if stop:
+                return
+
+    def _decr_pending(self, n: int) -> None:
+        """Drop *n* from the pending counter and wake any flush() waiters."""
+        with self._pending_cond:
+            self._pending = max(0, self._pending - n)
+            if self._pending == 0:
+                self._pending_cond.notify_all()
+
+    def _flush_batch(self, events: list[SecurityEvent]) -> None:
+        """Append a batch of events under the chain lock, then forward them."""
+        callback: Callable[[dict], None] | None
+        with self._lock:
+            self._dir.mkdir(parents=True, exist_ok=True)
+            # Remember the chain tip so we can roll back if the append fails:
+            # we advance _last_hash per event below, but nothing is persisted
+            # until the write() succeeds. Without the rollback, a failed write
+            # would leave _last_hash pointing at a phantom hash never on disk,
+            # and the next batch would chain off it — silently corrupting the
+            # HMAC chain (verify_integrity would then report a break).
+            prev_last_hash = self._last_hash
+            lines: list[str] = []
+            for event in events:
+                event.prev_hash = self._last_hash
+                event.entry_hash = self._compute_hash(event)
+                lines.append(json.dumps(asdict(event)) + "\n")
+                self._last_hash = event.entry_hash
+            try:
+                with open(self._path, "a", encoding="utf-8") as f:
+                    f.write("".join(lines))
+            except OSError:
+                self._last_hash = prev_last_hash  # nothing persisted — roll back
+                logger.warning("SEL append failed for %d events", len(events), exc_info=True)
+            callback = self._forward_callback
+        if callback:
+            for event in events:
+                self._forward_event(callback, event)
+
+    def _forward_event(self, callback: Callable[[dict], None], event: SecurityEvent) -> None:
+        """Redact and forward a single event to the centralized sink."""
+        try:
+            # circular import: kiro_claw.security imports SecurityEvent/
+            # SecurityEventLog from this module at top level, so redact() can
+            # only be imported lazily here.
+            from kiro_claw.security import redact
+
+            def _redact_deep(obj: object) -> object:
+                if isinstance(obj, str):
+                    return redact(obj)
+                if isinstance(obj, dict):
+                    return {k: _redact_deep(v) for k, v in obj.items()}
+                if isinstance(obj, (list, tuple)):
+                    return type(obj)(_redact_deep(i) for i in obj)
+                return obj
+
+            callback(_redact_deep(asdict(event)))  # type: ignore[arg-type]
+        except Exception:
+            logger.warning("forward_callback failed", exc_info=True)
+
+    def flush(self, timeout: float = _FLUSH_TIMEOUT_SECS) -> None:
+        """Block until all enqueued events are written. Bounded by *timeout*.
+
+        Called before every read path (recent/verify_integrity/prune) and on
+        shutdown so the on-disk log reflects all enqueued events. Waits on the
+        pending-event counter (race-free vs a bare queue-empty check) with a
+        timeout so a wedged writer can't hang a read forever.
+        """
+        with self._pending_cond:
+            if self._pending == 0:
+                return
+            self._pending_cond.wait_for(lambda: self._pending == 0, timeout=timeout)
 
     def _load_or_create_hmac_key(self) -> bytes:
         key_path = self._dir / _HMAC_KEY_FILE
@@ -140,31 +289,25 @@ class SecurityEventLog:
         return hmac.new(self._hmac_key, payload, hashlib.sha256).hexdigest()
 
     def log(self, event: SecurityEvent) -> None:
-        """Append an event to the log with HMAC chain integrity."""
-        with self._lock:
-            event.prev_hash = self._last_hash
-            event.entry_hash = self._compute_hash(event)
-            self._dir.mkdir(parents=True, exist_ok=True)
-            with open(self._path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(asdict(event)) + "\n")
-            self._last_hash = event.entry_hash
-            callback = self._forward_callback
-        if callback:
-            try:
-                from kiro_claw.security import redact
+        """Enqueue an event for the background writer (non-blocking).
 
-                def _redact_deep(obj: object) -> object:
-                    if isinstance(obj, str):
-                        return redact(obj)
-                    if isinstance(obj, dict):
-                        return {k: _redact_deep(v) for k, v in obj.items()}
-                    if isinstance(obj, (list, tuple)):
-                        return type(obj)(_redact_deep(i) for i in obj)
-                    return obj
-
-                callback(_redact_deep(asdict(event)))  # type: ignore[arg-type]
-            except Exception:
-                logger.warning("forward_callback failed", exc_info=True)
+        The HMAC chain (prev_hash/entry_hash) is computed in the writer thread
+        in enqueue order, so callers never pay the hash + file-append cost on
+        the hot path. If the writer can't be started (unexpected), fall back to
+        a synchronous write so an event is never silently dropped.
+        """
+        if self._sync:
+            self._flush_batch([event])
+            return
+        try:
+            self._ensure_writer()
+            with self._pending_cond:
+                self._pending += 1
+            self._queue.put(event)
+        except Exception:
+            # Writer unavailable — write synchronously so the audit entry lands.
+            logger.warning("SEL writer enqueue failed; writing synchronously", exc_info=True)
+            self._flush_batch([event])
 
     def log_tool_invocation(
         self,
@@ -229,6 +372,7 @@ class SecurityEventLog:
 
     def verify_integrity(self) -> tuple[int, int]:
         """Verify HMAC chain. Returns (total_entries, valid_entries)."""
+        self.flush()  # ensure all queued events are on disk before verifying
         if not self._path.exists():
             return 0, 0
         total = 0
@@ -259,6 +403,7 @@ class SecurityEventLog:
 
     def recent(self, limit: int = 100) -> list[dict]:
         """Return the most recent events."""
+        self.flush()  # surface any queued-but-unwritten events
         if not self._path.exists():
             return []
         lines = self._path.read_text(encoding="utf-8").splitlines()
@@ -277,10 +422,9 @@ class SecurityEventLog:
 
     def prune(self, keep_days: int = _RETENTION_DAYS) -> int:
         """Remove entries older than keep_days. Returns count removed."""
+        self.flush()  # don't rewrite the file out from under queued appends
         if not self._path.exists():
             return 0
-        from datetime import timedelta
-
         cutoff_dt = datetime.now(tz=timezone.utc) - timedelta(days=keep_days)
         cutoff_str = cutoff_dt.isoformat()
 

@@ -1,6 +1,6 @@
 # Security Event Log (SEL) Module
 
-Last Updated: 2026-03-10
+Last Updated: 2026-06-03
 
 ## Overview
 
@@ -38,6 +38,27 @@ Each entry records:
 - Verification: `verify_integrity()` walks the chain and reports tampered entries
 - Append-only: no in-place edits; pruning rewrites with chain rebuild
 
+## Async Writer
+
+`log()` is off the hot path: callers enqueue the event on an unbounded
+`queue.Queue` (never blocking) and a single daemon writer thread drains it,
+computing the HMAC chain in enqueue order and batching up to `_QUEUE_DRAIN_BATCH`
+events into one `open()`+write. The writer starts lazily on first `log()` and
+registers an `atexit` flush.
+
+- **Durability**: eventually-durable, not synchronously-durable — a crash/kill
+  can lose at most the events still queued. Acceptable for an audit log; the
+  hot path (e.g. per-message skill triggering) no longer pays fsync/lock latency.
+- **Read-after-write**: `flush()` runs before every read path (`recent`,
+  `verify_integrity`, `prune`) and on exit. It waits on a pending-event counter
+  (a `threading.Condition`, race-free vs a bare queue-empty check), bounded by
+  `_FLUSH_TIMEOUT_SECS` so a wedged writer can't hang a read.
+- **Fallback**: if the writer can't be started, `log()` writes synchronously so
+  an event is never silently dropped.
+- **`sync=True`**: `SecurityEventLog(base_dir=..., sync=True)` writes each event
+  inline (no thread) — used by tests that read the raw JSONL immediately after
+  logging.
+
 ## Retention
 
 Default 365 days. Pruned daily by heartbeat service (`_PRUNE_TICKS`).
@@ -71,4 +92,8 @@ kiroclaw security verify            # Verify HMAC chain integrity
 
 ## Thread Safety
 
-Singleton pattern with `threading.Lock` on all writes. Safe for concurrent access from asyncio event loop + MCP server stdio processes.
+Singleton pattern. The chain state (`_last_hash`) and the file append are
+guarded by `threading.Lock`, held only inside the writer thread (and the
+synchronous fallback / `prune`), never by enqueuing callers. Enqueue is
+lock-free via the thread-safe `queue.Queue`. Safe for concurrent access from the
+asyncio event loop + MCP server stdio processes.

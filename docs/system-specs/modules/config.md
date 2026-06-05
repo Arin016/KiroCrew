@@ -74,6 +74,18 @@ types in overlay replace base values.
 Loads config from disk. Merges `config.local.json` overlay if present.
 Returns defaults if file is missing or invalid.
 
+**Hot-path cache.** `load()` is called per message / per request on several hot
+paths. The expensive work — reading `config.json` (+ `config.local.json`),
+`json.loads`, `_deep_merge`, and the full `jsonschema.validate` — is cached as
+the validated, merged `data` dict, keyed on a fingerprint of both files
+(`st_mtime_ns`, `st_size`, `st_mode`). On a cache hit, `load()` still builds
+**fresh dataclasses from a deep copy**, so the many callers that mutate the
+returned config in place (settings handlers, the write-back migration) never
+corrupt the shared cache. The cache is mtime-keyed (not a blind TTL), so a
+runtime edit is reflected on the next `load()`; `save()` also invalidates it
+eagerly via `_invalidate_config_cache()`. The defaults-only path (neither file
+present) is not cached.
+
 ### `KiroClawConfig._resolve_agent_model() -> str`
 Reads model from installed agent config (`~/.kiro/agents/kiroclaw.json`),
 falling back to project-level `agents/defaults.json`, then `"auto"`.
@@ -88,7 +100,8 @@ Serializes config to the JSON structure used by `config.json`. Uses `_configured
 env var) to avoid clobbering the saved port on write-back.
 
 ### `KiroClawConfig.save() -> None`
-Writes current config to `~/.kiroclaw/config.json` via `to_dict()`.
+Writes current config to `~/.kiroclaw/config.json` via `to_dict()`. Invalidates
+the `load()` validated-data cache so the next load reflects the write immediately.
 
 ### `config_dir() -> Path`
 Returns `~/.kiroclaw/`. Overridden by `KIROCLAW_HOME` env var (refuses system directories like `/`, `/usr`, `/System`, `/etc`).

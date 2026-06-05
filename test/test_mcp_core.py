@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from kiro_claw.mcp_core import _call_tool
 
 
@@ -119,3 +121,87 @@ class TestSendMessageCronSession:
             result = _call_tool("send_message", {"text": "hi", "session": "bogus"})
             assert "session" in result.lower() or "error" in result.lower()
             mock_post.assert_not_called()
+
+
+class TestKnowledgeSearchCache:
+    """_get_knowledge_search reuses store+embedder until the DB/config changes."""
+
+    def _reset(self):
+        import kiro_claw.mcp_core as mc
+
+        mc._KNOWLEDGE_CACHE = None
+
+    def test_reuses_store_when_db_unchanged(self, tmp_path):
+        from kiro_claw.mcp_core import _get_knowledge_search
+
+        self._reset()
+        db_path = tmp_path / "knowledge.db"
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text("{}")
+
+        store1, _ = _get_knowledge_search(db_path, cfg_path)
+        store2, _ = _get_knowledge_search(db_path, cfg_path)
+        # Same object — not rebuilt — when nothing changed.
+        assert store1 is store2
+        self._reset()
+
+    def test_rebuilds_after_ingest(self, tmp_path):
+        from kiro_claw.mcp_core import _get_knowledge_search
+
+        self._reset()
+        db_path = tmp_path / "knowledge.db"
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text("{}")
+
+        store1, _ = _get_knowledge_search(db_path, cfg_path)
+        # Simulate ingestion: write through the store so the DB file changes.
+        store1.add_item("Title", "body text", "doc")
+        # Force a checkpoint so the main DB file's mtime/size move (WAL mode).
+        store1.db.execute("PRAGMA wal_checkpoint(FULL)")
+        store2, _ = _get_knowledge_search(db_path, cfg_path)
+        # A changed DB signature must yield a freshly-built store.
+        assert store1 is not store2
+        self._reset()
+
+    def test_config_change_rebuilds(self, tmp_path):
+        from kiro_claw.mcp_core import _get_knowledge_search
+
+        self._reset()
+        db_path = tmp_path / "knowledge.db"
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text('{"memory": {"embedding_provider": "none"}}')
+
+        _, emb1 = _get_knowledge_search(db_path, cfg_path)
+        assert emb1 is None
+        cfg_path.write_text(
+            '{"memory": {"embedding_provider": "ollama", "embedding_model": "m"}}'
+        )
+        _, emb2 = _get_knowledge_search(db_path, cfg_path)
+        assert emb2 is not None  # embedder rebuilt from new config
+        self._reset()
+
+    def test_failed_rebuild_keeps_old_store_usable(self, tmp_path, monkeypatch):
+        """If a rebuild's KnowledgeStore() raises, the cached store must NOT be
+        left with a closed connection — the old store stays usable."""
+        import kiro_claw.mcp_core as mc
+        from kiro_claw.mcp_core import _get_knowledge_search
+
+        self._reset()
+        db_path = tmp_path / "knowledge.db"
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text("{}")
+
+        store1, _ = _get_knowledge_search(db_path, cfg_path)
+        # Change the config so the next call enters the rebuild branch.
+        cfg_path.write_text('{"memory": {"embedding_provider": "none"}}')
+
+        def _boom(*a, **k):
+            raise RuntimeError("db locked")
+
+        monkeypatch.setattr(mc, "KnowledgeStore", _boom)
+        with pytest.raises(RuntimeError):
+            _get_knowledge_search(db_path, cfg_path)
+        # The old cached store's connection must still be open (not closed before
+        # the failed build) — a query succeeds rather than raising ProgrammingError.
+        assert store1.db.execute("SELECT 1").fetchone()[0] == 1
+        self._reset()

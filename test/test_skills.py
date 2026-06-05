@@ -105,7 +105,7 @@ class TestTriggeredSkills:
         if monkeypatch is not None:
             from unittest.mock import MagicMock
 
-            monkeypatch.setattr("kiro_claw.sel.sel", lambda: MagicMock())
+            monkeypatch.setattr("kiro_claw.skills.sel", lambda: MagicMock())
         return loader
 
     def test_exact_trigger_match(self, tmp_path, monkeypatch):
@@ -139,7 +139,7 @@ class TestTriggeredSkills:
         loader = SkillsLoader(skills_path=skills_dir, install_builtins=False)
         from unittest.mock import MagicMock
 
-        monkeypatch.setattr("kiro_claw.sel.sel", lambda: MagicMock())
+        monkeypatch.setattr("kiro_claw.skills.sel", lambda: MagicMock())
         assert loader.get_triggered_skills("hello world") == []
 
     def test_case_insensitive(self, tmp_path, monkeypatch):
@@ -161,7 +161,7 @@ class TestTriggeredSkills:
         loader = SkillsLoader(skills_path=skills_dir, install_builtins=False)
         from unittest.mock import MagicMock
 
-        monkeypatch.setattr("kiro_claw.sel.sel", lambda: MagicMock())
+        monkeypatch.setattr("kiro_claw.skills.sel", lambda: MagicMock())
         assert loader.get_triggered_skills("anything") == []
 
 
@@ -269,7 +269,7 @@ class TestTriggerMatching:
         mock_config = MagicMock()
         mock_config.skills.max_triggered = 3
         monkeypatch.setattr("kiro_claw.config.loader.KiroClawConfig.load", lambda: mock_config)
-        monkeypatch.setattr("kiro_claw.sel.sel", lambda: MagicMock())
+        monkeypatch.setattr("kiro_claw.skills.sel", lambda: MagicMock())
 
         result = loader.get_triggered_skills("what's the weather forecast today")
         assert "weather" in result
@@ -289,7 +289,7 @@ class TestTriggerMatching:
         mock_config = MagicMock()
         mock_config.skills.max_triggered = 3
         monkeypatch.setattr("kiro_claw.config.loader.KiroClawConfig.load", lambda: mock_config)
-        monkeypatch.setattr("kiro_claw.sel.sel", lambda: MagicMock())
+        monkeypatch.setattr("kiro_claw.skills.sel", lambda: MagicMock())
 
         # Positive match without negative words
         assert "code-search" in loader.get_triggered_skills("search code repositories")
@@ -306,12 +306,11 @@ class TestTriggerMatching:
                 f"skill{i}",
                 f"---\nname: skill{i}\ndescription: Skill {i}\ntriggers: test\n---\n",
             )
-        loader = SkillsLoader(skills_path=skills_dir, install_builtins=False)
+        # max_triggered is snapshotted at construction, so inject via config=.
+        cfg = KiroClawConfig(skills=SkillsConfig(max_triggered=2))
+        loader = SkillsLoader(skills_path=skills_dir, install_builtins=False, config=cfg)
 
-        mock_config = MagicMock()
-        mock_config.skills.max_triggered = 2
-        monkeypatch.setattr("kiro_claw.config.loader.KiroClawConfig.load", lambda: mock_config)
-        monkeypatch.setattr("kiro_claw.sel.sel", lambda: MagicMock())
+        monkeypatch.setattr("kiro_claw.skills.sel", lambda: MagicMock())
 
         result = loader.get_triggered_skills("test")
         assert len(result) == 2
@@ -338,7 +337,7 @@ class TestTriggerMatching:
         mock_config = MagicMock()
         mock_config.skills.max_triggered = 5
         monkeypatch.setattr("kiro_claw.config.loader.KiroClawConfig.load", lambda: mock_config)
-        monkeypatch.setattr("kiro_claw.sel.sel", lambda: MagicMock())
+        monkeypatch.setattr("kiro_claw.skills.sel", lambda: MagicMock())
 
         result = loader.get_triggered_skills("alpha beta gamma")
         assert len(result) == 2
@@ -360,7 +359,7 @@ class TestTriggerMatching:
         mock_config = MagicMock()
         mock_config.skills.max_triggered = 5
         monkeypatch.setattr("kiro_claw.config.loader.KiroClawConfig.load", lambda: mock_config)
-        monkeypatch.setattr("kiro_claw.sel.sel", lambda: MagicMock())
+        monkeypatch.setattr("kiro_claw.skills.sel", lambda: MagicMock())
 
         result = loader.get_triggered_skills("test")
         assert "always" not in result
@@ -381,7 +380,7 @@ class TestTriggerMatching:
         mock_config = MagicMock()
         mock_config.skills.max_triggered = 3
         monkeypatch.setattr("kiro_claw.config.loader.KiroClawConfig.load", lambda: mock_config)
-        monkeypatch.setattr("kiro_claw.sel.sel", lambda: MagicMock())
+        monkeypatch.setattr("kiro_claw.skills.sel", lambda: MagicMock())
 
         assert "tiny-url" in loader.get_triggered_skills("please shorten this url")
         assert "tiny-url" in loader.get_triggered_skills("create a tiny link for me")
@@ -859,3 +858,140 @@ class TestSkillsLoaderExtraPaths:
         )
         assert "x" not in {s["name"] for s in loader.list_skills()}
         assert loader.load_skill("x") is None
+
+
+class TestTriggerPerformance:
+    """Per-message cost reductions in get_triggered_skills (perf)."""
+
+    def test_single_audit_event_for_triggered_set(self, tmp_path, monkeypatch):
+        """One SEL event per call (for the matched set), not one per skill."""
+        from unittest.mock import MagicMock
+
+        skills_dir = tmp_path / "skills"
+        # Several skills; only one will match the query.
+        _create_skill(skills_dir, "tiny-url",
+                      "---\nname: tiny-url\ndescription: d\ntriggers: shorten url\n---\n# x\n")
+        _create_skill(skills_dir, "weather",
+                      "---\nname: weather\ndescription: d\ntriggers: weather forecast\n---\n# x\n")
+        _create_skill(skills_dir, "pipeline",
+                      "---\nname: pipeline\ndescription: d\ntriggers: pipeline health\n---\n# x\n")
+        loader = SkillsLoader(skills_path=skills_dir, install_builtins=False)
+
+        fake_sel = MagicMock()
+        monkeypatch.setattr("kiro_claw.skills.sel", lambda: fake_sel)
+        triggered = loader.get_triggered_skills("please shorten this url")
+
+        assert "tiny-url" in triggered
+        # Exactly ONE audit event, regardless of how many skills were scanned.
+        assert fake_sel.log_tool_invocation.call_count == 1
+
+    def test_no_audit_event_when_nothing_triggers(self, tmp_path, monkeypatch):
+        """The common case (no match) writes zero SEL events."""
+        from unittest.mock import MagicMock
+
+        skills_dir = tmp_path / "skills"
+        _create_skill(skills_dir, "tiny-url",
+                      "---\nname: tiny-url\ndescription: d\ntriggers: shorten url\n---\n# x\n")
+        loader = SkillsLoader(skills_path=skills_dir, install_builtins=False)
+
+        fake_sel = MagicMock()
+        monkeypatch.setattr("kiro_claw.skills.sel", lambda: fake_sel)
+        assert loader.get_triggered_skills("hello there friend") == []
+        assert fake_sel.log_tool_invocation.call_count == 0
+
+    @pytest.mark.parametrize(
+        "triggers",
+        [
+            "shorten url, !test",  # positive first
+            "!test, shorten url",  # negative first — must be order-independent
+        ],
+    )
+    def test_negative_trigger_exclusion_is_audited(self, tmp_path, monkeypatch, triggers):
+        """A negative trigger that excludes an otherwise-matching skill is a
+        permission DENY and must still emit an audit event (with the negated
+        skill in metadata), regardless of trigger order in the frontmatter."""
+        from unittest.mock import MagicMock
+
+        skills_dir = tmp_path / "skills"
+        _create_skill(skills_dir, "tiny-url",
+                      f"---\nname: tiny-url\ndescription: d\ntriggers: {triggers}\n---\n# x\n")
+        loader = SkillsLoader(skills_path=skills_dir, install_builtins=False)
+
+        fake_sel = MagicMock()
+        monkeypatch.setattr("kiro_claw.skills.sel", lambda: fake_sel)
+        # "shorten url" matches the positive trigger, but "test" fires the
+        # negative trigger → excluded.
+        triggered = loader.get_triggered_skills("shorten url for this test")
+
+        assert triggered == []  # excluded by negative trigger
+        # The denial is audited (one event), with the skill named in metadata —
+        # even when "!test" is listed before "shorten url".
+        assert fake_sel.log_tool_invocation.call_count == 1
+        _, kwargs = fake_sel.log_tool_invocation.call_args
+        assert kwargs["outcome"] == "denied"
+        assert "tiny-url" in kwargs["metadata"]["negated"]
+
+    def test_iter_result_is_cached(self, tmp_path, monkeypatch):
+        """The skill-file walk is cached, not re-run on every call."""
+        from unittest.mock import MagicMock
+
+        skills_dir = tmp_path / "skills"
+        _create_skill(skills_dir, "tiny-url",
+                      "---\nname: tiny-url\ndescription: d\ntriggers: shorten url\n---\n# x\n")
+        loader = SkillsLoader(skills_path=skills_dir, install_builtins=False)
+        monkeypatch.setattr("kiro_claw.skills.sel", lambda: MagicMock())
+
+        calls = {"n": 0}
+        orig = loader._iter_uncached
+
+        def _counting():
+            calls["n"] += 1
+            return orig()
+
+        monkeypatch.setattr(loader, "_iter_uncached", _counting)
+        for _ in range(5):
+            loader.get_triggered_skills("shorten this url")
+        # 5 messages, but the underlying walk ran at most once (TTL cache).
+        assert calls["n"] <= 1
+
+    def test_config_not_loaded_per_message(self, tmp_path, monkeypatch):
+        """get_triggered_skills must not re-load config on every message — the
+        trigger cap is snapshotted at construction (max_triggered hoist)."""
+        from unittest.mock import MagicMock
+
+        skills_dir = tmp_path / "skills"
+        _create_skill(skills_dir, "tiny-url",
+                      "---\nname: tiny-url\ndescription: d\ntriggers: shorten url\n---\n# x\n")
+        loader = SkillsLoader(skills_path=skills_dir, install_builtins=False)
+        monkeypatch.setattr("kiro_claw.skills.sel", lambda: MagicMock())
+
+        calls = {"n": 0}
+        real_load = KiroClawConfig.load
+
+        def _counting_load():
+            calls["n"] += 1
+            return real_load()
+
+        monkeypatch.setattr("kiro_claw.config.loader.KiroClawConfig.load", _counting_load)
+        for _ in range(5):
+            loader.get_triggered_skills("shorten this url")
+        # Zero config loads across 5 messages — the cap was snapshotted in __init__.
+        assert calls["n"] == 0
+
+    def test_max_triggered_snapshot_caps_results(self, tmp_path, monkeypatch):
+        """The snapshotted max_triggered still bounds the result count."""
+        from unittest.mock import MagicMock
+
+        skills_dir = tmp_path / "skills"
+        for i in range(5):
+            _create_skill(
+                skills_dir, f"s{i}",
+                f"---\nname: s{i}\ndescription: d\ntriggers: shorten url\n---\n# x\n",
+            )
+        cfg = KiroClawConfig()
+        cfg.skills.max_triggered = 2
+        loader = SkillsLoader(skills_path=skills_dir, install_builtins=False, config=cfg)
+        monkeypatch.setattr("kiro_claw.skills.sel", lambda: MagicMock())
+
+        triggered = loader.get_triggered_skills("shorten url")
+        assert len(triggered) == 2

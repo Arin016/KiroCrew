@@ -30,8 +30,13 @@ def sel_dir(tmp_path):
 
 @pytest.fixture
 def log(sel_dir):
-    """Create a fresh SEL instance in a temp dir."""
-    return SecurityEventLog(base_dir=sel_dir)
+    """Create a fresh SEL instance in a temp dir.
+
+    sync=True so events are written inline — these tests read the raw log file
+    immediately after logging. The async background writer is covered
+    separately in TestAsyncWriter.
+    """
+    return SecurityEventLog(base_dir=sel_dir, sync=True)
 
 
 def _make_event(**overrides) -> SecurityEvent:
@@ -51,22 +56,22 @@ def _make_event(**overrides) -> SecurityEvent:
 
 class TestHmacKeyManagement:
     def test_creates_key_file_on_first_init(self, sel_dir):
-        SecurityEventLog(base_dir=sel_dir)
+        SecurityEventLog(base_dir=sel_dir, sync=True)
         key_path = sel_dir / "sel_hmac.key"
         assert key_path.exists()
         assert len(key_path.read_bytes()) == 32
 
     def test_key_file_permissions(self, sel_dir):
-        SecurityEventLog(base_dir=sel_dir)
+        SecurityEventLog(base_dir=sel_dir, sync=True)
         key_path = sel_dir / "sel_hmac.key"
         mode = oct(key_path.stat().st_mode & 0o777)
         assert mode == "0o600"
 
     def test_reuses_existing_key(self, sel_dir):
-        log1 = SecurityEventLog(base_dir=sel_dir)
+        log1 = SecurityEventLog(base_dir=sel_dir, sync=True)
         key1 = log1._hmac_key
         SecurityEventLog._instance = None
-        log2 = SecurityEventLog(base_dir=sel_dir)
+        log2 = SecurityEventLog(base_dir=sel_dir, sync=True)
         assert log2._hmac_key == key1
 
 
@@ -352,8 +357,8 @@ class TestInferSource:
 
 class TestSingleton:
     def test_returns_same_instance(self, sel_dir):
-        log1 = SecurityEventLog(base_dir=sel_dir)
-        log2 = SecurityEventLog(base_dir=sel_dir)
+        log1 = SecurityEventLog(base_dir=sel_dir, sync=True)
+        log2 = SecurityEventLog(base_dir=sel_dir, sync=True)
         assert log1 is log2
 
     def test_sel_accessor(self, sel_dir):
@@ -377,7 +382,7 @@ class TestReadLastHash:
         expected_hash = log._last_hash
         # Reset and re-read
         SecurityEventLog._instance = None
-        log2 = SecurityEventLog(base_dir=sel_dir)
+        log2 = SecurityEventLog(base_dir=sel_dir, sync=True)
         assert log2._last_hash == expected_hash
 
 
@@ -420,15 +425,15 @@ class TestHmacKeyManagementExtras:
             raise OSError("chmod denied")
 
         monkeypatch.setattr("kiro_claw.sel.os.chmod", _boom)
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         assert (tmp_path / "sel_hmac.key").exists()
         assert log._hmac_key
 
     def test_singleton_init_is_idempotent(self, tmp_path: Path) -> None:
-        a = SecurityEventLog(base_dir=tmp_path)
+        a = SecurityEventLog(base_dir=tmp_path, sync=True)
         # Second call must reuse the original instance and ignore base_dir.
         other = tmp_path / "other"
-        b = SecurityEventLog(base_dir=other)
+        b = SecurityEventLog(base_dir=other, sync=True)
         assert a is b
         assert a._dir == tmp_path
         assert not other.exists()
@@ -436,7 +441,7 @@ class TestHmacKeyManagementExtras:
 
 class TestLogHashAndCallbackExtras:
     def test_compute_hash_is_deterministic(self, tmp_path: Path) -> None:
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         evt = _make_event()
         h1 = log._compute_hash(evt)
         h2 = log._compute_hash(evt)
@@ -444,7 +449,7 @@ class TestLogHashAndCallbackExtras:
         assert len(h1) == 64  # sha256 hex
 
     def test_compute_hash_excludes_entry_hash_field(self, tmp_path: Path) -> None:
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         evt = _make_event()
         h_before = log._compute_hash(evt)
         evt.entry_hash = "anything"
@@ -454,7 +459,7 @@ class TestLogHashAndCallbackExtras:
     def test_log_invokes_forward_callback_with_redacted_payload(
         self, tmp_path: Path
     ) -> None:
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         captured: list[dict] = []
         log.set_forward_callback(captured.append)
         # Embed an AWS access key in resources — must be redacted before
@@ -466,7 +471,7 @@ class TestLogHashAndCallbackExtras:
         assert "REDACTED" in forwarded["resources"]
 
     def test_set_forward_callback_unregister(self, tmp_path: Path) -> None:
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         captured: list[dict] = []
         log.set_forward_callback(captured.append)
         log.log(_make_event(event_id="e1"))
@@ -480,7 +485,7 @@ class TestVerifyIntegrityExtras:
     def test_detects_chain_break(self, tmp_path: Path) -> None:
         # Distinct from a tampered HMAC: here the prev_hash linkage is
         # broken but the entry's own HMAC may still verify in isolation.
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         log.log(_make_event(event_id="e0"))
         log.log(_make_event(event_id="e1"))
         path = tmp_path / "security_events.jsonl"
@@ -494,7 +499,7 @@ class TestVerifyIntegrityExtras:
         assert valid == 1  # entry 1 fails the chain check
 
     def test_skips_blank_lines(self, tmp_path: Path) -> None:
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         log.log(_make_event())
         path = tmp_path / "security_events.jsonl"
         path.write_text(path.read_text() + "\n\n   \n")
@@ -502,7 +507,7 @@ class TestVerifyIntegrityExtras:
         assert total == 1 and valid == 1
 
     def test_handles_malformed_json(self, tmp_path: Path) -> None:
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         log.log(_make_event())
         path = tmp_path / "security_events.jsonl"
         path.write_text(path.read_text() + "not-json-at-all\n")
@@ -514,7 +519,7 @@ class TestVerifyIntegrityExtras:
 
 class TestLogToolInvocationExtras:
     def test_explicit_source_overrides_inferred(self, tmp_path: Path) -> None:
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         log.log_tool_invocation(
             session_key="dashboard:abc",  # would infer "dashboard"
             source="cli",  # explicit override
@@ -524,7 +529,7 @@ class TestLogToolInvocationExtras:
         assert log.recent()[0]["source"] == "cli"
 
     def test_request_id_coerced_to_string(self, tmp_path: Path) -> None:
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         log.log_tool_invocation(
             session_key="cli_chat",
             tool_name="t",
@@ -534,7 +539,7 @@ class TestLogToolInvocationExtras:
         assert log.recent()[0]["request_id"] == "42"
 
     def test_metadata_is_persisted(self, tmp_path: Path) -> None:
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         log.log_tool_invocation(
             session_key="cli_chat",
             tool_name="t",
@@ -546,7 +551,7 @@ class TestLogToolInvocationExtras:
 
 class TestLogApiAccessExtras:
     def test_truncates_long_resources_and_error(self, tmp_path: Path) -> None:
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         log.log_api_access(
             caller="alice",
             operation="op",
@@ -561,7 +566,7 @@ class TestLogApiAccessExtras:
 
 class TestRecentExtras:
     def test_respects_limit(self, tmp_path: Path) -> None:
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         for i in range(10):
             log.log(_make_event(event_id=f"e{i}"))
         events = log.recent(limit=3)
@@ -569,7 +574,7 @@ class TestRecentExtras:
         assert [e["event_id"] for e in events] == ["e9", "e8", "e7"]
 
     def test_skips_malformed_lines(self, tmp_path: Path) -> None:
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         log.log(_make_event(event_id="good"))
         path = tmp_path / "security_events.jsonl"
         path.write_text(path.read_text() + "garbage-line\n")
@@ -578,7 +583,7 @@ class TestRecentExtras:
         assert events[0]["event_id"] == "good"
 
     def test_recent_skips_blank_lines(self, tmp_path: Path) -> None:
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         log.log(_make_event())
         path = tmp_path / "security_events.jsonl"
         path.write_text(path.read_text() + "\n   \n")
@@ -589,7 +594,7 @@ class TestPruneExtras:
     def test_recomputes_last_hash_after_prune(self, tmp_path: Path) -> None:
         # When prune removes the chain tail, _last_hash must move back so
         # subsequent log() calls link to the surviving tail, not a phantom.
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         log.log(_make_event(event_id="old", timestamp="2020-01-01T00:00:00+00:00"))
         from datetime import datetime, timezone
 
@@ -602,7 +607,7 @@ class TestPruneExtras:
         assert events[0]["prev_hash"] == events[1]["entry_hash"]
 
     def test_prune_removes_malformed_lines(self, tmp_path: Path) -> None:
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         from datetime import datetime, timezone
 
         now = datetime.now(tz=timezone.utc).isoformat()
@@ -613,7 +618,7 @@ class TestPruneExtras:
         assert log.prune() == 1
 
     def test_prune_keeps_when_nothing_old(self, tmp_path: Path) -> None:
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         from datetime import datetime, timezone
 
         now = datetime.now(tz=timezone.utc).isoformat()
@@ -626,7 +631,7 @@ class TestReadLastHashExtras:
     def test_scans_back_across_4kb_boundary(self, tmp_path: Path) -> None:
         # Force the backward-scan loop to iterate past one 4 KB chunk so the
         # buf-prepend path is exercised.
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         big_resources = "x" * 200  # ~250 B per JSONL line
         for i in range(60):  # ~15 KB total — well past 4 KB chunk
             log.log(_make_event(event_id=f"e{i:02d}", resources=big_resources))
@@ -634,7 +639,7 @@ class TestReadLastHashExtras:
 
         SecurityEventLog._instance = None
         SecurityEventLog._initialized = False
-        log2 = SecurityEventLog(base_dir=tmp_path)
+        log2 = SecurityEventLog(base_dir=tmp_path, sync=True)
         assert log2._last_hash == expected_tail
 
     def test_corrupt_file_falls_back_to_empty(self, tmp_path: Path) -> None:
@@ -644,5 +649,116 @@ class TestReadLastHashExtras:
         # Single un-parseable line — _read_last_hash must swallow the
         # JSONDecodeError and return "" so init can succeed.
         (tmp_path / "security_events.jsonl").write_text("not json\n")
-        log = SecurityEventLog(base_dir=tmp_path)
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
         assert log._last_hash == ""
+
+
+class TestAsyncWriter:
+    """The default (production) async background-writer path."""
+
+    def test_async_log_then_flush_persists(self, tmp_path: Path) -> None:
+        """Async log() enqueues; flush() guarantees the events are on disk."""
+        log = SecurityEventLog(base_dir=tmp_path)  # async (default)
+        for i in range(5):
+            log.log(_make_event(event_id=f"a{i}", operation=f"op{i}"))
+        log.flush()
+        sel_file = tmp_path / "security_events.jsonl"
+        lines = sel_file.read_text().strip().splitlines()
+        assert len(lines) == 5
+
+    def test_async_chain_intact_after_batch(self, tmp_path: Path) -> None:
+        """Batched async writes still form a valid HMAC chain."""
+        log = SecurityEventLog(base_dir=tmp_path)
+        for i in range(20):
+            log.log(_make_event(event_id=f"b{i}", operation=f"op{i}"))
+        total, valid = log.verify_integrity()  # flushes internally
+        assert total == 20
+        assert valid == 20
+
+    def test_recent_flushes_before_read(self, tmp_path: Path) -> None:
+        """recent() must surface just-enqueued events (flush-before-read)."""
+        log = SecurityEventLog(base_dir=tmp_path)
+        log.log(_make_event(event_id="r0", operation="opX"))
+        events = log.recent(limit=10)
+        assert any(e["operation"] == "opX" for e in events)
+
+    def test_async_concurrent_writes_no_loss(self, tmp_path: Path) -> None:
+        """Many threads enqueue concurrently; flush then all land, chain valid."""
+        log = SecurityEventLog(base_dir=tmp_path)
+
+        def writer(start: int) -> None:
+            for i in range(25):
+                log.log(_make_event(event_id=f"t{start}_{i}", operation=f"op{start}_{i}"))
+
+        threads = [threading.Thread(target=writer, args=(t,)) for t in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        total, valid = log.verify_integrity()
+        assert total == 100
+        assert valid == 100
+
+    def test_flush_noop_when_nothing_queued(self, tmp_path: Path) -> None:
+        """flush() on an idle log returns immediately without error."""
+        log = SecurityEventLog(base_dir=tmp_path)
+        log.flush()  # no writer started yet — must not hang or raise
+
+    def test_writer_survives_failing_batch(self, tmp_path: Path) -> None:
+        """If _flush_batch raises, the writer must still decrement _pending (so
+        flush() doesn't hang forever) and keep draining subsequent events."""
+        log = SecurityEventLog(base_dir=tmp_path)
+        calls = {"n": 0}
+        real_flush = log._flush_batch
+
+        def _flaky(events):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError("simulated mkdir/write failure")
+            return real_flush(events)
+
+        log._flush_batch = _flaky  # type: ignore[method-assign]
+        log.log(_make_event(event_id="boom"))
+        # flush() must return within the timeout, not hang on a stuck _pending.
+        log.flush(timeout=2.0)
+        assert log._pending == 0
+        # A subsequent event still drains (the writer thread did not die).
+        log.log(_make_event(event_id="ok"))
+        log.flush(timeout=2.0)
+        assert log._pending == 0
+        assert any(e["event_id"] == "ok" for e in log.recent(limit=10))
+
+    def test_last_hash_rolls_back_on_write_failure(self, tmp_path: Path) -> None:
+        """A failed append must not advance _last_hash — otherwise the next
+        event chains off a hash never written to disk, corrupting the HMAC
+        chain. sync=True so the failing write happens inline."""
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
+        log.log(_make_event(event_id="e0"))  # persisted; establishes the tip
+        tip = log._last_hash
+
+        # Make the next append's open() fail, then restore it.
+        real_open = open
+        state = {"fail": True}
+
+        def _maybe_fail(path, *a, **k):
+            if state["fail"] and str(path).endswith("security_events.jsonl"):
+                raise OSError("disk full")
+            return real_open(path, *a, **k)
+
+        import builtins
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(builtins, "open", _maybe_fail)
+        log.log(_make_event(event_id="e1"))  # write fails — must roll back
+        monkeypatch.undo()
+
+        # _last_hash unchanged (the failed event left no trace).
+        assert log._last_hash == tip
+        # The next successful event chains off the real tip, so the on-disk
+        # chain verifies clean (no phantom-hash break).
+        log.log(_make_event(event_id="e2"))
+        total, valid = log.verify_integrity()
+        assert total == valid  # every persisted entry links correctly
+        ids = [e["event_id"] for e in log.recent(limit=10)]
+        assert "e1" not in ids  # the failed write is absent
+        assert "e2" in ids and "e0" in ids

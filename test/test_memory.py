@@ -70,6 +70,46 @@ class TestMemoryStore:
         assert "cron scheduling" in history
         assert "file locking" in history
 
+
+class TestRecentHistoryCache:
+    """read_recent_history TTL cache (per-message hot path)."""
+
+    def test_repeated_reads_hit_cache(self, tmp_path, monkeypatch):
+        """A second read within the TTL must not re-walk the history files."""
+        store = MemoryStore(workspace=tmp_path)
+        store.append_history("Discussed cron scheduling")
+
+        calls = {"n": 0}
+        orig = store._read_recent_history_uncached
+
+        def _counting(days, today):
+            calls["n"] += 1
+            return orig(days, today)
+
+        monkeypatch.setattr(store, "_read_recent_history_uncached", _counting)
+        first = store.read_recent_history(days=1)
+        for _ in range(4):
+            store.read_recent_history(days=1)
+        assert "cron scheduling" in first
+        assert calls["n"] == 1  # only the first read walked the files
+
+    def test_append_invalidates_cache(self, tmp_path):
+        """A new entry must be visible on the next read despite the cache."""
+        store = MemoryStore(workspace=tmp_path)
+        store.append_history("first entry")
+        assert "first entry" in store.read_recent_history(days=1)
+        store.append_history("second entry")
+        result = store.read_recent_history(days=1)
+        assert "second entry" in result
+
+    def test_distinct_days_arg_not_conflated(self, tmp_path):
+        """Different ``days`` arguments must not serve each other's cached value."""
+        store = MemoryStore(workspace=tmp_path)
+        store.append_history("today entry")
+        # days=0 short-circuits to "" before the cache; days=1 returns content.
+        assert store.read_recent_history(days=0) == ""
+        assert "today entry" in store.read_recent_history(days=1)
+
     def test_source_citations_in_context(self, tmp_path):
         store = MemoryStore(workspace=tmp_path)
         store.write_preferences("# User Preferences\n\n- likes lobsters\n")

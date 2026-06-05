@@ -28,6 +28,20 @@ _CACHE_TS: float = 0.0
 _CACHE_TTL = 120  # 2 min
 _CACHE_LOCK = asyncio.Lock()
 
+# Cache for the raw _parse_sessions() result, used by api_usage's
+# claude_code/bedrock branch (api_kiro_usage has its own _CACHE of the full
+# response). _parse_sessions does a full iterdir + per-file stat + line-by-line
+# json.loads of every in-window shard, so it is both TTL-cached (120s) and run
+# off the event loop. Previously the cc/bedrock branch parsed inline on the loop
+# on every poll. _SESSIONS_CACHE_LOCK collapses concurrent cold-cache requests
+# into a single parse (mirrors api_kiro_usage's _CACHE_LOCK).
+# None = unpopulated. A sentinel (not truthiness) so a valid-but-empty parse
+# result ({}) is still cached and served from the fast path, rather than
+# re-parsing on every call.
+_SESSIONS_CACHE: dict[str, Any] | None = None
+_SESSIONS_CACHE_TS: float = 0.0
+_SESSIONS_CACHE_LOCK = asyncio.Lock()
+
 # Cache for _parse_token_history — shards are append-only so we key the
 # cache on a tuple of (filename, mtime, size) for every shard in the
 # 30-day window. Any append to any shard changes the key, invalidating
@@ -73,33 +87,68 @@ def _shards_in_window(days: int) -> list[Path]:
     return paths
 
 
+def _build_token_record(
+    slot_key: str, model: str, event: object, provider: str, now: datetime
+) -> dict[str, Any]:
+    """Build the JSONL token-usage record dict (no I/O)."""
+    return {
+        "_type": "tokens",
+        "ts": now.isoformat(),
+        "slot": slot_key,
+        "provider": provider or "",
+        "model": model or "",
+        "input": getattr(event, "input_tokens", 0),
+        "output": getattr(event, "output_tokens", 0),
+        "cache_create": getattr(event, "cache_creation_tokens", 0),
+        "cache_read": getattr(event, "cache_read_tokens", 0),
+        "cost": getattr(event, "cost_usd", 0.0),
+        "turns": getattr(event, "num_turns", 0),
+        "duration_ms": getattr(event, "duration_ms", 0),
+    }
+
+
+def _write_token_record(record: dict[str, Any], now: datetime) -> None:
+    """Append a prebuilt token record to today's shard (blocking I/O)."""
+    shard_path = _shard_path_for(now)
+    parent = shard_path.parent
+    # mkdir only when missing — the dir is created once per day, not per turn.
+    if not parent.exists():
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open(shard_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+
 def persist_token_record(slot_key: str, model: str, event: object, provider: str = "") -> None:
     """Append a token usage record to today's shard under
-    ``~/.kiroclaw/usage/tokens/YYYY-MM-DD.jsonl``.
+    ``~/.kiroclaw/usage/tokens/YYYY-MM-DD.jsonl`` (synchronous).
 
     The ``provider`` field tags the source LLM backend (acp,
     claude_code, bedrock) so the dashboard chart can filter by provider.
+
+    On the async chat hot path, prefer ``persist_token_record_async`` which
+    offloads the blocking write off the event loop.
     """
     try:
         now = datetime.now().astimezone()
-        record = {
-            "_type": "tokens",
-            "ts": now.isoformat(),
-            "slot": slot_key,
-            "provider": provider or "",
-            "model": model or "",
-            "input": getattr(event, "input_tokens", 0),
-            "output": getattr(event, "output_tokens", 0),
-            "cache_create": getattr(event, "cache_creation_tokens", 0),
-            "cache_read": getattr(event, "cache_read_tokens", 0),
-            "cost": getattr(event, "cost_usd", 0.0),
-            "turns": getattr(event, "num_turns", 0),
-            "duration_ms": getattr(event, "duration_ms", 0),
-        }
-        shard_path = _shard_path_for(now)
-        shard_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with open(shard_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+        _write_token_record(_build_token_record(slot_key, model, event, provider, now), now)
+    except Exception:
+        logger.debug("Failed to persist token record for slot %s", slot_key, exc_info=True)
+
+
+async def persist_token_record_async(
+    slot_key: str, model: str, event: object, provider: str = ""
+) -> None:
+    """Async variant: builds the record on-loop, offloads the file write.
+
+    Called per agent turn (EVENT_COMPLETE) from the chat runner, which runs on
+    the aiohttp event loop — the synchronous open/append previously blocked all
+    co-resident coroutines for the IO window. These are best-effort analytics
+    (no fsync, exceptions swallowed), so off-loop write loses no durability.
+    """
+    try:
+        now = datetime.now().astimezone()
+        record = _build_token_record(slot_key, model, event, provider, now)
+        await asyncio.to_thread(_write_token_record, record, now)
     except Exception:
         logger.debug("Failed to persist token record for slot %s", slot_key, exc_info=True)
 
@@ -450,6 +499,36 @@ def _parse_sessions() -> dict:
     }
 
 
+async def _cached_parse_sessions() -> dict:
+    """Run _parse_sessions() off the event loop with a 120s TTL cache.
+
+    Both usage endpoints call this so neither blocks the aiohttp loop on the
+    iterdir + per-file stat + json.loads scan, and a burst of polls reuses one
+    parse. Returns {} when there is no sessions directory (the common case for
+    claude_code/bedrock, where ~/.kiro/sessions/cli is kiro-cli's own store).
+    """
+    global _SESSIONS_CACHE, _SESSIONS_CACHE_TS
+    now = time.time()
+    # Fast path — lock-free read (double-checked locking, like api_kiro_usage).
+    # `is not None` (not truthiness) so a valid-but-empty {} parse is still a hit.
+    if now - _SESSIONS_CACHE_TS < _CACHE_TTL and _SESSIONS_CACHE is not None:
+        return _SESSIONS_CACHE
+    if not _SESSIONS_DIR.exists():
+        return {}
+    async with _SESSIONS_CACHE_LOCK:
+        # Re-check: a concurrent request may have refreshed while we waited, so
+        # a burst of cold-cache polls collapses into a single parse.
+        now = time.time()
+        if now - _SESSIONS_CACHE_TS < _CACHE_TTL and _SESSIONS_CACHE is not None:
+            return _SESSIONS_CACHE
+        loop = asyncio.get_running_loop()
+        sessions = await loop.run_in_executor(None, _parse_sessions)
+        if isinstance(sessions, dict) and "error" not in sessions:
+            _SESSIONS_CACHE = sessions
+            _SESSIONS_CACHE_TS = time.time()
+    return sessions
+
+
 def get_usage_cache() -> dict:
     """Public accessor for billing usage cache from sessions handler."""
     try:
@@ -531,7 +610,8 @@ async def api_usage(request: web.Request) -> web.Response:
 
     stats_instance = Stats()
     stats = stats_instance.snapshot()
-    sessions = _parse_sessions() if _SESSIONS_DIR.exists() else {}
+    # Cached + off-loop (was an inline, uncached _parse_sessions on the event loop).
+    sessions = await _cached_parse_sessions()
 
     # Token history from persisted JSONL records (survives restarts).
     # Since we persist on every EVENT_COMPLETE, JSONL is the source of truth.

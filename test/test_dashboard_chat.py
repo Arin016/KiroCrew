@@ -2043,10 +2043,12 @@ class TestTokenPersistenceBackfill:
 
         captured: list[tuple] = []
 
-        def _fake_persist(slot_key, model, event, provider=""):
+        async def _fake_persist(slot_key, model, event, provider=""):
             captured.append((slot_key, model, provider))
 
-        monkeypatch.setattr("kiro_claw.dashboard.chat_runner.persist_token_record", _fake_persist)
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_runner.persist_token_record_async", _fake_persist
+        )
 
         from kiro_claw.dashboard.chat import _run_chat
 
@@ -2081,9 +2083,12 @@ class TestTokenPersistenceBackfill:
         state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
 
         captured: list[tuple] = []
+
+        async def _fake_persist(k, m, e, provider=""):
+            captured.append((k, m, provider))
+
         monkeypatch.setattr(
-            "kiro_claw.dashboard.chat_runner.persist_token_record",
-            lambda k, m, e, provider="": captured.append((k, m, provider)),
+            "kiro_claw.dashboard.chat_runner.persist_token_record_async", _fake_persist
         )
 
         from kiro_claw.dashboard.chat import _run_chat
@@ -2115,9 +2120,12 @@ class TestTokenPersistenceBackfill:
         state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
 
         captured: list[tuple] = []
+
+        async def _fake_persist(k, m, e, provider=""):
+            captured.append((k, m, provider))
+
         monkeypatch.setattr(
-            "kiro_claw.dashboard.chat_runner.persist_token_record",
-            lambda k, m, e, provider="": captured.append((k, m, provider)),
+            "kiro_claw.dashboard.chat_runner.persist_token_record_async", _fake_persist
         )
 
         from kiro_claw.dashboard.chat import _run_chat
