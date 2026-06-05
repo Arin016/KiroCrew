@@ -165,6 +165,49 @@ The function is pure — `fs`, `os`, `path`, `process.resourcesPath`, and
 - On window close the app hides to the tray; quitting sends `SIGTERM` to the
   gateway process.
 
+## Code signing & notarization (macOS)
+
+An unsigned `.app`/DMG is quarantined by Gatekeeper and shows **"KiroClaw is
+damaged and can't be opened"** when downloaded on another Mac. To distribute a
+DMG that opens cleanly you must sign it with a **Developer ID Application**
+certificate and **notarize** it with Apple. (Local builds without credentials
+still work — they produce an ad-hoc–signed DMG you can open on the build machine
+after right-click → Open or `xattr -dr com.apple.quarantine KiroClaw.app`.)
+
+The build is already wired for this — `website/electron/package.json` enables
+`hardenedRuntime` with `build/entitlements.mac.plist`, and the
+`scripts/notarize.js` afterSign hook notarizes when credentials are present and
+silently skips when they aren't. You only supply the secrets at build time via
+env vars (nothing is committed):
+
+```bash
+# 1. Signing identity — a Developer ID Application cert exported as .p12
+#    (Xcode → Settings → Accounts, or developer.apple.com → Certificates).
+export CSC_LINK=/abs/path/DeveloperIDApplication.p12   # or its base64
+export CSC_KEY_PASSWORD='<p12 export password>'
+
+# 2. Notarization credentials — EITHER an App Store Connect API key …
+export APPLE_API_KEY=/abs/path/AuthKey_XXXXXXXXXX.p8
+export APPLE_API_KEY_ID=XXXXXXXXXX
+export APPLE_API_ISSUER=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+#    … OR an Apple ID + app-specific password (appleid.apple.com → Sign-In
+#    & Security → App-Specific Passwords):
+export APPLE_ID='you@example.com'
+export APPLE_APP_SPECIFIC_PASSWORD='abcd-efgh-ijkl-mnop'
+export APPLE_TEAM_ID=XXXXXXXXXX
+
+# 3. Build — electron-builder signs, the hook notarizes + staples.
+make desktop
+```
+
+Verify the result: `spctl -a -vv "KiroClaw.app"` should report
+`source=Notarized Developer ID` and `codesign -dv` should show your Team ID
+(not `Signature=adhoc`).
+
+Requires a paid Apple Developer account ($99/yr) for the Developer ID cert and
+notary access. Without one, distribute via Homebrew cask or instruct users to
+clear the quarantine flag.
+
 ## Remote tunnel mode
 
 The desktop app can also connect to a gateway running on a **remote** host (e.g.

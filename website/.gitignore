@@ -8,6 +8,10 @@ coverage
 # Electron
 electron/dist
 electron/node_modules
+# …but the electron-builder resources dir is committed source, not an artifact
+# (the bare `build` rule above would otherwise ignore it).
+!electron/build
+!electron/build/**
 
 # TUI
 tui/dist
