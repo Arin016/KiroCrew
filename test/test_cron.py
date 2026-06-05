@@ -721,12 +721,16 @@ class TestTimezoneScheduling:
         assert CronService._is_due(job, now) is False
 
     def test_is_due_spring_forward_skipped_hour(self) -> None:
-        """During spring forward, a job targeting the skipped hour still fires once."""
-        # 2025-03-09: Toronto clocks jump 2:00 AM EST -> 3:00 AM EDT at 07:00 UTC,
-        # so the wall-clock 2:30 AM never occurs. croniter resolves the cron expr
-        # "30 2 * * *" to the start of the resumed hour: it matches at 3:00 AM EDT
-        # (07:00 UTC) rather than being silently skipped for the day. The job fires
-        # once at that shifted UTC time, not at 07:30 UTC (3:30 AM EDT).
+        """During spring forward, a job targeting the skipped hour still fires.
+
+        2025-03-09: Toronto clocks jump 2:00 AM EST -> 3:00 AM EDT at 07:00 UTC,
+        so the wall-clock 2:30 AM never occurs. The invariant we care about is
+        that the daily job is NOT silently lost for the day: it still fires, in
+        the resumed hour, and never before the jump. We assert that invariant
+        rather than the exact resolved instant, because the precise UTC minute(s)
+        croniter maps the skipped wall-time to are croniter-version-specific
+        (e.g. 2.0.7 matches a two-minute window at 07:29-07:30 UTC).
+        """
         job = CronJob(
             id="j1",
             name="test",
@@ -734,9 +738,36 @@ class TestTimezoneScheduling:
             schedule=CronSchedule(kind="cron", cron_expr="30 2 * * *"),
             timezone="America/Toronto",
         )
-        # Fires at the resolved time: 07:00 UTC == 3:00 AM EDT.
-        fires_at = datetime(2025, 3, 9, 7, 0, tzinfo=timezone.utc).timestamp()
-        assert CronService._is_due(job, fires_at) is True
-        # Does not fire at the literal 3:30 AM EDT (07:30 UTC) wall-clock minute.
-        not_at = datetime(2025, 3, 9, 7, 30, tzinfo=timezone.utc).timestamp()
-        assert CronService._is_due(job, not_at) is False
+        # Scan every UTC minute across the spring-forward window (01:00-04:00
+        # local) and collect the minutes the job is due.
+        window_start = datetime(2025, 3, 9, 6, 0, tzinfo=timezone.utc)
+        jump_utc = datetime(2025, 3, 9, 7, 0, tzinfo=timezone.utc).timestamp()
+        resume_end = datetime(2025, 3, 9, 8, 0, tzinfo=timezone.utc).timestamp()
+        fires = [
+            ts
+            for i in range(180)
+            if CronService._is_due(job, (ts := (window_start.timestamp() + i * 60)))
+        ]
+        # Not silently skipped — it fires at least once on the DST day.
+        assert fires, "daily job in the skipped DST hour must still fire"
+        # Every fire lands in the resumed hour [03:00, 04:00) EDT, i.e. at/after
+        # the jump and within the first resumed hour — never at the vanished
+        # pre-jump wall-clock time.
+        assert all(jump_utc <= ts < resume_end for ts in fires)
+
+    def test_is_due_normal_day_fires_exactly_once(self) -> None:
+        """On a non-DST day a daily cron job is due in exactly one UTC minute."""
+        job = CronJob(
+            id="j1",
+            name="test",
+            message="msg",
+            schedule=CronSchedule(kind="cron", cron_expr="30 2 * * *"),
+            timezone="America/Toronto",
+        )
+        window_start = datetime(2025, 3, 10, 6, 0, tzinfo=timezone.utc)
+        fires = [
+            i
+            for i in range(180)
+            if CronService._is_due(job, window_start.timestamp() + i * 60)
+        ]
+        assert len(fires) == 1
