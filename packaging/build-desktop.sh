@@ -29,7 +29,16 @@ cd "$ROOT"
 printf '\n\033[1;33m▶ Building for host arch only: %s/%s. Universal binaries are NOT produced — run once per target arch (see docs/DESKTOP_APP.md).\033[0m\n' \
   "$(uname -s)" "$(uname -m)"
 
-PY="${PYTHON:-python3}"
+# Prefer the repo's build venv (created by `make backend`) so PyInstaller installs
+# without tripping PEP 668 on an externally-managed system Python. An explicit
+# PYTHON=... still wins; otherwise fall back to python3.
+if [ -n "${PYTHON:-}" ]; then
+  PY="$PYTHON"
+elif [ -x "$ROOT/.venv/bin/python" ]; then
+  PY="$ROOT/.venv/bin/python"
+else
+  PY="python3"
+fi
 ELECTRON_DIR="$ROOT/website/electron"
 SPEC="$ROOT/packaging/kiroclaw-backend.spec"
 PYI_DIST="$ROOT/build/pyinstaller/dist"
