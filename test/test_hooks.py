@@ -150,6 +150,51 @@ class TestToolHooks:
         mgr = HookManager(cfg)
         assert mgr.on_tool_call("ReadFile").action == TOOL_AUTO_APPROVE
 
+    def test_sensitive_bash_denied_without_running_prefix(self):
+        """A bare bash command (Claude Code provider title — no 'Running: '
+        prefix) that reads a credential path must still be DENIED.
+
+        The claude-agent-acp adapter sets a Bash tool's title to the raw
+        command (no kiro-cli 'Running: ' display prefix), so the sensitive
+        path check must not be gated on that prefix.
+        """
+        mgr = HookManager()
+        result = mgr.on_tool_call("cat ~/.aws/credentials")
+        assert result.action == TOOL_DENY
+        assert "sensitive" in result.reason.lower()
+
+    def test_sensitive_bash_denied_with_running_prefix(self):
+        """The kiro-cli 'Running: ' prefixed form must remain DENIED too."""
+        mgr = HookManager()
+        assert mgr.on_tool_call("Running: cat ~/.ssh/id_rsa").action == TOOL_DENY
+
+    def test_benign_bash_without_prefix_not_denied(self):
+        """A bare benign bash command must NOT be falsely denied."""
+        mgr = HookManager()
+        assert mgr.on_tool_call("ls -la /workplace").action == TOOL_ALLOW
+
+    def test_sensitive_path_denied_as_bare_title(self):
+        """A file-read tool whose title is the BARE path (Claude Code provider —
+        no 'Reading ' prefix) must be DENIED via is_sensitive_path.
+
+        is_sensitive_path was previously gated on the 'Reading ' prefix, so a
+        bare '~/.aws/credentials' title slipped through (is_sensitive_bash_command
+        needs a command verb, so it can't catch a bare path).
+        """
+        mgr = HookManager()
+        assert mgr.on_tool_call("~/.aws/credentials").action == TOOL_DENY
+        assert mgr.on_tool_call("~/.ssh/id_rsa").action == TOOL_DENY
+
+    def test_sensitive_path_denied_with_reading_prefix(self):
+        """The kiro-cli 'Reading ' prefixed form must remain DENIED too."""
+        mgr = HookManager()
+        assert mgr.on_tool_call("Reading ~/.aws/credentials:1-5").action == TOOL_DENY
+
+    def test_benign_path_as_bare_title_not_denied(self):
+        """A bare non-sensitive path title must NOT be falsely denied."""
+        mgr = HookManager()
+        assert mgr.on_tool_call("/workplace/src/main.py").action == TOOL_ALLOW
+
     def test_running_prefix_pattern_auto_approves(self):
         """Regression: 'Running: *' must match bash tools whose title starts with 'Running: '."""
         cfg = HooksConfig(auto_approve_tools=["Running: *"])

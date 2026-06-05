@@ -2240,8 +2240,23 @@ class AcpClient:
         )
 
     async def reject_tool(self, request_id: str | int) -> None:
-        self._permission_options.pop(request_id, None)
-        await self._send_response(request_id, {"outcome": {"outcome": OUTCOME_CANCELLED}})
+        """Reject a pending session/request_permission.
+
+        Prefers a clean ``selected`` reject using the reject optionId the agent
+        advertised (claude-agent-acp offers ``reject`` → behavior:"deny",
+        surfacing a clear "permission denied" rather than the cryptic
+        "Tool use aborted" the adapter throws on a ``cancelled`` outcome).
+        Falls back to ``cancelled`` when no reject option was advertised
+        (kiro-cli), which kiro handles as an ordinary rejection.
+        """
+        recorded = self._permission_options.pop(request_id, None)
+        reject_id = recorded.get("reject") if recorded else None
+        if reject_id:
+            await self._send_response(
+                request_id, {"outcome": {"outcome": OUTCOME_SELECTED, "optionId": reject_id}}
+            )
+        else:
+            await self._send_response(request_id, {"outcome": {"outcome": OUTCOME_CANCELLED}})
 
     async def send_command(self, command: str, args: dict | None = None) -> str:
         """Execute a kiro slash command (e.g. '/compact', '/usage', '/effort').
@@ -2889,14 +2904,25 @@ class AcpClient:
                 {"id": OPTION_ALLOW_ALWAYS, "label": "Allow always"},
             ]
             kind_to_id = {"allow_once": OPTION_ALLOW_ONCE, "allow_always": OPTION_ALLOW_ALWAYS}
-        # Only record optionIds when the agent actually advertised an allow
-        # option; otherwise approve_tool falls back to literal OPTION_ALLOW_*
-        # which is safe for kiro and avoids fabricating ids the agent rejects.
+        # Record optionIds the agent advertised so approve_tool / reject_tool
+        # can echo the exact ids. We record when EITHER an allow option (for
+        # approve) OR a reject option (for a clean reject) was advertised.
+        # claude-agent-acp advertises a {kind:"reject_once", optionId:"reject"}
+        # option whose selection yields behavior:"deny" — sending that is far
+        # better than a "cancelled" outcome, which the adapter turns into the
+        # cryptic "Tool use aborted". kiro-cli advertises no reject option, so
+        # reject_tool falls back to "cancelled" there (handled as a clean
+        # rejection by kiro).
         any_allow = kind_to_id.get("allow_once") or kind_to_id.get("allow_always")
-        if request_id != "" and any_allow is not None:
-            once_id = kind_to_id.get("allow_once") or any_allow
-            always_id = kind_to_id.get("allow_always") or any_allow
-            self._permission_options[request_id] = {"once": once_id, "always": always_id}
+        any_reject = kind_to_id.get("reject_once") or kind_to_id.get("reject_always")
+        if request_id != "" and (any_allow is not None or any_reject is not None):
+            recorded: dict[str, str] = {}
+            if any_allow is not None:
+                recorded["once"] = kind_to_id.get("allow_once") or any_allow
+                recorded["always"] = kind_to_id.get("allow_always") or any_allow
+            if any_reject is not None:
+                recorded["reject"] = any_reject
+            self._permission_options[request_id] = recorded
 
         # Resolve full tool input — the preceding ToolCall session/notification
         # carries the complete params that we cache by toolCallId.  The

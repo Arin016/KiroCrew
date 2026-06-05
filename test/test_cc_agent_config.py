@@ -14,11 +14,62 @@ from kiro_claw.cc_agent import (
     _translate_tool_list,
     acp_servers_from_cc_map,
     build_acp_mcp_servers,
+    find_overbroad_cc_deny_rules,
     generate_cc_agent_markdown,
     generate_mcp_json,
     install_cc_agent,
     install_cc_global_deny_settings,
 )
+
+
+class TestFindOverbroadCcDenyRules:
+    """Detect a user/project ``permissions.deny`` that hard-blocks benign bash.
+
+    Claude Code's native engine reads ``~/.claude/settings.json`` (and project
+    ``.claude/settings.json``) ``permissions.deny`` and blocks matching commands
+    BEFORE KiroClaw's approval gate — silently surfacing as "Tool use aborted".
+    A rule like ``Bash(*)`` / ``Bash(git *)`` blocks everything; we detect it by
+    matching the deny glob against benign canary commands.
+    """
+
+    def test_flags_bash_star(self):
+        settings = {"permissions": {"deny": ["Bash(*)"]}}
+        assert find_overbroad_cc_deny_rules(settings) == ["Bash(*)"]
+
+    def test_flags_bash_git_star(self):
+        settings = {"permissions": {"deny": ["Bash(git *)"]}}
+        assert "Bash(git *)" in find_overbroad_cc_deny_rules(settings)
+
+    def test_flags_bash_space_glob(self):
+        # ``Bash(* *)`` matches any command with an argument (e.g. ``ls -la``).
+        settings = {"permissions": {"deny": ["Bash(* *)"]}}
+        assert "Bash(* *)" in find_overbroad_cc_deny_rules(settings)
+
+    def test_does_not_flag_kiroclaw_scoped_patterns(self):
+        # KiroClaw's own scoped patterns must NOT be reported — they match no
+        # benign canary command.
+        settings = {"permissions": {"deny": list(_CC_DENY_PATTERNS)}}
+        assert find_overbroad_cc_deny_rules(settings) == []
+
+    def test_does_not_flag_narrow_user_rule(self):
+        settings = {"permissions": {"deny": ["Bash(rm -rf /*)", "Bash(git push*)"]}}
+        assert find_overbroad_cc_deny_rules(settings) == []
+
+    def test_ignores_non_bash_rules(self):
+        # Read()/Edit() rules and bare tool names are not bash blocks.
+        settings = {"permissions": {"deny": ["Read(~/.aws/*)", "WebFetch"]}}
+        assert find_overbroad_cc_deny_rules(settings) == []
+
+    def test_empty_or_missing_permissions(self):
+        assert find_overbroad_cc_deny_rules({}) == []
+        assert find_overbroad_cc_deny_rules({"permissions": {}}) == []
+        assert find_overbroad_cc_deny_rules({"permissions": {"deny": []}}) == []
+
+    def test_robust_to_malformed_input(self):
+        # Non-dict / non-list shapes must not raise.
+        assert find_overbroad_cc_deny_rules(None) == []
+        assert find_overbroad_cc_deny_rules({"permissions": {"deny": "Bash(*)"}}) == []
+        assert find_overbroad_cc_deny_rules({"permissions": {"deny": [123, None]}}) == []
 
 
 class TestGenerateMarkdown:

@@ -34,8 +34,11 @@ BUILTIN_DENY_PATTERNS: list[str] = [
     "*terminate_instance*",
     "*drop_table*",
     "*delete_bucket*",
-    # Git push (should be explicit)
-    "*git*push*",
+    # NOTE: ``git push`` is NOT a glob here — a broad ``*git*push*`` substring
+    # glob over-blocked any command whose text merely contained "push" (e.g. a
+    # ``git commit -m`` message mentioning push, or an ``ssh host '...'`` whose
+    # remote command did).  It is now matched by the verb-anchored
+    # ``_GIT_PUBLISH_*_RE`` regexes below (see ``_is_git_publish``).
 ]
 
 # Exceptions keyed by the deny pattern they apply to. If an input matches
@@ -43,9 +46,13 @@ BUILTIN_DENY_PATTERNS: list[str] = [
 # This avoids a blanket allowlist that could bypass unrelated deny rules.
 # Exceptions are NOT applied when the input contains command separators
 # (;, &&, ||, |, newlines) to prevent chaining bypasses.
-_DENY_EXCEPTIONS: dict[str, list[str]] = {
-    "*git*push*": ["* stash push*"],
-}
+#
+# Currently empty: the only former entry (``git stash push`` excepted from
+# ``*git*push*``) is obsolete now that git-publish is detected by a
+# verb-anchored regex that never matches ``git stash push`` in the first
+# place. The two-pass exception machinery in ``is_denied`` is retained as a
+# general mechanism for any future pattern that needs a scoped carve-out.
+_DENY_EXCEPTIONS: dict[str, list[str]] = {}
 
 # Used to *split* a command into independently-evaluatable segments.
 # Splits on every shell separator that can chain commands or carve out a
@@ -67,6 +74,53 @@ _DENY_EXCEPTIONS: dict[str, list[str]] = {
 # Literal whitespace is NOT a separator — flag values (e.g. `-C /path`)
 # must stay attached to their flag token.
 _CMD_SPLIT_RE = re.compile(r"[;\n`]|\|\|?|&&|&(?!&)|\$\(|\)")
+
+# ── Git publish detection (verb-anchored) ──
+# ``git push`` must be blocked, but ``push`` appearing anywhere in arbitrary
+# command text (a commit message, a branch name, a grep pattern, an ssh remote
+# payload) must NOT trip the deny.  We therefore require ``push`` to be the git
+# *subcommand* — i.e. the first non-flag/non-option token after ``git`` — rather
+# than a substring.  Mirrors the anchored regex in
+# ``config/defaults.json`` deniedCommands.
+#
+# ``git [<-c k=v>...] [<-C path>...] push ...`` is a publish.  Intervening
+# tokens may only be options (``-x``) or option-with-value pairs
+# (``-C /path``, ``-c core.x=y``) — a bare non-flag token before ``push``
+# (e.g. ``stash``) means ``push`` is NOT the subcommand, so ``git stash push``
+# is correctly allowed.  Anchored to a segment start (optionally preceded by a
+# command separator) so ``git log --grep push`` is not matched.
+#
+# The trailing terminator is a lookahead that accepts whitespace, end-of-string,
+# OR a shell metacharacter that closes/terminates the segment — so a bare
+# ``git push`` (no remote/branch, valid: pushes current branch to the default
+# remote) is still caught inside ``$(git push)``, `` `git push` ``, ``git push|cat``,
+# ``git push&``, etc., not just when followed by a space.
+_GIT_PUBLISH_RE = re.compile(
+    r"(?:^|[;&|`\n]|\$\()\s*git\s+(?:-\S+\s+(?:[^-]\S*\s+)?)*push(?=\s|[)`;&|]|$)"
+)
+
+# Glue-evasion guard: bash command-substitution / quoting tricks that evaluate
+# to ``git push`` but break the token sequence above, e.g.
+# ``git$(echo ' ')push``, ``git`echo`push``, ``git$()push``.  After stripping
+# empty substitutions/backticks the residue is ``gitpush``; we also match a
+# literal ``git_push`` (kiro-cli historically denied that form).
+_GIT_PUBLISH_GLUE_RE = re.compile(r"git(?:\$\([^)]*\)|`[^`]*`)+push|git_push")
+
+# Human-readable label recorded in the denial reason + SEL audit event when
+# a git-publish invocation is blocked (the regexes above are the mechanism).
+_GIT_PUBLISH_DENY_LABEL = "git push"
+
+
+def _is_git_publish(text_lower: str) -> bool:
+    """Return True if *text_lower* invokes ``git push`` (verb-anchored).
+
+    Operates on an already-lowercased string.  Detects both a normal
+    ``git ... push`` invocation (where ``push`` is the subcommand) and the
+    command-substitution glue-evasion forms.  Does NOT match ``git stash
+    push``, ``git commit -m '...push...'``, ``git log --grep push``, etc.
+    """
+    return bool(_GIT_PUBLISH_RE.search(text_lower) or _GIT_PUBLISH_GLUE_RE.search(text_lower))
+
 
 # ── Sensitive Paths ──
 # Directories and files that must never be read by the agent.
@@ -503,6 +557,16 @@ def is_denied(tool_name: str, extra_patterns: list[str] | None = None) -> str | 
     """
     lower = tool_name.lower()
     all_glob_patterns = BUILTIN_DENY_PATTERNS + (extra_patterns or [])
+
+    # ── Git publish (verb-anchored, not a glob) ──
+    # Checked on the whole string first so command-substitution glue-evasion
+    # (e.g. ``git$(echo ' ')push``) is caught even though splitting on ``$(``
+    # / ``)`` would otherwise scatter the ``git``/``push`` tokens across
+    # segments.  ``_is_git_publish`` is verb-anchored, so a commit message or
+    # branch name merely containing "push" does not match.
+    if _is_git_publish(lower):
+        _emit_deny_event(tool_name, _GIT_PUBLISH_DENY_LABEL, lower)
+        return f"Blocked by security policy: {_GIT_PUBLISH_DENY_LABEL}"
 
     # ── Pass 1: whole-string deny ──
     # If any pattern matches the full input AND no exception matches the

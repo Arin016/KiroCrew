@@ -3618,8 +3618,11 @@ class TestBuildPermissionEvent:
             "always": "allow_always",
         }
 
-    def test_reject_only_options_not_recorded(self):
-        """If no allow option is advertised, _permission_options stays empty."""
+    def test_reject_option_recorded_even_without_allow(self):
+        """A reject option must be recorded so reject_tool can send a clean
+        ``selected`` reject (behavior:"deny") instead of ``cancelled`` (which
+        the claude-agent-acp adapter turns into "Tool use aborted").
+        """
         client = AcpClient()
         from kiro_claw.acp.types import JsonRpcMessage
 
@@ -3634,7 +3637,7 @@ class TestBuildPermissionEvent:
             },
         )
         client._build_permission_event(msg)
-        assert 22 not in client._permission_options
+        assert client._permission_options[22].get("reject") == "reject_once"
 
     def test_unknown_legacy_id_not_classified(self):
         """Unknown legacy ids do not get a synthesized kind."""
@@ -3719,6 +3722,57 @@ class TestApproveTool:
             {"outcome": {"outcome": OUTCOME_SELECTED, "optionId": "custom_id"}},
         )
         assert client._permission_options[46] == {"once": "allow", "always": "allow_always"}
+
+
+class TestRejectTool:
+    """Tests for reject_tool clean-reject vs cancelled dispatch."""
+
+    @pytest.mark.asyncio
+    async def test_uses_recorded_reject_optionid(self, tmp_path):
+        """When a reject option was advertised, reject_tool sends a clean
+        ``selected`` reject so the adapter returns behavior:"deny" rather than
+        throwing "Tool use aborted" on a cancelled outcome."""
+        from kiro_claw.acp.types import OUTCOME_SELECTED
+
+        client = AcpClient(work_dir=tmp_path)
+        # claude-agent-acp advertises optionId "reject" with kind "reject_once"
+        client._permission_options[60] = {"once": "allow", "reject": "reject"}
+        client._send_response = AsyncMock()
+        await client.reject_tool(60)
+        client._send_response.assert_awaited_once_with(
+            60,
+            {"outcome": {"outcome": OUTCOME_SELECTED, "optionId": "reject"}},
+        )
+        assert 60 not in client._permission_options
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_cancelled_when_no_reject_option(self, tmp_path):
+        """When no reject option was advertised (kiro-cli), reject_tool falls
+        back to the cancelled outcome — kiro handles it as a clean rejection."""
+        from kiro_claw.acp.types import OUTCOME_CANCELLED
+
+        client = AcpClient(work_dir=tmp_path)
+        client._permission_options[61] = {"once": "allow_once", "always": "allow_always"}
+        client._send_response = AsyncMock()
+        await client.reject_tool(61)
+        client._send_response.assert_awaited_once_with(
+            61,
+            {"outcome": {"outcome": OUTCOME_CANCELLED}},
+        )
+        assert 61 not in client._permission_options
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_cancelled_when_nothing_recorded(self, tmp_path):
+        """No recorded options at all → cancelled fallback (safe for kiro)."""
+        from kiro_claw.acp.types import OUTCOME_CANCELLED
+
+        client = AcpClient(work_dir=tmp_path)
+        client._send_response = AsyncMock()
+        await client.reject_tool(62)
+        client._send_response.assert_awaited_once_with(
+            62,
+            {"outcome": {"outcome": OUTCOME_CANCELLED}},
+        )
 
 
 class TestHandlePermission:

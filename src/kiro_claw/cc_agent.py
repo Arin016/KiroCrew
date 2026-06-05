@@ -28,6 +28,7 @@ sessions — see https://docs.anthropic.com/en/docs/claude-code/settings .
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import os
@@ -729,6 +730,60 @@ _CC_DENY_PATTERNS: list[str] = [
     "Edit(~/.ssh/*)",
     "Edit(*/.ssh/*)",
 ]
+
+
+# Benign canary commands. Any ``Bash(<glob>)`` deny rule that matches one of
+# these is over-broad: it would hard-block ordinary work. KiroClaw's own scoped
+# patterns (``Bash(git push*)``, ``Bash(*DROP TABLE*)``, …) match none of these.
+_CC_DENY_CANARIES: tuple[str, ...] = (
+    "ls",
+    "ls -la",
+    "git status",
+    "cat file.txt",
+    "echo hi",
+    "python3 script.py",
+    "pwd",
+)
+
+
+def find_overbroad_cc_deny_rules(settings: Any) -> list[str]:
+    """Return ``Bash(...)`` deny rules in *settings* that block benign commands.
+
+    Claude Code's native permission engine reads ``permissions.deny`` from the
+    user-global ``~/.claude/settings.json`` and project ``.claude/settings.json``
+    and blocks matching tools BEFORE KiroClaw's ``canUseTool`` host gate runs —
+    a rule like ``Bash(*)`` / ``Bash(git *)`` therefore aborts ordinary commands
+    with a cryptic "Tool use aborted" and no approval prompt, upstream of and
+    invisible to KiroClaw. KiroClaw cannot override these (they are the user's
+    own config), so the best we can do is detect and surface them.
+
+    A rule is "over-broad" when its ``Bash(<glob>)`` body matches any benign
+    canary command (case-insensitive fnmatch). KiroClaw's bundled scoped
+    patterns match no canary and are never reported. Non-``Bash(...)`` rules
+    (``Read()``/``Edit()``/bare tool names) are ignored — they don't gate bash.
+
+    Defensive against malformed input: a non-dict ``settings`` or non-list
+    ``deny`` yields ``[]`` rather than raising.
+    """
+    if not isinstance(settings, dict):
+        return []
+    perms = settings.get("permissions")
+    if not isinstance(perms, dict):
+        return []
+    deny = perms.get("deny")
+    if not isinstance(deny, list):
+        return []
+    flagged: list[str] = []
+    for rule in deny:
+        if not isinstance(rule, str):
+            continue
+        m = re.match(r"^Bash\((.*)\)$", rule.strip())
+        if not m:
+            continue
+        glob = m.group(1).lower()
+        if any(fnmatch.fnmatch(c, glob) for c in _CC_DENY_CANARIES):
+            flagged.append(rule)
+    return flagged
 
 
 def _atomic_settings_write(path: Path, data: dict[str, Any], mode: int | None = None) -> None:

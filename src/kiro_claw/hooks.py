@@ -243,16 +243,22 @@ class HookManager:
         # patterns like "ls" or "rm *" match without the prefix.
         normalized = _normalize_tool_name(tool_name)
 
-        # Sensitive path protection (always enforced, before all other checks)
-        if tool_name.startswith("Reading "):
-            # fs_read / ReadFile — check the path
-            if is_sensitive_path(normalized):
-                return ToolHookResult.deny(f"Blocked: access to sensitive path: {normalized}")
-        elif tool_name.startswith("Running: "):
-            # execute_bash — check for reads of sensitive paths
-            reason = is_sensitive_bash_command(normalized)
-            if reason:
-                return ToolHookResult.deny(reason)
+        # Sensitive path protection (always enforced, before all other checks).
+        # kiro-cli adds "Reading "/"Running: " display prefixes; the
+        # claude-agent-acp adapter does NOT (its file-read title is the bare
+        # path, its Bash title the bare command). So the prefix only HINTS at
+        # the tool kind — we must run BOTH checks on the normalized name
+        # regardless of prefix, or credential reads slip through on the Claude
+        # Code provider. is_sensitive_path resolves the title as a path: a real
+        # file-read title ("~/.aws/credentials") matches, while a bash command
+        # title ("cat ~/.aws/credentials") resolves to a non-sensitive path and
+        # is instead caught by is_sensitive_bash_command below.
+        if is_sensitive_path(normalized):
+            return ToolHookResult.deny(f"Blocked: access to sensitive path: {normalized}")
+        # execute_bash (prefixed or bare) — check for reads of sensitive paths.
+        reason = is_sensitive_bash_command(normalized)
+        if reason:
+            return ToolHookResult.deny(reason)
 
         # Built-in security deny list (always enforced)
         reason = is_denied(normalized, self._config.auto_deny_tools) or is_denied(

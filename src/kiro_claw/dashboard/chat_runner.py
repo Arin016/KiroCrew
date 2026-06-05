@@ -1713,7 +1713,31 @@ async def _run_chat(
                     tool_result = state.context_builder.hooks.on_tool_call(event.title)
                     if tool_result.action == TOOL_DENY:
                         await client.reject_tool(event.request_id)
-                        slot.append("tool", f"🚫 {event.title} (blocked)", "msg msg-tool")
+                        # Surface WHY: carry the deny reason into the pill so
+                        # the user sees "Blocked by security policy: ..." rather
+                        # than an opaque "(blocked)" (or, on the claude provider,
+                        # a cryptic "Tool use aborted" with no explanation).
+                        _deny_reason = (tool_result.reason or "blocked").strip()
+                        _deny_title, _ = redact_exfiltration_urls(event.title)
+                        _deny_title, _ = redact_credentials(_deny_title)
+                        _deny_msg, _ = redact_exfiltration_urls(_deny_reason)
+                        _deny_msg, _ = redact_credentials(_deny_msg)
+                        slot.append(
+                            "tool",
+                            f"🚫 {_deny_title} — {_deny_msg}",
+                            "msg msg-tool",
+                            meta=_tool_meta(event),
+                        )
+                        # Broadcast a visible activity event (mirrors the
+                        # auto-approve branch) so the block isn't silent.
+                        state.broadcast_ws(
+                            "activity_event",
+                            {
+                                "slot": slot.key,
+                                "kind": "permission",
+                                "text": f"Blocked: {_deny_title} — {_deny_msg}",
+                            },
+                        )
                         sel().log_tool_invocation(
                             session_key=session_key,
                             agent=slot.agent or "kiroclaw",

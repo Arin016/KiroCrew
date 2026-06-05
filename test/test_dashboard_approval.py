@@ -207,6 +207,54 @@ class TestApprovalModes:
         client.approve_tool.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_hook_deny_pill_includes_reason(self, tmp_path):
+        """The blocked pill must carry the deny reason, not just '(blocked)',
+        so the user learns WHY (e.g. 'Blocked by security policy: git push')
+        instead of seeing a silent/cryptic stop."""
+        cb = _context_builder(
+            ToolHookResult.deny("Blocked by security policy: git push")
+        )
+        state, client = _make_state(tmp_path, context_builder=cb)
+        slot = _make_slot()
+        _set_stream(client, [_permission_event(), _complete_event()])
+
+        with _patch_stats():
+            await _run_chat(state, slot, "hello")
+
+        msgs = _tool_messages(slot)
+        assert any(
+            "security policy: git push" in m.get("content", "").lower()
+            for m in msgs
+        ), [m.get("content") for m in msgs]
+
+    @pytest.mark.asyncio
+    async def test_hook_deny_broadcasts_activity_event(self, tmp_path):
+        """A host-gate deny must broadcast a visible activity_event (mirroring
+        the auto-approve branch) so the block is not silent."""
+        cb = _context_builder(
+            ToolHookResult.deny("Blocked by security policy: git push")
+        )
+        state, client = _make_state(tmp_path, context_builder=cb)
+        slot = _make_slot()
+        _set_stream(client, [_permission_event(), _complete_event()])
+
+        with _patch_stats():
+            await _run_chat(state, slot, "hello")
+
+        perm_activity = [
+            c.args
+            for c in state.broadcast_ws.call_args_list
+            if c.args and c.args[0] == "activity_event"
+            and isinstance(c.args[1], dict)
+            and c.args[1].get("kind") == "permission"
+        ]
+        assert perm_activity, state.broadcast_ws.call_args_list
+        # The broadcast text should mention the block.
+        assert any(
+            "block" in a[1].get("text", "").lower() for a in perm_activity
+        ), perm_activity
+
+    @pytest.mark.asyncio
     async def test_hook_auto_approve_skips_prompt(self, tmp_path):
         """Hook auto-approve must approve without interactive prompt."""
         cb = _context_builder(ToolHookResult.auto_approve())

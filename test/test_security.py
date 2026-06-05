@@ -395,6 +395,19 @@ class TestBuiltinDenyPatterns:
             is not None
         )
         assert is_denied("git stash push -m `git push origin main`") is not None
+        # Newline-chained publish (heredoc / multi-statement script body).
+        assert is_denied("echo starting\ngit push origin main") is not None
+        # Leading whitespace before the publish must not evade.
+        assert is_denied("   git push origin main") is not None
+        # Bare ``git push`` (no remote/branch — pushes current branch to the
+        # default remote) inside a subshell / backtick, where ``push`` is
+        # followed by a closing metacharacter rather than whitespace/EOL.
+        # A naive ``push(?:\s|$)`` terminator missed these.
+        assert is_denied("echo $(git push)") is not None
+        assert is_denied("result=`git push`") is not None
+        assert is_denied("x=$(git push); echo done") is not None
+        assert is_denied("git push|cat") is not None
+        assert is_denied("git push&") is not None
 
     def test_allows_legitimate_stash_in_pipeline(self) -> None:
         """Per-segment evaluation: legitimate ``git stash push`` followed by
@@ -508,29 +521,73 @@ class TestBuiltinDenyPatterns:
             is not None
         )
 
-    def test_blocks_command_with_branch_name_substring(self) -> None:
-        """Documents current glob-layer behavior: branch names containing
-        ``git-publish-verb`` substrings remain over-blocked because the
-        broad ``*git*push*`` fnmatch glob is substring-only.
+    def test_allows_commit_message_mentioning_push(self) -> None:
+        """A ``git commit`` whose message merely mentions ``push`` must be
+        ALLOWED — ``push`` is not the git verb here.
 
-        This is a known glob-precision limitation inherited from
-        `CR-272068197 <https://code.amazon.com/reviews/CR-272068197>`_
-        (see patrigao's "false positives" table at post #27).  The
-        per-segment work in this CR doesn't fix it because the whole
-        command stays a single segment when there are no shell separators.
-
-        Replacing the broad glob with a regex matcher that requires a
-        word-boundary token sequence is a separate change tracked
-        elsewhere; this test pins the current behavior and will need to
-        flip to ``is None`` once that change lands.
+        Regression for the silent ``Tool use aborted`` on the Claude Code
+        provider (interest thread p1780505710223359): the broad
+        ``*git*push*`` substring glob matched any commit whose ``-m`` body
+        contained the word ``push``, so the host gate denied it and
+        the claude-agent-acp adapter surfaced the cryptic abort with no
+        approval prompt.  Anchoring ``push`` as the git subcommand fixes it
+        while keeping real ``git push`` blocked.
         """
         from kiro_claw.security import is_denied
 
+        assert is_denied("git commit -m 'fix: do not push secrets to remote'") is None
+        assert (
+            is_denied(
+                "git commit -m 'refactor: push results downstream and reset cache'"
+            )
+            is None
+        )
+        # Multi-line / heredoc-style body mentioning push.
+        assert (
+            is_denied("git commit -m 'docs: explain when to push and when to rebase'")
+            is None
+        )
+
+    def test_allows_git_verbs_with_push_substring_args(self) -> None:
+        """Other git subcommands whose arguments contain ``push`` (branch
+        names, grep patterns, config keys) must be ALLOWED — only an actual
+        ``git push`` invocation is a publish.
+        """
+        from kiro_claw.security import is_denied
+
+        assert is_denied("git log --grep push") is None
+        assert is_denied("git config push.default current") is None
+        assert is_denied("git branch --contains pushed-feature") is None
         assert (
             is_denied(
                 "git switch -c fix/security-tighten-git-push origin/beta-braveheart"
             )
-            is not None
+            is None
+        )
+        # ``git remote`` referencing a remote literally named "push".
+        assert is_denied("git remote show push") is None
+
+    def test_allows_ssh_remote_command_without_publish(self) -> None:
+        """A plain ``ssh host '<cmd>'`` whose remote command contains the word
+        ``push`` (but is not a real ``git push``) must be ALLOWED.
+
+        Covers the ssh symptom from the same thread: remote
+        interactions starting with ``ssh xxxx`` were aborting.
+        """
+        from kiro_claw.security import is_denied
+
+        assert is_denied("ssh dev-dsk 'cd /workplace && git status'") is None
+        assert (
+            is_denied("ssh dev-dsk 'git commit -m \"address push-back from review\"'")
+            is None
+        )
+
+    def test_blocks_ssh_remote_real_git_push(self) -> None:
+        """A real ``git push`` inside an ``ssh`` remote command stays BLOCKED."""
+        from kiro_claw.security import is_denied
+
+        assert (
+            is_denied("ssh host 'cd /repo && git push origin main'") is not None
         )
 
     def test_deny_event_audit_emitted_on_block(self, monkeypatch) -> None:
@@ -550,20 +607,25 @@ class TestBuiltinDenyPatterns:
             captured.append((tool_name, deny_pattern, segment))
 
         monkeypatch.setattr(security_module, "_emit_deny_event", fake_emit)
-        # Pass-1 outright deny.
+        # Git-publish deny (verb-anchored regex, recorded under "git push").
         result = security_module.is_denied("git push origin main --force")
         assert result is not None
         assert len(captured) == 1
         assert captured[0][0] == "git push origin main --force"
-        assert captured[0][1] == "*git*push*"
-        # Pass-2 segment deny (chained bypass attempt).
+        assert captured[0][1] == security_module._GIT_PUBLISH_DENY_LABEL
+        # Chained bypass attempt is caught on the whole string (the separator
+        # is part of the git-publish anchor), and still audited.
         captured.clear()
         result = security_module.is_denied(
             "git stash push && git push origin main"
         )
         assert result is not None
-        # First call was for the embedded push segment.
         assert any("git push origin main" in c[2] for c in captured)
+        # A glob-based deny (e.g. terminate_instance) still records its glob.
+        captured.clear()
+        result = security_module.is_denied("aws ec2 terminate_instance i-1")
+        assert result is not None
+        assert captured[0][1] == "*terminate_instance*"
 
     def test_blocks_delete_stack(self) -> None:
         from kiro_claw.security import is_denied
