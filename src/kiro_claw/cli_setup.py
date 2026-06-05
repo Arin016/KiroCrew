@@ -192,6 +192,20 @@ def _setup(agent_only: bool = False, clean: bool = False) -> None:
     agent_path = install_agent(clean=clean)
     print(f"  ✅ Agent installed: {agent_path}")
 
+    # 2a. Ensure `kiroclaw` is reachable on PATH (the packaged Electron app
+    #     doesn't run install.sh) and purge stale predecessor MCP entries left
+    #     in the user's global provider config by the MeshClaw → KiroClaw
+    #     rename. Both run only here, on the explicit setup/migration path.
+    from kiro_claw.agent import ensure_kiroclaw_on_path
+    from kiro_claw.mcp_cleanup import clean_stale_managed_mcp
+
+    shim = ensure_kiroclaw_on_path()
+    if shim:
+        print(f"  ✅ Linked kiroclaw on PATH: {shim}")
+    removed_mcp = clean_stale_managed_mcp()
+    if removed_mcp:
+        print(f"  ✅ Removed stale MCP entries: {', '.join(removed_mcp)}")
+
     # 2b. Ensure config.json has default KiroClaw agent for fresh installs
     _ensure_default_agent_in_config()
 

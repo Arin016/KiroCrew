@@ -673,6 +673,12 @@ class GatewayOrchestrator:
 
             path = rebuild_agent_config()
             logger.info("Agent config installed: %s", path)
+
+            # Deliver shim + one-time stale-MCP purge automatically — the
+            # desktop app launches the gateway but never runs `kiroclaw setup`.
+            from kiro_claw.agent import run_first_run_setup  # circular import
+
+            run_first_run_setup()
         except Exception:
             logger.warning("Agent config install failed", exc_info=True)
 

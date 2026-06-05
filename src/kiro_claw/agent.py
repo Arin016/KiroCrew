@@ -31,6 +31,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -155,6 +156,11 @@ def _resolve_kiroclaw_bin() -> str:
 
     Resolution order (first existing + executable wins):
 
+    0. Frozen/PyInstaller app (the shipped desktop app): ``sys.executable``
+       *is* the kiroclaw CLI — e.g. ``.../kiroclaw-backend`` — which accepts
+       the ``mcp-core`` / ``mcp-cron`` subcommands. The bundle has no
+       ``bin/kiroclaw`` and nothing named ``kiroclaw`` on PATH, so this is the
+       only reliable handle; without it kiroclaw-core/kiroclaw-cron are dropped.
     1. Same install as the current process: walk up from ``kiro_claw.__file__``
        looking for a ``bin/kiroclaw`` sibling. Covers venv-based installs and
        source-tree dev trees.
@@ -174,6 +180,18 @@ def _resolve_kiroclaw_bin() -> str:
         if not (sp and os.path.isfile(sp) and os.access(sp, os.X_OK)):
             return False
         return _bin_is_usable(Path(sp))
+
+    # Frozen/PyInstaller app (shipped desktop app): ``sys.executable`` is the
+    # bundled ``kiroclaw-backend`` binary, which *is* the kiroclaw CLI and
+    # accepts the ``mcp-core`` / ``mcp-cron`` subcommands. The bundle ships no
+    # ``bin/kiroclaw`` and nothing named ``kiroclaw`` on PATH, so this is the
+    # only reliable handle — without it kiroclaw-core / kiroclaw-cron (and
+    # therefore spawn_run / cron_add / learn_add …) get dropped.
+    if getattr(sys, "frozen", False):
+        exe = sys.executable
+        if _usable(exe):
+            _KIROCLAW_BIN = exe
+            return _KIROCLAW_BIN
 
     # 0. Prefer the venv entrypoint for source-tree installs (editable
     #    install with a sibling .venv directory, e.g. project/src/kiro_claw
@@ -238,6 +256,100 @@ _MANAGED_MCP_SERVERS: dict[str, dict] = {
     "kiroclaw-cron": {"command_fn": _resolve_kiroclaw_bin, "args": ["mcp-cron"]},
     "kiroclaw-core": {"command_fn": _resolve_kiroclaw_bin, "args": ["mcp-core"]},
 }
+
+
+def ensure_kiroclaw_on_path(bin_dir: Path | None = None) -> str | None:
+    """Ensure a ``kiroclaw`` launcher is reachable on the user's PATH.
+
+    The source ``install.sh`` symlinks ``~/.local/bin/kiroclaw`` → the venv
+    entry point, but install paths that don't run it (notably the packaged
+    Electron app) leave no ``kiroclaw`` on PATH — breaking the ``kiroclaw``
+    terminal command. This mirrors that symlink step in Python so it runs from
+    ``kiroclaw setup``. Best-effort and idempotent:
+
+    * No-op if ``kiroclaw`` already resolves on PATH to the same binary.
+    * No-op if no concrete binary can be resolved (nothing to point at).
+    * Otherwise (re)create ``<bin_dir>/kiroclaw`` → the resolved binary.
+
+    Args:
+        bin_dir: Target directory for the shim. Defaults to ``~/.local/bin``.
+
+    Returns:
+        The shim path if one was created/updated, else ``None``.
+    """
+    target = _resolve_kiroclaw_bin()
+    # Nothing concrete to point at — bare "kiroclaw" or a non-executable file.
+    if not (os.path.isabs(target) and os.path.isfile(target) and os.access(target, os.X_OK)):
+        return None
+
+    # Already reachable on PATH as the same binary? Then there's nothing to do.
+    existing = shutil.which("kiroclaw")
+    if existing and os.path.realpath(existing) == os.path.realpath(target):
+        return None
+
+    bin_dir = bin_dir or (Path.home() / ".local" / "bin")
+    link = bin_dir / "kiroclaw"
+    try:
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink() or link.exists():
+            if os.path.realpath(link) == os.path.realpath(target):
+                return None
+            link.unlink()
+        link.symlink_to(target)
+    except OSError:
+        logger.warning("Could not create kiroclaw shim at %s", link, exc_info=True)
+        return None
+    logger.info("Linked kiroclaw shim: %s -> %s", link, target)
+    return str(link)
+
+
+# One-time migrations performed automatically on gateway first-run (so the
+# desktop app, which never runs `kiroclaw setup`, still gets them).
+_MIGRATIONS_DIR = _USER_DIR / ".migrations"
+_STALE_MCP_PURGE_MARKER = _MIGRATIONS_DIR / "stale_managed_mcp_purged"
+
+
+def run_first_run_setup() -> None:
+    """Deliver the install-time steps the desktop app needs without a terminal.
+
+    The Electron app only runs ``kiroclaw gateway`` — never ``kiroclaw
+    setup`` — yet two concerns aren't covered by the gateway's agent-config
+    rebuild. This is invoked from gateway startup to close that gap:
+
+    * **PATH shim** — ``ensure_kiroclaw_on_path()`` is idempotent and only
+      writes ``~/.local/bin/kiroclaw``, so it runs on every start.
+    * **Stale predecessor MCP purge** — ``clean_stale_managed_mcp()`` mutates
+      the user's *global* ``~/.kiro/settings/mcp.json``, so it runs ONCE,
+      guarded by a marker file, to honor the "KiroClaw owns only the agent
+      file" boundary (no global rewrite on subsequent starts).
+
+    Best-effort: never raises — any failure is logged and startup continues.
+    """
+    # 1. PATH shim — safe and idempotent on every start.
+    try:
+        shim = ensure_kiroclaw_on_path()
+        if shim:
+            logger.info("First-run: linked kiroclaw shim at %s", shim)
+    except Exception:
+        logger.warning("First-run: shim install failed", exc_info=True)
+
+    # 2. Stale managed-MCP purge — one-time, marker-guarded.
+    if _STALE_MCP_PURGE_MARKER.exists():
+        return
+    try:
+        from kiro_claw.mcp_cleanup import clean_stale_managed_mcp  # noqa: PLC0415
+
+        removed = clean_stale_managed_mcp()
+        if removed:
+            logger.info("First-run: purged stale managed MCP entries: %s", removed)
+        # Mark done even when nothing was removed, so the global mcp.json is
+        # never re-read/rewritten on later starts.
+        _MIGRATIONS_DIR.mkdir(parents=True, exist_ok=True)
+        _STALE_MCP_PURGE_MARKER.write_text(
+            datetime.now(timezone.utc).isoformat() + "\n", encoding="utf-8"
+        )
+    except Exception:
+        logger.warning("First-run: stale MCP purge failed", exc_info=True)
 
 
 def _prompt_path(mode: str = "") -> Path:
