@@ -19,6 +19,7 @@ from kiro_claw.dashboard.chat_utils import (
 )
 from kiro_claw.dashboard.state import DashboardState, _ChatSlot
 from kiro_claw.effort import EFFORT_LEVELS, EFFORT_VALUES
+from kiro_claw.history import _archive_lines
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,12 @@ def _redact_meta_for_role(role: str, meta: dict) -> dict:
 
 
 _MAX_HISTORY_CHARS = 8000
+
+# Bounded retries for taking a consistent (window, _disk_older_count) snapshot
+# when _save_slot_to_history runs in the flush executor thread concurrently with
+# event-loop mutations (#4). A handful suffices — the only racing mutation is the
+# rare >10000-message trim; retries just re-read until the two reads agree.
+_FLUSH_SNAPSHOT_RETRIES = 4
 
 # Fallback effort levels — used when no ACP session has reported its config
 # yet (cold start). Sourced from the shared ``effort.py`` vocabulary so every
@@ -277,6 +284,10 @@ def _rehydrate_slot_from_history(state: DashboardState, slot_name: str) -> _Chat
     if meta.get("forked_from") is not None:
         slot.forked_from = meta["forked_from"]
     messages = state.conversation_log.read_messages(history_key)
+    # Only the recent window is loaded into memory; older on-disk lines become
+    # the FROZEN PREFIX that saves never rewrite. _disk_older_count must
+    # therefore count those older lines so the save model preserves them.
+    slot._disk_older_count = max(0, len(messages) - 200)
     for m in messages[-200:]:
         role = m.get("role", "assistant")
         cls = m.get("cls") or ("msg msg-u" if role == "user" else "msg msg-a")
@@ -296,6 +307,10 @@ def _rehydrate_slot_from_history(state: DashboardState, slot_name: str) -> _Chat
         _attach_variants(slot, m)
     slot.drain()
     slot._resumed_count = len(slot.messages)
+    # The whole in-memory window is already on disk → it is the on-disk window
+    # region. Saves re-serialize the window in place; the frozen prefix (older
+    # turns counted above) is never rewritten.
+    slot._disk_window_len = len(slot.messages)
     slot._dirty = False
     logger.info("Rehydrated session %s (%s) from history", slot_name, slot.title)
     return slot
@@ -433,11 +448,141 @@ def restore_recent_sessions(
             _attach_variants(slot, m)
         slot.drain()
         slot._resumed_count = len(slot.messages)
+        # Loaded window is the on-disk window region; older lines (counted in
+        # _disk_older_count above) are the frozen prefix saves never rewrite.
+        slot._disk_window_len = len(slot.messages)
         slot._dirty = False
         restored += 1
         logger.info("Restored session %s (%s)", slot_name, slot.title)
     _sync_dashboard_slots(state)
     return restored
+
+
+def _diff_dropped_message_lines(old_lines: list[str], new_lines: list[str]) -> list[str]:
+    """Return existing message lines that *new_lines* would drop.
+
+    Both inputs are full file-line lists (metadata line at index 0, which is
+    skipped on both sides). Compares by normalized JSON (``sort_keys``, so a
+    key-order change is not a spurious drop). Corrupted/unparseable old lines
+    are treated as dropped (archived). This is the same drop-detection rule
+    ``ConversationLog.rewrite_session`` applies; it is factored out here so the
+    dashboard rewrite path and ``rewrite_session`` share one definition.
+    """
+    if old_lines and '"_type"' in old_lines[0]:
+        old_lines = old_lines[1:]
+    kept_serialized: set[str] = set()
+    for ln in new_lines[1:]:
+        if not ln.strip():
+            continue
+        try:
+            kept_serialized.add(json.dumps(json.loads(ln), sort_keys=True))
+        except (json.JSONDecodeError, ValueError):
+            continue
+    dropped: list[str] = []
+    for ln in old_lines:
+        if not ln.strip():
+            continue
+        try:
+            normalized = json.dumps(json.loads(ln), sort_keys=True)
+        except (json.JSONDecodeError, ValueError):
+            dropped.append(ln)  # corrupted line → archive it
+            continue
+        if normalized not in kept_serialized:
+            dropped.append(ln)
+    return dropped
+
+
+def _archive_dropped_lines(
+    state: DashboardState, history_key: str, old_lines: list[str], new_lines: list[str]
+) -> None:
+    """Archive on-disk message lines that *new_lines* (full file) would drop.
+
+    Used only by the rewrite path (rewind/regenerate/fork), which intentionally
+    truncates the in-memory window. The frozen prefix is present unchanged in
+    both *old_lines* and *new_lines*, so it is never archived — only the dropped
+    window tail is. No-op in the steady-state superset case.
+    """
+    dropped = _diff_dropped_message_lines(old_lines, new_lines)
+    if not dropped:
+        return
+    base = state.conversation_log._dir if state.conversation_log else None
+    _archive_lines(history_key, dropped, reason="compact", base=base)
+
+
+def _build_message_entry(m: dict) -> dict | None:
+    """Build one persisted JSONL message dict from an in-memory slot message.
+
+    Returns None for transient roles that are never persisted. Applies the
+    same redaction the overwrite path used so append and rewrite produce
+    byte-identical lines for the same message.
+    """
+    role = m.get("role", "assistant")
+    if role in ("chunk", "done", "streaming", "queued", "permission"):
+        return None
+    content = m.get("content", "")
+    if role not in ("user", "system"):
+        content, _ = redact_exfiltration_urls(content)
+        content, _ = redact_credentials(content)
+    entry: dict = {
+        "role": role,
+        "content": content,
+        "ts": m.get("ts", ""),
+        "source_thread": "dashboard",
+        "source_user": "dashboard",
+    }
+    if m.get("variants"):
+        redacted_variants: list[dict] = []
+        for v in m["variants"]:
+            if not isinstance(v, dict):
+                continue
+            vc = v.get("content", "")
+            vc, _ = redact_exfiltration_urls(vc)
+            vc, _ = redact_credentials(vc)
+            redacted_variants.append({**v, "content": vc})
+        entry["variants"] = redacted_variants
+        entry["variant_idx"] = m.get("variant_idx", 0)
+    cls_val = m.get("cls", "")
+    if role == "system" and cls_val:
+        entry["cls"] = cls_val
+    if isinstance(m.get("meta"), dict):
+        entry["meta"] = _redact_meta_for_role(role, m["meta"])
+    return entry
+
+
+def _read_frozen_prefix(slot: _ChatSlot, path, disk_older: int) -> str:
+    """Return the frozen-prefix bytes: the first *disk_older* on-disk message lines.
+
+    These are the lines OLDER than the in-memory window — never rewritten, so
+    older history survives a restart that only loaded a recent window. The bytes
+    are cached on the slot keyed by ``(mtime, disk_older)`` so a steady 5s flush
+    is O(window) rather than O(file size) (#5): the cache hits whenever the file
+    has not changed on disk since the last save (the only writer of this file is
+    this slot, so its own atomic_write bumps the mtime and the next call re-reads
+    — but the prefix region is identical, so re-reads are rare in practice and
+    always correct).
+
+    Returns "" when there is no frozen prefix (a fresh slot, ``disk_older == 0``)
+    or the file is missing/unreadable/has no metadata line.
+    """
+    if disk_older <= 0:
+        return ""
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return ""
+    cache = slot._frozen_prefix_cache
+    if cache is not None and cache[0] == mtime and cache[1] == disk_older:
+        return cache[2]
+    try:
+        existing = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return ""
+    if not existing or '"_type"' not in existing[0]:
+        return ""
+    body = existing[1:]  # message lines only (metadata excluded)
+    prefix = "".join(body[:disk_older])
+    slot._frozen_prefix_cache = (mtime, disk_older, prefix)
+    return prefix
 
 
 def _save_slot_to_history(
@@ -447,14 +592,89 @@ def _save_slot_to_history(
     *,
     closed: bool = False,
     force: bool = False,
+    rewrite: bool = False,
 ) -> None:
-    """Persist slot messages to JSONL history."""
-    msgs = messages if messages is not None else slot.messages
-    if not state.conversation_log or not msgs:
+    """Persist slot messages to JSONL history (append-safe).
+
+    The session file is modeled as **frozen prefix + live window**:
+
+    - The **frozen prefix** is the first ``slot._disk_older_count`` on-disk
+      message lines — the turns OLDER than the in-memory window (set at
+      restore/resume). These bytes are read verbatim and NEVER rewritten, so a
+      restart that loaded only a recent window can no longer destroy older
+      history.
+    - The **live window** is ``slot.messages`` (small, ~500 messages). It is
+      re-serialized in full on every save. Re-serializing the whole window means
+      in-place edits to already-shown messages (stop-event resolution, file-change
+      chips, mcp_oauth banner completion) and any reordering done by
+      ``_flush_segment`` all persist correctly — there is no position counter to
+      get out of sync.
+
+    The default save writes ``meta + frozen_prefix + serialize(window)``.
+
+    Pass ``rewrite=True`` (or an explicit *messages* snapshot, which implies it)
+    for operations that INTENTIONALLY truncate the window (rewind/regenerate/
+    fork): the file is rebuilt as ``meta + frozen_prefix + serialize(snapshot)``
+    and the dropped window tail is archived first via ``_archive_dropped_lines``.
+
+    Concurrency (#4): ``_flush_dirty_slots`` runs this in an executor thread
+    while ``_run_chat`` mutates ``slot.messages`` on the event loop. We snapshot
+    ``list(slot.messages)`` (a single GIL-atomic attribute read) and the matching
+    ``slot._disk_older_count`` up front, then operate only on that snapshot, so a
+    concurrent ``_flush_segment`` reassigning ``slot.messages`` cannot interleave
+    with the read-serialize-write and skip/duplicate a message.
+
+    Operates ONLY on this slot's own single session file (``_path(history_key)``);
+    tab_id chaining is 1:1 (a slot's tab_id maps to exactly one file — fork makes
+    a fresh slot with its own file), so this never reads/writes a sibling and
+    legacy no-tab_id sessions stay isolated.
+    """
+    if not state.conversation_log:
         return
-    if slot._resumed_count > 0 and len(msgs) <= slot._resumed_count:
-        if not closed and not force:
-            return
+    # An explicit message snapshot always means "this is the full authoritative
+    # window state" → rewrite. Edit paths (rewind/regenerate/fork) pass a snapshot.
+    # A slot left in _pending_rewrite by a failed inline rewrite (#3) also takes
+    # the archive-safe rewrite path until it succeeds.
+    if messages is not None or slot._pending_rewrite:
+        rewrite = True
+    # Snapshot the window and its disk-older count CONSISTENTLY (#4). The save
+    # may run in the flush executor thread while _flush_segment (reassigns
+    # slot.messages) or append (trims the front AND bumps _disk_older_count)
+    # run on the event loop. A trim is the only mutation that changes the
+    # window/_disk_older_count relationship, so we read _disk_older_count,
+    # snapshot the window, then confirm _disk_older_count is unchanged; a small
+    # bounded retry closes the race without locks (slot._lock is an asyncio.Lock
+    # and so cannot be acquired from this thread). An explicit snapshot is
+    # already consistent by construction.
+    if messages is not None:
+        window = list(messages)
+        disk_older = slot._disk_older_count
+    else:
+        for _ in range(_FLUSH_SNAPSHOT_RETRIES):
+            disk_older = slot._disk_older_count
+            window = list(slot.messages)
+            if slot._disk_older_count == disk_older:
+                break
+        else:
+            disk_older = slot._disk_older_count
+            window = list(slot.messages)
+    if not window:
+        return
+    # Skip a pure no-op: a freshly resumed slot with no new AND no edited
+    # messages. ``slot._dirty`` is set by both append and in-place edits
+    # (update_message / _resolve_stop_event / file-change + mcp_oauth patches),
+    # so a dirty slot whose length merely equals the resumed count still falls
+    # through and re-serializes the window — otherwise an in-place edit after
+    # resume would never reach disk (#2). closed/force/rewrite always proceed.
+    if (
+        slot._resumed_count > 0
+        and len(window) <= slot._resumed_count
+        and not slot._dirty
+        and not closed
+        and not force
+        and not rewrite
+    ):
+        return
     history_key = _history_key_for(slot.key)
     try:
         existing_meta = state.conversation_log.get_metadata(history_key)
@@ -499,41 +719,56 @@ def _save_slot_to_history(
         tab_id = getattr(slot, "_tab_id", None) or existing_meta.get("tab_id")
         if tab_id:
             meta_line["tab_id"] = tab_id
-        lines = [json.dumps(meta_line) + "\n"]
-        for m in msgs:
-            role = m.get("role", "assistant")
-            if role in ("chunk", "done", "streaming", "queued", "permission"):
-                continue
-            content = m.get("content", "")
-            if role not in ("user", "system"):
-                content, _ = redact_exfiltration_urls(content)
-                content, _ = redact_credentials(content)
-            entry: dict = {
-                "role": role,
-                "content": content,
-                "ts": m.get("ts", ""),
-                "source_thread": "dashboard",
-                "source_user": "dashboard",
-            }
-            if m.get("variants"):
-                redacted_variants: list[dict] = []
-                for v in m["variants"]:
-                    if not isinstance(v, dict):
-                        continue
-                    vc = v.get("content", "")
-                    vc, _ = redact_exfiltration_urls(vc)
-                    vc, _ = redact_credentials(vc)
-                    redacted_variants.append({**v, "content": vc})
-                entry["variants"] = redacted_variants
-                entry["variant_idx"] = m.get("variant_idx", 0)
-            cls_val = m.get("cls", "")
-            if role == "system" and cls_val:
-                entry["cls"] = cls_val
-            if isinstance(m.get("meta"), dict):
-                entry["meta"] = _redact_meta_for_role(role, m["meta"])
-            lines.append(json.dumps(entry) + "\n")
+        meta_str = json.dumps(meta_line) + "\n"
 
-        atomic_write(path, "".join(lines), fsync=True)
+        # ── Frozen prefix (never rewritten) + freshly serialized window ──────
+        # Read the verbatim bytes of the on-disk lines OLDER than the in-memory
+        # window (cached, O(window) on a steady flush — #5). Then re-serialize
+        # the ENTIRE window snapshot so in-place edits and reordering persist.
+        frozen_prefix = _read_frozen_prefix(slot, path, disk_older)
+        window_lines = [
+            json.dumps(e) + "\n"
+            for m in window
+            if (e := _build_message_entry(m)) is not None
+        ]
+        payload = meta_str + frozen_prefix + "".join(window_lines)
+
+        # Rewrite paths (rewind/regenerate/fork) intentionally TRUNCATE the
+        # window, so the dropped tail must be archived first to stay
+        # recoverable. The default save is a superset of what's on disk (frozen
+        # prefix unchanged + same-or-grown window), so it drops nothing — and we
+        # skip the O(file) archive-diff read there to keep a steady flush
+        # O(window) (#5). Both sides are passed as proper per-line lists so the
+        # normalized-JSON diff matches the frozen-prefix lines (never archived).
+        if rewrite and path.exists():
+            try:
+                old_lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+                new_lines = payload.splitlines(keepends=True)
+                _archive_dropped_lines(state, history_key, old_lines, new_lines)
+            except Exception:
+                logger.warning(
+                    "Failed to archive dropped lines for %s", history_key, exc_info=True
+                )
+
+        atomic_write(path, payload, fsync=True)
+        # A rewrite (archive-safe) save succeeded → clear the pending-rewrite
+        # flag so later saves return to the cheap default path (#3).
+        if rewrite:
+            slot._pending_rewrite = False
+        # Record how many window messages are now on disk so memory trimming
+        # can safely fold leading window messages into the frozen prefix (#8).
+        slot._disk_window_len = len(window)
+        # We just wrote the file, so we KNOW its frozen prefix is exactly
+        # ``frozen_prefix`` at the new mtime — refresh the cache rather than
+        # invalidating it, so the next steady flush is a cache hit (O(window),
+        # #5) instead of an O(file) re-read.
+        if disk_older > 0:
+            try:
+                slot._frozen_prefix_cache = (path.stat().st_mtime, disk_older, frozen_prefix)
+            except OSError:
+                slot._frozen_prefix_cache = None
+        else:
+            slot._frozen_prefix_cache = None
         state.conversation_log._invalidate_cache(history_key)
         state.conversation_log.invalidate_tab_id_cache()
     except Exception:

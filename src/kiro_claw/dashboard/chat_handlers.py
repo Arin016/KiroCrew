@@ -1329,6 +1329,10 @@ async def api_chat_slot_resume(request: web.Request) -> web.Response:
         _attach_variants(slot, m)
     slot.drain()
     slot._resumed_count = len(slot.messages)
+    # Loaded window is the on-disk window region; older lines (in
+    # _disk_older_count above) are the frozen prefix saves never rewrite,
+    # so older on-disk turns are preserved.
+    slot._disk_window_len = len(slot.messages)
     total = disk_total
     recent = slot.messages[-200:] if len(slot.messages) > 200 else slot.messages
     _sync_dashboard_slots(state)

@@ -902,6 +902,323 @@ class TestInMemoryAuthority:
             assert data["has_more"] is False
             assert [m["content"] for m in data["messages"]] == ["msg 0", "msg 1"]
 
+    def test_append_only_preserves_full_disk_history(self, tmp_path, monkeypatch):
+        """Save keeps ALL on-disk messages; nothing dropped or archived.
+
+        After a restart the slot holds only a recent window (the frozen prefix
+        counted by _disk_older_count is OLDER on disk) while the JSONL still has
+        the full history. Saving a new turn must preserve the frozen prefix
+        byte-for-byte — no overwrite, no truncation, no archive.
+        """
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        from kiro_claw.dashboard.chat import _save_slot_to_history
+
+        state = _make_state(tmp_path)
+        log = state.conversation_log
+        # 8 messages on disk total (the pre-restart full history).
+        for i in range(8):
+            log.append("dashboard:s4", "user", f"old msg {i}")
+        # Restore truncated to the last 3 in memory; _disk_window_len mirrors
+        # what restore sets (those 3 are already the on-disk window tail).
+        slot = state.get_or_create_slot("s4")
+        slot.append("user", "old msg 5")
+        slot.append("user", "old msg 6")
+        slot.append("user", "old msg 7")
+        slot.drain()
+        slot._resumed_count = len(slot.messages)
+        slot._disk_window_len = len(slot.messages)
+        slot._disk_older_count = 5
+        slot.append("user", "brand new msg")
+        slot.drain()
+
+        _save_slot_to_history(state, slot)
+
+        # Nothing archived — the frozen prefix is never dropped.
+        assert not (tmp_path / "archive").exists()
+        # All 8 original messages + the new one are on disk, in order.
+        disk = log.read_messages("dashboard:s4")
+        contents = [m["content"] for m in disk]
+        assert contents == [f"old msg {i}" for i in range(8)] + ["brand new msg"]
+
+    def test_append_only_no_duplicate_on_resave(self, tmp_path, monkeypatch):
+        """Re-saving without new messages must not duplicate the tail on disk."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        from kiro_claw.dashboard.chat import _save_slot_to_history
+
+        state = _make_state(tmp_path)
+        log = state.conversation_log
+        for i in range(4):
+            log.append("dashboard:s6", "user", f"msg {i}")
+        slot = state.get_or_create_slot("s6")
+        for i in range(4):
+            slot.append("user", f"msg {i}")
+        slot.drain()
+        slot._resumed_count = len(slot.messages)
+        slot._disk_window_len = len(slot.messages)
+
+        slot.append("assistant", "reply A")
+        slot.drain()
+        _save_slot_to_history(state, slot)
+        # A redundant save (force) must not duplicate the already-written tail.
+        _save_slot_to_history(state, slot, force=True)
+
+        disk = log.read_messages("dashboard:s6")
+        contents = [m["content"] for m in disk]
+        assert contents == [f"msg {i}" for i in range(4)] + ["reply A"]
+
+    def test_save_steady_state_does_not_archive(self, tmp_path, monkeypatch):
+        """A normal append (slot is a superset of disk) archives nothing."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        from kiro_claw.dashboard.chat import _save_slot_to_history
+
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("s5")
+        slot.append("user", "first")
+        slot.drain()
+        _save_slot_to_history(state, slot)
+        slot.append("assistant", "reply")
+        slot.drain()
+        _save_slot_to_history(state, slot)
+
+        assert not (tmp_path / "archive").exists()
+
+    def test_append_only_does_not_merge_unrelated_session(self, tmp_path, monkeypatch):
+        """Append-only writes ONLY to the slot's own file — never an unrelated one.
+
+        Guards the regression the reporter flagged: a second, unrelated session
+        must not get merged into this slot's history. Append-only touches a
+        single session file, so a sibling file is left completely untouched.
+        """
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        from kiro_claw.dashboard.chat import _save_slot_to_history
+
+        state = _make_state(tmp_path)
+        log = state.conversation_log
+        # Two independent on-disk sessions (no shared tab_id).
+        for i in range(3):
+            log.append("dashboard:sessA", "user", f"A{i}")
+        for i in range(2):
+            log.append("dashboard:sessB", "user", f"B{i}")
+        b_before = log.read_messages("dashboard:sessB")
+
+        slot = state.get_or_create_slot("sessA")
+        for i in range(3):
+            slot.append("user", f"A{i}")
+        slot.drain()
+        slot._resumed_count = len(slot.messages)
+        slot._disk_window_len = len(slot.messages)
+        slot._tab_id = ""  # no chaining
+        slot.append("user", "A-new")
+        slot.drain()
+        _save_slot_to_history(state, slot)
+
+        # sessA got its new turn; sessB is byte-for-byte untouched.
+        assert [m["content"] for m in log.read_messages("dashboard:sessA")] == [
+            "A0", "A1", "A2", "A-new"
+        ]
+        assert log.read_messages("dashboard:sessB") == b_before
+
+    def test_rewrite_path_archives_dropped_tail(self, tmp_path, monkeypatch):
+        """An explicit snapshot save (rewrite, e.g. rewind) archives dropped msgs."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        from kiro_claw.dashboard.chat import _save_slot_to_history
+
+        state = _make_state(tmp_path)
+        log = state.conversation_log
+        slot = state.get_or_create_slot("s7")
+        for c in ("q1", "a1", "q2", "a2"):
+            slot.append("user" if c.startswith("q") else "assistant", c)
+        slot.drain()
+        _save_slot_to_history(state, slot)  # append-only establishes the file
+        assert not (tmp_path / "archive").exists()
+
+        # Rewind-style: truncate to first turn and rewrite via explicit snapshot.
+        snapshot = [dict(m) for m in slot.messages[:1]]
+        _save_slot_to_history(state, slot, snapshot)
+
+        # Disk now holds only the kept prefix; dropped tail is archived.
+        disk = log.read_messages("dashboard:s7")
+        assert [m["content"] for m in disk] == ["q1"]
+        archives = list((tmp_path / "archive").glob("dashboard_s7__*.jsonl"))
+        assert len(archives) == 1
+        content = archives[0].read_text()
+        for dropped in ("a1", "q2", "a2"):
+            assert dropped in content
+
+    def test_rewrite_preserves_frozen_prefix(self, tmp_path, monkeypatch):
+        """A rewrite (rewind) with a frozen prefix keeps the prefix, drops only the tail.
+
+        With _disk_older_count > 0 the file is frozen_prefix + window. A rewrite
+        that truncates the window must leave the frozen prefix byte-for-byte and
+        archive only the dropped window tail — never the older history.
+        """
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        from kiro_claw.dashboard.chat import _save_slot_to_history
+
+        state = _make_state(tmp_path)
+        log = state.conversation_log
+        # 6 messages on disk; only the last 2 are the in-memory window.
+        for i in range(6):
+            log.append("dashboard:s11", "user", f"old {i}")
+        slot = state.get_or_create_slot("s11")
+        slot.append("user", "old 4")
+        slot.append("assistant", "old 5")
+        slot.drain()
+        slot._resumed_count = len(slot.messages)
+        slot._disk_window_len = len(slot.messages)
+        slot._disk_older_count = 4  # old 0..3 are the frozen prefix
+
+        # Rewind-style truncate to just the first window message + rewrite.
+        snapshot = [dict(m) for m in slot.messages[:1]]
+        _save_slot_to_history(state, slot, snapshot)
+
+        disk = log.read_messages("dashboard:s11")
+        # Frozen prefix preserved + kept window head; dropped tail archived.
+        assert [m["content"] for m in disk] == [
+            "old 0", "old 1", "old 2", "old 3", "old 4"
+        ]
+        archives = list((tmp_path / "archive").glob("dashboard_s11__*.jsonl"))
+        assert len(archives) == 1
+        content = archives[0].read_text()
+        assert "old 5" in content
+        # The frozen prefix must NOT be archived.
+        for frozen in ("old 0", "old 1", "old 2", "old 3"):
+            assert frozen not in content
+
+    def test_flush_then_finalized_reply_persists(self, tmp_path, monkeypatch):
+        """#1: a mid-turn flush past a stop_event must not lose the later reply.
+
+        Repro of the boundary-asymmetry bug: a stop happens mid-turn, the 5s
+        flush persists the window ending in the stop_event, then _flush_segment
+        finalizes the assistant reply and moves the stop_event AFTER it. The
+        finalized reply must end up on disk (the old position-counter model
+        committed past the stop_event and dropped the later assistant line).
+        """
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        import json
+
+        from kiro_claw.dashboard.chat import _flush_segment, _save_slot_to_history
+
+        state = _make_state(tmp_path)
+        log = state.conversation_log
+        slot = state.get_or_create_slot("s8")
+        slot.append("user", "do a thing")
+        # Streaming chunk + a stop_event interleaved with this segment.
+        slot.append("chunk", "partial output")
+        stop_cls = json.dumps({"kind": "stop_event", "id": "stop-1", "state": "stopping"})
+        slot.append("system", stop_cls, cls=stop_cls)
+        slot.drain()
+
+        # 5s flush lands here — window ends in chunk + stop_event.
+        _save_slot_to_history(state, slot)
+
+        # _flush_segment finalizes the assistant reply and re-orders the
+        # stop_event to land AFTER it.
+        _flush_segment(state, slot, "final answer", broadcast=False)
+        slot.drain()
+        _save_slot_to_history(state, slot)
+
+        disk = log.read_messages("dashboard:s8")
+        contents = [m["content"] for m in disk]
+        # The finalized reply is on disk, after the user prompt; chunk dropped.
+        assert "final answer" in contents
+        assert "do a thing" in contents
+        assert "partial output" not in contents
+        # Stop card persists after the finalized assistant reply.
+        assert contents.index("final answer") < contents.index(stop_cls)
+
+    def test_inplace_stop_resolution_persists(self, tmp_path, monkeypatch):
+        """#2: an in-place edit of an already-flushed message must persist.
+
+        The stop_event message is flushed as "stopping"; later it is mutated in
+        place to "stopped" (mirrors _resolve_stop_event). The re-serialized
+        window must carry the resolution to disk — the old append-only model
+        only wrote new tail messages and dropped the in-place edit.
+        """
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        import json
+
+        from kiro_claw.dashboard.chat import _save_slot_to_history
+
+        state = _make_state(tmp_path)
+        log = state.conversation_log
+        slot = state.get_or_create_slot("s9")
+        slot.append("user", "go")
+        stopping = json.dumps({"kind": "stop_event", "id": "stop-x", "state": "stopping"})
+        slot.append("system", stopping, cls=stopping)
+        slot.drain()
+        _save_slot_to_history(state, slot)  # flushed as "stopping"
+        # Model a resumed slot: the window equals the resumed count and the
+        # in-place edit adds NO new message — exercises the resumed-guard path.
+        slot._resumed_count = len(slot.messages)
+        slot._disk_window_len = len(slot.messages)
+        slot._dirty = False
+
+        # Resolve in place (same object already on disk at index < end).
+        stopped = json.dumps({"kind": "stop_event", "id": "stop-x", "state": "stopped"})
+        for m in slot.messages:
+            if m.get("role") == "system":
+                m["cls"] = stopped
+                m["content"] = stopped
+                slot._dirty = True  # _resolve_stop_event sets this
+                break
+        _save_slot_to_history(state, slot)
+
+        disk = log.read_messages("dashboard:s9")
+        sys_msgs = [m for m in disk if m.get("role") == "system"]
+        assert len(sys_msgs) == 1
+        assert json.loads(sys_msgs[0]["cls"])["state"] == "stopped"
+
+    def test_failed_rewrite_does_not_strand_or_lose(self, tmp_path, monkeypatch):
+        """#3: a failed inline rewrite must not lose the dropped tail or strand state.
+
+        rewind/regenerate truncate the window then save with a snapshot. If that
+        save raises, _pending_rewrite stays set so the next (flush) save still
+        takes the archive-safe rewrite path — the dropped tail is archived, not
+        silently overwritten, and the kept prefix is correct on disk.
+        """
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        from kiro_claw.dashboard import chat_persistence
+        from kiro_claw.dashboard.chat import _save_slot_to_history
+
+        state = _make_state(tmp_path)
+        log = state.conversation_log
+        slot = state.get_or_create_slot("s10")
+        for c in ("q1", "a1", "q2", "a2"):
+            slot.append("user" if c.startswith("q") else "assistant", c)
+        slot.drain()
+        _save_slot_to_history(state, slot)
+
+        # Simulate rewind: truncate window to first turn, mark pending rewrite,
+        # and have the inline rewrite save blow up inside atomic_write.
+        del slot.messages[1:]
+        slot._pending_rewrite = True
+        orig_atomic = chat_persistence.atomic_write
+        calls = {"n": 0}
+
+        def _boom(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("disk full")
+            return orig_atomic(*a, **k)
+
+        monkeypatch.setattr(chat_persistence, "atomic_write", _boom)
+        snapshot = [dict(m) for m in slot.messages]
+        with pytest.raises(OSError):
+            _save_slot_to_history(state, slot, snapshot)
+        # Flag still set → flush retries the archive-safe rewrite (2nd write OK).
+        assert slot._pending_rewrite is True
+        _save_slot_to_history(state, slot)
+        assert slot._pending_rewrite is False
+
+        disk = log.read_messages("dashboard:s10")
+        assert [m["content"] for m in disk] == ["q1"]
+        archives = list((tmp_path / "archive").glob("dashboard_s10__*.jsonl"))
+        assert len(archives) >= 1
+        content = "".join(a.read_text() for a in archives)
+        for dropped in ("a1", "q2", "a2"):
+            assert dropped in content
+
 
 # ── Session rename tests ──
 
@@ -4957,6 +5274,10 @@ class TestFolderAssignmentPersistence:
         slot.append("user", "hello")
         slot.drain()
         slot._resumed_count = len(slot.messages)
+        # Model a genuinely-resumed, UNCHANGED slot: restore sets _dirty=False.
+        # (A dirty slot — e.g. an in-place stop-event edit — must NOT be skipped;
+        # see test_inplace_stop_resolution_persists.)
+        slot._dirty = False
         slot.folder_id = "f-force"
 
         # Without force — save is skipped by the guard, no file written.

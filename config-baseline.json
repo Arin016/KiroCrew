@@ -483,7 +483,8 @@
         "autocompact_pct": 90.0,
         "pool_size": 0,
         "pool_agent": "",
-        "pool_ttl_secs": 1800
+        "pool_ttl_secs": 1800,
+        "archive_retention_days": 30
       }
     },
     {
@@ -555,6 +556,20 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": 1800
+    },
+    {
+      "path": "session.archive_retention_days",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Archive Retention (days)",
+      "help": "Days to keep compacted/rotated session archives before auto-cleanup. -1 disables cleanup (manage deletion manually).",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 30
     },
     {
       "path": "taskrunner",

@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from kiro_claw.config.loader import config_dir
+from kiro_claw.config.loader import KiroClawConfig, config_dir
 from kiro_claw.llm_helpers import ToolApprovalPolicy, stream_and_collect_json
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
@@ -86,15 +86,50 @@ def _archive_lines(key: str, lines: list[str], reason: str, base: Path | None = 
 _last_cleanup: float = 0.0
 
 
-def _cleanup_old_archives(retention_days: int = ARCHIVE_RETENTION_DAYS, base: Path | None = None) -> int:
-    """Delete archive files older than retention_days. Rate-limited to once per hour."""
+def _resolve_retention_days() -> int:
+    """Read session.archive_retention_days from config.
+
+    Returns the configured retention window in days, or ``-1`` when cleanup is
+    disabled.  Falls back to the hardcoded default if config can't be loaded
+    (e.g. during early init or in a stripped test environment).
+    """
+    try:
+        return int(KiroClawConfig.load().session.archive_retention_days)
+    except Exception:
+        return ARCHIVE_RETENTION_DAYS
+
+
+def _cleanup_old_archives(retention_days: int | None = None, base: Path | None = None) -> int:
+    """Delete archive files older than retention_days. Rate-limited to once per hour.
+
+    When *retention_days* is None, the value is resolved from config
+    (``session.archive_retention_days``).  A negative value disables cleanup
+    entirely — the user manages archive deletion manually.
+    """
     global _last_cleanup
     import time as _time
 
+    # Explicit negative disables cleanup immediately (no config read needed).
+    if retention_days is not None and retention_days < 0:
+        return 0  # cleanup disabled
+    # Rate-limit guard runs BEFORE resolving retention from config so a
+    # throttled call (the common case on hot archive paths) returns without
+    # the expensive KiroClawConfig.load() disk read + parse (Bug #6).
     now = _time.time()
     if now - _last_cleanup < 3600:
         return 0
+    # Past the throttle window: stamp _last_cleanup NOW, before resolving
+    # retention. Otherwise a config-resolved "disabled" (negative) would return
+    # without updating the window, so every subsequent archive write would
+    # re-run the expensive KiroClawConfig.load() — reintroducing the Bug #6
+    # regression for the disabled case.
     _last_cleanup = now
+    # Resolve retention from config if not given, honoring a config-resolved
+    # negative as the disable signal too.
+    if retention_days is None:
+        retention_days = _resolve_retention_days()
+    if retention_days < 0:
+        return 0  # cleanup disabled
     adir = _archive_dir(base)
     if not adir.exists():
         return 0

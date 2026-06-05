@@ -311,6 +311,9 @@ class _ChatSlot:
         "_fork_lock",
         "_tab_id",
         "_disk_older_count",
+        "_disk_window_len",
+        "_frozen_prefix_cache",
+        "_pending_rewrite",
         "_file_changes",
         "linked_session_key",
         "_browse_mode",
@@ -392,6 +395,27 @@ class _ChatSlot:
         self._fork_lock: asyncio.Lock = asyncio.Lock()  # serialises concurrent forks on this slot
         self._tab_id: str = ""  # permanent tab identity for cross-restart session chaining
         self._disk_older_count: int = 0  # count of disk messages OLDER than in-memory window (stable, set at restore/resume)
+        # Count of in-memory window messages the LAST save persisted to disk
+        # (the on-disk window region). Trimming may only fold a leading window
+        # message into the frozen prefix once it is known to be on disk; this
+        # watermark is what makes the #8 trim credit safe. It is NOT a fragile
+        # "what to append" counter — saves always re-serialize the WHOLE window.
+        self._disk_window_len: int = 0
+        # Cached frozen-prefix bytes for the append-safe save model.
+        # The session file is FROZEN-PREFIX (the first _disk_older_count on-disk
+        # message lines, OLDER than the in-memory window) + a fresh re-serialize
+        # of the whole window. The prefix is never rewritten, so a restart that
+        # loaded only a recent window can no longer destroy older history. This
+        # caches the prefix bytes keyed by (path-mtime, _disk_older_count) so a
+        # 5s flush is O(window), not O(file). See chat_persistence._save_*.
+        self._frozen_prefix_cache: tuple[float, int, str] | None = None
+        # Set by rewind/regenerate after they TRUNCATE the window. While set,
+        # _save_slot_to_history takes the archive-safe rewrite path so the
+        # dropped tail is archived — even if the inline rewrite save failed
+        # (#3): the next 5s flush then retries the rewrite instead of silently
+        # overwriting (the default save skips archiving). Cleared on a
+        # successful rewrite save.
+        self._pending_rewrite: bool = False
         self._file_changes: list[dict[str, str]] = []  # [{path, content}] before-snapshots accumulated per turn for file-chip diffs
         self.linked_session_key: str = ""  # when set, _run_chat uses this as session key
         self._browse_mode: bool = False  # per-turn: True when user explicitly enables browser
@@ -431,6 +455,23 @@ class _ChatSlot:
         if len(self.messages) > _MAX_SLOT_MESSAGES:
             excess = len(self.messages) - _MAX_SLOT_MESSAGES
             del self.messages[:excess]
+            self._resumed_count = max(0, self._resumed_count - excess)
+            # A trimmed leading window message may only join the frozen prefix
+            # once it is actually on disk (#8). Credit _disk_older_count only
+            # for the persisted portion; the unpersisted overflow (should not
+            # happen between 5s flushes) is logged rather than silently counted
+            # as on-disk, which would have stranded those turns.
+            persisted_trim = min(excess, self._disk_window_len)
+            self._disk_older_count += persisted_trim
+            self._disk_window_len = max(0, self._disk_window_len - excess)
+            if persisted_trim < excess:
+                logger.warning(
+                    "Slot %s trimmed %d messages not yet flushed to disk; "
+                    "they will not be recoverable from history",
+                    self.key, excess - persisted_trim,
+                )
+            # The frozen prefix grew → its cached bytes are stale.
+            self._frozen_prefix_cache = None
 
     def drain(self) -> list[dict[str, str]]:
         """Return and clear pending messages."""

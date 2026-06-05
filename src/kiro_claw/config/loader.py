@@ -306,6 +306,23 @@ def _sanitize_bot_name(raw: str) -> str:
     return _BOT_NAME_RE.sub("", name)
 
 
+def _archive_retention_days(session_data: dict) -> int:
+    """Resolve session.archive_retention_days, normalizing the disable sentinel.
+
+    ``null`` (absent/None in JSON) and any negative value both mean "disable
+    automatic cleanup"; both normalize to ``-1``.  A non-negative integer is the
+    retention window in days.  Defaults to 30 when unset.
+    """
+    raw = session_data.get("archive_retention_days", 30)
+    if raw is None:
+        return -1
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return 30
+    return val if val >= 0 else -1
+
+
 @dataclass
 class AgentConfig:
     approval_mode: str = field(
@@ -515,6 +532,14 @@ class SessionConfig:
         metadata=_meta(
             "Warm Pool TTL",
             "Max age in seconds for pooled processes. Stale processes are discarded at claim time. 0 disables.",
+        ),
+    )
+    archive_retention_days: int = field(
+        default=30,
+        metadata=_meta(
+            "Archive Retention (days)",
+            "Days to keep compacted/rotated session archives before auto-cleanup. "
+            "-1 disables cleanup (manage deletion manually).",
         ),
     )
 
@@ -1860,6 +1885,7 @@ class KiroClawConfig:
                 pool_size=int(session_data.get("pool_size", 0)),
                 pool_agent=str(session_data.get("pool_agent", "")),
                 pool_ttl_secs=int(session_data.get("pool_ttl_secs", 1800)),
+                archive_retention_days=_archive_retention_days(session_data),
             ),
             taskrunner=TaskRunnerConfig(
                 max_parallel_steps=taskrunner_data.get(

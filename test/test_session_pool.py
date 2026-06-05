@@ -9,6 +9,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_config_dir(tmp_path, monkeypatch):
+    """Point config_dir() at a throwaway dir so SessionManager's SessionMap
+    writes to a per-test ``session_map.json`` instead of the real
+    ``~/.kiroclaw/session_map.json``.
+
+    Without this, every test reuses key ``"test-key"``: a pool-claim test
+    persists a ``claude_code`` session_map entry (which ``SessionMap.get``
+    returns without a kiro-file existence check), and a later test reading
+    the same key then sees a truthy ``resume_sid`` and bypasses the warm
+    pool — making ``assert provider is pooled`` fail nondeterministically
+    under xdist. Isolating config_dir also stops the suite from polluting
+    the developer's real ``~/.kiroclaw``.
+    """
+    monkeypatch.setenv("KIROCLAW_HOME", str(tmp_path / "kiroclaw_home"))
+
+
 def _make_cfg(
     pool_size: int = 2, pool_agent: str = "kiroclaw", pool_ttl_secs: int = 1800
 ) -> MagicMock:

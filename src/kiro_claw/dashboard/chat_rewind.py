@@ -183,6 +183,10 @@ async def api_chat_slot_rewind(request: web.Request) -> web.Response:
         del slot.messages[index:]
         slot._dirty = True
         slot._resumed_count = 0
+        # Window was truncated → next save MUST be the archive-safe rewrite path.
+        # If the inline save below fails, the flag keeps the flush loop on the
+        # rewrite path so the dropped tail is still archived (#3).
+        slot._pending_rewrite = True
 
         # Swap the ACP session: kill current process AND delete the
         # session_map entry so the next get_or_create cold-starts a fresh

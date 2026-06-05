@@ -54,6 +54,15 @@ class TestMcpProcessCountLinux:
             patch("kiro_claw.dashboard.handlers_system.os.getpid", return_value=99999),
             patch("kiro_claw.dashboard.handlers_system.os.listdir", side_effect=fake_listdir),
             patch.object(Path, "read_bytes", fake_read_bytes),
+            # Linux MCP counting uses /proc (os.listdir + read_bytes), NOT
+            # subprocess. Stub check_output so the unrelated CPU `ps -A -o %cpu`
+            # block never spawns a real process — under xdist CPU saturation its
+            # 2s timeout SIGKILLs the child and the Popen-cleanup waitpid reap
+            # hangs past pytest-timeout (a flaky failure under load).
+            patch(
+                "kiro_claw.dashboard.handlers_system.subprocess.check_output",
+                return_value="%CPU\n0.0\n",
+            ),
         ):
             mock_sys.platform = "linux"
             data = _run_collect()
@@ -78,6 +87,12 @@ class TestMcpProcessCountLinux:
             patch("kiro_claw.dashboard.handlers_system.os.getpid", return_value=10),
             patch("kiro_claw.dashboard.handlers_system.os.listdir", side_effect=fake_listdir),
             patch.object(Path, "read_bytes", fake_read_bytes),
+            # See test_counts_all_signatures: stub the CPU `ps` subprocess so a
+            # 2s-timeout SIGKILL + waitpid hang can't make this flaky under load.
+            patch(
+                "kiro_claw.dashboard.handlers_system.subprocess.check_output",
+                return_value="%CPU\n0.0\n",
+            ),
         ):
             mock_sys.platform = "linux"
             data = _run_collect()

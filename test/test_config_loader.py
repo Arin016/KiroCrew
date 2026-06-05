@@ -21,10 +21,10 @@ from kiro_claw.config.loader import (
     _HAS_JSONSCHEMA,
     AgentConfig,
     DashboardConfig,
-    MemoryConfig,
-    MemoryStoreConfig,
     KiroClawAgentConfig,
     KiroClawConfig,
+    MemoryConfig,
+    MemoryStoreConfig,
     ResolvedBindings,
     SecretaryConfig,
     SessionConfig,
@@ -2141,3 +2141,37 @@ class TestWidgetDensityRoundTrip:
             cfg.save()
             loaded = KiroClawConfig.load()
         assert loaded.dashboard.widget_density == "less"
+
+
+class TestArchiveRetentionDays:
+    """session.archive_retention_days parsing and disable sentinel."""
+
+    def test_default_is_30(self) -> None:
+        cfg = _load_from_dict({})
+        assert cfg.session.archive_retention_days == 30
+
+    def test_explicit_value_loaded(self) -> None:
+        cfg = _load_from_dict({"session": {"archive_retention_days": 90}})
+        assert cfg.session.archive_retention_days == 90
+
+    def test_null_disables_cleanup(self) -> None:
+        cfg = _load_from_dict({"session": {"archive_retention_days": None}})
+        assert cfg.session.archive_retention_days == -1
+
+    def test_negative_normalizes_to_disabled(self) -> None:
+        cfg = _load_from_dict({"session": {"archive_retention_days": -5}})
+        assert cfg.session.archive_retention_days == -1
+
+    def test_invalid_falls_back_to_default(self) -> None:
+        cfg = _load_from_dict({"session": {"archive_retention_days": "garbage"}})
+        assert cfg.session.archive_retention_days == 30
+
+    def test_survives_save_load(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        cfg = _load_from_dict({"session": {"archive_retention_days": 60}})
+        cfg_file = tmp_path / "config.json"
+        with patch("kiro_claw.config.loader.config_path", return_value=cfg_file):
+            cfg.save()
+            loaded = KiroClawConfig.load()
+        assert loaded.session.archive_retention_days == 60

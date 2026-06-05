@@ -797,6 +797,111 @@ class TestArchive:
         removed = _cleanup_old_archives(retention_days=7, base=tmp_path)
         assert removed == 0
 
+    def test_cleanup_disabled_when_retention_negative(self, tmp_path):
+        """retention_days < 0 disables cleanup — old files are kept."""
+        import os
+        import time
+
+        import kiro_claw.history as history_mod
+        from kiro_claw.history import _cleanup_old_archives
+
+        history_mod._last_cleanup = 0.0
+        adir = tmp_path / "archive"
+        adir.mkdir()
+        old = adir / "old__20200101-000000.jsonl"
+        old.write_text("{}\n")
+        ten_days_ago = time.time() - 10 * 86400
+        os.utime(old, (ten_days_ago, ten_days_ago))
+        removed = _cleanup_old_archives(retention_days=-1, base=tmp_path)
+        assert removed == 0
+        assert old.exists()
+
+    def test_cleanup_resolves_retention_from_config(self, tmp_path, monkeypatch):
+        """retention_days=None resolves the window from config."""
+        import os
+        import time
+
+        import kiro_claw.history as history_mod
+        from kiro_claw.history import _cleanup_old_archives
+
+        monkeypatch.setattr(history_mod, "_resolve_retention_days", lambda: 7)
+        history_mod._last_cleanup = 0.0
+        adir = tmp_path / "archive"
+        adir.mkdir()
+        old = adir / "old__20200101-000000.jsonl"
+        old.write_text("{}\n")
+        ten_days_ago = time.time() - 10 * 86400
+        os.utime(old, (ten_days_ago, ten_days_ago))
+        removed = _cleanup_old_archives(base=tmp_path)
+        assert removed == 1
+        assert not old.exists()
+
+    def test_cleanup_throttled_skips_config_load(self, tmp_path, monkeypatch):
+        """A rate-limited call must NOT resolve retention from config (Bug #6).
+
+        Config resolution (KiroClawConfig.load — a disk read + parse) is
+        expensive and runs on every archive write via _archive_lines. The
+        throttle guard must short-circuit BEFORE that read so the common
+        once-per-hour-already-ran path stays cheap.
+        """
+        import time
+
+        import kiro_claw.history as history_mod
+        from kiro_claw.history import _cleanup_old_archives
+
+        def _boom() -> int:
+            raise AssertionError("config must not be loaded on a throttled call")
+
+        monkeypatch.setattr(history_mod, "_resolve_retention_days", _boom)
+        # Simulate a cleanup that ran moments ago → within the 1h window.
+        history_mod._last_cleanup = time.time()
+        removed = _cleanup_old_archives(base=tmp_path)
+        assert removed == 0
+
+    def test_cleanup_throttled_explicit_negative_skips_config_load(
+        self, tmp_path, monkeypatch
+    ):
+        """Explicit negative disables without touching config, even when throttled."""
+        import time
+
+        import kiro_claw.history as history_mod
+        from kiro_claw.history import _cleanup_old_archives
+
+        def _boom() -> int:
+            raise AssertionError("config must not be loaded for explicit negative")
+
+        monkeypatch.setattr(history_mod, "_resolve_retention_days", _boom)
+        history_mod._last_cleanup = time.time()
+        removed = _cleanup_old_archives(retention_days=-1, base=tmp_path)
+        assert removed == 0
+
+    def test_cleanup_config_disabled_stamps_window_to_throttle_next_call(
+        self, tmp_path, monkeypatch
+    ):
+        """A config-resolved 'disabled' must still stamp _last_cleanup (Bug #6).
+
+        If the throttle window is not stamped when retention resolves negative,
+        every subsequent archive write re-runs the expensive config load. The
+        first call should resolve config once; the immediate next call must be
+        throttled and NOT resolve config again.
+        """
+        import kiro_claw.history as history_mod
+        from kiro_claw.history import _cleanup_old_archives
+
+        calls = {"n": 0}
+
+        def _disabled() -> int:
+            calls["n"] += 1
+            return -1  # cleanup disabled via config
+
+        monkeypatch.setattr(history_mod, "_resolve_retention_days", _disabled)
+        history_mod._last_cleanup = 0.0  # force first call past the throttle
+        assert _cleanup_old_archives(base=tmp_path) == 0
+        assert calls["n"] == 1  # config resolved once
+        # Immediate second call must be throttled → config NOT resolved again.
+        assert _cleanup_old_archives(base=tmp_path) == 0
+        assert calls["n"] == 1
+
     def test_safe_key_sanitizes_unsafe_chars(self, tmp_path):
         """Keys with slashes/colons must be sanitized into safe filenames."""
         from kiro_claw.history import _archive_lines, _safe_key

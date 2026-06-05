@@ -40,13 +40,40 @@ class TestMacOsSysctlPaths:
             assert handlers_system._VM_STAT == "/usr/bin/vm_stat"
 
     def test_collect_metrics_returns_mem_on_darwin(self) -> None:
-        """On macOS, _collect_system_metrics returns mem_used_gb when commands succeed."""
+        """On macOS, _collect_system_metrics returns mem_used_gb when commands succeed.
+
+        Subprocess output is mocked per-command so the test is hermetic: it must
+        not spawn real ``sysctl``/``vm_stat``/``ps``. The CPU block's real
+        ``ps -A -o %cpu`` (timeout=2) otherwise gets SIGKILLed under xdist CPU
+        saturation, and the Popen-cleanup ``waitpid`` reap hangs past
+        pytest-timeout — a flaky test failure under load.
+        """
         if sys.platform != "darwin":
             return  # Skip on non-macOS
 
         from kiro_claw.dashboard import handlers_system
 
-        with patch.object(handlers_system, "_get_static_system_info", return_value={}):
+        vm_stat_out = (
+            "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+            "Pages free:                          100000.\n"
+            "Pages inactive:                       50000.\n"
+        )
+
+        def fake_check_output(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            exe = cmd[0]
+            if exe == handlers_system._SYSCTL:
+                return b"34359738368"  # 32 GiB, hw.memsize
+            if exe == handlers_system._VM_STAT:
+                return vm_stat_out.encode()
+            return b"%CPU\n0.0\n"  # ps -A -o %cpu and any other call
+
+        with (
+            patch.object(handlers_system, "_get_static_system_info", return_value={}),
+            patch(
+                "kiro_claw.dashboard.handlers_system.subprocess.check_output",
+                side_effect=fake_check_output,
+            ),
+        ):
             handlers_system._metrics_cache = {}
             handlers_system._metrics_cache_ts = 0.0
             data = handlers_system._collect_system_metrics()
