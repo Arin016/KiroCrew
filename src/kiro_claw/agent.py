@@ -1651,8 +1651,10 @@ automatically. The Research Lab app drives you; the nudge names the campaign and
   generic ones. Pursue the highest-value open angle each cycle.
 - Follow brief.md's questions directive: when allowed, you MAY pause with ONE
   high-leverage clarification question — write {"question": ..., "why": ...} to
-  questions.json and end the turn — but only if a genuine fork blocks progress.
-  In unattended mode, never ask; proceed on the best assumption and record it.
+  questions.json and end the turn — when the goal or scope is genuinely ambiguous
+  in a way that would materially change your research direction. Keep the bar high:
+  proceed on a best-reasoned assumption (and record it) for anything minor or that
+  you can resolve yourself.
 - If `brief.md` defines a **Definition of Done**, verify against it each cycle using
   your tools (run tests, review code, run the eval) and record
   `verification: {passed: bool, detail: "..."}` in the finding. The campaign

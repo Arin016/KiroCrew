@@ -27,6 +27,8 @@
     ]
   },
   "backend": {
-    "entryPoint": "backend/server.py"
+    "entryPoint": "kiro_claw.apps.builtins.file_explorer.server",
+    "port": "auto",
+    "healthCheck": "/health"
   }
 }

@@ -575,7 +575,7 @@ def _search_python(root: Path, query: str, include: str, exclude: str) -> list[d
 
 
 class FileExplorerHandler(BaseHTTPRequestHandler):
-    server_version = "KiroClawFileExplorer/0.1"
+    server_version = "KiroClaw-FileExplorer/0.1"
 
     # Silence default logging — we use our own.
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003
