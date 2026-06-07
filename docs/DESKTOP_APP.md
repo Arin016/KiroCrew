@@ -47,7 +47,7 @@ supported targets you must run the build on a machine of each architecture:
 | Target | Build host | Produces |
 |--------|-----------|----------|
 | macOS arm64 (Apple Silicon) | Apple Silicon Mac | arm64 `.dmg` |
-| macOS x86_64 (Intel) | Intel Mac (or `arch -x86_64` under Rosetta with an x86_64 toolchain) | x86_64 `.dmg` |
+| macOS x86_64 (Intel) | Intel Mac, or an Apple-Silicon Mac via Rosetta (see [Building BOTH macOS DMGs](#building-both-macos-dmgs-from-one-apple-silicon-machine-rosetta)) | x86_64 `.dmg` |
 | Linux x86_64 | x86_64 Linux | x86_64 `.AppImage` |
 | Linux aarch64 (Graviton/ARM) | aarch64 Linux | aarch64 `.AppImage` |
 
@@ -58,6 +58,93 @@ each artifact on its own runner (e.g. a CI matrix of `macos-14` (arm64),
 There is intentionally no `universal2` macOS target — it would require
 universal2 wheels for every native dependency (numpy, aiohttp, lxml, PyYAML),
 which not all publish.
+
+### Building BOTH macOS DMGs from one Apple-Silicon machine (Rosetta)
+
+You can produce both the arm64 and the x86_64 DMG on a single Apple-Silicon Mac
+without an Intel machine, by running the x86_64 toolchain under **Rosetta 2**.
+PyInstaller does not cross-compile, so the trick is to freeze the backend with
+an *x86_64* Python (run via `arch -x86_64`) and then ask electron-builder for
+the x64 target (it downloads the x86_64 Electron itself).
+
+Prerequisites: Rosetta 2 (`softwareupdate --install-rosetta --agree-to-license`)
+and an x86_64-capable `python3` (the system `/usr/bin/python3` is universal2 and
+works; verify with `arch -x86_64 /usr/bin/python3 -c 'import platform;
+print(platform.machine())'` → `x86_64`).
+
+```bash
+# 0. Build + stage the frontend ONCE (arch-independent); both DMGs reuse it.
+cd website && npm ci && npm run build && cd ..
+rm -rf src/kiro_claw/static/dist && cp -R website/dist src/kiro_claw/static/dist
+
+# 1. arm64 (native): freeze + stage + package. SKIP_FRONTEND reuses step 0.
+SKIP_FRONTEND=1 PYTHON="$PWD/.venv/bin/python" bash packaging/build-desktop.sh
+#    → website/electron/dist/KiroClaw-<version>-arm64.dmg
+
+# 2. x86_64 (under Rosetta): build an x86_64 venv, freeze with it, then have
+#    electron-builder package the x64 target with that backend staged.
+arch -x86_64 /usr/bin/python3 -m venv .venv-x86
+arch -x86_64 .venv-x86/bin/python -m pip install -U pip setuptools wheel
+arch -x86_64 .venv-x86/bin/python -m pip install -e . "pyinstaller>=6,<7"
+PYTHONPATH="$PWD/src" arch -x86_64 .venv-x86/bin/python -m PyInstaller \
+  packaging/kiroclaw-backend.spec --noconfirm \
+  --distpath "$PWD/build/pyinstaller-x86/dist" \
+  --workpath "$PWD/build/pyinstaller-x86/build"
+rm -rf website/electron/backend-dist/kiroclaw-backend
+cp -R build/pyinstaller-x86/dist/kiroclaw-backend website/electron/backend-dist/kiroclaw-backend
+( cd website/electron && npx electron-builder --mac --x64 )
+#    → website/electron/dist/KiroClaw-<version>.dmg   (no -arch suffix == x64)
+
+# 3. Restore the arm64 backend into backend-dist so the working tree is back to
+#    its native state for normal `make desktop` runs.
+rm -rf website/electron/backend-dist/kiroclaw-backend
+cp -R build/pyinstaller/dist/kiroclaw-backend website/electron/backend-dist/kiroclaw-backend
+```
+
+electron-builder names the host-arch (arm64) DMG `KiroClaw-<v>-arm64.dmg` and the
+x64 DMG `KiroClaw-<v>.dmg` (no suffix), so the two coexist in
+`website/electron/dist/`. Verify each actually carries the matching backend:
+
+```bash
+# The embedded backend's arch MUST match the DMG's arch (an arm64 DMG carrying
+# an x86_64 backend would crash on launch). Mount and check:
+hdiutil attach -nobrowse -readonly website/electron/dist/KiroClaw-<v>-arm64.dmg
+file "/Volumes/KiroClaw <v>-arm64/KiroClaw.app/Contents/Resources/backend-dist/kiroclaw-backend/kiroclaw-backend"
+#   → …executable arm64
+hdiutil detach "/Volumes/KiroClaw <v>-arm64"
+```
+
+> CI is still the cleaner path for releases (`macos-14` for arm64, `macos-13`
+> for x86_64) — the Rosetta route is for producing both locally when you don't
+> have an Intel runner.
+
+### Refreshing / cleaning the DMGs
+
+The `dist/` directory is **not** cleaned between builds, so old artifacts pile up
+(e.g. a `KiroClaw-1.0.0.dmg` from before a version bump, or a stale `mac/`
+app-staging dir). After a version change or a re-build, remove the stale ones so
+only the current set remains:
+
+```bash
+cd website/electron/dist
+rm -f KiroClaw-<old-version>*.dmg            # stale DMGs from a prior version
+rm -rf mac mac-arm64                          # app-staging dirs (regenerated each build)
+rm -f builder-debug.yml
+```
+
+The desktop app's version comes from `website/electron/package.json` (`version`)
+— **keep it in sync with the backend `version` in `pyproject.toml`**. When you
+bump one, bump the other and the root `version` fields in
+`website/electron/package-lock.json` (the top-level `version` and
+`packages[""].version`, NOT the dependency entries that coincidentally share a
+version), or `npm ci` will complain about a lock mismatch.
+
+> **npm registry pin (required):** both `website/.npmrc` *and*
+> `website/electron/.npmrc` pin `registry=https://registry.npmjs.org/`. The
+> electron pin is load-bearing — without it `npm ci` in `website/electron/`
+> inherits whatever registry the machine's global `~/.npmrc` sets and can fail
+> with an auth error on a non-public registry. Any new npm subproject needs its
+> own public-registry `.npmrc`.
 
 ## Build pipeline
 
@@ -89,7 +176,9 @@ Step by step:
    `website/electron/backend-dist/kiroclaw-backend/`.
 4. **Package** — in `website/electron/`, runs `npm ci` (or `npm install`) +
    `npm run dist` (electron-builder), producing the installer(s) in
-   `website/electron/dist/`.
+   `website/electron/dist/`. This `npm ci` is pinned to the public registry by
+   `website/electron/.npmrc`; see the registry-pin note under
+   [Refreshing / cleaning the DMGs](#refreshing--cleaning-the-dmgs).
 
 ### Build-only-the-backend escape hatches
 

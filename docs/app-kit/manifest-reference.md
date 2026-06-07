@@ -114,7 +114,7 @@ The app manifest (`app.json`) declares your app's identity, resources, and requi
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `backend.entryPoint` | string | | Script to run (relative to app root) |
+| `backend.entryPoint` | string | | Script to run (relative to app root), or a dotted Python module path launched via `python -m` (used by built-in apps like `file-explorer`, e.g. `kiro_claw.apps.builtins.file_explorer.server`) |
 | `backend.port` | string | `"auto"` | Port number or `"auto"` for auto-assignment |
 | `backend.healthCheck` | string | `"/health"` | Health check endpoint path |
 | `backend.routes` | string | | Base route path for the backend |
