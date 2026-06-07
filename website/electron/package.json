@@ -1,6 +1,6 @@
 {
   "name": "kiroclaw-electron-mac",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "KiroClaw \u2014 AI agent desktop app",
   "main": "main.js",
   "scripts": {
