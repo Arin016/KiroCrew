@@ -10,8 +10,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from kiro_claw.apps.registry import (
+    _clone_sandbox_mode,
     _external_registry_cache_path,
     _fetch_external_registry_index,
+    _git_url_host,
+    _is_ssh_git_url,
     _load_external_registries,
     _read_external_registry_cache,
     _write_external_registry_cache,
@@ -364,3 +367,75 @@ class TestGetRegistryAppExternal:
 
         result = get_registry_app("shared-app")
         assert result["repo"] == "CoreRepo"  # core wins
+
+
+# ---------------------------------------------------------------------------
+# Clone sandbox-mode gating (trusted-host SSH exposure)
+# ---------------------------------------------------------------------------
+
+
+class TestGitUrlHost:
+    def test_ssh_scheme_with_user_and_port(self):
+        assert _git_url_host("ssh://git@example.com:2222/org/app.git") == "example.com"
+
+    def test_scp_style(self):
+        assert _git_url_host("git@github.com:org/app.git") == "github.com"
+
+    def test_https(self):
+        assert _git_url_host("https://gitlab.com/org/app") == "gitlab.com"
+
+    def test_host_is_lowercased(self):
+        assert _git_url_host("ssh://GitHub.COM/org/app") == "github.com"
+
+    def test_unparseable_returns_empty(self):
+        assert _git_url_host("not a url") == ""
+        assert _git_url_host("") == ""
+
+
+class TestIsSshGitUrl:
+    def test_ssh_scheme(self):
+        assert _is_ssh_git_url("ssh://git@host/p") is True
+
+    def test_git_ssh_scheme(self):
+        assert _is_ssh_git_url("git+ssh://host/p") is True
+
+    def test_scp_style(self):
+        assert _is_ssh_git_url("git@github.com:org/app.git") is True
+
+    def test_https_is_not_ssh(self):
+        assert _is_ssh_git_url("https://github.com/org/app") is False
+
+    def test_empty(self):
+        assert _is_ssh_git_url("") is False
+
+
+class TestCloneSandboxMode:
+    """The fix: only SSH remotes on trusted hosts get ~/.ssh-exposing standard mode."""
+
+    def test_https_always_strict(self):
+        # https never needs SSH keys, regardless of host.
+        assert _clone_sandbox_mode("https://github.com/org/app") == "strict"
+
+    def test_ssh_public_forge_is_standard(self):
+        assert _clone_sandbox_mode("git@github.com:org/app.git") == "standard"
+        assert _clone_sandbox_mode("ssh://git@gitlab.com/org/app") == "standard"
+
+    def test_ssh_untrusted_host_stays_strict(self):
+        # The core of finding B: a hostile/typo'd SSH host must NOT be offered
+        # the owner's ~/.ssh keys — it fails closed under strict.
+        assert _clone_sandbox_mode("ssh://evil.example.com/x") == "strict"
+        assert _clone_sandbox_mode("git@evil.example:apps.git") == "strict"
+
+    def test_configured_registry_host_is_trusted(self):
+        # A self-hosted registry the user explicitly configured is trusted.
+        trusted = frozenset({"git.internal.example"})
+        assert _clone_sandbox_mode("git@git.internal.example:apps.git", trusted) == "standard"
+        # ...but only that host, not arbitrary ones.
+        assert _clone_sandbox_mode("git@other.example:apps.git", trusted) == "strict"
+
+    def test_unparseable_ssh_url_stays_strict(self):
+        assert _clone_sandbox_mode("ssh://") == "strict"
+
+    def test_no_trusted_hosts_defaults_to_public_only(self):
+        assert _clone_sandbox_mode("git@bitbucket.org:org/app.git") == "standard"
+        assert _clone_sandbox_mode("git@selfhosted.example:org/app.git") == "strict"

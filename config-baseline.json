@@ -2654,7 +2654,7 @@
       "sensitive": false,
       "tags": [],
       "label": "Repo",
-      "help": "GitFarm package name containing apps.",
+      "help": "Git URL of the repo containing apps (https or ssh).",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": ""

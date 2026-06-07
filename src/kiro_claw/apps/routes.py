@@ -1212,7 +1212,11 @@ async def _fetch_git_blob(repo: str, ref: str, file_path: str, cache_path: Path)
     clone URL is resolved from the registry entry; returns ``False`` (graceful
     fallback) when no URL is resolvable or anything goes wrong.
     """
-    from kiro_claw.apps.registry import minimal_env
+    from kiro_claw.apps.registry import (
+        _clone_sandbox_mode,
+        _configured_registry_hosts,
+        minimal_env,
+    )
     from kiro_claw.sandbox import wrap_argv
 
     git_url = _registry_git_url(repo)
@@ -1236,7 +1240,9 @@ async def _fetch_git_blob(repo: str, ref: str, file_path: str, cache_path: Path)
             git_url,
             tmp_root,
         ]
-        sandboxed_cmd, _cleanup = wrap_argv(clone_cmd, mode="strict")
+        sandboxed_cmd, _cleanup = wrap_argv(
+            clone_cmd, mode=_clone_sandbox_mode(git_url, _configured_registry_hosts())
+        )
         proc = await asyncio.create_subprocess_exec(
             *sandboxed_cmd,
             stdout=asyncio.subprocess.PIPE,

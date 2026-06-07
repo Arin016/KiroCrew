@@ -914,7 +914,7 @@ class ExternalRegistryConfig:
     )
     repo: str = field(
         default="",
-        metadata=_meta("Repo", "GitFarm package name containing apps."),
+        metadata=_meta("Repo", "Git URL of the repo containing apps (https or ssh)."),
     )
     branch: str = field(
         default="mainline",

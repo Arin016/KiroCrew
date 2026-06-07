@@ -186,6 +186,91 @@ def _looks_like_git_url(url: str) -> bool:
     return False
 
 
+# Well-known public git forges that legitimately serve repos over SSH. Cloning
+# from one of these may need ~/.ssh exposed for key auth (private repos), so the
+# sandbox is loosened from "strict" to "standard" ONLY for these hosts plus any
+# host the user explicitly configured as an external registry. Everything else
+# stays "strict" (~/.ssh hidden) so a typo'd/hostile remote can never be offered
+# the owner's SSH keys. https remotes never need ~/.ssh and always stay strict.
+_PUBLIC_GIT_HOSTS: frozenset[str] = frozenset(
+    {
+        "github.com",
+        "ssh.github.com",
+        "gitlab.com",
+        "bitbucket.org",
+        "git.sr.ht",
+        "codeberg.org",
+    }
+)
+
+
+def _git_url_host(url: str) -> str:
+    """Extract the lowercase host from a git URL, or '' if not parseable.
+
+    Handles ``ssh://[user@]host[:port]/path``, scp-style ``user@host:path``,
+    and ``scheme://[user@]host/path`` forms.
+    """
+    url = (url or "").strip()
+    if not url:
+        return ""
+    # scheme://[user@]host[:port]/path  (ssh, git, https, http, git+ssh, ...)
+    m = re.match(r"^[A-Za-z][A-Za-z0-9+.\-]*://(?:[^/@]+@)?([^/:]+)", url)
+    if m:
+        return m.group(1).lower()
+    # scp-style: [user@]host:path
+    m = re.match(r"^(?:[^/@]+@)?([^/:]+):", url)
+    if m:
+        return m.group(1).lower()
+    return ""
+
+
+def _is_ssh_git_url(url: str) -> bool:
+    """True when *url* clones over SSH (and would need ~/.ssh for key auth)."""
+    url = (url or "").strip()
+    return url.startswith(("ssh://", "git+ssh://")) or bool(re.match(r"^[^/@]+@[^/:]+:.+", url))
+
+
+def _clone_sandbox_mode(git_url: str, trusted_hosts: frozenset[str] | None = None) -> str:
+    """Pick the sandbox mode for cloning *git_url*.
+
+    Returns ``"standard"`` (exposes ~/.ssh so git can offer the owner's SSH
+    keys) ONLY for an SSH/scp remote whose host is trusted — a well-known
+    public forge or a host the user explicitly configured as an external
+    registry. All other cases return ``"strict"`` (~/.ssh hidden): https/git
+    remotes never need SSH keys, and an untrusted SSH host fails closed rather
+    than being offered the owner's private keys.
+    """
+    if not _is_ssh_git_url(git_url):
+        return "strict"
+    host = _git_url_host(git_url)
+    if not host:
+        return "strict"
+    allowed = _PUBLIC_GIT_HOSTS | (trusted_hosts or frozenset())
+    return "standard" if host in allowed else "strict"
+
+
+def _configured_registry_hosts() -> frozenset[str]:
+    """Hosts of the user-configured external registries (trusted for SSH).
+
+    A registry the owner deliberately added to their config is a host they
+    intend to authenticate to, so its SSH clones are allowed ~/.ssh access even
+    if it is not a well-known public forge (e.g. a self-hosted Gitea/GitLab).
+    """
+    from kiro_claw.config.loader import (
+        KiroClawConfig,  # deferred: loader imports apps/ at module level
+    )
+
+    try:
+        config = KiroClawConfig.load()
+    except Exception as exc:  # config load is best-effort for this gate
+        logger.debug("Could not load config for registry host allowlist: %s", exc)
+        return frozenset()
+    hosts = {
+        _git_url_host(reg.repo) for reg in (config.registries or []) if _git_url_host(reg.repo)
+    }
+    return frozenset(hosts)
+
+
 def _load_registry_file() -> list[dict[str, Any]]:
     """Load and parse the bundled app-registry.json."""
     if not _REGISTRY_FILE.is_file():
@@ -292,7 +377,9 @@ async def _fetch_app_manifest(
             git_url,
             tmp_root,
         ]
-        sandboxed_cmd, _cleanup = wrap_argv(clone_cmd, mode="strict")
+        sandboxed_cmd, _cleanup = wrap_argv(
+            clone_cmd, mode=_clone_sandbox_mode(git_url, _configured_registry_hosts())
+        )
         proc = await asyncio.create_subprocess_exec(
             *sandboxed_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -558,7 +645,14 @@ async def _fetch_external_registry_index(
 
     Security controls:
     - Input validation: branch is regex-validated; only cloneable URLs accepted.
-    - OS-level sandbox: wrap_argv(mode="strict") applied to the clone.
+    - OS-level sandbox: wrap_argv with a trusted-host-gated mode
+      (_clone_sandbox_mode). An SSH/scp remote on a well-known public forge or a
+      user-configured registry host clones in "standard" mode (~/.ssh exposed so
+      git can offer the owner's keys); any other remote stays "strict" (~/.ssh
+      hidden) so a typo'd/hostile host is never offered the owner's SSH keys.
+      https remotes never need ~/.ssh and always stay strict. Both modes unshare
+      the user/mount namespaces and hide sensitive config dirs (.gnupg,
+      .config/gcloud, ...).
     - Timeout + kill: _communicate_with_timeout() kills on timeout.
     - Read-only: only ``git clone`` (no write operations to the remote).
     - SEL audit (best-effort): start/outcome events logged when SEL is present.
@@ -605,7 +699,9 @@ async def _fetch_external_registry_index(
             git_url,
             tmp_root,
         ]
-        sandboxed_cmd, _ = wrap_argv(clone_cmd, mode="strict")
+        sandboxed_cmd, _ = wrap_argv(
+            clone_cmd, mode=_clone_sandbox_mode(git_url, _configured_registry_hosts())
+        )
         proc = await asyncio.create_subprocess_exec(
             *sandboxed_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -940,7 +1036,9 @@ async def _git_clone_or_pull(
         git_url,
         str(dest),
     ]
-    sandboxed_cmd, _cleanup = wrap_argv(clone_cmd, mode="strict")
+    sandboxed_cmd, _cleanup = wrap_argv(
+        clone_cmd, mode=_clone_sandbox_mode(git_url, _configured_registry_hosts())
+    )
     proc = await asyncio.create_subprocess_exec(
         *sandboxed_cmd,
         stdout=asyncio.subprocess.PIPE,
