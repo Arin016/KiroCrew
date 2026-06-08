@@ -16,7 +16,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from kiro_claw.config.loader import config_dir
+from kiro_claw.config.paths import config_dir
 from kiro_claw.providers.cleanup import _cleanup_cc_session, _is_safe_path
 
 logger = logging.getLogger(__name__)

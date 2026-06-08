@@ -25,7 +25,7 @@ try:
 except ImportError:
     import sqlite3
 
-from kiro_claw.config.loader import config_dir
+from kiro_claw.config.paths import config_dir
 from kiro_claw.security import is_sensitive_path
 from kiro_claw.snapshot import (
     _copy_tree_no_overwrite,

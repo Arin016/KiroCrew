@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kiro_claw.config.loader import config_dir
+from kiro_claw.config.paths import config_dir
 
 METADATA_DIR_NAME = "agent-metadata"
 

@@ -14,7 +14,6 @@ import json
 import logging
 import os
 import re as _re
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -22,6 +21,27 @@ from pathlib import Path
 
 from kiro_claw import __version__, model_registry
 from kiro_claw.acp.types import ACP_BACKEND_CLAUDE
+
+# Pure path primitives live in the leaf module ``config.paths`` (stdlib-only,
+# no ``kiro_claw`` imports) so the modules that only need ``config_dir()`` can
+# import them from there without transitively pulling in the full loader (DTOs,
+# schema validation, the process-global cache, and the provider factory).
+# Re-exported here for backward compatibility — existing callers keep importing
+# these from ``kiro_claw.config.loader``.
+#
+# The *dir-derived* helpers (config_path, workspace_root, workspace_dir_for, …)
+# stay defined below in this module, not in the leaf, so their ``config_dir()``
+# calls resolve in this namespace and remain redirectable via
+# ``patch("kiro_claw.config.loader.config_dir", ...)`` (used across the suite).
+from kiro_claw.config.paths import (  # noqa: F401
+    _WORKSPACE_DIR_NAME,
+    CONFIG_DIR_NAME,
+    OUTBOX_DIR_NAME,
+    _default_workspace_base,
+    _safe_dir_name,
+    config_dir,
+    config_package_dir,
+)
 from kiro_claw.effort import is_valid_effort, model_supports_effort
 
 # Schema validation + the validated-data cache live in ``config.validation``.
@@ -48,8 +68,6 @@ from kiro_claw.config.validation import validate_config_data as _validate_config
 
 logger = logging.getLogger(__name__)
 
-CONFIG_DIR_NAME = ".kiroclaw"
-
 # Credential keys loaded from .env / environment
 CRED_SLACK_APP_TOKEN = "SLACK_APP_TOKEN"
 CRED_SLACK_BOT_TOKEN = "SLACK_BOT_TOKEN"
@@ -67,24 +85,16 @@ _DEFAULT_PORT = 8765
 DASHBOARD_PORT: int = int(os.environ.get("KIROCLAW_PORT", _DEFAULT_PORT))
 
 
-# Cross-platform workspace root for LLM working directories.
-# Override: KIROCLAW_WORKSPACE env var or ~/.kiroclaw/workspace_dir
-# macOS: /Volumes/workplace/kiroclaw-workspace (fallback ~/workplace)
-# Linux: ~/workplace/kiroclaw-workspace
-_WORKSPACE_DIR_NAME = "kiroclaw-workspace"
+# Dir-derived path helpers (workspace_root, config_path, workspace_dir_for, …)
+# build on the pure primitives imported from ``config.paths`` above. They live
+# here — not in the leaf — so their ``config_dir()`` / ``_default_workspace_base()``
+# lookups resolve in this module's namespace, keeping the
+# ``patch("kiro_claw.config.loader.config_dir", ...)`` test seam working.
 
 
 def _workspace_dir_file() -> Path:
     """Return the path to the saved workspace_dir file, respecting KIROCLAW_HOME."""
     return config_dir() / "workspace_dir"
-
-
-def _default_workspace_base() -> Path:
-    """Return the platform-specific default base for the workspace."""
-    if sys.platform == "darwin":
-        vol = Path("/Volumes/workplace")
-        return vol if vol.is_dir() else Path.home() / "workplace"
-    return Path.home() / "workplace"
 
 
 def workspace_root() -> Path:
@@ -123,11 +133,6 @@ def _safe_int(value: object, default: int) -> int:
         return default
 
 
-def _safe_dir_name(key: str) -> str:
-    """Sanitize a session key into a safe directory name."""
-    return key.replace("/", "_").replace("\\", "_").replace(":", "_").replace(" ", "_")
-
-
 def _session_work_dir(session_key: str | None) -> Path:
     """Return a per-session subdirectory under workspace_root()."""
     root = workspace_root()
@@ -136,27 +141,9 @@ def _session_work_dir(session_key: str | None) -> Path:
     return root / "_default"
 
 
-OUTBOX_DIR_NAME = "outbox"
-
-
 def outbox_dir() -> Path:
     """Return the outbox directory for agent-to-user file delivery."""
     d = workspace_root() / OUTBOX_DIR_NAME
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def config_dir() -> Path:
-    override = os.environ.get("KIROCLAW_HOME")
-    if override:
-        p = Path(override).expanduser().resolve()
-        # Refuse root or system directories as config home
-        if p == Path("/") or p.parts[:2] in (("/", "usr"), ("/", "System"), ("/", "etc")):
-            logger.warning("KIROCLAW_HOME=%s is a system directory, ignoring", override)
-        else:
-            p.mkdir(parents=True, exist_ok=True)
-            return p
-    d = Path.home() / CONFIG_DIR_NAME
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -296,7 +283,7 @@ def resolve_agent_config_path() -> Path:
         p = Path(proj) / "agents" / "defaults.json"
         if p.exists():
             return p
-    return Path(__file__).resolve().parent / "defaults.json"
+    return config_package_dir() / "defaults.json"
 
 
 DEFAULT_BEDROCK_MODEL = "anthropic.claude-sonnet-4-20250514"
@@ -2095,7 +2082,7 @@ class KiroClawConfig:
             except (json.JSONDecodeError, OSError):
                 pass
         # Bundled defaults.json
-        bundled = Path(__file__).resolve().parent / "defaults.json"
+        bundled = config_package_dir() / "defaults.json"
         if bundled.is_file():
             try:
                 data = json.loads(bundled.read_text(encoding="utf-8"))

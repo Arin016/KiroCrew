@@ -12,7 +12,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from kiro_claw.config.loader import config_dir
+from kiro_claw.config.paths import config_dir
 
 logger = logging.getLogger(__name__)
 
