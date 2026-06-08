@@ -104,6 +104,70 @@ class TestInstallAgent:
         assert config["model"] == "claude-user-custom"
         assert "WriteFile" in config["tools"]
 
+    def test_fresh_install_marks_model_managed(self, tmp_path: Path):
+        """Fresh install tracks the shipped default via model_managed=True."""
+        cfg_dir = _bundled_defaults(tmp_path)
+        path = _run_install(tmp_path, cfg_dir)
+        config = json.loads(path.read_text())
+        assert config["model"] == "claude-default"
+        assert config["model_managed"] is True
+
+    def test_managed_config_tracks_defaults_bump(self, tmp_path: Path):
+        """A managed config re-syncs model from defaults.json on a bump."""
+        cfg_dir = _bundled_defaults(tmp_path)
+        kiro_dir = tmp_path / "kiro_agents"
+        kiro_dir.mkdir(exist_ok=True)
+        existing = {
+            "model": "claude-old-default",
+            "model_managed": True,
+            "tools": [],
+            "allowedTools": [],
+            "mcpServers": {},
+        }
+        (kiro_dir / "kiroclaw.json").write_text(json.dumps(existing))
+
+        path = _run_install(tmp_path, cfg_dir)
+        config = json.loads(path.read_text())
+        assert config["model"] == "claude-default"
+        assert config["model_managed"] is True
+
+    def test_legacy_config_without_marker_frozen(self, tmp_path: Path):
+        """A legacy config (no marker) is grandfathered: model untouched."""
+        cfg_dir = _bundled_defaults(tmp_path)
+        kiro_dir = tmp_path / "kiro_agents"
+        kiro_dir.mkdir(exist_ok=True)
+        existing = {
+            "model": "claude-legacy-4.6",
+            "tools": [],
+            "allowedTools": [],
+            "mcpServers": {},
+        }
+        (kiro_dir / "kiroclaw.json").write_text(json.dumps(existing))
+
+        path = _run_install(tmp_path, cfg_dir)
+        config = json.loads(path.read_text())
+        assert config["model"] == "claude-legacy-4.6"
+        assert "model_managed" not in config
+
+    def test_explicitly_frozen_config_not_tracked(self, tmp_path: Path):
+        """model_managed=False (explicit pick) is never re-synced to default."""
+        cfg_dir = _bundled_defaults(tmp_path)
+        kiro_dir = tmp_path / "kiro_agents"
+        kiro_dir.mkdir(exist_ok=True)
+        existing = {
+            "model": "claude-user-pinned",
+            "model_managed": False,
+            "tools": [],
+            "allowedTools": [],
+            "mcpServers": {},
+        }
+        (kiro_dir / "kiroclaw.json").write_text(json.dumps(existing))
+
+        path = _run_install(tmp_path, cfg_dir)
+        config = json.loads(path.read_text())
+        assert config["model"] == "claude-user-pinned"
+        assert config["model_managed"] is False
+
     def test_existing_config_refreshes_security_fields(self, tmp_path: Path):
         """deniedCommands and hooks are always overwritten from bundled."""
         cfg_dir = _bundled_defaults(tmp_path)

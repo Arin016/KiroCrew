@@ -940,6 +940,12 @@ async def api_agent_detail(request: web.Request) -> web.Response:
                             data["model"] = patch_body["model"] or None
                             if data["model"] is None:
                                 data.pop("model", None)
+                                # Cleared/auto: resume tracking the shipped
+                                # default (re-synced by _refresh_dynamic_fields).
+                                data["model_managed"] = True
+                            else:
+                                # Explicit pick: freeze it against default bumps.
+                                data["model_managed"] = False
                         f.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
                     state = request.app["state"]
                     state.push_refresh("agents")

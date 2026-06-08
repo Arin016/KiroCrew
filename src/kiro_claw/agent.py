@@ -1193,6 +1193,12 @@ def build_agent_config() -> dict:
             entry["autoApprove"] = list(spec["autoApprove"])
         mcp[name] = entry
 
+    # The shipped default `model` came from defaults.json above. Mark it as
+    # managed so _refresh_dynamic_fields keeps tracking the shipped default on
+    # every install; a later defaults.json bump then propagates automatically.
+    # An explicit user pick (PATCH) clears this marker to freeze the choice.
+    config["model_managed"] = True
+
     return config
 
 
@@ -1267,6 +1273,15 @@ def _refresh_dynamic_fields(config: dict) -> None:
     cur_model = config.get("model", "")
     if cur_model in _model_migration:
         config["model"] = _model_migration[cur_model]
+
+    # Default-model tracking: when the model is managed (not an explicit user
+    # pick), re-sync it from the shipped defaults.json so a default bump
+    # propagates to existing installs. Legacy configs predating this marker
+    # have no `model_managed` key and are left untouched (grandfathered).
+    if config.get("model_managed"):
+        shipped_model = (_load_json(_shipped_defaults()) or {}).get("model")
+        if shipped_model:
+            config["model"] = shipped_model
 
     # Ensure kiro-cli uses agent-level mcpServers exclusively (not global
     # mcp.json).  Existing configs created before this field was added lack
