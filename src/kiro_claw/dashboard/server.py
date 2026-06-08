@@ -993,7 +993,7 @@ async def start_dashboard(
                 dm_channel = await slack_client.open_dm(owner_id)
                 await slack_client.post_message(
                     dm_channel,
-                    "\U0001f512 Safety override expired. Tools now require approval. Reply `!yolo renew` to re-authorize.",
+                    "\U0001f512 Safety override expired. Tools now require approval. Reply `/kiroclaw yolo` to re-authorize.",
                 )
         except Exception:
             logger.debug("Slack expiry notification skipped", exc_info=True)
