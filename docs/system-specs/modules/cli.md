@@ -38,8 +38,8 @@ This allows `kiroclaw` to find project-level agent config and skills from any di
 | `kiroclaw manifest` | Generate Slack manifest with user alias auto-populated |
 | `kiroclaw update` | Update to latest version (git pull + rebuild) |
 | `kiroclaw status` | Show runtime stats from running gateway |
-| `kiroclaw stop` | Stop a running gateway (service-aware: stops the systemd/launchd service if active, otherwise SIGTERM via port lookup) |
-| `kiroclaw restart` | Restart a running gateway (service-aware: restarts the systemd/launchd service if active, otherwise SIGTERMs the foreground gateway and respawns it detached). |
+| `kiroclaw stop` | Stop a running gateway (service-aware: stops the systemd/launchd service if active, otherwise SIGTERM via port lookup). Pass `--port N` to bypass the service short-circuit and target a specific gateway. |
+| `kiroclaw restart` | Restart a running gateway (service-aware: restarts the systemd/launchd service if active, otherwise SIGTERMs the foreground gateway and respawns it detached). Pass `--port N` to bypass the service short-circuit and target a specific gateway. |
 | `kiroclaw service install` | Install gateway as a system-level systemd service (Linux, requires sudo for `tee` + `systemctl` only) or launchd LaunchAgent (macOS, no sudo). Auto-restarts on crash, auto-starts on boot. |
 | `kiroclaw service uninstall` | Stop and remove the systemd unit / launchd plist. |
 | `kiroclaw service status` | Show service status (`systemctl status` or `launchctl list`). No sudo required. |
@@ -189,10 +189,13 @@ Each step checks if the tool is already installed and skips if present. See `DEP
 
 `kiroclaw stop [--port PORT]` stops a running gateway:
 
-1. If a systemd/launchd service is active (see Service Management),
-   stop it via the service manager and return — without this branch,
-   SIGTERM-by-port would be racing the manager's auto-restart.
-2. Otherwise: `lsof -ti TCP:{port} -sTCP:LISTEN` to find PIDs.
+1. If a systemd/launchd service is active **and** the caller did not pass
+   `--port` explicitly (see Service Management), stop it via the service
+   manager and return — without this branch, SIGTERM-by-port would be
+   racing the manager's auto-restart.
+2. Otherwise (no service active, or `--port` was passed explicitly to
+   target a non-default dev gateway): `lsof -ti TCP:{port} -sTCP:LISTEN`
+   to find PIDs.
 3. `ps -p {pid} -o args=` to verify it's a KiroClaw process.
 4. `SIGTERM` to each verified PID.
 5. Waits up to 1s for exit.
@@ -203,15 +206,17 @@ Each step checks if the tool is already installed and skips if present. See `DEP
 `kiroclaw restart [--port PORT]` restarts a running gateway. Mirrors
 `stop`'s service-aware structure:
 
-1. If a systemd/launchd service is active, ask the platform to restart
-   it. On Linux: `sudo systemctl restart kiroclaw.service` (single
+1. If a systemd/launchd service is active **and** the caller did not
+   pass `--port` explicitly, ask the platform to restart it. On Linux:
+   `sudo systemctl restart kiroclaw.service` (single
    atomic operation, smaller down-window than stop+start, and the
    supervisor stays in charge of the lifecycle the whole time). On
    macOS: `launchctl unload <plist>` + `launchctl load <plist>` (no
    `-w`, so persistent enable state is unchanged). The deprecated
    `launchctl restart` is avoided because under `KeepAlive` it behaves
    like `stop` (SIGTERM + immediate respawn) and never re-reads the plist.
-2. Otherwise (foreground gateway, no service):
+2. Otherwise (foreground gateway, no service, or `--port` passed
+   explicitly to target a non-default dev gateway):
    - `lsof -ti TCP:{port} -sTCP:LISTEN` to detect a running gateway.
      If found, run the existing `_stop` SIGTERM-by-port path.
      If not (e.g. the user runs `restart` after a crash), skip the stop

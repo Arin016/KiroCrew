@@ -676,7 +676,13 @@ Examples:
         "--port",
         type=int,
         default=None,
-        help="Dashboard port (default: resolved from KIROCLAW_PORT env or dashboard.url config)",
+        help=(
+            "Dashboard port (default: resolved from KIROCLAW_PORT env or "
+            "dashboard.url config). When passed explicitly, bypasses the "
+            "systemd/launchd service short-circuit and SIGTERMs the gateway "
+            "bound to that port — use this for parallel dev gateways on a "
+            "non-default port."
+        ),
     )
 
     # restart — service-aware: restarts the systemd/launchd service if active,
@@ -689,7 +695,13 @@ Examples:
         "--port",
         type=int,
         default=None,
-        help="Dashboard port (default: resolved from KIROCLAW_PORT env or dashboard.url config)",
+        help=(
+            "Dashboard port (default: resolved from KIROCLAW_PORT env or "
+            "dashboard.url config). When passed explicitly, bypasses the "
+            "systemd/launchd service short-circuit and restarts the gateway "
+            "bound to that port — use this for parallel dev gateways on a "
+            "non-default port."
+        ),
     )
 
     # service — install/uninstall/status as a system-level systemd unit (Linux,
@@ -1180,9 +1192,9 @@ Examples:
     elif args.command == "update":
         _update()
     elif args.command == "stop":
-        _stop(resolve_client_port(args.port))
+        _stop(args.port)
     elif args.command == "restart":
-        _restart(resolve_client_port(args.port))
+        _restart(args.port)
     elif args.command == "service":
         sys.exit(_service_cmd(args))
     elif args.command == "logs":

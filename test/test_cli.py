@@ -1355,6 +1355,26 @@ class TestStop:
             _stop(8765)
         assert "SIGTERM" in capsys.readouterr().out
 
+    def test_explicit_port_bypasses_service_short_circuit(self, capsys):
+        # When --port is passed explicitly (cli_port is not None), the
+        # systemd/launchd service short-circuit must be bypassed so the
+        # SIGTERM-by-port path can target a non-default dev gateway.
+        from kiro_claw.cli_server import _stop
+
+        with self._mock_sel(), patch(
+            "kiro_claw.cli_server.service_controller.stop_service",
+            return_value=True,
+        ) as mock_stop_service, patch(
+            "subprocess.check_output", side_effect=subprocess.CalledProcessError(1, "lsof")
+        ):
+            with pytest.raises(SystemExit):
+                _stop(8089)
+        # Service short-circuit must NOT have been called.
+        mock_stop_service.assert_not_called()
+        # And we should have fallen through to the SIGTERM path
+        # (which exits 1 here because lsof finds nothing on 8089).
+        assert "No KiroClaw gateway" in capsys.readouterr().out
+
 
 class TestRestart:
     """Tests for the service-aware ``_restart`` CLI function.
@@ -1382,7 +1402,7 @@ class TestRestart:
         ) as mock_spawn, patch(
             "subprocess.check_output"
         ) as mock_lsof:
-            _restart(8765)
+            _restart(None)
         mock_restart.assert_called_once()
         # Service path must NOT also spawn — that would race the supervisor.
         mock_spawn.assert_not_called()
@@ -1407,7 +1427,7 @@ class TestRestart:
         ) as mock_spawn, patch(
             "kiro_claw.cli_server._stop"
         ) as mock_stop:
-            _restart(8765)
+            _restart(None)
         mock_stop.assert_not_called()
         mock_spawn.assert_called_once()
         out = capsys.readouterr().out
@@ -1427,10 +1447,10 @@ class TestRestart:
         ) as mock_stop, patch(
             "kiro_claw.cli_server._spawn_detached_gateway", return_value=5678
         ) as mock_spawn:
-            _restart(8765)
+            _restart(None)
         # Order matters: stop first, then spawn — otherwise the new
         # gateway would race the old one for the port and lose.
-        mock_stop.assert_called_once_with(8765)
+        mock_stop.assert_called_once_with(None)
         mock_spawn.assert_called_once()
         assert "5678" in capsys.readouterr().out
 
@@ -1453,8 +1473,8 @@ class TestRestart:
         ) as mock_stop, patch(
             "kiro_claw.cli_server._spawn_detached_gateway", return_value=9999
         ) as mock_spawn:
-            _restart(8765)
-        mock_stop.assert_called_once_with(8765)
+            _restart(None)
+        mock_stop.assert_called_once_with(None)
         mock_spawn.assert_called_once()
         assert "9999" in capsys.readouterr().out
 
@@ -1502,6 +1522,28 @@ class TestRestart:
         # First arg is sys.executable (path to current Python). Just check
         # the invocation form, not the absolute path.
         assert argv[1:] == ["-m", "kiro_claw", "gateway"]
+
+    def test_explicit_port_bypasses_service_short_circuit(self, capsys):
+        # When cli_port is not None, bypass systemd: the service unit is not
+        # bound to a specific port, so short-circuiting through it would
+        # target the wrong gateway.
+        from kiro_claw.cli_server import _restart
+
+        with self._mock_sel(), patch(
+            "kiro_claw.cli_server.service_controller.restart_service",
+            return_value=True,
+        ) as mock_restart_service, patch(
+            "kiro_claw.cli_server._spawn_detached_gateway", return_value=4321
+        ) as mock_spawn, patch(
+            "subprocess.check_output",
+            side_effect=subprocess.CalledProcessError(1, "lsof"),
+        ):
+            _restart(8089)
+        # Service short-circuit must NOT have been called.
+        mock_restart_service.assert_not_called()
+        # And we should have fallen through to the spawn path.
+        mock_spawn.assert_called_once()
+        assert "Started detached gateway" in capsys.readouterr().out
 
 
 class TestResolveClientPort:

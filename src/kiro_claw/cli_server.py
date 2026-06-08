@@ -147,15 +147,20 @@ def _logout(port: int) -> None:
         sys.exit(1)
 
 
-def _stop(port: int) -> None:
+def _stop(cli_port: int | None = None) -> None:
     """Stop a running KiroClaw gateway.
 
-    If a user-level service (systemd/launchd) is active, prefer
-    ``service stop`` so the process manager does not immediately
-    restart the gateway under us. Otherwise fall back to the
-    SIGTERM-by-port path used for foreground gateways.
+    Accepts the raw CLI ``--port`` value (``None`` when not passed).
+    Resolution and service-bypass are both derived from this single input:
+
+    - ``cli_port is None``: user didn't pass ``--port``, so we resolve via
+      env/config/default AND try the systemd/launchd service first.
+    - ``cli_port is not None``: user explicitly targeted a port, so we
+      bypass the service short-circuit and SIGTERM the gateway bound to
+      that port directly.
     """
-    if service_controller.stop_service():
+    port = resolve_client_port(cli_port)
+    if cli_port is None and service_controller.stop_service():
         sel().log_api_access(
             caller="cli", operation="gateway_stop", outcome="allowed",
             source="cli", resources=f"port={port} via=service",
@@ -325,25 +330,24 @@ def _spawn_detached_gateway() -> int:
     return proc.pid
 
 
-def _restart(port: int) -> None:
+def _restart(cli_port: int | None = None) -> None:
     """Restart a running KiroClaw gateway.
 
     Service-aware, mirroring :func:`_stop`:
 
-    1. If a systemd/launchd service is active, ask the platform to
-       restart it (``systemctl restart`` / ``launchctl unload + load``).
-       Atomic, the supervisor stays in charge of the lifecycle, and
-       the calling shell returns immediately.
+    1. If a systemd/launchd service is active AND the caller did not
+       explicitly request a specific port, ask the platform to restart
+       it (``systemctl restart`` / ``launchctl unload + load``).
     2. Otherwise, SIGTERM the foreground gateway via the existing
        lsof+SIGTERM path used by ``kiroclaw stop``, then spawn a
-       detached replacement so the shell still returns immediately
-       and the user is not left without a running gateway.
+       detached replacement.
 
-    Without (1), SIGTERM-by-port would race the manager's auto-restart;
-    without (2), a tmux/screen user would have to re-launch the gateway
-    by hand.
+    When ``cli_port is not None`` (user passed ``--port N``), branch (1) is
+    bypassed: the systemd unit name is not bound to a specific port, so
+    short-circuiting through it would target the wrong gateway.
     """
-    if service_controller.restart_service():
+    port = resolve_client_port(cli_port)
+    if cli_port is None and service_controller.restart_service():
         sel().log_api_access(
             caller="cli", operation="gateway_restart", outcome="allowed",
             source="cli", resources=f"port={port} via=service",
@@ -371,7 +375,7 @@ def _restart(port: int) -> None:
         # user asked for a restart; an exit-before-spawn here would
         # leave them with no running gateway at all.
         try:
-            _stop(port)
+            _stop(cli_port)
         except SystemExit:
             pass
 
