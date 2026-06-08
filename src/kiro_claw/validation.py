@@ -32,6 +32,9 @@ MAX_RESPONSE_LEN = 100_000  # truncate tool responses
 # Allowed categories for lessons
 ALLOWED_LESSON_CATEGORIES = frozenset({"tool", "preference", "knowledge"})
 
+# Allowed scopes for lessons (mirrors the learn_add MCP inputSchema enum).
+ALLOWED_LESSON_SCOPES = frozenset({"global", "workspace"})
+
 # Allowed cron schedule kinds
 ALLOWED_SCHEDULE_KINDS = frozenset({"every", "cron", "at"})
 
@@ -307,6 +310,13 @@ LEARN_ADD_SCHEMA = ToolSchema(
         FieldSpec("rule", str, required=True, max_len=MAX_SHORT_STRING),
         FieldSpec("category", str, allowed=ALLOWED_LESSON_CATEGORIES, default="knowledge"),
         FieldSpec("negative", str, max_len=MAX_SHORT_STRING),
+        # scope/workspace: the learn_add MCP tool (mcp_core.py) and the
+        # /api/lessons handler already support workspace-scoped lessons; this
+        # schema was created before that feature landed and never listed them,
+        # so unknown-field rejection blocked the params. The "workspace
+        # required when scope='workspace'" rule is enforced in the handler.
+        FieldSpec("scope", str, allowed=ALLOWED_LESSON_SCOPES, default="global"),
+        FieldSpec("workspace", str, max_len=MAX_SHORT_STRING, pattern=WORKSPACE_NAME_RE),
     ],
 )
 

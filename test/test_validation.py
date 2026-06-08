@@ -193,6 +193,32 @@ class TestValidateToolArgs:
                 LEARN_ADD_SCHEMA,
             )
 
+    def test_learn_add_with_scope_and_workspace(self):
+        result = validate_tool_args(
+            {"rule": "use pytest-asyncio", "scope": "workspace", "workspace": "my-project"},
+            LEARN_ADD_SCHEMA,
+        )
+        assert result["scope"] == "workspace"
+        assert result["workspace"] == "my-project"
+
+    def test_learn_add_scope_defaults_global(self):
+        result = validate_tool_args({"rule": "use dark mode"}, LEARN_ADD_SCHEMA)
+        assert result["scope"] == "global"
+
+    def test_learn_add_bad_scope(self):
+        with pytest.raises(ValidationError, match="must be one of"):
+            validate_tool_args(
+                {"rule": "x", "scope": "session"},
+                LEARN_ADD_SCHEMA,
+            )
+
+    def test_learn_add_bad_workspace(self):
+        with pytest.raises(ValidationError, match="invalid format"):
+            validate_tool_args(
+                {"rule": "x", "scope": "workspace", "workspace": "bad name!"},
+                LEARN_ADD_SCHEMA,
+            )
+
     def test_cron_add_valid(self):
         result = validate_tool_args(
             {"name": "check", "message": "check pipeline", "every": 300},
