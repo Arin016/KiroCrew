@@ -2253,6 +2253,80 @@ class TestRuntimeWiring:
             assert data["workspace"] == "oncall-ws"
 
     @pytest.mark.asyncio
+    async def test_api_chat_slot_agent_updates_project_dir(self, tmp_path, monkeypatch):
+        """Switching agent also updates slot.project to the new workspace dir.
+
+        Without this, the dashboard file search stays scoped to the previous
+        workspace even after the user selects a different agent.
+        """
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        slot.project = "/old/project"
+        state.sessions.reset = AsyncMock()
+
+        mock_cfg = MagicMock()
+        mock_cfg.agents = {"dev": MagicMock(workspace="dev-ws", memory_store="default")}
+        mock_cfg.workspaces = {"dev-ws": MagicMock(dir="/workspace/dev")}
+        mock_cfg.default_workspace = "default"
+        mock_cfg.default_memory_store = "default"
+        mock_cfg.memory_stores = {"default": MagicMock()}
+        mock_cfg.memory = MagicMock()
+
+        mock_bindings = MagicMock()
+        mock_bindings.workspace_dir = Path("/workspace/dev")
+        mock_bindings.memory_store_name = "default"
+
+        monkeypatch.setattr("kiro_claw.dashboard.chat.KiroClawConfig.load", lambda: mock_cfg)
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.KiroClawConfig.load", lambda: mock_cfg
+        )
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat.resolve_agent_bindings",
+            lambda cfg, name: mock_bindings,
+        )
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.resolve_agent_bindings",
+            lambda cfg, name: mock_bindings,
+        )
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat._workspace_name_for_dir",
+            lambda cfg, ws_dir: "dev-ws",
+        )
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers._workspace_name_for_dir",
+            lambda cfg, ws_dir: "dev-ws",
+        )
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.default_project_dir",
+            lambda ws: "/workspace/dev",
+        )
+
+        async with TestClient(TestServer(_make_app_with_agent_routes(state))) as client:
+            resp = await client.post("/api/chat/slots/s1/agent", json={"agent": "dev"})
+            assert resp.status == 200
+            assert slot.project == "/workspace/dev"
+
+    @pytest.mark.asyncio
+    async def test_api_chat_slot_workspace_updates_project_dir(self, tmp_path, monkeypatch):
+        """Switching workspace also updates slot.project to the new workspace dir."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        slot.project = "/old/project"
+        state.sessions.reset = AsyncMock()
+
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.default_project_dir",
+            lambda ws: "/workspace/new-ws",
+        )
+
+        async with TestClient(TestServer(_make_app_with_agent_routes(state))) as client:
+            resp = await client.post("/api/chat/slots/s1/workspace", json={"workspace": "new-ws"})
+            assert resp.status == 200
+            assert slot.project == "/workspace/new-ws"
+
+    @pytest.mark.asyncio
     async def test_api_chat_slot_agent_persists_to_metadata(self, tmp_path, monkeypatch):
         """Switching a slot's agent writes the new value to the JSONL metadata.
 

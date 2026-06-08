@@ -928,6 +928,7 @@ async def api_chat_slot_agent(request: web.Request) -> web.Response:
             ws_name = _workspace_name_for_dir(cfg, bindings.workspace_dir)
             slot.workspace = ws_name
             workspace = ws_name
+            slot.project = default_project_dir(workspace)
     except Exception:
         logger.warning("Failed to resolve agent bindings for %r", agent_name, exc_info=True)
 
@@ -1071,6 +1072,7 @@ async def api_chat_slot_workspace(request: web.Request) -> web.Response:
             status=409,
         )
     slot.workspace = ws_name
+    slot.project = default_project_dir(ws_name)
     logger.info("Slot %s workspace switched to %r, resetting session", name, ws_name)
     await state.sessions.reset(_history_key_for(name))
     state.push_slots_update()
