@@ -434,6 +434,7 @@ from kiro_claw.dashboard.handlers.core import (  # noqa: E402, F401
     _stt_prereq_commands,
     api_app_token,
     api_branding,
+    api_health,
     api_logout,
     api_kiroclaw_config,
     api_kiroclaw_config_patch,

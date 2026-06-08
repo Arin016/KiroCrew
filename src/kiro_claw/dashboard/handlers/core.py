@@ -85,6 +85,11 @@ async def api_branding(request: web.Request) -> web.Response:
     )
 
 
+async def api_health(request: web.Request) -> web.Response:
+    """GET /api/health — liveness probe; returns 200 whenever the server is up."""
+    return web.json_response({"ok": True})
+
+
 async def pwa_file(request: web.Request) -> web.StreamResponse:
     """Serve PWA root files (manifest, service worker, icons) from dist/."""
     name = request.match_info["name"]

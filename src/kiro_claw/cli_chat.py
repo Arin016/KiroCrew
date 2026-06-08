@@ -101,13 +101,15 @@ def _tui(args: argparse.Namespace) -> None:
     os.execvp("node", cmd)
 
 
-async def _chat(message: str | None, model: str | None) -> None:
+async def _chat(message: str | None, model: str | None, agent: str | None = None) -> None:
     """Run a single message or interactive chat session."""
     cfg = KiroClawConfig.load()
     if model:
         cfg.agent.model = model
+    channel_id = os.environ.get("KIROCLAW_CHANNEL_ID") or None
+    agent_name = agent or cfg.agent.default_agent or None
     provider: LLMProvider = cfg.create_provider_factory()(
-        "cli_chat", agent=cfg.agent.default_agent or None
+        "cli_chat", agent=agent_name, channel_id=channel_id
     )
     await provider.start()
 

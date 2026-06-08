@@ -331,6 +331,7 @@ async def start_dashboard(
     app.router.add_get("/api/stream", handlers.api_stream)
     app.router.add_get("/api/midway-ttl", handlers.api_midway_ttl)
     app.router.add_get("/api/dashboard/branding", handlers.api_branding)
+    app.router.add_get("/api/health", handlers.api_health)
     app.router.add_get("/api/admin/compliance/yolo-status", handlers.api_compliance_yolo_status)
 
     # Suggestions (pre-computed contextual prompts)

@@ -354,6 +354,7 @@ Examples:
     )
     chat_parser.add_argument("-m", "--message", help="Single message (non-interactive)")
     chat_parser.add_argument("--model", help="Model to use (default: from config)")
+    chat_parser.add_argument("--agent", help="Agent to use (default: from config)")
     chat_parser.add_argument("--tui", action="store_true", help="Launch TUI instead of REPL")
 
     # tui
@@ -1141,7 +1142,7 @@ Examples:
                 _tui(args)
             else:
                 print("Tip: Try `kiroclaw tui` for the new terminal UI experience")
-                asyncio.run(_chat(args.message, args.model))
+                asyncio.run(_chat(args.message, args.model, agent=getattr(args, "agent", None)))
     elif args.command == "tui":
         _tui(args)
     elif args.command == "gateway":
