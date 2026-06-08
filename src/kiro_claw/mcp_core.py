@@ -54,6 +54,7 @@ from kiro_claw.security import (
 )
 from kiro_claw.sel import sel
 from kiro_claw.validation import (
+    _SLACK_TS_RE,
     ARTIFACT_DELETE_SCHEMA,
     ARTIFACT_GET_SCHEMA,
     ARTIFACT_LIST_SCHEMA,
@@ -62,6 +63,7 @@ from kiro_claw.validation import (
     ARTIFACT_UPDATE_SCHEMA,
     ARTIFACT_VERSIONS_SCHEMA,
     AUTONUDGE_STOP_SCHEMA,
+    CHANNEL_ID_RE,
     LOCAL_KNOWLEDGE_SEARCH_SCHEMA,
     MCP_CORE_SCHEMAS,
     REGISTER_HOOK_SCHEMA,
@@ -414,6 +416,28 @@ def _list_tools() -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["text"],
+            },
+        },
+        {
+            "name": "delete_message",
+            "description": (
+                "Delete a message previously sent by this bot. Only works on "
+                "messages authored by the KiroClaw bot itself (Slack API constraint). "
+                "Use to clean up transient notifications after the user acknowledges them."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "channel": {
+                        "type": "string",
+                        "description": "Channel ID where the message was posted.",
+                    },
+                    "ts": {
+                        "type": "string",
+                        "description": "Timestamp of the message to delete (from send_message response).",
+                    },
+                },
+                "required": ["channel", "ts"],
             },
         },
         {
@@ -1348,6 +1372,42 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
                 else "Message sent to Slack + notification."
             )
         return "Notification delivered."
+
+    if name == "delete_message":
+        channel = args["channel"]
+        msg_ts = args["ts"]
+        if not CHANNEL_ID_RE.match(channel):
+            sel().log_tool_invocation(
+                session_key=_resolve_session_key(),
+                source="mcp",
+                tool_name="delete_message",
+                outcome="error",
+            )
+            return "Error: invalid channel ID format."
+        if not _SLACK_TS_RE.match(msg_ts):
+            sel().log_tool_invocation(
+                session_key=_resolve_session_key(),
+                source="mcp",
+                tool_name="delete_message",
+                outcome="error",
+            )
+            return "Error: invalid message timestamp format."
+        resp = _post("/api/delete-message", {"channel": channel, "ts": msg_ts})
+        if resp.get("error"):
+            sel().log_tool_invocation(
+                session_key=_resolve_session_key(),
+                source="mcp",
+                tool_name="delete_message",
+                outcome="error",
+            )
+            return f"Failed: {resp['error']}"
+        sel().log_tool_invocation(
+            session_key=_resolve_session_key(),
+            source="mcp",
+            tool_name="delete_message",
+            outcome="success",
+        )
+        return "Message deleted."
 
     if name == "read_slack_profile":
         user_id = args["user"]

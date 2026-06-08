@@ -141,6 +141,7 @@ def _register_mcp_routes(app: web.Application) -> None:
     app.router.add_post("/api/taskrunner", handlers.api_taskrunner_start)
     app.router.add_post("/api/taskrunner/cancel", handlers.api_taskrunner_cancel)
     app.router.add_post("/api/send-message", handlers.api_send_message)
+    app.router.add_post("/api/delete-message", handlers.api_delete_message)
     app.router.add_post("/api/browser-event", handlers.api_browser_event)
     app.router.add_post("/api/browser-auth-retry", handlers.api_browser_auth_retry)
     app.router.add_get("/api/browser/config", handlers.api_browser_config_get)
@@ -899,6 +900,7 @@ async def start_dashboard(
             internal_paths=frozenset(
                 {
                     "/api/send-message",
+                    "/api/delete-message",
                     "/api/browser-event",
                     "/api/session-keepalive",
                     "/api/session-tool-policy",

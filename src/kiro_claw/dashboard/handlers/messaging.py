@@ -850,6 +850,30 @@ async def api_slack_reactions(request: web.Request) -> web.Response:
         return web.json_response({"error": safe_error}, status=502)
 
 
+async def api_delete_message(request: web.Request) -> web.Response:
+    """POST /api/delete-message — delete a bot-authored Slack message."""
+    state: DashboardState = request.app["state"]
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    channel = body.get("channel", "").strip()
+    ts = body.get("ts", "").strip()
+    if not channel or not ts:
+        return web.json_response({"error": "channel and ts required"}, status=400)
+    slack = state.slack_client
+    if not slack:
+        return web.json_response({"error": "Slack not connected"}, status=503)
+    try:
+        await slack.delete_message(channel, ts)
+    except Exception as e:
+        safe_error = str(e).split("\n")[0][:200]
+        safe_error, _ = redact_credentials(safe_error)
+        safe_error, _ = redact_exfiltration_urls(safe_error)
+        return web.json_response({"error": f"Delete failed: {safe_error}"}, status=502)
+    return web.json_response({"ok": True})
+
+
 async def api_slack_profile(request: web.Request) -> web.Response:
     """POST /api/slack-profile — read a Slack user's profile."""
     import time  # noqa: F811
