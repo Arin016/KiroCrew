@@ -106,8 +106,9 @@ def _safe_campaign_dir(campaign_id: str) -> Path | None:
 
 def _get_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), isolation_level=None)
     conn.row_factory = sqlite3.Row
+    conn.execute("BEGIN")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS campaigns (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, question TEXT NOT NULL,
@@ -124,6 +125,8 @@ def _get_db() -> sqlite3.Connection:
         conn.execute("ALTER TABLE campaigns ADD COLUMN success_criteria TEXT")
     if "auto_approve" not in cols:
         conn.execute("ALTER TABLE campaigns ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 0")
+    if "parent_id" not in cols:
+        conn.execute("ALTER TABLE campaigns ADD COLUMN parent_id TEXT")
     conn.commit()
     return conn
 
@@ -162,6 +165,28 @@ def _redact_finding(finding: dict) -> dict:
         return val
 
     return {k: _redact_value(v) for k, v in finding.items()}
+
+
+def _redact_tree_node(node: Any) -> Any:
+    """Redact a single persisted grill-tree element before serving it.
+
+    The tree is LLM-generated, so EVERY element must be scanned — not just
+    dicts. String elements (e.g. from a malformed LLM response or schema
+    drift) are scrubbed with the same credential/exfil-URL redaction used for
+    findings; nested lists are scanned recursively; primitives
+    (int/float/bool/None) carry no secrets and pass through unchanged.
+    """
+    if isinstance(node, dict):
+        return _redact_finding(node)
+    if isinstance(node, str):
+        # Reuse _redact_finding's string handling (incl. fail-closed masking
+        # when the security module is unavailable) via a throwaway wrapper.
+        return _redact_finding({"v": node})["v"]
+    if isinstance(node, list):
+        # Recurse into nested lists: a drifted/malformed tree could nest
+        # strings (with credentials/exfil URLs) inside a list element.
+        return [_redact_tree_node(item) for item in node]
+    return node
 
 
 # --- SEL audit ---
@@ -320,17 +345,55 @@ def get_findings(campaign_id: str) -> list[dict]:
     return results
 
 
+def _list_cycle_files(campaign_id: str) -> list[Path]:
+    """Return sorted cycle_*.json paths (newest last) WITHOUT reading them.
+
+    Used by the watchdog for a cheap O(1)-read count on every poll; the actual
+    file is only parsed (via _read_finding_file) when the count advances.
+    """
+    safe_dir = _safe_campaign_dir(campaign_id)
+    findings_dir = (safe_dir / "findings") if safe_dir else None
+    if not findings_dir or not findings_dir.exists():
+        return []
+    return sorted(findings_dir.glob("cycle_*.json"))
+
+
+def _read_finding_file(path: Path) -> dict:
+    """Read + redact a single cycle finding file; {} on parse/IO error."""
+    try:
+        return _redact_finding(json.loads(path.read_text()))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
 # --- CRUD ---
+
+
+_FORK_NAME_PREFIX = "Forked: "
+
+
+def _fork_name(source: str) -> str:
+    """Build a forked campaign's display name with a clear 'Forked:' prefix.
+
+    Mirrors create_campaign's 50-char name cap and avoids double-prefixing
+    when the source already starts with the prefix (e.g. forking a fork).
+    """
+    base = (source or "").strip()
+    if base.startswith(_FORK_NAME_PREFIX):
+        base = base[len(_FORK_NAME_PREFIX) :].strip()
+    return (_FORK_NAME_PREFIX + base[: 50 - len(_FORK_NAME_PREFIX)]).strip()
 
 
 def create_campaign(config: dict) -> dict:
     campaign_id = uuid.uuid4().hex[:8]
     name = config.get("name") or config["question"][:50].strip()
+    parent_id = config.get("parent_id") or None
     db = _get_db()
+    db.execute("BEGIN")
     db.execute(
         "INSERT INTO campaigns (id,name,question,sub_questions,sources,"
-        "max_cycles,idle_secs,success_criteria,auto_approve,status,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "max_cycles,idle_secs,success_criteria,auto_approve,parent_id,status,created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             campaign_id,
             name,
@@ -341,12 +404,20 @@ def create_campaign(config: dict) -> dict:
             config.get("idle_secs", DEFAULT_IDLE_SECS),
             config.get("success_criteria") or None,
             int(bool(config.get("auto_approve", False))),
+            parent_id,
             CampaignStatus.READY,
             time.time(),
         ),
     )
     db.commit()
     db.close()
+    # Persist the grill tree if provided (full tree with clarifier answers,
+    # pruned branches, origin tags — enables revisiting + challenge mode).
+    grill_tree = config.get("grill_tree")
+    if grill_tree and isinstance(grill_tree, list):
+        d = _campaign_dir(campaign_id)
+        d.mkdir(parents=True, exist_ok=True)
+        d.joinpath("grill_tree.json").write_text(json.dumps(grill_tree, indent=2))
     write_status(campaign_id, CampaignStatus.READY)
     _audit("campaign_created", campaign_id)
     return {"id": campaign_id, "name": name, "status": CampaignStatus.READY}
@@ -377,6 +448,7 @@ def update_campaign_status(campaign_id: str, new_status: str, **kwargs: Any) -> 
         sets.append("error_message = ?")
         vals.append(kwargs["error_message"])
     vals.append(campaign_id)
+    db.execute("BEGIN")
     db.execute(f"UPDATE campaigns SET {', '.join(sets)} WHERE id = ?", vals)
     db.commit()
     db.close()
@@ -431,6 +503,7 @@ def delete_campaign(campaign_id: str) -> dict:
     if not _validate_campaign_id(campaign_id):
         return {"error": "invalid campaign_id"}
     db = _get_db()
+    db.execute("BEGIN")
     rows = db.execute("DELETE FROM campaigns WHERE id = ?", (campaign_id,)).rowcount
     db.commit()
     db.close()
@@ -521,13 +594,12 @@ async def _watchdog_loop(app: web.Application | None = None) -> None:
                     update_campaign_status(cid, CampaignStatus.NEEDS_INPUT)
                     _emit_sse({"type": "needs_input", "campaign_id": cid})
                     continue
-                findings = get_findings(cid)
-                count = len(findings)
+                # Lightweight: count files without reading them all. Only parse
+                # the latest finding when count advances (avoids re-reading 50+
+                # JSON files every 5s).
+                cycle_files = _list_cycle_files(cid)
+                count = len(cycle_files)
                 if cid not in last_counts or last_ts.get(cid, 0.0) < (started or 0):
-                    # Seed on first observation, AND re-seed after a (re)start:
-                    # a resumed campaign (NEEDS_INPUT/paused -> running) refreshes
-                    # started_at, so a stale pre-pause last_ts must not instantly
-                    # trip the unresponsive deadline the moment it resumes.
                     last_counts[cid] = count
                     last_ts[cid] = time.time()
                     continue
@@ -535,15 +607,18 @@ async def _watchdog_loop(app: web.Application | None = None) -> None:
                 if count > prev:
                     last_counts[cid] = count
                     last_ts[cid] = time.time()
-                    _emit_sse({"type": "new_finding", "campaign_id": cid, "finding": findings[-1]})
+                    # Read only the newest finding (last file).
+                    latest = _read_finding_file(cycle_files[-1])
+                    _emit_sse({"type": "new_finding", "campaign_id": cid, "finding": latest})
                     db2 = _get_db()
+                    db2.execute("BEGIN")
                     db2.execute(
                         "UPDATE campaigns SET total_cycles=? WHERE id=?",
                         (count, cid),
                     )
                     db2.commit()
                     db2.close()
-                    verified = findings[-1].get("verification")
+                    verified = latest.get("verification")
                     if isinstance(verified, dict) and verified.get("passed") is True:
                         update_campaign_status(cid, CampaignStatus.COMPLETE)
                         _emit_sse({"type": "complete", "campaign_id": cid})
@@ -820,8 +895,55 @@ async def _handle_action(request: web.Request) -> web.Response:
         "resume": CampaignStatus.RUNNING,
         "stop": CampaignStatus.STOPPED,
     }
-    if action not in status_map:
+    if action not in status_map and action != "fork":
         return web.json_response({"error": f"Unknown action: {action}"}, status=400)
+
+    # Fork: creates a new child campaign from a completed parent.
+    if action == "fork":
+        db = _get_db()
+        parent = db.execute(
+            "SELECT id, question, sources, status FROM campaigns WHERE id = ?",
+            (cid,),
+        ).fetchone()
+        db.close()
+        if parent is None:
+            return web.json_response({"error": "Not found"}, status=404)
+        if parent["status"] not in (CampaignStatus.COMPLETE, CampaignStatus.STOPPED):
+            return web.json_response(
+                {"error": "Can only fork a completed or stopped campaign"}, status=409
+            )
+        # Build the fork config from the request body (sub_questions come from
+        # the frontend's challenge-mode grill tree).
+        fork_config = {
+            "question": body.get("question") or parent["question"],
+            "name": _fork_name(body.get("name") or body.get("question") or parent["question"]),
+            "sub_questions": body.get("sub_questions", []),
+            "sources": json.loads(parent["sources"] or "[]"),
+            "max_cycles": body.get("max_cycles", 30),
+            "idle_secs": body.get("idle_secs", DEFAULT_IDLE_SECS),
+            "success_criteria": body.get("success_criteria"),
+            "auto_approve": body.get("auto_approve", False),
+            "parent_id": cid,
+            "grill_tree": body.get("grill_tree"),
+        }
+        result = create_campaign(fork_config)
+        # Copy parent FINDINGS.md as context into the fork's dir. Use the
+        # path-traversal-guarded _safe_campaign_dir (resolve + is_relative_to)
+        # for both ids — defense-in-depth even though both are already
+        # format-validated (cid via _validate_campaign_id, result["id"] is a
+        # freshly generated uuid) — consistent with _handle_grill_tree /
+        # get_findings.
+        parent_dir = _safe_campaign_dir(cid)
+        fork_dir = _safe_campaign_dir(result["id"])
+        if parent_dir is None or fork_dir is None:
+            return web.json_response({"error": "Invalid campaign ID"}, status=400)
+        fork_dir.mkdir(parents=True, exist_ok=True)
+        parent_findings = parent_dir / "FINDINGS.md"
+        if parent_findings.exists():
+            (fork_dir / "parent_findings.md").write_text(parent_findings.read_text())
+        _audit("campaign_forked", result["id"], parent=cid)
+        return web.json_response(result, status=201)
+
     # Guard invalid source-state transitions (e.g. start on a running campaign,
     # which would reset started_at and relaunch a duplicate worker loop).
     allowed = {
@@ -934,6 +1056,36 @@ async def _handle_stream(request: web.Request) -> web.StreamResponse:
 # --- Route registration ---
 
 
+async def _handle_grill_tree(request: web.Request) -> web.Response:
+    """Serve the persisted grill tree for a campaign (for revisiting / challenge mode)."""
+    if denied := _require_auth(request):
+        return denied
+    cid = request.match_info["id"]
+    d = _safe_campaign_dir(cid)
+    if d is None:
+        return web.json_response({"error": "Invalid campaign ID"}, status=400)
+    tree_path = d / "grill_tree.json"
+    if not tree_path.exists():
+        return web.json_response({"tree": []})
+    try:
+        tree = json.loads(tree_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        tree = []
+    # Never trust LLM output: node text/recommended fields are model-generated,
+    # so redact credentials + exfiltration URLs before serving to the dashboard
+    # (same treatment as cycle findings via _redact_finding).
+    if not isinstance(tree, list):
+        # Fail-closed: a non-list payload (file corruption/tampering) is not a
+        # valid grill tree and can't be element-redacted — drop it entirely
+        # rather than serving unscanned LLM-generated content to the client.
+        tree = []
+    else:
+        # Scan EVERY element, not just dicts: stray strings would otherwise be
+        # served unredacted.
+        tree = [_redact_tree_node(n) for n in tree]
+    return web.json_response({"tree": tree})
+
+
 def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/apps/auto-research/validate", _handle_validate)
     app.router.add_post("/api/apps/auto-research/suggest", _handle_suggest)
@@ -941,6 +1093,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/apps/auto-research/campaigns", _handle_list)
     app.router.add_get("/api/apps/auto-research/campaigns/{id}", _handle_get)
     app.router.add_get("/api/apps/auto-research/campaigns/{id}/report", _handle_report)
+    app.router.add_get("/api/apps/auto-research/campaigns/{id}/grill-tree", _handle_grill_tree)
     app.router.add_patch("/api/apps/auto-research/campaigns/{id}", _handle_action)
     app.router.add_delete("/api/apps/auto-research/campaigns/{id}", _handle_delete)
     app.router.add_post("/api/apps/auto-research/campaigns/{id}/nudge", _handle_nudge)

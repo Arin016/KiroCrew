@@ -29,12 +29,15 @@ from kiro_claw.apps.builtins.auto_research.handlers import (
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path: Path):
     """Isolate DB and research dir per test."""
-    with patch(
-        "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH",
-        tmp_path / "test.db",
-    ), patch(
-        "kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR",
-        tmp_path / "research",
+    with (
+        patch(
+            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH",
+            tmp_path / "test.db",
+        ),
+        patch(
+            "kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR",
+            tmp_path / "research",
+        ),
     ):
         yield tmp_path
 
@@ -454,12 +457,15 @@ class TestHTTPHandlers:
             request["user"] = "test-user"
             return await handler(request)
 
-        with patch(
-            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH",
-            tmp_path / "t.db",
-        ), patch(
-            "kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR",
-            tmp_path / "r",
+        with (
+            patch(
+                "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH",
+                tmp_path / "t.db",
+            ),
+            patch(
+                "kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR",
+                tmp_path / "r",
+            ),
         ):
             a = web.Application(middlewares=[_inject_user])
             register_routes(a)
@@ -469,9 +475,10 @@ class TestHTTPHandlers:
     async def test_validate(self, app, tmp_path: Path):
         from aiohttp.test_utils import TestClient, TestServer
 
-        with patch(
-            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"
-        ), patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with (
+            patch("kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+        ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post(
                     "/api/apps/auto-research/validate",
@@ -510,9 +517,10 @@ class TestHTTPHandlers:
 
         from kiro_claw.apps.builtins.auto_research import handlers as h
 
-        with patch(
-            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"
-        ), patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with (
+            patch("kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+        ):
             async with TestClient(TestServer(app)) as c:
                 cr = await c.post(
                     "/api/apps/auto-research/campaigns",
@@ -534,9 +542,10 @@ class TestHTTPHandlers:
 
         from kiro_claw.apps.builtins.auto_research import handlers as h
 
-        with patch(
-            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"
-        ), patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with (
+            patch("kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+        ):
             async with TestClient(TestServer(app)) as c:
                 cr = await c.post(
                     "/api/apps/auto-research/campaigns",
@@ -552,9 +561,10 @@ class TestHTTPHandlers:
     async def test_create_list_get(self, app, tmp_path: Path):
         from aiohttp.test_utils import TestClient, TestServer
 
-        with patch(
-            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"
-        ), patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with (
+            patch("kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+        ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post(
                     "/api/apps/auto-research/campaigns",
@@ -572,9 +582,10 @@ class TestHTTPHandlers:
     async def test_action_start_stop(self, app, tmp_path: Path):
         from aiohttp.test_utils import TestClient, TestServer
 
-        with patch(
-            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"
-        ), patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with (
+            patch("kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+        ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post(
                     "/api/apps/auto-research/campaigns",
@@ -596,9 +607,10 @@ class TestHTTPHandlers:
 
         from kiro_claw.apps.builtins.auto_research import handlers as h
 
-        with patch(
-            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"
-        ), patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with (
+            patch("kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+        ):
             async with TestClient(TestServer(app)) as c:
                 cr = await c.post(
                     "/api/apps/auto-research/campaigns",
@@ -616,9 +628,10 @@ class TestHTTPHandlers:
     async def test_action_start_on_running_returns_409(self, app, tmp_path: Path):
         from aiohttp.test_utils import TestClient, TestServer
 
-        with patch(
-            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"
-        ), patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with (
+            patch("kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+        ):
             async with TestClient(TestServer(app)) as c:
                 cr = await c.post(
                     "/api/apps/auto-research/campaigns",
@@ -636,9 +649,10 @@ class TestHTTPHandlers:
     async def test_action_resume_from_failed_clears_error(self, app, tmp_path: Path):
         from aiohttp.test_utils import TestClient, TestServer
 
-        with patch(
-            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"
-        ), patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with (
+            patch("kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+        ):
             async with TestClient(TestServer(app)) as c:
                 cr = await c.post(
                     "/api/apps/auto-research/campaigns",
@@ -660,9 +674,10 @@ class TestHTTPHandlers:
     async def test_action_unknown(self, app, tmp_path: Path):
         from aiohttp.test_utils import TestClient, TestServer
 
-        with patch(
-            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"
-        ), patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with (
+            patch("kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+        ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post(
                     "/api/apps/auto-research/campaigns",
@@ -678,9 +693,10 @@ class TestHTTPHandlers:
     async def test_nudge(self, app, tmp_path: Path):
         from aiohttp.test_utils import TestClient, TestServer
 
-        with patch(
-            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"
-        ), patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with (
+            patch("kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+        ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post(
                     "/api/apps/auto-research/campaigns",
@@ -696,9 +712,10 @@ class TestHTTPHandlers:
     async def test_nudge_empty(self, app, tmp_path: Path):
         from aiohttp.test_utils import TestClient, TestServer
 
-        with patch(
-            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"
-        ), patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with (
+            patch("kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+        ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post(
                     "/api/apps/auto-research/campaigns",
@@ -718,9 +735,10 @@ class TestHTTPHandlers:
         from kiro_claw.apps.builtins.auto_research.handlers import register_routes
 
         # No middleware → no user set → handlers must reject with 401
-        with patch(
-            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"
-        ), patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with (
+            patch("kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+        ):
             no_auth_app = web.Application()
             register_routes(no_auth_app)
             async with TestClient(TestServer(no_auth_app)) as c:
@@ -731,9 +749,10 @@ class TestHTTPHandlers:
     async def test_get_invalid_id(self, app, tmp_path: Path):
         from aiohttp.test_utils import TestClient, TestServer
 
-        with patch(
-            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"
-        ), patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with (
+            patch("kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+        ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.get("/api/apps/auto-research/campaigns/ZZZZZZZZ")
                 assert r.status == 400
@@ -742,9 +761,10 @@ class TestHTTPHandlers:
     async def test_action_nonexistent_404(self, app, tmp_path: Path):
         from aiohttp.test_utils import TestClient, TestServer
 
-        with patch(
-            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"
-        ), patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with (
+            patch("kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+        ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.patch(
                     "/api/apps/auto-research/campaigns/deadbeef", json={"action": "start"}
@@ -997,3 +1017,382 @@ class TestUnattendedQuestionEnforcement:
         (tmp_path / "a1b2c3d4").mkdir()
         with patch.object(h, "RESEARCH_DIR", tmp_path):
             assert h._should_pause_for_question("a1b2c3d4", False) is False
+
+
+class TestSqliteIsolation:
+    def test_concurrent_reader_writer_no_deadlock(self, tmp_path: Path):
+        """Two connections open *simultaneously*: with isolation_level=None +
+        explicit BEGIN/COMMIT each write commits and releases its lock, so a
+        second still-open connection can read AND write without hitting a
+        leaked write lock ("database is locked"). Under the old default
+        isolation the first connection's implicit transaction would leak the
+        lock and the second connection's write would block/raise.
+        """
+        from kiro_claw.apps.builtins.auto_research import handlers as h
+
+        camp = h.create_campaign(
+            {
+                "question": "Concurrent test question padded enough",
+                "sub_questions": [],
+                "sources": ["web"],
+                "max_cycles": 5,
+            }
+        )
+        cid = camp["id"]
+
+        # Open TWO connections at once and keep BOTH alive for the whole test.
+        writer = h._get_db()
+        reader = h._get_db()
+        # Fail fast instead of waiting out the default 5s busy timeout if a
+        # lock leaks, so a regression surfaces as a quick error not a hang.
+        writer.execute("PRAGMA busy_timeout = 500")
+        reader.execute("PRAGMA busy_timeout = 500")
+        try:
+            # Writer commits a change; its write lock must be released after.
+            writer.execute("BEGIN")
+            writer.execute("UPDATE campaigns SET status='running' WHERE id=?", (cid,))
+            writer.execute("COMMIT")
+
+            # The still-open reader sees the committed write...
+            row = reader.execute("SELECT status FROM campaigns WHERE id=?", (cid,)).fetchone()
+            assert row["status"] == "running"
+
+            # ...and can itself write while the writer connection is STILL open.
+            # This is the real concurrency assertion: a leaked write lock from
+            # the writer would make this raise sqlite3.OperationalError
+            # ("database is locked").
+            reader.execute("BEGIN")
+            reader.execute("UPDATE campaigns SET status='paused' WHERE id=?", (cid,))
+            reader.execute("COMMIT")
+
+            row2 = writer.execute("SELECT status FROM campaigns WHERE id=?", (cid,)).fetchone()
+            assert row2["status"] == "paused"
+        finally:
+            reader.close()
+            writer.close()
+
+        # Sanity: the handler API path (BEGIN + UPDATE + COMMIT) still works.
+        h.update_campaign_status(cid, "running")
+        db = h._get_db()
+        try:
+            row3 = db.execute("SELECT status FROM campaigns WHERE id=?", (cid,)).fetchone()
+            assert row3["status"] == "running"
+        finally:
+            db.close()
+
+    def test_isolation_level_is_none(self, tmp_path: Path):
+        """Verify _get_db returns a connection with isolation_level=None."""
+        from kiro_claw.apps.builtins.auto_research import handlers as h
+
+        db = h._get_db()
+        assert db.isolation_level is None
+        db.close()
+
+
+class TestForkAndGrillTreeHTTP:
+    @pytest.fixture
+    def app(self, tmp_path: Path):
+        from aiohttp import web
+
+        from kiro_claw.apps.builtins.auto_research.handlers import register_routes
+
+        @web.middleware
+        async def _inject_user(request, handler):
+            request["user"] = "test-user"
+            return await handler(request)
+
+        with (
+            patch(
+                "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH",
+                tmp_path / "t.db",
+            ),
+            patch(
+                "kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR",
+                tmp_path / "r",
+            ),
+        ):
+            a = web.Application(middlewares=[_inject_user])
+            register_routes(a)
+            yield a
+
+    @pytest.mark.asyncio
+    async def test_fork_creates_child_with_parent_link(self, app):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_claw.apps.builtins.auto_research import handlers as h
+
+        parent = h.create_campaign(
+            {
+                "question": "Parent question padded long enough here",
+                "sub_questions": [],
+                "sources": ["web"],
+                "max_cycles": 5,
+            }
+        )
+        pid = parent["id"]
+        h.update_campaign_status(pid, h.CampaignStatus.COMPLETE)
+        (h._campaign_dir(pid) / "FINDINGS.md").write_text("# Parent findings\nsome evidence")
+
+        async with TestClient(TestServer(app)) as c:
+            r = await c.patch(
+                f"/api/apps/auto-research/campaigns/{pid}",
+                json={
+                    "action": "fork",
+                    "sub_questions": ["Follow-up sub-question one"],
+                    "scope_constraints": ["stay on topic"],
+                    "max_cycles": 7,
+                },
+            )
+            assert r.status == 201
+            child = await r.json()
+        child_id = child["id"]
+        assert child_id != pid
+        assert child["name"].startswith("Forked: ")
+        row = h.get_campaign(child_id)
+        assert row is not None and row["parent_id"] == pid
+        assert row["name"].startswith("Forked: ")
+        assert (h._campaign_dir(child_id) / "parent_findings.md").read_text() == (
+            "# Parent findings\nsome evidence"
+        )
+
+    def test_fork_name_helper(self):
+        from kiro_claw.apps.builtins.auto_research.handlers import _fork_name
+
+        # Prefixes, caps at 50 chars, and never double-prefixes a re-fork.
+        assert _fork_name("Migrate auth").startswith("Forked: ")
+        assert len(_fork_name("x" * 200)) <= 50
+        assert _fork_name("Forked: already a fork") == "Forked: already a fork"
+
+    @pytest.mark.asyncio
+    async def test_fork_missing_parent_404(self, app):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(app)) as c:
+            r = await c.patch("/api/apps/auto-research/campaigns/deadbeef", json={"action": "fork"})
+            assert r.status == 404
+
+    @pytest.mark.asyncio
+    async def test_fork_incomplete_parent_409(self, app):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_claw.apps.builtins.auto_research import handlers as h
+
+        parent = h.create_campaign(
+            {
+                "question": "Running parent question padded enough",
+                "sub_questions": [],
+                "sources": ["web"],
+                "max_cycles": 5,
+            }
+        )
+        pid = parent["id"]
+        h.update_campaign_status(pid, h.CampaignStatus.RUNNING)
+        async with TestClient(TestServer(app)) as c:
+            r = await c.patch(f"/api/apps/auto-research/campaigns/{pid}", json={"action": "fork"})
+            assert r.status == 409
+
+    @pytest.mark.asyncio
+    async def test_grill_tree_returns_persisted_tree(self, app):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_claw.apps.builtins.auto_research import handlers as h
+
+        tree = [{"id": "n1", "kind": "research", "text": "sub q", "origin": "grill"}]
+        camp = h.create_campaign(
+            {
+                "question": "Persisted tree question padded enough",
+                "sub_questions": [],
+                "sources": ["web"],
+                "max_cycles": 5,
+                "grill_tree": tree,
+            }
+        )
+        cid = camp["id"]
+        async with TestClient(TestServer(app)) as c:
+            r = await c.get(f"/api/apps/auto-research/campaigns/{cid}/grill-tree")
+            assert r.status == 200
+            body = await r.json()
+        assert body["tree"] == tree
+
+    @pytest.mark.asyncio
+    async def test_grill_tree_redacts_node_text(self, app):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_claw.apps.builtins.auto_research import handlers as h
+
+        tree = [{"id": "n1", "kind": "research", "text": "leaked AKIAIOSFODNN7EXAMPLE in node"}]
+        camp = h.create_campaign(
+            {
+                "question": "Redacted tree question padded enough",
+                "sub_questions": [],
+                "sources": ["web"],
+                "max_cycles": 5,
+                "grill_tree": tree,
+            }
+        )
+        cid = camp["id"]
+        async with TestClient(TestServer(app)) as c:
+            r = await c.get(f"/api/apps/auto-research/campaigns/{cid}/grill-tree")
+            assert r.status == 200
+            body = await r.text()
+        assert "AKIAIOSFODNN7EXAMPLE" not in body
+
+    @pytest.mark.asyncio
+    async def test_grill_tree_redacts_string_elements(self, app):
+        """Non-dict (string) elements are LLM-generated too: a stray string
+        from a malformed/drifted model response must be scanned, not served
+        unredacted."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_claw.apps.builtins.auto_research import handlers as h
+
+        camp = h.create_campaign(
+            {
+                "question": "String node question padded enough",
+                "sub_questions": [],
+                "sources": ["web"],
+                "max_cycles": 5,
+            }
+        )
+        cid = camp["id"]
+        # Simulate a malformed tree mixing a dict node with a bare string.
+        d = h._safe_campaign_dir(cid)
+        assert d is not None
+        (d / "grill_tree.json").write_text(
+            json.dumps([{"id": "n1", "text": "ok"}, "leaked AKIAIOSFODNN7EXAMPLE here"])
+        )
+        async with TestClient(TestServer(app)) as c:
+            r = await c.get(f"/api/apps/auto-research/campaigns/{cid}/grill-tree")
+            assert r.status == 200
+            body = await r.text()
+        assert "AKIAIOSFODNN7EXAMPLE" not in body
+
+    @pytest.mark.asyncio
+    async def test_grill_tree_redacts_nested_list_elements(self, app):
+        """A nested list element (schema drift) is scanned recursively — a
+        secret buried inside a nested list must not be served unredacted."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_claw.apps.builtins.auto_research import handlers as h
+
+        camp = h.create_campaign(
+            {
+                "question": "Nested list question padded enough",
+                "sub_questions": [],
+                "sources": ["web"],
+                "max_cycles": 5,
+            }
+        )
+        cid = camp["id"]
+        # A list element nested inside the tree, carrying a secret string.
+        d = h._safe_campaign_dir(cid)
+        assert d is not None
+        (d / "grill_tree.json").write_text(
+            json.dumps([{"id": "n1", "text": "ok"}, ["benign", "leaked AKIAIOSFODNN7EXAMPLE here"]])
+        )
+        async with TestClient(TestServer(app)) as c:
+            r = await c.get(f"/api/apps/auto-research/campaigns/{cid}/grill-tree")
+            assert r.status == 200
+            body = await r.text()
+        assert "AKIAIOSFODNN7EXAMPLE" not in body
+
+    @pytest.mark.asyncio
+    async def test_grill_tree_non_list_fails_closed(self, app):
+        """A non-list payload (file corruption/tampering) is dropped to [] —
+        never served unredacted (fail-closed)."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_claw.apps.builtins.auto_research import handlers as h
+
+        camp = h.create_campaign(
+            {
+                "question": "Non list question padded long enough",
+                "sub_questions": [],
+                "sources": ["web"],
+                "max_cycles": 5,
+            }
+        )
+        cid = camp["id"]
+        # A dict (not a list) with an embedded secret simulates tampering.
+        d = h._safe_campaign_dir(cid)
+        assert d is not None
+        (d / "grill_tree.json").write_text(json.dumps({"text": "leaked AKIAIOSFODNN7EXAMPLE here"}))
+        async with TestClient(TestServer(app)) as c:
+            r = await c.get(f"/api/apps/auto-research/campaigns/{cid}/grill-tree")
+            assert r.status == 200
+            body = await r.json()
+            text = json.dumps(body)
+        assert body["tree"] == []
+        assert "AKIAIOSFODNN7EXAMPLE" not in text
+
+    @pytest.mark.asyncio
+    async def test_grill_tree_empty_when_absent(self, app):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_claw.apps.builtins.auto_research import handlers as h
+
+        camp = h.create_campaign(
+            {
+                "question": "No tree question padded long enough",
+                "sub_questions": [],
+                "sources": ["web"],
+                "max_cycles": 5,
+            }
+        )
+        cid = camp["id"]
+        async with TestClient(TestServer(app)) as c:
+            r = await c.get(f"/api/apps/auto-research/campaigns/{cid}/grill-tree")
+            assert r.status == 200
+            body = await r.json()
+        assert body["tree"] == []
+
+    @pytest.mark.asyncio
+    async def test_grill_tree_invalid_id_400(self, app):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(app)) as c:
+            # Non-hex id fails _safe_campaign_dir -> 400 (no traversal/leak).
+            r = await c.get("/api/apps/auto-research/campaigns/ZZZZZZZZ/grill-tree")
+            assert r.status == 400
+
+
+class TestWatchdogFindingHelpers:
+    def test_list_cycle_files_sorted_newest_last(self):
+        from kiro_claw.apps.builtins.auto_research import handlers as h
+
+        camp = h.create_campaign(
+            {
+                "question": "Watchdog helper question padded enough",
+                "sub_questions": [],
+                "sources": ["web"],
+                "max_cycles": 20,
+            }
+        )
+        cid = camp["id"]
+        fdir = h._campaign_dir(cid) / "findings"
+        fdir.mkdir(parents=True, exist_ok=True)
+        for n in (1, 2, 10, 12):
+            (fdir / f"cycle_{n:03d}.json").write_text(json.dumps({"cycle": n}))
+        files = h._list_cycle_files(cid)
+        assert len(files) == 4
+        assert files[-1].name == "cycle_012.json"
+
+    def test_list_cycle_files_invalid_id_empty(self):
+        from kiro_claw.apps.builtins.auto_research import handlers as h
+
+        assert h._list_cycle_files("../../etc") == []
+
+    def test_read_finding_file_redacts(self, tmp_path: Path):
+        from kiro_claw.apps.builtins.auto_research import handlers as h
+
+        p = tmp_path / "cycle_001.json"
+        p.write_text(json.dumps({"summary": "leaked AKIAIOSFODNN7EXAMPLE here"}))
+        out = h._read_finding_file(p)
+        assert "AKIAIOSFODNN7EXAMPLE" not in json.dumps(out)
+
+    def test_read_finding_file_bad_json_returns_empty(self, tmp_path: Path):
+        from kiro_claw.apps.builtins.auto_research import handlers as h
+
+        p = tmp_path / "cycle_001.json"
+        p.write_text("not json{{{")
+        assert h._read_finding_file(p) == {}
