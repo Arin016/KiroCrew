@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -438,6 +437,44 @@ class TestDiscoverNew:
         mcp_json.write_text(
             json.dumps(
                 {"mcpServers": {"srv": {"command": "a", "env": {"NEW": "val"}}}}
+            )
+        )
+        monkeypatch.setattr("kiro_claw.mcp_discovery._MCP_JSON_PATHS", (mcp_json,))
+        result = discover_servers_to_sync()
+        assert result == []
+
+    def test_discover_skips_existing_with_divergent_args(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Existing servers with different args are NOT flagged for sync.
+
+        Args are user-customizable (e.g. --include-tools additions).
+        Since install_agent() preserves user args via setdefault merge,
+        flagging on args divergence only wastes a full config rebuild.
+        """
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        cfg = {
+            "mcpServers": {
+                "srv": {
+                    "command": "srv-cmd",
+                    "args": ["--include-tools=ReadInternalWebsites,TicketingWriteActions"],
+                }
+            }
+        }
+        (agent_dir / "defaults.json").write_text(json.dumps(cfg))
+        monkeypatch.setenv("KIROCLAW_PROJECT_DIR", str(tmp_path))
+        mcp_json = tmp_path / "mcp.json"
+        mcp_json.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "srv": {
+                            "command": "srv-cmd",
+                            "args": ["--include-tools=ReadInternalWebsites"],
+                        }
+                    }
+                }
             )
         )
         monkeypatch.setattr("kiro_claw.mcp_discovery._MCP_JSON_PATHS", (mcp_json,))

@@ -693,18 +693,20 @@ def discover_servers_to_sync() -> list[McpServerInfo]:
         if name not in agent_names:
             out.append(info)
         else:
-            # Include existing local servers with divergent fields
+            # Include existing local servers with divergent command or env.
+            # Args divergence is intentionally excluded: user-customized
+            # args (e.g. --include-tools additions) are preserved by
+            # install_agent()'s setdefault merge, so triggering a full
+            # rebuild on args-only differences is wasted work.
             existing = agent_mcp[name]
             if not isinstance(existing, dict) or info.is_remote:
                 continue
             existing_env = existing.get("env", {})
             if not isinstance(existing_env, dict):
                 existing_env = {}
-            if (
-                not all(existing_env.get(k) == v for k, v in info.env.items())
-                or info.command != existing.get("command", "")
-                or (info.args is not None and info.args != existing.get("args", []))
-            ):
+            if not all(
+                existing_env.get(k) == v for k, v in info.env.items()
+            ) or info.command != existing.get("command", ""):
                 out.append(info)
     return out
 
