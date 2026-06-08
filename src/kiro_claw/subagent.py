@@ -640,7 +640,8 @@ class SubagentManager:
 
         if not info.done:
             info.done = True
-            info.error = f"Reaped after {int(elapsed)}s (exceeded {self._default_timeout}s deadline) [{_timeout_context(info, include_elapsed=False)}]"
+            if not info.error:
+                info.error = f"Reaped after {int(elapsed)}s (exceeded {self._default_timeout}s deadline) [{_timeout_context(info, include_elapsed=False)}]"
             self._running_count = max(0, self._running_count - 1)
             Stats().inc_subagent_failed()
             self._write_tombstone(info, "reaped")

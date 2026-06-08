@@ -671,6 +671,38 @@ class TestSubagentReaper:
         await asyncio.sleep(0)
         assert reaper.cancelled() or reaper.done()
 
+    @pytest.mark.asyncio
+    async def test_cancel_preserves_error_message(self) -> None:
+        """cancel() sets 'Cancelled by user' and _force_reap does not overwrite it."""
+        from kiro_claw.subagent import SubagentInfo
+
+        sessions = _mock_sessions()
+        on_done = AsyncMock()
+
+        manager = SubagentManager(
+            sessions=sessions,
+            ctx_builder=_mock_ctx_builder(),
+            on_done=on_done,
+            is_yolo=lambda: True,
+        )
+
+        info = SubagentInfo(
+            id="cancel001",
+            task="long task",
+            started=time.time() - 5,
+        )
+        manager._agents["cancel001"] = info
+        manager._running_count = 1
+
+        with patch("kiro_claw.subagent.Stats"), patch("kiro_claw.subagent.sel"):
+            result = await manager.cancel("cancel001")
+
+        assert result is True
+        assert info.done is True
+        assert info.error == "Cancelled by user"
+        assert manager._running_count == 0
+        on_done.assert_awaited_once_with(info)
+
 
 class TestConfigurableTimeout:
     """Tests for configurable subagent timeout via default_timeout parameter."""
