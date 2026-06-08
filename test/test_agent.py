@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import unittest.mock
 from contextlib import ExitStack
 from pathlib import Path
@@ -943,6 +944,35 @@ class TestResolveKiroclawBin:
             assert result == str(venv_bin)
         finally:
             agent_mod._KIROCLAW_BIN = old_val
+
+
+class TestKiroclawMcpInvocation:
+    """Tests for built-in MCP server invocation resolution.
+
+    Regression: when ``_resolve_kiroclaw_bin`` cannot find a usable
+    standalone binary (e.g. the gateway runs as a systemd user service and
+    ``kiroclaw`` is not on the service PATH), the built-in cron/core servers
+    must still get a runnable command instead of the bare ``"kiroclaw"``
+    sentinel, which fails validation and drops them from ``kiroclaw.json`` on
+    every refresh.
+    """
+
+    def test_uses_standalone_binary_when_resolved(self):
+        from kiro_claw.agent import _kiroclaw_mcp_invocation
+
+        with patch("kiro_claw.agent._resolve_kiroclaw_bin", return_value="/opt/bin/kiroclaw"):
+            cmd, args = _kiroclaw_mcp_invocation("mcp-cron")
+        assert cmd == "/opt/bin/kiroclaw"
+        assert args == ["mcp-cron"]
+
+    def test_falls_back_to_interpreter_module_when_unresolved(self):
+        from kiro_claw.agent import _kiroclaw_mcp_invocation
+
+        # Bare "kiroclaw" is the unresolved sentinel from _resolve_kiroclaw_bin.
+        with patch("kiro_claw.agent._resolve_kiroclaw_bin", return_value="kiroclaw"):
+            cmd, args = _kiroclaw_mcp_invocation("mcp-core")
+        assert cmd == sys.executable
+        assert args == ["-m", "kiro_claw", "mcp-core"]
 
 
 class TestKiroHooksMerge:

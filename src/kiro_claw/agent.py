@@ -245,6 +245,29 @@ def _resolve_kiroclaw_bin() -> str:
     return "kiroclaw"
 
 
+def _kiroclaw_mcp_invocation(subcommand: str) -> tuple[str, list[str]]:
+    """Resolve a CWD- and shebang-independent invocation for a built-in
+    MCP server (``kiroclaw-cron`` / ``kiroclaw-core``).
+
+    Prefers a standalone ``kiroclaw`` binary when one resolves. Falls back
+    to ``<interpreter> -m kiro_claw <subcommand>`` when
+    :func:`_resolve_kiroclaw_bin` cannot find a usable standalone binary --
+    e.g. an install whose launcher is not on the service PATH (the gateway
+    running as a systemd user service is the common case): there
+    ``_resolve_kiroclaw_bin`` returns the bare ``"kiroclaw"`` sentinel, the
+    command fails to validate, and the server gets dropped from
+    ``kiroclaw.json`` on every config refresh.
+
+    ``sys.executable`` is the absolute path of the running interpreter, so it
+    needs no PATH entry and ignores any broken launcher. ``python -m
+    kiro_claw`` dispatches the same CLI as the ``kiroclaw`` console script.
+    """
+    bin_path = _resolve_kiroclaw_bin()
+    if bin_path == "kiroclaw":  # unresolved sentinel from _resolve_kiroclaw_bin
+        return sys.executable, ["-m", "kiro_claw", subcommand]
+    return bin_path, [subcommand]
+
+
 # ---------------------------------------------------------------------------
 # Managed MCP servers — single source of truth.
 #
@@ -253,8 +276,8 @@ def _resolve_kiroclaw_bin() -> str:
 # one entry here.
 # ---------------------------------------------------------------------------
 _MANAGED_MCP_SERVERS: dict[str, dict] = {
-    "kiroclaw-cron": {"command_fn": _resolve_kiroclaw_bin, "args": ["mcp-cron"]},
-    "kiroclaw-core": {"command_fn": _resolve_kiroclaw_bin, "args": ["mcp-core"]},
+    "kiroclaw-cron": {"invocation_fn": lambda: _kiroclaw_mcp_invocation("mcp-cron")},
+    "kiroclaw-core": {"invocation_fn": lambda: _kiroclaw_mcp_invocation("mcp-core")},
 }
 
 
@@ -1160,8 +1183,12 @@ def build_agent_config() -> dict:
     config["prompt"] = f"file://{_prompt_path()}"
     mcp = config.setdefault("mcpServers", {})
     for name, spec in _MANAGED_MCP_SERVERS.items():
-        cmd = spec.get("command") or spec["command_fn"]()
-        entry = {"command": cmd, "args": list(spec["args"])}
+        if "invocation_fn" in spec:
+            cmd, args = spec["invocation_fn"]()
+        else:
+            cmd = spec.get("command") or spec["command_fn"]()
+            args = list(spec["args"])
+        entry = {"command": cmd, "args": args}
         if "autoApprove" in spec:
             entry["autoApprove"] = list(spec["autoApprove"])
         mcp[name] = entry
@@ -1184,8 +1211,11 @@ def _refresh_dynamic_fields(config: dict) -> None:
     for name, spec in _MANAGED_MCP_SERVERS.items():
         is_new = name not in mcp
         entry = mcp.setdefault(name, {})
-        entry["command"] = spec.get("command") or spec["command_fn"]()
-        entry["args"] = list(spec["args"])
+        if "invocation_fn" in spec:
+            entry["command"], entry["args"] = spec["invocation_fn"]()
+        else:
+            entry["command"] = spec.get("command") or spec["command_fn"]()
+            entry["args"] = list(spec["args"])
         # Strip any stale remote-transport fields from older builds: these
         # servers are stdio-only, and a leftover ``url`` would otherwise
         # propagate into the CC config and shadow the command. (Root fix for
