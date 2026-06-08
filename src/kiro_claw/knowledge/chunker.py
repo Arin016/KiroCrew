@@ -49,7 +49,10 @@ class HeadingAwareChunker:
             # Then add overlap (convert token count to word count)
             if i > 0 and self.overlap > 0:
                 prev_words = raw_chunks[i - 1].split()
-                overlap_word_count = int(self.overlap / 1.3)
+                # Floor at 1: int(self.overlap / 1.3) is 0 for overlap == 1, and
+                # prev_words[-0:] is prev_words[0:] — i.e. the ENTIRE previous chunk,
+                # which would silently duplicate it into every subsequent chunk.
+                overlap_word_count = max(1, int(self.overlap / 1.3))
                 overlap_words = prev_words[-overlap_word_count:]
                 content = " ".join(overlap_words) + "\n" + content
 

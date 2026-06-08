@@ -675,6 +675,47 @@ class TestChunkerExtended:
         assert len(chunks) == 1
         assert chunks[0]["section_title"] is None
 
+    def test_small_overlap_does_not_duplicate_whole_prev_chunk(self):
+        """Regression: overlap=1 passed the ``overlap > 0`` guard but
+        ``int(1 / 1.3) == 0``, and ``prev_words[-0:]`` is ``prev_words[0:]`` — the
+        ENTIRE previous chunk. So a small (but valid, user-configurable via a source's
+        ``chunk_overlap`` property) overlap silently prepended the whole previous chunk
+        to every subsequent chunk, duplicating content across the knowledge base.
+        """
+        words = " ".join(f"w{i}" for i in range(400))
+        chunker = HeadingAwareChunker(target_size=50, overlap=1)
+        chunks = chunker.chunk(words)
+        assert len(chunks) >= 2  # must actually split to exercise the overlap path
+
+        prev_word_count = len(chunks[0]["content"].split())
+        # The overlap prefix is the first line of chunk[1] (joined with "\n" + content).
+        overlap_prefix = chunks[1]["content"].split("\n", 1)[0]
+        injected = len(overlap_prefix.split())
+        # A tiny overlap must inject a tiny prefix — never (almost) the whole prev chunk.
+        assert injected < prev_word_count, (
+            f"overlap=1 injected {injected} words but previous chunk has "
+            f"{prev_word_count} — the entire previous chunk was duplicated"
+        )
+        assert injected <= 2, f"overlap=1 should inject ~0-1 words, got {injected}"
+
+    def test_zero_overlap_injects_nothing(self):
+        words = " ".join(f"w{i}" for i in range(400))
+        chunker = HeadingAwareChunker(target_size=50, overlap=0)
+        chunks = chunker.chunk(words)
+        assert len(chunks) >= 2
+        # With overlap=0 chunk[1] has no injected prefix line from chunk[0].
+        assert not chunks[1]["content"].startswith(chunks[0]["content"].split()[0] + " w")
+
+    def test_large_overlap_still_works(self):
+        # The fix must not change behavior for the normal/default overlap.
+        words = " ".join(f"w{i}" for i in range(400))
+        chunker = HeadingAwareChunker(target_size=50, overlap=200)
+        chunks = chunker.chunk(words)
+        assert len(chunks) >= 2
+        overlap_prefix = chunks[1]["content"].split("\n", 1)[0]
+        # int(200/1.3) = 153, capped by prev chunk length — a real, multi-word overlap.
+        assert len(overlap_prefix.split()) >= 2
+
 
 # ---------------------------------------------------------------------------
 # 11. FileReader -- additional coverage
