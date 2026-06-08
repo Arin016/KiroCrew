@@ -9,6 +9,13 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/css/dashboard.css?v=2">
+<link rel="stylesheet" href="/static/css/cli-mode.css?v=1">
+<script>
+  // Set data-ui from localStorage before paint to prevent flash of chat
+  // layout when the user's preferred mode is 'cli'. Mirrors the existing
+  // theme bootstrap pattern. Synced by setUI() in dashboard.js.
+  try { var u = localStorage.getItem('mc-ui'); if (u === 'cli') document.documentElement.dataset.ui = 'cli'; } catch (e) {}
+</script>
 </head>
 <body>
 <div class="shell" id="shell">
@@ -28,6 +35,7 @@
       </div>
       <div class="pill"><span class="statusDot" id="sse-dot"></span><span>Health</span><span class="mono" id="sse-lbl">Connecting</span></div>
       <button class="theme-toggle" id="theme-toggle">☀ Light</button>
+      <button class="ui-toggle" id="ui-toggle" title="Toggle UI: chat ⇄ CLI">▮ CLI</button>
     </div>
   </header>
 

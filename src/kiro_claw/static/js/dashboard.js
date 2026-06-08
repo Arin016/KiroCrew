@@ -26,6 +26,14 @@ const tBtn=document.getElementById('theme-toggle');
 function setTheme(t){document.documentElement.dataset.theme=t;localStorage.setItem('mc-theme',t);tBtn.textContent=t==='dark'?'☀ Light':'🌙 Dark'}
 setTheme(localStorage.getItem('mc-theme')||'dark');
 tBtn.onclick=()=>setTheme(document.documentElement.dataset.theme==='dark'?'light':'dark');
+
+// ── UI mode (chat ⇄ cli) ──
+// Orthogonal to theme. Persisted as 'mc-ui'. Default 'chat' (no surface change).
+// data-ui is a NEW axis — distinct from data-mode (theme-derived light/dark hint).
+const uBtn=document.getElementById('ui-toggle');
+function setUI(u){document.documentElement.dataset.ui=u;localStorage.setItem('mc-ui',u);if(uBtn)uBtn.textContent=u==='cli'?'💬 Chat':'▮ CLI'}
+setUI(localStorage.getItem('mc-ui')||'chat');
+if(uBtn)uBtn.onclick=()=>setUI(document.documentElement.dataset.ui==='cli'?'chat':'cli');
 // ── SSE ──
 const sse=new EventSource('/api/stream')
 sse.addEventListener('dashboard',e=>{try{const d=JSON.parse(e.data);
