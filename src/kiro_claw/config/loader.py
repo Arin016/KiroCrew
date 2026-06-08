@@ -10,13 +10,11 @@ timeouts, hook rules, and the dashboard URL via the config file. (The dashboard
 
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import os
 import re as _re
 import sys
-import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -26,12 +24,27 @@ from kiro_claw import __version__, model_registry
 from kiro_claw.acp.types import ACP_BACKEND_CLAUDE
 from kiro_claw.effort import is_valid_effort, model_supports_effort
 
-try:
-    import jsonschema
-
-    _HAS_JSONSCHEMA = True
-except ImportError:  # pragma: no cover
-    _HAS_JSONSCHEMA = False
+# Schema validation + the validated-data cache live in ``config.validation``.
+# Re-exported here for backward compatibility — callers and tests still
+# reference these as ``kiro_claw.config.loader.X`` (e.g. the cache tests patch
+# ``kiro_claw.config.loader._validate_config_data``). ``validate_config_data``
+# is aliased to the historical private name ``_validate_config_data``. The cache
+# fingerprint (``_config_fingerprint``) deliberately stays in this module — see
+# its definition below.
+from kiro_claw.config.validation import (  # noqa: F401
+    _CONFIG_CACHE,
+    _CONFIG_CACHE_LOCK,
+    _HAS_JSONSCHEMA,
+    _actual_type_name,
+    _apply_field_default,
+    _dot_path_from_json_path,
+    _get_help_text,
+    _is_deprecated_path,
+    _is_sensitive_path,
+    _lookup_schema_node,
+    _mask_value,
+)
+from kiro_claw.config.validation import validate_config_data as _validate_config_data  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -1014,106 +1027,6 @@ _JSON_TYPE_LABELS: dict[str, str] = {
 }
 
 
-def _lookup_schema_node(schema: dict, dot_path: str) -> dict | None:
-    """Walk the JSON Schema tree to find the node for a dot-separated path."""
-    parts = dot_path.split(".")
-    node = schema
-    for part in parts:
-        props = node.get("properties", {})
-        if part in props:
-            node = props[part]
-        else:
-            return None
-    return node
-
-
-def _is_sensitive_path(schema: dict, dot_path: str) -> bool:
-    """Return True if the field at *dot_path* is marked sensitive."""
-    node = _lookup_schema_node(schema, dot_path)
-    if node is None:
-        return False
-    return node.get("x-meta", {}).get("sensitive", False)
-
-
-def _is_deprecated_path(schema: dict, dot_path: str) -> bool:
-    """Return True if the field at *dot_path* is marked deprecated."""
-    node = _lookup_schema_node(schema, dot_path)
-    if node is None:
-        return False
-    return node.get("x-meta", {}).get("deprecated", False)
-
-
-def _get_help_text(schema: dict, dot_path: str) -> str:
-    """Return the help text for the field at *dot_path*."""
-    node = _lookup_schema_node(schema, dot_path)
-    if node is None:
-        return ""
-    return node.get("x-meta", {}).get("help", "")
-
-
-def _mask_value(value: object, sensitive: bool) -> str:
-    """Return a display string for a value, masking if sensitive."""
-    if sensitive:
-        return '"***"'
-    return repr(value)
-
-
-def _dot_path_from_json_path(path: list) -> str:
-    """Convert a jsonschema error path (deque of keys) to a dot-separated string."""
-    return ".".join(str(p) for p in path)
-
-
-def _actual_type_name(value: object) -> str:
-    """Return a human-readable type name for a JSON value."""
-    if isinstance(value, bool):
-        return "boolean"
-    if isinstance(value, int):
-        return "integer"
-    if isinstance(value, float):
-        return "number"
-    if isinstance(value, str):
-        return "string"
-    if isinstance(value, list):
-        return "array"
-    if isinstance(value, dict):
-        return "object"
-    if value is None:
-        return "null"
-    return type(value).__name__
-
-
-def _apply_field_default(data: dict, dot_path: str) -> None:
-    """Remove the invalid value at *dot_path* so the loader falls back to defaults.
-
-    Only handles top-level and one-level nested paths (e.g. ``agent.provider``).
-    """
-    parts = dot_path.split(".")
-    if len(parts) == 1:
-        data.pop(parts[0], None)
-    elif len(parts) == 2:
-        section = data.get(parts[0])
-        if isinstance(section, dict):
-            section.pop(parts[1], None)
-
-
-# ── Validated-data cache ──
-#
-# KiroClawConfig.load() is called on per-message / per-request hot paths (skill
-# triggering, context build, dashboard handlers). The expensive part is NOT the
-# dataclass construction — it is reading config.json (+ config.local.json),
-# json.loads, _deep_merge, and the full jsonschema.validate against the whole
-# config schema. We cache ONLY that validated, merged dict, keyed on a cheap
-# fingerprint (path + st_mtime_ns + st_size + st_mode) of both files. On a cache
-# hit load() still builds fresh dataclasses from a deep copy, so the 100+ callers
-# that mutate the returned config in place (settings handlers, the write-back
-# migration) never corrupt the shared cache. mtime-keying (not a blind TTL)
-# means a runtime edit — e.g. via the dashboard settings handler that calls
-# save() — is reflected on the very next load(); save() also invalidates eagerly.
-_CONFIG_CACHE_LOCK = threading.Lock()
-# (fingerprint, deep-copyable validated data dict)
-_CONFIG_CACHE: tuple[tuple, dict] | None = None
-
-
 def _config_fingerprint() -> tuple:
     """Cheap signature of the config files — changes whenever either is edited.
 
@@ -1134,135 +1047,22 @@ def _config_fingerprint() -> tuple:
 def _cached_validated_data() -> dict | None:
     """Return a deep copy of the cached validated config dict, or None on miss.
 
-    The deep copy is mandatory: load() and its callers mutate the returned
-    structure (the write-back migration adds a default agent; settings handlers
-    assign nested fields), so the cached original must never be handed out.
+    Thin wrapper over the :class:`~kiro_claw.config.validation.ConfigCache`:
+    the fingerprint is computed here (``_config_fingerprint`` stays in this
+    module because it reads ``config_path()``/``config_local_path()``, which the
+    test suite patches as ``kiro_claw.config.loader.config_path``).
     """
-    global _CONFIG_CACHE
-    fp = _config_fingerprint()
-    with _CONFIG_CACHE_LOCK:
-        if _CONFIG_CACHE is not None and _CONFIG_CACHE[0] == fp:
-            return copy.deepcopy(_CONFIG_CACHE[1])
-    return None
+    return _CONFIG_CACHE.get(_config_fingerprint())
 
 
 def _store_validated_data(data: dict, fp: tuple) -> None:
-    """Cache a deep copy of *data* under fingerprint *fp*.
-
-    *fp* MUST be the fingerprint captured BEFORE the files were read (by
-    ``load()``), not a fresh stat. If a write lands between the read and this
-    store, *fp* describes the pre-write file, so it won't match the post-write
-    on-disk stat — the next ``load()`` misses and re-reads rather than serving
-    the stale content we just read. Re-statting here instead would cache old
-    content under the new file's fingerprint (a read->store TOCTOU) and serve
-    it as a false hit until the file changed again.
-    """
-    global _CONFIG_CACHE
-    with _CONFIG_CACHE_LOCK:
-        _CONFIG_CACHE = (fp, copy.deepcopy(data))
+    """Cache a deep copy of *data* under fingerprint *fp* (see ConfigCache.store)."""
+    _CONFIG_CACHE.store(data, fp)
 
 
 def _invalidate_config_cache() -> None:
     """Drop the cached validated config (called after save()/write-back)."""
-    global _CONFIG_CACHE
-    with _CONFIG_CACHE_LOCK:
-        _CONFIG_CACHE = None
-
-
-def _validate_config_data(data: dict) -> dict:
-    """Validate *data* against the config JSON Schema.
-
-    Logs warnings for any issues found and mutates *data* in-place to
-    remove invalid values (so the loader falls back to field defaults).
-    Always returns *data* — never raises.
-    """
-    if not _HAS_JSONSCHEMA:
-        return data
-
-    # Lazy import to avoid circular import at module level
-    from kiro_claw.config.schema import JSON_SCHEMA, SCHEMA_REGISTRY
-
-    # 1. Detect unrecognized top-level keys
-    known_top_keys = {e.path for e in SCHEMA_REGISTRY if "." not in e.path and e.path != "*"}
-    unknown = sorted(set(data.keys()) - known_top_keys)
-    if unknown:
-        logger.warning("Config: unrecognized top-level keys: %s", ", ".join(unknown))
-
-    # 2. Detect deprecated fields and log warnings
-    for entry in SCHEMA_REGISTRY:
-        if not entry.deprecated:
-            continue
-        parts = entry.path.split(".")
-        # Check if the deprecated key is present in data
-        node = data
-        found = True
-        for p in parts:
-            if isinstance(node, dict) and p in node:
-                node = node[p]
-            else:
-                found = False
-                break
-        if found:
-            logger.warning(
-                "Config: deprecated field '%s': %s",
-                entry.path,
-                entry.help,
-            )
-
-    # 3. Normalize case-insensitive enum fields before validation
-    agent = data.get("agent")
-    if isinstance(agent, dict) and isinstance(agent.get("log_level"), str):
-        agent["log_level"] = agent["log_level"].upper()
-
-    # 4. Run jsonschema validation
-    try:
-        jsonschema.validate(data, JSON_SCHEMA)
-    except jsonschema.ValidationError:
-        # Collect all errors (including nested ones)
-        validator_cls = jsonschema.validators.validator_for(JSON_SCHEMA)
-        validator = validator_cls(JSON_SCHEMA)
-        for err in validator.iter_errors(data):
-            dot_path = _dot_path_from_json_path(err.absolute_path)
-            if not dot_path:
-                # Root-level schema error — skip
-                continue
-
-            sensitive = _is_sensitive_path(JSON_SCHEMA, dot_path)
-            value = err.instance
-            display_val = _mask_value(value, sensitive)
-
-            # Determine error type
-            if err.validator == "enum":
-                allowed = err.schema.get("enum", [])
-                logger.warning(
-                    "Config: enum violation at '%s': " "allowed values %s, got %s; using default",
-                    dot_path,
-                    allowed,
-                    display_val,
-                )
-                _apply_field_default(data, dot_path)
-            elif err.validator == "type":
-                expected = err.schema.get("type", "unknown")
-                actual = _actual_type_name(value)
-                logger.warning(
-                    "Config: type mismatch at '%s': "
-                    "expected %s, got %s (value: %s); using default",
-                    dot_path,
-                    expected,
-                    actual,
-                    display_val,
-                )
-                _apply_field_default(data, dot_path)
-            else:
-                # Generic validation error
-                logger.warning(
-                    "Config: validation error at '%s': %s; using default",
-                    dot_path,
-                    err.message,
-                )
-                _apply_field_default(data, dot_path)
-
-    return data
+    _CONFIG_CACHE.clear()
 
 
 # Channel activation modes

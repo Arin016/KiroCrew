@@ -7,12 +7,14 @@ hypothesis for property-based testing.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import re
 import typing
 
 from hypothesis import given
 from hypothesis import strategies as st
 
+from kiro_claw.config import schema as _schema_module
 from kiro_claw.config.loader import (
     AgentConfig,
     DashboardConfig,
@@ -530,3 +532,55 @@ class TestAgentWorkspaceBindingsSchema:
         assert ms_ap.get("type") == "object"
         assert "description" in ms_ap.get("properties", {})
         assert "embedding_provider" in ms_ap.get("properties", {})
+
+
+class TestFieldTypeResolution:
+    """Pin the get_type_hints-based field-type resolution (replaced eval()).
+
+    Schema generation resolves dataclass field annotations via
+    ``typing.get_type_hints(cls)`` against each class's own module namespace,
+    not by ``eval()``-ing annotation strings against the loader module globals.
+    These tests guard against a silent regression where a field type fails to
+    resolve and falls back to the catch-all ``str``/``"string"`` JSON type.
+    """
+
+    # Fields whose declared type is NOT a plain ``str`` — they must resolve to
+    # their real JSON type, never silently degrade to "string".
+    _NON_STRING_FIELDS: list[tuple[str, str]] = [
+        ("slack.tracking_channels", "array"),
+        ("slack.reactions", "object"),
+        ("slack.trusted_bot_ids", "array"),
+        ("agent.subagent_cwd_allowed_roots", "array"),
+        ("memory.semantic_keys", "array"),
+        ("slack_channels", "object"),
+        ("session.timeout_secs", "integer"),
+        ("session.pool_size", "integer"),
+    ]
+
+    def test_non_string_fields_resolve_to_real_types(self) -> None:
+        by_path = {e.path: e for e in SCHEMA_REGISTRY}
+        for path, expected in self._NON_STRING_FIELDS:
+            entry = by_path.get(path)
+            assert entry is not None, f"missing schema entry for {path}"
+            assert entry.type == expected, (
+                f"{path}: type resolved to {entry.type!r}, expected {expected!r} "
+                f"— a 'string' here usually means field-type resolution silently "
+                f"fell back (regression of the get_type_hints fix)"
+            )
+
+    def test_schema_module_does_not_reach_into_loader_namespace(self) -> None:
+        # The eval()-against-loader-globals coupling has been removed. Guard
+        # against its reintroduction so schema generation stays self-contained.
+        src = inspect.getsource(_schema_module)
+        assert "vars(_loader_mod)" not in src, "schema must not eval() against the loader namespace"
+        assert "eval(" not in src, "schema field-type resolution must not use eval()"
+
+    def test_nested_dataclass_fields_resolve_as_objects(self) -> None:
+        # dict[str, ChannelConfig] must resolve ChannelConfig as a nested object
+        # schema (additionalProperties), proving cross-module forward refs work
+        # through get_type_hints without the loader-namespace eval.
+        sc = JSON_SCHEMA["properties"].get("slack_channels", {})
+        assert sc.get("type") == "object"
+        ap = sc.get("additionalProperties", {})
+        assert isinstance(ap, dict) and ap.get("type") == "object"
+        assert "properties" in ap and len(ap["properties"]) > 0

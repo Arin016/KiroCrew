@@ -115,7 +115,7 @@ def _optional_inner(tp: type) -> tuple[type, bool]:
         # ``X | None`` (PEP 604) has origin ``types.UnionType`` on 3.10+
         origin is not None and getattr(origin, "__name__", "") == "UnionType"
     ):
-        args = [a for a in typing.get_args(tp) if a is not type(None)]
+        args = [a for a in typing.get_args(tp) if a is not type(None)]  # noqa: E721
         if len(args) == 1 and len(typing.get_args(tp)) == 2:
             return args[0], True
     return tp, False
@@ -142,27 +142,17 @@ def _default_for_field(f: dataclasses.Field) -> object:  # type: ignore[type-arg
     return None
 
 
-def _resolve_field_type(f: dataclasses.Field) -> type:  # type: ignore[type-arg]
-    """Resolve the runtime type for a dataclass field.
+def _build_field_schema(
+    f: dataclasses.Field,  # type: ignore[type-arg]
+    resolved_type: type | None,
+) -> dict:
+    """Build a JSON Schema property dict for a single dataclass field.
 
-    With ``from __future__ import annotations``, ``f.type`` is a string.
-    We resolve it by looking up the type hints on the owning class via
-    ``typing.get_type_hints()``, but since we don't have the owning class
-    here we use ``eval()`` against the loader module's namespace.
+    *resolved_type* is the field's concrete runtime type as resolved by the
+    caller via ``typing.get_type_hints()`` on the owning class. It is ``None``
+    only if hint resolution failed for the whole class, in which case we fall
+    back to ``str`` (matching the historical ``eval``-failure fallback).
     """
-    import kiro_claw.config.loader as _loader_mod
-
-    tp = f.type
-    if isinstance(tp, str):
-        try:
-            tp = eval(tp, vars(_loader_mod))  # noqa: S307
-        except Exception:
-            return str  # fallback
-    return tp  # type: ignore[return-value]
-
-
-def _build_field_schema(f: dataclasses.Field) -> dict:  # type: ignore[type-arg]
-    """Build a JSON Schema property dict for a single dataclass field."""
     meta: dict = dict(f.metadata) if f.metadata else {}
     label: str = meta.get("label", f.name)
     help_text: str = meta.get("help", "")
@@ -171,7 +161,7 @@ def _build_field_schema(f: dataclasses.Field) -> dict:  # type: ignore[type-arg]
     deprecated: bool = meta.get("deprecated", False)
     enum_values: list | None = meta.get("enum", None)
 
-    tp = _resolve_field_type(f)
+    tp: type = resolved_type if resolved_type is not None else str
     schema: dict = {}
 
     if _is_dataclass_type(tp):
@@ -220,10 +210,34 @@ def _build_field_schema(f: dataclasses.Field) -> dict:  # type: ignore[type-arg]
 
 
 def _build_object_schema(cls: type) -> dict:
-    """Build a JSON Schema ``object`` node for a dataclass type."""
+    """Build a JSON Schema ``object`` node for a dataclass type.
+
+    Field annotations are strings under ``from __future__ import annotations``,
+    so we resolve them with ``typing.get_type_hints(cls)`` — which evaluates
+    each annotation against *the dataclass's own module globals + localns*. This
+    keeps the resolution self-contained (no reaching into the loader module's
+    namespace) and lets schema generation consume the DTOs one-directionally.
+
+    Failure mode note: ``get_type_hints`` resolves a class's annotations as a
+    unit, so if any single annotation is unresolvable the whole call raises and
+    every field in *this* class degrades to ``str`` (the ``except`` below) —
+    broader than the prior per-field annotation-string fallback, which dropped
+    only the offending field. This is acceptable because such a failure signals
+    a genuine annotation bug (a forward ref to a name that does not exist in the
+    class's module), which should be fixed rather than silently half-resolved;
+    and resolution never reaches across modules the way the old loader-namespace
+    approach did. All config DTOs resolve cleanly today.
+    """
+    try:
+        hints = typing.get_type_hints(cls)
+    except Exception:
+        # A bad annotation strings-out this class's schema rather than crashing
+        # generation. See the failure-mode note above.
+        hints = {}
+
     props: dict = {}
     for f in fields(cls):
-        props[f.name] = _build_field_schema(f)
+        props[f.name] = _build_field_schema(f, hints.get(f.name))
 
     return {
         "type": "object",
