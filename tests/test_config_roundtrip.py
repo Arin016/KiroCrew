@@ -1,8 +1,8 @@
 """Tests that KiroClawConfig.save() preserves all dataclass fields.
 
 Regression test for the bug where to_dict() omitted secretary,
-taskrunner, orchestrator, and skills — causing save() to silently
-drop them from config.json.
+taskrunner, orchestrator, skills, and tunnel — causing save() to
+silently drop them from config.json.
 """
 
 from __future__ import annotations
@@ -79,3 +79,13 @@ def test_save_load_roundtrip_skills(cfg_file):
 
     raw = json.loads(cfg_file.read_text(encoding="utf-8"))
     assert raw["skills"]["max_triggered"] == 5
+
+
+def test_save_load_roundtrip_tunnel(cfg_file):
+    """Tunnel config must survive a save/load cycle."""
+    cfg = KiroClawConfig()
+    cfg.tunnel.enabled = True
+    cfg.save()
+
+    raw = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert raw["tunnel"]["enabled"] is True

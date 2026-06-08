@@ -2208,6 +2208,7 @@ class KiroClawConfig:
             "memory": asdict(self.memory),
             "slack": asdict(self.slack),
             "dashboard": asdict(self.dashboard),
+            "tunnel": asdict(self.tunnel),
             "hooks": self.hooks,
             "agents": {name: asdict(agent_cfg) for name, agent_cfg in self.agents.items()},
             "default_agent": self.default_agent,
@@ -2222,12 +2223,12 @@ class KiroClawConfig:
             "orchestrator": asdict(self.orchestrator),
             "cron_history": asdict(self.cron_history),
             "skills": asdict(self.skills),
+            "snapshot_dir": self.snapshot_dir,
             "timezone": self.timezone,
             "auto_update": self.auto_update,
         }
-        # External registries (only serialize if non-empty)
-        if self.registries:
-            d["registries"] = [asdict(r) for r in self.registries]
+        # External registries (always serialized so save() round-trips the field)
+        d["registries"] = [asdict(r) for r in self.registries]
         # Preserve per-channel activation settings on round-trip
         slack_section = d.setdefault("slack", {})
         if self.slack_channels:
