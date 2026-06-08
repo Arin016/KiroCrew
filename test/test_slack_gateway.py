@@ -3359,3 +3359,87 @@ class TestCronSlackDeliveryFailure:
         assert result == "result"
         # Dashboard should have been notified about the Slack failure
         assert ds.notify.call_count >= 2  # once for result, once for slack failure
+
+
+class TestDeliverCronResponse:
+    """_deliver_cron_response — Slack delivery of post-subagent cron output (Mesh-1892)."""
+
+    def _orch_with_slack(self):
+        orch = _make_orchestrator(owner_id="U_OWNER")
+        orch.sessions = _mock_sessions()
+        slack = MagicMock()
+        slack.post_message = AsyncMock()
+        slack.open_dm = AsyncMock(return_value="D_OWNER")
+        orch.slack = slack
+        return orch, slack
+
+    @pytest.mark.asyncio
+    async def test_posts_to_stored_channel_and_thread(self):
+        orch, slack = self._orch_with_slack()
+        orch.sessions.get_channel = MagicMock(return_value="C123")
+        orch.sessions.get_thread = MagicMock(return_value="T456")
+
+        posted = await orch._deliver_cron_response("cron:job1", "hello world")
+
+        assert posted is True
+        slack.post_message.assert_awaited_once()
+        args = slack.post_message.call_args.args
+        assert args[0] == "C123"
+        assert "hello world" in args[1]
+        assert args[2] == "T456"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_owner_dm(self):
+        orch, slack = self._orch_with_slack()
+        # No stored channel → open owner DM. A stale thread_ts from another
+        # channel must be dropped (invalid in a DM).
+        orch.sessions.get_thread = MagicMock(return_value="T_STALE")
+        posted = await orch._deliver_cron_response("cron:job1", "hi")
+
+        assert posted is True
+        slack.open_dm.assert_awaited_once_with("U_OWNER")
+        assert slack.post_message.call_args.args[0] == "D_OWNER"
+        assert slack.post_message.call_args.args[2] is None
+
+    @pytest.mark.asyncio
+    async def test_noop_when_silent(self):
+        orch, slack = self._orch_with_slack()
+        orch.sessions.get_channel = MagicMock(return_value="C123")
+
+        posted = await orch._deliver_cron_response("cron:job1", "hi", silent=True)
+
+        assert posted is False
+        slack.post_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_noop_when_text_blank(self):
+        orch, slack = self._orch_with_slack()
+        orch.sessions.get_channel = MagicMock(return_value="C123")
+
+        posted = await orch._deliver_cron_response("cron:job1", "   ")
+
+        assert posted is False
+        slack.post_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_redacts_before_posting(self):
+        # Defense-in-depth: the helper must redact at the Slack boundary even
+        # if the caller already redacted (security-controls).
+        orch, slack = self._orch_with_slack()
+        orch.sessions.get_channel = MagicMock(return_value="C123")
+        with (
+            patch(
+                "kiro_claw.slack.gateway.redact_exfiltration_urls",
+                return_value=("urlsafe", []),
+            ) as rurl,
+            patch(
+                "kiro_claw.slack.gateway.redact_credentials",
+                return_value=("REDACTED", []),
+            ) as rcred,
+        ):
+            posted = await orch._deliver_cron_response("cron:job1", "tok http://evil.example")
+
+        assert posted is True
+        rurl.assert_called_once()
+        rcred.assert_called_once()
+        assert "REDACTED" in slack.post_message.call_args.args[1]

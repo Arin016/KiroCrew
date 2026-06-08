@@ -788,6 +788,38 @@ class GatewayOrchestrator:
                     raise
         return None  # unreachable but satisfies type checker
 
+    async def _deliver_cron_response(
+        self, parent_key: str, text: str, *, silent: bool = False
+    ) -> bool:
+        """Deliver a cron session's post-subagent response to Slack (Mesh-1892).
+
+        When a cron session spawns subagents via ``spawn_run``, the agent's
+        synthesized response was only appended to the dashboard notification
+        body and never posted to Slack — making subagent delegation useless in
+        cron contexts. This routes that response to the channel/thread the cron
+        originally posted in (stored on the session at delivery time), falling
+        back to the owner's DM. No-op when silent, when Slack is unavailable,
+        or when no channel can be resolved.
+        """
+        if silent or self.slack is None or not text.strip():
+            return False
+        assert self.sessions is not None
+        channel = self.sessions.get_channel(parent_key)
+        thread_ts = self.sessions.get_thread(parent_key)
+        if not channel and self._owner_id:
+            channel = await self._open_dm_with_retry(self._owner_id, parent_key)
+            thread_ts = None  # a thread_ts from another channel is invalid in a DM
+        if not channel:
+            logger.warning("Cron %s: no channel resolved for subagent response", parent_key)
+            return False
+        # Defense-in-depth: redact at the Slack boundary so this helper is safe
+        # even if a future caller forgets to pre-redact (security-controls).
+        text, _ = redact_exfiltration_urls(text)
+        text, _ = redact_credentials(text)
+        for part in split_message(to_slack_mrkdwn(text), limit=_CRON_MSG_LIMIT):
+            await self.slack.post_message(channel, part, thread_ts)
+        return True
+
     async def _init_cron(self) -> None:
         """Initialize and start the cron service."""
 
@@ -2396,6 +2428,17 @@ class GatewayOrchestrator:
                     cron_response, _ = redact_credentials(cron_response)
                     body = f"{body}\n\n{cron_response}"
                     logger.info("Subagent %s → cron session %s", info.id, parent_key)
+                    # Mesh-1892: also deliver the synthesized response to Slack.
+                    # Previously it only reached the dashboard notification body.
+                    try:
+                        await self._deliver_cron_response(
+                            parent_key, cron_response, silent=info.silent
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Subagent %s: failed to deliver cron response to Slack",
+                            info.id,
+                        )
                 # Reset only when no subagents running AND no injections pending
                 still_running = self.subagent_mgr and any(
                     a.parent_session_key == parent_key and a.id != info.id
