@@ -1,4 +1,4 @@
-"""Tests for ``test/harness.py`` — gateway-spawning context manager.
+"""Tests for ``kiro_claw.testing.harness`` — gateway-spawning context manager.
 
 Most tests exercise the harness's internal helpers in isolation with a
 stand-in for ``subprocess.Popen``. Spawning a real gateway takes 5–15s
@@ -19,7 +19,8 @@ from typing import Optional
 from unittest.mock import patch
 
 import pytest
-from harness import (
+
+from kiro_claw.testing.harness import (
     DEFAULT_READY_TIMEOUT,
     READY_PREFIX,
     GatewayHandle,
@@ -76,11 +77,13 @@ def test_ready_line_parses_valid_payload() -> None:
 
 def test_ready_line_skips_lines_before_ready() -> None:
     """Pre-READY chatter (e.g. ``Created default config``) must not break parsing."""
-    fake = FakePopen([
-        b"Some startup log\n",
-        b"Another line\n",
-        f'{READY_PREFIX}{{"port": 1, "token": "t", "pid": 1, "home": "/h"}}\n'.encode(),
-    ])
+    fake = FakePopen(
+        [
+            b"Some startup log\n",
+            b"Another line\n",
+            f'{READY_PREFIX}{{"port": 1, "token": "t", "pid": 1, "home": "/h"}}\n'.encode(),
+        ]
+    )
 
     result = _wait_for_ready_line(fake, timeout=5.0, stderr_buffer=[])  # type: ignore[arg-type]
 
@@ -146,12 +149,12 @@ def test_ready_line_timeout_fires_when_subprocess_silent_but_alive() -> None:
 @pytest.mark.parametrize(
     "bad_payload",
     [
-        "not-json",                          # invalid JSON
-        "[1, 2, 3]",                         # valid JSON but not a dict
-        '"just-a-string"',                   # valid JSON, scalar
-        '{"foo": 1}',                        # dict, missing both required keys
-        '{"port": 1}',                       # dict, missing token
-        '{"token": "t", "pid": 1}',          # dict, missing port
+        "not-json",  # invalid JSON
+        "[1, 2, 3]",  # valid JSON but not a dict
+        '"just-a-string"',  # valid JSON, scalar
+        '{"foo": 1}',  # dict, missing both required keys
+        '{"port": 1}',  # dict, missing token
+        '{"token": "t", "pid": 1}',  # dict, missing port
     ],
 )
 def test_ready_line_raises_on_malformed_payload(bad_payload: str) -> None:
@@ -213,7 +216,7 @@ def test_terminate_falls_back_to_sigkill() -> None:
         ready_line = proc.stdout.readline()
         assert ready_line == b"READY\n", f"child did not signal ready: {ready_line!r}"
 
-        with patch("harness.TERMINATE_GRACE_SECONDS", 0.5):
+        with patch("kiro_claw.testing.harness.TERMINATE_GRACE_SECONDS", 0.5):
             _terminate_process_group(proc)
         assert proc.poll() is not None
         # On POSIX, SIGKILL is signal 9; returncode is -9 when killed.
@@ -291,8 +294,12 @@ def test_spawn_feature_gateway_happy_path() -> None:
         captured_cmd.append(cmd)
         return fake_proc
 
-    with patch("harness.subprocess.Popen", side_effect=fake_popen), patch(
-        "harness._terminate_process_group", side_effect=fake_terminate
+    with (
+        patch("kiro_claw.testing.harness.subprocess.Popen", side_effect=fake_popen),
+        patch(
+            "kiro_claw.testing.harness._terminate_process_group",
+            side_effect=fake_terminate,
+        ),
     ):
         with spawn_feature_gateway(fixture="empty") as handle:
             assert handle.port == 51234
@@ -336,8 +343,9 @@ def test_spawn_feature_gateway_crons_opt_in() -> None:
         captured_cmd.append(cmd)
         return fake_proc
 
-    with patch("harness.subprocess.Popen", side_effect=fake_popen), patch(
-        "harness._terminate_process_group"
+    with (
+        patch("kiro_claw.testing.harness.subprocess.Popen", side_effect=fake_popen),
+        patch("kiro_claw.testing.harness._terminate_process_group"),
     ):
         with spawn_feature_gateway(fixture="empty", crons=True):
             pass
@@ -368,9 +376,13 @@ def test_parallel_spawns_get_distinct_homes_and_ports() -> None:
         ]
     )
 
-    with patch(
-        "harness.subprocess.Popen", side_effect=lambda *a, **kw: next(procs)
-    ), patch("harness._terminate_process_group"):
+    with (
+        patch(
+            "kiro_claw.testing.harness.subprocess.Popen",
+            side_effect=lambda *a, **kw: next(procs),
+        ),
+        patch("kiro_claw.testing.harness._terminate_process_group"),
+    ):
         with spawn_feature_gateway(fixture="empty") as outer:
             with spawn_feature_gateway(fixture="empty") as inner:
                 # Distinct ports propagated from the (different) READY lines.

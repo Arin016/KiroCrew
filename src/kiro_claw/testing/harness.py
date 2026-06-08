@@ -13,7 +13,7 @@ not the recommended path).
 
 Usage:
 
-    from test.harness import spawn_feature_gateway
+    from kiro_claw.testing.harness import spawn_feature_gateway
 
     with spawn_feature_gateway() as handle:
         # drive Playwright / urllib / etc against handle.url
@@ -35,7 +35,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Iterator, Optional
+from typing import IO, Any, Iterator, Optional
 
 # 60 s default — config init + MCP probe + dashboard bind takes meaningful
 # time on slow machines. Plan suggested 30 s; 60 s gives headroom without
@@ -96,9 +96,10 @@ class GatewaySpawnError(RuntimeError):
 def _resolve_workspace_src() -> Path:
     """Locate the in-repo ``src/`` so PYTHONPATH points at feature-branch code.
 
-    Walks up from this file's location (``<pkg>/test/harness.py``) to find
-    the package root, then returns ``<pkg>/src``. We deliberately avoid
-    using the system-installed ``kiroclaw`` for two reasons:
+    Walks up from this file's location
+    (``<pkg>/src/kiro_claw/testing/harness.py``) to find the package's
+    ``src/`` directory. We deliberately avoid using the system-installed
+    ``kiroclaw`` for two reasons:
 
     1. We're testing the *current* code, not whatever the developer has
        on PATH. A stale Toolbox install would silently mask regressions.
@@ -106,14 +107,13 @@ def _resolve_workspace_src() -> Path:
        i.e. when the system install doesn't yet have ``--test-mode``.
     """
     here = Path(__file__).resolve()
-    # <pkg>/test/harness.py -> <pkg>
-    pkg_root = here.parent.parent
-    src = pkg_root / "src"
+    # <pkg>/src/kiro_claw/testing/harness.py -> <pkg>/src
+    src = here.parent.parent.parent
     if not (src / "kiro_claw" / "__init__.py").exists():
         raise GatewaySpawnError(
             f"Could not locate kiro_claw package at {src}. "
-            f"Harness expects test/harness.py at <pkg>/test/, with the "
-            f"source tree at <pkg>/src/kiro_claw/."
+            f"Harness expects harness.py at <pkg>/src/kiro_claw/testing/, "
+            f"with the source tree at <pkg>/src/kiro_claw/."
         )
     return src
 
@@ -123,7 +123,7 @@ def _wait_for_ready_line(
     *,
     timeout: float,
     stderr_buffer: list[bytes],
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Read stdout until we see ``KIROCLAW_READY:{...}`` or hit the timeout.
 
     Uses ``selectors`` rather than ``stdout.readline()`` so the deadline is
@@ -185,7 +185,7 @@ def _wait_for_ready_line(
                 line = line_bytes.decode("utf-8", errors="replace").strip()
                 if line.startswith(READY_PREFIX):
                     try:
-                        payload = json.loads(line[len(READY_PREFIX):])
+                        payload = json.loads(line[len(READY_PREFIX) :])
                     except json.JSONDecodeError as exc:
                         raise GatewaySpawnError(
                             f"malformed {READY_PREFIX} line: {line!r} ({exc})"

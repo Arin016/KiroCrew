@@ -7,8 +7,8 @@ line, and verify core functionality works end-to-end.
 Gated behind ``KIROCLAW_E2E=1`` because they spawn a real gateway process
 (5-15s startup). CI runs them via ToD shared fleet; local devs opt in.
 
-Requires: ``test/harness.py`` (CR-275699038, merged) and composable CLI
-flags (CR-274772612, merged).
+Requires: ``kiro_claw.testing.harness`` (CR-275699038, merged) and composable
+CLI flags (CR-274772612, merged).
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ def gateway():
     No state cleanup between tests; each test must be tolerant of
     prior-test side effects, or use a fresh per-test gateway.
     """
-    from harness import spawn_feature_gateway
+    from kiro_claw.testing.harness import spawn_feature_gateway
 
     with spawn_feature_gateway(fixture="minimal", approval="reads") as handle:
         yield handle
