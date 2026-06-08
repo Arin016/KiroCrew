@@ -324,7 +324,29 @@ def _read_message(stdin) -> dict[str, Any] | None:
                     sep = raw.readline()
                     if sep.strip() == b"":
                         break
-                body = raw.read(length)
+                # Read exactly `length` bytes. A single raw.read(length) may
+                # return fewer bytes than requested on a partial read (the
+                # RawIOBase/socket contract permits short reads), which would
+                # truncate the body, fail json.loads, and desync the stream for
+                # every subsequent message. Loop until we have the full body or
+                # hit EOF. (io.BufferedReader blocks for the full count today, so
+                # this is robustness hardening for non-buffered/custom streams.)
+                chunks: list[bytes] = []
+                remaining = length
+                while remaining > 0:
+                    chunk = raw.read(remaining)
+                    if not chunk:
+                        break  # EOF before the full body arrived
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                if remaining > 0:
+                    # EOF before the declared body fully arrived — the message is
+                    # incomplete. Discard it explicitly rather than handing a truncated
+                    # body to json.loads, which could otherwise return a message the
+                    # sender never finished transmitting if the partial bytes happen to
+                    # be valid JSON (e.g. a well-formed prefix).
+                    continue
+                body = b"".join(chunks)
                 return json.loads(body.decode("utf-8"))
             except (ValueError, json.JSONDecodeError):
                 continue
