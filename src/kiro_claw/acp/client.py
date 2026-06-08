@@ -1588,6 +1588,15 @@ class AcpClient:
             line = await asyncio.wait_for(self._process.stdout.readline(), timeout=timeout)
         except asyncio.TimeoutError:
             return None
+        except (ValueError, asyncio.LimitOverrunError) as exc:
+            # A single JSON-RPC line exceeded the stdout StreamReader buffer
+            # (_STDOUT_BUFFER_LIMIT). asyncio leaves the stream in a corrupted
+            # state after an overrun — every subsequent read also fails — so
+            # treat the process as dead and let session recovery respawn it
+            # instead of freezing the session on an unhandled exception.
+            raise AcpProcessDied(
+                f"ACP stdout line exceeded {_STDOUT_BUFFER_LIMIT}-byte buffer: {exc}"
+            ) from exc
 
         if not line:
             # EOF — process likely died or closing. Check and avoid busy-loop.

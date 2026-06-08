@@ -747,6 +747,29 @@ class TestAcpClientReadMessage:
         msg = await client._read_message(timeout=1.0)
         assert msg is None
 
+    @pytest.mark.asyncio
+    async def test_read_buffer_overrun_raises_process_died(self, tmp_path):
+        """A line exceeding the stdout buffer must surface as AcpProcessDied.
+
+        asyncio's StreamReader.readline() raises ValueError when a single
+        line exceeds its limit; the stream is corrupted afterward. The read
+        loop must convert that into AcpProcessDied so session recovery
+        respawns the process instead of the session freezing.
+        """
+        client = AcpClient(work_dir=tmp_path)
+
+        mock_process = MagicMock()
+        mock_stdout = AsyncMock()
+        mock_stdout.readline = AsyncMock(
+            side_effect=ValueError("Separator is not found, and chunk exceed the limit")
+        )
+        mock_process.stdout = mock_stdout
+        mock_process.returncode = None
+        client._process = mock_process
+
+        with pytest.raises(AcpProcessDied):
+            await client._read_message(timeout=1.0)
+
 
 class TestAcpClientExtractChunk:
     def test_extract_text_chunk(self, tmp_path):
