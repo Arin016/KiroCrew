@@ -343,7 +343,14 @@ def run_script_sandboxed(
     file_path_str, func_name = resolve_script_path(script_path)
 
     launcher = (
-        "import sys, json, os, types\n"
+        # Import sys first (builtin, unshadowable) and strip the launcher's own
+        # /tmp dir from sys.path[0] before importing json/os/types/kiro_claw —
+        # otherwise a stray sibling like /tmp/struct.py or /tmp/os.py shadows the
+        # stdlib and crashes the cron launcher on startup. The user-script dir is
+        # re-added explicitly below, after the strip.
+        "import sys\n"
+        "sys.path[:] = [p for p in sys.path if p not in ('', sys.path[0])]\n"
+        "import json, os, types\n"
         "from kiro_claw.cron_script import ScriptContext, Skip, Done, Report\n"
         f"sys.path.insert(0, os.path.dirname({file_path_str!r}))\n"
         f"mod = types.ModuleType('_cron_script')\n"

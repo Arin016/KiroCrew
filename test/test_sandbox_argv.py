@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -160,6 +161,117 @@ class TestBuildLauncherScript:
         script = _build_launcher_script("strict")
         for prefix in _SENSITIVE_ENV_PREFIXES:
             assert prefix in script
+
+    def test_strips_self_dir_before_ctypes_import(self):
+        """The sys.path hardening must run before the first shadowable import.
+
+        Regression guard for the /tmp/struct.py shadowing outage: ctypes does
+        ``from struct import calcsize`` at import time, so the launcher dir must
+        be removed from sys.path *before* ``import ctypes``.
+        """
+        script = _build_launcher_script("strict")
+        assert "sys.path[:]" in script
+        assert script.index("sys.path[:]") < script.index("import ctypes")
+        # sys must be imported first (it is a builtin and cannot be shadowed).
+        assert script.index("import sys") < script.index("sys.path[:]")
+
+
+class TestLauncherStdlibShadowing:
+    """End-to-end: a sibling /tmp/struct.py must NOT crash the launcher.
+
+    Hermetic — every poison file lives in pytest's isolated tmp_path subdir,
+    never bare /tmp, so the running gateway's launcher (sys.path[0] == /tmp) is
+    never affected by these tests.
+    """
+
+    # A drop-in stdlib name that ctypes -> struct.calcsize depends on.
+    _POISON = "def calcsize(*a, **k):\n    raise RuntimeError('shadowed!')\n"
+
+    def _run_launcher(self, script_dir: Path) -> subprocess.CompletedProcess:
+        """Write the launcher into script_dir and run it with no args.
+
+        With no command argv the launcher exits immediately after its imports
+        and the ``if not argv`` guard — it never forks/unshares/execs. So this
+        exercises exactly the import path that the outage crashed on, and
+        nothing else.
+        """
+        launcher = script_dir / "launcher.py"
+        launcher.write_text(_build_launcher_script("standard"))
+        return subprocess.run(
+            [sys.executable, str(launcher)],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    def test_prelude_removes_script_dir_from_syspath(self, tmp_path):
+        """Deterministic proof of the mechanism, independent of struct caching.
+
+        Runs the launcher's real generated prelude (everything up to the first
+        ``import ctypes``) from a tmp dir, then dumps sys.path. The script's own
+        directory — which CPython puts at sys.path[0] — must be gone afterwards.
+        Unlike the struct e2e below, this does not depend on whether the
+        interpreter pre-imports ``struct``, so it always discriminates the fix.
+        """
+        script = _build_launcher_script("standard")
+        prelude = script[: script.index("import ctypes")]
+        probe = tmp_path / "launcher.py"
+        probe.write_text(prelude + "import json\nprint(json.dumps(sys.path))\n")
+        result = subprocess.run(
+            [sys.executable, str(probe)],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        import json
+        paths = json.loads(result.stdout.strip().splitlines()[-1])
+        assert str(tmp_path) not in paths, f"script dir not stripped: {paths}"
+        assert "" not in paths, f"cwd entry not stripped: {paths}"
+
+    def test_launcher_survives_sibling_struct_py(self, tmp_path):
+        """With the fix, a sibling struct.py is ignored and imports succeed."""
+        (tmp_path / "struct.py").write_text(self._POISON)
+        result = self._run_launcher(tmp_path)
+        # No-args launcher exits via sys.exit("...: no command given") AFTER all
+        # imports succeed — so a clean "no command given" proves imports passed.
+        assert "calcsize" not in result.stderr, result.stderr
+        # The launcher binds Linux-only libc symbols (unshare) at module import
+        # time; on non-Linux hosts it dies there, AFTER the shadowable stdlib
+        # imports the fix guards, but BEFORE the argv guard. That still proves
+        # the imports survived the poison; only the argv guard is unreachable.
+        if "unshare" in result.stderr and "no command given" not in result.stderr:
+            pytest.skip("launcher needs Linux-only libc unshare; not this host")
+        assert "no command given" in result.stderr, (
+            f"launcher did not reach the argv guard; stderr={result.stderr!r}"
+        )
+
+    def test_control_unstripped_launcher_would_crash(self, tmp_path):
+        """Sanity: prove the poison is real — an un-hardened launcher DOES crash.
+
+        Strips the hardening line so we don't silently ship a test that passes
+        for the wrong reason. The poison only bites if the interpreter imports
+        ``struct`` fresh (not already cached at startup); if a given build
+        interpreter pre-caches ``struct``, the shadowing can't be demonstrated
+        here, so we skip rather than red the build for an unrelated reason.
+        """
+        (tmp_path / "struct.py").write_text(self._POISON)
+        hardened = _build_launcher_script("standard")
+        unstripped = "\n".join(
+            ln for ln in hardened.splitlines() if "sys.path[:]" not in ln
+        )
+        launcher = tmp_path / "launcher.py"
+        launcher.write_text(unstripped)
+        result = subprocess.run(
+            [sys.executable, str(launcher)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if "no command given" in result.stderr:
+            pytest.skip(
+                "interpreter pre-caches 'struct'; sibling shadowing not "
+                "reproducible here — positive test still guards the fix"
+            )
+        # Otherwise the shadowed struct broke the ctypes import -> launcher
+        # died before reaching the argv guard, proving the poison is real.
+        assert ("calcsize" in result.stderr) or ("shadowed!" in result.stderr), (
+            f"expected a struct-shadowing import failure; stderr={result.stderr!r}"
+        )
 
 
 class TestSandboxExecArgv:

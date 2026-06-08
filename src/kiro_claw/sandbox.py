@@ -277,10 +277,20 @@ def _build_launcher_script(sandbox_level: str = "strict") -> str:
 
     return f'''#!/usr/bin/env python3
 """Namespace sandbox launcher — spawned by KiroClaw."""
+import sys
+# Harden against stdlib shadowing. This launcher runs as
+# ``python /tmp/kiroclaw_sandbox_*.py``, so CPython prepends the script's own
+# directory (sys.path[0], typically /tmp) to sys.path. A stray sibling module
+# left in that directory by another process — /tmp/struct.py, /tmp/os.py — then
+# shadows the real stdlib and crashes the imports below (seen in the wild:
+# "ImportError: cannot import name 'calcsize' from '/tmp/struct.py'", which
+# kills the agent subprocess on spawn). ``sys`` is a builtin and cannot be
+# shadowed, so importing it first is safe; drop the launcher dir (and any cwd
+# "" entry) before importing anything that resolves from the filesystem.
+sys.path[:] = [p for p in sys.path if p not in ("", sys.path[0])]
 import ctypes
 import ctypes.util
 import os
-import sys
 import tempfile
 
 _CLONE_NEWUSER = 0x10000000
