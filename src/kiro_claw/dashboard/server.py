@@ -514,6 +514,7 @@ async def start_dashboard(
     )
     app.router.add_get("/api/aim/mcp/registry", handlers.api_aim_mcp_registry)
     app.router.add_post("/api/chat/slots/{slot}/resume", chat.api_chat_slot_resume)
+    app.router.add_post("/api/chat/takeover", chat.api_chat_takeover)
     app.router.add_post("/api/chat/slots/{slot}/approve", chat.api_chat_slot_approve)
     app.router.add_post("/api/chat/slots/{slot}/plan-action", chat.api_chat_plan_action)
     app.router.add_post("/api/chat/mode", chat.api_chat_mode)
