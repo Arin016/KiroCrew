@@ -56,6 +56,44 @@ from kiro_claw.validation import _AGENT_NAME_RE
 logger = logging.getLogger(__name__)
 
 
+def _sweep_stale_permissions(slot: "_ChatSlot") -> None:
+    """Mark unresolved permissions from prior turns as stale.
+
+    Called once at turn-start, before the new user message is appended.
+    Safe: if we're starting a new turn, any prior unresolved permission
+    is definitionally orphaned — the LLM that requested it is gone.
+
+    Note: if the same slot is open in multiple tabs, an in-flight pending
+    approval in tab A may be marked stale by a turn-start in tab B. The
+    failure mode is benign (user re-clicks approve); single-tab use is
+    unaffected.
+    """
+    for msg in slot.messages:
+        if msg.get("role") != "permission":
+            continue
+        try:
+            cls = json.loads(msg.get("cls", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(cls, dict):
+            # Valid JSON but not an object (e.g. [], "x", 123, null) — cannot
+            # carry a "resolved" key; skip rather than raise TypeError and
+            # abort the whole sweep. Mirrors parse_cls_meta() in state.py.
+            continue
+        if "resolved" in cls:
+            continue
+        cls["resolved"] = "stale"
+        msg["cls"] = json.dumps(cls)
+        slot._dirty = True
+        sel().log_api_access(
+            caller="gateway",
+            operation="permission.resolve_stale",
+            outcome="allowed",
+            source="turn_start_sweep",
+            resources=cls.get("request_id", ""),
+        )
+
+
 async def api_chat(request: web.Request) -> web.StreamResponse:
     """POST /api/chat — send message to a slot, stream response via SSE."""
     state: DashboardState = request.app["state"]
@@ -146,6 +184,9 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
 
     slot._has_reader = not ws_mode  # Only block SSE broadcast if HTTP SSE reader
     slot._file_changes = []  # Reset file-change accumulator for the new turn
+    # ── Sweep orphaned permissions from prior turns ──
+    _sweep_stale_permissions(slot)
+
     slot._browse_mode = bool(body.get("browse"))
     if slot._browse_mode and "[BROWSE]" not in message:
         message = "[BROWSE] " + message
