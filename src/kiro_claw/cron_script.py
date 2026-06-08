@@ -115,6 +115,9 @@ class ScriptContext:
         kwargs_str = redact_exfiltration_urls(redact_credentials(kwargs_str)[0])[0]
         safe_kwargs = json.loads(kwargs_str) if kwargs else {}
         payload: dict[str, Any] = {"text": safe_text, **safe_kwargs}
+        # caller_session lets session="origin" resolve to the chat that created this
+        # cron; hard-assigned (not setdefault) so a script cannot spoof another session
+        payload["caller_session"] = f"cron:{self.job.id}"
         result = self._post("/api/send-message", payload)
         if "error" in result:
             raise RuntimeError(f"notify() failed: {result['error']}")
