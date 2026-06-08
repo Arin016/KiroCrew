@@ -1696,7 +1696,8 @@
         "reactions": {},
         "reactions_enabled": true,
         "home_tab_sessions_per_kind": 5,
-        "use_tunnel_url": false
+        "use_tunnel_url": false,
+        "challenge_redirect_enabled": false
       }
     },
     {
@@ -1918,6 +1919,22 @@
       ],
       "label": "Use Tunnel URL in Slack",
       "help": "When true, dashboard links posted to Slack (DM and channel challenge) use the tunnel URL if one is active. When false (default), Slack links always use the configured dashboard origin or host:port. Disabled by default until the tunnel mechanism is scaled for general use.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
+    },
+    {
+      "path": "slack.challenge_redirect_enabled",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [
+        "slack"
+      ],
+      "label": "Challenge Redirect Enabled",
+      "help": "When true, all Slack messages are redirected to a dashboard session before the agent processes them (posture-verified access). Default false (opt-in phase).",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": false

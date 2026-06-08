@@ -95,14 +95,13 @@ def _ensure_event_loop():
 def _disable_challenge_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin challenge-redirect OFF in tests so messages reach the agent.
 
-    This matches the production default (the redirect flow is opt-in via
-    KIROCLAW_ENABLE_CHALLENGE=1), but is pinned explicitly so a stray env var
-    in the test environment can't flip it on. Tests that specifically exercise
-    challenge behavior re-enable it via monkeypatch or patch.
+    This matches the production default (challenge_redirect_enabled=false).
+    Tests that specifically exercise challenge behavior override this via
+    monkeypatch on the config.
     """
     import kiro_claw.slack.events as _events_mod
 
-    monkeypatch.setattr(_events_mod, "_CHALLENGE_REDIRECT_ENABLED", False)
+    monkeypatch.setattr(_events_mod, "_is_challenge_redirect_enabled", lambda: False)
 
 
 @pytest.fixture(autouse=True)

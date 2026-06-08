@@ -276,45 +276,42 @@ class TestSendChannelChallenge:
 
 
 class TestChallengeRedirectDefault:
-    """The challenge-and-redirect gate is OFF by default (the redirect flow is
-    not yet ready); operators opt in with KIROCLAW_ENABLE_CHALLENGE=1."""
+    """Challenge-redirect is controlled by slack.challenge_redirect_enabled config."""
 
-    def _reload_events(self):
+    def _call_real_fn(self):
+        """Call the real _is_challenge_redirect_enabled, bypassing conftest patch."""
         import importlib
 
-        import kiro_claw.slack.events as ev
+        mod = importlib.import_module("kiro_claw.slack.events")
+        # Get the real function from the module's source (reload restores it)
+        mod = importlib.reload(mod)
+        return mod._is_challenge_redirect_enabled()
 
-        return importlib.reload(ev)
+    def test_disabled_when_config_false(self, monkeypatch):
+        from unittest.mock import MagicMock
 
-    def test_disabled_by_default_when_env_unset(self, monkeypatch):
-        monkeypatch.delenv("KIROCLAW_ENABLE_CHALLENGE", raising=False)
-        monkeypatch.delenv("KIROCLAW_DISABLE_CHALLENGE", raising=False)
-        try:
-            ev = self._reload_events()
-            assert ev._CHALLENGE_REDIRECT_ENABLED is False
-        finally:
-            self._reload_events()  # restore module to ambient env
+        mock_cfg = MagicMock()
+        mock_cfg.slack.challenge_redirect_enabled = False
+        monkeypatch.setattr("kiro_claw.config.KiroClawConfig.load", lambda: mock_cfg)
+        assert self._call_real_fn() is False
 
-    def test_enabled_only_with_explicit_opt_in(self, monkeypatch):
-        monkeypatch.setenv("KIROCLAW_ENABLE_CHALLENGE", "1")
-        try:
-            ev = self._reload_events()
-            assert ev._CHALLENGE_REDIRECT_ENABLED is True
-        finally:
-            monkeypatch.delenv("KIROCLAW_ENABLE_CHALLENGE", raising=False)
-            self._reload_events()
+    def test_enabled_when_config_true(self, monkeypatch):
+        from unittest.mock import MagicMock
 
-    def test_legacy_disable_var_no_longer_enables(self, monkeypatch):
-        # The old KIROCLAW_DISABLE_CHALLENGE var must NOT re-enable the gate —
-        # default is off, and only the positive opt-in turns it on.
-        monkeypatch.delenv("KIROCLAW_ENABLE_CHALLENGE", raising=False)
-        monkeypatch.setenv("KIROCLAW_DISABLE_CHALLENGE", "0")
-        try:
-            ev = self._reload_events()
-            assert ev._CHALLENGE_REDIRECT_ENABLED is False
-        finally:
-            monkeypatch.delenv("KIROCLAW_DISABLE_CHALLENGE", raising=False)
-            self._reload_events()
+        mock_cfg = MagicMock()
+        mock_cfg.slack.challenge_redirect_enabled = True
+        monkeypatch.setattr("kiro_claw.config.KiroClawConfig.load", lambda: mock_cfg)
+        assert self._call_real_fn() is True
+
+    def test_falls_back_to_default_on_config_error(self, monkeypatch):
+        """Config load failure returns dataclass default (fail-closed when forced)."""
+        monkeypatch.setattr(
+            "kiro_claw.config.KiroClawConfig.load",
+            lambda: (_ for _ in ()).throw(RuntimeError("corrupt")),
+        )
+        from kiro_claw.config.loader import SlackConfig
+
+        assert self._call_real_fn() == SlackConfig().challenge_redirect_enabled
 
 
 # -- Thread context in token (reconnect / auto-link) --

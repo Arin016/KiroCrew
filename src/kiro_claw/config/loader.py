@@ -763,6 +763,16 @@ class SlackConfig:
             tags=["slack"],
         ),
     )
+    challenge_redirect_enabled: bool = field(
+        default=False,
+        metadata=_meta(
+            "Challenge Redirect Enabled",
+            "When true, all Slack messages are redirected to a dashboard session "
+            "before the agent processes them (posture-verified access). "
+            "Default false (opt-in phase).",
+            tags=["slack"],
+        ),
+    )
 
 
 @dataclass
@@ -1828,6 +1838,9 @@ class KiroClawConfig:
                 },
                 reactions_enabled=bool(slack_data.get("reactions_enabled", True)),
                 use_tunnel_url=bool(slack_data.get("use_tunnel_url", False)),
+                challenge_redirect_enabled=bool(
+                    slack_data.get("challenge_redirect_enabled", False)
+                ),
             ),
             dashboard=DashboardConfig(
                 url=dashboard_data.get("url", ""),
