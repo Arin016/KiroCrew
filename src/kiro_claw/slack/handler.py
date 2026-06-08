@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -35,7 +36,13 @@ from kiro_claw.config.loader import ACTIVATION_REVIEW, KiroClawConfig, config_di
 from kiro_claw.context import ContextBuilder
 from kiro_claw.cron import CronService, compute_next_run_ts, format_schedule, get_local_tz
 from kiro_claw.history import ConversationLog, HistoryConsolidator
-from kiro_claw.hooks import HOOK_REPLY, TOOL_AUTO_APPROVE, TOOL_DENY, validate_file_path
+from kiro_claw.hooks import (
+    HOOK_REPLY,
+    TOOL_AUTO_APPROVE,
+    TOOL_DENY,
+    safe_read_file_bytes,
+    validate_file_path,
+)
 from kiro_claw.llm_helpers import save_conversation_turn
 from kiro_claw.midway import get_midway_status_line
 from kiro_claw.providers.base import (
@@ -483,6 +490,13 @@ _cached_default_agent: str | None = None  # None = not yet loaded from disk
 # Set via !ta command (thread-agent).
 _thread_agents: dict[str, str] = {}
 
+# Per-thread project directory overrides: session_key → absolute path.
+# Set via !project command.
+_thread_projects: dict[str, str] = {}
+
+# Guard set for _hydrate_thread_overrides to avoid repeated I/O per session.
+_hydrated_sessions: set[str] = set()
+
 # Set via !temporary modifier — thread-scoped temporary (blank-slate) mode.
 # Bounded LRU to prevent unbounded growth in long-running bots.
 _THREAD_TEMPORARY_MAX = 10_000
@@ -692,16 +706,78 @@ def _get_default_agent() -> str:
     return _cached_default_agent
 
 
+def _hydrate_thread_overrides(session_key: str, conversation_log: ConversationLog | None) -> None:
+    """Populate in-memory caches from conversation log metadata if not already set."""
+    if session_key in _hydrated_sessions:
+        return
+    _hydrated_sessions.add(session_key)
+    if not conversation_log:
+        return
+    try:
+        meta = conversation_log.get_metadata(session_key)
+    except Exception:
+        logger.debug("Failed to hydrate thread overrides for %s", session_key, exc_info=True)
+        return
+    if meta.get("agent"):
+        _thread_agents[session_key] = meta["agent"]
+    if meta.get("project"):
+        # Defense-in-depth: re-validate the persisted path at this input
+        # boundary. Conversation-log metadata is normally written through the
+        # guarded !project handler, but if it is ever corrupted or tampered
+        # with, a sensitive credential path (~/.aws, ~/.ssh, …) must never be
+        # loaded into the in-memory cache.
+        if not is_sensitive_path(meta["project"]):
+            _thread_projects[session_key] = meta["project"]
+        else:
+            logger.warning(
+                "Ignoring sensitive project path from thread metadata for %s",
+                session_key,
+            )
+
+
 def _get_agent_for_session(session_key: str) -> str:
     """Return agent for a session: thread override first, then global default."""
     return _thread_agents.get(session_key) or _get_default_agent()
 
 
-def _resolve_agent_name(name: str) -> str | None:
-    """Resolve an agent name to its internal kiro-cli name via suffix matching.
+def _discover_project_agents(project_dir: str | None) -> list[Path]:
+    """Return agent JSON files from <project_dir>/.kiro/ and .kiro/agents/."""
+    if not project_dir:
+        return []
+    if is_sensitive_path(project_dir):
+        return []
+    kiro_dir = Path(project_dir) / ".kiro"
+    if not kiro_dir.is_dir():
+        return []
+    specs = list(kiro_dir.glob("*.agent-spec.json"))
+    agents_dir = kiro_dir / "agents"
+    if agents_dir.is_dir():
+        specs.extend(agents_dir.glob("*.json"))
+    return sorted(specs, key=lambda f: f.stem)
 
+
+def _resolve_agent_name(name: str, project_dir: str | None = None) -> str | None:
+    """Resolve an agent name to its internal name via suffix matching.
+
+    Searches project-local .kiro/ first (if project_dir set), then ~/.kiro/agents/.
     Returns the resolved name, or None if not found.
     """
+    # Project-local agents take priority
+    for spec in _discover_project_agents(project_dir):
+        if spec.stem == name or spec.stem.replace(".agent-spec", "") == name:
+            # Fallback must strip the ".agent-spec" suffix: the match arm
+            # accepts both "<name>" and "<name>.agent-spec", so returning the
+            # raw stem would yield "<name>.agent-spec" — a name that won't
+            # resolve downstream. Use the cleaned stem in every fallback branch.
+            fallback = spec.stem.removesuffix(".agent-spec")
+            raw = safe_read_file_bytes(str(spec))
+            if raw is None:
+                return fallback
+            try:
+                return json.loads(raw.decode("utf-8")).get("name", fallback)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return fallback
+
     agents_dir = Path.home() / ".kiro" / "agents"
     jsons = (
         sorted(agents_dir.glob("*.json"), key=lambda f: (len(f.stem), f.stem))
@@ -1244,7 +1320,7 @@ async def _handle_slash_command(
             await slack.post_message(channel, "🔄 Reset to default agent.", reply_ts)
             await _add_phase_reaction(slack, channel, msg_ts, "done")
             return ""
-        resolved = _resolve_agent_name(agent_name)
+        resolved = _resolve_agent_name(agent_name, _thread_projects.get(session_key))
         if not resolved:
             agents_dir = Path.home() / ".kiro" / "agents"
             jsons = sorted(agents_dir.glob("*.json")) if agents_dir.is_dir() else []
@@ -1394,6 +1470,11 @@ async def _handle_slash_command(
         agent_name = parts[1]
         if agent_name.lower() in ("default", "off"):
             _thread_agents.pop(session_key, None)
+            if conversation_log:
+                try:
+                    conversation_log.update_metadata(session_key, {"agent": ""})
+                except Exception:
+                    logger.debug("Failed to clear agent in conversation log", exc_info=True)
             sel().log_tool_invocation(
                 session_key=session_key,
                 source="slack",
@@ -1406,7 +1487,7 @@ async def _handle_slash_command(
             await slack.post_message(channel, "🔄 Thread agent reset.", reply_ts)
             await _add_phase_reaction(slack, channel, msg_ts, "done")
             return ""
-        resolved = _resolve_agent_name(agent_name)
+        resolved = _resolve_agent_name(agent_name, _thread_projects.get(session_key))
         if not resolved:
             agents_dir = Path.home() / ".kiro" / "agents"
             jsons = sorted(agents_dir.glob("*.json")) if agents_dir.is_dir() else []
@@ -1416,6 +1497,11 @@ async def _handle_slash_command(
             )
             return ""
         _thread_agents[session_key] = resolved
+        if conversation_log:
+            try:
+                conversation_log.update_metadata(session_key, {"agent": resolved})
+            except Exception:
+                logger.debug("Failed to persist agent to conversation log", exc_info=True)
         sel().log_tool_invocation(
             session_key=session_key,
             source="slack",
@@ -1427,6 +1513,99 @@ async def _handle_slash_command(
         await sessions.remove(session_key)
         await slack.post_message(channel, f"🔄 Thread agent: *{resolved}*", reply_ts)
         await _add_phase_reaction(slack, channel, msg_ts, "done")
+        return ""
+
+    # ── !project <path> / !project off — thread-scoped agent-discovery dir ──
+    # NOTE: this only scopes which project-local .kiro agents are discoverable
+    # for !ta in this thread; it does NOT change the agent's working directory
+    # (cwd). Provider cwd plumbing is out of scope for this CR.
+    if cmd == "!project":
+        parts = cmd_text.split(maxsplit=1)
+        if len(parts) < 2:
+            current = _thread_projects.get(session_key, "")
+            msg = (
+                f"Thread agent-discovery project: `{current}`"
+                if current
+                else "No project set. Usage: `!project <path>` or `!project off`\n"
+                "Scopes which project-local `.kiro` agents `!ta` can find — "
+                "does not change the working directory."
+            )
+            await slack.post_message(channel, msg, reply_ts)
+            return ""
+        raw_path = parts[1].strip()
+        if raw_path.lower() in ("off", "clear", "reset"):
+            _thread_projects.pop(session_key, None)
+            if conversation_log:
+                try:
+                    conversation_log.update_metadata(session_key, {"project": ""})
+                except Exception:
+                    logger.debug("Failed to clear project in conversation log", exc_info=True)
+            sel().log_tool_invocation(
+                session_key=session_key,
+                source="slack",
+                tool_name="!project",
+                tool_kind="command",
+                outcome="project_cleared",
+                metadata={"user": user_id, "channel": channel},
+            )
+            await sessions.remove(session_key)
+            await slack.post_message(channel, "Thread project cleared.", reply_ts)
+            return ""
+        resolved = os.path.realpath(os.path.expanduser(raw_path))
+        if is_sensitive_path(resolved):
+            sel().log_tool_invocation(
+                session_key=session_key,
+                source="slack",
+                tool_name="!project",
+                tool_kind="command",
+                outcome="project_denied_sensitive",
+                metadata={"user": user_id, "channel": channel, "project": resolved},
+            )
+            await slack.post_message(
+                channel, "Cannot use sensitive path as project directory.", reply_ts
+            )
+            return ""
+        if not os.path.isdir(resolved):
+            sel().log_tool_invocation(
+                session_key=session_key,
+                source="slack",
+                tool_name="!project",
+                tool_kind="command",
+                outcome="project_denied_invalid",
+                metadata={"user": user_id, "channel": channel, "project": resolved},
+            )
+            await slack.post_message(channel, f"Not a directory: `{resolved}`", reply_ts)
+            return ""
+        _thread_projects[session_key] = resolved
+        if conversation_log:
+            try:
+                conversation_log.update_metadata(session_key, {"project": resolved})
+            except Exception:
+                logger.debug("Failed to persist project to conversation log", exc_info=True)
+        sel().log_tool_invocation(
+            session_key=session_key,
+            source="slack",
+            tool_name="!project",
+            tool_kind="command",
+            outcome="project_set",
+            metadata={"user": user_id, "channel": channel, "project": resolved},
+        )
+        await sessions.remove(session_key)
+        # Discover project-local agents
+        project_agents = _discover_project_agents(resolved)
+        agent_info = ""
+        if project_agents:
+            names = ", ".join(
+                f"`{s.stem.replace('.agent-spec', '') if '.agent-spec' in s.name else s.stem}`"
+                for s in project_agents
+            )
+            agent_info = f"\nAgents found: {names} — use `!ta <name>` to switch"
+        await slack.post_message(
+            channel,
+            f"Thread agent-discovery project: `{resolved}` "
+            f"(scopes `!ta` agent lookup, not the working directory){agent_info}",
+            reply_ts,
+        )
         return ""
 
     # ── !allowlist — multi-user access disabled ──
@@ -1479,23 +1658,18 @@ async def _handle_slash_command(
             if agent_name.lower() == "off":
                 agent_name = ""
             else:
-                agents_dir = Path.home() / ".kiro" / "agents"
-                if not agents_dir.is_dir():
-                    await slack.post_message(
-                        channel,
-                        "Cannot validate agent: agents directory not found.",
-                        reply_ts,
-                    )
-                    return ""
-                known = {f.stem for f in agents_dir.glob("*.json")}
-                if agent_name not in known:
-                    names = ", ".join(sorted(known)) if known else "(none found)"
+                resolved = _resolve_agent_name(agent_name, _thread_projects.get(session_key))
+                if not resolved:
+                    agents_dir = Path.home() / ".kiro" / "agents"
+                    jsons = sorted(agents_dir.glob("*.json")) if agents_dir.is_dir() else []
+                    names = ", ".join(sorted(f.stem for f in jsons)) if jsons else "(none found)"
                     await slack.post_message(
                         channel,
                         f"Unknown agent `{agent_name}`. Available: {names}",
                         reply_ts,
                     )
                     return ""
+                agent_name = resolved
             _persist_channel_config(channel, agent=agent_name)
             _reload_orch_cfg()
             sel().log_api_access(
@@ -1807,6 +1981,7 @@ async def handle_message(
     _t0 = time.monotonic()
     session_key = thread_ts or msg_ts
     reply_ts = thread_ts or msg_ts
+    _hydrate_thread_overrides(session_key, conversation_log)
 
     # ── Linked thread intercept: route to dashboard slot if linked ──
     if _dashboard_state and hasattr(_dashboard_state, "get_linked_slot"):
