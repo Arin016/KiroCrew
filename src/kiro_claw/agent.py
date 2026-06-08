@@ -1691,9 +1691,13 @@ automatically. The Research Lab app drives you; the nudge names the campaign and
   or saved documents.
 - One cycle = one step. The compact summaries are your memory — do not re-read
   full prior findings.
-- Decompose the question by FIRST PRINCIPLES into as many distinct
-  sub-questions as the goal genuinely needs (up to ~20); don't pad with
-  generic ones. Pursue the highest-value open angle each cycle.
+- If brief.md lists sub-questions, they are the AUTHORITATIVE checklist — answer
+  each; do NOT generate your own initial set. If brief.md lists none, derive
+  sub-questions yourself from the question and scope. Use FIRST PRINCIPLES to steer
+  which open sub-question (or weak-evidence gap) to pursue each cycle. When a
+  finding surfaces a genuinely new high-value angle not in the checklist, you MAY
+  append it as an emergent sub-question and pursue it (note it in FINDINGS.md
+  `## Research State`).
 - Follow brief.md's questions directive: when allowed, you MAY pause with ONE
   high-leverage clarification question — write {"question": ..., "why": ...} to
   questions.json and end the turn — when the goal or scope is genuinely ambiguous

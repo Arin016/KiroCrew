@@ -127,6 +127,8 @@ def _get_db() -> sqlite3.Connection:
         conn.execute("ALTER TABLE campaigns ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 0")
     if "parent_id" not in cols:
         conn.execute("ALTER TABLE campaigns ADD COLUMN parent_id TEXT")
+    if "scope_constraints" not in cols:
+        conn.execute("ALTER TABLE campaigns ADD COLUMN scope_constraints TEXT")
     conn.commit()
     return conn
 
@@ -251,12 +253,15 @@ def validate_campaign(config: dict) -> dict:
         clean_name = _redact_finding({"v": active["name"]})["v"]
         errors.append(f"Campaign '{clean_name}' is already active. Stop it first.")
 
+    n = len(config.get("sub_questions", []))
+    suggested_max_cycles = n + (n + 2) // 3 + 1 if n > 0 else 0
     return {
         "can_start": len(errors) == 0,
         "errors": errors,
         "warnings": warnings,
         "estimated_cycles": max_cycles,
         "estimated_duration_min": max_cycles * 2,
+        "suggested_max_cycles": suggested_max_cycles,
     }
 
 
@@ -391,15 +396,16 @@ def create_campaign(config: dict) -> dict:
     db = _get_db()
     db.execute("BEGIN")
     db.execute(
-        "INSERT INTO campaigns (id,name,question,sub_questions,sources,"
+        "INSERT INTO campaigns (id,name,question,sub_questions,sources,scope_constraints,"
         "max_cycles,idle_secs,success_criteria,auto_approve,parent_id,status,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             campaign_id,
             name,
             config["question"],
             json.dumps(config.get("sub_questions", [])),
             json.dumps(config.get("sources", [])),
+            json.dumps(config.get("scope_constraints", [])),
             config.get("max_cycles", 30),
             config.get("idle_secs", DEFAULT_IDLE_SECS),
             config.get("success_criteria") or None,
@@ -685,8 +691,8 @@ async def _launch_loop(request: web.Request, cid: str) -> None:
         return
     db = _get_db()
     row = db.execute(
-        "SELECT question, sub_questions, sources, max_cycles, idle_secs, success_criteria, "
-        "auto_approve FROM campaigns WHERE id = ?",
+        "SELECT question, sub_questions, sources, scope_constraints, max_cycles, idle_secs, "
+        "success_criteria, auto_approve FROM campaigns WHERE id = ?",
         (cid,),
     ).fetchone()
     db.close()
@@ -718,15 +724,38 @@ async def _launch_loop(request: web.Request, cid: str) -> None:
 
 
 def _write_brief(cid: str, row: Any) -> None:
-    """Write the campaign brief (raw question + sub-questions) the agent reads each cycle.
+    """Write the campaign brief — question, scope, and the authoritative
+    sub-question checklist the agent reads each cycle.
 
     Local file in the campaign dir (the agent's file-based interface) — not an
     external surface, so the user's own question text is written as-is.
     """
     subs = json.loads(row["sub_questions"] or "[]")
     srcs = json.loads(row["sources"] or "[]")
-    lines = ["# Research Brief", "", f"**Question:** {row['question']}", "", "**Sub-questions:**"]
-    lines += [f"- {s}" for s in subs] or ["- (none — derive your own from the question)"]
+    cols = row.keys()
+    constraints = (
+        json.loads(row["scope_constraints"] or "[]") if "scope_constraints" in cols else []
+    )
+    lines = ["# Research Brief", "", f"**Question:** {row['question']}", ""]
+    if constraints:
+        lines += ["## Scope & Constraints", ""]
+        lines += [
+            f"- {c.get('q', '')} → {c.get('a', '')}" for c in constraints if isinstance(c, dict)
+        ]
+        lines.append("")
+    if subs:
+        lines.append(
+            "**Sub-questions (authoritative checklist — answer each; do NOT invent your own "
+            "initial set). Items tagged _(emergent)_ were discovered mid-research:**"
+        )
+        for s in subs:
+            text = s.get("text", "") if isinstance(s, dict) else str(s)
+            origin = s.get("origin", "grill") if isinstance(s, dict) else "grill"
+            lines.append(f"- {text}" + (" _(emergent)_" if origin == "emergent" else ""))
+    else:
+        lines.append(
+            "**Sub-questions:** (none provided — derive your own from the question and scope)"
+        )
     lines += [
         "",
         f"**Sources allowed:** {', '.join(srcs) or 'any'}",
@@ -783,19 +812,64 @@ async def _handle_validate(request: web.Request) -> web.Response:
     return web.json_response(validate_campaign(body))
 
 
-_SUGGEST_PROMPT = (
-    "Propose sub-questions that make researching this question thorough — each "
-    "capturing a DISTINCT perspective or angle needed to investigate it well "
-    "(e.g. technical feasibility, trade-offs, alternatives, risks, cost, prior "
-    "art, stakeholder needs, success criteria). Reason from first principles: "
-    "fundamental, non-overlapping angles, not generic restatements. Output ONLY "
-    "a JSON array of concise sub-question strings (no prose), at most 20."
-    "\n\nQuestion: {q}"
+# --- Grill question tree ---
+# Node JSON contract (see grill-question-tree-design.md):
+#   { id, parent|null, kind: "root"|"clarifier"|"research", text,
+#     recommended (clarifier only), answer (clarifier only),
+#     origin: "grill"|"emergent" (research only), status }
+_MAX_GRILL_DEPTH = 4  # a node at this depth can no longer be expanded
+_GRILL_CHILD_CAP = 5  # max children returned per expand
+
+
+def _new_node_id() -> str:
+    return "n" + uuid.uuid4().hex[:8]
+
+
+def _node_depth(tree: list[dict], node_id: str) -> int:
+    """Depth of node_id (root=0). Returns -1 if node_id is not in the tree."""
+    by_id = {n["id"]: n for n in tree if isinstance(n, dict) and "id" in n}
+    if node_id not in by_id:
+        return -1
+    depth = 0
+    seen: set = set()
+    cur: dict | None = by_id[node_id]
+    while cur is not None and cur.get("parent") and cur["id"] not in seen:
+        seen.add(cur["id"])
+        depth += 1
+        cur = by_id.get(cur["parent"])
+    return depth
+
+
+_GRILL_EXPAND_PROMPT = (
+    "You are helping a user scope a research campaign by growing a question tree. "
+    "Reason from FIRST PRINCIPLES. Given the main question, the tree so far, and the "
+    "target node to expand, propose at most 5 children — the highest-value next nodes. "
+    "Each child is either:\n"
+    '  - "clarifier": a question to ASK THE USER to narrow scope or surface an unknown '
+    'they may not have considered; include a "recommended" best-guess answer.\n'
+    '  - "research": a well-formed, distinct sub-question the campaign should '
+    "investigate (use only when it is already a concrete research target).\n"
+    "Distinct, non-overlapping angles; no generic restatements. Output ONLY a JSON "
+    'array like [{"kind":"clarifier","text":"...","recommended":"..."},'
+    '{"kind":"research","text":"..."}].'
 )
 
 
-def _parse_subquestions(raw: str) -> list[str]:
-    """Extract a JSON array of sub-question strings from an LLM reply (cap 20)."""
+def _compact_tree(tree: list[dict]) -> str:
+    """One line per node (id/kind/text + answer) as LLM context."""
+    lines = []
+    for n in tree:
+        if not isinstance(n, dict):
+            continue
+        line = f"- [{n.get('id', '?')}] {n.get('kind', '?')}: {n.get('text', '')}"
+        if n.get("answer"):
+            line += f" → answered: {n['answer']}"
+        lines.append(line)
+    return "\n".join(lines) if lines else "(empty — this is the first round)"
+
+
+def _parse_grill_nodes(raw: str) -> list[dict]:
+    """Extract child node dicts {kind, text, recommended?} from an LLM reply."""
     start, end = raw.find("["), raw.rfind("]")
     if start < 0 or end <= start:
         return []
@@ -803,28 +877,92 @@ def _parse_subquestions(raw: str) -> list[str]:
         items = json.loads(raw[start : end + 1])
     except (json.JSONDecodeError, ValueError):
         return []
-    out = [str(s).strip() for s in items if isinstance(s, str) and s.strip()]
-    return out[:20]
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        text = str(it.get("text", "")).strip()
+        kind = it.get("kind")
+        if not text or kind not in ("clarifier", "research"):
+            continue
+        node = {"kind": kind, "text": text}
+        if kind == "clarifier":
+            node["recommended"] = str(it.get("recommended", "")).strip()
+        out.append(node)
+    return out
 
 
-async def _handle_suggest(request: web.Request) -> web.Response:
+async def _grill_expand_children(
+    pool: Any, question: str, tree: list[dict], node_id: str | None
+) -> list[dict]:
+    """Return raw child dicts {kind, text, recommended?} for the target node.
+
+    Uses the dedicated auto_research_llm_pool (CC worker is haiku-backed — the
+    fast model the grill wants); empty-on-failure so the UI degrades gracefully.
+    """
+    if pool is None:
+        return []
+    target = "the root question (propose the first round of children)"
+    if node_id is not None:
+        node = next((n for n in tree if isinstance(n, dict) and n.get("id") == node_id), None)
+        if node:
+            target = f"[{node_id}] {node.get('kind')}: {node.get('text', '')}"
+            ans = node.get("answer") or node.get("recommended")
+            if ans:
+                target += f" (answer: {ans})"
+    prompt = (
+        f"{_GRILL_EXPAND_PROMPT}\n\nMain question: {question}\n\n"
+        f"Tree so far:\n{_compact_tree(tree)}\n\nExpand: {target}"
+    )
+    try:
+        raw = await pool.send(prompt, timeout=18.0)
+    except Exception as exc:
+        logger.warning("auto_research grill expand failed: %s", exc)
+        return []
+    return _parse_grill_nodes(raw)
+
+
+async def _handle_grill_expand(request: web.Request) -> web.Response:
     if denied := _require_auth(request):
         return denied
     body = await request.json()
     question = (body.get("question") or "").strip()
     if len(question) < 20:
         return web.json_response({"error": "Question too short"}, status=400)
-    _audit("campaign_suggest", "*")
+    tree = body.get("tree") or []
+    node_id = body.get("node_id")
+    if not isinstance(tree, list):
+        return web.json_response({"error": "tree must be a list"}, status=400)
+    if node_id is not None:
+        depth = _node_depth(tree, node_id)
+        if depth < 0:
+            return web.json_response({"error": "Unknown node_id"}, status=400)
+        if depth >= _MAX_GRILL_DEPTH:
+            return web.json_response({"nodes": [], "reason": "max_depth"})
+    _audit("grill_expand", "*")
     pool = request.app.get("auto_research_llm_pool")
-    if pool is None:
-        return web.json_response({"sub_questions": []})
-    try:
-        raw = await pool.send(_SUGGEST_PROMPT.format(q=question), timeout=45.0)
-        subs = _parse_subquestions(raw)
-    except Exception as exc:
-        logger.warning("auto_research suggest failed: %s", exc)
-        subs = []
-    return web.json_response({"sub_questions": _redact_finding({"v": subs})["v"]})
+    raw = await _grill_expand_children(pool, question, tree, node_id)
+    nodes = []
+    for ch in raw[:_GRILL_CHILD_CAP]:
+        kind = ch.get("kind") if ch.get("kind") in ("clarifier", "research") else "research"
+        text = str(ch.get("text", "")).strip()
+        if not text:
+            continue
+        nodes.append(
+            {
+                "id": _new_node_id(),
+                "parent": node_id,
+                "kind": kind,
+                "text": text,
+                "recommended": (
+                    str(ch.get("recommended", "")).strip() if kind == "clarifier" else ""
+                ),
+                "answer": "",
+                "origin": "grill" if kind == "research" else "",
+                "status": "open",
+            }
+        )
+    return web.json_response(_redact_finding({"nodes": nodes}))
 
 
 async def _handle_create(request: web.Request) -> web.Response:
@@ -1088,7 +1226,7 @@ async def _handle_grill_tree(request: web.Request) -> web.Response:
 
 def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/apps/auto-research/validate", _handle_validate)
-    app.router.add_post("/api/apps/auto-research/suggest", _handle_suggest)
+    app.router.add_post("/api/apps/auto-research/grill/expand", _handle_grill_expand)
     app.router.add_post("/api/apps/auto-research/campaigns", _handle_create)
     app.router.add_get("/api/apps/auto-research/campaigns", _handle_list)
     app.router.add_get("/api/apps/auto-research/campaigns/{id}", _handle_get)
@@ -1101,7 +1239,7 @@ def register_routes(app: web.Application) -> None:
 
     async def _start_watchdog(_app: web.Application) -> None:
         global _watchdog_task
-        # Dedicated LLM pool for the suggest endpoint — isolated from the
+        # Dedicated LLM pool for the grill expand endpoint — isolated from the
         # Knowledge Library's pool so the two apps don't share workers.
         _app["auto_research_llm_pool"] = LLMPool(pool_size=1)
         _watchdog_task = asyncio.create_task(_watchdog_loop(_app))

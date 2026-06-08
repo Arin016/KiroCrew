@@ -276,23 +276,6 @@ class TestStatusEnum:
         assert {s.value for s in CampaignStatus} == expected
 
 
-class TestSuggestParse:
-    def test_parses_embedded_json_array(self):
-        from kiro_claw.apps.builtins.auto_research.handlers import _parse_subquestions
-
-        assert _parse_subquestions('here you go: ["a", "b", "c"] done') == ["a", "b", "c"]
-
-    def test_caps_at_20(self):
-        from kiro_claw.apps.builtins.auto_research.handlers import _parse_subquestions
-
-        assert len(_parse_subquestions(json.dumps([f"q{i}" for i in range(50)]))) == 20
-
-    def test_junk_returns_empty(self):
-        from kiro_claw.apps.builtins.auto_research.handlers import _parse_subquestions
-
-        assert _parse_subquestions("no array here") == []
-
-
 # --- Redaction ---
 class TestRedaction:
     def test_redact_finding_with_security_module(self):
@@ -486,30 +469,6 @@ class TestHTTPHandlers:
                 )
                 assert r.status == 200
                 assert (await r.json())["can_start"] is True
-
-    @pytest.mark.asyncio
-    async def test_suggest_uses_llm_pool(self, app, tmp_path: Path):
-        from aiohttp.test_utils import TestClient, TestServer
-
-        class _FakePool:
-            async def send(self, prompt: str, timeout: float = 0) -> str:
-                return '["What are the constraints?", "What alternatives exist?"]'
-
-            async def shutdown(self) -> None:
-                pass
-
-        async with TestClient(TestServer(app)) as c:
-            # Inject after startup so the on_startup hook's real pool is replaced.
-            app["auto_research_llm_pool"] = _FakePool()
-            r = await c.post(
-                "/api/apps/auto-research/suggest",
-                json={"question": "How should we design the caching layer for this service?"},
-            )
-            assert r.status == 200
-            assert (await r.json())["sub_questions"] == [
-                "What are the constraints?",
-                "What alternatives exist?",
-            ]
 
     @pytest.mark.asyncio
     async def test_nudge_resumes_needs_input(self, app, tmp_path: Path):
@@ -1396,3 +1355,247 @@ class TestWatchdogFindingHelpers:
         p = tmp_path / "cycle_001.json"
         p.write_text("not json{{{")
         assert h._read_finding_file(p) == {}
+
+
+# --- Grill question tree ---
+
+
+class TestGrillParse:
+    def test_parses_clarifier_and_research(self):
+        from kiro_claw.apps.builtins.auto_research.handlers import _parse_grill_nodes
+
+        raw = (
+            'ok: [{"kind":"clarifier","text":"Prod or explore?","recommended":"prod"},'
+            '{"kind":"research","text":"Durability?"}] done'
+        )
+        out = _parse_grill_nodes(raw)
+        assert out == [
+            {"kind": "clarifier", "text": "Prod or explore?", "recommended": "prod"},
+            {"kind": "research", "text": "Durability?"},
+        ]
+
+    def test_drops_bad_and_empty(self):
+        from kiro_claw.apps.builtins.auto_research.handlers import _parse_grill_nodes
+
+        raw = '[{"kind":"bogus","text":"x"},{"kind":"research","text":""},{"text":"no kind"}]'
+        assert _parse_grill_nodes(raw) == []
+
+    def test_garbage_returns_empty(self):
+        from kiro_claw.apps.builtins.auto_research.handlers import _parse_grill_nodes
+
+        assert _parse_grill_nodes("no json here") == []
+
+    def test_node_depth(self):
+        from kiro_claw.apps.builtins.auto_research.handlers import _node_depth
+
+        tree = [{"id": "n0", "parent": None}, {"id": "n1", "parent": "n0"}]
+        assert _node_depth(tree, "n0") == 0
+        assert _node_depth(tree, "n1") == 1
+        assert _node_depth(tree, "missing") == -1
+
+
+class TestGrillBrief:
+    def test_scope_block_checklist_and_origin(self, tmp_path: Path):
+        from kiro_claw.apps.builtins.auto_research import handlers as h
+
+        cfg = {
+            "question": "Should we migrate auth to BigWeaver?",
+            "sub_questions": [
+                {"text": "Durability model?", "origin": "grill"},
+                {"text": "Latency under load?", "origin": "emergent"},
+            ],
+            "sources": ["internal"],
+            "max_cycles": 7,
+            "scope_constraints": [{"q": "Prod or explore?", "a": "production"}],
+        }
+        cid = h.create_campaign(cfg)["id"]
+        (h.RESEARCH_DIR / cid).mkdir(parents=True, exist_ok=True)
+        db = h._get_db()
+        row = db.execute(
+            "SELECT question, sub_questions, sources, scope_constraints, max_cycles, "
+            "idle_secs, success_criteria, auto_approve FROM campaigns WHERE id=?",
+            (cid,),
+        ).fetchone()
+        db.close()
+        h._write_brief(cid, row)
+        brief = (h.RESEARCH_DIR / cid / "brief.md").read_text()
+        assert "## Scope & Constraints" in brief
+        assert "Prod or explore? → production" in brief
+        assert "authoritative checklist" in brief
+        assert "- Durability model?" in brief
+        assert "- Latency under load? _(emergent)_" in brief
+
+    def test_no_subquestions_brief_is_not_contradictory(self, tmp_path: Path):
+        from kiro_claw.apps.builtins.auto_research import handlers as h
+
+        cid = h.create_campaign(
+            {
+                "question": "Explore caching strategies for the service layer",
+                "sub_questions": [],
+                "sources": ["web"],
+                "max_cycles": 5,
+            }
+        )["id"]
+        (h.RESEARCH_DIR / cid).mkdir(parents=True, exist_ok=True)
+        db = h._get_db()
+        row = db.execute(
+            "SELECT question, sub_questions, sources, scope_constraints, max_cycles, "
+            "idle_secs, success_criteria, auto_approve FROM campaigns WHERE id=?",
+            (cid,),
+        ).fetchone()
+        db.close()
+        h._write_brief(cid, row)
+        brief = (h.RESEARCH_DIR / cid / "brief.md").read_text()
+        # With no sub-questions, the brief must NOT tell the agent "do NOT invent
+        # your own" (that contradicts deriving its own) and SHOULD invite deriving.
+        assert "do NOT invent your own" not in brief
+        assert "derive your own from the question and scope" in brief
+
+
+class TestGrillSuggestedCycles:
+    def test_suggested_max_cycles(self):
+        from kiro_claw.apps.builtins.auto_research.handlers import validate_campaign
+
+        v = validate_campaign(
+            {
+                "question": "Should we migrate auth to BigWeaver service?",
+                "sub_questions": [{"text": f"q{i}"} for i in range(4)],
+                "sources": ["internal"],
+                "max_cycles": 7,
+            }
+        )
+        assert v["suggested_max_cycles"] == 4 + (4 + 2) // 3 + 1  # == 7
+
+
+class TestGrillHTTP:
+    @pytest.fixture
+    def app(self, tmp_path: Path):
+        from aiohttp import web
+
+        from kiro_claw.apps.builtins.auto_research.handlers import register_routes
+
+        @web.middleware
+        async def _inject_user(request, handler):
+            request["user"] = "test-user"
+            return await handler(request)
+
+        with patch(
+            "kiro_claw.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"
+        ), patch(
+            "kiro_claw.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"
+        ):
+            a = web.Application(middlewares=[_inject_user])
+            register_routes(a)
+            yield a
+
+    @pytest.mark.asyncio
+    async def test_expand_initial_round_with_context(self, app):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        captured = {}
+
+        class _FakePool:
+            async def send(self, prompt: str, timeout: float = 0) -> str:
+                captured["prompt"] = prompt
+                return (
+                    '[{"kind":"clarifier","text":"Prod or explore?","recommended":"prod"},'
+                    '{"kind":"research","text":"Durability model?"}]'
+                )
+
+            async def shutdown(self) -> None:
+                pass
+
+        async with TestClient(TestServer(app)) as c:
+            app["auto_research_llm_pool"] = _FakePool()
+            r = await c.post(
+                "/api/apps/auto-research/grill/expand",
+                json={
+                    "question": "Should we migrate auth to BigWeaver service?",
+                    "tree": [],
+                    "node_id": None,
+                    "mode": "generate",
+                },
+            )
+            assert r.status == 200
+            nodes = (await r.json())["nodes"]
+            assert [n["kind"] for n in nodes] == ["clarifier", "research"]
+            assert all(n["id"] and n["parent"] is None for n in nodes)
+            assert nodes[0]["recommended"] == "prod"
+            assert nodes[1]["origin"] == "grill"
+            assert "first round" in captured["prompt"]
+
+    @pytest.mark.asyncio
+    async def test_expand_depth_cap(self, app):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        tree = [
+            {
+                "id": f"n{i}",
+                "parent": (f"n{i-1}" if i else None),
+                "kind": "clarifier",
+                "text": "q",
+                "answer": "a",
+            }
+            for i in range(5)
+        ]  # n4 is at depth 4
+        async with TestClient(TestServer(app)) as c:
+            r = await c.post(
+                "/api/apps/auto-research/grill/expand",
+                json={
+                    "question": "Should we migrate auth to BigWeaver service?",
+                    "tree": tree,
+                    "node_id": "n4",
+                    "mode": "generate",
+                },
+            )
+            body = await r.json()
+            assert body["nodes"] == [] and body["reason"] == "max_depth"
+
+    @pytest.mark.asyncio
+    async def test_expand_unknown_node_400(self, app):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(app)) as c:
+            r = await c.post(
+                "/api/apps/auto-research/grill/expand",
+                json={
+                    "question": "Should we migrate auth to BigWeaver service?",
+                    "tree": [],
+                    "node_id": "zz",
+                    "mode": "generate",
+                },
+            )
+            assert r.status == 400
+
+    @pytest.mark.asyncio
+    async def test_expand_redacts_returned_text(self, app):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        class _FakePool:
+            async def send(self, prompt: str, timeout: float = 0) -> str:
+                return '[{"kind":"research","text":"key AKIAIOSFODNN7EXAMPLE leaked"}]'
+
+            async def shutdown(self) -> None:
+                pass
+
+        async with TestClient(TestServer(app)) as c:
+            app["auto_research_llm_pool"] = _FakePool()
+            r = await c.post(
+                "/api/apps/auto-research/grill/expand",
+                json={
+                    "question": "Should we migrate auth to BigWeaver service?",
+                    "tree": [],
+                    "node_id": None,
+                    "mode": "generate",
+                },
+            )
+            assert "AKIAIOSFODNN7EXAMPLE" not in (await r.text())
+
+    @pytest.mark.asyncio
+    async def test_expand_requires_auth(self):
+        from kiro_claw.apps.builtins.auto_research.handlers import _handle_grill_expand
+
+        request = MagicMock()
+        request.get.return_value = None  # no authenticated user
+        resp = await _handle_grill_expand(request)
+        assert resp.status == 401
