@@ -1862,6 +1862,53 @@ class TestToSlackMrkdwnKeepTables:
         assert "```mermaid" not in result
 
 
+class TestMermaidSequenceArrows:
+    """Regression: dashed sequence-diagram arrows were rendered by a dead branch.
+
+    In ``_mermaid_sequence`` the dashed-arrow line was::
+
+        arrow = "⇠" if ">>" in arrow_type else "⇠"   # both branches identical
+
+    so (1) a dashed reply ``-->>`` and a dashed open ``-->`` rendered identically
+    (the message-type distinction Mermaid encodes was silently lost), and (2) both
+    pointed LEFT (``⇠``) while ``src``/``dst`` are laid out left-to-right, so the
+    arrow pointed back at the source — the opposite direction from the solid arrows
+    ``->>`` (``→``) and ``->`` (``⇢``) on the same diagram.
+    """
+
+    @staticmethod
+    def _seq(line: str) -> str:
+        from kiro_claw.slack.format import _mermaid_sequence
+
+        # _mermaid_sequence skips the first line ("sequenceDiagram")
+        return _mermaid_sequence("sequenceDiagram\n" + line)
+
+    def test_dashed_arrows_point_same_direction_as_solid(self):
+        # All four arrow types describe A talking to B; none should point back at A.
+        for at in ("->>", "-->>", "->", "-->"):
+            out = self._seq(f"A {at} B: msg")
+            assert "⇠" not in out, (
+                f"arrow_type {at!r} rendered a left-pointing '⇠' though layout is "
+                f"left-to-right (A→B): {out!r}"
+            )
+
+    def test_dashed_reply_distinct_from_dashed_open(self):
+        # '-->>' (dashed reply, has '>>') must not render identically to '-->'.
+        reply = self._seq("A -->> B: ok")
+        open_ = self._seq("A --> B: ping")
+        reply_glyph = reply.split("A ", 1)[1].split(" B", 1)[0]
+        open_glyph = open_.split("A ", 1)[1].split(" B", 1)[0]
+        assert reply_glyph != open_glyph, (
+            f"dashed reply '-->>' and dashed open '-->' render the same glyph "
+            f"{reply_glyph!r} — the '>>' distinction is lost"
+        )
+
+    def test_solid_arrows_unchanged(self):
+        # The fix must not alter the already-correct solid-arrow rendering.
+        assert "→" in self._seq("A ->> B: call")
+        assert "⇢" in self._seq("A -> B: note")
+
+
 class TestStreamingTablePreservation:
     """Tests that tables are preserved when using the streaming API path."""
 

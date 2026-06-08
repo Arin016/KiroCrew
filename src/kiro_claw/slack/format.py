@@ -302,9 +302,15 @@ def _mermaid_sequence(body: str) -> str:
         if not m:
             continue
         src, arrow_type, dst, msg = m.groups()
-        arrow = "→" if ">>" in arrow_type else "⇢"
+        # Mermaid arrows read left-to-right (src → dst), so the glyph must point
+        # toward dst. ">>" is a solid arrowhead; "--" marks a dashed (reply) line.
+        # Previously the dashed branch was "⇠ if … else ⇠": both branches identical,
+        # so dashed replies and dashed-open arrows rendered the same AND pointed back
+        # at the source. Keep the four arrow types visually distinct and rightward.
         if "--" in arrow_type:
-            arrow = "⇠" if ">>" in arrow_type else "⇠"
+            arrow = "⇒" if ">>" in arrow_type else "⤳"  # dashed reply vs dashed open
+        else:
+            arrow = "→" if ">>" in arrow_type else "⇢"  # solid reply vs solid open
         lines.append(f"  {src} {arrow} {dst}: {msg.strip()}")
     return "\n".join(lines) if lines else body
 
