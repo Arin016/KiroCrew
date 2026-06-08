@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import unicodedata
@@ -997,18 +998,20 @@ class ArtifactStore:
         )
 
     def _read_text(self, path: Path) -> str:
-        if is_sensitive_path(str(path)):
-            raise ArtifactError(f"refusing to read sensitive path: {path}")
-        return path.read_text(encoding="utf-8")
+        resolved = Path(os.path.realpath(path))
+        if is_sensitive_path(str(resolved)):
+            raise ArtifactError(f"refusing to read sensitive path: {resolved}")
+        return resolved.read_text(encoding="utf-8")
 
     def _write_text(self, path: Path, text: str) -> None:
-        if is_sensitive_path(str(path)):
-            raise ArtifactError(f"refusing to write sensitive path: {path}")
-        path.parent.mkdir(parents=True, exist_ok=True)
+        resolved = Path(os.path.realpath(path))
+        if is_sensitive_path(str(resolved)):
+            raise ArtifactError(f"refusing to write sensitive path: {resolved}")
+        resolved.parent.mkdir(parents=True, exist_ok=True)
         # Atomic write: tmp file + rename.
-        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp = resolved.with_suffix(resolved.suffix + ".tmp")
         tmp.write_text(text, encoding="utf-8")
-        tmp.replace(path)
+        tmp.replace(resolved)
 
     def _prune_versions(self, slug: str) -> None:
         versions_dir = self._artifact_dir(slug) / "versions"
