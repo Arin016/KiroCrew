@@ -462,7 +462,13 @@ _INIT_TIMEOUT = 240.0  # 4 min — MCP servers can be slow to initialize
 # but usually never sends a JSON-RPC response — MCP servers load
 # asynchronously.  Any late responses land in _buffer and are harmlessly
 # skipped by _process_message() during the next prompt read loop.
-_DRAIN_DURATION = 10.0  # drain MCP server init notifications (~3s observed)
+_DRAIN_DURATION = 10.0  # hard cap on draining MCP server init notifications
+# Idle early-exit: once no init notification has arrived for this long, MCP
+# servers have gone quiet and we stop draining instead of always waiting the full
+# _DRAIN_DURATION. The cap still bounds genuinely slow servers; the idle window
+# only short-circuits the common fast case (~3s observed), cutting time-to-first
+# -token on new sessions without risking a missed banner from an active server.
+_DRAIN_IDLE_EXIT = 1.5
 _DEFAULT_PROMPT_TIMEOUT = 7200.0  # 2 hours — allow very long tool execution
 _READ_TIMEOUT = 20.0
 # After streaming content, if no new data arrives for this many seconds,
@@ -1727,13 +1733,23 @@ class AcpClient:
         _reinject()
         raise AcpTimeoutError()
 
-    async def _drain_notifications(self, duration: float = _DRAIN_DURATION) -> None:
+    async def _drain_notifications(
+        self,
+        duration: float = _DRAIN_DURATION,
+        idle_exit: float = _DRAIN_IDLE_EXIT,
+    ) -> None:
         """Drain init notifications (buffered + live) and log MCP servers.
 
         Captures `_kiro.dev/mcp/oauth_request` into `_pending_oauth_requests` so
         callers can surface an Authorize prompt after `ensure_ready()` returns.
+
+        Exits early once no notification has arrived for ``idle_exit`` seconds
+        (MCP servers have gone quiet), bounded by the ``duration`` hard cap. This
+        avoids always waiting the full cap on the common fast path while still
+        giving genuinely slow servers up to ``duration`` to report in.
         """
         deadline = time.monotonic() + duration
+        last_activity = time.monotonic()
         drained = 0
         mcp_servers: list[str] = []
 
@@ -1785,13 +1801,28 @@ class AcpClient:
                 mcp_servers.append(name or msg.method or "unknown")
         self._mcp_notifications.clear()
 
-        while time.monotonic() < deadline:
-            remaining = deadline - time.monotonic()
+        while True:
+            # Single time snapshot per iteration so the deadline and idle checks
+            # can't diverge on a loaded host (CR feedback).
+            now = time.monotonic()
+            remaining = deadline - now
             if remaining <= 0:
                 break
+            # Early-exit once servers have been quiet for the idle window. Poll in
+            # idle-sized slices (capped by remaining) so we notice quiet promptly.
+            idle_remaining = idle_exit - (now - last_activity)
+            if idle_remaining <= 0:
+                break
             try:
-                read_msg = await self._read_message(timeout=min(remaining, 2.0))
-                if not read_msg or not read_msg.method:
+                read_msg = await self._read_message(
+                    timeout=min(remaining, idle_remaining, 2.0)
+                )
+                if not read_msg:
+                    continue
+                # Any received message counts as activity (servers still talking),
+                # resetting the idle window even if it carries no method.
+                last_activity = time.monotonic()
+                if not read_msg.method:
                     continue
                 drained += 1
                 _capture_oauth(read_msg)
