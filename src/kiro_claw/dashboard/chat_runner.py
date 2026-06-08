@@ -2423,6 +2423,16 @@ async def _run_chat(
                         _extract_and_redact_plan_metadata(assistant_text)
                     )
             _flush_segment(state, slot, assistant_text, broadcast=False)
+        elif _stop_reason != STOP_REASON_CANCELLED:
+            # Model returned an empty response — notify the user so they know
+            # the turn completed silently rather than appearing hung.
+            logger.warning("Empty model response for slot %s", slot.key)
+            _empty_msg = "⟳ Empty response — please retry."
+            slot.append("error", _empty_msg, "msg msg-err")
+            state.broadcast_ws(
+                "chat_message",
+                {"slot": slot.key, "role": "error", "content": _empty_msg},
+            )
         # Attach accumulated file changes to last assistant message before persist
         _flush_file_changes(slot)
         # Save to history and trigger memory consolidation
