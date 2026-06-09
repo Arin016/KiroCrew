@@ -92,6 +92,65 @@ class TestRedactCredentials:
         result, warnings = redact_credentials(text)
         assert result == text
 
+    # ── JSON-form credential redaction (regression) ──
+    # The key-value patterns required the key name to be immediately followed by
+    # `[:=]`, so JSON (`"aws_secret_access_key": "..."`) — where a closing quote
+    # sits between the key and the colon — was NOT matched and the secret leaked.
+    # JSON is one of the most common shapes credentials take in tool output/logs.
+
+    def test_redacts_json_secret_access_key(self) -> None:
+        text = '{"aws_secret_access_key": "ABCverysecret123"}'
+        result, warnings = redact_credentials(text)
+        assert "ABCverysecret123" not in result
+        assert warnings
+
+    def test_redacts_json_secret_no_space(self) -> None:
+        text = '{"aws_secret_access_key":"ABCverysecret123"}'
+        result, _ = redact_credentials(text)
+        assert "ABCverysecret123" not in result
+
+    def test_redacts_json_session_token(self) -> None:
+        text = '{"aws_session_token": "XYZtokenvalue789"}'
+        result, _ = redact_credentials(text)
+        assert "XYZtokenvalue789" not in result
+
+    def test_redacts_json_access_key_id(self) -> None:
+        text = '{"aws_access_key_id": "someAccessKeyIdValue"}'
+        result, _ = redact_credentials(text)
+        assert "someAccessKeyIdValue" not in result
+
+    def test_bare_keyvalue_still_redacted(self) -> None:
+        # Regression guard: the original bare forms must still work.
+        for text, secret in [
+            ("aws_secret_access_key=BAREsecret1", "BAREsecret1"),
+            ("aws_secret_access_key: BAREsecret2", "BAREsecret2"),
+            ("SecretAccessKey=BAREsecret3", "BAREsecret3"),
+        ]:
+            result, _ = redact_credentials(text)
+            assert secret not in result, f"bare form leaked: {text!r}"
+
+    def test_prose_mentioning_key_not_overredacted(self) -> None:
+        # The key name as ordinary prose (followed by a space/word, not [:=]) must
+        # not trigger redaction — guards against over-redaction from the new pattern.
+        text = "The aws_secret_access_key field is required for auth."
+        result, _ = redact_credentials(text)
+        assert result == text
+
+    def test_redacts_json_compact_no_overcapture(self) -> None:
+        """Compact JSON: only the secret value is redacted, not adjacent fields."""
+        text = '{"aws_secret_access_key":"SECRET","region":"us-east-1"}'
+        result, _ = redact_credentials(text)
+        assert "SECRET" not in result
+        assert '"region":"us-east-1"' in result  # adjacent field preserved
+
+    def test_multi_credential_json_both_redacted(self) -> None:
+        """Multiple credentials in one compact JSON object — both must be redacted."""
+        text = '{"aws_secret_access_key":"SECRET1","aws_session_token":"TOKEN2","region":"x"}'
+        result, _ = redact_credentials(text)
+        assert "SECRET1" not in result
+        assert "TOKEN2" not in result
+        assert '"region":"x"' in result
+
 
 class TestRedactCredentialsBase64:
     """Tests for base64-encoded credential detection."""

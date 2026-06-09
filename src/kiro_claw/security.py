@@ -366,9 +366,19 @@ def redact_exfiltration_urls(text: str) -> tuple[str, list[str]]:
 _CREDENTIAL_PATTERNS = re.compile(
     r"(?:"
     r"(?:AKIA|ASIA)[A-Z0-9]{16}"  # AWS access key ID
-    r"|(?:SecretAccessKey|aws_secret_access_key)\s*[:=]\s*\S+"
-    r"|(?:SessionToken|aws_session_token)\s*[:=]\s*\S+"
-    r"|(?:AccessKeyId|aws_access_key_id)\s*[:=]\s*\S+"
+    # key-value forms: tolerate an optional closing quote after the key name and an
+    # optional opening quote before the value so JSON (`"aws_secret_access_key": "v"`)
+    # is redacted, not just bare `key=v` / `key: v`. Without the `["']?` the closing
+    # quote in JSON sits between the key and `:` and defeats the match → secret leaks.
+    # The value class is [^\s"',}]+ (NOT \S+): \S+ is greedy and, in compact JSON
+    # like {"aws_secret_access_key":"SECRET","region":"x"}, swallows everything
+    # through the closing brace (`"`, `,`, `}` all match \S) — destroying adjacent
+    # fields and consuming a following credential key so it's never matched/counted.
+    # Stopping at JSON structural delimiters bounds the value while still matching
+    # bare key=value forms.
+    r'|(?:SecretAccessKey|aws_secret_access_key)["\']?\s*[:=]\s*["\']?[^\s"\',}]+'
+    r'|(?:SessionToken|aws_session_token)["\']?\s*[:=]\s*["\']?[^\s"\',}]+'
+    r'|(?:AccessKeyId|aws_access_key_id)["\']?\s*[:=]\s*["\']?[^\s"\',}]+'
     r"|BEGIN[\s](?:RSA|DSA|EC|OPENSSH)[\s]PRIVATE[\s]KEY"
     r"|xox[bpas]-[0-9a-zA-Z-]{10,}"  # Slack token
     r")",
