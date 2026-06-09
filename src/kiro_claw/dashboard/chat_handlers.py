@@ -1434,10 +1434,12 @@ async def api_chat_mode(request: web.Request) -> web.Response:
         if slot_key and slot_key in state._slots:
             state._slots[slot_key]._trust = False
             state._slots[slot_key]._trust_reads = True
+            state.sessions.set_approval_policy(f"dashboard:{slot_key}", "")
         else:
             for slot in state._slots.values():
                 slot._trust = False
                 slot._trust_reads = True
+                state.sessions.set_approval_policy(f"dashboard:{slot.key}", "")
         try:
             sel().log_api_access(
                 caller="dashboard:mode",
@@ -1454,6 +1456,7 @@ async def api_chat_mode(request: web.Request) -> web.Response:
             if slot_key not in state._slots:
                 return web.json_response({"ok": False, "error": "unknown slot"}, status=400)
             state._slots[slot_key]._trust = True
+            state.sessions.set_approval_policy(f"dashboard:{slot_key}", "auto")
             linked_ch = getattr(state._slots[slot_key], "_slack_channel", None)
             if mgr and linked_ch and linked_ch in mgr._channels:
                 mgr._channels[linked_ch].trusted = True
@@ -1461,6 +1464,7 @@ async def api_chat_mode(request: web.Request) -> web.Response:
         else:
             for slot in state._slots.values():
                 slot._trust = True
+                state.sessions.set_approval_policy(f"dashboard:{slot.key}", "auto")
             if mgr:
                 for ch in mgr._channels.values():
                     ch.trusted = True
@@ -1486,6 +1490,7 @@ async def api_chat_mode(request: web.Request) -> web.Response:
                 return web.json_response({"ok": False, "error": "unknown slot"}, status=400)
             state._slots[slot_key]._trust = False
             state._slots[slot_key]._trust_reads = False
+            state.sessions.set_approval_policy(f"dashboard:{slot_key}", "")
             linked_ch = getattr(state._slots[slot_key], "_slack_channel", None)
             if mgr and linked_ch and linked_ch in mgr._channels:
                 mgr._channels[linked_ch].trusted = False
@@ -1494,6 +1499,7 @@ async def api_chat_mode(request: web.Request) -> web.Response:
             for slot in state._slots.values():
                 slot._trust = False
                 slot._trust_reads = False
+                state.sessions.set_approval_policy(f"dashboard:{slot.key}", "")
             if mgr:
                 for ch in mgr._channels.values():
                     ch.trusted = False

@@ -3394,6 +3394,64 @@ class TestApiChatModePropagation:
         assert "dashboard:s2" in cleared
         assert "dashboard:s1" not in cleared
 
+    @pytest.mark.asyncio
+    async def test_trust_mode_propagates_approval_policy_to_session(self, tmp_path, monkeypatch):
+        """Trust mode must set session approval_policy='auto' so subagents inherit."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_claw.slack.handler.is_yolo_mode", lambda: False)
+        state = _make_state(tmp_path)
+        state.push_slots_update = MagicMock()
+        state.get_or_create_slot("s1")
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            await client.post("/api/chat/mode", json={"mode": "trust", "slot": "s1"})
+
+        state.sessions.set_approval_policy.assert_any_call("dashboard:s1", "auto")
+
+    @pytest.mark.asyncio
+    async def test_normal_mode_resets_approval_policy(self, tmp_path, monkeypatch):
+        """Normal mode must reset session approval_policy so subagents require approval."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_claw.slack.handler.is_yolo_mode", lambda: False)
+        state = _make_state(tmp_path)
+        state.push_slots_update = MagicMock()
+        state.get_or_create_slot("s1")
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            await client.post("/api/chat/mode", json={"mode": "normal", "slot": "s1"})
+
+        state.sessions.set_approval_policy.assert_any_call("dashboard:s1", "")
+
+    @pytest.mark.asyncio
+    async def test_trust_reads_mode_resets_approval_policy(self, tmp_path, monkeypatch):
+        """trust_reads must reset approval_policy (not auto-approve writes)."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_claw.slack.handler.is_yolo_mode", lambda: False)
+        state = _make_state(tmp_path)
+        state.push_slots_update = MagicMock()
+        state.get_or_create_slot("s1")
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            await client.post("/api/chat/mode", json={"mode": "trust_reads", "slot": "s1"})
+
+        state.sessions.set_approval_policy.assert_any_call("dashboard:s1", "")
+
+    @pytest.mark.asyncio
+    async def test_trust_mode_all_slots_propagates_approval_policy(self, tmp_path, monkeypatch):
+        """Trust without slot_key must set approval_policy on all slots."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_claw.slack.handler.is_yolo_mode", lambda: False)
+        state = _make_state(tmp_path)
+        state.push_slots_update = MagicMock()
+        state.get_or_create_slot("s1")
+        state.get_or_create_slot("s2")
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            await client.post("/api/chat/mode", json={"mode": "trust"})
+
+        state.sessions.set_approval_policy.assert_any_call("dashboard:s1", "auto")
+        state.sessions.set_approval_policy.assert_any_call("dashboard:s2", "auto")
+
 
 class TestApproveYoloPropagation:
     """api_chat_slot_approve with yolo action propagates policy to all slots."""
