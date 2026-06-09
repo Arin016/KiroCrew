@@ -2,5 +2,11 @@
 # Updated at the END of every sync run (Step 7). The meshclaw-sync skill bounds
 # the candidate set by these SHAs — see skills/meshclaw-sync/SKILL.md Step 1.
 # Format: "<branch> <sha>  # <date> <note>"
-beta ea6348d5      # 2026-06-09 batch-6: ported 3 (3862e8cb Bikini-Bottom persona, d6cdf8d9 self-update/gateway-restart skills, d40b9c52 cc-plugins agent resolution), SKIP ea6348d5 (midway cache; midway.py is a no-op stub). DEFERRED b490c7e8 (dynamic subagent sizing) for human review — imports absent mcp_gateway.pool, needs net-new proc-subtree helpers authored locally. Boundary held at ea6348d5 (b490c7e8's parent) so the next run re-sees b490c7e8.
+beta ea6348d5      # 2026-06-09 boundary HELD at ea6348d5 (b490c7e8's parent) because b490c7e8 is DEFERRED.
+# PORTED past this boundary (re-surface as ALREADY_PRESENT, content-check will re-skip): d40b9c52 cc-plugins,
+# 3862e8cb Bikini-Bottom persona, d6cdf8d9 self-update/gateway-restart skills (batch-6); 11973f4c approval_policy-on-mode-toggle (batch-7).
+# SKIP ea6348d5 (midway cache; midway.py is a no-op stub).
+# DEFERRED b490c7e8 (dynamic subagent sizing) for human review — imports absent mcp_gateway.pool, needs net-new
+# proc-subtree helpers authored locally. Linear chain ea6348d5->b490c7e8->11973f4c means the boundary cannot
+# advance past b490c7e8 without dropping it; the per-run triage re-skips already-ported SHAs by content.
 mainline 49633d05  # 2026-06-09 no mainline-only delta past this
