@@ -2,5 +2,5 @@
 # Updated at the END of every sync run (Step 7). The meshclaw-sync skill bounds
 # the candidate set by these SHAs — see skills/meshclaw-sync/SKILL.md Step 1.
 # Format: "<branch> <sha>  # <date> <note>"
-beta 7686142d      # 2026-06-09 batch-5 ported (f51e6275..7686142d: 3 KEEP [7686142d JSON-cred redaction, de284367 spawn_run model, 14b05be1 subagent activity cards], 63ee7fde SKIP config->configuration rename)
+beta ea6348d5      # 2026-06-09 batch-6: ported 3 (3862e8cb Bikini-Bottom persona, d6cdf8d9 self-update/gateway-restart skills, d40b9c52 cc-plugins agent resolution), SKIP ea6348d5 (midway cache; midway.py is a no-op stub). DEFERRED b490c7e8 (dynamic subagent sizing) for human review — imports absent mcp_gateway.pool, needs net-new proc-subtree helpers authored locally. Boundary held at ea6348d5 (b490c7e8's parent) so the next run re-sees b490c7e8.
 mainline 49633d05  # 2026-06-09 no mainline-only delta past this
