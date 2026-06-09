@@ -1696,6 +1696,79 @@ class TestDrainStderrRedaction:
         assert "AKIAIOSFODNN7EXAMPLE" not in logged_text
 
 
+class TestDrainStderrSuppression:
+    """Mesh-1943: _drain_stderr drops high-frequency content-free adapter
+    diagnostics (thinking_tokens "Unexpected case" lines) without warning or
+    polluting the diagnostic ring buffer, while still proving liveness."""
+
+    def _reader(self, lines):
+        """A mock StreamReader that yields *lines* (str) then EOF."""
+        reader = AsyncMock(spec=["readline"])
+        reader.readline = AsyncMock(
+            side_effect=[line.encode() + b"\n" for line in lines] + [b""]
+        )
+        return reader
+
+    @pytest.mark.asyncio
+    async def test_marker_lines_suppressed_not_logged_or_buffered(self):
+        client = AcpClient()
+        marker = (
+            'Unexpected case: {"type":"system","subtype":"thinking_tokens",'
+            '"estimated_tokens":1234,"session_id":"abc-123"}'
+        )
+        reader = self._reader([marker] * 5)
+
+        with patch("kiro_claw.acp.client.logger") as mock_logger:
+            await client._drain_stderr(reader)
+
+        # No per-line WARNING for suppressed markers.
+        mock_logger.warning.assert_not_called()
+        # Not appended to the bounded diagnostic ring buffer.
+        assert list(client._stderr_lines) == []
+
+    @pytest.mark.asyncio
+    async def test_suppressed_lines_still_advance_liveness(self):
+        client = AcpClient()
+        client._last_activity = 0.0  # force a detectable advance
+        reader = self._reader(["estimated thinking_tokens delta"])
+
+        with patch("kiro_claw.acp.client.logger"):
+            await client._drain_stderr(reader)
+
+        # Liveness must advance for suppressed lines so the idle watchdog
+        # (is_responsive) does not kill an actively-thinking turn.
+        assert client._last_activity > 0.0
+
+    @pytest.mark.asyncio
+    async def test_real_errors_pass_through(self):
+        client = AcpClient()
+        raw = "Error: adapter crashed in handler"
+        reader = self._reader([raw])
+
+        with patch("kiro_claw.acp.client.logger") as mock_logger:
+            await client._drain_stderr(reader)
+
+        assert list(client._stderr_lines) == [raw]
+        mock_logger.warning.assert_called_once()
+        assert mock_logger.warning.call_args[0][2] == raw
+
+    @pytest.mark.asyncio
+    async def test_mixed_stream_keeps_real_error_after_burst(self):
+        client = AcpClient()
+        real_before = "Error: first real failure"
+        real_after = "Error: second real failure"
+        burst = ["system subtype thinking_tokens delta"] * 50
+        reader = self._reader([real_before] + burst + [real_after])
+
+        with patch("kiro_claw.acp.client.logger") as mock_logger:
+            await client._drain_stderr(reader)
+
+        # Only the two real lines are logged and buffered; the 50-line burst
+        # neither logs nor evicts the earlier real error from the ring buffer.
+        assert list(client._stderr_lines) == [real_before, real_after]
+        assert mock_logger.warning.call_count == 2
+
+
 class TestReadMessageStderrRedaction:
     """Test 3.2: _read_message redacts stderr in AcpError."""
 
@@ -5340,3 +5413,46 @@ class TestAcpClientDrainEarlyExit:
         # Confirm the drain loop actually iterated (processed reads), not just
         # that the timer expired (CR feedback).
         assert reads["n"] > 0, "drain loop never read a message during the cap window"
+
+
+class TestResolveKiroBinEnvOverride:
+    """_resolve_kiro_bin honors the KIROCLAW_KIRO_BIN override for environments
+    (e.g. AgentSpaces/DevSpaces) where the toolbox shim is broken."""
+
+    def test_env_override_used_when_valid(self, tmp_path):
+        from kiro_claw.acp.client import _resolve_kiro_bin
+
+        fake = tmp_path / "kiro-cli"
+        fake.write_text("#!/bin/sh\n")
+        fake.chmod(0o755)
+        with patch.dict("os.environ", {"KIROCLAW_KIRO_BIN": str(fake)}):
+            assert _resolve_kiro_bin() == str(fake)
+
+    def test_env_override_ignored_when_missing_file(self, tmp_path):
+        # A configured-but-nonexistent path must not be returned; resolution
+        # falls through to the normal candidates / PATH lookup.
+        from kiro_claw.acp.client import _resolve_kiro_bin
+
+        missing = str(tmp_path / "does-not-exist")
+        with patch.dict("os.environ", {"KIROCLAW_KIRO_BIN": missing}):
+            assert _resolve_kiro_bin() != missing
+
+    def test_env_override_ignored_when_not_executable(self, tmp_path):
+        from kiro_claw.acp.client import _resolve_kiro_bin
+
+        nonexec = tmp_path / "kiro-cli"
+        nonexec.write_text("#!/bin/sh\n")
+        nonexec.chmod(0o644)  # not executable
+        with patch.dict("os.environ", {"KIROCLAW_KIRO_BIN": str(nonexec)}):
+            assert _resolve_kiro_bin() != str(nonexec)
+
+    def test_no_env_falls_through(self):
+        # With no override set, resolution uses the normal candidate/PATH path
+        # and never returns the override sentinel.
+        from kiro_claw.acp.client import _resolve_kiro_bin
+
+        env = {k: v for k, v in os.environ.items() if k != "KIROCLAW_KIRO_BIN"}
+        with patch.dict("os.environ", env, clear=True):
+            # Should not raise; returns either a real path or None.
+            result = _resolve_kiro_bin()
+            assert result is None or isinstance(result, str)

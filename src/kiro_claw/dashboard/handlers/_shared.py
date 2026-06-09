@@ -288,6 +288,10 @@ def _resolve_loaded_by_agents(skill_md: Path) -> list[str]:
     out: list[str] = []
     for agents_dir in _agent_dirs():
         for agent_path in sorted(agents_dir.glob("*.json")):
+            # Skip macOS AppleDouble sidecars ("._foo.json"). These are not
+            # JSON; a manual tar from macOS can drag them in.
+            if agent_path.name.startswith("._"):
+                continue
             # Resolve and gate on sensitive paths before reading — a symlink
             # under ~/.kiro/agents/ could otherwise point at a credential
             # file (e.g. ~/.aws/credentials renamed *.json).  All file reads
@@ -300,7 +304,9 @@ def _resolve_loaded_by_agents(skill_md: Path) -> list[str]:
                 continue
             try:
                 data = json.loads(resolved.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            # ValueError covers both json.JSONDecodeError and
+            # UnicodeDecodeError (a non-UTF-8 file must not 500 the API).
+            except (OSError, ValueError):
                 continue
             if not isinstance(data, dict):
                 continue

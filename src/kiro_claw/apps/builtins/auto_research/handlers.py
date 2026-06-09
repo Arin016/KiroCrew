@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html as html_mod
 import json
 import logging
 import re
@@ -18,6 +19,12 @@ from aiohttp import web
 
 from kiro_claw.autonudge import get_instance as _autonudge_instance
 from kiro_claw.knowledge.llm_pool import LLMPool
+
+try:
+    from kiro_claw.artifacts import ArtifactNotFoundError, ArtifactStore
+    _HAS_ARTIFACTS = True
+except ImportError:
+    _HAS_ARTIFACTS = False
 
 try:
     from kiro_claw.security import redact_credentials, redact_exfiltration_urls
@@ -37,6 +44,7 @@ RESEARCH_DIR = Path.home() / ".kiroclaw" / "workspace" / "research"
 DB_PATH = Path.home() / ".kiroclaw" / "apps" / "auto-research" / "campaigns.db"
 MAX_CYCLES_HARD_CAP = 100
 POLL_INTERVAL = 5
+_MAX_PARALLEL_WORKERS = 5  # hard cap on parallel sub-agents per cycle
 # Default seconds between cycles (until the next nudge fires). The watchdog's
 # inactivity timeout is idle_secs * 2; the first cycle gets a longer startup
 # grace (it can't produce anything until the first nudge + a full work turn).
@@ -129,6 +137,10 @@ def _get_db() -> sqlite3.Connection:
         conn.execute("ALTER TABLE campaigns ADD COLUMN parent_id TEXT")
     if "scope_constraints" not in cols:
         conn.execute("ALTER TABLE campaigns ADD COLUMN scope_constraints TEXT")
+    if "parallel_workers" not in cols:
+        conn.execute("ALTER TABLE campaigns ADD COLUMN parallel_workers INTEGER NOT NULL DEFAULT 1")
+    if "report_artifact_slug" not in cols:
+        conn.execute("ALTER TABLE campaigns ADD COLUMN report_artifact_slug TEXT")
     conn.commit()
     return conn
 
@@ -397,8 +409,9 @@ def create_campaign(config: dict) -> dict:
     db.execute("BEGIN")
     db.execute(
         "INSERT INTO campaigns (id,name,question,sub_questions,sources,scope_constraints,"
-        "max_cycles,idle_secs,success_criteria,auto_approve,parent_id,status,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "max_cycles,idle_secs,success_criteria,auto_approve,parent_id,parallel_workers,"
+        "status,created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             campaign_id,
             name,
@@ -411,6 +424,7 @@ def create_campaign(config: dict) -> dict:
             config.get("success_criteria") or None,
             int(bool(config.get("auto_approve", False))),
             parent_id,
+            min(int(config.get("parallel_workers", 1)), _MAX_PARALLEL_WORKERS),
             CampaignStatus.READY,
             time.time(),
         ),
@@ -438,7 +452,7 @@ def update_campaign_status(campaign_id: str, new_status: str, **kwargs: Any) -> 
         db.close()
         return {"error": "campaign not found"}
     current = row["status"]
-    if current in _TERMINAL_STATUSES and new_status != current:
+    if current in _TERMINAL_STATUSES and new_status not in (current, CampaignStatus.RUNNING):
         db.close()
         return {"error": f"invalid transition: {current} -> {new_status}"}
     sets: list[str] = ["status = ?"]
@@ -446,6 +460,10 @@ def update_campaign_status(campaign_id: str, new_status: str, **kwargs: Any) -> 
     if new_status == CampaignStatus.RUNNING:
         sets.append("started_at = ?")
         vals.append(time.time())
+        # Clear the prior run's completed_at so resumed COMPLETE/STOPPED campaigns
+        # don't end up with completed_at < started_at (breaks duration math/UI).
+        sets.append("completed_at = ?")
+        vals.append(None)
         kwargs.setdefault("error_message", None)  # clear stale failure on (re)start
     if new_status in (CampaignStatus.COMPLETE, CampaignStatus.STOPPED, CampaignStatus.FAILED):
         sets.append("completed_at = ?")
@@ -692,7 +710,7 @@ async def _launch_loop(request: web.Request, cid: str) -> None:
     db = _get_db()
     row = db.execute(
         "SELECT question, sub_questions, sources, scope_constraints, max_cycles, idle_secs, "
-        "success_criteria, auto_approve FROM campaigns WHERE id = ?",
+        "success_criteria, auto_approve, parallel_workers FROM campaigns WHERE id = ?",
         (cid,),
     ).fetchone()
     db.close()
@@ -746,12 +764,19 @@ def _write_brief(cid: str, row: Any) -> None:
     if subs:
         lines.append(
             "**Sub-questions (authoritative checklist — answer each; do NOT invent your own "
-            "initial set). Items tagged _(emergent)_ were discovered mid-research:**"
+            "initial set). Items tagged _(emergent)_ were discovered mid-research; items "
+            "tagged _(user guidance)_ are directives the user added — follow them, even if "
+            "phrased as an instruction rather than a question:**"
         )
         for s in subs:
             text = s.get("text", "") if isinstance(s, dict) else str(s)
             origin = s.get("origin", "grill") if isinstance(s, dict) else "grill"
-            lines.append(f"- {text}" + (" _(emergent)_" if origin == "emergent" else ""))
+            tag = (
+                " _(emergent)_" if origin == "emergent"
+                else " _(user guidance)_" if origin == "manual"
+                else ""
+            )
+            lines.append(f"- {text}{tag}")
     else:
         lines.append(
             "**Sub-questions:** (none provided — derive your own from the question and scope)"
@@ -784,6 +809,17 @@ def _write_brief(cid: str, row: Any) -> None:
         "Adapt direction each cycle from prior findings; pursue the highest-value open "
         "lead toward the question.",
     ]
+    # Parallel worker instruction
+    pw = int(row["parallel_workers"]) if "parallel_workers" in row.keys() else 1
+    if pw > 1:
+        lines += [
+            "", f"**Parallel execution:** You have {pw} parallel worker slots. Each cycle, "
+            "use `spawn_run` with a `tasks` array to investigate up to "
+            f"{pw} open sub-questions simultaneously (one task per sub-question). "
+            "Each task should be a self-contained research instruction for that sub-question. "
+            "Wait for all completion events, then synthesize results into your cycle finding. "
+            f"If fewer than {pw} sub-questions remain open, spawn only as many as needed.",
+        ]
     _campaign_dir(cid).joinpath("brief.md").write_text("\n".join(lines))
 
 
@@ -1091,6 +1127,8 @@ async def _handle_action(request: web.Request) -> web.Response:
             CampaignStatus.STAGNANT,
             CampaignStatus.NEEDS_INPUT,
             CampaignStatus.FAILED,
+            CampaignStatus.COMPLETE,
+            CampaignStatus.STOPPED,
         },
         "pause": {CampaignStatus.RUNNING},
         "stop": {
@@ -1154,6 +1192,357 @@ async def _handle_nudge(request: web.Request) -> web.Response:
         update_campaign_status(cid, CampaignStatus.RUNNING)
     _audit("campaign_nudge", cid)
     return web.json_response({"ok": True})
+
+
+_REPORT_TIMEOUT = 90.0
+
+
+def _build_report_prompt(question: str, subs: list, findings_md: str,
+                         total_cycles: int) -> str:
+    """Prompt the LLM to author a polished, self-contained HTML report."""
+    sub_lines = []
+    for s in subs:
+        if isinstance(s, dict):
+            st = "answered" if s.get("status") == "answered" else "open"
+            sub_lines.append(f"- [{st}] {s.get('text', '')}")
+        else:
+            sub_lines.append(f"- {s}")
+    subs_block = "\n".join(sub_lines) if sub_lines else "(none)"
+    return (
+        "You are formatting a completed research campaign into a polished, "
+        "self-contained HTML report for sharing.\n\n"
+        f"# Research question\n{question}\n\n"
+        f"# Sub-questions\n{subs_block}\n\n"
+        f"# Cycles run\n{total_cycles}\n\n"
+        f"# Findings (markdown, authored during research)\n{findings_md}\n\n"
+        "Produce a SINGLE self-contained HTML document (no external assets) that "
+        "presents this research clearly and attractively:\n"
+        "- A header with the question and a one-paragraph executive summary you synthesize.\n"
+        "- A 'Key findings' section highlighting the most important, well-evidenced points.\n"
+        "- A 'Sub-questions' section showing which were answered vs still open.\n"
+        "- Preserve any source citations / links present in the findings.\n"
+        "- Use clean, modern inline CSS (system font, readable ~800px width, light theme).\n"
+        "- Do NOT invent facts that are not present in the findings.\n"
+        "Output ONLY the raw HTML document, starting with <!DOCTYPE html>. "
+        "Do not wrap it in markdown code fences."
+    )
+
+
+async def _handle_report_status(request: web.Request) -> web.Response:
+    """GET /campaigns/{id}/report-status -- has a report artifact already been
+    exported for this campaign, and does it still exist?
+
+    Returns ``{slug}`` (the live artifact slug) or ``{slug: null}``. Read-only
+    status probe so the UI can show "View report" + "Regenerate" upfront
+    instead of a bare "Export". Degrades gracefully when artifacts are off.
+    """
+    if (denied := _require_auth(request)):
+        return denied
+    cid = request.match_info["id"]
+    if not _validate_campaign_id(cid):
+        return web.json_response({"error": "Invalid campaign ID"}, status=400)
+    if not _HAS_ARTIFACTS:
+        return web.json_response({"slug": None})
+    db = _get_db()
+    row = db.execute(
+        "SELECT report_artifact_slug FROM campaigns WHERE id = ?", (cid,)
+    ).fetchone()
+    db.close()
+    if row is None:
+        return web.json_response({"error": "Not found"}, status=404)
+    slug = row["report_artifact_slug"]
+    if not slug:
+        return web.json_response({"slug": None})
+    # Verify the artifact still exists so the UI never offers a dead link.
+    try:
+        ArtifactStore().get(slug)
+    except ArtifactNotFoundError:
+        return web.json_response({"slug": None})
+    except Exception:
+        logger.exception("report-status lookup failed for %s", cid)
+        return web.json_response({"slug": None})
+    return web.json_response({"slug": slug})
+
+
+async def _handle_to_artifact(request: web.Request) -> web.Response:
+    """POST /campaigns/{id}/to-artifact -- author an HTML report artifact.
+
+    The report is LLM-authored (a polished, synthesized document) so it is nice
+    to read; if the LLM pool is unavailable or returns nothing, we fall back to
+    a mechanical render of FINDINGS.md so the action never hard-fails.
+    """
+    if (denied := _require_auth(request)):
+        return denied
+    cid = request.match_info["id"]
+    if not _validate_campaign_id(cid):
+        return web.json_response({"error": "Invalid campaign ID"}, status=400)
+    # Fail fast before any filesystem / DB / render work if artifacts are off.
+    if not _HAS_ARTIFACTS:
+        return web.json_response({"error": "Artifact system unavailable"}, status=503)
+    d = _safe_campaign_dir(cid)
+    if d is None:
+        return web.json_response({"error": "Invalid campaign ID"}, status=400)
+    findings_path = d / "FINDINGS.md"
+    if not findings_path.exists():
+        return web.json_response({"error": "No findings yet"}, status=404)
+    db = _get_db()
+    row = db.execute(
+        "SELECT question, sub_questions, total_cycles, status, report_artifact_slug "
+        "FROM campaigns WHERE id = ?",
+        (cid,),
+    ).fetchone()
+    db.close()
+    if row is None:
+        return web.json_response({"error": "Not found"}, status=404)
+    question = row["question"]
+    findings_md = findings_path.read_text()
+    subs = json.loads(row["sub_questions"] or "[]")
+
+    # Prefer an LLM-authored report (synthesized + nicely formatted). Cap the
+    # findings fed to the prompt so a huge report doesn't blow the context.
+    authored: str | None = None
+    pool = request.app.get("auto_research_llm_pool")
+    if pool is not None:
+        try:
+            prompt = _build_report_prompt(question, subs, findings_md[:24000],
+                                          row["total_cycles"])
+            raw = (await pool.send(prompt, timeout=_REPORT_TIMEOUT)).strip()
+            # LLMs often wrap HTML in a ```html … ``` fence despite instructions.
+            raw = re.sub(r"^```[a-zA-Z0-9]*\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw).strip()
+            if raw:
+                authored = raw
+        except Exception:
+            logger.exception("LLM report authoring failed for %s; using fallback", cid)
+    # Graceful fallback: mechanical render of the (escaped) findings.
+    html: str = authored if authored is not None else _render_findings_html(
+        question, subs, findings_md, row["total_cycles"], cid)
+
+    # Redact agent/user-authored content before it lands in a shareable,
+    # publishable artifact (HTML-escaping does NOT remove leaked credentials /
+    # exfil URLs — that's this step). Applied uniformly to both paths.
+    html = _redact_finding({"v": html})["v"]
+    store = ArtifactStore()
+    safe_q = _redact_finding({"v": question})["v"]
+    name = f"Research: {safe_q[:50]}"
+    # Reuse-or-create so repeated exports update ONE artifact (new version)
+    # instead of spawning a fresh duplicate on every click. We only reuse a
+    # stored slug if the artifact still exists — if the user deleted it, fall
+    # through to create and re-bind a new slug.
+    existing_slug = row["report_artifact_slug"]
+    art = None
+    regenerated = False
+    if existing_slug:
+        try:
+            store.get(existing_slug)  # existence probe
+            art = store.update(
+                existing_slug,
+                content=html,
+                name=name,
+                description=f"Research findings for campaign {cid}",
+                actor="agent",
+                snapshot=True,
+            )
+            regenerated = True
+        except ArtifactNotFoundError:
+            art = None  # stored slug is dead — create a fresh one below
+    if art is None:
+        art = store.create(
+            name=name,
+            content=html,
+            kind="html",
+            source="subagent",
+            description=f"Research findings for campaign {cid}",
+            tags=["research"],
+        )
+    # Persist the slug so the next export regenerates this same artifact and
+    # the UI can show "View report" upfront.
+    if art.slug != existing_slug:
+        db = _get_db()
+        db.execute("UPDATE campaigns SET report_artifact_slug = ? WHERE id = ?",
+                   (art.slug, cid))
+        db.commit()
+        db.close()
+    _audit("campaign_to_artifact", cid, slug=art.slug)
+    return web.json_response(
+        {"slug": art.slug, "name": name, "regenerated": regenerated},
+        status=200 if regenerated else 201,
+    )
+
+
+def _render_findings_html(question: str, subs: list, findings_md: str,
+                          total_cycles: int, cid: str) -> str:
+    """Render campaign findings into a self-contained HTML document."""
+    q = html_mod.escape(question)
+    sub_items = ""
+    for s in subs:
+        text = html_mod.escape(s.get("text", "") if isinstance(s, dict) else str(s))
+        origin = html_mod.escape(s.get("origin", "grill") if isinstance(s, dict) else "grill")
+        status = s.get("status", "open") if isinstance(s, dict) else "open"
+        icon = "✅" if status == "answered" else "🔍"
+        sub_items += f"<li>{icon} {text} <em>({origin})</em></li>\n"
+    # Convert markdown to basic HTML (just escape and preserve structure)
+    body_html = html_mod.escape(findings_md).replace("\n\n", "</p><p>").replace("\n", "<br>")
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Research: {q}</title>
+<style>
+body {{ font-family: system-ui, sans-serif; max-width: 800px; margin: 2em auto; padding: 0 1em; line-height: 1.6; color: #1a1a1a; }}
+h1 {{ font-size: 1.4em; }}
+h2 {{ font-size: 1.1em; margin-top: 1.5em; border-bottom: 1px solid #eee; padding-bottom: 0.3em; }}
+.meta {{ color: #666; font-size: 0.85em; }}
+ul {{ padding-left: 1.5em; }}
+li {{ margin: 0.3em 0; }}
+.findings {{ background: #f9f9f9; padding: 1em; border-radius: 6px; margin-top: 1em; }}
+p {{ margin: 0.5em 0; }}
+</style></head><body>
+<h1>🔬 {q}</h1>
+<div class="meta">{total_cycles} cycles · Campaign {html_mod.escape(cid)}</div>
+<h2>Sub-questions</h2>
+<ul>{sub_items}</ul>
+<h2>Findings</h2>
+<div class="findings"><p>{body_html}</p></div>
+</body></html>"""
+
+
+async def _handle_knowledge_status(request: web.Request) -> web.Response:
+    """GET /campaigns/{id}/knowledge-status -- has this campaign's findings
+    already been ingested into the Knowledge Library?
+
+    Read-only status probe so the UI can render "Already in Knowledge" upfront
+    instead of discovering it via a 409 after the user clicks. Degrades
+    gracefully (``in_library: false``) when the Knowledge Library is
+    unavailable -- a status check must never surface a 503.
+    """
+    if (denied := _require_auth(request)):
+        return denied
+    cid = request.match_info["id"]
+    if not _validate_campaign_id(cid):
+        return web.json_response({"error": "Invalid campaign ID"}, status=400)
+    d = _safe_campaign_dir(cid)
+    if d is None:
+        return web.json_response({"error": "Invalid campaign ID"}, status=400)
+    state = request.app.get("state")
+    if state is None or not hasattr(state, "knowledge_store"):
+        return web.json_response({"in_library": False})
+    store = state.knowledge_store
+    # Mirror _handle_to_knowledge's dedup key: the resolved path of the
+    # sanitized copy. resolve() works even if the file hasn't been written yet
+    # (it has not, until the user adds it), so no filesystem side effects here.
+    uri = str((d / "findings_for_knowledge.md").resolve())
+    try:
+        existing = store.get_source_by_uri(uri)
+    except Exception:
+        logger.exception("knowledge-status lookup failed for %s", cid)
+        return web.json_response({"in_library": False})
+    if existing:
+        return web.json_response({"in_library": True, "source_id": existing["id"]})
+    return web.json_response({"in_library": False})
+
+
+async def _handle_to_knowledge(request: web.Request) -> web.Response:
+    """POST /campaigns/{id}/to-knowledge -- ingest FINDINGS.md into Knowledge Library."""
+    if (denied := _require_auth(request)):
+        return denied
+    cid = request.match_info["id"]
+    if not _validate_campaign_id(cid):
+        return web.json_response({"error": "Invalid campaign ID"}, status=400)
+    d = _safe_campaign_dir(cid)
+    if d is None:
+        return web.json_response({"error": "Invalid campaign ID"}, status=400)
+    findings_path = d / "FINDINGS.md"
+    if not findings_path.exists():
+        return web.json_response({"error": "No findings yet"}, status=404)
+    # Access knowledge store and pipeline from app state
+    state = request.app.get("state")
+    if state is None or not hasattr(state, "knowledge_store"):
+        return web.json_response({"error": "Knowledge Library unavailable"}, status=503)
+    store = state.knowledge_store
+    pipeline = request.app.get("knowledge_pipeline")
+    if pipeline is None:
+        return web.json_response({"error": "Knowledge pipeline unavailable"}, status=503)
+    # The Knowledge Library is an external surface (content surfaces to users and
+    # agents via RAG/search), so redact credentials + exfil URLs before ingestion.
+    # The agent may have encountered secrets mid-research; ingesting raw would
+    # leak them. Write a sanitized copy and ingest THAT, never the raw file.
+    redacted = _redact_finding({"v": findings_path.read_text()})["v"]
+    sanitized_path = d / "findings_for_knowledge.md"
+    sanitized_path.write_text(redacted)
+    uri = str(sanitized_path.resolve())
+    # Dedup check
+    existing = store.get_source_by_uri(uri)
+    if existing:
+        return web.json_response({"error": "Already in Knowledge Library", "id": existing["id"]}, status=409)
+    # Add source and trigger ingestion
+    db = _get_db()
+    row = db.execute("SELECT question FROM campaigns WHERE id = ?", (cid,)).fetchone()
+    db.close()
+    # The Knowledge Library is an external surface (RAG/search), so even the
+    # source name metadata must be redacted before ingestion — matching the
+    # treatment _handle_to_artifact applies to its artifact name.
+    name = (f"Research: {_redact_finding({'v': row['question'][:60]})['v']}"
+            if row else f"Research: {cid}")
+    sid = store.add_source(name=name, source_type="local_file", uri=uri, properties={})
+    store.db.execute("UPDATE sources SET sync_status = 'syncing' WHERE id = ?", (sid,))
+    store.db.commit()
+
+    async def _bg_ingest() -> None:
+        try:
+            await pipeline.ingest_file(uri, source_id=sid)
+            store.db.execute("UPDATE sources SET sync_status = 'synced' WHERE id = ?", (sid,))
+            store.db.commit()
+        except Exception:
+            logger.exception("Research findings ingestion failed for %s", cid)
+            store.db.execute("UPDATE sources SET sync_status = 'error' WHERE id = ?", (sid,))
+            store.db.commit()
+
+    task = asyncio.create_task(_bg_ingest())
+    app_tasks = request.app.setdefault("_bg_tasks", set())
+    app_tasks.add(task)
+    task.add_done_callback(app_tasks.discard)
+    _audit("campaign_to_knowledge", cid, source_id=sid)
+    return web.json_response({"id": sid, "status": "ingesting"}, status=201)
+
+
+async def _handle_add_question(request: web.Request) -> web.Response:
+    """Append a user-authored sub-question to a campaign mid-run."""
+    if (denied := _require_auth(request)):
+        return denied
+    cid = request.match_info["id"]
+    if not _validate_campaign_id(cid):
+        return web.json_response({"error": "Invalid campaign ID"}, status=400)
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        return web.json_response({"error": "text required"}, status=400)
+    db = _get_db()
+    row = db.execute(
+        "SELECT sub_questions, question, sources, scope_constraints, max_cycles, "
+        "idle_secs, success_criteria, auto_approve FROM campaigns WHERE id = ?",
+        (cid,),
+    ).fetchone()
+    if row is None:
+        db.close()
+        return web.json_response({"error": "Not found"}, status=404)
+    subs = json.loads(row["sub_questions"] or "[]")
+    subs.append({"text": text, "origin": "manual", "status": "open"})
+    db.execute("BEGIN")
+    db.execute("UPDATE campaigns SET sub_questions = ? WHERE id = ?", (json.dumps(subs), cid))
+    db.commit()
+    # Re-read the row so _write_brief sees the updated sub_questions.
+    # parallel_workers MUST be included — _write_brief defaults it to 1 when
+    # absent, which would silently drop the parallel instruction from the brief.
+    row = db.execute(
+        "SELECT question, sub_questions, sources, scope_constraints, max_cycles, "
+        "idle_secs, success_criteria, auto_approve, parallel_workers "
+        "FROM campaigns WHERE id = ?",
+        (cid,),
+    ).fetchone()
+    db.close()
+    # Regenerate brief.md so the agent sees the new question next cycle.
+    _write_brief(cid, row)
+    _audit("campaign_add_question", cid)
+    _emit_sse({"type": "question_added", "campaign_id": cid})
+    return web.json_response({"ok": True, "sub_questions": subs})
 
 
 async def _handle_stream(request: web.Request) -> web.StreamResponse:
@@ -1235,6 +1624,11 @@ def register_routes(app: web.Application) -> None:
     app.router.add_patch("/api/apps/auto-research/campaigns/{id}", _handle_action)
     app.router.add_delete("/api/apps/auto-research/campaigns/{id}", _handle_delete)
     app.router.add_post("/api/apps/auto-research/campaigns/{id}/nudge", _handle_nudge)
+    app.router.add_post("/api/apps/auto-research/campaigns/{id}/questions", _handle_add_question)
+    app.router.add_post("/api/apps/auto-research/campaigns/{id}/to-knowledge", _handle_to_knowledge)
+    app.router.add_get("/api/apps/auto-research/campaigns/{id}/knowledge-status", _handle_knowledge_status)
+    app.router.add_post("/api/apps/auto-research/campaigns/{id}/to-artifact", _handle_to_artifact)
+    app.router.add_get("/api/apps/auto-research/campaigns/{id}/report-status", _handle_report_status)
     app.router.add_get("/api/apps/auto-research/campaigns/{id}/stream", _handle_stream)
 
     async def _start_watchdog(_app: web.Application) -> None:

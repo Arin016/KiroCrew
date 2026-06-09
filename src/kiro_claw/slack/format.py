@@ -358,8 +358,12 @@ def split_message(text: str, limit: int = SLACK_MSG_LIMIT) -> list[str]:
         if len(text) <= limit:
             parts.append(text)
             break
-        # Reserve space for continuation marker on non-final chunks
-        chunk_limit = limit - len(CONTINUATION)
+        # Reserve space for continuation marker on non-final chunks. Guard against
+        # a limit <= len(CONTINUATION): without the max(., 1) floor, chunk_limit
+        # would be <= 0, cut would be 0, the remainder would never shrink, and the
+        # loop would spin forever. Keep at least one character of progress per
+        # iteration so the function always terminates regardless of `limit`.
+        chunk_limit = max(1, limit - len(CONTINUATION))
         # Try to split at last newline within limit
         cut = text.rfind("\n", 0, chunk_limit)
         if cut <= 0:

@@ -247,6 +247,31 @@ class TestResolveLoadedByAgents:
         # Does not raise, returns empty.
         assert _resolve_loaded_by_agents(skill_md) == []
 
+    def test_survives_non_utf8_agent_json(self, fake_home):
+        """A non-UTF-8 file matching ``*.json`` (e.g. a macOS AppleDouble
+        ``._*.json`` sidecar dragged in by a manual tar) must be skipped, not
+        raise UnicodeDecodeError and 500 the /api/skills endpoint."""
+        agents_dir = fake_home / ".kiro" / "agents"
+        agents_dir.mkdir(parents=True)
+        skill_md = fake_home / ".kiro" / "skills" / "x" / "SKILL.md"
+        skill_md.parent.mkdir(parents=True)
+        skill_md.write_text("---\n---\n")
+
+        # A valid loader that must still be discovered despite the bad sibling.
+        (agents_dir / "loader.json").write_text(json.dumps({
+            "name": "loader",
+            "resources": ["skill://~/.kiro/skills/*/SKILL.md"],
+        }))
+        # AppleDouble sidecar: starts with "._" and is non-UTF-8 binary.
+        (agents_dir / "._loader.json").write_bytes(
+            b"\x02\x00\x00\x00\xa3\x80\x81\x82 not utf-8"
+        )
+        # Arbitrary non-UTF-8 *.json that is not an AppleDouble name either.
+        (agents_dir / "binary.json").write_bytes(b"\xff\xfe\x00\x01\xa3")
+
+        out = _resolve_loaded_by_agents(skill_md)
+        assert out == ["loader"]
+
     def test_returns_empty_when_no_agents_dir(self, fake_home):
         skill_md = fake_home / "elsewhere.md"
         skill_md.write_text("")

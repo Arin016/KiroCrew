@@ -474,6 +474,9 @@ async def dispatch(payload: dict) -> None:
     if action_id.startswith("mc_session_end_"):
         await _handle_session_end(payload, action, channel, msg_ts, user_id)
         return
+    if action_id.startswith("mc_inline_stop_"):
+        await _handle_inline_stop(payload, action, channel, msg_ts, user_id)
+        return
     if action_id == "mc_session_new":
         await _handle_session_new(payload, action, channel, msg_ts, user_id)
         return
@@ -2087,6 +2090,9 @@ async def _handle_session_end(
     sel().log_api_access(caller=user_id, operation="slack.session_end", outcome="allowed", source="slack", resources=session_id)
 
     key_to_remove = _orch.sessions.find_key_by_sid(session_id)
+    # Also try treating value as a direct session key (from /kiroclaw sessions buttons)
+    if not key_to_remove and _orch.sessions.has_session(session_id):
+        key_to_remove = session_id
     if key_to_remove:
         # Trigger skill extraction before killing the session (fire-and-forget)
         if _orch.consolidator:
@@ -2119,6 +2125,59 @@ async def _handle_session_end(
             await _orch.slack.update_message(channel, msg_ts, text=label)
         except Exception:
             pass
+
+
+async def _handle_inline_stop(
+    payload: dict, action: dict, channel: str, msg_ts: str, user_id: str
+) -> None:
+    """Stop the active turn for a session via the inline stop button."""
+    if not is_owner(user_id):
+        sel().log_api_access(caller=user_id, operation="slack.inline_stop", outcome="denied", source="slack", resources=action.get("value", ""))
+        return
+    session_key = action.get("value", "")
+    if not (session_key and _orch and _orch.sessions):
+        sel().log_api_access(caller=user_id, operation="slack.inline_stop", outcome="invalid", source="slack", resources=session_key)
+        return
+
+    sel().log_api_access(caller=user_id, operation="slack.inline_stop", outcome="allowed", source="slack", resources=session_key)
+
+    # Immediate feedback — update the working message to show stopping
+    if _orch.slack and channel and msg_ts:
+        try:
+            await _orch.slack.update_message(channel, msg_ts, text="⏹ _Stopping…_")
+        except Exception:
+            pass
+
+    async def _on_soft() -> None:
+        if _orch.slack and channel and msg_ts:
+            try:
+                await _orch.slack.update_message(channel, msg_ts, text="⏹ Execution stopped.")
+            except Exception:
+                pass
+
+    async def _on_hard() -> None:
+        if _orch.slack and channel and msg_ts:
+            try:
+                await _orch.slack.update_message(channel, msg_ts, text="⛔ Execution stopped — session reset.")
+            except Exception:
+                pass
+
+    outcome = await _orch.sessions.stop_turn(
+        session_key, on_soft=_on_soft, on_hard=_on_hard
+    )
+    if outcome == "idle" and _orch.slack and channel and msg_ts:
+        try:
+            await _orch.slack.update_message(channel, msg_ts, text="⏹ Nothing running.")
+        except Exception:
+            pass
+    sel().log_tool_invocation(
+        session_key=session_key,
+        source="slack",
+        tool_name="inline_stop",
+        tool_kind="command",
+        outcome=outcome,
+        metadata={"user": user_id, "channel": channel},
+    )
 
 
 async def _handle_session_new(

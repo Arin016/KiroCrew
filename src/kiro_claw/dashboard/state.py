@@ -126,35 +126,73 @@ _READ_ONLY_PIPE_RE = re.compile(
     r"^\s*(grep|egrep|fgrep|head|tail|wc|sort|uniq|cut|less|more|cat)\b"
 )
 
-# Reject redirections and command substitutions — conservative, may reject
-# harmless patterns like 2>/dev/null but false positives are preferable.
+# Reject redirections and command substitutions — conservative.
 _UNSAFE_SHELL_RE = re.compile(r">|`|\$\(|<\(|(?<!&)&(?!&)")
 
+# Discard-only redirect idioms that are read-only despite containing '>'/'&':
+# `2>/dev/null`, `>/dev/null`, `&>/dev/null`, `2>>/dev/null`, and `2>&1`.
+# These sink or merge output, never writing a real file, so they must be
+# stripped before _UNSAFE_SHELL_RE — otherwise every `find … 2>/dev/null`
+# falls through to an interactive prompt. A redirect to any real path
+# (e.g. `cmd > out.txt`) still trips _UNSAFE_SHELL_RE and stays unsafe.
+# The `(?![\w./-])` guard pins the match to the literal device `/dev/null`:
+# without it, `>/dev/nullx` or `>/dev/null/../etc/passwd` would be scrubbed as
+# a sink, smuggling a real-file write past the unsafe-shell check.
+_DEVNULL_REDIR_RE = re.compile(r"(?:\d*>>?|&>)\s*/dev/null(?![\w./-])|\d*>&\d+")
 
-def is_read_only_bash(cmd: str) -> bool:
-    """Check if a bash command is read-only. Deny-by-default."""
+
+def _classify_bash(cmd: str) -> str:
+    """Single source of truth for read-only bash classification.
+
+    Returns "" when the command is read-only, otherwise a human-readable
+    reason it was rejected. :func:`is_read_only_bash` and
+    :func:`unsafe_bash_reason` both delegate here so the two can never
+    diverge — the invariant "reason is non-empty iff not read-only" holds
+    by construction rather than by parallel maintenance. Deny-by-default.
+    """
     if not cmd.strip():
-        return False
-    if _UNSAFE_SHELL_RE.search(cmd):
-        return False
+        return "empty command"
+    # Strip discard-only redirects (output sinks / stderr-merge) before the
+    # unsafe-shell check; they are read-only but contain '>' / '&'.
+    scrubbed = _DEVNULL_REDIR_RE.sub(" ", cmd)
+    if _UNSAFE_SHELL_RE.search(scrubbed):
+        return "unsafe shell pattern (redirect, command/process substitution, or backgrounding)"
     parts = re.split(r"\s*(?:&&|\|\||;|\n)\s*", cmd.strip())
     for part in parts:
         if not part.strip():
             continue
         pipe_parts = [p.strip() for p in part.split("|") if p.strip()]
         if not pipe_parts:
-            return False
+            return "unsafe shell pattern"
         first = pipe_parts[0].strip().lower()
         if not (
             first.endswith("--help")
             or first.endswith("--version")
             or any(first == p or first.startswith(p + " ") for p in _READ_ONLY_BASH_PREFIXES)
         ):
-            return False
+            base = first.split()[0] if first.split() else first
+            return f"command '{base}' is not on the read-only allowlist"
         for target in pipe_parts[1:]:
             if not _READ_ONLY_PIPE_RE.match(target):
-                return False
-    return True
+                tgt = target.split()[0] if target.split() else target
+                return f"pipe target '{tgt}' is not a read-only filter"
+    return ""
+
+
+def is_read_only_bash(cmd: str) -> bool:
+    """Check if a bash command is read-only. Deny-by-default."""
+    return _classify_bash(cmd) == ""
+
+
+def unsafe_bash_reason(cmd: str) -> str:
+    """Human-readable reason a bash command failed read-only classification.
+
+    Used to make rejection messages specific ("unsafe shell pattern …")
+    instead of the generic adapter default ("User refused permission to run
+    tool"). Returns "" when the command IS read-only (no reason to reject on
+    safety grounds).
+    """
+    return _classify_bash(cmd)
 
 
 # ── Shared helpers ──
@@ -227,6 +265,55 @@ CRON_NOTIFY_PREFIX = "[Cron notification from "
 CRON_NOTIFY_END = "[End of cron notification]"
 CRON_NOTIFY_RE = re.compile(rf'^{re.escape(CRON_NOTIFY_PREFIX)}"(.*)"\]')
 SUBAGENT_COMPLETION_PREFIX = "[Subagent completion event]"
+# Synthetic continuation injected after a recoverable tool refusal (host-gate
+# policy deny or the read-only bash gate) ended a turn early. Carries the
+# refusal reason back to the model so it can adapt instead of stalling for the
+# user. Rendered as an "inject" message (not a user bubble) and never mirrored
+# to a linked Slack thread as user input.
+REFUSAL_RECOVERY_PREFIX = "[Tool refusal — automatic recovery]"
+
+
+def build_refusal_recovery_prompt(refusals: list[tuple[str, str]]) -> str:
+    """Build the body of an automatic continuation after a recoverable tool refusal.
+
+    When a tool call is refused for a recoverable, system-side reason — a
+    host-gate policy deny or the read-only bash safety gate — kiro-cli ends the
+    turn early with an attribution-free "tool uses were interrupted" marker. The
+    refusal reason is otherwise surfaced only to the dashboard pill and the SEL
+    audit log, never to the model, so the agent stalls and waits for the user.
+
+    ``refusals`` is a list of ``(tool_title, reason)`` tuples recorded during the
+    turn (already redacted by the caller). The returned text hands those reasons
+    back to the model and frames the block as a system policy decision — NOT a
+    user cancellation — so the agent can adapt (an allowed alternative, a
+    different tool) or stop on its own with a reason. The caller prepends
+    :data:`REFUSAL_RECOVERY_PREFIX`. Returns "" if there is nothing to recover.
+
+    Lives here (a leaf module that owns the prefix) rather than in context.py so
+    chat_runner can import it at module top without a circular import. There is
+    deliberately no retry cap: the model decides when to stop, and the user's
+    Stop button remains the hard breaker.
+    """
+    if not refusals:
+        return ""
+    lines = [
+        "One or more tool calls in your previous turn were blocked by a KiroClaw "
+        "safety policy, which ended the turn early. This was NOT a user action — "
+        "do not treat it as a cancellation or interruption by the user.",
+        "",
+        "Blocked:",
+    ]
+    for title, reason in refusals:
+        lines.append(f"  - {title}: {reason}" if reason else f"  - {title}")
+    lines += [
+        "",
+        "Decide how to proceed: use an allowed alternative (for a shell command, "
+        "a read-only variant), a different tool, or — if the block is correct and "
+        "you genuinely cannot proceed — say so and stop. Otherwise continue the "
+        "task where you left off.",
+    ]
+    return "\n".join(lines)
+
 
 _OPTIONS_RE = re.compile(r"\[OPTIONS:\s*([^\]]+)\]")
 
@@ -298,6 +385,7 @@ class _ChatSlot:
         "_recovery_retrigger_count",
         "_prompt_busy_retries",
         "_acp_pipe_death_retries",
+        "_empty_response_retries",
         "_batch_rejected",
         "color_index",
         "color_theme",
@@ -379,6 +467,7 @@ class _ChatSlot:
         self._recovery_retrigger_count: int = 0
         self._prompt_busy_retries: int = 0
         self._acp_pipe_death_retries: int = 0
+        self._empty_response_retries: int = 0
         self._batch_rejected: bool = False
         self.color_index: int | None = None
         self.color_theme: str = ""
@@ -1505,6 +1594,35 @@ class DashboardState:
                 ws_msg = json.dumps({"type": "notification", "data": note})
             self._send_ws_all(ws_msg)
 
+    def _spawn_ws_send(self, ws: web.WebSocketResponse, msg: str) -> None:
+        """Fire-and-forget a WS send while retaining a strong task reference.
+
+        ``asyncio.ensure_future(...)`` without keeping the returned task lets the
+        event loop hold only a weak reference, so the task can be garbage-collected
+        mid-send — silently dropping the websocket message (a lost dashboard update).
+        Track it in ``_background_tasks`` (the existing pattern in this module) and
+        discard on completion so the reference is held for the task's lifetime.
+        """
+        task = asyncio.ensure_future(ws.send_str(msg))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._on_ws_send_done)
+
+    def _on_ws_send_done(self, task: asyncio.Task) -> None:
+        """Discard the finished WS-send task and surface any failure.
+
+        A failed ``ws.send_str`` (e.g. ``ConnectionResetError`` when a client
+        disconnects mid-send) is otherwise swallowed silently — the task stores the
+        exception, nobody reads it, and it's GC'd with the task — leaving operators
+        blind to send failures under burst load. Log at DEBUG since peer disconnects
+        are routine and expected, not errors.
+        """
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.debug("WS send failed (client likely disconnected): %s", exc)
+
     def _send_ws_all(self, msg: str) -> None:
         """Send a pre-serialized JSON string to all WS clients."""
         dead: list[web.WebSocketResponse] = []
@@ -1513,7 +1631,7 @@ class DashboardState:
                 dead.append(ws)
                 continue
             try:
-                asyncio.ensure_future(ws.send_str(msg))
+                self._spawn_ws_send(ws, msg)
             except Exception:
                 dead.append(ws)
         for ws in dead:
@@ -1585,7 +1703,7 @@ class DashboardState:
                 dead.append(ws)
                 continue
             try:
-                asyncio.ensure_future(ws.send_str(msg))
+                self._spawn_ws_send(ws, msg)
             except Exception:
                 dead.append(ws)
         for ws in dead:

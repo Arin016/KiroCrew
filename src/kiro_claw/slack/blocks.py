@@ -77,6 +77,13 @@ def session_task_card(
                     "text": {"type": "plain_text", "text": "▶️ Resume"},
                     "action_id": f"mc_session_resume_{key}",
                     "value": json.dumps({"key": key, "title": title}),
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "⏹️ End"},
+                    "action_id": f"mc_session_end_{key}",
+                    "value": key,
+                    "style": "danger",
                 }
             ],
         },
@@ -617,6 +624,28 @@ def build_stop_failed_blocks() -> list[dict]:
             "type": "section",
             "text": {"type": "mrkdwn", "text": "⛔  *[Stop Failed, Session Reset]*"},
         }
+    ]
+
+
+def build_working_blocks(session_key: str) -> list[dict]:
+    """Inline 'working' message with a Stop button shown during execution."""
+    return [
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": "⏳ _Working…_"}],
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": f"mc_inline_stop_{session_key}",
+                    "text": {"type": "plain_text", "text": "⏹ Stop"},
+                    "value": session_key,
+                    "style": "danger",
+                }
+            ],
+        },
     ]
 
 

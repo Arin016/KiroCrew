@@ -22,19 +22,29 @@ removed.
 
 ## Step 1 — Find the candidate commits
 
-There is no merge-base. Bound the candidate set by the version where the fork
-was branched (currently internal **v2.6.0**). List upstream's non-merge commits
-since that boundary:
+There is no merge-base. The fork tracks the upstream **`origin/beta-braveheart`**
+branch (beta lands fixes before mainline). Sync is **incremental**: bound the
+candidate set by the last-synced upstream tip, recorded in the state file
+`skills/meshclaw-sync/last-synced.txt` (one SHA per tracked branch). List the
+new non-merge commits on each branch since its last-synced tip:
 
 ```bash
 cd /Volumes/workplace/MeshClaw/src/MeshClaw
 git fetch -q
-# 72301c08 == the v2.6.0 release merge the fork was cut from; update as the
-# fork rebaselines. Find it with: git log --oneline --all | grep "v2.6.0 release"
-git log --no-merges --oneline 72301c08..origin/mainline
+BETA=$(grep '^beta ' /Volumes/workplace/KiroClawExternal/src/KiroClawExternal/skills/meshclaw-sync/last-synced.txt | awk '{print $2}')
+MAIN=$(grep '^mainline ' /Volumes/workplace/KiroClawExternal/src/KiroClawExternal/skills/meshclaw-sync/last-synced.txt | awk '{print $2}')
+git log --no-merges --oneline "$BETA"..origin/beta-braveheart      # new beta commits
+git log --no-merges --oneline "$MAIN"..origin/mainline             # new mainline-only commits
 ```
 
-For each commit, get the touched files: `git show --stat <sha>`.
+A mainline-only commit (not reachable from beta) is also a candidate — check
+`git merge-base --is-ancestor <sha> origin/beta-braveheart`. For each commit,
+get the touched files: `git show --stat <sha>`.
+
+**At the END of every sync, update `last-synced.txt`** to the new branch tips
+so the next run only sees genuinely-new commits. (The fork was originally cut
+from the v2.6.0 release merge `72301c08`; that is history now — the state file
+is the live boundary.)
 
 ## Step 2 — Triage each commit (KEEP vs SKIP)
 
@@ -46,19 +56,40 @@ removed or stubbed. These have no public-fork equivalent:
 | Brazil / `Config` / `AUTOSDE.yaml` / toolbox bundler / `npm-pretty-much` | public build is setuptools + npm/Vite |
 | Midway / `mwinit` / MCS / Kerberos / federate / AEA tunnel | auth stubs (`midway.py`, `browser/auth.py`, `tunnel/manager.py`) |
 | `builder-mcp` / `arcc` / Quip / Taskei / SIM / mimir | removed integrations |
+| `writing_review/` + `dashboard/handlers_writing_review.py` | dir ABSENT in fork (deleted subsystem) |
+| `mcp_gateway/` + `promptfarm/` + `instances/` | dirs ABSENT in fork (the upstream `instances/` SSH-tunnel feature was deferred, not ported) |
+| `code_reviewer` / `secretary` / `taskkeeper` | deleted; `sync_aim_packages` is a no-op stub (`return None`) |
 | CodeArtifact / vendored `claude-agent-acp` | fork uses **public** `npm i -g @agentclientprotocol/claude-agent-acp` |
 | Cognito / RUM ids / AEA | removed identity/telemetry |
+
+**Confirm ABSENT by `ls`, not memory** — a commit confined to an absent dir is
+SKIP/NA_INTERNAL. A commit that merely *mentions* an internal name in a
+docstring/comment or in an exact-match allowlist of tool-name strings (e.g.
+`HEARTBEAT_SAFE_TOOLS` listing `TaskeiGetTask`, `search_arcc`,
+`BrazilBuildAnalyzerTool`) is still KEEP — those literals are **inert** in OSS
+(the tools never resolve), so copy them verbatim per COPY-not-rewrite rather
+than editing the allowlist.
 
 **KEEP** — generic core fixes: provider/ACP logic, session/cron/memory, Slack
 gateway + dashboard, security controls (deny patterns, redaction, trust
 matching), token auth, model handling. These are the daily bread of a sync.
 
 **PARTIAL** — a commit that mixes both. Port only the generic hunks; drop the
-internal ones. The classic example: the upstream `send_channel_challenge`
-change that also flipped tunnel delivery from opt-in to unconditional —
-**port the signature/token-claims logic, but KEEP the fork's
-`get_tunnel_url() if cfg.slack.use_tunnel_url else ""` gate** (tunnel is
-deliberately opt-in here).
+internal ones. Examples:
+- The upstream `send_channel_challenge` change that also flipped tunnel
+  delivery from opt-in to unconditional — **port the signature/token-claims
+  logic, but KEEP the fork's `get_tunnel_url() if cfg.slack.use_tunnel_url
+  else ""` gate** (tunnel is deliberately opt-in here).
+- A new `_install_<x>_agent()` that pulls `builder-mcp` into a dedicated agent
+  JSON — **de-Amazon it to `kiroclaw-core`-only**, matching how the fork already
+  rewrote `_install_research_agent` / `_install_knowledge_agent` (see
+  `MIGRATION_PLAN.md`). Port the generic *mechanism* (dedicated agent, dynamic
+  `tools`-from-resolved-`mcpServers`, prompt), drop `builder-mcp` from the pull
+  tuple, and soften any internal-tool prose in the system prompt. Then **adapt
+  the tests** that assert the builder-mcp behavior to the kiroclaw-core reality.
+- A hunk anchored on a fork stub with no upstream pre-image (e.g. the
+  `sync_aim_packages` iterdir loop the fork replaced with `return None`) has
+  **no anchor — drop it.**
 
 If unsure whether a fix is already in the fork, check by **content**, not SHA:
 read the upstream diff, then read the corresponding `kiro_claw` file. Verdicts:
@@ -119,8 +150,31 @@ Gotchas:
 - This machine runs **free-threaded CPython 3.13t**; prefix `PYTHON_GIL=0` to
   silence the GIL-re-enable warning. Async tests need `@pytest.mark.asyncio`.
 - `tsc -b` (not `--noEmit`) is the real frontend typecheck.
-- Do NOT run `black src/kiro_claw test` over the whole tree — the installed
-  black churns ~300 unrelated files. Pass explicit file paths only.
+- **The installed `black` (25.1.0) is NEWER than the repo's formatter** — it
+  wants to reformat ~300 untouched files AND upstream's own post-image fails it
+  too. So `black --check` is NOT the gate. **Do not run black to "fix"
+  anything.** The real gate is **flake8**, which **ignores E501** (line length)
+  — so the long verbatim-copied lines you port are fine. Verify your edits are
+  clean by: (a) `flake8 <files>`, (b) a `>100`-char scan of *only your added
+  lines*, (c) comparing black-`--diff` `+`-line counts mainline-vs-yours per
+  file (equal ⇒ your edits add no new churn). `apps/builtins/*` also ignores E128.
+- **isort failures may be pre-existing** — if `isort --check` flags a file you
+  only added a field/kwarg to (no import change), confirm it fails on `mainline`
+  too (`git show mainline:<f> | isort --check -`) and leave it; don't churn.
+- **Regenerate-from-pre-image trick** for a test/spec file the commit heavily
+  rewrites: if the fork file is byte-identical to the upstream PRE-image (modulo
+  the rename), it is safe to regenerate wholesale from the POST-image —
+  `diff <(git show <sha>^:path | sed '<rename map>') fork/path` == empty proves
+  it, then `git show <sha>:path | sed '<rename map>' > fork/path`. The rename
+  map: `s/mesh_claw/kiro_claw/g; s/MeshClaw/KiroClaw/g; s/MESHCLAW/KIROCLAW/g; s/meshclaw/kiroclaw/g`.
+  Watch for load-bearing literals the broad map also rewrites correctly
+  (e.g. `meshclaw browse *` → `kiroclaw browse *`, `mcp__meshclaw-core__` →
+  `mcp__kiroclaw-core__`) — grep the result for residual `mesh` tokens.
+- **Insert big verbatim blocks with a Python splice**, not Edit, when the block
+  is large and clean (e.g. a new function or test class) — extract via
+  `git show <sha>:path | awk/sed`, map symbols, then `str.replace(anchor, block
+  + "\n\n\n" + anchor, 1)` against a unique anchor. Re-check blank-line spacing
+  (flake8 E301/E303) after splicing next to a class member.
 
 ## Step 5 — Commit (one fix per commit)
 
@@ -165,3 +219,56 @@ sensitive-path blocking, the SEL HMAC audit log, command-trust matching.
 And keep the OSS-flipped defaults: provider `claude_code`, optional `kiro-cli`
 via PATH, Ollama public embeddings, Piper TTS default, Slack enterprise
 default-open, lazy boto3/transcribe imports.
+
+## Step 7 — Build, verify, and ship (used by the recurring auto-sync)
+
+After porting + the Step 4 verify + the Step 6 audit, a full sync run finishes
+with a build and a CR:
+
+1. **Rebuild both macOS DMGs** (the ported backend must ship). Dual-arch from
+   one Apple-Silicon Mac via Rosetta — full recipe in `docs/DESKTOP_APP.md`:
+   ```bash
+   cd website && npm install && npm run build && cp -R dist ../src/kiro_claw/static/dist && cd ..
+   SKIP_FRONTEND=1 PYTHON=$PWD/.venv/bin/python bash packaging/build-desktop.sh   # arm64
+   # x86_64: arch -x86_64 .venv-x86 (system py3 universal2) + electron-builder --x64,
+   #   then RESTORE the arm64 backend into website/electron/backend-dist.
+   ```
+   Mount-verify each DMG carries the matching backend arch
+   (`file …/Resources/backend-dist/kiroclaw-backend/kiroclaw-backend`) — a
+   mismatch crashes on launch. Keep electron `package.json` version at `0.1.0`;
+   `rm` stale DMGs (`dist/` is not auto-cleaned). DMGs are gitignored artifacts.
+   - `.venv`/`.venv-x86` only carry runtime deps from the editable install —
+     `pip install pyinstaller` into each before building.
+
+2. **Commit** each fix separately (Step 5 format) and **update
+   `skills/meshclaw-sync/last-synced.txt`** to the new branch tips in the final
+   commit.
+
+3. **Submit a CR** to mainline:
+   ```bash
+   cr --destination-branch mainline --open
+   # if auto-merge later complains the destination is null:
+   #   cr -r CR-XXXXX --destination-branch mainline
+   ```
+   The CR **title** names the batch (e.g. `[KiroClaw] MeshClaw beta sync
+   <date>: N commits ported`). The **description MUST list, per commit, both
+   what was synced AND what was left out** — every KEEP/PARTIAL with its
+   upstream SHA + one-line summary, and every SKIP/NA_INTERNAL/deferred with the
+   reason (writing_review absent, builder-mcp internal, instances deferred,
+   etc.). Provenance across the history-less boundary lives entirely in this
+   description.
+
+   Origin = `ssh://git.amazon.com:2222/pkg/KiroClawExternal`. Per the global git
+   rule, `commit`/`push`/CR need explicit user authorization — the recurring
+   auto-sync cron job **is** that standing authorization; a manual invocation is
+   not (ask first).
+
+## Recurring auto-sync (cron)
+
+A durable cron job runs this whole skill every 6 hours (scan → triage+verify →
+port → build → commit → CR). It is the standing authorization for commit/push/CR.
+If a run finds **zero** new candidates, it does nothing and exits (no empty
+commit, no CR). If it hits an ambiguous large/PARTIAL commit it can't confidently
+de-Amazon, it ports the clean KEEPs, leaves the ambiguous one un-ported, and
+**notes it in the CR description** as deferred-for-human-review rather than
+guessing.

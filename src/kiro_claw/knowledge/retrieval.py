@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import struct
 from collections import defaultdict
@@ -13,6 +14,8 @@ except ImportError:
     import sqlite3
 
 from .store import KnowledgeStore
+
+logger = logging.getLogger(__name__)
 
 
 class HybridRetriever:
@@ -147,11 +150,34 @@ class HybridRetriever:
         ).fetchall()
 
         scored = []
+        mismatched = 0
+        q_len = len(query_vec)
         for row in rows:
             item_vec = _bytes_to_floats(row["embedding"])
-            if item_vec:
-                sim = self._cosine_similarity(query_vec, item_vec)
+            if not item_vec:
+                continue
+            if len(item_vec) != q_len:
+                # Incomparable dims (embedding model/dimension changed between
+                # ingestion and query). _cosine_similarity would return 0.0; skip
+                # the item entirely so all-zero "ghost" results can't fill the
+                # top-K when vector search is the only signal.
+                mismatched += 1
+                continue
+            sim = self._cosine_similarity(query_vec, item_vec)
+            if sim > 0.0:
                 scored.append((row["id"], sim))
+
+        if mismatched:
+            # One log line per search (not per item) — gives operators a signal
+            # that a model swap / re-index left the index degraded, without
+            # instrumenting the pure static helper.
+            logger.warning(
+                "Knowledge vector search: skipped %d/%d items with mismatched "
+                "embedding dimension (query=%d) — search may be degraded; re-index needed",
+                mismatched,
+                len(rows),
+                q_len,
+            )
 
         scored.sort(key=lambda x: x[1], reverse=True)
         return [(item_id, rank + 1) for rank, (item_id, _) in enumerate(scored[:limit])]
@@ -169,7 +195,17 @@ class HybridRetriever:
 
     @staticmethod
     def _cosine_similarity(a: list[float], b: list[float]) -> float:
-        """Cosine similarity. Returns 0.0 for zero vectors."""
+        """Cosine similarity. Returns 0.0 for zero vectors.
+
+        Vectors of differing dimensionality are incomparable and return 0.0:
+        a freshly embedded query vector is compared against item vectors read
+        from the DB, so an embedding-dimension change between ingestion and query
+        would otherwise let ``zip`` silently truncate the dot product (while the
+        norms use the full vectors), yielding a meaningless similarity. This
+        mirrors the length guard already enforced in ``vector_memory.py``.
+        """
+        if len(a) != len(b):
+            return 0.0
         dot = sum(x * y for x, y in zip(a, b))
         norm_a = math.sqrt(sum(x * x for x in a))
         norm_b = math.sqrt(sum(x * x for x in b))

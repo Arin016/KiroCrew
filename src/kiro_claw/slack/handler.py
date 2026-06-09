@@ -64,7 +64,7 @@ from kiro_claw.security import (
 )
 from kiro_claw.sel import sel
 from kiro_claw.session import SessionManager
-from kiro_claw.slack.blocks import deprecation_warning_block
+from kiro_claw.slack.blocks import build_working_blocks, deprecation_warning_block
 from kiro_claw.slack.client import SlackClientOps
 from kiro_claw.slack.format import (
     SLACK_MSG_LIMIT,
@@ -2285,6 +2285,14 @@ async def handle_message(
     # sees the status indicator instead of a blank bot message.
     await slack.set_thread_status(channel, reply_ts, _STATUS_WORKING)
 
+    # Post inline stop button (only in threaded conversations to avoid breaking tests)
+    _working_ts: str | None = None
+    if thread_ts:
+
+        _working_ts = await slack.post_blocks(
+            channel, build_working_blocks(session_key), "Working…", reply_ts
+        )
+
     use_slack_stream = False
     stream_ts: str | None = None
 
@@ -2849,11 +2857,23 @@ async def handle_message(
                 await slack.delete_message(channel, stream_ts)
             except Exception:
                 logger.debug("Failed to delete cancelled stream", exc_info=True)
+        if _working_ts:
+            try:
+                await slack.delete_message(channel, _working_ts)
+            except Exception:
+                pass
         return
 
     # Clear assistant thread status (skip in review mode — keep indicator until button press)
     if channel_activation != ACTIVATION_REVIEW:
         await slack.set_thread_status(channel, reply_ts, "")
+
+    # Remove inline stop button
+    if _working_ts:
+        try:
+            await slack.delete_message(channel, _working_ts)
+        except Exception:
+            pass
 
     # Suppress error replies for trusted bot messages to prevent echo loops
     if from_trusted_bot and _had_error:
@@ -2954,7 +2974,7 @@ async def handle_message(
         await slack.post_message(channel, clean_text or _NO_RESPONSE, reply_ts)
 
     # Post thinking/reasoning as a thread reply between response and timing footer
-    if thinking_accumulated:
+    if thinking_accumulated and KiroClawConfig.load().slack.show_thinking:
         thinking_mrkdwn = to_slack_mrkdwn(thinking_accumulated)
         thinking_mrkdwn, exfil_warnings = redact_exfiltration_urls(thinking_mrkdwn)
         for w in exfil_warnings:

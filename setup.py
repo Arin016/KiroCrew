@@ -16,9 +16,53 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+import sys
 
-from setuptools import setup
+from setuptools import Command, setup
 from setuptools.command.build_py import build_py
+
+
+class E2eTestCommand(Command):
+    """Run the gated E2E smoke suite (``test/test_e2e_smoke.py``).
+
+    Invoked as ``python setup.py test_e2e``. Distinct from the regular test run
+    (the Makefile ``test`` target / plain ``pytest``) on purpose:
+      * sets ``KIROCLAW_E2E=1`` to lift the ``skipif`` gate in
+        test_e2e_smoke.py (those tests spawn a real gateway subprocess);
+      * runs only that one file, serially, clearing the default
+        ``[tool:pytest]`` addopts (``-n auto`` + ``--cov`` + ``--timeout=120``)
+        -- xdist would spawn one gateway per worker and coverage of a
+        subprocess gateway is meaningless.
+    """
+
+    description = "Run the E2E smoke suite (test/test_e2e_smoke.py)"
+    user_options: list = []
+
+    def initialize_options(self) -> None:
+        pass
+
+    def finalize_options(self) -> None:
+        pass
+
+    def run(self) -> None:
+        base = os.path.dirname(os.path.abspath(__file__))
+        env = dict(os.environ)
+        env["KIROCLAW_E2E"] = "1"
+        cmd = [
+            sys.executable, "-m", "pytest",
+            os.path.join("test", "test_e2e_smoke.py"),
+            # Drop the heavy unit-test addopts (-n auto, --cov, --timeout=120);
+            # the e2e suite runs serially with a longer per-test timeout.
+            "-o", "addopts=",
+            "-p", "no:cacheprovider",
+            "-v",
+            "--timeout=300",
+        ]
+        print("[test_e2e] KIROCLAW_E2E=1 " + " ".join(cmd))
+        rc = subprocess.call(cmd, cwd=base, env=env)
+        if rc != 0:
+            raise SystemExit(rc)
 
 
 class BuildWithFrontend(build_py):
@@ -56,5 +100,6 @@ class BuildWithFrontend(build_py):
 setup(
     cmdclass={
         "build_py": BuildWithFrontend,
+        "test_e2e": E2eTestCommand,
     },
 )

@@ -75,6 +75,38 @@ _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 _DIST_DIR = _STATIC_DIR / "dist"
 
 
+def _register_dist_static_routes(app: web.Application, dist_dir: Path) -> None:
+    """Register static routes for the React ``dist/`` build on ``app``.
+
+    Extracted from ``start_dashboard`` so the route wiring (which subdirectories
+    of the build get served at which prefix) is unit-testable without standing
+    up the full gateway. Each optional subdirectory is mounted only when present.
+    """
+    app.router.add_static(
+        "/assets",
+        dist_dir / "assets" if (dist_dir / "assets").is_dir() else dist_dir,
+        show_index=False,
+        append_version=True,
+    )
+    if (dist_dir / "sprites").is_dir():
+        app.router.add_static("/sprites", dist_dir / "sprites", show_index=False)
+    # Self-hosted fonts (AWS Diatype family) live at dist/fonts/ and are
+    # referenced by absolute url('/fonts/...') in @font-face. Without this
+    # route they fall through to the SPA fallback (index.html), and the
+    # browser reports "invalid sfntVersion" trying to parse HTML as a font.
+    if (dist_dir / "fonts").is_dir():
+        app.router.add_static("/fonts", dist_dir / "fonts", show_index=False)
+    # Vendor shims for the app import map (react, react-dom, react/jsx-runtime)
+    if (dist_dir / "vendor").is_dir():
+        app.router.add_static(
+            "/vendor",
+            dist_dir / "vendor",
+            show_index=False,
+            append_version=False,  # stable URLs, no cache-busting
+        )
+    logger.info("Serving React build from %s", dist_dir)
+
+
 def _migrate_playwright_to_proxy() -> None:
     """Migrate existing mcp.json from direct npm-playwright-mcp to proxy."""
     mcp_json = Path.home() / ".kiro" / "settings" / "mcp.json"
@@ -570,6 +602,7 @@ async def start_dashboard(
     app.router.add_post("/api/taskrunner/{task_id}/execute", handlers.api_taskrunner_execute_plan)
     app.router.add_post("/api/reveal", handlers.api_reveal_path)
     app.router.add_get("/api/file-read", handlers.api_file_read)
+    app.router.add_get("/api/file-download", handlers.api_file_download)
     app.router.add_get("/api/file-raw", handlers.api_file_raw)
     app.router.add_get("/api/file-watch", handlers.api_file_watch)
     app.router.add_post("/api/file-write", handlers.api_file_write)
@@ -759,23 +792,7 @@ async def start_dashboard(
 
     # Static files — prefer React dist/ build, fall back to legacy static/
     if _DIST_DIR.is_dir():
-        app.router.add_static(
-            "/assets",
-            _DIST_DIR / "assets" if (_DIST_DIR / "assets").is_dir() else _DIST_DIR,
-            show_index=False,
-            append_version=True,
-        )
-        if (_DIST_DIR / "sprites").is_dir():
-            app.router.add_static("/sprites", _DIST_DIR / "sprites", show_index=False)
-        # Vendor shims for the app import map (react, react-dom, react/jsx-runtime)
-        if (_DIST_DIR / "vendor").is_dir():
-            app.router.add_static(
-                "/vendor",
-                _DIST_DIR / "vendor",
-                show_index=False,
-                append_version=False,  # stable URLs, no cache-busting
-            )
-        logger.info("Serving React build from %s", _DIST_DIR)
+        _register_dist_static_routes(app, _DIST_DIR)
     if _STATIC_DIR.is_dir():
         app.router.add_static(
             "/static",
@@ -834,7 +851,7 @@ async def start_dashboard(
             return await handler(request)  # type: ignore[operator]
         except web.HTTPNotFound:
             if request.method == "GET" and not request.path.startswith(
-                ("/api/", "/assets/", "/static/", "/sprites/", "/vendor/")
+                ("/api/", "/assets/", "/static/", "/sprites/", "/vendor/", "/fonts/")
             ):
                 return await handlers.index(request)
             raise

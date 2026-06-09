@@ -85,7 +85,7 @@ def test_create_chat_slot(gateway):
 
 def test_cron_list_fixture_crons(gateway):
     """Cron list returns the fixture's crons (minimal has 2: active + paused)."""
-    data = _api_get(gateway, "/api/cron")
+    data = _api_get(gateway, "/api/crons")
     assert "jobs" in data
     # minimal fixture ships 2 crons
     assert len(data["jobs"]) >= 2

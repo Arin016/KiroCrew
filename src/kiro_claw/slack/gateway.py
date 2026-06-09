@@ -89,7 +89,7 @@ from kiro_claw.providers.base import LLMEvent
 from kiro_claw.safety_override import safety_override
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
-from kiro_claw.session import BACKGROUND_KEY, SessionManager
+from kiro_claw.session import HEARTBEAT_KEY, SessionManager
 from kiro_claw.skills import SkillsLoader
 from kiro_claw.slack.client import RealSlackClient
 from kiro_claw.slack.format import build_cron_ack_block, split_message, to_slack_mrkdwn
@@ -226,6 +226,152 @@ def _is_read_only_tool(event_title: str) -> bool:
     if any(token in _WRITE_INDICATORS for token in tokens):
         return False
     return True
+
+
+# ── Heartbeat tool allowlist ──
+#
+# Heartbeat sessions run unattended on a timer.  Tool approval cannot prompt
+# a human, so we maintain a strict explicit allowlist of read-only /
+# observation tools that auto-approve.  Anything outside the list is rejected
+# with a SEL audit event so operators can see what got blocked and tune the
+# list.
+#
+# The allowlist is **name-based and exact-match only** (no verb/heuristic
+# fallback).  Heartbeat polls untrusted external content (CR comments, ticket
+# bodies) where prompt-injection could try to coax the agent into write
+# actions; a verb-based fallback could be widened by a clever name like
+# ``get_all_credentials`` or ``list_env_secrets`` from a malicious MCP server
+# or injected payload.  Exact-match enforcement is auditable and cannot be
+# widened that way.
+#
+# When a legitimate new read tool needs to run in heartbeat, operators
+# observe the SEL ``denied`` events for it and explicitly add the name to
+# this set.  This is deny-by-default per the security-controls guideline.
+HEARTBEAT_SAFE_TOOLS = frozenset({
+    # Local / built-in read tools
+    "Read",
+    "Grep",
+    "Glob",
+    # Workspace exploration
+    "WorkspaceGitDetails",
+    "WorkspaceSearch",
+    # Internal Amazon read APIs (builder-mcp)
+    "ReadInternalWebsites",
+    "InternalSearch",
+    "InternalCodeSearch",
+    "SearchAcronymCentral",
+    # Code review reads (CRUX)
+    "CodeReviewReadActions",
+    # Ticketing / Taskei reads
+    "TicketingReadActions",
+    "TaskeiGetTask",
+    "TaskeiGetRooms",
+    "TaskeiGetRoomResources",
+    "TaskeiListTasks",
+    # Pipeline / Apollo / on-call reads
+    "GetPipelineDetails",
+    "GetPipelineHealth",
+    "GetPipelinesRelevantToUser",
+    "ApolloReadActions",
+    "OncallReadActions",
+    # SAS / security-assurance reads
+    "GetSasRisks",
+    "GetSasCampaigns",
+    # Knowledge base reads
+    "ListKnowledgeBases",
+    "QueryKnowledgeBases",
+    # KiroClaw-core reads (no side effects)
+    "learn_list",
+    "cron_list",
+    "spawn_list",
+    "spawn_status",
+    "artifact_list",
+    "artifact_get",
+    "artifact_versions",
+    "recall",
+    "local_knowledge_search",
+    "search_arcc",
+    # Software recommendations / search (read)
+    "SearchSoftwareRecommendations",
+    "GetSoftwareRecommendation",
+    # Test-run reads
+    "ReadRemoteTestRun",
+    # Build analyzers (read)
+    "BrazilBuildAnalyzerTool",
+    "BrazilPackageBuilderAnalyzerTool",
+})
+
+
+def _is_heartbeat_safe_tool(event_title: str) -> bool:
+    """Return True if *event_title* is safe to auto-approve in a heartbeat task.
+
+    Strict exact-name match against ``HEARTBEAT_SAFE_TOOLS``.  No verb-based
+    fallback — heartbeat polls untrusted external content (CR comments,
+    ticket bodies) where prompt-injection could try to widen approval via a
+    clever read-shaped tool name (``get_all_credentials``,
+    ``list_env_secrets``, etc.).  Per security-controls deny-by-default:
+    reject unless positively confirmed.
+
+    kiro-cli ACP sends MCP tool names with a ``mcp__<server>__`` prefix
+    (e.g. ``mcp__builder-mcp__CodeReviewReadActions``).  We strip that
+    prefix before matching so the allowlist can stay server-agnostic.
+
+    Returns False on empty / whitespace-only / unrecognised names.
+    """
+    if not event_title:
+        return False
+    name = event_title.strip()
+    if not name:
+        return False
+    # Strip MCP server prefix: "mcp__builder-mcp__ToolName" → "ToolName"
+    if name.startswith("mcp__"):
+        parts = name.split("__", 2)
+        if len(parts) == 3:
+            name = parts[2]
+    return name in HEARTBEAT_SAFE_TOOLS
+
+
+# Prepended to every heartbeat task_text before ``ctx_builder.build_message``.
+# Inline injection survives context compaction and webhook-restored sessions
+# where skill / system-prompt copies of the same instruction can drift out of
+# effective context.  See CR-268592581 for the original gateway-injection
+# rationale.
+_HEARTBEAT_KEEP_INJECTION = (
+    "[HEARTBEAT TASK — you MUST include the keyword HEARTBEAT_KEEP "
+    "in your response if this task is NOT complete. Omit the "
+    "keyword only when the task is fully complete.]\n\n"
+)
+
+
+def _build_heartbeat_hooks(user_hooks: HookManager) -> HookManager:
+    """Return a HookManager scoped for heartbeat use.
+
+    The interactive user's ``auto_approve_tools`` (e.g. ``*``, ``Write*``)
+    must NEVER widen the heartbeat allowlist — ``llm_helpers._resolve_permission``
+    consults ``hooks.on_tool_call()`` BEFORE the ``on_tool_approval`` callback,
+    so a user-config auto-approve would bypass ``_heartbeat_approval``
+    entirely (bolichen review on CR-277980962/r5).
+
+    The heartbeat-scoped hooks keep:
+      - sensitive-path deny (always-on, structural — not from user config)
+      - the user's ``auto_deny_tools`` (denies are safe; users can only
+        narrow, not widen, what runs in heartbeat)
+
+    They drop:
+      - ``auto_approve_tools`` (set to empty so ``HEARTBEAT_SAFE_TOOLS`` is
+        the sole approval authority)
+      - ``auto_replies`` / ``transforms`` / ``context_rules`` (chat-only)
+
+    The result: every tool call in a heartbeat session takes the
+    ``on_tool_approval`` branch, where ``_heartbeat_approval`` enforces
+    strict allowlist + SEL audit.
+    """
+    user_cfg = user_hooks._config  # noqa: SLF001 — internal hooks state by design
+    scoped = HooksConfig(
+        auto_approve_tools=[],
+        auto_deny_tools=list(user_cfg.auto_deny_tools),
+    )
+    return HookManager(scoped)
 
 
 def _result_hash(text: str) -> str:
@@ -582,6 +728,92 @@ class GatewayOrchestrator:
 
         return _approve
 
+    # ------------------------------------------------------------------
+    # Heartbeat tool approval — strict allowlist, no UI prompt
+    # ------------------------------------------------------------------
+    async def _heartbeat_approval(
+        self, event: LLMEvent, _parent_session_key: str = ""
+    ) -> bool:
+        """Tool-approval callback for heartbeat sessions.
+
+        Heartbeat runs unattended on a timer — there is no human to click an
+        approval button.  We auto-approve only tools whose name is in
+        ``HEARTBEAT_SAFE_TOOLS`` (strict exact-match) and reject everything
+        else with a SEL audit event.
+
+        This is the "Option A" mitigation for the heartbeat security review
+        on CR-268592581: blanket ``AUTO_APPROVE`` was rejected because polled
+        external content (CR comments, ticket bodies) is untrusted; a strict
+        name-based allowlist gives heartbeat the tool access it needs while
+        keeping the write surface closed to deny-by-default.
+
+        Both approve and deny outcomes emit SEL audit events
+        (``log_tool_invocation``) so operators can audit every permission
+        decision made on behalf of an unattended heartbeat session.
+        """
+        title = (event.title or "").strip()
+        # Tool titles are LLM-originated input. Redact before any external
+        # surface — SEL audit AND dashboard-visible logger warnings —
+        # per the security-controls "never trust LLM output" guideline.
+        safe_title = redact_exfiltration_urls(
+            redact_credentials(title)[0]
+        )[0]
+
+        def _audit(outcome: str, **metadata: str) -> None:
+            """Emit a SEL ``log_tool_invocation`` event.
+
+            Raises on failure — callers must decide whether the underlying
+            permission decision can proceed without an audit trail. The
+            approve path treats SEL failure as fatal (deny-by-default,
+            preserve audit invariant). The deny path tolerates SEL failure
+            because the tool is rejected regardless.
+            """
+            sel().log_tool_invocation(
+                session_key=HEARTBEAT_KEY,
+                source="heartbeat",
+                agent="kiroclaw-heartbeat",
+                tool_name=safe_title or "<unknown>",
+                tool_kind=event.tool_kind,
+                outcome=outcome,
+                request_id=event.request_id,
+                metadata=metadata or None,
+            )
+
+        if _is_heartbeat_safe_tool(title):
+            # Fail-closed: if SEL is down we cannot record the auto-approve
+            # decision, and unattended sessions must not run tools without
+            # an auditable permission record. Deny rather than approve
+            # silently (security-controls deny-by-default).
+            try:
+                _audit("auto_approved", reason="in_heartbeat_safe_tools")
+            except Exception:
+                logger.warning(
+                    "SEL audit failed on heartbeat approve path — "
+                    "denying tool to preserve audit-or-deny invariant",
+                    exc_info=True,
+                )
+                return False
+            return True
+
+        # Reject + audit. Logged via the same SEL channel as the interactive
+        # approval path so operators can see what got blocked and decide
+        # whether to extend HEARTBEAT_SAFE_TOOLS. SEL failure here is
+        # tolerated because the tool is denied regardless — the safety
+        # property the audit protects (no unaudited tool runs) is preserved.
+        try:
+            _audit("denied", reason="not_in_heartbeat_safe_tools")
+        except Exception:
+            logger.warning(
+                "SEL audit failed on heartbeat deny path — "
+                "tool was still rejected",
+                exc_info=True,
+            )
+        logger.warning(
+            "Heartbeat blocked tool call: %s (not in HEARTBEAT_SAFE_TOOLS)",
+            safe_title or "<unknown>",
+        )
+        return False
+
     # Required packages that must be importable (import_name, pip_spec).
     # pip_spec may include version constraints matching setup.cfg.
     _REQUIRED_DEPS = [
@@ -843,7 +1075,12 @@ class GatewayOrchestrator:
                             slot.append("queued", wrapped, json.dumps(_cls))
                         else:
                             slot.append("inject", wrapped, inject_cls)
-                            task = asyncio.create_task(_run_chat(self.dashboard_state, slot, wrapped))
+                            task = asyncio.create_task(
+                                asyncio.wait_for(
+                                    _run_chat(self.dashboard_state, slot, wrapped),
+                                    timeout=CHAT_TURN_TIMEOUT,
+                                )
+                            )
                             slot.task = task
                             self.dashboard_state._background_tasks.add(task)
                             task.add_done_callback(self.dashboard_state._background_tasks.discard)
@@ -1493,27 +1730,55 @@ class GatewayOrchestrator:
         """Initialize and start the heartbeat service."""
         memory = self.ctx_builder.memory if self.ctx_builder else MemoryStore()
 
+        # Heartbeat-scoped hooks: drops the user's ``auto_approve_tools`` so
+        # ``HEARTBEAT_SAFE_TOOLS`` is the sole approval authority for any
+        # tool call in a heartbeat session.  Built once at init — heartbeat
+        # config changes require a gateway restart anyway.
+        assert self.ctx_builder is not None
+        heartbeat_hooks = _build_heartbeat_hooks(self.ctx_builder.hooks)
+
         async def _heartbeat_task(task_text: str, deliver: str) -> str | None:
             assert self.sessions is not None
             assert self.ctx_builder is not None
-            session_key = BACKGROUND_KEY
+            session_key = HEARTBEAT_KEY
             _acquired = False
             try:
-                client, is_new, _resumed = await self.sessions.get_or_create(session_key)
+                # Use the dedicated ``kiroclaw-heartbeat`` agent — minimal
+                # MCP surface (kiroclaw-core only on public installs) so cycle
+                # cold-starts stay cheap.  Tool calls are still gated at
+                # runtime by ``_heartbeat_approval`` against
+                # ``HEARTBEAT_SAFE_TOOLS``.
+                client, is_new, _resumed = await self.sessions.get_or_create(
+                    session_key, agent="kiroclaw-heartbeat",
+                )
                 _acquired = True
-                full_message, _ = self.ctx_builder.build_message(task_text, is_new)
+
+                # Prepend an unmissable HEARTBEAT_KEEP reminder to every task
+                # text before message build.  This survives context
+                # compaction and webhook-restored sessions where skill /
+                # system-prompt copies of the same instruction can drift out
+                # of effective context (CR-268592581 rationale).
+                injected = _HEARTBEAT_KEEP_INJECTION + task_text
+                full_message, _ = self.ctx_builder.build_message(injected, is_new)
 
                 # A heartbeat turn runs unattended. Bound it with a hard deadline
-                # (mirrors cron's _execute_with_timeout) so a single non-allowlisted
-                # tool approval — which blocks on the human-approval wait with no
-                # human present — cannot freeze the whole heartbeat subsystem.
+                # (mirrors cron's _execute_with_timeout) as defense in depth so
+                # any unexpected hang in stream_and_collect cannot freeze the
+                # whole heartbeat subsystem. ``_heartbeat_approval`` already
+                # rejects non-allowlisted tools immediately (no human-approval
+                # wait), so the timeout is the second line of defense.
+                #
+                # ``hooks=heartbeat_hooks`` (NOT the interactive user hooks):
+                # the user's ``auto_approve_tools`` MUST NOT widen the heartbeat
+                # allowlist — ``llm_helpers._resolve_permission`` consults
+                # ``hooks.on_tool_call()`` BEFORE ``on_tool_approval``.
                 result_text = await asyncio.wait_for(
                     stream_and_collect(
                         client,
                         full_message,
                         approval_policy=ToolApprovalPolicy.HOOK_BASED,
-                        hooks=self.ctx_builder.hooks,
-                        on_tool_approval=self._interactive_approval("heartbeat"),
+                        hooks=heartbeat_hooks,
+                        on_tool_approval=self._heartbeat_approval,
                     ),
                     timeout=HEARTBEAT_TASK_TIMEOUT_SECS,
                 )
@@ -1522,8 +1787,12 @@ class GatewayOrchestrator:
                     result_text = "_No response._"
             except asyncio.TimeoutError:
                 # Tear down the in-flight turn so the underlying claude-agent-acp
-                # process/turn doesn't linger holding the background session.
-                # Do this BEFORE the finally releases the session.
+                # process/turn doesn't linger holding the heartbeat session.
+                # Per-task reset is safe here because asyncio.wait_for has
+                # already cancelled the in-flight stream_and_collect, so any
+                # concurrent heartbeat task using the same key was already
+                # blocked on the per-key semaphore (held until our finally
+                # releases) — they pick up the freshly-recreated session.
                 logger.warning(
                     "Heartbeat task timed out after %ds, resetting session: %s",
                     HEARTBEAT_TASK_TIMEOUT_SECS,
@@ -1543,8 +1812,12 @@ class GatewayOrchestrator:
                 raise
             finally:
                 if _acquired:
+                    # Release the per-session semaphore so the next task in
+                    # this cycle (asyncio.gather'd) can acquire the SAME
+                    # warm session.  Cycle-end teardown is handled by
+                    # ``_recycle_heartbeat`` (called once after gather
+                    # completes) — see ``HeartbeatService._process_heartbeat_file``.
                     self.sessions.release(session_key)
-                    await self.sessions.recycle_background()
 
             result_safe, _ = redact_exfiltration_urls(result_text)
             result_safe, _ = redact_credentials(result_safe)
@@ -1564,10 +1837,28 @@ class GatewayOrchestrator:
                 )
             return result_safe
 
+        async def _on_cycle_end() -> None:
+            """Recycle the heartbeat session ONCE per cycle, not per task.
+
+            Multi-task heartbeat cycles run concurrently via
+            ``asyncio.gather`` and share ``HEARTBEAT_KEY``.  A per-task
+            ``reset()`` would tear down the session under sibling tasks
+            still in flight (bolichen review on CR-277980962/r5).
+            ``recycle_heartbeat`` is conditional (only kills when context
+            crosses the 70% threshold) so warm cycles reuse the same MCP
+            toolbelt and avoid per-cycle cold-start cost.
+            """
+            assert self.sessions is not None
+            try:
+                await self.sessions.recycle_heartbeat()
+            except Exception:
+                logger.warning("Heartbeat: cycle-end recycle failed", exc_info=True)
+
         self.heartbeat_svc = HeartbeatService(
             memory=memory,
             on_task=_heartbeat_task,
             consolidator=self.consolidator,
+            on_cycle_end=_on_cycle_end,
         )
         await self.heartbeat_svc.start()
 
@@ -1619,7 +1910,12 @@ class GatewayOrchestrator:
                 return False
             # Show nudge as a distinct "nudge" role message in the slot history.
             slot.append("nudge", tagged, "msg msg-nudge")
-            task = asyncio.create_task(_run_chat(self.dashboard_state, slot, tagged))
+            task = asyncio.create_task(
+                asyncio.wait_for(
+                    _run_chat(self.dashboard_state, slot, tagged),
+                    timeout=CHAT_TURN_TIMEOUT,
+                )
+            )
             # Mirror dashboard /api/chat/send path so slot.running == True and sidebar
             # shows the "turn active" three-dots indicator immediately.
             slot.task = task
@@ -2197,7 +2493,7 @@ class GatewayOrchestrator:
                                 "Subagent %s: slot %s claimed by another injection, queuing",
                                 info.id, _slot_name,
                             )
-                            # Bounded by CHAT_TURN_TIMEOUT (~600s): _run_chat's
+                            # Bounded by CHAT_TURN_TIMEOUT (~7200s): _run_chat's
                             # finally block drains slot._queue on any exit path.
                             _injection_slot.queue_append(announce)
                             self.dashboard_state.push_slots_update()

@@ -270,7 +270,14 @@ def _session_home_tab_blocks(
                     "text": {"type": "plain_text", "text": "▶️ Resume"},
                     "action_id": f"mc_session_resume_{row['key']}",
                     "value": json.dumps({"key": row["key"], "title": safe_title}),
-                }
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "⏹️ End"},
+                    "action_id": f"mc_session_end_{row['key']}",
+                    "value": row["key"],
+                    "style": "danger",
+                },
             ],
         },
     ]

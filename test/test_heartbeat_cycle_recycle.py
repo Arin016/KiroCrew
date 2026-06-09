@@ -1,0 +1,388 @@
+"""Tests for the heartbeat cycle-end recycle path.
+
+Per bolichen review on CR-277980962/r5:
+- A per-task ``reset(HEARTBEAT_KEY)`` in ``_heartbeat_task.finally`` deterministically
+  tears down the session under concurrent ``asyncio.gather``'d sibling tasks
+  sharing the same key — the next sibling streams against a torn-down provider.
+- Per-cycle reset (always-recycle) cold-starts the entire MCP toolbelt every
+  minute even on healthy idle sessions.
+
+Resolution: per-task ``finally`` only releases the per-key semaphore; cycle-end
+recycle is handled once by ``SessionManager.recycle_heartbeat`` (called from
+``HeartbeatService._process_heartbeat_file`` after ``asyncio.gather`` completes,
+matching ``recycle_background``'s ≥70% / 40-prompt-blind thresholds).  Multi-task
+cycles share one warm session; only between cycles do we conditionally recycle.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from kiro_claw.heartbeat import HeartbeatService, heartbeat_path
+from kiro_claw.session import HEARTBEAT_KEY
+
+
+def _make_cfg():
+    """Minimal KiroClawConfig stub for SessionManager unit tests."""
+    cfg = MagicMock()
+    cfg.session.pool_size = 0
+    cfg.session.pool_agent = ""
+    cfg.session.pool_ttl_secs = 0
+    cfg.session.pool_cwd = ""
+    cfg.agent.default_agent = ""
+    return cfg
+
+
+@pytest.fixture()
+def heartbeat_file(tmp_path, monkeypatch):
+    """Redirect heartbeat_path() to a tmp file."""
+    monkeypatch.setattr("kiro_claw.heartbeat.workspace_dir", lambda: tmp_path)
+    return heartbeat_path()
+
+
+class TestOnCycleEndCallback:
+    @pytest.mark.asyncio
+    async def test_callback_invoked_after_gather_completes(self, heartbeat_file):
+        """on_cycle_end fires exactly once per cycle, AFTER all tasks finish."""
+        order: list[str] = []
+
+        async def _on_task(text, deliver):
+            order.append(f"task:{text}")
+            return None
+
+        async def _on_cycle_end():
+            order.append("cycle_end")
+
+        heartbeat_file.write_text(
+            "# Heartbeat Tasks\n\n"
+            "- [ ] task A\n"
+            "- [ ] task B\n"
+            "- [ ] task C\n",
+            encoding="utf-8",
+        )
+
+        svc = HeartbeatService(
+            memory=MagicMock(),
+            on_task=_on_task,
+            on_cycle_end=_on_cycle_end,
+        )
+        await svc._process_heartbeat_file()
+
+        # All tasks ran exactly once, then on_cycle_end fired once at the end.
+        task_runs = [s for s in order if s.startswith("task:")]
+        assert len(task_runs) == 3
+        assert order[-1] == "cycle_end", "on_cycle_end must fire LAST"
+        assert order.count("cycle_end") == 1, "on_cycle_end must fire exactly once"
+
+    @pytest.mark.asyncio
+    async def test_callback_invoked_even_when_tasks_raise(self, heartbeat_file):
+        """on_cycle_end runs even if individual tasks fail."""
+        cycle_end_called = []
+
+        async def _on_task(text, deliver):
+            raise RuntimeError("task boom")
+
+        async def _on_cycle_end():
+            cycle_end_called.append(True)
+
+        heartbeat_file.write_text(
+            "# Heartbeat Tasks\n\n- [ ] some task\n",
+            encoding="utf-8",
+        )
+
+        svc = HeartbeatService(
+            memory=MagicMock(),
+            on_task=_on_task,
+            on_cycle_end=_on_cycle_end,
+        )
+        await svc._process_heartbeat_file()
+
+        assert cycle_end_called == [True]
+
+    @pytest.mark.asyncio
+    async def test_callback_failure_does_not_crash_loop(self, heartbeat_file):
+        """A raising on_cycle_end must NOT propagate — the cycle is over,
+        and the periodic loop must keep ticking."""
+        async def _on_task(text, deliver):
+            return None
+
+        async def _on_cycle_end():
+            raise RuntimeError("recycle failed")
+
+        heartbeat_file.write_text(
+            "# Heartbeat Tasks\n\n- [ ] some task\n",
+            encoding="utf-8",
+        )
+
+        svc = HeartbeatService(
+            memory=MagicMock(),
+            on_task=_on_task,
+            on_cycle_end=_on_cycle_end,
+        )
+        # Should NOT raise — the warning is logged and the loop continues.
+        await svc._process_heartbeat_file()
+
+    @pytest.mark.asyncio
+    async def test_no_callback_when_no_tasks(self, heartbeat_file):
+        """Cycles with zero tasks skip on_cycle_end entirely (no churn)."""
+        cycle_end_called = []
+
+        async def _on_task(text, deliver):
+            return None
+
+        async def _on_cycle_end():
+            cycle_end_called.append(True)
+
+        # File exists but has only the header — zero tasks.
+        heartbeat_file.write_text(
+            "# Heartbeat Tasks\n\n",
+            encoding="utf-8",
+        )
+
+        svc = HeartbeatService(
+            memory=MagicMock(),
+            on_task=_on_task,
+            on_cycle_end=_on_cycle_end,
+        )
+        await svc._process_heartbeat_file()
+
+        assert cycle_end_called == [], "on_cycle_end must not fire when no tasks ran"
+
+
+class TestRecycleHeartbeat:
+    """``SessionManager.recycle_heartbeat`` mirrors ``recycle_background`` —
+    threshold-driven, no eager replacement (heartbeat is on-demand)."""
+
+    @pytest.mark.asyncio
+    async def test_no_op_when_session_absent(self):
+        """Cycles where no heartbeat task ever ran (no session created)
+        must be cheap — no work, no errors."""
+        from kiro_claw.session import SessionManager
+
+        mgr = SessionManager(cfg=_make_cfg(), provider_factory=MagicMock())
+        # Should not raise even with no provider, no session, no factory call.
+        await mgr.recycle_heartbeat()
+
+    @pytest.mark.asyncio
+    async def test_no_op_below_threshold(self):
+        """Healthy session (under 70% context, under 40 prompts) is preserved
+        — cycle-end recycle must NOT churn warm sessions."""
+        from kiro_claw.session import SessionManager, _Session
+
+        mgr = SessionManager(cfg=_make_cfg(), provider_factory=MagicMock())
+        provider = MagicMock()
+        provider.context_usage_pct = MagicMock(return_value=15.0)
+        provider.shutdown = AsyncMock()
+        sess = _Session(provider=provider, is_new=False)
+        sess.prompt_count = 5
+        mgr._sessions[HEARTBEAT_KEY] = sess
+
+        await mgr.recycle_heartbeat()
+
+        # Session preserved; no shutdown.
+        assert HEARTBEAT_KEY in mgr._sessions
+        provider.shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_recycles_at_pct_threshold(self):
+        """At ≥70% context, recycle drops the session so the next
+        ``get_or_create`` creates a fresh one on demand."""
+        from kiro_claw.session import SessionManager, _Session
+
+        mgr = SessionManager(cfg=_make_cfg(), provider_factory=MagicMock())
+        provider = MagicMock()
+        provider.context_usage_pct = MagicMock(return_value=72.0)
+        provider.shutdown = AsyncMock()
+        sess = _Session(provider=provider, is_new=False)
+        sess.prompt_count = 10
+        mgr._sessions[HEARTBEAT_KEY] = sess
+
+        await mgr.recycle_heartbeat()
+
+        # Old session torn down and removed; no eager replacement (unlike
+        # background, which calls _ensure_background — heartbeat is
+        # on-demand only).
+        assert HEARTBEAT_KEY not in mgr._sessions
+        provider.shutdown.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_recycles_blind_at_40_prompts(self):
+        """When provider can't report context%, fall back to prompt count."""
+        from kiro_claw.session import SessionManager, _Session
+
+        mgr = SessionManager(cfg=_make_cfg(), provider_factory=MagicMock())
+        provider = MagicMock()
+        provider.context_usage_pct = MagicMock(return_value=0.0)
+        provider.shutdown = AsyncMock()
+        sess = _Session(provider=provider, is_new=False)
+        sess.prompt_count = 40
+        mgr._sessions[HEARTBEAT_KEY] = sess
+
+        await mgr.recycle_heartbeat()
+
+        assert HEARTBEAT_KEY not in mgr._sessions
+        provider.shutdown.assert_awaited_once()
+
+
+class TestHeartbeatAgentInstall:
+    """``_install_heartbeat_agent`` writes the kiroclaw-heartbeat agent
+    config with a minimal MCP surface (gsanc review on CR-277980962/r5)."""
+
+    def test_installs_with_minimal_mcp_servers(self, tmp_path, monkeypatch):
+        """Heartbeat agent gets kiroclaw-core only on public installs — NOT
+        kiroclaw-cron / arcc-governance / etc.  This is gsanc's
+        narrow-toolbelt fix for cold-start cost. (The Amazon-internal
+        builder-mcp wiring is omitted on public installs, matching
+        ``_install_research_agent`` / ``_install_knowledge_agent``.)"""
+        import json
+
+        from kiro_claw import agent as agent_mod
+
+        kiro_dir = tmp_path / "agents"
+        kiro_dir.mkdir()
+        # Seed a main kiroclaw.json with multiple mcp servers — the heartbeat
+        # installer should pick out only the one it needs (kiroclaw-core).
+        main_config = {
+            "name": "kiroclaw",
+            "mcpServers": {
+                "builder-mcp": {"command": "/bin/builder-mcp", "args": ["x"]},
+                "kiroclaw-core": {"command": "/bin/mc", "args": ["mcp-core"]},
+                "kiroclaw-cron": {"command": "/bin/mc", "args": ["mcp-cron"]},
+                "arcc-governance": {"command": "/bin/arcc", "args": []},
+            },
+        }
+        (kiro_dir / "kiroclaw.json").write_text(json.dumps(main_config))
+
+        monkeypatch.setattr(agent_mod, "KIRO_AGENTS_DIR", kiro_dir)
+
+        agent_mod._install_heartbeat_agent()
+
+        path = kiro_dir / "kiroclaw-heartbeat.json"
+        assert path.exists()
+        config = json.loads(path.read_text())
+
+        assert config["name"] == "kiroclaw-heartbeat"
+        # Minimal MCP surface — only kiroclaw-core on public installs
+        # (builder-mcp is Amazon-internal and omitted).
+        assert set(config["mcpServers"].keys()) == {"kiroclaw-core"}
+        # Tools tags reflect that server (so kiro-cli loads it).
+        assert "@kiroclaw-core" in config["tools"]
+        assert "@builder-mcp" not in config["tools"]
+        # Description references the SEL audit gateway-side responsibility.
+        assert "HEARTBEAT_SAFE_TOOLS" in config["description"]
+
+    def test_strips_include_tools_filters_from_main_config(self, tmp_path, monkeypatch):
+        """The main kiroclaw config may narrow a server via ``--include-tools``
+        / ``--include-tool-tags`` / ``--exclude-tools``; those filters are
+        fragile (a typo silently surfaces zero tools to the agent) and the
+        heartbeat allowlist is enforced gateway-side anyway. Strip them so
+        the heartbeat agent always sees the full catalog and
+        ``HEARTBEAT_SAFE_TOOLS`` is the sole gate. (Asserted on kiroclaw-core —
+        the only server the public installer pulls.)
+        """
+        import json
+
+        from kiro_claw import agent as agent_mod
+
+        kiro_dir = tmp_path / "agents"
+        kiro_dir.mkdir()
+        main_config = {
+            "name": "kiroclaw",
+            "mcpServers": {
+                "kiroclaw-core": {
+                    "command": "/bin/mc",
+                    "args": [
+                        "mcp-core",
+                        "--include-tools=recall,learn_list",
+                        "--include-tool-tags",
+                        "read,default",
+                        "--exclude-tools",
+                        "send_message",
+                        "--skill-paths",
+                        "/skills/path",
+                    ],
+                },
+            },
+        }
+        (kiro_dir / "kiroclaw.json").write_text(json.dumps(main_config))
+        monkeypatch.setattr(agent_mod, "KIRO_AGENTS_DIR", kiro_dir)
+
+        agent_mod._install_heartbeat_agent()
+
+        config = json.loads((kiro_dir / "kiroclaw-heartbeat.json").read_text())
+        core_args = config["mcpServers"]["kiroclaw-core"]["args"]
+        # Filter flags + their values must be stripped (both --flag=value and
+        # --flag <value> shapes).
+        joined = " ".join(core_args)
+        assert "--include-tools" not in joined
+        assert "--include-tool-tags" not in joined
+        assert "--exclude-tools" not in joined
+        assert "recall,learn_list" not in joined  # value of --include-tools=
+        assert "read,default" not in joined  # value of --include-tool-tags
+        assert "send_message" not in joined  # value of --exclude-tools
+        # Skill paths + positional args must be preserved (unrelated args).
+        assert "--skill-paths" in core_args
+        assert "/skills/path" in core_args
+        assert "mcp-core" in core_args
+
+    def test_install_resilient_when_main_config_missing(self, tmp_path, monkeypatch):
+        """First-run scenario: kiroclaw.json may not exist yet when the
+        heartbeat installer is called.  Should still write a valid (empty
+        mcpServers) heartbeat config — install ordering is not load-bearing."""
+        import json
+
+        from kiro_claw import agent as agent_mod
+
+        kiro_dir = tmp_path / "agents"
+        kiro_dir.mkdir()
+        monkeypatch.setattr(agent_mod, "KIRO_AGENTS_DIR", kiro_dir)
+
+        agent_mod._install_heartbeat_agent()
+
+        path = kiro_dir / "kiroclaw-heartbeat.json"
+        assert path.exists()
+        config = json.loads(path.read_text())
+        assert config["name"] == "kiroclaw-heartbeat"
+        # No main config → empty mcpServers (subsequent rebuild_agent_config
+        # call will re-seed when kiroclaw.json appears).
+        assert config["mcpServers"] == {}
+        # tools must be derived from mcpServers — never reference a
+        # namespace without a matching mcpServers entry, otherwise kiro-cli
+        # fails to load the agent. (AutoSDE finding on rev 6.)
+        assert config["tools"] == []
+
+    def test_tools_derived_from_resolved_mcp_servers(self, tmp_path, monkeypatch):
+        """``tools`` must be built from the mcpServers actually resolved.
+
+        The public installer only pulls ``kiroclaw-core``; the Amazon-internal
+        ``builder-mcp`` is never carried over.  So a main config that has
+        builder-mcp but NOT kiroclaw-core resolves to an empty toolbelt — and
+        the tools list must NEVER reference a namespace without a matching
+        mcpServers entry, otherwise kiro-cli fails to load the agent.
+        (AutoSDE finding on rev 6.)
+        """
+        import json
+
+        from kiro_claw import agent as agent_mod
+
+        kiro_dir = tmp_path / "agents"
+        kiro_dir.mkdir()
+        # Main config has builder-mcp but NOT kiroclaw-core.
+        main_config = {
+            "name": "kiroclaw",
+            "mcpServers": {
+                "builder-mcp": {"command": "/bin/builder-mcp", "args": []},
+            },
+        }
+        (kiro_dir / "kiroclaw.json").write_text(json.dumps(main_config))
+        monkeypatch.setattr(agent_mod, "KIRO_AGENTS_DIR", kiro_dir)
+
+        agent_mod._install_heartbeat_agent()
+
+        config = json.loads((kiro_dir / "kiroclaw-heartbeat.json").read_text())
+        # builder-mcp is omitted on public installs; kiroclaw-core absent here.
+        assert config["mcpServers"] == {}
+        # tools list mirrors mcpServers — never references @builder-mcp.
+        assert config["tools"] == []

@@ -65,7 +65,7 @@ Processes a single incoming message with streaming:
 19. Finalize status reactions in `finally` block → done (🦞) or error (😱); release semaphore
 20. Strip inline `<thinking>` tags from accumulated text
 21. Final update with mrkdwn-converted response (split into multiple messages if over 3900 chars)
-22. Post thinking content as 💭 thread reply (if any)
+22. Post thinking content as 💭 thread reply (if any, and `slack.show_thinking` is true)
 
 ### `StatusReactionController`
 Phase-aware Slack reaction manager with stall detection. Manages emoji lifecycle per message:
@@ -241,7 +241,7 @@ Slack `file_share` messages are processed in `_route_message()` after dedup + au
 - Edit throttled to ~1/sec to avoid Slack rate limits (Tier 3: ~50 req/min)
 - Cursor indicator (▍) shown during streaming, removed on completion
 - Tool calls shown inline as 🔧 _tool name_
-- **Thinking/reasoning content** filtered from the main response — accumulated separately and posted as a 💭 thread reply after the main message. Inline `<thinking>` / `</thinking>` tags are also stripped as a safety net.
+- **Thinking/reasoning content** filtered from the main response — accumulated separately and posted as a 💭 thread reply after the main message. Inline `<thinking>` / `</thinking>` tags are also stripped as a safety net. The thread reply is suppressed when `slack.show_thinking` is `false` (default `true`).
 - Final message split into multiple posts if over 3900 chars (via `split_message()`)
 
 ## Message Queue (`session.py` + `events.py`)

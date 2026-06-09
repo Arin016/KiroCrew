@@ -83,6 +83,7 @@ Browse at `http://localhost:6777`. The backend serves the built frontend assets 
 |---------|---------|---------|
 | `KIROCLAW_HOME` | Config/data directory override | `~/.kiroclaw` |
 | `KIROCLAW_PORT` | Dashboard port override | `8765` |
+| `KIROCLAW_KIRO_BIN` | Explicit path to the `kiro-cli` binary (overrides PATH auto-detection) | auto-detected |
 
 If you don't need to run production and dev side by side, omit `KIROCLAW_PORT` —
 just stop your production gateway first.

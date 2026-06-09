@@ -862,3 +862,50 @@ class TestDocxContentType:
         """Verify .docx is in the dispatch table."""
         reader = FileReader()
         assert '.docx' in reader._DISPATCH
+
+
+class TestCosineSimilarityDimensionMismatch:
+    """Regression: HybridRetriever._cosine_similarity must treat vectors of
+    different dimensionality as incomparable (return 0.0), not silently truncate.
+
+    The query vector is freshly embedded while the item vector is read from the DB,
+    so a change in embedding dimensionality between ingestion and query yields
+    mismatched lengths. With a plain ``zip(a, b)`` the dot product silently
+    truncates to the shorter length while the norms still use the full vectors,
+    producing a meaningless (often falsely high) similarity. The sibling code in
+    ``vector_memory.py`` already guards this exact case (``if n_floats != q_len:
+    continue``); this helper must not score across mismatched dimensions either.
+    """
+
+    def test_mismatched_dims_return_zero_not_false_match(self):
+        # 8-dim query vs 4-dim stored item that happens to equal the query's prefix.
+        # Truncating zip() makes these look identical (1.0); they are incomparable.
+        query_vec = [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+        item_vec = [1.0, 1.0, 1.0, 1.0]
+        sim = HybridRetriever._cosine_similarity(query_vec, item_vec)
+        assert sim == 0.0, (
+            f"mismatched-dimension vectors must be incomparable (0.0), got {sim} "
+            "— dot product silently truncated while norms used full vectors"
+        )
+
+    def test_mismatched_dims_other_order_also_zero(self):
+        # Order must not matter: shorter query vs longer item is equally incomparable.
+        sim = HybridRetriever._cosine_similarity([1.0, 1.0, 1.0, 1.0],
+                                                 [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+        assert sim == 0.0
+
+    def test_equal_dims_unaffected(self):
+        # The fix must not change behavior for the normal equal-length case.
+        a = [1.0, 0.0, 0.0]
+        b = [1.0, 0.0, 0.0]
+        assert HybridRetriever._cosine_similarity(a, b) == pytest.approx(1.0)
+        orthogonal = HybridRetriever._cosine_similarity([1.0, 0.0], [0.0, 1.0])
+        assert orthogonal == pytest.approx(0.0)
+
+    def test_empty_vector_edge_cases(self):
+        # Document guard precedence (review nit): the length check runs first.
+        # [] vs [1.0] are mismatched dims -> 0.0 (length guard wins).
+        assert HybridRetriever._cosine_similarity([], [1.0]) == 0.0
+        assert HybridRetriever._cosine_similarity([1.0], []) == 0.0
+        # [] vs [] are equal-length but zero-norm -> 0.0 (zero-norm guard).
+        assert HybridRetriever._cosine_similarity([], []) == 0.0

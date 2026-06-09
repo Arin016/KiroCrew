@@ -670,7 +670,17 @@ class TestTerminalWsIntegration:
 
     @pytest.mark.asyncio
     async def test_ws_ctrl_c_delivers_sigint(self, monkeypatch, tmp_path):
-        """Send \\x03 (Ctrl+C) and verify the child process receives SIGINT."""
+        """Send \\x03 (Ctrl+C) and verify the child process receives SIGINT.
+
+        Deflake notes: the original version used three fixed ``asyncio.sleep``
+        calls (1.0s + 1.0s + 1.5s) which intermittently fired before the shell
+        had printed its prompt, echoed ``sleep 30``, or recovered after SIGINT
+        on a busy CI host — leaving the final ``echo SIGINT_OK`` probe stuck
+        in the input buffer of a shell that hadn't yet returned to a prompt.
+        Replaced with bounded "drain until marker appears in accumulated PTY
+        output" helpers: deterministic on a fast host, falls back to a
+        generous overall budget on a slow one.
+        """
         cfg_file = tmp_path / "config.json"
         cfg_file.write_text(json.dumps({"dashboard": {"terminal": {"enabled": True}}}))
         monkeypatch.setattr(terminal, "config_path", lambda: cfg_file)
@@ -681,36 +691,79 @@ class TestTerminalWsIntegration:
 
         from aiohttp.test_utils import TestClient, TestServer
 
+        async def _drain_until(ws, predicate, *, budget_secs: float):
+            """Read PTY frames into an accumulator until ``predicate(buf)`` is
+            true or the overall ``budget_secs`` runs out.  Returns the
+            accumulated bytes (caller can decide whether the predicate held)."""
+            loop = asyncio.get_event_loop()
+            deadline = loop.time() + budget_secs
+            buf = bytearray()
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return bytes(buf)
+                try:
+                    msg = await ws.receive(timeout=remaining)
+                except asyncio.TimeoutError:
+                    return bytes(buf)
+                if msg.type == web.WSMsgType.BINARY:
+                    buf.extend(msg.data)
+                    if predicate(bytes(buf)):
+                        return bytes(buf)
+                elif msg.type in (web.WSMsgType.CLOSE, web.WSMsgType.ERROR):
+                    return bytes(buf)
+
         async with TestClient(TestServer(app)) as client:
             async with client.ws_connect("/api/ws/terminal/sigint-sess") as ws:
-                # Wait for shell prompt to be ready
-                await asyncio.sleep(1.0)
+                # Drain until the shell prints its prompt.  Bash defaults to
+                # ``$ ``/``# `` for the user/root primary prompt; either is a
+                # signal that the PTY has spawned and reached interactive idle.
+                pre_prompt = await _drain_until(
+                    ws,
+                    lambda b: b"$ " in b or b"# " in b,
+                    budget_secs=10,
+                )
+                # Intentionally loose: under xdist load the shell init
+                # output may not include the prompt sentinel within the
+                # budget, but a non-empty drain still indicates the PTY is
+                # alive. The real readiness gate is the `sleep 30` echo
+                # check below — if the shell isn't actually interactive,
+                # that assertion fails fast and unambiguously.
+                assert pre_prompt, "shell never produced any PTY output"
 
-                # Run sleep in foreground (shell survives SIGINT)
+                # Run sleep in foreground; drain until we see the command
+                # echoed back (so we know the shell is processing it, not
+                # buffering it pre-prompt).
                 await ws.send_bytes(b"sleep 30\n")
-                await asyncio.sleep(1.0)
+                echoed = await _drain_until(
+                    ws,
+                    lambda b: b"sleep 30" in b,
+                    budget_secs=5,
+                )
+                assert b"sleep 30" in echoed, (
+                    "shell did not echo `sleep 30` within 5s — "
+                    "input may not have reached an interactive shell"
+                )
 
-                # Send Ctrl+C (ETX byte)
+                # Send Ctrl+C (ETX byte) and drain until the prompt redraws,
+                # which is the visible signal that the foreground job has
+                # been killed and the shell is back at idle.
                 await ws.send_bytes(b"\x03")
-                await asyncio.sleep(1.5)
+                await _drain_until(
+                    ws,
+                    lambda b: b"$ " in b or b"# " in b,
+                    budget_secs=5,
+                )
 
                 # Shell should still be alive after SIGINT killed sleep.
-                # Send a probe command.
+                # Probe with an echo and drain until we see the marker.
                 await ws.send_bytes(b"echo SIGINT_OK\n")
-
-                # Drain frames looking for our marker
-                found = False
-                for _ in range(50):
-                    try:
-                        msg = await ws.receive(timeout=3)
-                    except asyncio.TimeoutError:
-                        break
-                    if msg.type == web.WSMsgType.BINARY:
-                        if b"SIGINT_OK" in msg.data:
-                            found = True
-                            break
-                    elif msg.type in (web.WSMsgType.CLOSE, web.WSMsgType.ERROR):
-                        break
+                tail = await _drain_until(
+                    ws,
+                    lambda b: b"SIGINT_OK" in b,
+                    budget_secs=10,
+                )
+                found = b"SIGINT_OK" in tail
 
                 sess = registry["sigint-sess"]
                 # Success: shell responded (SIGINT killed sleep, shell continued)

@@ -85,7 +85,28 @@ def _load_or_create_secret() -> bytes:
         return os.urandom(32)
 
 
-_SECRET = _load_or_create_secret()
+_SECRET: bytes | None = None
+_SECRET_LOCK = threading.Lock()
+
+
+def _get_secret() -> bytes:
+    """Return the HMAC signing secret, loading/creating it on first use.
+
+    Lazy (NOT a module-level call) so that merely *importing* this module
+    does not write ``token_signing.key`` into ``$KIROCLAW_HOME``. The CLI
+    imports token_auth transitively for every ``kiroclaw`` subcommand, so an
+    import-time write (a) breaks ``gateway --seed`` — which requires an empty
+    target home and refuses a non-empty one — and (b) pollutes the home for
+    read-only commands like ``kiroclaw --help``. Memoized under a lock so the
+    key is loaded exactly once even under concurrent first use.
+    """
+    global _SECRET
+    if _SECRET is None:
+        with _SECRET_LOCK:
+            if _SECRET is None:
+                _SECRET = _load_or_create_secret()
+    return _SECRET
+
 
 _REVOCATION_FILE = "token_revocation.gen"
 
@@ -243,7 +264,13 @@ MAX_CONCURRENT_NONCES = 50
 # Module-level singleton instance
 _state: TokenStateManager = TokenStateManager(max_concurrent_nonces=MAX_CONCURRENT_NONCES)
 
-_BYPASS_PREFIXES = ("/assets/", "/static/")
+# Public static-asset prefixes exempt from token auth (GET of non-secret files
+# the dashboard HTML references before the auth cookie is established).
+# /fonts/ holds the self-hosted AWS Diatype woff2 files (public.html @font-face
+# url('/fonts/...')); without the exemption the auth middleware 403s each font
+# request and the browser, parsing the 403 HTML body as a font, logs
+# "invalid sfntVersion" and falls back to a default typeface.
+_BYPASS_PREFIXES = ("/assets/", "/static/", "/fonts/")
 _BYPASS_EXACT = {"/logo.png", "/manifest.json", "/sw.js", "/pcm-worklet.js", "/api/token/local"}
 
 # Anchored bypass for installed-app static UI bundles only (federated-app
@@ -316,7 +343,7 @@ def _b64url_decode(s: str) -> bytes:
 
 
 def _sign(payload: bytes) -> str:
-    return _b64url_encode(hmac.new(_SECRET, payload, hashlib.sha256).digest())
+    return _b64url_encode(hmac.new(_get_secret(), payload, hashlib.sha256).digest())
 
 
 def generate_token(

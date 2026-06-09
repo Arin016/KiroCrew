@@ -17,6 +17,7 @@ from kiro_claw.dashboard.cron_inject import (
     inject_cron_result_to_dashboard,
 )
 from kiro_claw.dashboard.state import DashboardState
+from kiro_claw.llm_helpers import stream_and_collect
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.validation import CHANNEL_ID_RE, CHANNEL_MAX_LEN
 
@@ -36,6 +37,45 @@ def _sel():
     """Late-binding _sel() for test monkeypatch compatibility."""
     import kiro_claw.dashboard.handlers as _pkg  # noqa: F811
     return _pkg.sel()
+
+
+_CONTRADICTION_PROMPT = (
+    "Given an OLD rule and a NEW rule, determine if they contradict each other "
+    "(following both simultaneously is impossible or produces conflicting behavior).\n\n"
+    "OLD: {old_rule}\n\nNEW: {new_rule}\n\n"
+    "Respond with exactly one word: CONTRADICTORY, COMPLEMENTARY, or UNRELATED."
+)
+
+_CONTRADICTION_SESSION_KEY = "background:contradiction-check"
+
+
+async def _resolve_contradictions(
+    state: DashboardState, new_rule: str, candidates: list[dict]
+) -> list[str]:
+    """Use LLM to identify which candidate lessons contradict the new rule."""
+    to_delete: list[str] = []
+    for candidate in candidates:
+        prompt = _CONTRADICTION_PROMPT.format(
+            old_rule=candidate["rule"], new_rule=new_rule
+        )
+        try:
+            provider, _new, _resumed = await state.sessions.get_or_create(
+                _CONTRADICTION_SESSION_KEY, agent="kiroclaw-lite",
+            )
+            try:
+                response = await stream_and_collect(provider, prompt)
+            finally:
+                state.sessions.release(_CONTRADICTION_SESSION_KEY)
+            verdict = response.strip().upper().split()[0] if response else ""
+            if verdict == "CONTRADICTORY":
+                logger.info(
+                    "Contradiction: new %r supersedes %r (sim=%.2f)",
+                    new_rule[:60], candidate["rule"][:60], candidate["similarity"],
+                )
+                to_delete.append(candidate["key"])
+        except Exception:
+            logger.debug("Contradiction check failed for %r", candidate["key"], exc_info=True)
+    return to_delete
 
 
 # ── Cron / Lessons ──
@@ -411,7 +451,28 @@ async def api_lessons_create(request: web.Request) -> web.Response:
     # Write to vector store if available, else JSONL
     vs = _get_memory(state).vector_store
     if vs:
-        vs.write_lesson(rule, category)
+        # Embed the rule once off the event loop and reuse it for both the
+        # contradiction scan and write_lesson's own dedup pass — the store
+        # methods otherwise each perform a blocking Ollama embed of the same
+        # text. find_contradiction_candidates and write_lesson are synchronous
+        # (blocking embed + O(N) cosine scan), so run them via to_thread to
+        # avoid stalling concurrent dashboard/Slack requests.
+        rule_emb = await asyncio.to_thread(vs.embed_lesson, rule)
+        candidates = await asyncio.to_thread(
+            vs.find_contradiction_candidates, rule, 0.4, 0.85, rule_emb
+        )
+        if candidates:
+            contradicted = await _resolve_contradictions(state, rule, candidates)
+            for key in contradicted:
+                vs.delete_semantic(key, "contradiction_superseded")
+                # Lesson deletion is a destructive action; emit a SEL audit
+                # event so the contradiction-supersede trail is traceable.
+                _sel().log_api_access(
+                    caller=sk, operation="lesson.contradiction_superseded",
+                    outcome="allowed", source="dashboard", resources=key,
+                )
+                logger.info("Deleted contradicted lesson: %s", key)
+        await asyncio.to_thread(vs.write_lesson, rule, category, None, "user_explicit", rule_emb)
     else:
         lesson = Lesson(rule=rule, category=category, ts=datetime.now(timezone.utc).isoformat())
         if scope == "workspace":

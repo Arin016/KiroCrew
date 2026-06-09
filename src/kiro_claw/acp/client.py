@@ -133,6 +133,49 @@ _CLAUDE_ACP_DEP_MARKER = Path("@agentclientprotocol") / "sdk"
 # NOT read this file itself — it takes mcpServers as a session/new param).
 _CC_MCP_FILE = Path.home() / ".claude" / "agents" / "kiroclaw.mcp.json"
 
+# High-frequency, content-free adapter stderr diagnostics that _drain_stderr()
+# drops instead of forwarding as per-line WARNINGs.  The driving case is the
+# claude-agent-acp "Unexpected case: {...thinking_tokens...}" line.  Mechanism
+# (confirmed by reading the vendored adapter, dist/acp-agent.js): claude-code
+# emits a `system` message with subtype `thinking_tokens`, but the adapter's
+# `switch (message.subtype)` enumerates ~18 known subtypes (init, status,
+# compact_boundary, memory_recall, api_retry, ...) and routes anything else to
+# `default: unreachable(message)`, which does `logger.error("Unexpected case:
+# " + JSON.stringify(message))` to stderr — one line per token delta.  Measured
+# at ~10 lines/sec during active thinking (one line per 2-4 thinking tokens; the
+# payload is only estimated_tokens/_delta/uuid/session_id — no response content,
+# so dropping them loses nothing).
+#
+# This is a forward-compat gap in the adapter, NOT new behavior in a specific
+# claude-code build: the `thinking_tokens` event is present in both 2.1.165.357
+# and 2.1.168.358 (verified by string-matching both bundled `claude` binaries —
+# identical occurrences), so it predates the .168 update that drew attention to
+# it.  Exactly when it began appearing in our logs is unconfirmed.  The cleaner
+# long-term fix is upstream (add a `thinking_tokens` case to the adapter / bump
+# the vendored version); this filter is the version-agnostic stopgap that also
+# absorbs the next unenumerated subtype's flood.
+#
+# Why drop rather than just downgrade the level:
+#   1. Log hygiene — gateway.log uses a RotatingFileHandler(maxBytes=2MB,
+#      backupCount=3) (see cli.py), so a sustained burst rolls genuine
+#      diagnostics out of the retained 8MB window.
+#   2. Event-loop load — the file handler is a plain *synchronous* handler and
+#      _drain_stderr runs as a task on the gateway event loop, so each forwarded
+#      line costs a synchronous file write + two regex redaction passes on the
+#      same loop that streams responses.  Per-session the cost is small; it
+#      compounds across concurrent thinking sessions.
+# (This is a log-volume / event-loop-load reduction, NOT a fix for any
+# turn-stall or "agent not responding" symptom — no such causal link was
+# established.)
+#
+# Match on a stable substring (not the full JSON) so the filter survives field
+# changes, and keep the tuple NARROW so a genuine error line is never silently
+# swallowed.
+_SUPPRESSED_STDERR_MARKERS = ("thinking_tokens",)
+# Minimum seconds between throttled debug summaries of the suppressed-line count,
+# so the suppression itself stays observable without re-introducing a flood.
+_SUPPRESSED_STDERR_SUMMARY_INTERVAL_SECS = 60.0
+
 
 def _claude_acp_mcp_servers() -> list[dict]:
     """Build the ACP ``session/new`` mcpServers array for the claude backend.
@@ -182,14 +225,18 @@ def _is_safe_oauth_url(url: str) -> bool:
 
 
 def _resolve_kiro_bin() -> str | None:
-    """Find the kiro-cli binary on PATH, or None when it is not installed.
+    """Find the kiro-cli binary, or None when it is not installed.
 
     kiro-cli is an OPTIONAL backend — the default is ``claude-agent-acp``.
-    Resolve it purely from PATH (augmented with the usual local bin dirs so a
-    non-login gateway still finds a user install) and return ``None`` rather
-    than raising when it is absent, so a vanilla machine without kiro-cli
-    simply falls back to the default backend.
+    Honours an explicit ``KIROCLAW_KIRO_BIN`` override first (only when it points
+    at an existing executable; ignored otherwise), then resolves from PATH
+    (augmented with the usual local bin dirs so a non-login gateway still finds a
+    user install) and returns ``None`` rather than raising when it is absent, so
+    a vanilla machine without kiro-cli simply falls back to the default backend.
     """
+    env_bin = os.environ.get("KIROCLAW_KIRO_BIN")
+    if env_bin and Path(env_bin).is_file() and os.access(env_bin, os.X_OK):
+        return env_bin
     search_path = augmented_path(os.environ.get("PATH", ""))
     return shutil.which(KIRO_CLI_BIN, path=search_path)
 
@@ -1204,20 +1251,44 @@ class AcpClient:
             self._stderr_task = asyncio.ensure_future(self._drain_stderr(self._process.stderr))
 
     async def _drain_stderr(self, stderr: asyncio.StreamReader) -> None:
+        # Count of suppressed high-frequency marker lines (see
+        # _SUPPRESSED_STDERR_MARKERS) and the monotonic timestamp of the last
+        # throttled summary, so a thinking burst is observable in the log
+        # without re-introducing the per-delta flood it replaced.
+        suppressed = 0
+        last_summary = time.monotonic()
         while True:
             line = await stderr.readline()
             if not line:
                 break
             text = line.decode(errors="replace").strip()
-            if text:
-                self._stderr_lines.append(text)
-                self._last_activity = time.monotonic()
-                from kiro_claw.security import redact_credentials, redact_exfiltration_urls
-
-                redacted, _ = redact_exfiltration_urls(text)
-                redacted, _ = redact_credentials(redacted)
-                _bin_label = "claude-acp" if self._is_claude else KIRO_CLI_BIN
-                logger.warning("%s stderr: %s", _bin_label, redacted)
+            if not text:
+                continue
+            # Liveness must advance for EVERY line, including suppressed ones:
+            # the adapter is provably alive while emitting them, and the idle
+            # watchdog (is_responsive) must not kill an actively-thinking turn.
+            # One monotonic read, reused for the throttle check below.
+            now = time.monotonic()
+            self._last_activity = now
+            if any(marker in text for marker in _SUPPRESSED_STDERR_MARKERS):
+                # Drop the line: no per-occurrence WARNING, and crucially do not
+                # append to the bounded _stderr_lines ring buffer — otherwise a
+                # thinking burst evicts the last real errors from diagnostics.
+                suppressed += 1
+                if now - last_summary >= _SUPPRESSED_STDERR_SUMMARY_INTERVAL_SECS:
+                    logger.debug("suppressed %d adapter stderr marker line(s)", suppressed)
+                    suppressed = 0
+                    last_summary = now
+                continue
+            self._stderr_lines.append(text)
+            redacted, _ = redact_exfiltration_urls(text)
+            redacted, _ = redact_credentials(redacted)
+            _bin_label = "claude-acp" if self._is_claude else KIRO_CLI_BIN
+            logger.warning("%s stderr: %s", _bin_label, redacted)
+        if suppressed:
+            # Flush the residual count once the stream closes so the final burst
+            # is still accounted for.
+            logger.debug("suppressed %d adapter stderr marker line(s)", suppressed)
 
     async def _snapshot_process_tree(self) -> None:
         """Discover and track the full process tree after MCP servers are loaded.

@@ -181,8 +181,17 @@ _STATELESS_PREFIXES = (
     _SIDE_PREFIX,
 )
 
-# Background session key — cron, heartbeat, lessons share this session
+# Background session key — cron and lessons share this session.
+# Heartbeat uses a separate key (HEARTBEAT_KEY) so it can run a tooled
+# agent without forcing other background callers (chat-title, consolidator,
+# taskkeeper) to load the same MCP servers.
 BACKGROUND_KEY = "_bg"
+
+# Heartbeat session key — used by HeartbeatService.  Spawned with the full
+# ``kiroclaw`` agent so polled tasks can call read-only MCP tools (CR/ticket
+# status, etc.).  Tool approval at runtime is gated by the
+# ``HEARTBEAT_SAFE_TOOLS`` allowlist in ``slack/gateway.py``.
+HEARTBEAT_KEY = "_hb"
 
 
 # Context usage thresholds
@@ -210,7 +219,7 @@ _BG_RECYCLE_PCT = 70.0  # recycle at 70% — well before overflow
 _BG_BLIND_RECYCLE_PROMPTS = 40  # recycle after 40 prompts if no metadata
 
 # Persistent session keys — never expired by idle cleanup
-_PERSISTENT_KEYS = frozenset({BACKGROUND_KEY})
+_PERSISTENT_KEYS = frozenset({BACKGROUND_KEY, HEARTBEAT_KEY})
 
 # Sentinel model values that mean "let kiro-cli resolve from agent JSON".
 # When the global agent.model config is one of these, get_or_create() skips
@@ -786,6 +795,44 @@ class SessionManager:
 
         # Create fresh replacement
         await self._ensure_background()
+
+    async def recycle_heartbeat(self) -> None:
+        """Check heartbeat session context and recycle if too full.
+
+        Mirrors :meth:`recycle_background` but for ``HEARTBEAT_KEY``.  Called
+        once per heartbeat cycle (after all tasks finish), NOT per task —
+        per-task recycle would tear down the session under concurrent
+        ``asyncio.gather``'d siblings sharing the same key.
+
+        Same thresholds as background:
+        - At ≥ 70% context → recycle
+        - After 40 prompts with no metadata → recycle (blind fallback)
+
+        No-op if the heartbeat session was never created (cycle had no
+        tasks) or already torn down by a per-task timeout reset.
+        """
+        session = self._sessions.get(HEARTBEAT_KEY)
+        if not session:
+            return
+
+        pct = session.provider.context_usage_pct()
+        needs_recycle = pct >= _BG_RECYCLE_PCT
+        if not needs_recycle and pct == 0.0:
+            needs_recycle = session.prompt_count >= _BG_BLIND_RECYCLE_PROMPTS
+
+        if not needs_recycle:
+            return
+
+        reason = f"context at {pct:.0f}%" if pct > 0 else f"blind ({session.prompt_count} prompts)"
+        logger.info("Recycling heartbeat session — %s", reason)
+
+        # Kill old session — next get_or_create(HEARTBEAT_KEY) will create
+        # a fresh one (no eager _ensure_heartbeat — heartbeat sessions are
+        # only spawned on demand, unlike the persistent background session).
+        async with self._lock:
+            old = self._sessions.pop(HEARTBEAT_KEY, None)
+        if old:
+            await old.provider.shutdown()
 
     async def get_or_create(
         self,

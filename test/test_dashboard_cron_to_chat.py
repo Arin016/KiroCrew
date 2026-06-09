@@ -115,6 +115,50 @@ class TestInjectCronResultToDashboard:
         state.push_slots_update.assert_called_once()
 
 
+class TestPersistsResultToConversationLog:
+    """Mesh-1933: the result must be written to the canonical ConversationLog
+    under the linked key cron:{id} so a dashboard follow-up turn
+    (chat_runner.build_session_replay) has it as context."""
+
+    def test_appends_result_to_conversation_log_under_linked_key(self):
+        state = _make_state()
+        job = _make_job(job_id="job1", name="my-cron")
+        inject_cron_result_to_dashboard(state, job, "the result")
+        # read_messages probed for dedup, then append called with linked key.
+        assert state.conversation_log.append.call_count == 1
+        args, kwargs = state.conversation_log.append.call_args
+        assert args[0] == "cron:job1"
+        assert args[1] == "assistant"
+        assert "the result" in args[2]
+        assert args[2].startswith("# Cron Job Result: my-cron")
+
+    def test_does_not_persist_when_already_in_log(self):
+        state = _make_state()
+        job = _make_job(job_id="job2", name="my-cron")
+        context = "# Cron Job Result: my-cron\n\nthe result"
+        # Conversation log already has this exact message.
+        state.conversation_log.read_messages.return_value = [
+            {"role": "assistant", "content": context}
+        ]
+        inject_cron_result_to_dashboard(state, job, "the result")
+        state.conversation_log.append.assert_not_called()
+
+    def test_empty_result_does_not_persist(self):
+        state = _make_state()
+        job = _make_job(job_id="job3")
+        inject_cron_result_to_dashboard(state, job, "")
+        state.conversation_log.append.assert_not_called()
+
+    def test_no_conversation_log_does_not_crash(self):
+        state = _make_state()
+        state.conversation_log = None
+        job = _make_job(job_id="job4")
+        # Must not raise when conversation_log is unavailable.
+        inject_cron_result_to_dashboard(state, job, "result")
+        slot = state.get_or_create_slot(name=f"cron-{job.id}")
+        assert len(slot.messages) == 1
+
+
 class TestHydrateSlotFromHistory:
     """Tests for hydrate_slot_from_history (accepts pre-loaded messages)."""
 

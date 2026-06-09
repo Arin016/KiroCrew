@@ -744,6 +744,15 @@ class SlackConfig:
             tags=["slack"],
         ),
     )
+    show_thinking: bool = field(
+        default=True,
+        metadata=_meta(
+            "Show Thinking",
+            "Post the model's thinking/reasoning as a thread reply in Slack. "
+            "Disable to keep responses concise.",
+            tags=["slack"],
+        ),
+    )
     home_tab_sessions_per_kind: int = field(
         default=5,
         metadata=_meta(
@@ -1841,6 +1850,7 @@ class KiroClawConfig:
                 challenge_redirect_enabled=bool(
                     slack_data.get("challenge_redirect_enabled", False)
                 ),
+                show_thinking=bool(slack_data.get("show_thinking", True)),
             ),
             dashboard=DashboardConfig(
                 url=dashboard_data.get("url", ""),

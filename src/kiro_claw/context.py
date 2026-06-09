@@ -653,8 +653,24 @@ class ContextBuilder:
         """Read the prompt from a custom agent's config file."""
         agents_dir = Path.home() / ".kiro" / "agents"
         for f in agents_dir.glob("*.json"):
+            # Skip macOS AppleDouble sidecars ("._foo.json"); not JSON.
+            if f.name.startswith("._"):
+                continue
+            # Resolve and gate on sensitive paths before reading: a symlink
+            # under ~/.kiro/agents/ could otherwise point at a credential
+            # file (e.g. ~/.aws/credentials renamed *.json).
             try:
-                data = json.loads(f.read_text(encoding="utf-8"))
+                resolved = f.resolve(strict=True)
+            except OSError:
+                continue
+            if is_sensitive_path(str(resolved)):
+                continue
+            try:
+                # ValueError covers json.JSONDecodeError + UnicodeDecodeError
+                # so a non-UTF-8 sidecar can't break context building.
+                data = json.loads(resolved.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    continue
                 if data.get("name") == agent or f.stem == agent:
                     prompt = data.get("prompt") or ""
                     if prompt.startswith("file://"):
@@ -663,7 +679,7 @@ class ContextBuilder:
                         except (OSError, PermissionError):
                             return ""
                     return prompt
-            except (json.JSONDecodeError, OSError):
+            except (OSError, ValueError):
                 continue
         return ""
 

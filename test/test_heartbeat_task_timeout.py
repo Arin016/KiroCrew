@@ -4,8 +4,14 @@ An unattended heartbeat turn can block on a human-approval wait with no human
 present. Without a bound, a single non-allowlisted tool approval would freeze the
 whole heartbeat subsystem up to the 2h approval window. ``_heartbeat_task`` wraps
 ``stream_and_collect`` in ``asyncio.wait_for(timeout=HEARTBEAT_TASK_TIMEOUT_SECS)``
-and, on timeout, resets the background session (killing the lingering turn/process)
+and, on timeout, resets the heartbeat session (killing the lingering turn/process)
 before releasing it, returning a graceful incomplete result instead of crashing.
+
+Per-task ``finally`` only releases the per-key semaphore (NOT reset) — concurrent
+``asyncio.gather``'d sibling tasks share ``HEARTBEAT_KEY`` and a per-task reset
+would tear down a session a sibling is still using.  Cycle-end recycle is
+handled separately by ``SessionManager.recycle_heartbeat`` (called once via
+``HeartbeatService.on_cycle_end``).
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ import pytest
 
 import kiro_claw.slack.gateway as gw_mod
 from kiro_claw.heartbeat import HEARTBEAT_TASK_TIMEOUT_SECS
-from kiro_claw.session import BACKGROUND_KEY
+from kiro_claw.session import HEARTBEAT_KEY
 
 
 def _make_orchestrator():
@@ -29,7 +35,6 @@ def _make_orchestrator():
     sessions.get_or_create = AsyncMock(return_value=(client, True, False))
     sessions.reset = AsyncMock()
     sessions.release = MagicMock()
-    sessions.recycle_background = AsyncMock()
     orch.sessions = sessions
 
     ctx_builder = MagicMock()
@@ -39,8 +44,11 @@ def _make_orchestrator():
     orch.ctx_builder = ctx_builder
 
     orch.consolidator = None
-    # Approval callback is irrelevant here — stream_and_collect is mocked.
+    # Heartbeat now uses ``_heartbeat_approval`` (scoped allowlist) directly,
+    # but the interactive helper is still patched on the orchestrator surface
+    # for any test that wants to swap it out.
     orch._interactive_approval = MagicMock(return_value=AsyncMock())
+    orch._heartbeat_approval = AsyncMock(return_value=True)
     orch._deliver_result = AsyncMock()
     return orch, sessions
 
@@ -88,11 +96,13 @@ class TestHeartbeatTaskTimeout:
         # Should NOT raise — timeout is handled gracefully.
         result = await on_task("do a thing", "")
 
-        # In-flight turn torn down via reset on the background key before release.
-        sessions.reset.assert_awaited_once_with(BACKGROUND_KEY)
-        # finally still ran: session released + background recycled.
-        sessions.release.assert_called_once_with(BACKGROUND_KEY)
-        sessions.recycle_background.assert_awaited_once()
+        # In-flight turn torn down via reset on the heartbeat key — once
+        # in the except branch only; the finally branch no longer resets
+        # (cycle-end recycle is handled by SessionManager.recycle_heartbeat,
+        # invoked once after asyncio.gather completes — not per task).
+        sessions.reset.assert_awaited_once_with(HEARTBEAT_KEY)
+        # finally still ran: session released.
+        sessions.release.assert_called_once_with(HEARTBEAT_KEY)
         # Graceful incomplete result mentions the deadline; loop not wedged.
         assert str(HEARTBEAT_TASK_TIMEOUT_SECS) in result
         assert "timed out" in result.lower()
@@ -120,14 +130,24 @@ class TestHeartbeatTaskTimeout:
         on_task = await _capture_task(orch)
         result = await on_task("do a thing", "")
 
-        sessions.reset.assert_awaited_once_with(BACKGROUND_KEY)
-        sessions.release.assert_called_once_with(BACKGROUND_KEY)
-        sessions.recycle_background.assert_awaited_once()
+        # The except-branch reset raises; the exception is swallowed so the
+        # loop continues and the graceful timeout result is still returned.
+        # No second reset in finally (per-task reset removed — cycle-end
+        # recycle is handled by SessionManager.recycle_heartbeat).
+        sessions.reset.assert_awaited_once_with(HEARTBEAT_KEY)
+        sessions.release.assert_called_once_with(HEARTBEAT_KEY)
         assert "timed out" in result.lower()
 
     @pytest.mark.asyncio()
     async def test_success_path_does_not_reset(self, monkeypatch):
-        """A normal (non-hanging) turn never resets the session."""
+        """A normal (non-hanging) turn never resets the session.
+
+        Per-task reset was removed — concurrent asyncio.gather'd sibling tasks
+        share HEARTBEAT_KEY and a per-task reset would tear down a session a
+        sibling is still using.  Cycle-end recycle is handled by
+        SessionManager.recycle_heartbeat (invoked once via
+        HeartbeatService.on_cycle_end after gather completes).
+        """
         orch, sessions = _make_orchestrator()
 
         async def _ok(*args, **kwargs):
@@ -138,7 +158,8 @@ class TestHeartbeatTaskTimeout:
         on_task = await _capture_task(orch)
         result = await on_task("do a thing", "")
 
+        # Success path takes neither the except-branch reset nor a finally
+        # reset.  Only release runs.
         sessions.reset.assert_not_awaited()
-        sessions.release.assert_called_once_with(BACKGROUND_KEY)
-        sessions.recycle_background.assert_awaited_once()
+        sessions.release.assert_called_once_with(HEARTBEAT_KEY)
         assert result == "all good"

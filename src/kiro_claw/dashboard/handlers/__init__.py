@@ -126,6 +126,7 @@ from kiro_claw.dashboard.handlers.files import (  # noqa: E402, F401
     api_browse_files,
     api_dashboard_config,
     api_file_diff,
+    api_file_download,
     api_file_raw,
     api_file_read,
     api_file_search,

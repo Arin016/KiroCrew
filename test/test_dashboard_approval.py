@@ -9,7 +9,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from kiro_claw.dashboard.chat import _run_chat
-from kiro_claw.dashboard.state import DashboardState, _ChatSlot, parse_cls_meta
+from kiro_claw.dashboard.state import (
+    REFUSAL_RECOVERY_PREFIX,
+    DashboardState,
+    _ChatSlot,
+    build_refusal_recovery_prompt,
+    parse_cls_meta,
+)
 from kiro_claw.history import ConversationLog
 from kiro_claw.hooks import ToolHookResult
 from kiro_claw.providers.base import (
@@ -268,6 +274,85 @@ class TestApprovalModes:
         assert not any(m["role"] == "permission" for m in _tool_messages(slot))
         client.approve_tool.assert_called_once()
         client.reject_tool.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_auto_approve_still_fires_pretooluse_script_hook(self, tmp_path):
+        """Auto-approve must NOT bypass scripted PreToolUse hooks (audit gate)."""
+        from kiro_claw.hooks import HOOK_EVENT_PRE_TOOL_USE
+
+        cb = _context_builder(ToolHookResult.auto_approve())
+        hook_store = _make_hook_store()
+        state, client = _make_state(tmp_path, context_builder=cb, hook_store=hook_store)
+        slot = _make_slot()
+        _set_stream(client, [_permission_event(), _complete_event()])
+
+        with _patch_stats():
+            await _run_chat(state, slot, "hello")
+
+        # Hook must have fired with PreToolUse before approval.
+        events_fired = [c.args[0] for c in hook_store.fire.call_args_list]
+        assert HOOK_EVENT_PRE_TOOL_USE in events_fired, events_fired
+        # Tool must still be approved (empty hook results = pass-through).
+        client.approve_tool.assert_called_once()
+        client.reject_tool.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_auto_approve_blocked_by_pretooluse_script_hook(self, tmp_path):
+        """Exit-2 PreToolUse hook must override auto-approve and reject the tool.
+
+        chat_runner's inner _fire() helper translates a ScriptHookResult
+        with exit_code=2 into a 'BLOCKED:<name>:<stderr>' marker string
+        before the auto-approve branch checks startswith('BLOCKED:'). The
+        mock returns ScriptHookResult-shaped objects so the full
+        translation path runs.
+        """
+        cb = _context_builder(ToolHookResult.auto_approve())
+        hook_store = _make_hook_store()
+        # ScriptHookResult-shaped mock: _fire() reads .exit_code/.stderr/
+        # .hook_name and converts exit-2 into the BLOCKED: string the
+        # auto-approve branch checks.
+        blocked_result = MagicMock(
+            exit_code=2,
+            stderr="policy denial",
+            stdout="",
+            hook_name="test-blocker",
+        )
+        hook_store.fire = AsyncMock(return_value=[blocked_result])
+        state, client = _make_state(tmp_path, context_builder=cb, hook_store=hook_store)
+        slot = _make_slot()
+        _set_stream(client, [_permission_event(), _complete_event()])
+
+        with _patch_stats():
+            await _run_chat(state, slot, "hello")
+
+        # Tool must be rejected because the script hook blocked it.
+        client.reject_tool.assert_called_once()
+        client.approve_tool.assert_not_called()
+        # User-facing pill must reflect the block (NOT a hook_error).
+        msgs = _tool_messages(slot)
+        assert any(
+            "hook blocked" in m.get("content", "").lower() for m in msgs
+        ), msgs
+
+    @pytest.mark.asyncio
+    async def test_auto_approve_deny_by_default_on_unexpected_hook_output(self, tmp_path):
+        """Non-list/None hook return must reject the tool (deny-by-default)."""
+        cb = _context_builder(ToolHookResult.auto_approve())
+        hook_store = _make_hook_store()
+        # Simulate a misbehaving fire() returning None (e.g. store
+        # misconfiguration, race). Iterating None would raise TypeError;
+        # the inner guard must reject explicitly rather than fall through.
+        hook_store.fire = AsyncMock(return_value=None)
+        state, client = _make_state(tmp_path, context_builder=cb, hook_store=hook_store)
+        slot = _make_slot()
+        _set_stream(client, [_permission_event(), _complete_event()])
+
+        with _patch_stats():
+            await _run_chat(state, slot, "hello")
+
+        # Deny-by-default: auto-approve must NOT silently approve on bad hook output.
+        client.approve_tool.assert_not_called()
+        client.reject_tool.assert_called_once()
 
     @pytest.mark.asyncio
     @pytest.mark.xdist_group(name="serial")
@@ -623,3 +708,110 @@ class TestStateMetaAndPermissions:
         slot = _make_slot()
         slot.append("tool", "test", meta={"tool_call_id": "tc-1"}, broadcast=False)
         assert slot.messages[-1].get("meta", {}).get("tool_call_id") == "tc-1"
+
+
+class TestRefusalRecovery:
+    """A recoverable refusal (host-gate policy deny / read-only bash gate) ends
+    the turn via kiro-cli's tool-interrupted marker. KiroClaw should hand the
+    reason back to the model as an auto-continuation so the agent can adapt
+    instead of stalling — without the user having to poke it."""
+
+    @pytest.mark.asyncio
+    async def test_host_gate_deny_enqueues_recovery_continuation(self, tmp_path):
+        """A host-gate deny records the reason and the finally-block dequeue
+        re-dispatches it as an 'inject' continuation carrying that reason."""
+        cb = _context_builder(
+            ToolHookResult.deny("Blocked by security policy: git push")
+        )
+        state, client = _make_state(tmp_path, context_builder=cb)
+        slot = _make_slot()
+
+        # The AsyncMock client returns coroutines for sync getters; give the
+        # success-tail context-usage readout real values so it doesn't raise
+        # before the recovery step (production always has real numbers here).
+        client.context_usage_pct = MagicMock(return_value=0.0)
+        client._client = client
+        client.last_prompt_stats = None
+
+        # First turn denies; the recovery continuation turn streams clean so the
+        # loop terminates (no artificial cap — the model would simply stop here).
+        calls = {"n": 0}
+
+        def _stream(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _async_iter([_permission_event(), _complete_event()])
+            return _async_iter([_complete_event()])
+
+        client.stream = MagicMock(side_effect=_stream)
+
+        with _patch_stats():
+            await _run_chat(state, slot, "hello")
+            # Drain the auto-dispatched recovery turn so no task is left pending.
+            if slot.task:
+                await slot.task
+
+        injects = [m for m in slot.messages if m.get("role") == "inject"]
+        assert injects, "expected an injected recovery continuation"
+        recovery = injects[-1]["content"]
+        assert recovery.startswith(REFUSAL_RECOVERY_PREFIX)
+        assert "security policy: git push" in recovery.lower()
+        assert "NOT a user action" in recovery
+        # The synthetic prompt is delivered to the model (a 2nd stream call).
+        assert calls["n"] >= 2
+        client.reject_tool.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_clean_turn_does_not_enqueue_recovery(self, tmp_path):
+        """An auto-approved tool with no refusal must not trigger recovery."""
+        cb = _context_builder(ToolHookResult.auto_approve())
+        state, client = _make_state(tmp_path, context_builder=cb)
+        slot = _make_slot()
+        _set_stream(client, [_permission_event(), _complete_event()])
+
+        with _patch_stats():
+            await _run_chat(state, slot, "hello")
+            if slot.task:
+                await slot.task
+
+        assert not any(
+            REFUSAL_RECOVERY_PREFIX in m.get("content", "") for m in slot.messages
+        )
+        assert not slot._queue
+
+
+class TestBuildRefusalRecoveryPrompt:
+    """build_refusal_recovery_prompt hands a tool-refusal reason back to the
+    model so it can adapt, instead of the turn stalling silently."""
+
+    def test_empty_returns_empty(self):
+        assert build_refusal_recovery_prompt([]) == ""
+
+    def test_single_refusal_includes_title_and_reason(self):
+        out = build_refusal_recovery_prompt(
+            [("bash", "command 'python' is not on the read-only allowlist")]
+        )
+        assert "bash" in out
+        assert "not on the read-only allowlist" in out
+        # Frames the block as a system decision, NOT a user cancellation.
+        assert "NOT a user action" in out
+        assert "not treat it as a cancellation" in out
+        # Tells the model it may adapt or stop on its own.
+        assert "alternative" in out.lower()
+
+    def test_multiple_refusals_all_listed(self):
+        out = build_refusal_recovery_prompt(
+            [("bash", "unsafe shell pattern"), ("fs_write", "blocked by policy")]
+        )
+        assert "bash" in out and "unsafe shell pattern" in out
+        assert "fs_write" in out and "blocked by policy" in out
+        assert out.count("- ") >= 2
+
+    def test_missing_reason_still_lists_title(self):
+        out = build_refusal_recovery_prompt([("some_tool", "")])
+        assert "some_tool" in out
+
+    def test_body_excludes_prefix(self):
+        # The caller prepends REFUSAL_RECOVERY_PREFIX; the body must not.
+        out = build_refusal_recovery_prompt([("bash", "reason")])
+        assert REFUSAL_RECOVERY_PREFIX not in out

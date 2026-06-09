@@ -292,6 +292,7 @@ async def test_cookie_not_reset_when_present() -> None:
     [
         "/assets/style.css",
         "/static/app.js",
+        "/fonts/AWSDiatype-Regular.woff2",
         "/logo.png",
         "/manifest.json",
         "/sw.js",

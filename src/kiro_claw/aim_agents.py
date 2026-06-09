@@ -28,6 +28,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from kiro_claw.security import is_sensitive_path
+
 logger = logging.getLogger(__name__)
 
 _KIRO_AGENTS_DIR = Path.home() / ".kiro" / "agents"
@@ -80,8 +82,22 @@ def list_agents(agents_dir: Path | None = None) -> list[AimAgent]:
 
     agents: list[AimAgent] = []
     for f in sorted(d.glob("*.json")):
+        # Skip macOS AppleDouble sidecars ("._foo.json"); not JSON.
+        if f.name.startswith("._"):
+            continue
+        # Resolve and gate on sensitive paths before reading: a symlink
+        # under ~/.kiro/agents/ could otherwise point at a credential file
+        # (e.g. ~/.aws/credentials renamed *.json).
         try:
-            data = json.loads(f.read_text(encoding="utf-8"))
+            resolved = f.resolve(strict=True)
+        except OSError:
+            continue
+        if is_sensitive_path(str(resolved)):
+            continue
+        try:
+            data = json.loads(resolved.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                continue
             # Determine source: kiroclaw's own, AIM-installed, or builtin
             # AIM pattern: filename contains the agent name from JSON data
             #   Remote: PackageName-agent-name.json
@@ -120,7 +136,9 @@ def list_agents(agents_dir: Path | None = None) -> list[AimAgent]:
                     package=package,
                 )
             )
-        except (json.JSONDecodeError, OSError):
+        except (OSError, ValueError):
+            # ValueError covers json.JSONDecodeError + UnicodeDecodeError
+            # so one non-UTF-8 file can't break the whole agent list.
             logger.debug("Skipping invalid agent config: %s", f)
             continue
 

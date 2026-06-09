@@ -7319,8 +7319,21 @@ class TestAcpProcessDiedRecovery:
 
         state.sessions.reset.assert_awaited_once()
         assert slot._acp_pipe_death_retries == 1
+        # Retry shows a single PERSISTED error card (reliably visible at
+        # turn-teardown, unlike an ephemeral chat_status which the frontend drops
+        # once the streaming turn ends). slot.append both persists the card and
+        # emits a single chat_message via _on_message.
         error_msgs = [m for m in slot.messages if m.get("role") == "error"]
         assert any("retrying" in m.get("content", "") for m in error_msgs)
+        # Regression guard for the duplicate-card bug: the retry card must NOT be
+        # ALSO explicitly broadcast over chat_message (slot.append already emits it
+        # once via _on_message). A redundant broadcast_ws renders a second card.
+        dup_broadcasts = [
+            c for c in state.broadcast_ws.call_args_list
+            if c.args and c.args[0] == "chat_message"
+            and len(c.args) > 1 and "retrying" in c.args[1].get("content", "")
+        ]
+        assert dup_broadcasts == [], "retry card must not be double-emitted via broadcast_ws"
 
     @pytest.mark.asyncio
     async def test_budget_exhaustion_shows_stuck(self, tmp_path: Path) -> None:
@@ -7430,3 +7443,265 @@ class TestAcpProcessDiedRecovery:
             await _run_chat(state, slot, "test message")
 
         assert (0, "test message") in calls
+
+    @pytest.mark.asyncio
+    async def test_acperror_process_exited_uses_pipe_death_counter(self, tmp_path: Path) -> None:
+        """Option Y: AcpError 'process exited' increments the pipe-death counter, not busy."""
+        from kiro_claw.acp.client import AcpError
+
+        state, slot, client, _run_chat = self._make_state_and_slot(tmp_path)
+        self._make_stream_raise(client, AcpError("ACP process exited (code=1)"))
+
+        await _run_chat(state, slot, "test message")
+
+        assert slot._acp_pipe_death_retries == 1
+        assert slot._prompt_busy_retries == 0
+        error_msgs = [m for m in slot.messages if m.get("role") == "error"]
+        assert any("Connection lost" in m.get("content", "") for m in error_msgs)
+
+    @pytest.mark.asyncio
+    async def test_acperror_already_in_progress_uses_busy_counter(self, tmp_path: Path) -> None:
+        """Option Y: AcpError 'already in progress' increments the busy counter, not pipe-death."""
+        from kiro_claw.acp.client import AcpError
+
+        state, slot, client, _run_chat = self._make_state_and_slot(tmp_path)
+        self._make_stream_raise(client, AcpError("Prompt already in progress"))
+
+        await _run_chat(state, slot, "test message")
+
+        assert slot._prompt_busy_retries == 1
+        assert slot._acp_pipe_death_retries == 0
+        error_msgs = [m for m in slot.messages if m.get("role") == "error"]
+        assert any("Session busy" in m.get("content", "") for m in error_msgs)
+
+    @pytest.mark.asyncio
+    async def test_prompt_busy_exhausted_depth_gt0_shows_please_retry(self, tmp_path: Path) -> None:
+        """PromptBusyExhaustedError at _prompt_depth>0 with budget remaining hits the
+        else branch: surfaces a 'Session busy — please retry' card (not a silent
+        failure) and does NOT re-queue (mirrors the AcpProcessDied depth>0 handling)."""
+        from kiro_claw.llm_helpers import PromptBusyExhaustedError
+
+        state, slot, client, _run_chat = self._make_state_and_slot(tmp_path)
+        self._make_stream_raise(client, PromptBusyExhaustedError("busy"))
+
+        await _run_chat(state, slot, "test message", _prompt_depth=1)
+
+        # depth>0 + counter (1) <= 3: neither the retry-and-requeue `if` nor the
+        # `elif > 3` fires, so the new `else` surfaces feedback instead of failing
+        # silently. No re-queue at depth>0.
+        assert slot._prompt_busy_retries == 1
+        error_msgs = [m for m in slot.messages if m.get("role") == "error"]
+        assert any("please retry" in m.get("content", "").lower() for m in error_msgs)
+        assert any("Session busy" in m.get("content", "") for m in error_msgs)
+
+    @pytest.mark.asyncio
+    async def test_acperror_process_exited_depth_gt0_resets_no_requeue(self, tmp_path: Path) -> None:
+        """A pipe-death AcpError ('process exited') at _prompt_depth>0 must STILL reset
+        the dead session and increment the pipe-death counter (mirrors AcpProcessDied /
+        PromptBusyExhaustedError), and surface a 'Connection lost — please retry' card —
+        but NOT re-queue (re-queue is depth-0 only). Previously the whole reset/counter
+        block was gated on `_prompt_depth == 0`, so a depth>0 pipe-death fell through to
+        the generic else: no session reset (the next turn hit the dead process) and the
+        failure never counted toward the exhaustion threshold."""
+        from kiro_claw.acp.client import AcpError
+
+        state, slot, client, _run_chat = self._make_state_and_slot(tmp_path)
+        self._make_stream_raise(client, AcpError("ACP process exited (code=1)"))
+
+        await _run_chat(state, slot, "test message", _prompt_depth=1)
+
+        # The dead process IS reset and the failure IS counted, regardless of depth.
+        state.sessions.reset.assert_awaited_once()
+        assert slot._acp_pipe_death_retries == 1
+        # A friendly feedback card (not a bare ❌ raw-error card), and NO re-queue.
+        error_msgs = [m for m in slot.messages if m.get("role") == "error"]
+        assert any("Connection lost" in m.get("content", "") for m in error_msgs)
+        assert any("please retry" in m.get("content", "").lower() for m in error_msgs)
+        assert not slot._queue, "depth>0 must not re-queue"
+
+
+class TestEmptyResponseRetry:
+    """Verify _run_chat retries once on empty model response, then shows error."""
+
+    def _make_state_and_slot(self, tmp_path):
+        from kiro_claw.dashboard.chat_runner import _run_chat
+
+        state = _make_state(tmp_path)
+        state.sessions.get_or_create = AsyncMock(return_value=(MagicMock(), False, False))
+        state.sessions.release = MagicMock()
+        state.sessions.reset = AsyncMock()
+        state.sessions.set_approval_policy = MagicMock()
+        state.sessions.check_context_usage = MagicMock()
+        state.sessions.record_success = MagicMock()
+        state.sessions.get_slack_link = MagicMock(return_value=(None, None))
+        state.broadcast_ws = MagicMock()
+        state.push_slots_update = MagicMock()
+        state.is_yolo_active = MagicMock(return_value=False)
+        state._background_tasks = set()
+
+        slot = state.get_or_create_slot("empty-resp-slot")
+        slot.append("user", "hello", "msg msg-u")
+
+        mock_client = state.sessions.get_or_create.return_value[0]
+        mock_client.context_usage_pct = MagicMock(return_value=50.0)
+        mock_client.shutdown = AsyncMock()
+        return state, slot, mock_client, _run_chat
+
+    def _make_empty_stream(self, mock_client):
+        """Stream that completes immediately with no text."""
+        from kiro_claw.providers.base import EVENT_COMPLETE, LLMEvent
+
+        async def _stream(msg):
+            yield LLMEvent(kind=EVENT_COMPLETE)
+
+        mock_client.stream = _stream
+        mock_client.stream_command = _stream
+
+    @pytest.mark.asyncio
+    async def test_first_empty_response_requeues_message(self, tmp_path: Path) -> None:
+        """First empty response at depth 0 → message re-queued silently."""
+        state, slot, client, _run_chat = self._make_state_and_slot(tmp_path)
+        self._make_empty_stream(client)
+
+        # Spy on queue_insert to verify the message is ACTUALLY re-queued (the
+        # behavior the test name promises) — not merely that the counter ticked.
+        calls = []
+        orig = _ChatSlot.queue_insert
+
+        def spy(self_slot, *a, **kw):
+            calls.append(a)
+            return orig(self_slot, *a, **kw)
+
+        with patch.object(_ChatSlot, "queue_insert", spy), patch(
+            "kiro_claw.dashboard.chat_runner._save_slot_to_history"
+        ) as mock_save, patch(
+            "kiro_claw.dashboard.chat_runner._maybe_consolidate"
+        ) as mock_consolidate, patch(
+            "kiro_claw.dashboard.chat_runner._flush_file_changes"
+        ) as mock_flush:
+            await _run_chat(state, slot, "test message")
+
+        assert slot._empty_response_retries == 1
+        # The message must be re-queued at the front of the queue.
+        assert (0, "test message") in calls
+        # No error shown on first attempt
+        error_msgs = [m for m in slot.messages if m.get("role") == "error"]
+        assert not any("Empty response" in m.get("content", "") for m in error_msgs)
+        # Re-queue path must NOT persist/consolidate the spurious empty turn or
+        # record success (item 3 of the CR).
+        mock_save.assert_not_called()
+        mock_consolidate.assert_not_called()
+        state.sessions.record_success.assert_not_called()
+        # _flush_file_changes is intentionally NOT skipped: the try-body call (inside
+        # the `if not _retrying_empty` guard) is skipped, but the finally block calls
+        # it once unconditionally ("ensure file changes always surface, even on
+        # cancel/error"). So it is called exactly once here, not zero times.
+        assert mock_flush.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_response_at_depth_gt0_shows_error_immediately(self, tmp_path: Path) -> None:
+        """At _prompt_depth>0 an empty response is NOT silently retried — it shows the
+        terminal '⟳ Empty response — please retry.' card on the FIRST empty. The silent
+        re-queue is intentionally depth-0 only (nested tool-use turns must not silently
+        re-queue and risk a runaway loop)."""
+        state, slot, client, _run_chat = self._make_state_and_slot(tmp_path)
+        self._make_empty_stream(client)
+
+        await _run_chat(state, slot, "test message", _prompt_depth=1)
+
+        # depth>0: the `if _prompt_depth == 0 ...` guard is false, so the else fires —
+        # terminal card immediately, no silent retry, no increment of the counter.
+        error_msgs = [m for m in slot.messages if m.get("role") == "error"]
+        assert any("Empty response" in m.get("content", "") for m in error_msgs)
+        assert slot._empty_response_retries == 0
+
+    @pytest.mark.asyncio
+    async def test_second_empty_response_shows_error(self, tmp_path: Path) -> None:
+        """Second consecutive empty response → error card shown."""
+        state, slot, client, _run_chat = self._make_state_and_slot(tmp_path)
+        slot._empty_response_retries = 1  # already retried once
+        self._make_empty_stream(client)
+
+        await _run_chat(state, slot, "test message")
+
+        error_msgs = [m for m in slot.messages if m.get("role") == "error"]
+        assert any("Empty response" in m.get("content", "") for m in error_msgs)
+        # After the terminal second-empty error, the counter resets so the NEXT
+        # independent user turn gets a fresh one-retry budget (not sticky at 1).
+        assert slot._empty_response_retries == 0
+
+    @pytest.mark.asyncio
+    async def test_successful_response_resets_counter(self, tmp_path: Path) -> None:
+        """A successful (non-empty) response resets the retry counter."""
+        from kiro_claw.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK, LLMEvent
+
+        state, slot, client, _run_chat = self._make_state_and_slot(tmp_path)
+        slot._empty_response_retries = 1  # had a prior empty
+
+        async def _stream(msg):
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="Hello!")
+            yield LLMEvent(kind=EVENT_COMPLETE)
+
+        client.stream = _stream
+        client.stream_command = _stream
+
+        await _run_chat(state, slot, "test message")
+
+        assert slot._empty_response_retries == 0
+
+    @pytest.mark.asyncio
+    async def test_compaction_turn_no_empty_response_error(self, tmp_path: Path) -> None:
+        """Compaction turns set assistant_text='' but should NOT trigger empty response error."""
+        from kiro_claw.providers.base import EVENT_COMPACTION_STATUS, EVENT_COMPLETE, LLMEvent
+
+        state, slot, client, _run_chat = self._make_state_and_slot(tmp_path)
+
+        async def _stream(msg):
+            yield LLMEvent(kind=EVENT_COMPACTION_STATUS, text="completed", title="summary")
+            yield LLMEvent(kind=EVENT_COMPLETE)
+
+        client.stream = _stream
+        client.stream_command = _stream
+
+        await _run_chat(state, slot, "/compact")
+
+        error_msgs = [m for m in slot.messages if m.get("role") == "error"]
+        assert not any("Empty response" in m.get("content", "") for m in error_msgs)
+
+    @pytest.mark.asyncio
+    async def test_clear_turn_no_empty_response_error(self, tmp_path: Path) -> None:
+        """Clear turns set assistant_text='' but should NOT trigger empty response error."""
+        from kiro_claw.providers.base import EVENT_CLEAR_STATUS, EVENT_COMPLETE, LLMEvent
+
+        state, slot, client, _run_chat = self._make_state_and_slot(tmp_path)
+
+        async def _stream(msg):
+            yield LLMEvent(kind=EVENT_CLEAR_STATUS)
+            yield LLMEvent(kind=EVENT_COMPLETE)
+
+        client.stream = _stream
+        client.stream_command = _stream
+
+        await _run_chat(state, slot, "/clear")
+
+        error_msgs = [m for m in slot.messages if m.get("role") == "error"]
+        assert not any("Empty response" in m.get("content", "") for m in error_msgs)
+
+    @pytest.mark.asyncio
+    async def test_agent_switch_turn_no_empty_response_error(self, tmp_path: Path) -> None:
+        """Agent switch turns set assistant_text='' but should NOT trigger empty response error."""
+        from kiro_claw.providers.base import EVENT_AGENT_SWITCHED, EVENT_COMPLETE, LLMEvent
+
+        state, slot, client, _run_chat = self._make_state_and_slot(tmp_path)
+
+        async def _stream(msg):
+            yield LLMEvent(kind=EVENT_AGENT_SWITCHED, text="new-agent")
+            yield LLMEvent(kind=EVENT_COMPLETE)
+
+        client.stream = _stream
+        client.stream_command = _stream
+
+        await _run_chat(state, slot, "test message")
+
+        error_msgs = [m for m in slot.messages if m.get("role") == "error"]
+        assert not any("Empty response" in m.get("content", "") for m in error_msgs)

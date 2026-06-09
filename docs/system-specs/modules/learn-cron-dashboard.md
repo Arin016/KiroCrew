@@ -1,6 +1,6 @@
 # Self-Learning, Cron & Dashboard Modules
 
-Last Updated: 2026-05-28 (v2.6.0: code-based script/command cron, trigger command, --agent CLI flag, timezone support, skip_dates, compact cron_list, strict_schedule)
+Last Updated: 2026-06-07 (CHAT_TURN_TIMEOUT applied uniformly to all _run_chat dispatch sites; bumped to 7200s to match ACP _DEFAULT_PROMPT_TIMEOUT)
 
 ## Overview
 
@@ -128,6 +128,8 @@ Each chat tab gets its own kiro-cli session keyed by `dashboard:{slot_key}` with
 Cross-tab context: **removed** (budget redistributed to other caps). Previously injected recent messages from other dashboard tabs; this block was eliminated and its 6,000-char budget absorbed into the raised memory/lessons caps above.
 
 **Context budget** (`context.py`): total cap 165,000 chars (~55k tokens). Priority order: critical rules → memory (preferences 4,250, projects 6,400, history 26,600) → skills (on-demand, few always-on) → lessons (37,250) → conversation history (8k budget, 8,000 chars/message cap, most-recent-first fill) → provenance. Individual messages exceeding 8,000 chars are truncated with `…[truncated]`. If total exceeds 165,000, hard-truncated at nearest newline.
+
+**Per-turn timeout** (`constants.py:CHAT_TURN_TIMEOUT`): every `_run_chat` invocation is wrapped with `asyncio.wait_for(timeout=CHAT_TURN_TIMEOUT)` regardless of dispatch site. This applies uniformly to: primary user-typed turn (`chat_handlers.py`), queue-drain (`chat_runner.py` finally block), cron injection (`handlers/messaging.py`), Slack/dashboard nudge (`slack/gateway.py` autonudge path), and subagent injection (`slack/gateway.py` two paths). The cap (7200s, 2 hours) is sized to match the inner ACP `_DEFAULT_PROMPT_TIMEOUT` so the dashboard layer does not bound below the transport. The `_STALE_TURN_TIMEOUT` (90s, in `acp/client.py`) is the real wedged-session guard — it fires when streaming has gone silent. `CHAT_TURN_TIMEOUT` is the upper safety ceiling for genuinely runaway work, not a "this turn took too long" guard.
 
 **Custom agent context**: When a dashboard slot uses a non-kiroclaw agent, `build_message()` and `build_session_context()` skip only skills and workspace identity (custom agents load their own via kiro-cli). All other context is injected for all agents: critical rules (diff rendering, OPTIONS buttons), memory (preferences, projects, history, semantic, episodic), lessons, hooks, and OPTIONS reminder. This ensures custom agents, cron jobs, and task runners all benefit from the user's learned preferences and project context.
 

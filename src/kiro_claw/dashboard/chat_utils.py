@@ -273,16 +273,22 @@ def _apply_incognito_prefix(slot, message: str) -> str:
 
 
 def _maybe_inject_persona(message: str, color_theme: str, is_new: bool) -> str:
-    """Append Lumon persona to *message* on first turn when theme is 'lumon'."""
-    if color_theme != "lumon" or not is_new:
+    """Append persona to *message* on first turn when the theme has a persona."""
+    if not is_new:
+        return message
+    if color_theme == "lumon":
+        tag, loader = "LUMON PERSONA", _cached_lumon_persona
+    elif color_theme == "lcars":
+        tag, loader = "LCARS PERSONA", _cached_lcars_persona
+    else:
         return message
     try:
-        text = _cached_lumon_persona()
+        text = loader()
         if text:
-            return message + f"\n[LUMON PERSONA]\n{text}\n[END LUMON PERSONA]\n\n"
+            return message + f"\n[{tag}]\n{text}\n[END {tag}]\n\n"
         return message
     except Exception:
-        logger.warning("Lumon persona injection failed", exc_info=True)
+        logger.warning("Persona injection failed", exc_info=True)
         return message
 
 
@@ -293,6 +299,16 @@ def _cached_lumon_persona() -> str:
     _p = _shipped_prompt().parent / "persona-lumon.md"
     if not _p.is_file():
         _p = _BUNDLED_CFG_DIR / "persona-lumon.md"
+    return safe_read_file(str(_p))
+
+
+@functools.lru_cache(maxsize=1)
+def _cached_lcars_persona() -> str:
+    """Load and cache the LCARS persona file."""
+
+    _p = _shipped_prompt().parent / "persona-lcars.md"
+    if not _p.is_file():
+        _p = _BUNDLED_CFG_DIR / "persona-lcars.md"
     return safe_read_file(str(_p))
 
 

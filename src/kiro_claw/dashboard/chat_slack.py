@@ -7,21 +7,29 @@ import logging
 from aiohttp import web
 
 from kiro_claw.config.loader import KiroClawConfig
+from kiro_claw.dashboard import state as dashboard_state
 from kiro_claw.dashboard.chat_persistence import _save_slot_to_history
 from kiro_claw.dashboard.chat_utils import _history_key_for
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.security import redact_and_truncate
 from kiro_claw.sel import sel
-from kiro_claw.slack.channel_resolver import ChannelNameResolver
+from kiro_claw.slack.channel_resolver import _CACHE_FILENAME, ChannelNameResolver
 from kiro_claw.sync_bridge import handoff_to_slack
 
 logger = logging.getLogger(__name__)
 
 
 def _get_channel_resolver(state: DashboardState) -> ChannelNameResolver:
-    """Lazily construct the shared ChannelNameResolver on first use."""
+    """Lazily construct the shared ChannelNameResolver on first use.
+
+    The cache path is derived from ``dashboard_state.config_dir`` (accessed as a
+    module attribute, not a ``from`` import) so it flows through the same seam
+    tests patch — isolating the on-disk cache to ``tmp_path`` under test while
+    resolving to the real ``~/.kiroclaw`` dir in production.
+    """
     if state._channel_resolver is None:
-        state._channel_resolver = ChannelNameResolver()
+        cache_path = dashboard_state.config_dir() / _CACHE_FILENAME
+        state._channel_resolver = ChannelNameResolver(cache_path=cache_path)
     return state._channel_resolver
 
 

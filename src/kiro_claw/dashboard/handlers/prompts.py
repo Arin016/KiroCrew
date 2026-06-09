@@ -217,10 +217,15 @@ async def api_skills(request: web.Request) -> web.Response:
             break
     result.extend(list_kiro_skills(project_dir))
     # Annotate each skill with the agents whose resources globs would load it.
+    # Isolate per-skill: a failure resolving one skill must not blank the
+    # whole list (defaults to the documented empty-list semantics).
     for s in result:
         path = s.get("path") or ""
         if path:
-            s["loaded_by_agents"] = _resolve_loaded_by_agents(Path(path))
+            try:
+                s["loaded_by_agents"] = _resolve_loaded_by_agents(Path(path))
+            except Exception:
+                s["loaded_by_agents"] = []
         else:
             s["loaded_by_agents"] = []
     return web.json_response(result)

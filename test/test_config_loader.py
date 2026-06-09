@@ -236,6 +236,7 @@ _slack_config_st = st.builds(
     open_channels=st.lists(st.from_regex(r"C[A-Z0-9]{8,10}", fullmatch=True), max_size=5),
     command=st.text(min_size=1, max_size=20),
     reactions_enabled=st.booleans(),
+    show_thinking=st.booleans(),
 )
 
 _dashboard_config_st = st.builds(
@@ -340,6 +341,7 @@ class TestConfigLoaderProperties:
         assert loaded.slack.tracking_channels == config.slack.tracking_channels
         assert loaded.slack.open_channels == config.slack.open_channels
         assert loaded.slack.reactions_enabled == config.slack.reactions_enabled
+        assert loaded.slack.show_thinking == config.slack.show_thinking
 
         # Compare dashboard
         assert loaded.dashboard.url == config.dashboard.url

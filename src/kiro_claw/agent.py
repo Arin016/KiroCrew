@@ -1515,6 +1515,12 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
     except Exception:
         logger.debug("kiroclaw-research agent install failed", exc_info=True)
 
+    # Install kiroclaw-heartbeat agent (used by HeartbeatService for unattended polling)
+    try:
+        _install_heartbeat_agent()
+    except Exception:
+        logger.debug("kiroclaw-heartbeat agent install failed", exc_info=True)
+
     # Bidirectional sync: ensure packages installed for one provider
     # are also available for the other (agents↔plugins, skills).
     sync_aim_packages()
@@ -1731,6 +1737,124 @@ def _install_research_agent() -> None:
     path = KIRO_AGENTS_DIR / _RESEARCH_AGENT_FILENAME
     _atomic_json_write(path, config)
     logger.info("Installed research agent config: %s", path)
+
+
+_HEARTBEAT_AGENT_FILENAME = "kiroclaw-heartbeat.json"
+
+_HEARTBEAT_SYSTEM_PROMPT = """# KiroClaw Heartbeat Worker
+
+You are `kiroclaw-heartbeat`, an unattended polling worker that runs one task
+per heartbeat cycle. You are dispatched by HeartbeatService when a task line in
+`HEARTBEAT.md` is due to run; the gateway delivers your response text directly
+to the user as a notification (no `send_message` call required, no chat panel
+to write to).
+
+## Charter
+
+- **Observe and report only.** Heartbeat tasks watch for a condition (a build
+  status, a file change, an external page state). When you see it, report.
+  When you don't, respond with `HEARTBEAT_KEEP` so the task stays armed for the
+  next cycle.
+- **No write actions.** Tool approval is gated at the gateway against
+  `HEARTBEAT_SAFE_TOOLS` (read-only allowlist). Any write tool you try will
+  be rejected and audited; do not waste a turn attempting one. If a task
+  asks you to "fix" or "update" something, treat it as "observe and notify
+  the user so they can fix" — never the action itself.
+- **Your response IS the notification.** Whatever you write becomes the
+  Slack/dashboard message the user sees. There is no transcript to scroll;
+  be concise (a sentence or two for a status check, a short bulleted summary
+  for a comment dump). Keep it scannable.
+- **HEARTBEAT_KEEP semantics.** Include the literal token `HEARTBEAT_KEEP`
+  anywhere in your response when the task is NOT done (so it retries next
+  cycle). Omit the token when the task is fully complete (so it is dropped
+  from the file).
+
+## Tools
+
+You have a curated read-only toolset (codebase search, knowledge-base query,
+and side-effect-free kiroclaw-core reads). Anything outside that list is
+rejected. If you find yourself wanting a tool that isn't available, say so in
+the response — the operator will add it after observing the SEL `denied` event.
+"""
+
+
+def _install_heartbeat_agent() -> None:
+    """Generate and install the kiroclaw-heartbeat agent config.
+
+    A dedicated agent for HeartbeatService.  Minimal MCP surface — only
+    ``kiroclaw-core`` (learn/cron/spawn list, recall, artifacts read) on
+    public installs.  Tool approval is enforced gateway-side against
+    ``HEARTBEAT_SAFE_TOOLS`` regardless; the per-agent MCP narrowing here
+    keeps cold-start cost low and reduces the surface the gateway has to
+    police.
+
+    (The Amazon-internal ``builder-mcp`` CR/ticket/pipeline read wiring is
+    omitted on public installs, matching ``_install_research_agent`` /
+    ``_install_knowledge_agent``.)
+
+    SEL audit logging stays at the gateway side — see
+    ``GatewayOrchestrator._heartbeat_approval``.
+    """
+    KIRO_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = KIRO_AGENTS_DIR / _HEARTBEAT_AGENT_FILENAME
+
+    # Pull the ``kiroclaw-core`` entry from the main agent config so the
+    # resolved command + skill-paths match the main agent (write-denied
+    # commands and security still come from bundled hooks). Strip the main
+    # agent's ``--include-tools``/``--include-tool-tags``/``--exclude-tools``
+    # filters so all read tools surface to the heartbeat agent — security is
+    # enforced gateway-side against ``HEARTBEAT_SAFE_TOOLS`` via
+    # ``_heartbeat_approval``, not by per-agent MCP filtering.
+    main_config = _load_json(KIRO_AGENTS_DIR / AGENT_FILENAME)
+    main_mcp = main_config.get("mcpServers", {}) or {}
+
+    _strip_flags = ("--include-tools", "--include-tool-tags", "--exclude-tools")
+    mcp: dict[str, dict] = {}
+    for name in ("kiroclaw-core",):
+        entry = main_mcp.get(name)
+        if not isinstance(entry, dict):
+            continue
+        cleaned = dict(entry)
+        args = entry.get("args") or []
+        if isinstance(args, list):
+            filtered: list[str] = []
+            skip_next = False
+            for arg in args:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if not isinstance(arg, str):
+                    filtered.append(arg)
+                    continue
+                if any(arg == f or arg.startswith(f + "=") for f in _strip_flags):
+                    # Form ``--flag=value`` is dropped; bare ``--flag`` consumes
+                    # the next arg too.
+                    skip_next = "=" not in arg
+                    continue
+                filtered.append(arg)
+            cleaned["args"] = filtered
+        mcp[name] = cleaned
+
+    config: dict[str, object] = {
+        "name": "kiroclaw-heartbeat",
+        "description": (
+            "Unattended polling worker — runs one HeartbeatService task per "
+            "cycle with a read-only MCP toolset. Tool approval is gated "
+            "gateway-side against HEARTBEAT_SAFE_TOOLS."
+        ),
+        "model": "claude-sonnet-4.6",
+        "cc_model": "claude-sonnet-4.6",
+        "includeMcpJson": False,
+        "prompt": _HEARTBEAT_SYSTEM_PROMPT,
+        "mcpServers": mcp,
+        # Build from the servers actually resolved so we never reference a
+        # tool namespace without a matching mcpServers entry — the
+        # rebuild_agent_config flow may run before either main entry exists.
+        "tools": [f"@{name}" for name in mcp],
+    }
+
+    _atomic_json_write(path, config)
+    logger.info("Installed heartbeat agent config: %s", path)
 
 
 def sync_aim_packages() -> None:

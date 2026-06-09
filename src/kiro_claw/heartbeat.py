@@ -56,11 +56,18 @@ class HeartbeatService:
         on_task: Callable[[str, str], Coroutine] | None = None,
         interval: int = _DEFAULT_INTERVAL,
         consolidator: HistoryConsolidator | None = None,
+        on_cycle_end: Callable[[], Coroutine] | None = None,
     ) -> None:
         self._memory = memory
         self._on_task = on_task
         self._interval = interval
         self._consolidator = consolidator
+        # Called once after every cycle's tasks finish (regardless of
+        # individual task success/fail).  Owner uses this to recycle the
+        # shared heartbeat session at cycle boundaries — the per-task
+        # ``finally`` block is too aggressive when concurrent tasks share
+        # one session key.
+        self._on_cycle_end = on_cycle_end
         self._tick = 0
         self._processing = False
         self._task: asyncio.Task | None = None  # type: ignore[type-arg]
@@ -160,6 +167,16 @@ class HeartbeatService:
             path.write_text(lines, encoding="utf-8")
         finally:
             self._processing = False
+            # Cycle-end teardown — runs once after ALL tasks in this cycle
+            # complete.  Owner can use this to conditionally recycle the
+            # shared heartbeat session (e.g. only when context > threshold)
+            # so multi-task cycles don't tear down the session another
+            # in-flight task is still using.
+            if self._on_cycle_end is not None:
+                try:
+                    await self._on_cycle_end()
+                except Exception:
+                    logger.warning("Heartbeat: on_cycle_end callback failed", exc_info=True)
 
 
 def _should_keep(result: str | None) -> bool:

@@ -63,6 +63,7 @@ for rel in [
     "config/defaults.json",
     "config/prompt.md",
     "config/persona-lumon.md",
+    "config/persona-lcars.md",
     "config/prompt-orchestrator.md",
     "apps/app-registry.json",
 ]:

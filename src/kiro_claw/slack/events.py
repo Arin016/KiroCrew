@@ -110,6 +110,37 @@ _skills_loader: SkillsLoader | None = None
 _bg_tasks: set[asyncio.Task[object]] = set()
 
 
+def _spawn_tracked(coro: Coroutine[object, object, object]) -> asyncio.Task[object]:
+    """Schedule *coro* as a task and retain a strong reference until it finishes.
+
+    ``asyncio.create_task``/``ensure_future`` alone is not enough: the event loop
+    keeps only a weak reference, so a fire-and-forget task can be garbage-collected
+    mid-execution (silently dropping the work). Tracking it in ``_bg_tasks`` and
+    discarding on completion keeps it alive for its whole lifetime.
+    """
+    task = asyncio.ensure_future(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_on_tracked_done)
+    return task
+
+
+def _on_tracked_done(task: asyncio.Task[object]) -> None:
+    """Discard a finished tracked task and surface any failure.
+
+    A bare ``discard`` swallows exceptions from the spawned coroutine — a failed
+    ``_respond`` POST (expired ``response_url``, network timeout) or a raising slash
+    handler would store the exception in the task, which nobody reads and which is
+    GC'd with the task, leaving operators blind to dropped slash replies. Log at
+    DEBUG (these failures are routine and peer-driven) while still discarding.
+    """
+    _bg_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.debug("Tracked slash task failed: %s", exc)
+
+
 def _get_skills_loader() -> SkillsLoader:
     global _skills_loader  # noqa: PLW0603
     if _skills_loader is None:
@@ -1360,7 +1391,7 @@ async def _handle_slash(orch: GatewayOrchestrator, payload: dict) -> None:
             resources=cmd_text,
             error="unauthorized sender",
         )
-        asyncio.create_task(_respond("⛔ You are not authorized to use this command."))
+        _spawn_tracked(_respond("⛔ You are not authorized to use this command."))
         return
 
     sel().log_api_access(
@@ -1372,7 +1403,7 @@ async def _handle_slash(orch: GatewayOrchestrator, payload: dict) -> None:
     )
 
     if not (orch.slack and orch._owner_id):
-        asyncio.create_task(_respond("⚠️ Owner not configured."))
+        _spawn_tracked(_respond("⚠️ Owner not configured."))
         return
 
     # Parse sub-command and args
@@ -1386,13 +1417,13 @@ async def _handle_slash(orch: GatewayOrchestrator, payload: dict) -> None:
         handler, _ = entry
         # Stash trigger_id so modal-opening handlers can use it
         orch._last_trigger_id = payload.get("trigger_id", "")  # type: ignore[attr-defined]
-        asyncio.create_task(handler(orch, caller_id, args, _respond))
+        _spawn_tracked(handler(orch, caller_id, args, _respond))
         return
 
     # Fallback: @user mention — multi-user access disabled for security
     user_match = re.search(r"<@([A-Z0-9]+)(?:\|([^>]+))?>", cmd_text)
     if user_match:
-        asyncio.create_task(
+        _spawn_tracked(
             _respond("⛔ Multi-user access is disabled. Only the owner can use KiroClaw via Slack.")
         )
         return
@@ -1402,14 +1433,14 @@ async def _handle_slash(orch: GatewayOrchestrator, payload: dict) -> None:
     if channel_match:
         channel_id = channel_match.group(1)
         channel_name = channel_match.group(2) or "Secret"
-        asyncio.create_task(
+        _spawn_tracked(
             prompt_track_channel(orch.slack, orch._owner_id, channel_id, channel_name)
         )
-        asyncio.create_task(_respond(f"📨 Track request sent for #{channel_name or channel_id}."))
+        _spawn_tracked(_respond(f"📨 Track request sent for #{channel_name or channel_id}."))
         return
 
     # Unknown sub-command → help
-    asyncio.create_task(_respond(_build_help_text(orch.slack_command)))
+    _spawn_tracked(_respond(_build_help_text(orch.slack_command)))
 
 
 # ---------------------------------------------------------------------------

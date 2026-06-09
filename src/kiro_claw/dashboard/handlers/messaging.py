@@ -20,6 +20,7 @@ from kiro_claw.browser.setup import (
     patch_mcp_extension,
     patch_mcp_headless,
 )
+from kiro_claw.constants import CHAT_TURN_TIMEOUT
 from kiro_claw.dashboard.chat_persistence import _rehydrate_slot_from_history
 from kiro_claw.dashboard.chat_utils import _remove_queued_by_id
 from kiro_claw.dashboard.state import (
@@ -579,7 +580,12 @@ async def api_send_message(request: web.Request) -> web.Response:
                         from kiro_claw.dashboard.chat_runner import _run_chat
 
                         slot.append("inject", wrapped, inject_cls)
-                        task = asyncio.create_task(_run_chat(state, slot, wrapped))
+                        task = asyncio.create_task(
+                            asyncio.wait_for(
+                                _run_chat(state, slot, wrapped),
+                                timeout=CHAT_TURN_TIMEOUT,
+                            )
+                        )
                         slot.task = task
                         state._background_tasks.add(task)
                         task.add_done_callback(state._background_tasks.discard)

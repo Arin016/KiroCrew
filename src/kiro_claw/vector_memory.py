@@ -11,6 +11,7 @@ time-decay retrieval via FAISS (falls back to FTS5 without embeddings).
 
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import math
@@ -99,6 +100,13 @@ _FAISS_SAVE_INTERVAL = 100  # save index every N writes
 _MAX_SEMANTIC_PER_CONSOLIDATION = 20
 _MAX_EPISODIC_PER_CONSOLIDATION = 10
 _MMR_LAMBDA = 0.6  # relevance vs diversity tradeoff (higher = more relevance)
+# Recall-safe upper bound on the MMR candidate pool. This is NOT a perf cap that
+# changes results — it only guards against pathological pool sizes (a vector search
+# returning thousands of rows) so the rerank can't blow up unbounded. It sits far
+# above any realistic episodic-recall pool, so in practice MMR reranks the full
+# candidate set. The real cost reduction comes from memoizing the query-independent
+# pairwise Jaccard inside _mmr_rerank (see comment there), not from shrinking the pool.
+_MMR_MAX_POOL = 1000
 _SEMANTIC_VECTOR_WEIGHT = 0.6  # weight for vector score in hybrid semantic retrieval
 _SEMANTIC_KEYWORD_WEIGHT = 0.4  # weight for keyword score in hybrid semantic retrieval
 
@@ -242,20 +250,62 @@ def _mmr_rerank(
     if len(candidates) <= 1:
         return candidates[:limit]
 
-    # Normalize scores to [0, 1]
-    max_score = max(c[score_key] for c in candidates) or 1.0
+    # Keep the FULL candidate pool so MMR can still surface a relevant-but-diverse item
+    # that ranked below the top-`limit` on pure relevance — that tail pick is the whole
+    # point of MMR, and truncating the pool toward `limit` would silently drop it. The
+    # only bound is a recall-safe ceiling (_MMR_MAX_POOL) far above any realistic pool,
+    # purely to cap pathological inputs; it keeps the highest-relevance rows if hit.
+    if len(candidates) > _MMR_MAX_POOL:
+        # heapq.nlargest is O(n log k) and avoids materializing a fully-sorted list,
+        # vs sorted(...)[:k] which is O(n log n). Only matters on the pathological
+        # >1000-candidate path, but it's the cheaper primitive for "top-k".
+        candidates = heapq.nlargest(_MMR_MAX_POOL, candidates, key=lambda c: c[score_key])
+
+    # Normalize scores to [0, 1]. Scores can be NEGATIVE: they derive from cosine
+    # similarity (faiss.IndexFlatIP / dot product of normalized vectors, range [-1, 1])
+    # times positive factors, so a query dissimilar to every candidate yields an
+    # all-negative set. A bare `or 1.0` only guards max_score == 0; a negative
+    # max_score would make `score / max_score` GROW as the true score worsens,
+    # inverting the ranking. Divide by 1.0 whenever the max is non-positive so the
+    # natural score order is preserved.
+    max_score = max(c[score_key] for c in candidates)
+    if max_score <= 0:
+        max_score = 1.0
     token_cache = [_tokenize(c.get(text_key, "")) for c in candidates]
+
+    # The cost driver is the diversity term: each MMR iteration recomputes
+    # _jaccard(idx, s) for every remaining idx against every already-selected s. But
+    # candidate↔candidate Jaccard is QUERY-INDEPENDENT — it depends only on the two
+    # token sets, not the request — and the same (idx, s) pair recurs across iterations.
+    # Memoize it by unordered index-pair so each pair is computed at most once. This
+    # collapses the repeated set-intersection work (the profiler hot spot) while
+    # preserving the full pool, so recall is unchanged. (Per-pair MinHash/LSH or a
+    # cross-request id-pair cache is a possible further optimization if the pool grows.)
+    sim_cache: dict[tuple[int, int], float] = {}
+
+    def _pair_sim(i: int, j: int) -> float:
+        key = (i, j) if i < j else (j, i)
+        cached = sim_cache.get(key)
+        if cached is None:
+            cached = _jaccard(token_cache[i], token_cache[j])
+            sim_cache[key] = cached
+        return cached
 
     selected: list[int] = []
     remaining = set(range(len(candidates)))
 
     for _ in range(min(limit, len(candidates))):
         best_idx = -1
-        best_mmr = -1.0
+        # Initialize to -inf, not -1.0: with negative scores (see the max_score guard
+        # above) relevance is negative, so an MMR value of 0.6*relevance - 0.4*max_sim
+        # can reach or fall below -1.0 (e.g. relevance=-1, max_sim=1 -> mmr=-1.0). A
+        # -1.0 floor with strict `>` would then select nothing, hit `best_idx < 0`, and
+        # break early — silently returning fewer results than `limit`.
+        best_mmr = -float("inf")
         for idx in remaining:
             relevance = candidates[idx][score_key] / max_score
             if selected:
-                max_sim = max(_jaccard(token_cache[idx], token_cache[s]) for s in selected)
+                max_sim = max(_pair_sim(idx, s) for s in selected)
             else:
                 max_sim = 0.0
             mmr = lam * relevance - (1 - lam) * max_sim
@@ -1209,6 +1259,7 @@ class VectorMemoryStore:
         category: str = "knowledge",
         negative: str | None = None,
         source: str = "user_explicit",
+        rule_emb: list[float] | None = None,
     ) -> bool:
         """Write a lesson as a semantic entry with key lesson.<hash>.
 
@@ -1216,12 +1267,16 @@ class VectorMemoryStore:
         - Substring match: if existing contains new (or vice versa), longer wins
         - Topic overlap: if >50% of significant words match, newer replaces older
         - Semantic similarity: if >85% cosine similarity, longer wins
+
+        Pass ``rule_emb`` to reuse an embedding already computed by the caller
+        and avoid a second blocking embed of the identical text.
         """
         import hashlib
 
         rule_lower = rule.lower()
         rule_words = self._lesson_keywords(rule_lower)
-        rule_emb = self._try_embed(rule) if self.embed_fn else None
+        if rule_emb is None:
+            rule_emb = self._try_embed(rule) if self.embed_fn else None
         backfills_done = 0
         pending_backfills: list[tuple[bytes, str]] = []  # (blob, key) pairs
 
@@ -1349,6 +1404,54 @@ class VectorMemoryStore:
             "yes",
         }
         return {w for w in re.split(r"\W+", text) if len(w) > 2 and w not in stop}
+
+    def embed_lesson(self, rule: str) -> list[float] | None:
+        """Embed a lesson rule once for reuse across dedup passes.
+
+        Synchronous (performs a blocking embed); callers on an event loop
+        should wrap this in ``asyncio.to_thread()``.
+        """
+        return self._try_embed(rule) if self.embed_fn else None
+
+    def find_contradiction_candidates(
+        self,
+        rule: str,
+        threshold_low: float = 0.4,
+        threshold_high: float = 0.85,
+        rule_emb: list[float] | None = None,
+    ) -> list[dict]:
+        """Find lessons related to rule but not caught by standard dedup.
+
+        Returns lessons with cosine similarity in [threshold_low, threshold_high)
+        — candidates that may contradict the new rule. Pass ``rule_emb`` to reuse
+        an embedding already computed by the caller and avoid a second blocking
+        embed of the identical text.
+        """
+        if rule_emb is None:
+            rule_emb = self._try_embed(rule) if self.embed_fn else None
+        if not rule_emb:
+            return []
+        candidates = []
+        for existing in self.get_lessons():
+            existing_emb_blob = existing.get("embedding")
+            if (
+                not existing_emb_blob
+                or not isinstance(existing_emb_blob, bytes)
+                or len(existing_emb_blob) < 4
+            ):
+                continue
+            try:
+                existing_emb = list(
+                    struct.unpack(f"{len(existing_emb_blob) // 4}f", existing_emb_blob)
+                )
+            except struct.error:
+                continue
+            sim = self._cosine_sim(rule_emb, existing_emb)
+            if threshold_low <= sim < threshold_high:
+                existing_val = str(json.loads(existing["value_json"]))
+                candidates.append({"key": existing["key"], "rule": existing_val, "similarity": sim})
+        candidates.sort(key=lambda x: x["similarity"], reverse=True)
+        return candidates[:5]
 
     def get_lessons(self, limit: int | None = None) -> list[dict]:
         """Return lesson.* entries ordered by most recently updated."""

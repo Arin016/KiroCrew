@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 
@@ -33,6 +34,22 @@ from kiro_claw.validation import (
     FILE_SEND_SCHEMA,
     ValidationError,
     validate_tool_args,
+)
+
+# Register OOXML office MIME types explicitly. The system mimetypes
+# database on AL2/AL2023 build hosts does NOT include .docx, .xlsx, or
+# .pptx by default, so mimetypes.guess_type() returns (None, None) for
+# those. Registering at module import time keeps api_file_download's
+# Content-Type header correct for the most common Word/Excel/PowerPoint
+# downloads (the Stores Discovery docx case that motivated this CR).
+mimetypes.add_type(
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx",
+)
+mimetypes.add_type(
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx",
+)
+mimetypes.add_type(
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx",
 )
 
 _INLINE_DISPOSITION_PREFIXES = frozenset({"audio/", "video/", "image/", "application/pdf"})
@@ -1324,6 +1341,148 @@ async def api_file_read(request: web.Request) -> web.Response:
             session_key="dashboard", tool_name="file_read", outcome="failure", resources=path
         )
         return web.json_response({"error": "failed to read file"}, status=500)
+
+
+async def api_file_download(request: web.Request) -> web.Response:
+    """GET /api/file-download?path=... — download a file as raw bytes.
+
+    Sibling of /api/file-read. file-read decodes content as UTF-8 with
+    errors='replace' to render text in the markdown panel; that mode
+    corrupts binary files (.docx, .pdf, images) by replacing non-text
+    bytes with U+FFFD. This endpoint streams the original bytes, sets
+    Content-Disposition: attachment, and applies X-Content-Type-Options:
+    nosniff to keep the browser from rendering the response inline.
+
+    Security: same path-validation as file-read (validate_tool_args,
+    _validate_dashboard_path, sensitive-path filter). Symlinks rejected
+    via O_NOFOLLOW. Files larger than _MAX_UPLOAD_BYTES are rejected.
+    Text files are still scanned for sensitive content (credentials and
+    exfiltration URLs); a positive hit aborts the download. Binary
+    files are served as-is without a MIME allowlist, since attachment
+    disposition + nosniff prevents inline rendering on the dashboard
+    origin.
+    """
+    # ``_h`` is a late-binding alias for the parent ``handlers`` package so that
+    # tests can monkey-patch ``kiro_claw.dashboard.handlers._validate_dashboard_path``;
+    # this is the same pattern api_file_raw uses (legitimate circular-import
+    # workaround, listed as an exception in the top-level-imports rule).
+    import kiro_claw.dashboard.handlers as _h  # noqa: F811  # circular import
+
+    raw_path = request.query.get("path", "")
+    # Resolve relative paths against project dir when resolve=1 (mirrors api_file_read)
+    if request.query.get("resolve") == "1" and raw_path and not raw_path.startswith(("/", "~")):
+        proj = os.environ.get("KIROCLAW_PROJECT_DIR", "")
+        if not proj:
+            return web.json_response(
+                {"error": "cannot resolve: no project dir configured"}, status=400,
+            )
+        raw_path = os.path.join(proj, raw_path)
+        resolved = os.path.realpath(raw_path)
+        resolved_proj = os.path.realpath(proj)
+        if not (resolved == resolved_proj or resolved.startswith(resolved_proj + os.sep)):
+            return web.json_response(
+                {"error": "path outside project directory"}, status=400,
+            )
+        raw_path = resolved
+
+    try:
+        validate_tool_args({"path": raw_path}, FILE_READ_SCHEMA)
+    except ValidationError:
+        _sel().log_tool_invocation(
+            session_key="dashboard", tool_name="file_download",
+            outcome="denied", resources=raw_path,
+        )
+        return web.json_response({"error": "invalid input"}, status=400)
+
+    path = _h._validate_dashboard_path(raw_path)
+    if not path:
+        _sel().log_tool_invocation(
+            session_key="dashboard", tool_name="file_download",
+            outcome="denied", resources=raw_path,
+        )
+        return web.json_response({"error": "invalid or forbidden path"}, status=400)
+    if is_sensitive_path(path):
+        _sel().log_tool_invocation(
+            session_key="dashboard", tool_name="file_download",
+            outcome="denied", resources=path, error="sensitive_path",
+        )
+        return web.json_response({"error": "sensitive path blocked"}, status=403)
+    if not os.path.isfile(path):
+        _sel().log_tool_invocation(
+            session_key="dashboard", tool_name="file_download",
+            outcome="not_found", resources=path,
+        )
+        return web.json_response({"error": "not found"}, status=404)
+
+    # Read raw bytes via O_NOFOLLOW to atomically reject symlinks (no TOCTOU race).
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as f:
+            st = os.fstat(f.fileno())
+            if st.st_size > _MAX_UPLOAD_BYTES:
+                _sel().log_tool_invocation(
+                    session_key="dashboard", tool_name="file_download",
+                    outcome="denied", resources=path, error="file_too_large",
+                )
+                return web.json_response({"error": "file too large"}, status=413)
+            data = f.read()
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:  # symlink with O_NOFOLLOW
+            _sel().log_tool_invocation(
+                session_key="dashboard", tool_name="file_download",
+                outcome="denied", resources=path, error="symlink_rejected",
+            )
+            return web.json_response({"error": "symlinks not allowed"}, status=403)
+        logger.exception("file_download read failed for %s", path)
+        _sel().log_tool_invocation(
+            session_key="dashboard", tool_name="file_download",
+            outcome="failure", resources=path,
+        )
+        return web.json_response({"error": "cannot read file"}, status=500)
+
+    # Defense in depth: scan content for credentials / exfil URLs.
+    # The security-controls rule requires BOTH redact_exfiltration_urls() AND
+    # redact_credentials() before content reaches an external surface. Order
+    # matters: exfil URLs first so any embedded credentials in URL fragments
+    # are caught before the bare-credential pass runs against the URL fragment.
+    #
+    # Mostly-binary files can still hide credential patterns in their
+    # decodable runs (e.g. an ASCII-art `AKIA...` with one stray non-UTF-8
+    # byte). Decoding with errors='replace' for the *scan only* (the served
+    # bytes are still raw) ensures the credential pass cannot be bypassed
+    # by sprinkling a single non-UTF-8 byte into the file.
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        text = data.decode("utf-8", errors="replace")
+    scrubbed, _exfil_count = redact_exfiltration_urls(text)
+    scrubbed, _cred_count = redact_credentials(scrubbed)
+    if scrubbed != text:
+        _sel().log_tool_invocation(
+            session_key="dashboard", tool_name="file_download",
+            outcome="denied", resources=path, error="content_redacted",
+        )
+        return web.json_response(
+            {"error": "file content was redacted; download aborted"}, status=400,
+        )
+
+    safe_name = urllib.parse.quote(os.path.basename(path), safe="")
+    content_type, _ = mimetypes.guess_type(path)
+    if not content_type:
+        content_type = "application/octet-stream"
+
+    _sel().log_tool_invocation(
+        session_key="dashboard", tool_name="file_download",
+        outcome="success", resources=path,
+    )
+    return web.Response(
+        body=data,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{safe_name}",
+            "Content-Type": content_type,
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 async def api_file_raw(request: web.Request) -> web.Response:

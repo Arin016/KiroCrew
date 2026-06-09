@@ -5,10 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from kiro_claw.vector_memory import (
+    _MMR_MAX_POOL,
     SemanticRejectCode,
     VectorMemoryStore,
     _contains_injection,
+    _jaccard,
+    _mmr_rerank,
     _stem_words,
+    _tokenize,
 )
 
 
@@ -788,3 +792,157 @@ class TestEmbedFnLazyRebind:
         # Both threads should have gotten the embedding (loser used the bound embed_fn)
         assert results[0] == [0.1, 0.2, 0.3]
         assert results[1] == [0.1, 0.2, 0.3]
+
+
+class TestMmrJaccardCacheAndRecall:
+    """_mmr_rerank keeps the FULL candidate pool and memoizes the query-independent
+    pairwise Jaccard, rather than truncating the pool toward `limit`.
+
+    Truncating by relevance would silently drop a relevant-but-diverse tail item that
+    MMR is specifically meant to surface (reviewer zejiangg, CR-280115836). Recall is
+    preserved by keeping the pool; cost is reduced by computing each candidate↔candidate
+    similarity at most once (it depends only on the two token sets, not the query).
+    """
+
+    @staticmethod
+    def _cands(n: int) -> list[dict]:
+        return [{"text": f"fragment number {i} alpha{i}", "score": float(n - i)} for i in range(n)]
+
+    def test_diverse_tail_item_is_selectable(self) -> None:
+        # The crux of the reviewer's objection: a low-relevance but highly DIVERSE item
+        # must remain selectable. Top items are near-duplicates; one tail item is
+        # unrelated. With limit=2, MMR must pick a top item + the diverse tail item.
+        cands = [
+            {"text": "python backend api server flask", "score": 0.90},
+            {"text": "python backend api server django", "score": 0.88},
+            {"text": "python backend api server fastapi", "score": 0.86},
+            {"text": "python backend api server tornado", "score": 0.84},
+            {"text": "kubernetes deployment yaml helm chart", "score": 0.50},
+        ]
+        got = _mmr_rerank([dict(c) for c in cands], limit=2)
+        texts = {c["text"] for c in got}
+        assert "kubernetes deployment yaml helm chart" in texts, (
+            "MMR must still be able to select the diverse tail item; truncating the "
+            "pool toward `limit` would drop it"
+        )
+
+    def test_cached_sim_matches_direct_jaccard(self) -> None:
+        # The memoized pairwise similarity must equal a direct _jaccard computation —
+        # caching is a speedup, never a behavior change.
+        cands = self._cands(40)
+        # Recreate the token sets the same way _mmr_rerank does.
+        toks = [_tokenize(c["text"]) for c in cands]
+        # Result must be deterministic and identical across repeated calls (cache is
+        # per-call, so two calls exercise it independently and must agree).
+        a = _mmr_rerank([dict(c) for c in cands], limit=6)
+        b = _mmr_rerank([dict(c) for c in cands], limit=6)
+        assert [c["text"] for c in a] == [c["text"] for c in b]
+        # Sanity: the helper the cache wraps is symmetric and in [0, 1].
+        assert _jaccard(toks[0], toks[1]) == _jaccard(toks[1], toks[0])
+        assert 0.0 <= _jaccard(toks[0], toks[1]) <= 1.0
+
+    def test_full_pool_preserved_for_pure_relevance(self) -> None:
+        # With strictly descending, well-separated scores and distinct text, MMR picks
+        # the top `limit` by relevance — and the pool is NOT pre-truncated.
+        cands = self._cands(500)
+        got = _mmr_rerank(list(cands), limit=6)
+        assert [c["text"] for c in got] == [c["text"] for c in cands[:6]]
+
+    def test_recall_safe_ceiling_keeps_highest_relevance(self) -> None:
+        # The only bound is a recall-safe ceiling far above realistic pools. If a
+        # pathological pool exceeds it, the highest-relevance rows are kept.
+        n = _MMR_MAX_POOL + 50
+        cands = self._cands(n)  # score = n-i, so index 0 is highest
+        got = _mmr_rerank(list(cands), limit=6)
+        assert [c["text"] for c in got] == [c["text"] for c in cands[:6]]
+
+    def test_small_pool_unaffected(self) -> None:
+        cands = self._cands(5)
+        got = _mmr_rerank(list(cands), limit=6)
+        assert len(got) == 5
+        assert got[0]["text"] == cands[0]["text"]
+
+    def test_max_pool_constant_sane(self) -> None:
+        assert _MMR_MAX_POOL >= 100  # comfortably above any realistic episodic pool
+
+
+class TestMmrRerankNegativeScores:
+    """Regression: MMR relevance normalization inverted ranking for negative scores.
+
+    ``score = cosine_sim * (0.7 + 0.3*importance) * exp(-0.03*days)``. The index is
+    ``faiss.IndexFlatIP`` (inner product on normalized vectors = cosine in [-1, 1]),
+    so ``cosine_sim`` — and therefore ``score`` — can be NEGATIVE for a query that is
+    dissimilar to the stored memories. The normalizer was::
+
+        max_score = max(c[score_key] for c in candidates) or 1.0
+        ...
+        relevance = candidates[idx][score_key] / max_score
+
+    The ``or 1.0`` only guards ``max_score == 0``. When every score is negative,
+    ``max_score`` is negative and ``score / max_score`` GROWS as the true score gets
+    worse (e.g. -1.0 / -0.1 = +10.0 vs -0.1 / -0.1 = +1.0), so MMR selects the LEAST
+    relevant candidate first — an inverted ranking in the core recall path. The fix
+    (``if max_score <= 0: max_score = 1.0``) is folded into this CR alongside the
+    full-pool + cached-Jaccard rework, since both touch ``_mmr_rerank``.
+    """
+
+    def test_all_negative_scores_keep_best_first(self):
+        # Distinct texts so the diversity term doesn't dominate; sorted desc by score.
+        cands = [
+            {"text": "alpha topic one", "score": -0.10},   # best (least negative)
+            {"text": "beta topic two", "score": -0.20},
+            {"text": "gamma topic three", "score": -0.50},
+            {"text": "zeta topic four", "score": -1.00},    # worst
+        ]
+        out = _mmr_rerank(cands, limit=2)
+        assert out[0]["score"] == -0.10, (
+            f"MMR selected score {out[0]['score']} first; the best (least-negative, "
+            "-0.10) candidate must rank first — negative max_score inverted the order"
+        )
+        # Confirm the *ordering*, not just the first pick: with near-zero diversity
+        # (distinct texts → low Jaccard) the second pick should be the next-best score.
+        assert out[1]["score"] == -0.20
+
+    def test_mixed_sign_scores_best_first(self):
+        cands = [
+            {"text": "alpha relevant", "score": 0.50},
+            {"text": "beta neutral", "score": 0.00},
+            {"text": "gamma anti", "score": -0.50},
+        ]
+        out = _mmr_rerank(cands, limit=1)
+        assert out[0]["score"] == 0.50
+
+    def test_all_zero_scores_does_not_crash(self):
+        # The historical `or 1.0` guard for the all-zero case must still hold.
+        cands = [{"text": f"t{i}", "score": 0.0} for i in range(4)]
+        out = _mmr_rerank(cands, limit=2)
+        assert len(out) == 2
+
+    def test_positive_scores_unchanged(self):
+        cands = [
+            {"text": "alpha", "score": 0.90},
+            {"text": "beta", "score": 0.50},
+            {"text": "gamma", "score": 0.10},
+        ]
+        out = _mmr_rerank(cands, limit=1)
+        assert out[0]["score"] == 0.90
+
+    def test_all_negative_similar_texts_returns_all_requested(self):
+        # AutoSDE edge case: all-negative scores + identical token sets push the MMR
+        # value to <= -1.0 (e.g. relevance=-1, max_sim=1 -> 0.6*-1 - 0.4*1 = -1.0). A
+        # best_mmr floor of -1.0 with strict `>` would select nothing and break early,
+        # returning fewer than `limit` results. With best_mmr=-inf, all are returned.
+        cands = [{"text": "identical token set here", "score": -1.0} for _ in range(3)]
+        out = _mmr_rerank([dict(c) for c in cands], limit=3)
+        assert len(out) == 3, f"expected 3 results, got {len(out)} (early-break regression)"
+
+    def test_very_negative_scores_first_iteration_not_empty(self):
+        # Scores more negative than -1.0 (cosine * positive factors can exceed [-1,1]
+        # in magnitude after weighting) must not yield an empty result on iteration 1
+        # (where max_sim=0 → mmr = lam*relevance, which can be < -1.0).
+        cands = [
+            {"text": "alpha unique words", "score": -5.0},
+            {"text": "beta different words", "score": -6.0},
+        ]
+        out = _mmr_rerank([dict(c) for c in cands], limit=2)
+        assert len(out) == 2

@@ -65,10 +65,13 @@ from kiro_claw.dashboard.handlers.usage import persist_token_record_async
 from kiro_claw.dashboard.state import (
     CRON_NOTIFY_PREFIX,
     CRON_NOTIFY_RE,
+    REFUSAL_RECOVERY_PREFIX,
     SUBAGENT_COMPLETION_PREFIX,
     DashboardState,
     _ChatSlot,
+    build_refusal_recovery_prompt,
     is_read_only_bash,
+    unsafe_bash_reason,
 )
 from kiro_claw.hooks import (
     HOOK_EVENT_AGENT_SPAWN,
@@ -107,6 +110,26 @@ from kiro_claw.stats import Stats
 from kiro_claw.validation import ValidationError, validate_ask_user_question
 
 logger = logging.getLogger(__name__)
+
+
+def _pre_tool_hooks_should_block(pre_hook_results: Any) -> bool:
+    """Deny-by-default for unexpected hook output, plus explicit BLOCKED:.
+
+    PreToolUse script hooks return a list of strings (each either a
+    stdout-injection string or a 'BLOCKED:<name>:<reason>' marker emitted
+    by ``_fire`` when a hook exits 2). This helper returns True when the
+    auto-approve path must reject the tool: anything that's not a list of
+    strings is treated as suspicious (deny-by-default), and any
+    BLOCKED:-prefixed string blocks. An empty list is the documented
+    pass-through contract (no hooks registered, or all registered hooks
+    exited 0 with no stdout) and returns False.
+    """
+    if pre_hook_results is None or not isinstance(pre_hook_results, list):
+        return True
+    return any(
+        not isinstance(r, str) or r.startswith("BLOCKED:")
+        for r in pre_hook_results
+    )
 
 
 def _backfill_canonical_model(client: Any, provider: str) -> str:
@@ -890,6 +913,16 @@ async def _run_chat(
     _pending_tools: dict[str, str] = {}  # tool_call_id -> tool_name
     needs_session_reset = False
     saw_compaction = False
+    _produced_visible_output = False
+    _retrying_empty = False
+    # Recoverable tool refusals (host-gate policy deny / read-only bash gate)
+    # recorded during this turn as (redacted_title, reason). If non-empty when
+    # the turn ends — and the user did not stop it — a recovery continuation is
+    # enqueued so the model learns why and can adapt instead of stalling.
+    _refusal_reasons: list[tuple[str, str]] = []
+    # True when this turn IS an automatic refusal-recovery continuation. Used to
+    # keep the synthetic prompt out of the linked-Slack user-message mirror.
+    _is_recovery = message.startswith(REFUSAL_RECOVERY_PREFIX)
 
     # ── Slash commands: detect early, before session acquisition ──
     first_word = message.split()[0] if message.strip() else ""
@@ -1364,7 +1397,7 @@ async def _run_chat(
         )
 
         # ── Bidirectional sync: mirror user message to linked Slack thread ──
-        if state.slack_client and not is_slash:
+        if state.slack_client and not is_slash and not _is_recovery:
             _mirror_thread, _mirror_chan = state.sessions.get_slack_link(session_key)
             if _mirror_thread and _mirror_chan:
                 try:
@@ -1748,6 +1781,13 @@ async def _run_chat(
                             request_id=event.request_id,
                             error="hook_deny",
                         )
+                        # Recoverable host-gate refusal: record for auto-recovery.
+                        # _deny_title/_deny_msg are ALREADY redacted just above
+                        # (redact_exfiltration_urls + redact_credentials) for the
+                        # display pill; reuse those sanitized values so the
+                        # model-bound recovery prompt never sees raw command
+                        # fragments, paths, or credentials.
+                        _refusal_reasons.append((_deny_title, _deny_msg))
                         continue
                     if tool_result.action == TOOL_AUTO_APPROVE:
                         try:
@@ -1766,6 +1806,56 @@ async def _run_chat(
                                 error=f"validation_failed: {e}",
                             )
                         else:
+                            # Declarative auto-approve must NOT bypass scripted
+                            # PreToolUse hooks — those are the audit/policy gate
+                            # and exit-2 BLOCKED takes precedence over auto-approve.
+                            try:
+                                _parsed_input = (
+                                    json.loads(event.tool_input) if event.tool_input else None
+                                )
+                            except Exception:
+                                _parsed_input = None
+                            try:
+                                pre_hook_results = await _fire(
+                                    HOOK_EVENT_PRE_TOOL_USE,
+                                    tool_name=validated_tool,
+                                    tool_input=_parsed_input,
+                                )
+                            except Exception as hook_exc:
+                                await client.reject_tool(event.request_id)
+                                slot.append(
+                                    "tool",
+                                    f"🚫 {event.title} (hook error)",
+                                    "msg msg-tool",
+                                )
+                                sel().log_tool_invocation(
+                                    session_key=session_key,
+                                    agent=slot.agent or "kiroclaw",
+                                    source="dashboard",
+                                    tool_name=event.title,
+                                    tool_kind=event.tool_kind,
+                                    outcome="hook_error",
+                                    request_id=event.request_id,
+                                    error=str(hook_exc),
+                                )
+                                continue
+                            if _pre_tool_hooks_should_block(pre_hook_results):
+                                await client.reject_tool(event.request_id)
+                                slot.append(
+                                    "tool",
+                                    f"🚫 {event.title} (hook blocked)",
+                                    "msg msg-tool",
+                                )
+                                sel().log_tool_invocation(
+                                    session_key=session_key,
+                                    agent=slot.agent or "kiroclaw",
+                                    source="dashboard",
+                                    tool_name=event.title,
+                                    tool_kind=event.tool_kind,
+                                    outcome="hook_blocked",
+                                    request_id=event.request_id,
+                                )
+                                continue
                             await client.approve_tool(event.request_id)
                             _tool_title = _broadcast_auto_tool(state, slot, event)
                             state.broadcast_ws(
@@ -1826,7 +1916,7 @@ async def _run_chat(
                             error=str(hook_exc),
                         )
                         continue
-                    if any(r.startswith("BLOCKED:") for r in pre_hook_results):
+                    if _pre_tool_hooks_should_block(pre_hook_results):
                         await client.reject_tool(event.request_id)
                         slot.append("tool", f"🚫 {event.title} (hook blocked)", "msg msg-tool")
                         sel().log_tool_invocation(
@@ -1996,7 +2086,7 @@ async def _run_chat(
                                 error=str(hook_exc),
                             )
                             continue
-                        if any(r.startswith("BLOCKED:") for r in pre_hook_results):
+                        if _pre_tool_hooks_should_block(pre_hook_results):
                             await client.reject_tool(event.request_id)
                             slot.append("tool", f"🚫 {event.title} (hook blocked)", "msg msg-tool")
                             sel().log_tool_invocation(
@@ -2141,7 +2231,7 @@ async def _run_chat(
                             metadata={"reason": "interactive"},
                         )
                         break
-                    if any(r.startswith("BLOCKED:") for r in pre_hook_results):
+                    if _pre_tool_hooks_should_block(pre_hook_results):
                         await client.reject_tool(event.request_id)
                         slot.append("tool", f"🚫 {event.title} (hook blocked)", "msg msg-tool")
                         sel().log_tool_invocation(
@@ -2173,17 +2263,42 @@ async def _run_chat(
                         )
                 else:
                     await client.reject_tool(event.request_id)
-                    slot.append("tool", f"🚫 {event.title} (rejected)", "msg msg-tool")
+                    # Explain WHY when the command tripped the read-only safety
+                    # gate, so the pill reads "Cancelled due to unsafe shell
+                    # pattern …" instead of the bare adapter default.
+                    # unsafe_bash_reason() embeds fragments of the LLM-supplied
+                    # command (base name / pipe target), so redact it — and the
+                    # title — before it reaches the dashboard or SEL metadata.
+                    _safety_reason = unsafe_bash_reason(cmd) if cmd else ""
+                    if _safety_reason:
+                        _safety_reason, _ = redact_exfiltration_urls(_safety_reason)
+                        _safety_reason, _ = redact_credentials(_safety_reason)
+                    _safe_reject_title, _ = redact_exfiltration_urls(event.title)
+                    _safe_reject_title, _ = redact_credentials(_safe_reject_title)
+                    _reject_label = (
+                        f"🚫 {_safe_reject_title} (cancelled — {_safety_reason})"
+                        if _safety_reason
+                        else f"🚫 {_safe_reject_title} (rejected)"
+                    )
+                    slot.append("tool", _reject_label, "msg msg-tool")
                     sel().log_tool_invocation(
                         session_key=session_key,
                         agent=slot.agent or "kiroclaw",
                         source="dashboard",
-                        tool_name=event.title,
+                        tool_name=_safe_reject_title,
                         tool_kind=event.tool_kind,
                         outcome="rejected",
                         request_id=event.request_id,
-                        metadata={"reason": "interactive"},
+                        metadata={"reason": _safety_reason or "interactive"},
                     )
+                    # Recoverable safety-gate refusal: record for auto-recovery.
+                    # _safe_reject_title/_safety_reason are ALREADY redacted just
+                    # above (redact_exfiltration_urls + redact_credentials) for the
+                    # pill and SEL metadata; reuse those sanitized values so the
+                    # model-bound recovery prompt never sees raw denied commands or
+                    # paths.
+                    if _safety_reason:
+                        _refusal_reasons.append((_safe_reject_title, _safety_reason))
 
                 if outcome != "approved":
                     # mark batch_rejected as true and continue loop instead of breaking
@@ -2199,10 +2314,12 @@ async def _run_chat(
                 logger.debug("Main loop: compaction event text=%r", event.text)
                 if _broadcast_compaction_result(state, slot, event):
                     saw_compaction = True
+                    _produced_visible_output = True
                     assistant_text = ""
             elif event.kind == EVENT_CLEAR_STATUS:
                 slot.messages.clear()
                 assistant_text = ""
+                _produced_visible_output = True
                 slot.append("assistant", "🗑️ Conversation cleared.", "msg msg-a")
                 state.broadcast_ws("slot_clear", {"slot": slot.key})
                 state.broadcast_ws(
@@ -2215,6 +2332,7 @@ async def _run_chat(
                 if new_agent:
                     slot.agent = new_agent
                     assistant_text = ""
+                    _produced_visible_output = True
                     slot.append(
                         "assistant",
                         f"🔄 Switched to agent: {new_agent}",
@@ -2322,6 +2440,7 @@ async def _run_chat(
             # (claude-agent-acp doesn't stream that, but the cleanup is harmless).
             slot.messages = [m for m in slot.messages if m.get("role") != "chunk"]
             assistant_text = ""
+            _produced_visible_output = True
             state.broadcast_ws("chat_done", {"slot": slot.key})
 
             # claude-agent-acp performs /compact synchronously inside session/prompt;
@@ -2423,31 +2542,59 @@ async def _run_chat(
                         _extract_and_redact_plan_metadata(assistant_text)
                     )
             _flush_segment(state, slot, assistant_text, broadcast=False)
-        elif _stop_reason != STOP_REASON_CANCELLED:
-            # Model returned an empty response — notify the user so they know
-            # the turn completed silently rather than appearing hung.
-            logger.warning("Empty model response for slot %s", slot.key)
-            _empty_msg = "⟳ Empty response — please retry."
-            slot.append("error", _empty_msg, "msg msg-err")
-            state.broadcast_ws(
-                "chat_message",
-                {"slot": slot.key, "role": "error", "content": _empty_msg},
-            )
-        # Attach accumulated file changes to last assistant message before persist
-        _flush_file_changes(slot)
-        # Save to history and trigger memory consolidation
-        _save_slot_to_history(state, slot)
-        slot._prompt_busy_retries = 0
-        slot._acp_pipe_death_retries = 0
+        elif (
+            _stop_reason != STOP_REASON_CANCELLED
+            and not _produced_visible_output
+            and not _refusal_reasons
+        ):
+            # Model returned an empty response — retry once, then notify user.
+            # Precedence: a turn that ended on a recoverable tool refusal also has
+            # empty assistant_text when the model went straight to the blocked
+            # tool with no preamble. That is NOT a blind-retry case — re-running
+            # the same message just re-hits the same gate. The `not _refusal_reasons`
+            # guard lets it fall through to the refusal-recovery path below, which
+            # hands the model the reason so it can adapt instead of looping.
+            logger.warning("Empty model response for slot %s (attempt %d)", slot.key, slot._empty_response_retries + 1)
+            if _prompt_depth == 0 and slot._empty_response_retries < 1:
+                # Seamless self-heal: silently re-queue on the first empty
+                # response. An ephemeral status indicator is not used here — it
+                # is emitted at turn-teardown and the frontend drops it once the
+                # streaming turn ends (so it never surfaces). Only the second
+                # consecutive empty surfaces a persisted error card below.
+                slot._empty_response_retries += 1
+                slot.queue_insert(0, message)
+                _retrying_empty = True
+            else:
+                # Single emit (see AcpProcessDied note): slot.append persists +
+                # broadcasts one chat_message via _on_message; no explicit broadcast_ws.
+                _empty_msg = "⟳ Empty response — please retry."
+                slot.append("error", _empty_msg, "msg msg-err")
+        # On an empty-response re-queue the turn produced nothing and will
+        # immediately re-run; skip persistence / consolidation / success-recording
+        # so we don't save a spurious empty turn or skew reliability metrics.
+        if not _retrying_empty:
+            # Attach accumulated file changes to last assistant message before persist
+            _flush_file_changes(slot)
+            # Save to history and trigger memory consolidation
+            _save_slot_to_history(state, slot)
+            # Reset ALL retry budgets once the cycle completes (success OR the
+            # terminal second-empty error) so each new user turn gets fresh budgets.
+            # Guarded by _retrying_empty so the empty re-queue iteration preserves
+            # every counter: an empty re-queue is NOT a successful turn, so it must
+            # not reset the pipe-death/busy budgets (otherwise an empty interleaved
+            # between transient failures would extend the intended 3-retry budget).
+            slot._empty_response_retries = 0
+            slot._prompt_busy_retries = 0
+            slot._acp_pipe_death_retries = 0
 
         if _stop_reason == STOP_REASON_CANCELLED:
             logger.info("Turn cancelled by user for slot %s", slot.key)
-        else:
+        elif not _retrying_empty:
             _maybe_consolidate(state, slot)
         state.sessions.check_context_usage(session_key, client)
         pct = client.context_usage_pct()
         state.broadcast_ws("context_usage", _context_usage_payload(slot.key, client))
-        if _stop_reason != STOP_REASON_CANCELLED:
+        if _stop_reason != STOP_REASON_CANCELLED and not _retrying_empty:
             state.sessions.record_success(session_key)
         # Broadcast prompt stats for activity viewer
         _prompt_stats = getattr(  # type: ignore[assignment]
@@ -2477,6 +2624,20 @@ async def _run_chat(
                 _autonudge.notify_turn_complete(slot.key)
         except Exception:
             logger.debug("autonudge.notify_turn_complete failed", exc_info=True)
+
+        # ── Tool-refusal recovery ──────────────────────────────────────────
+        # A recoverable refusal (host-gate policy deny or the read-only bash
+        # gate) ended this turn early via kiro-cli's tool-interrupted marker.
+        # Hand the reason back to the model as a continuation so it can adapt —
+        # an allowed alternative, a different tool, or a reasoned stop — instead
+        # of stalling for the user. Skipped on a user stop or when a session
+        # reset is already re-queuing. No turn cap by design: the model decides
+        # when to stop, and the user's Stop button stays the hard breaker. The
+        # finally block's dequeue loop picks this up and dispatches it.
+        if _refusal_reasons and not slot._stopping and not needs_session_reset:
+            _recovery_body = build_refusal_recovery_prompt(_refusal_reasons)
+            if _recovery_body:
+                slot.queue_insert(0, f"{REFUSAL_RECOVERY_PREFIX}\n{_recovery_body}")
 
         # ── Bidirectional sync: mirror response to linked Slack thread ──
         if assistant_text and state.slack_client and _mirror_thread and _mirror_chan:
@@ -2524,15 +2685,23 @@ async def _run_chat(
             )
         slot._acp_pipe_death_retries += 1
         if _prompt_depth == 0 and slot._acp_pipe_death_retries <= 3:
+            # Persisted card: reliably visible at turn-teardown (an ephemeral
+            # chat_status is dropped by the frontend once the streaming turn ends).
+            # slot.append already emits ONE chat_message (via _on_message /
+            # _broadcast_chat_message in ws_mode) AND persists the card — do NOT
+            # also broadcast_ws("chat_message") or the UI renders a duplicate card
+            # until the post-turn history refresh reconciles it.
+            _retry_msg = "⟳ Connection lost — retrying…"
+            slot.append("error", _retry_msg, "msg msg-err")
             slot.queue_insert(0, message)
-            slot.append("error", "⟳ Connection lost — retrying...", "msg msg-err")
         elif slot._acp_pipe_death_retries > 3:
             slot.append("error", "Session stuck — please start a new chat.", "msg msg-err")
         else:
             slot.append("error", "⟳ Connection lost — please retry.", "msg msg-err")
     except PromptBusyExhaustedError:
-        # Provider was killed after prompt-busy retries exhausted — reset + re-queue.
-        logger.info("Prompt busy exhausted in slot %s — resetting session and re-queuing", slot.key)
+        # Provider was killed after prompt-busy retries exhausted — reset (and
+        # re-queue only when retry-eligible; see per-branch handling below).
+        logger.info("Prompt busy exhausted in slot %s — resetting session", slot.key)
         needs_session_reset = True  # checked in finally block
         if assistant_text:
             slot.messages = [m for m in slot.messages if m.get("role") != "chunk"]
@@ -2543,9 +2712,18 @@ async def _run_chat(
             )
         slot._prompt_busy_retries += 1
         if _prompt_depth == 0 and slot._prompt_busy_retries <= 3:
+            # Single emit: slot.append persists + broadcasts one chat_message
+            # via _on_message (see the AcpProcessDied note above); no explicit
+            # broadcast_ws or the UI shows a duplicate card.
+            _retry_msg = "⟳ Session busy — retrying…"
+            slot.append("error", _retry_msg, "msg msg-err")
             slot.queue_insert(0, message)
         elif slot._prompt_busy_retries > 3:
             slot.append("error", "Session stuck — please start a new chat.", "msg msg-err")
+        else:
+            # depth>0 with budget remaining: no re-queue (mirrors AcpProcessDied),
+            # but still surface feedback so the nested turn doesn't fail silently.
+            slot.append("error", "⟳ Session busy — please retry.", "msg msg-err")
     except AcpError as exc:
         logger.warning("ACP error in slot %s: %s", slot.key, exc)
         _msg = str(exc)
@@ -2558,23 +2736,60 @@ async def _run_chat(
         _retry_eligible = (
             "already in progress" in _msg or "process exited" in _msg or "not running" in _msg
         )
-        if _retry_eligible and _prompt_depth == 0:
+        if _retry_eligible:
             logger.info(
-                "ACP transient (%s) in slot %s — resetting session and re-queuing",
-                _msg[:80],
-                slot.key,
+                "ACP transient (%s) in slot %s — resetting session",
+                _msg[:80], slot.key,
             )
+            # The ACP subprocess is dead (pipe death) or busy — always reset the
+            # session and count the failure, regardless of depth (mirrors the
+            # AcpProcessDied / PromptBusyExhaustedError handlers). Only the
+            # re-queue is depth-0-gated. Previously this whole block was gated on
+            # `_prompt_depth == 0`, so a depth>0 pipe-death fell through to the
+            # generic else: no reset (next turn hit the dead process) and the
+            # failure never counted toward the exhaustion threshold.
             needs_session_reset = True  # checked in finally block
             if assistant_text:
                 _safe, _ = redact_exfiltration_urls(assistant_text)
                 _safe, _ = redact_credentials(_safe)
                 slot.messages = [m for m in slot.messages if m.get("role") != "chunk"]
                 slot.append("assistant", _safe, "msg msg-a")
-            slot._prompt_busy_retries += 1
-            if slot._prompt_busy_retries <= 3:
+            # Option Y: pipe-death ("process exited"/"not running") shares the
+            # _acp_pipe_death_retries counter with the AcpProcessDied handler;
+            # genuine "already in progress" busy uses _prompt_busy_retries.
+            _is_pipe_death = "process exited" in _msg or "not running" in _msg
+            if _is_pipe_death:
+                slot._acp_pipe_death_retries += 1
+                _exhausted = slot._acp_pipe_death_retries > 3
+                _status = "⟳ Connection lost — retrying…"
+            else:
+                slot._prompt_busy_retries += 1
+                _exhausted = slot._prompt_busy_retries > 3
+                _status = "⟳ Session busy — retrying…"
+            if _exhausted:
+                logger.info("Retry budget exhausted for slot %s — surfacing 'Session stuck'", slot.key)
+                slot.append("error", "Session stuck — please start a new chat.", "msg msg-err")
+            elif _prompt_depth == 0:
+                # Single emit (see AcpProcessDied note): slot.append persists +
+                # broadcasts one chat_message via _on_message; no explicit broadcast_ws.
+                logger.info(
+                    "Re-queuing slot %s after transient (pipe_death=%s, attempt %d)",
+                    slot.key, _is_pipe_death,
+                    slot._acp_pipe_death_retries if _is_pipe_death else slot._prompt_busy_retries,
+                )
+                slot.append("error", _status, "msg msg-err")
                 slot.queue_insert(0, message)
             else:
-                slot.append("error", "Session stuck — please start a new chat.", "msg msg-err")
+                # depth>0 with budget remaining: session already reset + failure
+                # counted above; do NOT re-queue (mirrors AcpProcessDied /
+                # PromptBusyExhaustedError) — surface feedback so the nested turn
+                # doesn't fail silently against the now-dead process.
+                _retry_msg = (
+                    "⟳ Connection lost — please retry."
+                    if _is_pipe_death
+                    else "⟳ Session busy — please retry."
+                )
+                slot.append("error", _retry_msg, "msg msg-err")
         else:
             if assistant_text:
                 _safe, _ = redact_exfiltration_urls(assistant_text)
@@ -2656,14 +2871,23 @@ async def _run_chat(
             next_msg, _ = redact_credentials(next_msg)
             is_cron = next_msg.startswith(CRON_NOTIFY_PREFIX)
             is_subagent = next_msg.startswith(SUBAGENT_COMPLETION_PREFIX)
+            is_recovery = next_msg.startswith(REFUSAL_RECOVERY_PREFIX)
             _m = CRON_NOTIFY_RE.match(next_msg) if is_cron else None
             cron_label = _m.group(1) if _m else "cron"
             cron_label, _ = redact_exfiltration_urls(cron_label)
             cron_label, _ = redact_credentials(cron_label)
             slot.append(
-                "subagent" if is_subagent else "inject" if is_cron else "user",
+                "subagent"
+                if is_subagent
+                else "inject"
+                if (is_cron or is_recovery)
+                else "user",
                 next_msg,
-                json.dumps({"cronLabel": cron_label}) if is_cron else "msg msg-u",
+                json.dumps({"cronLabel": cron_label})
+                if is_cron
+                else "msg msg-inject"
+                if is_recovery
+                else "msg msg-u",
             )
 
             task = asyncio.create_task(

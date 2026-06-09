@@ -960,6 +960,56 @@ class TestSplitMessage:
     def test_empty_string_returns_single_part(self):
         assert split_message("") == [""]
 
+    def _split_with_timeout(self, text, limit, seconds=5.0):
+        """Run split_message in a daemon thread; return (parts, timed_out).
+
+        Guards against the historical infinite loop: when ``limit`` was <= the
+        length of the continuation marker, ``chunk_limit`` went <= 0, ``cut``
+        became 0, the remainder never shrank, and the loop ran forever. We use a
+        bounded join instead of relying on the global pytest timeout so the
+        failure is a clear assertion rather than a 120s hang.
+        """
+        import threading
+
+        box = {}
+
+        def run():
+            box["parts"] = split_message(text, limit)
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(timeout=seconds)
+        return box.get("parts"), t.is_alive()
+
+    def test_limit_equal_to_continuation_len_terminates(self):
+        # limit == len(CONTINUATION) drove chunk_limit to 0 -> infinite loop.
+        parts, timed_out = self._split_with_timeout("hello world " * 5, len(CONTINUATION))
+        assert not timed_out, "split_message did not terminate when limit == len(CONTINUATION)"
+        assert parts is not None
+
+    def test_tiny_and_zero_limits_terminate(self):
+        for limit in (0, 1, 5, len(CONTINUATION) - 1, len(CONTINUATION) + 1):
+            parts, timed_out = self._split_with_timeout("the quick brown fox " * 4, limit)
+            assert not timed_out, f"split_message hung for limit={limit}"
+            assert parts is not None
+
+    def test_small_limit_preserves_all_content(self):
+        # Even with a tiny limit the function must not silently drop characters.
+        text = "alpha beta gamma delta epsilon"
+        parts, timed_out = self._split_with_timeout(text, 5)
+        assert not timed_out
+        rejoined = "".join(
+            p[: -len(CONTINUATION)] if p.endswith(CONTINUATION) else p for p in parts
+        )
+        # Non-whitespace content is preserved in order (newlines/markers aside).
+        assert "".join(text.split()) == "".join(rejoined.split())
+
+    def test_normal_limits_still_terminate_quickly(self):
+        # Guard: the fix must not regress the common path.
+        parts, timed_out = self._split_with_timeout("x " * 5000, SLACK_MSG_LIMIT)
+        assert not timed_out
+        assert len(parts) >= 2
+
     def test_no_continuation_when_remainder_is_only_newlines(self):
         # Remainder after cut is only newlines — should not get CONTINUATION marker
         chunk_limit = SLACK_MSG_LIMIT - len(CONTINUATION)

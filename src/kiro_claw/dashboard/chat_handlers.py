@@ -25,6 +25,7 @@ from kiro_claw.config.loader import (
     default_project_dir,
     resolve_agent_bindings,
 )
+from kiro_claw.constants import CHAT_TURN_TIMEOUT
 from kiro_claw.dashboard.chat_orchestrator import _stage_loop
 from kiro_claw.dashboard.chat_persistence import (
     _attach_variants,
@@ -110,7 +111,7 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     user_meta = body.get("meta")  # knowledge/files/pastes metadata from frontend
     if not isinstance(user_meta, dict):
         user_meta = None
-    if not isinstance(color_theme, str) or color_theme not in {"", "lumon"}:
+    if not isinstance(color_theme, str) or color_theme not in {"", "lumon", "lcars"}:
         color_theme = ""
     if not isinstance(agent, str) or not (agent == "" or _AGENT_NAME_RE.match(agent)):
         _emit_agent_assignment(str(slot_name or ""), str(agent), outcome="denied_invalid")
@@ -285,7 +286,9 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     # so we don't discard the new turn's output.
     slot.drain()
 
-    task = asyncio.create_task(_run_chat(state, slot, message))
+    task = asyncio.create_task(
+        asyncio.wait_for(_run_chat(state, slot, message), timeout=CHAT_TURN_TIMEOUT)
+    )
     slot.task = task
     slot._recovery_retrigger_count = 0
     state._background_tasks.add(task)
