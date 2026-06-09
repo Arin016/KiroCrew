@@ -26,6 +26,7 @@ import re
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -789,7 +790,9 @@ def _resolve_agent_name(name: str, project_dir: str | None = None) -> str | None
         None,
     )
     if not match:
-        return None
+        # Fallback: search Claude Code cc-plugins agents
+        cc_match = _resolve_cc_agent_name(name)
+        return cc_match
     safe = validate_file_path(str(match))
     if not safe:
         return None
@@ -797,6 +800,82 @@ def _resolve_agent_name(name: str, project_dir: str | None = None) -> str | None
         return json.loads(Path(safe).read_text(encoding="utf-8")).get("name", match.stem)
     except (json.JSONDecodeError, OSError):
         return match.stem
+
+
+# Frontmatter ``name:`` matcher for cc-plugins agent specs. Pre-compiled at
+# module level rather than per-iteration inside the agent-file walk below.
+_CC_AGENT_NAME_RE = re.compile(r'^name:\s*["\']?([^"\'\n]+)', re.MULTILINE)
+
+
+def _iter_cc_agent_names(cc_plugins_dir: Path | None = None) -> Iterator[str]:
+    """Yield the ``name:`` from each ``~/.aim/cc-plugins/*/agents/*.md`` agent.
+
+    Single source of truth for walking the cc-plugins agent set: reads each
+    Markdown file, parses its YAML ``---`` frontmatter, and yields the declared
+    agent name (quotes/whitespace stripped). Files that are unreadable, lack
+    frontmatter, or omit ``name:`` are skipped. Iterated in sorted path order
+    for deterministic output.
+    """
+    cc_dir = cc_plugins_dir or (Path.home() / ".aim" / "cc-plugins")
+    if not cc_dir.is_dir():
+        return
+    for md_file in sorted(cc_dir.glob("*/agents/*.md")):
+        try:
+            raw = safe_read_file_bytes(str(md_file))
+            if raw is None:
+                continue
+            content = raw.decode("utf-8")
+            if not content.startswith("---"):
+                continue
+            frontmatter = content[3:content.index("---", 3)]
+            name_match = _CC_AGENT_NAME_RE.search(frontmatter)
+            if not name_match:
+                continue
+            agent_name = name_match.group(1).strip().strip("\"'")
+            if agent_name:
+                yield agent_name
+        except Exception:
+            continue
+
+
+def _resolve_cc_agent_name(name: str, cc_plugins_dir: Path | None = None) -> str | None:
+    """Return *name* if a cc-plugins agent declares it, else None."""
+    for agent_name in _iter_cc_agent_names(cc_plugins_dir):
+        if agent_name == name:
+            return agent_name
+    return None
+
+
+def _list_all_agent_names(cc_plugins_dir: Path | None = None) -> str:
+    """Return a comma-separated list of all available agent names.
+
+    Merges ``~/.kiro/agents/*.json`` (by stem) with the cc-plugins agents from
+    :func:`_iter_cc_agent_names`. The internal ``kiroclaw-lite`` variant is
+    hidden. Returns ``"(none found)"`` when empty.
+
+    Note: this listing is unioned across both agent sources, but *activation*
+    is not. cc-plugins (Claude Code) agents only actually load when
+    ``agent.provider=claude_code``; under the kiro-cli provider a ``!ta`` to a
+    cc-plugins name resolves and is recorded, but the next kiro session looks
+    for ``~/.kiro/agents/<name>.json`` and falls back if it is absent. Switch
+    the provider to ``claude_code`` to run cc-plugins agents.
+    """
+    names: list[str] = []
+    agents_dir = Path.home() / ".kiro" / "agents"
+    if agents_dir.is_dir():
+        # Hide the internal kiroclaw-lite variant from BOTH sources — a
+        # ~/.kiro/agents/kiroclaw-lite.json would otherwise leak into the list.
+        names.extend(
+            f.stem
+            for f in sorted(agents_dir.glob("*.json"))
+            if f.stem != "kiroclaw-lite"
+        )
+    seen = set(names)
+    for agent_name in _iter_cc_agent_names(cc_plugins_dir):
+        if agent_name not in seen and agent_name != "kiroclaw-lite":
+            names.append(agent_name)
+            seen.add(agent_name)
+    return ", ".join(names) if names else "(none found)"
 
 
 def _set_default_agent(name: str) -> None:
@@ -1322,9 +1401,7 @@ async def _handle_slash_command(
             return ""
         resolved = _resolve_agent_name(agent_name, _thread_projects.get(session_key))
         if not resolved:
-            agents_dir = Path.home() / ".kiro" / "agents"
-            jsons = sorted(agents_dir.glob("*.json")) if agents_dir.is_dir() else []
-            names = ", ".join(sorted(f.stem for f in jsons)) if jsons else "(none found)"
+            names = _list_all_agent_names()
             await slack.post_message(
                 channel, f"❌ Unknown agent `{agent_name}`. Available: {names}", reply_ts
             )
@@ -1489,9 +1566,7 @@ async def _handle_slash_command(
             return ""
         resolved = _resolve_agent_name(agent_name, _thread_projects.get(session_key))
         if not resolved:
-            agents_dir = Path.home() / ".kiro" / "agents"
-            jsons = sorted(agents_dir.glob("*.json")) if agents_dir.is_dir() else []
-            names = ", ".join(sorted(f.stem for f in jsons)) if jsons else "(none found)"
+            names = _list_all_agent_names()
             await slack.post_message(
                 channel, f"❌ Unknown agent `{agent_name}`. Available: {names}", reply_ts
             )
@@ -1660,9 +1735,7 @@ async def _handle_slash_command(
             else:
                 resolved = _resolve_agent_name(agent_name, _thread_projects.get(session_key))
                 if not resolved:
-                    agents_dir = Path.home() / ".kiro" / "agents"
-                    jsons = sorted(agents_dir.glob("*.json")) if agents_dir.is_dir() else []
-                    names = ", ".join(sorted(f.stem for f in jsons)) if jsons else "(none found)"
+                    names = _list_all_agent_names()
                     await slack.post_message(
                         channel,
                         f"Unknown agent `{agent_name}`. Available: {names}",
