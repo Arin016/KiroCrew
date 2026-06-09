@@ -7001,7 +7001,7 @@ class TestStopTurnSlotState:
 
         captured_states: list[str] = []
 
-        async def fake_stop_turn(key, *, force=False, on_soft=None, on_hard=None):
+        async def fake_stop_turn(key, *, force=False, preserve_queue=False, on_soft=None, on_hard=None):
             captured_states.append(slot._stop_state)
             if on_soft:
                 await on_soft()
@@ -7025,7 +7025,7 @@ class TestStopTurnSlotState:
         slot = state.get_or_create_slot("s1")
         slot.task = asyncio.ensure_future(asyncio.sleep(999))
 
-        async def fake_stop_turn(key, *, force=False, on_soft=None, on_hard=None):
+        async def fake_stop_turn(key, *, force=False, preserve_queue=False, on_soft=None, on_hard=None):
             if on_hard:
                 await on_hard()
             return "hard"
@@ -7050,7 +7050,7 @@ class TestStopTurnSlotState:
 
         force_called = []
 
-        async def fake_stop_turn(key, *, force=False, on_soft=None, on_hard=None):
+        async def fake_stop_turn(key, *, force=False, preserve_queue=False, on_soft=None, on_hard=None):
             force_called.append(force)
             if on_hard:
                 await on_hard()
@@ -7081,7 +7081,7 @@ class TestStopTurnSlotState:
 
         force_called = []
 
-        async def fake_stop_turn(key, *, force=False, on_soft=None, on_hard=None):
+        async def fake_stop_turn(key, *, force=False, preserve_queue=False, on_soft=None, on_hard=None):
             force_called.append(force)
             if on_hard:
                 await on_hard()
@@ -7101,20 +7101,87 @@ class TestStopTurnSlotState:
         slot.task.cancel()
 
     @pytest.mark.asyncio
-    async def test_stop_turn_first_press_clears_queue(self, tmp_path, monkeypatch):
-        """Queue populated; POST stop; queue empty (via stop_turn side effect)."""
+    async def test_stop_turn_first_press_preserves_queue(self, tmp_path, monkeypatch):
+        """Queue populated; POST stop; queue preserved for dequeue loop."""
         state = self._make_state(tmp_path, monkeypatch)
         slot = state.get_or_create_slot("s1")
         slot.task = asyncio.ensure_future(asyncio.sleep(999))
         slot._queue.extend(["msg1", "msg2"])
 
-        # stop_turn clears queue internally; verify slot._queue is cleared
-        # by the time stop_turn is called (api_chat_slot_stop sets state
-        # before calling stop_turn, and stop_turn calls clear_queue)
-        async def fake_stop_turn(key, *, force=False, on_soft=None, on_hard=None):
+        async def fake_stop_turn(key, *, force=False, preserve_queue=False, on_soft=None, on_hard=None):
+            assert preserve_queue is True
             if on_soft:
                 await on_soft()
             return "soft"
+
+        state.sessions.stop_turn = fake_stop_turn
+
+        app = _make_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/chat/slots/s1/stop")
+            assert resp.status == 200
+        assert len(slot._queue) == 2
+        slot.task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_double_press_force_kill_clears_queue(self, tmp_path, monkeypatch):
+        """Double-press (force kill) clears slot._queue so no dequeue fires."""
+        state = self._make_state(tmp_path, monkeypatch)
+        slot = state.get_or_create_slot("s1")
+        slot.task = asyncio.ensure_future(asyncio.sleep(999))
+        slot._stop_state = "soft_pending"
+        slot._queue.extend(["msg1", "msg2", "msg3"])
+
+        async def fake_stop_turn(key, *, force=False, preserve_queue=False, on_soft=None, on_hard=None):
+            if on_hard:
+                await on_hard()
+            return "hard"
+
+        state.sessions.stop_turn = fake_stop_turn
+
+        app = _make_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/chat/slots/s1/stop")
+            assert resp.status == 200
+        assert len(slot._queue) == 0
+        slot.task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_single_press_empty_queue_goes_idle(self, tmp_path, monkeypatch):
+        """Single press with no queued messages goes idle without error."""
+        state = self._make_state(tmp_path, monkeypatch)
+        slot = state.get_or_create_slot("s1")
+        slot.task = asyncio.ensure_future(asyncio.sleep(999))
+        assert len(slot._queue) == 0
+
+        async def fake_stop_turn(key, *, force=False, preserve_queue=False, on_soft=None, on_hard=None):
+            assert preserve_queue is True
+            if on_soft:
+                await on_soft()
+            return "soft"
+
+        state.sessions.stop_turn = fake_stop_turn
+
+        app = _make_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/chat/slots/s1/stop")
+            assert resp.status == 200
+        assert len(slot._queue) == 0
+        slot.task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_double_press_empty_queue_no_crash(self, tmp_path, monkeypatch):
+        """Double press with empty queue clears without error."""
+        state = self._make_state(tmp_path, monkeypatch)
+        slot = state.get_or_create_slot("s1")
+        slot.task = asyncio.ensure_future(asyncio.sleep(999))
+        slot._stop_state = "soft_pending"
+        assert len(slot._queue) == 0
+
+        async def fake_stop_turn(key, *, force=False, preserve_queue=False, on_soft=None, on_hard=None):
+            if on_hard:
+                await on_hard()
+            return "hard"
 
         state.sessions.stop_turn = fake_stop_turn
 
@@ -7143,7 +7210,7 @@ class TestStopTurnSlotState:
         slot = state.get_or_create_slot("s1")
         slot.task = asyncio.ensure_future(asyncio.sleep(999))
 
-        async def fake_stop_turn(key, *, force=False, on_soft=None, on_hard=None):
+        async def fake_stop_turn(key, *, force=False, preserve_queue=False, on_soft=None, on_hard=None):
             if on_soft:
                 await on_soft()
             return "soft"
@@ -7181,7 +7248,7 @@ class TestStopTurnSlotState:
         slot = state.get_or_create_slot("s1")
         slot.task = asyncio.ensure_future(asyncio.sleep(999))
 
-        async def fake_stop_turn(key, *, force=False, on_soft=None, on_hard=None):
+        async def fake_stop_turn(key, *, force=False, preserve_queue=False, on_soft=None, on_hard=None):
             # Verify the stop_event was inserted before callbacks
             stop_msgs = [m for m in slot.messages if _is_stop_event(m)]
             assert len(stop_msgs) == 1

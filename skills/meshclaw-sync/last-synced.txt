@@ -2,5 +2,5 @@
 # Updated at the END of every sync run (Step 7). The meshclaw-sync skill bounds
 # the candidate set by these SHAs — see skills/meshclaw-sync/SKILL.md Step 1.
 # Format: "<branch> <sha>  # <date> <note>"
-beta ba820cbe      # 2026-06-09 batch-3 ported (ef63016c..ba820cbe: 9 commits incl LCARS, refusal-recovery, empty-retry)
+beta f51e6275      # 2026-06-09 batch-4 ported (ba820cbe..f51e6275: 1 commit, stop-button queue preservation)
 mainline 49633d05  # 2026-06-09 no mainline-only delta past this

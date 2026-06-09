@@ -556,6 +556,7 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
     # "already soft_pending" signal, so a second press always means "kill it".
     if slot._stop_state == "soft_pending":
         slot._stop_state = "killing"
+        slot._queue.clear()
         state.push_slots_update()
         logger.info("Stop (force): hard-killing session for slot %s", name)
 
@@ -590,7 +591,9 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
 
     # First press: soft stop
     slot._stop_state = "soft_pending"
-    slot._queue.clear()
+    # NOTE: Do NOT clear the queue here — stop should only cancel the
+    # currently running turn, leaving queued messages intact for the user
+    # to process or dismiss individually.
     _was_auto = slot._auto_run
     slot._auto_run = False
     if _was_auto:
@@ -648,7 +651,7 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
         state.push_slots_update()
 
     outcome = await state.sessions.stop_turn(
-        _history_key_for(name), force=False, on_soft=_on_soft, on_hard=_on_hard
+        _history_key_for(name), force=False, preserve_queue=True, on_soft=_on_soft, on_hard=_on_hard
     )
     sel().log_tool_invocation(
         session_key=_history_key_for(name),
