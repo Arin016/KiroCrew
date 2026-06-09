@@ -42,6 +42,8 @@ from kiro_claw.acp.types import (
     EVENT_MCP_SERVER_INIT_FAILURE,
     EVENT_MCP_SERVER_INITIALIZED,
     EVENT_PERMISSION_REQUEST,
+    EVENT_SUBAGENT_ACTIVITY,
+    EVENT_SUBAGENT_LIST,
     EVENT_TEXT_CHUNK,
     EVENT_THINKING_CHUNK,
     EVENT_TOOL_CALL,
@@ -54,6 +56,7 @@ from kiro_claw.acp.types import (
     METHOD_COMMANDS_EXECUTE,
     METHOD_COMPACTION_STATUS,
     METHOD_INITIALIZE,
+    METHOD_KIRO_SESSION_UPDATE,
     METHOD_MCP_OAUTH_REQUEST,
     METHOD_MCP_SERVER_INIT_FAILURE,
     METHOD_MCP_SERVER_INITIALIZED,
@@ -65,6 +68,7 @@ from kiro_claw.acp.types import (
     METHOD_SESSION_UPDATE,
     METHOD_SET_MODE,
     METHOD_SET_MODEL,
+    METHOD_SUBAGENT_LIST_UPDATE,
     OPTION_ALLOW_ALWAYS,
     OPTION_ALLOW_ONCE,
     OUTCOME_CANCELLED,
@@ -1959,6 +1963,12 @@ class AcpClient:
         if msg.is_method(METHOD_MCP_SERVER_INIT_FAILURE):
             return "mcp_server_init_failure"
 
+        if msg.is_method(METHOD_SUBAGENT_LIST_UPDATE):
+            return "subagent_list"
+
+        if msg.is_method(METHOD_KIRO_SESSION_UPDATE):
+            return "subagent_activity"
+
         # Unknown server→client REQUEST (has both method AND id). Per JSON-RPC
         # the agent blocks until it gets a response, so it must be answered
         # (with -32601 by the dispatch sites) rather than silently skipped —
@@ -2241,6 +2251,41 @@ class AcpClient:
                 yield AcpEvent(kind=EVENT_COMPACTION_STATUS, text=status_type, title=summary)
             elif action == "clear":
                 yield AcpEvent(kind=EVENT_CLEAR_STATUS)
+            elif action == "subagent_list":
+                params = msg.params or {}
+                _subs = params.get("subagents")
+                logger.debug(
+                    "ACP subagent_list received: %s entries",
+                    len(_subs) if isinstance(_subs, list) else "n/a",
+                )
+                if isinstance(_subs, list):
+                    yield AcpEvent(kind=EVENT_SUBAGENT_LIST, subagents=_subs)
+            elif action == "subagent_activity":
+                # _kiro.dev/session/update: a sub-agent session's own update,
+                # tagged with its sessionId. Carries either:
+                # - tool_call_chunk (inner tool starting) with toolCallId/title
+                # - agent_message_chunk with text (sub-agent's streamed output)
+                params = msg.params or {}
+                _ssid = str(params.get("sessionId") or "")
+                _upd_raw = params.get("update")
+                _upd = _upd_raw if isinstance(_upd_raw, dict) else {}
+                _su_kind = str(_upd.get("sessionUpdate") or "")
+                _tcid = str(_upd.get("toolCallId") or "")
+                _su_text = str(_upd.get("text") or "")
+                if _ssid and _tcid:
+                    yield AcpEvent(
+                        kind=EVENT_SUBAGENT_ACTIVITY,
+                        sub_session_id=_ssid,
+                        tool_call_id=_tcid,
+                        title=str(_upd.get("title") or ""),
+                    )
+                elif _ssid and _su_text and _su_kind == "agent_message_chunk":
+                    # Sub-agent's streamed text output — the real content.
+                    yield AcpEvent(
+                        kind=EVENT_SUBAGENT_ACTIVITY,
+                        sub_session_id=_ssid,
+                        text=_su_text,
+                    )
             elif action == "agent_switched":
                 saw_agent_switch = True
                 params = msg.params or {}
@@ -2821,7 +2866,10 @@ class AcpClient:
                         output_parts.append(str(text)[:4000])
 
         # Path 2: `rawOutput` (arrives with status=completed) — fallback when
-        # there were no content blocks (e.g. some tools only emit rawOutput)
+        # there were no content blocks (e.g. some tools only emit rawOutput).
+        # kiro-cli tool results land here in two shapes:
+        #   items[].Text  — fs_read contents, shell-style text, etc.
+        #   items[].Json  — structured tool output (use .stdout when present)
         if not output_parts:
             raw_output = update.get("rawOutput")
             if isinstance(raw_output, dict):
@@ -2829,6 +2877,9 @@ class AcpClient:
                 if isinstance(items, list):
                     for item in items:
                         if not isinstance(item, dict):
+                            continue
+                        if "Text" in item and item.get("Text"):
+                            output_parts.append(str(item["Text"])[:4000])
                             continue
                         j = item.get("Json")
                         if isinstance(j, dict):
@@ -2847,6 +2898,7 @@ class AcpClient:
             kind=EVENT_TOOL_RESULT,
             tool_call_id=tool_use_id,
             tool_output=final_output,
+            tool_final=update.get("status") == "completed",
         )
 
     def _extract_tool_call_refinement(self, msg: JsonRpcMessage) -> AcpEvent | None:

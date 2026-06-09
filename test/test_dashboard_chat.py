@@ -1847,6 +1847,110 @@ class TestRunChatSegmentFlush:
             assert seq_values[i] > seq_values[i - 1], f"seq not monotonic: {seq_values}"
 
 
+class TestRunChatNativeSubagentAttribution:
+    """End-to-end: native (use_subagent) sub-agent tool calls + results are
+    attributed to per-sub-agent Activity cards, deduped, and the accumulated
+    feed is sent as the card's done ``result``."""
+
+    @staticmethod
+    def _make_mock_client(events):
+        client = AsyncMock()
+        client.context_usage_pct = MagicMock(return_value=10.0)
+
+        async def _stream(msg):
+            for ev in events:
+                yield ev
+
+        client.stream = _stream
+        client.stream_command = _stream
+        return client
+
+    @staticmethod
+    def _make_state_for_run_chat(tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.broadcast_ws = MagicMock()
+        state.push_slots_update = MagicMock()
+        state.context_builder = None
+        state.consolidator = None
+        state._hook_store = None
+        state._yolo = False
+        return state
+
+    @pytest.mark.asyncio
+    async def test_native_tool_calls_attribute_dedupe_and_accumulate(self, tmp_path, monkeypatch):
+        from kiro_claw.providers.base import (
+            EVENT_COMPLETE,
+            EVENT_SUBAGENT_ACTIVITY,
+            EVENT_SUBAGENT_LIST,
+            EVENT_TOOL_CALL,
+            EVENT_TOOL_RESULT,
+            LLMEvent,
+        )
+
+        def _sub(status):
+            return {
+                "sessionId": "sess-1",
+                "sessionName": "explorer",
+                "role": "gpu-multiagent-explorer",
+                "agentName": "gpu-multiagent-explorer",
+                "initialQuery": "explore acp",
+                "status": {"type": status, "message": ""},
+            }
+
+        events = [
+            # 1) crew list → spawn one card
+            LLMEvent(kind=EVENT_SUBAGENT_LIST, subagents=[_sub("working")]),
+            # 2) private-channel activity maps the inner toolCallId → this card
+            LLMEvent(kind=EVENT_SUBAGENT_ACTIVITY, sub_session_id="sess-1", tool_call_id="tc-1", title="read"),
+            # 3) flat tool_call (full title) → attributed to the card
+            LLMEvent(kind=EVENT_TOOL_CALL, title="Reading foo.py:1", tool_kind="read", tool_call_id="tc-1"),
+            # 4) flat tool_result (real output) → attributed + accumulated
+            LLMEvent(kind=EVENT_TOOL_RESULT, tool_call_id="tc-1", tool_output="file body XYZ", tool_final=True),
+            # 5) duplicate tool_result (kiro sends content + rawOutput) → deduped
+            LLMEvent(kind=EVENT_TOOL_RESULT, tool_call_id="tc-1", tool_output="file body XYZ", tool_final=True),
+            # 5b) sub-agent text streamed on the private channel (agent_message_chunk)
+            LLMEvent(kind=EVENT_SUBAGENT_ACTIVITY, sub_session_id="sess-1", text="thinking out loud"),
+            # 6) crew list terminal → done with accumulated feed
+            LLMEvent(kind=EVENT_SUBAGENT_LIST, subagents=[_sub("terminated")]),
+            LLMEvent(kind=EVENT_COMPLETE),
+        ]
+
+        state = self._make_state_for_run_chat(tmp_path, monkeypatch)
+        slot = state.get_or_create_slot("s1")
+        client = self._make_mock_client(events)
+        state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
+
+        from kiro_claw.dashboard.chat import _run_chat
+
+        await _run_chat(state, slot, "explore the codebase with 1 subagent")
+
+        calls = [(c.args[0], c.args[1]) for c in state.broadcast_ws.call_args_list]
+        card = "native:sess-1"
+
+        # Card spawned with agent + task.
+        spawns = [d for t, d in calls if t == "subagent_spawn" and d.get("id") == card]
+        assert len(spawns) == 1
+        assert spawns[0]["agent"] == "gpu-multiagent-explorer"
+        assert spawns[0]["task"] == "explore acp"
+
+        # Tool call + output streamed onto the card.
+        chunks = [d.get("text", "") for t, d in calls if t == "subagent_chunk" and d.get("id") == card]
+        joined = "".join(chunks)
+        assert "Reading foo.py:1" in joined  # full tool title from flat tool_call
+        assert "file body XYZ" in joined     # real tool output
+        assert "thinking out loud" in joined  # sub-agent text (agent_message_chunk)
+
+        # Dedupe: the duplicate tool_result must NOT double-print the output.
+        assert joined.count("file body XYZ") == 1
+
+        # Done fires once with the accumulated feed as result (not the sentinel).
+        dones = [d for t, d in calls if t == "subagent_done" and d.get("id") == card]
+        assert len(dones) == 1
+        assert "Reading foo.py:1" in dones[0]["result"]
+        assert "file body XYZ" in dones[0]["result"]
+
+
 class TestRunChatCompactDeferredWait:
     """The deferred-compaction wait at the end of _run_chat is a kiro-cli-only
     protocol step. claude-agent-acp performs /compact synchronously inside

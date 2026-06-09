@@ -1,0 +1,378 @@
+"""Tests for spawn_sub_agents MCP tool handler."""
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+from kiro_claw.mcp_core import _call_tool
+
+
+class TestSpawnSubAgents:
+    def test_spawns_agents_and_collects_results(self):
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "sess1"}):
+            mock_post.return_value = {"id": "a1"}
+            mock_get.return_value = {"done": True, "agent": "worker", "result": "ok"}
+
+            result = _call_tool("spawn_sub_agents", {
+                "agents": [{"agent_or_mode": "worker", "prompt": "do task"}],
+            })
+
+            assert '"completed"' in result
+            assert '"worker"' in result
+
+    def test_returns_error_for_empty_agents(self):
+        with patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            result = _call_tool("spawn_sub_agents", {"agents": []})
+            assert "Error" in result
+
+    def test_rejects_non_dict_entries_via_schema(self):
+        with patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            result = _call_tool("spawn_sub_agents", {
+                "agents": ["invalid", {"prompt": "real task"}],
+            })
+
+            assert "expected dict" in result
+
+    def test_skips_empty_prompt(self):
+        with patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            result = _call_tool("spawn_sub_agents", {
+                "agents": [{"prompt": ""}],
+            })
+            assert "no valid agent entries" in result
+
+    def test_reports_spawn_errors(self):
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {"error": "capacity reached"}
+
+            result = _call_tool("spawn_sub_agents", {
+                "agents": [{"prompt": "task1"}],
+            })
+
+            assert "Error spawning" in result
+            assert "capacity" in result
+
+    def test_mixed_success_and_spawn_error(self):
+        # One agent spawns OK, another fails to spawn: results must include the
+        # completed agent AND a spawn_errors entry.
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.side_effect = [{"id": "a1"}, {"error": "capacity reached"}]
+            mock_get.return_value = {"done": True, "agent": "w", "result": "ok"}
+
+            result = _call_tool("spawn_sub_agents", {
+                "agents": [{"prompt": "ok task"}, {"prompt": "doomed task"}],
+            })
+
+            assert '"completed"' in result
+            assert '"spawn_errors"' in result
+            assert "capacity reached" in result
+
+    def test_reports_spawn_with_no_agent_id(self):
+        # /api/spawn returns neither error nor id — must not append an empty
+        # id (which would poll /api/spawn/), but record an error instead.
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {}  # no "error", no "id"
+
+            result = _call_tool("spawn_sub_agents", {
+                "agents": [{"prompt": "task1"}],
+            })
+
+            assert "Error spawning" in result
+            assert "no agent id" in result
+            # The poll endpoint must never be hit with an empty id.
+            assert mock_get.call_count == 0
+
+    def test_reports_timed_out_agents(self):
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.time") as mock_time, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {"id": "a1"}
+            mock_get.return_value = {"done": False, "agent": "slow"}
+            # Deadline now uses time.monotonic(): calls are
+            # (1) deadline init, (2) _next_ping init, (3) loop guard.
+            # Make the loop-guard value exceed the deadline to time out at once.
+            mock_time.monotonic.side_effect = [0, 0, 999999]
+            mock_time.sleep = lambda _: None
+
+            result = _call_tool("spawn_sub_agents", {
+                "agents": [{"prompt": "long task"}],
+            })
+
+            assert '"timed_out"' in result
+
+    def test_pings_session_keepalive_during_long_poll(self):
+        """Finding 1: the poll loop must ping /api/session-keepalive so the
+        gateway does not SIGTERM the ACP subprocess mid-poll."""
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.time") as mock_time, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {"id": "a1"}
+            mock_get.return_value = {"done": True, "agent": "w", "result": "ok"}
+            # monotonic calls: deadline init(0), next_ping init(0), loop guard(10),
+            # keepalive check(70 >= 60 -> ping), next_ping reset(70).
+            mock_time.monotonic.side_effect = [0, 0, 10, 70, 70]
+            mock_time.sleep = lambda _: None
+
+            _call_tool("spawn_sub_agents", {"agents": [{"prompt": "slow task"}]})
+
+            assert any(
+                call.args and call.args[0] == "/api/session-keepalive"
+                for call in mock_post.call_args_list
+            ), "expected a /api/session-keepalive ping during the poll loop"
+
+    def test_errored_agent_settles_loop_without_spinning(self):
+        """Finding 1: an agent that reports error (never done) must settle the
+        poll loop instead of spinning until max_wait."""
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {"id": "a1"}
+            # done is False but error is set — must be treated as settled.
+            mock_get.return_value = {"done": False, "error": "crashed", "agent": "bad"}
+
+            result = _call_tool("spawn_sub_agents", {"agents": [{"prompt": "task"}]})
+
+            assert '"error"' in result
+            assert "crashed" in result
+
+    def test_max_wait_configurable_via_env(self):
+        """Finding 1: max_wait is configurable and clamped."""
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.time") as mock_time, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s",
+                                       "KIROCLAW_SPAWN_SUB_AGENTS_MAX_WAIT": "120"}):
+            mock_post.return_value = {"id": "a1"}
+            mock_get.return_value = {"done": False, "agent": "slow"}
+            # deadline = 0 + 120 = 120; loop guard at 200 exceeds it -> time out.
+            mock_time.monotonic.side_effect = [0, 0, 200]
+            mock_time.sleep = lambda _: None
+
+            result = _call_tool("spawn_sub_agents", {"agents": [{"prompt": "t"}]})
+
+            assert '"timed_out"' in result
+
+    def test_reports_errored_agents(self):
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {"id": "a1"}
+            mock_get.return_value = {"done": True, "error": "crashed", "agent": "bad"}
+
+            result = _call_tool("spawn_sub_agents", {
+                "agents": [{"prompt": "task"}],
+            })
+
+            assert '"error"' in result
+            assert "crashed" in result
+
+    def test_redacts_agent_name_in_output(self):
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {"id": "a1"}
+            mock_get.return_value = {
+                "done": True,
+                "agent": "agent AKIAIOSFODNN7EXAMPLE here",
+                "result": "ok",
+            }
+
+            result = _call_tool("spawn_sub_agents", {
+                "agents": [{"prompt": "task"}],
+            })
+
+            assert "AKIAIOSFODNN7EXAMPLE" not in result
+
+    def test_redacts_result_text(self):
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {"id": "a1"}
+            mock_get.return_value = {
+                "done": True,
+                "agent": "w",
+                "result": "key AKIAIOSFODNN7EXAMPLE found",
+            }
+
+            result = _call_tool("spawn_sub_agents", {
+                "agents": [{"prompt": "task"}],
+            })
+
+            assert "AKIAIOSFODNN7EXAMPLE" not in result
+
+    def test_passes_cwd_to_spawn(self):
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {"id": "a1"}
+            mock_get.return_value = {"done": True, "agent": "", "result": ""}
+
+            _call_tool("spawn_sub_agents", {
+                "agents": [{"prompt": "task"}],
+                "cwd": "/workspace/project",
+            })
+
+            body = mock_post.call_args[0][1]
+            assert body["cwd"] == "/workspace/project"
+
+    def test_multiple_agents_spawned_in_parallel(self):
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.side_effect = [{"id": "a1"}, {"id": "a2"}]
+            mock_get.return_value = {"done": True, "agent": "w", "result": "done"}
+
+            result = _call_tool("spawn_sub_agents", {
+                "agents": [
+                    {"agent_or_mode": "coder", "prompt": "code it"},
+                    {"agent_or_mode": "reviewer", "prompt": "review it"},
+                ],
+            })
+
+            assert mock_post.call_count == 2
+            assert result.count('"completed"') == 2
+
+    def test_truncates_oversized_prompt(self):
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {"id": "a1"}
+            mock_get.return_value = {"done": True, "agent": "", "result": ""}
+
+            long_prompt = "x" * 10000
+            _call_tool("spawn_sub_agents", {
+                "agents": [{"prompt": long_prompt}],
+            })
+
+            body = mock_post.call_args[0][1]
+            assert len(body["task"]) <= 5000
+
+    def test_truncates_oversized_agent_or_mode(self):
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {"id": "a1"}
+            mock_get.return_value = {"done": True, "agent": "w", "result": "ok"}
+
+            _call_tool("spawn_sub_agents", {
+                "agents": [{"agent_or_mode": "x" * 5000, "prompt": "task"}],
+            })
+
+            body = mock_post.call_args[0][1]
+            assert len(body["agent"]) < 5000  # truncated to MAX_SHORT_STRING
+
+    def test_invalid_max_wait_env_falls_back(self):
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {
+                 "KIROCLAW_SESSION_KEY": "s",
+                 "KIROCLAW_SPAWN_SUB_AGENTS_MAX_WAIT": "not-a-number",
+             }):
+            mock_post.return_value = {"id": "a1"}
+            mock_get.return_value = {"done": True, "agent": "w", "result": "ok"}
+
+            result = _call_tool("spawn_sub_agents", {"agents": [{"prompt": "task"}]})
+
+            # Bad env must not raise; the agent still completes.
+            assert '"completed"' in result
+
+    def test_keepalive_ping_failure_is_swallowed(self):
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.time") as mock_time, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            # spawn returns an id; the keepalive ping raises and must be swallowed.
+            def _post_side(url, body=None):
+                if url == "/api/session-keepalive":
+                    raise RuntimeError("network down")
+                return {"id": "a1"}
+            mock_post.side_effect = _post_side
+            mock_get.return_value = {"done": True, "agent": "w", "result": "ok"}
+            # Trigger the ping branch (70 >= 60).
+            mock_time.monotonic.side_effect = [0, 0, 10, 70, 70]
+            mock_time.sleep = lambda _: None
+
+            result = _call_tool("spawn_sub_agents", {"agents": [{"prompt": "task"}]})
+
+            assert '"completed"' in result
+
+    def test_poll_waits_then_completes(self):
+        import itertools
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.time") as mock_time, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {"id": "a1"}
+            # First poll: not done -> loop sleeps and re-polls; then done.
+            states = [{"done": False, "agent": "w"}]
+
+            def _get_side(url):
+                return states.pop(0) if states else {"done": True, "agent": "w", "result": "ok"}
+            mock_get.side_effect = _get_side
+            mock_time.monotonic.side_effect = itertools.count(0, 5)
+            mock_time.sleep = lambda _: None
+
+            result = _call_tool("spawn_sub_agents", {"agents": [{"prompt": "task"}]})
+
+            assert '"completed"' in result
+            # Slept at least once because the first poll was not-done.
+            assert mock_get.call_count >= 2
+
+
+class TestSpawnList:
+    def test_spawn_list_renders_running_and_done_agents(self):
+        with patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.list_agents", return_value=[]), \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_get.return_value = {"agents": [
+                {"id": "a1", "done": False, "task": "explore",
+                 "turns": 3, "last_tool": "shell", "elapsed": 12},
+                {"id": "a2", "done": True, "task": "summarize"},
+            ]}
+
+            result = _call_tool("spawn_list", {})
+
+            assert "a1" in result and "[running]" in result
+            assert "a2" in result and "[done]" in result
+            assert "shell" in result  # progress detail rendered
+
+    def test_spawn_list_empty(self):
+        with patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.list_agents", return_value=[]), \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_get.return_value = {"agents": []}
+
+            result = _call_tool("spawn_list", {})
+
+            assert "No subagents running" in result

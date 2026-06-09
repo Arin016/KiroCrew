@@ -221,6 +221,47 @@ Parameters:
 - `max_turns` (int, optional): override tool-call budget for this spawn (default: config or 100)
 - `agent` (str, optional): agent name for the subagent
 
+### MCP Tool: `spawn_sub_agents`
+
+Exposed via `kiroclaw-core` MCP server. Unlike fire-and-forget `spawn_run`,
+`spawn_sub_agents` is **blocking**: it spawns one or more sub-agents in
+parallel, waits until all of them finish, then returns their collected
+results inline to the calling tool invocation.
+
+Each sub-agent runs as its own KiroClaw-owned ACP session (via
+`SubagentManager`), so its text and tool calls stream live to the Activity
+tab (`subagent_spawn` / `subagent_chunk` / `subagent_tool` / `subagent_done`
+WS events) while the parent blocks.
+
+Native kiro-cli `subagent`/`use_subagent` crews run inside the parent's
+kiro-cli process rather than as KiroClaw-owned sessions. KiroClaw surfaces
+those in the Activity tab too, by observing kiro-cli's sub-agent
+notifications — one card per sub-agent, with each inner tool call and its
+output attributed to the right card.
+
+```python
+spawn_sub_agents(agents=[
+    {"agent_or_mode": "gpu-multiagent-explorer", "prompt": "list python modules"},
+    {"agent_or_mode": "gpu-multiagent-explorer", "prompt": "summarize last 5 commits"},
+])
+```
+
+Parameters:
+- `agents` (list[dict], required): each item is `{prompt: str, agent_or_mode?: str}`. `prompt` is truncated to `MAX_MEDIUM_STRING`; `agent_or_mode` to `MAX_SHORT_STRING`. Entries with an empty prompt are skipped.
+- `cwd` (str, optional): absolute path to launch all sub-agents in. Must be under a configured `subagent_cwd_allowed_roots` entry (default: `~/workspace`), same validation as `spawn_run`.
+
+Blocking poll semantics:
+- Each sub-agent is spawned via `POST /api/spawn` (with `parent_session`), then the handler polls `GET /api/spawn/{id}` every 2s until every sub-agent reports `done` (or `error`).
+- An errored/crashed sub-agent is treated as settled so one bad agent cannot keep the loop spinning until the deadline.
+- The loop pings `POST /api/session-keepalive` every 60s so the gateway's `is_responsive()` does not flag the (legitimately long-blocked) session as stale and SIGTERM the ACP subprocess mid-poll — same mechanism as the `wait` tool.
+- `max_wait` defaults to 7200s (2 hours), clamped to `[60, 7200]`, and is configurable via the `KIROCLAW_SPAWN_SUB_AGENTS_MAX_WAIT` environment variable. The deadline uses `time.monotonic()`.
+- Returns a newline-separated list of per-agent JSON results (`status`: `completed` / `error` / `timed_out`), all redacted for credentials and exfiltration URLs.
+
+Difference from `spawn_run`: `spawn_run` returns immediately and delivers
+results later via completion-event injection; `spawn_sub_agents` blocks and
+returns the aggregated results directly, so the calling agent can reason over
+them in the same turn.
+
 ## Orphan Recovery & Tombstoning
 
 Folder-per-agent persistence at `~/.kiroclaw/subagents/{id}/`:

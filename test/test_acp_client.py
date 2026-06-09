@@ -1091,6 +1091,20 @@ class TestProcessMessage:
         msg = JsonRpcMessage(method=METHOD_AGENT_SWITCHED, params={"agentName": "planner"})
         assert client._process_message(msg, req_id=99) == "agent_switched"
 
+    def test_subagent_list_update_classified(self):
+        client = self._make_client()
+        from kiro_claw.acp.types import METHOD_SUBAGENT_LIST_UPDATE, JsonRpcMessage
+
+        msg = JsonRpcMessage(method=METHOD_SUBAGENT_LIST_UPDATE, params={"subagents": []})
+        assert client._process_message(msg, req_id=99) == "subagent_list"
+
+    def test_kiro_session_update_classified(self):
+        client = self._make_client()
+        from kiro_claw.acp.types import METHOD_KIRO_SESSION_UPDATE, JsonRpcMessage
+
+        msg = JsonRpcMessage(method=METHOD_KIRO_SESSION_UPDATE, params={"sessionId": "s1"})
+        assert client._process_message(msg, req_id=99) == "subagent_activity"
+
     def test_unknown_method_skipped(self):
         client = self._make_client()
         from kiro_claw.acp.types import JsonRpcMessage
@@ -4484,6 +4498,51 @@ class TestExtractToolCallUpdate:
         assert event is not None
         assert "key" in event.tool_output
 
+    def test_raw_output_text_path(self):
+        # fs_read / shell-style tools land their output in items[].Text —
+        # this is the common case for native sub-agent read/summary tools.
+        client = self._client()
+        msg = self._make_msg({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tc-text",
+            "status": "completed",
+            "rawOutput": {
+                "items": [{"Text": "file contents line 1\nline 2"}],
+            },
+        })
+        event = client._extract_tool_call_update(msg)
+        assert event is not None
+        assert event.tool_call_id == "tc-text"
+        assert "file contents line 1" in event.tool_output
+        assert event.tool_final is True
+
+    def test_raw_output_text_priority_over_json(self):
+        # When an item carries both Text and Json, Text wins (it's the
+        # human-readable rendering kiro-cli already produced).
+        client = self._client()
+        msg = self._make_msg({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tc-both",
+            "rawOutput": {
+                "items": [{"Text": "rendered text", "Json": {"stdout": "raw json"}}],
+            },
+        })
+        event = client._extract_tool_call_update(msg)
+        assert event is not None
+        assert "rendered text" in event.tool_output
+        assert "raw json" not in event.tool_output
+
+    def test_raw_output_skips_empty_text(self):
+        # Empty Text must not short-circuit to a useless empty result; an
+        # item with empty Text and no Json yields no output.
+        client = self._client()
+        msg = self._make_msg({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tc-empty",
+            "rawOutput": {"items": [{"Text": ""}]},
+        })
+        assert client._extract_tool_call_update(msg) is None
+
     def test_content_takes_priority_over_raw(self):
         client = self._client()
         msg = self._make_msg(
@@ -5456,3 +5515,57 @@ class TestResolveKiroBinEnvOverride:
             # Should not raise; returns either a real path or None.
             result = _resolve_kiro_bin()
             assert result is None or isinstance(result, str)
+
+
+class TestDispatchSubagentEvents:
+    """_dispatch_events must yield EVENT_SUBAGENT_LIST and EVENT_SUBAGENT_ACTIVITY
+    for kiro-cli's _kiro.dev/subagent/list_update and _kiro.dev/session/update
+    notifications."""
+
+    @pytest.mark.asyncio
+    async def test_dispatch_yields_subagent_list_and_activity(self):
+        from kiro_claw.acp.types import (
+            EVENT_SUBAGENT_ACTIVITY,
+            EVENT_SUBAGENT_LIST,
+            JsonRpcMessage,
+        )
+
+        client = AcpClient()
+
+        subs = [{"sessionId": "s1", "role": "explorer", "status": {"type": "working"}}]
+        frames = [
+            ("subagent_list", JsonRpcMessage(params={"subagents": subs})),
+            # tool_call_chunk → toolCallId attribution
+            ("subagent_activity", JsonRpcMessage(params={
+                "sessionId": "s1",
+                "update": {"sessionUpdate": "tool_call_chunk", "toolCallId": "tc-1", "title": "read"},
+            })),
+            # agent_message_chunk → sub-agent text
+            ("subagent_activity", JsonRpcMessage(params={
+                "sessionId": "s1",
+                "update": {"sessionUpdate": "agent_message_chunk", "text": "hello from sub"},
+            })),
+            # non-dict subagents payload must be ignored (no yield)
+            ("subagent_list", JsonRpcMessage(params={"subagents": "nope"})),
+            ("complete", JsonRpcMessage(result={"stopReason": "end_turn"})),
+        ]
+
+        async def _fake_loop(req_id, timeout):
+            for f in frames:
+                yield f
+
+        client._prompt_loop = _fake_loop  # type: ignore[assignment]
+
+        events = []
+        async for ev in client._dispatch_events(req_id=1, timeout=1.0):
+            events.append(ev)
+
+        lists = [e for e in events if e.kind == EVENT_SUBAGENT_LIST]
+        acts = [e for e in events if e.kind == EVENT_SUBAGENT_ACTIVITY]
+        assert len(lists) == 1
+        assert lists[0].subagents == subs
+        # one tool-call activity (with toolCallId) + one text activity
+        tc = [a for a in acts if a.tool_call_id == "tc-1"]
+        txt = [a for a in acts if a.text == "hello from sub"]
+        assert len(tc) == 1 and tc[0].sub_session_id == "s1" and tc[0].title == "read"
+        assert len(txt) == 1 and txt[0].sub_session_id == "s1"

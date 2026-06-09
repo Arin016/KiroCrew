@@ -46,6 +46,9 @@ ALLOWED_HOOK_EVENTS = frozenset(
 # Valid agent name pattern (alphanumeric, hyphens, underscores)
 _AGENT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}[a-zA-Z0-9]$|^[a-zA-Z0-9]$")
 
+# Valid model name pattern — alphanumerics, hyphens, dots (e.g. "claude-opus-4.8", "deepseek-3.2")
+_MODEL_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
 # Valid workspace name pattern (same rules as agent names)
 WORKSPACE_NAME_RE = _AGENT_NAME_RE
 
@@ -300,6 +303,20 @@ SPAWN_RUN_SCHEMA = ToolSchema(
         # Optional working directory for the subagent subprocess. Must be
         # absolute, exist, and be under subagent_cwd_allowed_roots. Validated
         # in SubagentManager.spawn.
+        FieldSpec("cwd", str, max_len=MAX_MEDIUM_STRING),
+        # Optional model override for the subagent (e.g. "deepseek-3.2").
+        # When set, the subagent runs on this model instead of the gateway default.
+        FieldSpec("model", str, max_len=MAX_SHORT_STRING, pattern=_MODEL_NAME_RE),
+    ],
+)
+
+SPAWN_SUB_AGENTS_SCHEMA = ToolSchema(
+    tool_name="spawn_sub_agents",
+    fields=[
+        # Each item is a dict with prompt (required, max MAX_MEDIUM_STRING) and
+        # agent_or_mode (optional, max MAX_SHORT_STRING). Per-field validation
+        # enforced in handler (no item_schema support in FieldSpec).
+        FieldSpec("agents", list, required=True, item_type=dict),
         FieldSpec("cwd", str, max_len=MAX_MEDIUM_STRING),
     ],
 )
@@ -638,6 +655,7 @@ LOCAL_KNOWLEDGE_SEARCH_SCHEMA = ToolSchema(
 
 MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
     "spawn_run": SPAWN_RUN_SCHEMA,
+    "spawn_sub_agents": SPAWN_SUB_AGENTS_SCHEMA,
     "spawn_list": SPAWN_LIST_SCHEMA,
     "spawn_status": SPAWN_STATUS_SCHEMA,
     "learn_add": LEARN_ADD_SCHEMA,

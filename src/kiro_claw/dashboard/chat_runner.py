@@ -91,6 +91,8 @@ from kiro_claw.providers.acp import is_claude_backend
 from kiro_claw.providers.base import (
     EVENT_COMPLETE,
     EVENT_PERMISSION_REQUEST,
+    EVENT_SUBAGENT_ACTIVITY,
+    EVENT_SUBAGENT_LIST,
     EVENT_TEXT_CHUNK,
     EVENT_THINKING_CHUNK,
     EVENT_TOOL_CALL,
@@ -583,6 +585,116 @@ def _mask_quoted_separators(text: str) -> tuple[str, dict[str, str]]:
     return "".join(out), restore
 
 
+# Native kiro-cli subagents (``use_subagent``) are surfaced in the Activity tab
+# via the ``_kiro.dev/subagent/list_update`` notification (one card per
+# sub-agent), handled by ``_native_subagent_sync`` below. We no longer parse the
+# ``subagent`` tool call's ``stages`` — the list_update gives authoritative
+# per-sub-agent identity/status that the stages payload lacked.
+
+
+def _native_subagent_sync(state, slot, subagents, tracker, card_output=None) -> None:
+    """Reconcile per-subagent Activity cards from a kiro-cli
+    ``_kiro.dev/subagent/list_update`` notification.
+
+    Native (``use_subagent``) crews run *inside* the parent kiro-cli session, so
+    their internal tool calls are not attributable per sub-agent over standard
+    ACP. But kiro-cli also emits this list (the same data its TUI shows) with one
+    entry per sub-agent carrying ``sessionId``, ``sessionName``,
+    ``role``/``agentName``, ``initialQuery`` and ``status``. We map each entry to
+    its own Activity card (``native:<sessionId>``): spawned when first seen,
+    completed when its status terminates. This yields one card per sub-agent
+    (matching the spawn_run/spawn_sub_agents card model) with no agent-prompt
+    changes.
+
+    ``tracker`` is per-turn state: ``{session_id: {started, done, agent, task}}``.
+    """
+    if not isinstance(subagents, list):
+        return
+    _running = ("working", "running", "pending", "queued", "in_progress", "")
+    for sub in subagents:
+        if not isinstance(sub, dict):
+            continue
+        sid = str(sub.get("sessionId") or "")
+        if not sid:
+            continue
+        card_id = f"native:{_redact_tool_field(sid)}"
+        _status_raw = sub.get("status")
+        status = _status_raw if isinstance(_status_raw, dict) else {}
+        stype = str(status.get("type") or "").lower()
+        smsg = str(status.get("message") or "")
+        if sid not in tracker:
+            agent, _ = redact_exfiltration_urls(
+                str(sub.get("role") or sub.get("agentName") or "")
+            )
+            agent, _ = redact_credentials(agent)
+            task, _ = redact_exfiltration_urls(
+                str(sub.get("initialQuery") or sub.get("sessionName") or "")[:2000]
+            )
+            task, _ = redact_credentials(task)
+            tracker[sid] = {"started": time.time(), "done": False, "agent": agent, "task": task}
+            logger.debug(
+                "native subagent spawn broadcast: id=%s agent=%s slot=%s",
+                card_id, agent, slot.key,
+            )
+            state.broadcast_ws(
+                "subagent_spawn",
+                {"id": card_id, "slot": slot.key, "task": task, "agent": agent},
+            )
+        info = tracker[sid]
+        if info["done"]:
+            continue
+        if stype and stype not in _running:
+            err = None
+            if stype in ("failed", "error") and smsg:
+                err, _ = redact_exfiltration_urls(smsg)
+                err, _ = redact_credentials(err)
+                err = err[:200]
+            info["done"] = True
+            _feed = "".join((card_output or {}).get(card_id, []))[:8000]
+            state.broadcast_ws(
+                "subagent_done",
+                {
+                    "id": card_id,
+                    "slot": slot.key,
+                    "elapsed": time.time() - info["started"],
+                    "error": err,
+                    "task": info["task"],
+                    "agent": info["agent"],
+                    "result": _feed or "(output in chat)",
+                },
+            )
+        elif smsg and smsg.lower() != "running":
+            # Surface a non-generic status message as the card's current tool.
+            tool, _ = redact_exfiltration_urls(smsg)
+            tool, _ = redact_credentials(tool)
+            state.broadcast_ws(
+                "subagent_tool",
+                {"id": card_id, "slot": slot.key, "tool": tool[:80]},
+            )
+
+
+def _native_subagent_close_all(state, slot, tracker, card_output=None) -> None:
+    """Complete any still-open native subagent cards (turn-end safety net)."""
+    for sid, info in tracker.items():
+        if info.get("done"):
+            continue
+        info["done"] = True
+        _cid = f"native:{_redact_tool_field(sid)}"
+        _feed = "".join((card_output or {}).get(_cid, []))[:8000]
+        state.broadcast_ws(
+            "subagent_done",
+            {
+                "id": _cid,
+                "slot": slot.key,
+                "elapsed": time.time() - info.get("started", time.time()),
+                "error": None,
+                "task": info.get("task", ""),
+                "agent": info.get("agent", ""),
+                "result": _feed or "(output in chat)",
+            },
+        )
+
+
 def _matches_trusted_pattern(tool_title: str, patterns: set[str]) -> str | None:
     """Return the matched pattern if tool_title matches any trusted pattern.
 
@@ -911,6 +1023,20 @@ async def _run_chat(
     chunk_seq = 0
     in_tool_group = False
     _pending_tools: dict[str, str] = {}  # tool_call_id -> tool_name
+    # session_id -> {started, done, agent, task} for native kiro-cli subagents,
+    # reconciled from `_kiro.dev/subagent/list_update` (one card per sub-agent).
+    _native_tracker: dict[str, dict] = {}
+    # inner tool_call_id -> native card id, from `_kiro.dev/session/update`, so a
+    # sub-agent's tool calls stream onto its own card.
+    _native_tc_card: dict[str, str] = {}
+    # tool_call_ids whose output was already streamed to a native card — kiro
+    # emits two tool_call_update frames per tool (content + rawOutput), so we
+    # dedupe to avoid printing the same output twice.
+    _native_result_seen: set[str] = set()
+    # native card id -> accumulated activity feed (tool calls + outputs). The
+    # published frontend replaces a card's live `streaming` text with `result`
+    # on done, so we persist the feed here and send it as the done `result`.
+    _native_card_output: dict[str, list[str]] = {}
     needs_session_reset = False
     saw_compaction = False
     _produced_visible_output = False
@@ -1554,6 +1680,20 @@ async def _run_chat(
                     _raw = _raw[9:]
                 if event.tool_call_id:
                     _pending_tools[event.tool_call_id] = _raw
+                # If this tool call belongs to a native sub-agent (mapped via
+                # _kiro.dev/session/update), stream it onto that sub-agent's card.
+                _nat_card = (
+                    _native_tc_card.get(event.tool_call_id) if event.tool_call_id else None
+                )
+                if _nat_card:
+                    _ntool, _ = redact_exfiltration_urls(_raw or event.title or "")
+                    _ntool, _ = redact_credentials(_ntool)
+                    _ntool = _ntool[:80]
+                    _native_card_output.setdefault(_nat_card, []).append(f"\u2192 {_ntool}\n")
+                    state.broadcast_ws(
+                        "subagent_chunk",
+                        {"id": _nat_card, "slot": slot.key, "text": f"\u2192 {_ntool}\n"},
+                    )
                 await fire_tool_hooks(state._hook_store, event.title, event.tool_input)
                 # Mirror tool call to linked Slack stream
                 if _mirror_stream_ts:
@@ -1701,6 +1841,22 @@ async def _run_chat(
                         "output": _out,
                     },
                 )
+                # If this tool result belongs to a native sub-agent, stream its
+                # real output onto that sub-agent's card so the OUTPUT section
+                # shows actual results (git log, file contents, summaries) —
+                # not just tool names. Mirrors spawn_sub_agents' subagent_chunk.
+                _nat_card_r = (
+                    _native_tc_card.get(event.tool_call_id) if event.tool_call_id else None
+                )
+                if _nat_card_r and event.tool_output and event.tool_call_id not in _native_result_seen:
+                    _native_result_seen.add(event.tool_call_id)
+                    _nout, _ = redact_exfiltration_urls(event.tool_output)
+                    _nout, _ = redact_credentials(_nout)
+                    _native_card_output.setdefault(_nat_card_r, []).append(f"{_nout[:4000]}\n")
+                    state.broadcast_ws(
+                        "subagent_chunk",
+                        {"id": _nat_card_r, "slot": slot.key, "text": f"{_nout[:4000]}\n"},
+                    )
                 # Mark the matching tool message as done so completion state
                 # survives page reload (persisted in message meta, replayed via SSE).
                 # Also persist the redacted output here so the inline detail panel
@@ -2358,7 +2514,41 @@ async def _run_chat(
                 _mark_mcp_oauth_completed(
                     state, slot, event.server_name, success=False, error=event.text or ""
                 )
+            elif event.kind == EVENT_SUBAGENT_LIST:
+                # kiro-cli per-subagent state (native use_subagent crews).
+                # Reconcile one Activity card per sub-agent (spawn/done).
+                logger.debug(
+                    "EVENT_SUBAGENT_LIST: %s subagents, slot=%s",
+                    len(event.subagents or []), slot.key,
+                )
+                _native_subagent_sync(state, slot, event.subagents, _native_tracker, _native_card_output)
+            elif event.kind == EVENT_SUBAGENT_ACTIVITY:
+                # kiro-cli's _kiro.dev/session/update tags a sub-agent's inner
+                # tool call with its sessionId. This ALWAYS arrives before the
+                # corresponding flat tool_call/tool_call_update, so building the
+                # toolCallId->card map here lets those flat events (which carry
+                # the full tool title AND the real output) attribute to the
+                # right sub-agent card.
+                _sid = event.sub_session_id
+                if _sid in _native_tracker and event.tool_call_id:
+                    _native_tc_card[event.tool_call_id] = (
+                        f"native:{_redact_tool_field(_sid)}"
+                    )
+                # Some kiro-cli builds also stream the sub-agent's own text via
+                # agent_message_chunk on this channel — surface it on the card.
+                if _sid in _native_tracker and event.text:
+                    _card_id = f"native:{_redact_tool_field(_sid)}"
+                    _txt, _ = redact_exfiltration_urls(event.text)
+                    _txt, _ = redact_credentials(_txt)
+                    state.broadcast_ws(
+                        "subagent_chunk",
+                        {"id": _card_id, "slot": slot.key, "text": _txt},
+                    )
             elif event.kind == EVENT_COMPLETE:
+                # Safety net: complete any native subagent cards still marked
+                # running at turn end (in case a terminal status was missed),
+                # so cards don't stay stuck "running".
+                _native_subagent_close_all(state, slot, _native_tracker, _native_card_output)
                 if event.input_tokens or event.output_tokens:
                     stats = Stats()
                     stats.inc_input_tokens(event.input_tokens)

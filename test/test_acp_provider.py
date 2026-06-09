@@ -70,6 +70,34 @@ class TestStreamCommandRouting:
         assert events[0].text == "ok"
 
 
+class TestToLlmEventFieldPropagation:
+    """The provider reconstructs each AcpEvent via _to_llm_event; new fields
+    used by the Activity tab (tool_final, subagents, sub_session_id) must be
+    carried through or downstream consumers see defaults."""
+
+    @pytest.mark.asyncio
+    async def test_stream_propagates_tool_final_and_subagent_fields(self):
+        provider = _build_provider(backend=ACP_BACKEND_CLAUDE)
+        src = AcpEvent(
+            kind="tool_result",
+            tool_call_id="tc-1",
+            tool_output="done",
+            tool_final=True,
+            sub_session_id="sess-1",
+            subagents=[{"sessionId": "sess-1"}],
+        )
+        provider._client.stream_events = MagicMock(return_value=_async_iter([src]))
+
+        events = await _drain(provider.stream("hi"))
+
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.tool_final is True
+        assert ev.tool_output == "done"
+        assert ev.sub_session_id == "sess-1"
+        assert ev.subagents == [{"sessionId": "sess-1"}]
+
+
 class TestCompactRouting:
     @pytest.mark.asyncio
     async def test_kiro_backend_uses_send_command(self):

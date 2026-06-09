@@ -68,6 +68,7 @@ async def api_spawn(request: web.Request) -> web.Response:
                 "agent": body.get("agent", ""),
                 "max_turns": body.get("max_turns", 0),
                 "cwd": body.get("cwd", ""),
+                "model": body.get("model", ""),
             },
             SPAWN_RUN_SCHEMA,
         )
@@ -95,12 +96,14 @@ async def api_spawn(request: web.Request) -> web.Response:
     agent = cleaned.get("agent") or ""
     max_turns = cleaned.get("max_turns") or 0
     cwd = cleaned.get("cwd") or ""
+    model = cleaned.get("model") or ""
     info = state.subagents.spawn(
         task,
         parent_session_key=parent_session,
         agent=agent,
         max_turns=max_turns,
         cwd=cwd,
+        model=model or None,
         approval_mode=approval_mode or None,
         silent=silent,
     )

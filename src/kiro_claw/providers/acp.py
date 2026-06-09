@@ -450,9 +450,12 @@ class AcpProvider(LLMProvider):
             options=e.options,
             tool_input=e.tool_input,
             tool_output=e.tool_output,
+            tool_final=e.tool_final,
             raw_tool_params=e.raw_tool_params,
             server_name=e.server_name,
             oauth_url=e.oauth_url,
+            subagents=e.subagents,
+            sub_session_id=e.sub_session_id,
         )
 
     async def stream(self, message: str) -> AsyncIterator[LLMEvent]:

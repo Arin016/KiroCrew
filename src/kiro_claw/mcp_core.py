@@ -65,9 +65,12 @@ from kiro_claw.validation import (
     AUTONUDGE_STOP_SCHEMA,
     CHANNEL_ID_RE,
     LOCAL_KNOWLEDGE_SEARCH_SCHEMA,
+    MAX_MEDIUM_STRING,
+    MAX_SHORT_STRING,
     MCP_CORE_SCHEMAS,
     REGISTER_HOOK_SCHEMA,
     SPAWN_RUN_SCHEMA,
+    SPAWN_SUB_AGENTS_SCHEMA,
     TASK_RUN_SCHEMA,
     WAIT_SCHEMA,
     validate_tool_args,
@@ -193,6 +196,15 @@ def _list_tools() -> list[dict[str, Any]]:
                             "(default: [~/workspace, ~/workplace]). Applies to all tasks in a batch spawn."
                         ),
                     },
+                    "model": {
+                        "type": "string",
+                        "description": (
+                            "Optional model override for the subagent (e.g. 'deepseek-3.2', "
+                            "'claude-haiku-4.5'). When set, the subagent runs on this model "
+                            "instead of the gateway default. To discover available models, "
+                            "run: kiro-cli chat --list-models --format json"
+                        ),
+                    },
                 },
             },
         },
@@ -216,6 +228,47 @@ def _list_tools() -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["agent_id"],
+            },
+        },
+        {
+            "name": "spawn_sub_agents",
+            "description": (
+                "Spawn one or more sub-agents to run tasks in parallel. Each sub-agent "
+                "gets its own session with full tool access. BLOCKS until all sub-agents "
+                "complete, then returns their collected results. Use for delegating "
+                "independent subtasks to specialist agents. Preferred over spawn_run when "
+                "you need results before continuing."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agents": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "agent_or_mode": {
+                                    "type": "string",
+                                    "description": "Agent name for the sub-agent",
+                                },
+                                "prompt": {
+                                    "type": "string",
+                                    "description": "Task/prompt for the sub-agent",
+                                },
+                            },
+                            "required": ["prompt"],
+                        },
+                        "description": "Array of sub-agents to spawn in parallel",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": (
+                            "Optional absolute path to launch sub-agents in. "
+                            "Must be under a configured subagent_cwd_allowed_roots entry."
+                        ),
+                    },
+                },
+                "required": ["agents"],
             },
         },
         {
@@ -1065,6 +1118,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         agents_list = args.get("agents") or []
         max_turns = args.get("max_turns") or 0
         cwd = args.get("cwd") or ""
+        model = args.get("model") or ""
         if agents_list and len(agents_list) != len(task_list):
             return f"Error: agents length ({len(agents_list)}) must match tasks length ({len(task_list)})"
 
@@ -1078,6 +1132,8 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
                 body["max_turns"] = max_turns
             if cwd:
                 body["cwd"] = cwd
+            if model:
+                body["model"] = model
             d = _post("/api/spawn", body)
             if d.get("error"):
                 errors.append(f"{t[:60]}: {d['error']}")
@@ -1104,6 +1160,146 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         else:
             spawn_lines.append("All tasks queued — results will arrive as completion events.")
         return "\n".join(spawn_lines)
+
+    if name == "spawn_sub_agents":
+        args = validate_tool_args(args, SPAWN_SUB_AGENTS_SCHEMA)
+        agents_input = args.get("agents")
+        if not agents_input or not isinstance(agents_input, list):
+            return "Error: 'agents' array is required"
+        cwd = args.get("cwd") or ""
+        parent_session = _resolve_session_key()
+
+        def _redact_sa(text: str) -> str:
+            text, _ = redact_exfiltration_urls(text)
+            text, _ = redact_credentials(text)
+            return text
+
+        # Validate individual agent entries (schema guarantees dict entries)
+        for entry in agents_input:
+            p = entry.get("prompt", "")
+            if len(p) > MAX_MEDIUM_STRING:
+                entry["prompt"] = p[:MAX_MEDIUM_STRING]
+            a = entry.get("agent_or_mode", "")
+            if len(a) > MAX_SHORT_STRING:
+                entry["agent_or_mode"] = a[:MAX_SHORT_STRING]
+
+        sel().log_tool_invocation(
+            session_key=parent_session or "",
+            source="mcp_core",
+            tool_name="spawn_sub_agents",
+            outcome="attempt",
+            metadata={"agent_count": len(agents_input)},
+        )
+
+        sa_ids: list[str] = []
+        sa_errors: list[str] = []
+        for entry in agents_input:
+            prompt = entry.get("prompt", "").strip()
+            if not prompt:
+                continue
+            sa_agent = entry.get("agent_or_mode") or ""
+            sa_body = {
+                "task": prompt,
+                "agent": sa_agent,
+                "parent_session": parent_session,
+            }
+            if cwd:
+                sa_body["cwd"] = cwd
+            d = _post("/api/spawn", sa_body)
+            if d.get("error"):
+                sa_errors.append(f"{_redact_sa(prompt[:60])}: {_redact_sa(d['error'])}")
+            else:
+                aid = d.get("id", "")
+                if aid:
+                    sa_ids.append(aid)
+                else:
+                    sa_errors.append(
+                        f"{_redact_sa(prompt[:60])}: spawn returned no agent id"
+                    )
+
+        if not sa_ids and sa_errors:
+            return "Error spawning sub-agents:\n" + "\n".join(f"  - {e}" for e in sa_errors)
+        if not sa_ids:
+            return "Error: no valid agent entries found in 'agents' array"
+
+        # Poll until all sub-agents complete. Ping /api/session-keepalive every
+        # 60s so the gateway's is_responsive() does not flag this session as
+        # stale and SIGTERM the ACP subprocess mid-poll, which would abort the
+        # very sub-agents we are waiting on.
+        poll_interval = 2.0
+        try:
+            max_wait = float(os.environ.get("KIROCLAW_SPAWN_SUB_AGENTS_MAX_WAIT", "7200"))
+        except (TypeError, ValueError):
+            max_wait = 7200.0
+        max_wait = max(60.0, min(7200.0, max_wait))  # clamp: 1 min .. 2 hours
+        deadline = time.monotonic() + max_wait
+        _next_ping = time.monotonic() + 60.0  # first keepalive after 60s, not immediately
+        while time.monotonic() < deadline:
+            if time.monotonic() >= _next_ping:
+                try:
+                    _post("/api/session-keepalive", {})
+                except Exception:
+                    pass  # keepalive is best-effort
+                _next_ping = time.monotonic() + 60.0
+            all_done = True
+            for aid in sa_ids:
+                sa_st = _get(f"/api/spawn/{aid}")
+                # An errored/crashed agent is "settled" — without this, an agent
+                # that never sets done=True would spin the loop until max_wait.
+                if not (sa_st.get("done") or sa_st.get("error")):
+                    all_done = False
+                    break
+            if all_done:
+                break
+            time.sleep(poll_interval)
+
+        # Collect results
+        sa_results: list[str] = []
+        completed = 0
+        timed_out = 0
+        errored = 0
+        for aid in sa_ids:
+            sa_st = _get(f"/api/spawn/{aid}")
+            sa_name = _redact_sa(sa_st.get("agent", ""))
+            label = sa_name if sa_name else aid
+            if sa_st.get("error"):
+                errored += 1
+                sa_results.append(
+                    json.dumps({
+                        "agent": label, "status": "error",
+                        "error": _redact_sa(sa_st["error"]),
+                    })
+                )
+            elif not sa_st.get("done"):
+                timed_out += 1
+                sa_results.append(
+                    json.dumps({"agent": label, "status": "timed_out"})
+                )
+            else:
+                completed += 1
+                result_text = _redact_sa(sa_st.get("result", ""))
+                sa_results.append(
+                    json.dumps({
+                        "agent": label, "status": "completed", "text": result_text,
+                    })
+                )
+        if sa_errors:
+            sa_results.append(
+                json.dumps({"status": "spawn_errors", "errors": sa_errors})
+            )
+        sel().log_tool_invocation(
+            session_key=parent_session or "",
+            source="mcp_core",
+            tool_name="spawn_sub_agents",
+            outcome="completed" if not timed_out and not errored else "partial",
+            metadata={
+                "spawned": len(sa_ids),
+                "completed": completed,
+                "timed_out": timed_out,
+                "errored": errored,
+            },
+        )
+        return "\n\n".join(sa_results)
 
     if name == "spawn_list":
         d = _get("/api/spawn")

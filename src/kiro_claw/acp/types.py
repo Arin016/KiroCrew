@@ -20,6 +20,8 @@ EVENT_AGENT_SWITCHED = "agent_switched"
 EVENT_MCP_OAUTH_REQUEST = "mcp_oauth_request"
 EVENT_MCP_SERVER_INITIALIZED = "mcp_server_initialized"
 EVENT_MCP_SERVER_INIT_FAILURE = "mcp_server_init_failure"
+EVENT_SUBAGENT_LIST = "subagent_list"
+EVENT_SUBAGENT_ACTIVITY = "subagent_activity"
 
 # ── ACP Protocol Methods ──
 
@@ -40,6 +42,8 @@ METHOD_AGENT_SWITCHED = "_kiro.dev/agent/switched"
 METHOD_MCP_OAUTH_REQUEST = "_kiro.dev/mcp/oauth_request"
 METHOD_MCP_SERVER_INITIALIZED = "_kiro.dev/mcp/server_initialized"
 METHOD_MCP_SERVER_INIT_FAILURE = "_kiro.dev/mcp/server_init_failure"
+METHOD_SUBAGENT_LIST_UPDATE = "_kiro.dev/subagent/list_update"
+METHOD_KIRO_SESSION_UPDATE = "_kiro.dev/session/update"
 
 # ── ACP Backend Identifiers ──
 
@@ -152,6 +156,7 @@ class AcpEvent:
     options: list[dict[str, str]] = field(default_factory=list)
     tool_input: str = ""
     tool_output: str = ""
+    tool_final: bool = False  # True when this tool_result is the final (status=completed) update
     input_tokens: int = 0
     output_tokens: int = 0
     cache_creation_tokens: int = 0
@@ -163,6 +168,11 @@ class AcpEvent:
     # MCP OAuth notification fields (EVENT_MCP_OAUTH_REQUEST):
     server_name: str = ""
     oauth_url: str = ""
+    # Native subagent list (EVENT_SUBAGENT_LIST) — kiro-cli per-subagent state.
+    subagents: list[dict[str, Any]] | None = None
+    # Owning sub-agent session id (EVENT_SUBAGENT_ACTIVITY) — ties a tool call
+    # to a specific native sub-agent card.
+    sub_session_id: str = ""
 
 
 @dataclass
