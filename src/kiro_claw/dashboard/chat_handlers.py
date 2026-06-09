@@ -36,6 +36,7 @@ from kiro_claw.dashboard.chat_persistence import (
 )
 from kiro_claw.dashboard.chat_runner import _run_chat
 from kiro_claw.dashboard.chat_utils import (
+    _THEME_PERSONAS,
     _build_stream_chunk,
     _emit_agent_assignment,
     _history_key_for,
@@ -111,7 +112,7 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     user_meta = body.get("meta")  # knowledge/files/pastes metadata from frontend
     if not isinstance(user_meta, dict):
         user_meta = None
-    if not isinstance(color_theme, str) or color_theme not in {"", "lumon", "lcars"}:
+    if not isinstance(color_theme, str) or color_theme not in {"", *_THEME_PERSONAS}:
         color_theme = ""
     if not isinstance(agent, str) or not (agent == "" or _AGENT_NAME_RE.match(agent)):
         _emit_agent_assignment(str(slot_name or ""), str(agent), outcome="denied_invalid")

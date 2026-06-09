@@ -6911,15 +6911,15 @@ class TestLumonPersonaInjection:
     def setup_method(self):
         from kiro_claw.dashboard import chat
 
-        if hasattr(chat, "_cached_lumon_persona"):
-            chat._cached_lumon_persona.cache_clear()
+        if hasattr(chat, "_cached_persona"):
+            chat._cached_persona.cache_clear()
 
     def test_persona_appended_when_lumon(self, tmp_path):
         from kiro_claw.dashboard.chat import _maybe_inject_persona
 
         fake_persona = "Use a light Lumon-inspired persona."
         with patch(
-            "kiro_claw.dashboard.chat_utils._cached_lumon_persona", return_value=fake_persona
+            "kiro_claw.dashboard.chat_utils._cached_persona", return_value=fake_persona
         ):
             result = _maybe_inject_persona("hello", "lumon", True)
 
@@ -6942,7 +6942,7 @@ class TestLumonPersonaInjection:
         from kiro_claw.dashboard.chat import _maybe_inject_persona
 
         with patch(
-            "kiro_claw.dashboard.chat_utils._cached_lumon_persona", side_effect=ImportError("boom")
+            "kiro_claw.dashboard.chat_utils._cached_persona", side_effect=ImportError("boom")
         ):
             result = _maybe_inject_persona("hello", "lumon", True)
         assert result == "hello"
@@ -6950,9 +6950,61 @@ class TestLumonPersonaInjection:
     def test_persona_empty_cache_returns_original(self):
         from kiro_claw.dashboard.chat import _maybe_inject_persona
 
-        with patch("kiro_claw.dashboard.chat_utils._cached_lumon_persona", return_value=""):
+        with patch("kiro_claw.dashboard.chat_utils._cached_persona", return_value=""):
             result = _maybe_inject_persona("hello", "lumon", True)
         assert result == "hello"
+
+
+class TestBikiniPersonaInjection:
+    """Tests for _maybe_inject_persona helper function (bikini-bottom / Karen)."""
+
+    def setup_method(self):
+        from kiro_claw.dashboard import chat
+        if hasattr(chat, "_cached_persona"):
+            chat._cached_persona.cache_clear()
+
+    def test_persona_appended_when_bikini_bottom(self, tmp_path):
+        from kiro_claw.dashboard.chat import _maybe_inject_persona
+
+        fake_persona = "Use a Karen (from SpongeBob) persona."
+        with patch("kiro_claw.dashboard.chat_utils._cached_persona", return_value=fake_persona):
+            result = _maybe_inject_persona("hello", "bikini-bottom", True)
+
+        assert "[KAREN PERSONA]" in result
+        assert fake_persona in result
+
+    def test_persona_not_appended_without_bikini_bottom(self):
+        from kiro_claw.dashboard.chat import _maybe_inject_persona
+
+        result = _maybe_inject_persona("hello", "", True)
+        assert result == "hello"
+
+    def test_persona_not_appended_on_followup(self):
+        from kiro_claw.dashboard.chat import _maybe_inject_persona
+
+        result = _maybe_inject_persona("hello", "bikini-bottom", False)
+        assert result == "hello"
+
+    def test_persona_survives_cache_error(self):
+        from kiro_claw.dashboard.chat import _maybe_inject_persona
+
+        with patch("kiro_claw.dashboard.chat_utils._cached_persona", side_effect=ImportError("boom")):
+            result = _maybe_inject_persona("hello", "bikini-bottom", True)
+        assert result == "hello"
+
+    def test_persona_empty_cache_returns_original(self):
+        from kiro_claw.dashboard.chat import _maybe_inject_persona
+
+        with patch("kiro_claw.dashboard.chat_utils._cached_persona", return_value=""):
+            result = _maybe_inject_persona("hello", "bikini-bottom", True)
+        assert result == "hello"
+
+    def test_cached_persona_rejects_path_traversal(self):
+        from kiro_claw.dashboard import chat_utils
+
+        for bad in ("../persona.md", "..\\persona.md", "/etc/passwd", "sub/dir.md"):
+            with pytest.raises(ValueError):
+                chat_utils._cached_persona(bad)
 
 
 class TestStopReasonCancelled:

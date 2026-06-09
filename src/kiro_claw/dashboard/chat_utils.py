@@ -272,18 +272,28 @@ def _apply_incognito_prefix(slot, message: str) -> str:
     return message
 
 
+# Theme persona registry: color_theme slug -> (display tag, persona filename).
+# Adding a persona-backed theme is a single entry here plus dropping the
+# matching config/persona-<slug>.md (auto-packaged via the config/persona-*.md
+# glob in setup.cfg). No new loader function or branching required.
+_THEME_PERSONAS: dict[str, tuple[str, str]] = {
+    "lumon": ("LUMON PERSONA", "persona-lumon.md"),
+    "lcars": ("LCARS PERSONA", "persona-lcars.md"),
+    "bikini-bottom": ("KAREN PERSONA", "persona-bikini-bottom.md"),
+}
+
+
 def _maybe_inject_persona(message: str, color_theme: str, is_new: bool) -> str:
-    """Append persona to *message* on first turn when the theme has a persona."""
+    """Append a theme persona to *message* on the first turn, when the theme
+    declares one in ``_THEME_PERSONAS``."""
     if not is_new:
         return message
-    if color_theme == "lumon":
-        tag, loader = "LUMON PERSONA", _cached_lumon_persona
-    elif color_theme == "lcars":
-        tag, loader = "LCARS PERSONA", _cached_lcars_persona
-    else:
+    spec = _THEME_PERSONAS.get(color_theme)
+    if spec is None:
         return message
+    tag, filename = spec
     try:
-        text = loader()
+        text = _cached_persona(filename)
         if text:
             return message + f"\n[{tag}]\n{text}\n[END {tag}]\n\n"
         return message
@@ -292,23 +302,19 @@ def _maybe_inject_persona(message: str, color_theme: str, is_new: bool) -> str:
         return message
 
 
-@functools.lru_cache(maxsize=1)
-def _cached_lumon_persona() -> str:
-    """Load and cache the Lumon persona file."""
+@functools.lru_cache(maxsize=8)
+def _cached_persona(filename: str) -> str:
+    """Load and cache a shipped persona file by name (config/<filename>)."""
 
-    _p = _shipped_prompt().parent / "persona-lumon.md"
+    # Defense-in-depth: this helper is importable and LRU-cached, so reject any
+    # filename that could escape the config dir (path traversal / absolute path)
+    # even though current callers only pass hardcoded _THEME_PERSONAS values.
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise ValueError(f"Invalid persona filename: {filename}")
+
+    _p = _shipped_prompt().parent / filename
     if not _p.is_file():
-        _p = _BUNDLED_CFG_DIR / "persona-lumon.md"
-    return safe_read_file(str(_p))
-
-
-@functools.lru_cache(maxsize=1)
-def _cached_lcars_persona() -> str:
-    """Load and cache the LCARS persona file."""
-
-    _p = _shipped_prompt().parent / "persona-lcars.md"
-    if not _p.is_file():
-        _p = _BUNDLED_CFG_DIR / "persona-lcars.md"
+        _p = _BUNDLED_CFG_DIR / filename
     return safe_read_file(str(_p))
 
 

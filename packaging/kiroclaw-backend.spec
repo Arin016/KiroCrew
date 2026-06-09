@@ -64,6 +64,7 @@ for rel in [
     "config/prompt.md",
     "config/persona-lumon.md",
     "config/persona-lcars.md",
+    "config/persona-bikini-bottom.md",
     "config/prompt-orchestrator.md",
     "apps/app-registry.json",
 ]:
