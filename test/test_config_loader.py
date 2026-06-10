@@ -50,7 +50,7 @@ logger = logging.getLogger("kiro_claw.config.loader")
 # Fields with enum constraints and their allowed values
 _ENUM_FIELDS: list[tuple[str, str, list[str]]] = [
     ("agent", "approval_mode", ["auto", "interactive"]),
-    ("agent", "provider", ["acp", "bedrock"]),
+    ("agent", "provider", ["acp"]),
     ("agent", "sandbox", ["auto", "off"]),
     ("agent", "log_level", ["DEBUG", "INFO", "WARNING", "ERROR"]),
     ("memory", "embedding_provider", ["none", "ollama"]),
@@ -199,9 +199,7 @@ _agent_config_st = st.builds(
     approval_mode=st.sampled_from(["auto", "interactive"]),
     streaming=st.booleans(),
     model=st.text(min_size=0, max_size=20),
-    provider=st.sampled_from(["acp", "bedrock"]),
-    bedrock_model_id=st.text(min_size=1, max_size=40),
-    bedrock_region=st.sampled_from(["us-west-2", "us-east-1", "eu-west-1"]),
+    provider=st.just("acp"),
     default_agent=st.text(min_size=0, max_size=20),
     sandbox=st.sampled_from(["auto", "off"]),
     soft_stop_budget_secs=st.floats(min_value=0.5, max_value=60.0),
@@ -318,8 +316,6 @@ class TestConfigLoaderProperties:
         assert loaded.agent.streaming == config.agent.streaming
         assert loaded.agent.model == config.agent.model
         assert loaded.agent.provider == config.agent.provider
-        assert loaded.agent.bedrock_model_id == config.agent.bedrock_model_id
-        assert loaded.agent.bedrock_region == config.agent.bedrock_region
         assert loaded.agent.default_agent == config.agent.default_agent
         assert loaded.agent.sandbox == config.agent.sandbox
 
@@ -2238,17 +2234,17 @@ class TestConfigCache:
         with patch("kiro_claw.config.loader.config_path", return_value=cfg_file), patch(
             "kiro_claw.config.loader.config_local_path", return_value=local
         ):
-            self._write(cfg_file, {"agent": {"provider": "acp"}})
+            self._write(cfg_file, {"agent": {"model": "model-a"}})
             first = KiroClawConfig.load()
-            assert first.agent.provider == "acp"
-            # Rewrite with different content (provider value differs in length, so
+            assert first.agent.model == "model-a"
+            # Rewrite with different content (model value differs in length, so
             # the size component of the fingerprint changes); also force a distinct
             # mtime so the change is detected on coarse-resolution filesystems too.
-            self._write(cfg_file, {"agent": {"provider": "bedrock"}})
+            self._write(cfg_file, {"agent": {"model": "model-bbbb"}})
             st = cfg_file.stat()
             _os.utime(cfg_file, ns=(st.st_atime_ns + 1_000_000_000, st.st_mtime_ns + 1_000_000_000))
             second = KiroClawConfig.load()
-        assert second.agent.provider == "bedrock"
+        assert second.agent.model == "model-bbbb"
 
     def test_save_invalidates_cache(self, tmp_path: Path) -> None:
         """save() must drop the cache so the next load sees the written value."""

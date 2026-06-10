@@ -146,26 +146,10 @@ class TestCwdExtractionFromProvider:
     accessor returns the real path per provider type."""
 
     def test_acp_provider_cwd_returns_real_work_dir(self, tmp_path):
-        from kiro_claw.acp.types import ACP_BACKEND_CLAUDE
         from kiro_claw.providers.acp import AcpProvider
 
-        for backend in ("", ACP_BACKEND_CLAUDE):  # kiro + claude
-            with patch("kiro_claw.providers.acp.AcpClient"):
-                provider = AcpProvider(acp_backend=backend)
-            provider._client._work_dir = tmp_path
-            assert provider.cwd == str(tmp_path)
-            assert provider.cwd != ""
-
-    def test_base_provider_cwd_defaults_empty(self):
-        # Bedrock has no cwd override, so it inherits the ABC default "" —
-        # confirming the getattr(_work_dir)→provider.cwd migration leaves
-        # non-ACP providers unchanged.
-        from kiro_claw.providers.bedrock import BedrockProvider
-
-        assert BedrockProvider().cwd == ""
-
-    def test_claude_code_provider_cwd_returns_work_dir(self, tmp_path):
-        from kiro_claw.providers.claude_code import ClaudeCodeProvider
-
-        provider = ClaudeCodeProvider(work_dir=tmp_path)
+        with patch("kiro_claw.providers.acp.AcpClient"):
+            provider = AcpProvider(acp_backend="")  # kiro
+        provider._client._work_dir = tmp_path
         assert provider.cwd == str(tmp_path)
+        assert provider.cwd != ""

@@ -1355,66 +1355,6 @@ class TestKiroHooksMerge:
         assert total == _MAX_TOTAL_USER_HOOKS
 
 
-class TestCcAgentWriteIsolation:
-    """install_agent() must never write to the operator's real ~/.claude.
-
-    Regression guard for the leak where a full test run on a configured dev
-    desk clobbered ``~/.claude/agents/kiroclaw.{md,mcp.json}`` with fixture
-    content (dropping builder-mcp and every other server from the live agent
-    config). The autouse ``_isolate_cc_agent_writes`` fixture in conftest.py
-    redirects the three CC write-target globals to a tmp dir; these tests
-    assert the redirect is active and that ``install_agent`` honors it.
-    """
-
-    def test_cc_write_globals_redirected_away_from_real_home(self):
-        """The autouse fixture pins all three CC write targets outside ~/.claude."""
-        from kiro_claw import agent as agent_mod
-        from kiro_claw import cc_agent as cc_mod
-
-        real_home_claude = Path.home() / ".claude"
-        # None of the write targets may equal, or live under, the operator's
-        # real ~/.claude. Each global gets both the exact-path and the
-        # not-a-descendant check for symmetry.
-        assert agent_mod.CC_MCP_FILE != real_home_claude / "agents" / "kiroclaw.mcp.json"
-        assert real_home_claude not in agent_mod.CC_MCP_FILE.parents
-        # Exact-path check must target the real write dir (~/.claude/agents),
-        # not bare ~/.claude — the latter is vacuously true since CC_AGENTS_DIR
-        # is a child of ~/.claude and so could never equal it.
-        assert cc_mod.CC_AGENTS_DIR != real_home_claude / "agents"
-        assert real_home_claude not in cc_mod.CC_AGENTS_DIR.parents
-        assert cc_mod.CC_SETTINGS_PATH != real_home_claude / "settings.json"
-        assert real_home_claude not in cc_mod.CC_SETTINGS_PATH.parents
-
-    def test_install_agent_writes_cc_artifacts_under_tmp_not_real_home(self, tmp_path: Path):
-        """install_agent renders kiroclaw.md + kiroclaw.mcp.json to the redirected dir.
-
-        Intentionally dual-purpose: the ``is_file()`` assertions also exercise
-        the CC render path end-to-end. The production ``install_cc_agent_config``
-        call swallows its own errors, so if rendering silently no-op'd those
-        assertions would fail — making this test catch a broken render path as
-        well as proving the redirect holds.
-        """
-        from kiro_claw import agent as agent_mod
-        from kiro_claw import cc_agent as cc_mod
-
-        # Sanity: the artifacts the leak corrupted do not exist before the run.
-        real_md = Path.home() / ".claude" / "agents" / "kiroclaw.md"
-        real_mcp = Path.home() / ".claude" / "agents" / "kiroclaw.mcp.json"
-        md_before = real_md.read_text() if real_md.is_file() else None
-        mcp_before = real_mcp.read_text() if real_mcp.is_file() else None
-
-        cfg_dir = _bundled_defaults(tmp_path)
-        _run_install(tmp_path, cfg_dir)
-
-        # CC artifacts landed under the redirected (tmp) targets, not real home.
-        assert agent_mod.CC_MCP_FILE.is_file(), "kiroclaw.mcp.json should be written to the redirected target"
-        assert (cc_mod.CC_AGENTS_DIR / "kiroclaw.md").is_file(), "kiroclaw.md should be written to the redirected target"
-
-        # The operator's real ~/.claude agent files were not touched by the run.
-        assert (real_md.read_text() if real_md.is_file() else None) == md_before
-        assert (real_mcp.read_text() if real_mcp.is_file() else None) == mcp_before
-
-
 class TestKiroHooksFiltering:
     """Tests that KiroClaw-internal hook keys are stripped from kiro-cli agent config."""
 

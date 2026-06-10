@@ -16,7 +16,6 @@ from kiro_claw.acp.client import (
     AcpClient,
     AcpError,
     AcpProcessDied,
-    _claude_acp_mcp_servers,
     _format_acp_error,
     _make_unified_diff,
     _resolve_vendored_claude_acp,
@@ -319,37 +318,6 @@ class TestAcpClientBackendSelection:
                 "/usr/local/bin/node",
                 "/usr/local/lib/claude-agent-acp/index.js",
             ], "claude backend must spawn node + script explicitly"
-
-    @pytest.mark.asyncio
-    async def test_spawn_claude_backend_writes_settings_local(self, tmp_path):
-        client = AcpClient(work_dir=tmp_path, acp_backend=ACP_BACKEND_CLAUDE)
-        with patch(
-            "kiro_claw.acp.client._resolve_claude_acp_bin",
-            return_value=["/usr/local/bin/claude-agent-acp"],
-        ), patch(
-            "kiro_claw.acp.client.wrap_argv",
-            side_effect=lambda argv, mode: (argv, None),
-        ), patch(
-            "asyncio.create_subprocess_exec", new_callable=AsyncMock
-        ) as mock_exec, patch(
-            "kiro_claw.session._track_pid"
-        ), patch(
-            "kiro_claw.session._track_session_pid"
-        ):
-            mock_proc = MagicMock()
-            mock_proc.pid = 12345
-            mock_proc.returncode = None
-            mock_exec.return_value = mock_proc
-
-            await client._spawn()
-
-            settings = tmp_path / ".claude" / "settings.local.json"
-            assert settings.exists()
-            data = json.loads(settings.read_text())
-            # KiroClaw routes every tool decision through session/request_permission
-            # so the four-tier protocol (approve / trust_reads / trust / yolo)
-            # applies uniformly to claude-agent-acp and kiro-cli.
-            assert data["permissions"]["defaultMode"] == "default"
 
     @pytest.mark.asyncio
     async def test_spawn_claude_backend_missing_bin_raises(self, tmp_path):
@@ -2739,40 +2707,6 @@ class TestInitializeSession:
         assert client._resumed is False
 
     @pytest.mark.asyncio
-    async def test_cc_resume_loads_when_transcript_exists(self, tmp_path, monkeypatch):
-        """claude backend: when the CC transcript .jsonl exists, session/load
-        is attempted and resume succeeds."""
-        from kiro_claw.acp.types import ACP_BACKEND_CLAUDE
-        from kiro_claw.providers.cleanup import _cc_session_paths
-
-        # Pin the isolated CC config root into tmp_path so planting the transcript
-        # and the resume guard's .exists() resolve to the SAME hermetic dir (and
-        # we don't pollute the real ~/.kiroclaw/cc-config on the build host).
-        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cc-config"))
-
-        client = self._make_client(tmp_path, acp_backend=ACP_BACKEND_CLAUDE)
-        client._resume_session_id = "real-sess"
-        # Plant the CC transcript at the path the resume guard checks.
-        transcript = _cc_session_paths(tmp_path, "real-sess")[0]
-        transcript.parent.mkdir(parents=True, exist_ok=True)
-        transcript.write_text("{}")
-
-        responses = {
-            1: {"protocolVersion": "2025-08-22", "agentCapabilities": {"loadSession": True}},
-            2: {"modes": ["chat"]},  # load success
-        }
-
-        async def fake_wait(req_id, timeout=50.0):
-            return responses.get(req_id, {})
-
-        client._wait_for_response = AsyncMock(side_effect=fake_wait)
-        client._drain_notifications = AsyncMock()
-
-        await client._initialize_session()
-        assert client._session_id == "real-sess"
-        assert client._resumed is True
-
-    @pytest.mark.asyncio
     async def test_set_model_when_non_default(self, tmp_path):
         """Non-default model triggers set_model request."""
         client = self._make_client(tmp_path)
@@ -4819,89 +4753,6 @@ class TestExtractToolCallRefinement:
         assert event.tool_kind == "search"
 
 
-class TestClaudeAcpMcpServers:
-    """The session/new mcpServers builder for the claude-agent-acp backend."""
-
-    def test_reads_registry_and_reshapes(self, tmp_path):
-        reg = tmp_path / "kiroclaw.mcp.json"
-        reg.write_text(
-            json.dumps(
-                {
-                    "mcpServers": {
-                        "builder-mcp": {"command": "/bin/b", "args": ["--x"], "type": "stdio"},
-                        "deepwiki": {"url": "https://mcp.deepwiki.com/mcp"},
-                    }
-                }
-            )
-        )
-        with patch("kiro_claw.acp.client._CC_MCP_FILE", reg):
-            servers = _claude_acp_mcp_servers()
-        by_name = {s["name"]: s for s in servers}
-        assert by_name["builder-mcp"]["command"] == "/bin/b"
-        # url server got an explicit http type
-        assert by_name["deepwiki"]["type"] == "http"
-        # kiroclaw core/cron always injected as stdio
-        assert by_name["kiroclaw-core"]["type"] == "stdio"
-        assert by_name["kiroclaw-core"]["args"] == ["mcp-core"]
-        assert by_name["kiroclaw-cron"]["args"] == ["mcp-cron"]
-
-    def test_missing_file_still_yields_core_cron(self, tmp_path):
-        missing = tmp_path / "nope.json"
-        with patch("kiro_claw.acp.client._CC_MCP_FILE", missing):
-            servers = _claude_acp_mcp_servers()
-        names = {s["name"] for s in servers}
-        assert names == {"kiroclaw-core", "kiroclaw-cron"}
-        assert all(s["type"] == "stdio" for s in servers)
-
-    def test_malformed_json_degrades_to_core_cron(self, tmp_path):
-        reg = tmp_path / "bad.json"
-        reg.write_text("{not json")
-        with patch("kiro_claw.acp.client._CC_MCP_FILE", reg):
-            servers = _claude_acp_mcp_servers()
-        names = {s["name"] for s in servers}
-        assert names == {"kiroclaw-core", "kiroclaw-cron"}
-
-    def test_stale_url_on_core_overwritten_with_stdio(self, tmp_path):
-        # The on-disk registry may carry a dead gateway HTTP-MCP url for the
-        # managed servers; it must be overwritten with the stdio command.
-        reg = tmp_path / "kiroclaw.mcp.json"
-        reg.write_text(
-            json.dumps(
-                {"mcpServers": {"kiroclaw-core": {"url": "http://localhost:8765/api/mcp/core"}}}
-            )
-        )
-        with patch("kiro_claw.acp.client._CC_MCP_FILE", reg):
-            servers = _claude_acp_mcp_servers()
-        core = next(s for s in servers if s["name"] == "kiroclaw-core")
-        assert core["type"] == "stdio"
-        assert core["args"] == ["mcp-core"]
-        assert "url" not in core
-
-    def test_every_server_satisfies_adapter_required_arrays(self, tmp_path):
-        # The claude-agent-acp zod schema requires env (stdio) and headers
-        # (http/sse) as arrays. A registry mixing both transports must produce
-        # servers that all carry their required array, or session/new fails the
-        # whole batch with -32602 Invalid params.
-        reg = tmp_path / "kiroclaw.mcp.json"
-        reg.write_text(
-            json.dumps(
-                {
-                    "mcpServers": {
-                        "builder-mcp": {"command": "/bin/b", "args": ["--x"], "type": "stdio"},
-                        "deepwiki": {"url": "https://mcp.deepwiki.com/mcp"},
-                    }
-                }
-            )
-        )
-        with patch("kiro_claw.acp.client._CC_MCP_FILE", reg):
-            servers = _claude_acp_mcp_servers()
-        for s in servers:
-            if s.get("type") in ("http", "sse"):
-                assert isinstance(s.get("headers"), list), s
-            else:
-                assert isinstance(s.get("env"), list), s
-
-
 class TestCaptureAvailableModels:
     """Capturing the backend-advertised model list from session responses."""
 
@@ -5349,51 +5200,6 @@ class TestFormatAcpError:
         warnings = [r for r in caplog.records if "sensitive content" in r.getMessage()]
         assert warnings, "expected a redaction warning to be logged"
         assert "AKIAIOSFODNN7EXAMPLE" not in warnings[0].getMessage()
-
-
-class TestSettingsLocalModelInjection:
-    """The per-session settings.local.json must carry the full availableModels
-    allowlist so the adapter resolves the [1m] id (1M window) even over a
-    polluted user ~/.claude (availableModels=['opus','sonnet'])."""
-
-    def test_settings_local_has_available_models(self, tmp_path):
-        import json
-
-        from kiro_claw import model_registry as mr
-        from kiro_claw.acp.client import AcpClient
-        from kiro_claw.acp.types import ACP_BACKEND_CLAUDE
-
-        client = AcpClient(
-            work_dir=tmp_path,
-            model="global.anthropic.claude-opus-4-8[1m]",
-            agent="kiroclaw",
-            acp_backend=ACP_BACKEND_CLAUDE,
-        )
-        client._write_claude_local_settings()
-
-        data = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
-        assert data["permissions"]["defaultMode"] == "default"
-        for pid in mr.available_models("claude_code"):
-            assert pid in data["availableModels"]
-        assert data["model"] == "global.anthropic.claude-opus-4-8[1m]"
-
-    def test_settings_local_omits_model_when_auto(self, tmp_path):
-        import json
-
-        from kiro_claw.acp.client import AcpClient
-        from kiro_claw.acp.types import ACP_BACKEND_CLAUDE
-
-        # DEFAULT_MODEL ("auto") must NOT be written as a literal model value.
-        client = AcpClient(
-            work_dir=tmp_path,
-            model=None,
-            agent="kiroclaw",
-            acp_backend=ACP_BACKEND_CLAUDE,
-        )
-        client._write_claude_local_settings()
-        data = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
-        assert "model" not in data
-        assert data["availableModels"]  # allowlist still present
 
 
 class TestAcpClientDrainEarlyExit:

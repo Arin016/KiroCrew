@@ -77,18 +77,18 @@ class TestConfigOverlayLoad:
         config_dir = tmp_path / ".kiroclaw"
         config_dir.mkdir()
         base_config = {
-            "agent": {"yolo": False, "cc_model": "opus", "provider": "claude_code"},
+            "agent": {"yolo": False, "model": "opus", "provider": "acp"},
         }
         (config_dir / "config.json").write_text(json.dumps(base_config))
-        local_config = {"agent": {"yolo": True, "cc_model": "auto"}}
+        local_config = {"agent": {"yolo": True, "model": "auto"}}
         (config_dir / "config.local.json").write_text(json.dumps(local_config))
 
         with patch("kiro_claw.config.loader.config_dir", return_value=config_dir):
             cfg = KiroClawConfig.load()
 
         assert cfg.agent.yolo is True
-        assert cfg.agent.cc_model == "auto"
-        assert cfg.agent.provider == "claude_code"
+        assert cfg.agent.model == "auto"
+        assert cfg.agent.provider == "acp"
 
     def test_load_without_local_file(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".kiroclaw"
@@ -128,7 +128,7 @@ class TestConfigOverlayLoad:
     def test_local_overlay_adds_new_section(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".kiroclaw"
         config_dir.mkdir()
-        base_config = {"agent": {"provider": "claude_code"}}
+        base_config = {"agent": {"provider": "acp"}}
         (config_dir / "config.json").write_text(json.dumps(base_config))
         local_config = {"dashboard": {"auto_open_browser": False}}
         (config_dir / "config.local.json").write_text(json.dumps(local_config))
@@ -141,14 +141,14 @@ class TestConfigOverlayLoad:
     def test_overlay_applies_when_config_json_missing(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".kiroclaw"
         config_dir.mkdir()
-        local_config = {"agent": {"yolo": True, "provider": "claude_code"}}
+        local_config = {"agent": {"yolo": True, "provider": "acp"}}
         (config_dir / "config.local.json").write_text(json.dumps(local_config))
 
         with patch("kiro_claw.config.loader.config_dir", return_value=config_dir):
             cfg = KiroClawConfig.load()
 
         assert cfg.agent.yolo is True
-        assert cfg.agent.provider == "claude_code"
+        assert cfg.agent.provider == "acp"
 
     def test_overlay_applies_when_config_json_invalid(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".kiroclaw"
@@ -165,20 +165,20 @@ class TestConfigOverlayLoad:
     def test_save_does_not_leak_overlay_into_config_json(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".kiroclaw"
         config_dir.mkdir()
-        base_config = {"agent": {"yolo": False, "provider": "claude_code"}}
+        base_config = {"agent": {"yolo": False, "provider": "acp"}}
         (config_dir / "config.json").write_text(json.dumps(base_config))
-        local_config = {"agent": {"yolo": True, "cc_model": "auto"}}
+        local_config = {"agent": {"yolo": True, "model": "auto"}}
         (config_dir / "config.local.json").write_text(json.dumps(local_config))
 
         with patch("kiro_claw.config.loader.config_dir", return_value=config_dir):
             cfg = KiroClawConfig.load()
             assert cfg.agent.yolo is True
-            assert cfg.agent.cc_model == "auto"
+            assert cfg.agent.model == "auto"
             cfg.save()
             saved = json.loads((config_dir / "config.json").read_text())
 
         assert "yolo" not in saved.get("agent", {})
-        assert "cc_model" not in saved.get("agent", {})
+        assert "model" not in saved.get("agent", {})
 
     def test_load_warns_when_config_json_is_non_dict(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".kiroclaw"
@@ -196,7 +196,7 @@ class TestConfigOverlayLoad:
 
         config_dir = tmp_path / ".kiroclaw"
         config_dir.mkdir()
-        base = {"agent": {"provider": "claude_code"}}
+        base = {"agent": {"provider": "acp"}}
         (config_dir / "config.json").write_text(json.dumps(base))
         local_file = config_dir / "config.local.json"
         local_file.write_text(json.dumps({"agent": {"yolo": True}}))

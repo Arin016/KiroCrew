@@ -137,23 +137,6 @@ class TestModelRegistry:
         assert rows[0]["model_name"] == "opus-4.8-1m"
 
 
-class TestClaudeCodeConstantsBackedByRegistry:
-    def test_default_model_matches_registry(self):
-        from kiro_claw.providers.claude_code import _CC_DEFAULT_MODEL
-
-        assert _CC_DEFAULT_MODEL == mr.to_provider_id(mr.default("claude_code"), "claude_code")
-
-    def test_cc_agent_constants_do_not_drift_from_registry(self):
-        # cc_agent._CC_AVAILABLE_MODELS / _CC_DEFAULT_MODEL seed the isolated dir
-        # and are the secondary fallback in _write_claude_local_settings. They
-        # are an independent copy of the registry data; guard against silent
-        # desync on a future registry edit.
-        from kiro_claw.cc_agent import _CC_AVAILABLE_MODELS, _CC_DEFAULT_MODEL
-
-        assert list(_CC_AVAILABLE_MODELS) == mr.available_models("claude_code")
-        assert _CC_DEFAULT_MODEL == mr.to_provider_id(mr.default("claude_code"), "claude_code")
-
-
 class TestCorruptRegistryFallback:
     """The hardcoded _FALLBACK_PROVIDER_IDS table must not drift from the JSON."""
 

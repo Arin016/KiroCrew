@@ -29,52 +29,6 @@ requires_git = pytest.mark.skipif(not _HAS_GIT, reason="git not available")
 
 
 @pytest.fixture(autouse=True)
-def _isolate_cc_agent_writes(tmp_path_factory, monkeypatch):
-    """Redirect the real-home Claude Code agent write targets to a tmp dir.
-
-    ``install_agent()`` (and its alias ``rebuild_agent_config()``) renders
-    Claude Code's agent artifacts via ``install_cc_agent_config()`` and
-    re-asserts the security deny block via ``repair_agent_configs()``. Those
-    paths write to three module globals bound to the operator's real
-    ``~/.claude`` at import time:
-
-      - ``kiro_claw.agent.CC_MCP_FILE``    → ``~/.claude/agents/kiroclaw.mcp.json``
-      - ``kiro_claw.cc_agent.CC_AGENTS_DIR`` → ``~/.claude/agents/`` (kiroclaw.md)
-      - ``kiro_claw.cc_agent.CC_SETTINGS_PATH`` → ``~/.claude/settings.json``
-
-    Per-test helpers (``_run_install``, ``_run_with_kiro_hooks``) patch the
-    kiro-side globals but predate the CC write path, so any test exercising
-    ``install_agent`` on a configured dev desk silently clobbers the real
-    agent definition with fixture content — dropping builder-mcp and every
-    other server from the operator's live agent config. This autouse guard
-    pins all three to ``tmp_path`` for the whole suite, so a test need not
-    remember to patch them itself.
-
-    Scope of the redirect: it covers all code that reads these names as
-    module attributes at call time, which is how the production *write*
-    paths reference them today. It does NOT cover a consumer that copies a
-    value out via ``from kiro_claw.cc_agent import CC_SETTINGS_PATH`` — that
-    creates an independent binding this ``setattr`` cannot reach. Such
-    by-value importers do exist (``cli_doctor``/``cli_commands`` bind
-    ``CC_SETTINGS_PATH``; ``acp.client`` re-derives the mcp-file path), but
-    every one of them only *reads* the target (doctor reporting, dry-run
-    messages, loading the MCP registry) — none writes. The leak this guard
-    closes is a stray *write* into real ``~/.claude``, so the read-only
-    by-value bindings are unaffected. A future by-value importer that *wrote*
-    to one of these targets would need its own patch.
-
-    ``_USER_CC_ROOT`` / ``cc_config_root`` are intentionally NOT redirected:
-    they are read-only seed sources, and ``TestCcConfigRoot`` asserts the
-    real-home fallback value. A test that wants a specific CC write target
-    re-patches these globals itself; that local patch wins over this fixture.
-    """
-    cc_root = tmp_path_factory.mktemp("cc-agent-isolation")
-    monkeypatch.setattr("kiro_claw.agent.CC_MCP_FILE", cc_root / "agents" / "kiroclaw.mcp.json")
-    monkeypatch.setattr("kiro_claw.cc_agent.CC_AGENTS_DIR", cc_root / "agents")
-    monkeypatch.setattr("kiro_claw.cc_agent.CC_SETTINGS_PATH", cc_root / "settings.json")
-
-
-@pytest.fixture(autouse=True)
 def _reset_safety_override_between_tests():
     """Reset the SafetyOverride singleton between tests to prevent state leaking."""
     _reset_safety_override()
