@@ -97,6 +97,18 @@ describe('App routing', () => {
     expect(screen.getByText('Settings')).toBeInTheDocument()
   })
 
+  it('renders the registry-derived Artifacts and Knowledge nav items', () => {
+    // Regression guard for the aaf7cfe stale-branch merge, which reverted the
+    // registry-driven rail (`NAV_ITEMS = getBuiltinSurfaces().map(...)`) back
+    // to a hardcoded array that omitted Artifacts and Knowledge. Both are
+    // registered unconditionally in `surfaces/builtins.tsx`, so they must
+    // always appear in the rail. Asserting them by label catches a future
+    // hardcoded-array regression that the isolated surfaces.test.tsx cannot.
+    renderWithProviders(<App />, { route: '/chat' })
+    expect(screen.getByText('Artifacts')).toBeInTheDocument()
+    expect(screen.getByText('Knowledge')).toBeInTheDocument()
+  })
+
   it('does not double-render Secretary when the builtin Secretary app is enabled', async () => {
     // Regression for the Surface registry refactor: Secretary registers a
     // surface (so its attention badge wires through `selectSurfaceBadgeCount`)
