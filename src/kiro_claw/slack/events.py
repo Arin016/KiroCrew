@@ -1626,6 +1626,22 @@ async def _dispatch_queued(
     )
 
 
+def _extract_shared_text(event: dict) -> str:
+    """Recover message text from forwarded-message attachments.
+
+    Slack forwards carry their content in the ``attachments`` array (entries
+    flagged ``is_share`` / ``is_msg_unfurl``), not in the top-level ``text``
+    field. Link-unfurl attachments are excluded so pasted URLs don't leak
+    preview text into the routed message body.
+    """
+    parts = [
+        (att.get("text") or att.get("fallback") or "")
+        for att in (event.get("attachments") or [])
+        if att.get("is_share") or att.get("is_msg_unfurl")
+    ]
+    return "\n\n".join(part for part in parts if part).strip()
+
+
 async def _route_message(
     orch: GatewayOrchestrator,
     event: dict,
@@ -1641,6 +1657,11 @@ async def _route_message(
     msg_ts = event.get("ts", "")
     team_id = event.get("team", "")
     files = event.get("files", [])
+
+    # Slack forwards carry content in attachments, not text — recover it so the
+    # forward isn't silently dropped by the (not text and not files) guard below.
+    if not text:
+        text = _extract_shared_text(event)
 
     logger.debug("Stream debug: team_id=%s user_id=%s channel=%s", team_id, sender_id, channel)
 
