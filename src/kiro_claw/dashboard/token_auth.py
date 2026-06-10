@@ -653,6 +653,25 @@ def parse_duration(s: str) -> int | None:
     return min(secs, MAX_SESSION_TTL_SECS)
 
 
+def _cookie_port_from_host(request: web.Request, fallback: int) -> str:
+    """Return the port the browser connects to (Host header), else *fallback*.
+
+    The dashboard cookie is named ``mc_token_<port>``. Keying it by the server's
+    own listen port breaks under SSH tunnels: two Cloud Desktops both serving on
+    7777 but tunneled to distinct local ports would collide on a single
+    ``mc_token_7777`` because browser cookies are not isolated by port (RFC 6265
+    scopes by host only). The browser-facing port is unique per dashboard, so it
+    is the correct key. Falls back to the server port when the Host header
+    carries no port, preserving behavior for direct (non-tunnel) access.
+    """
+    host = request.headers.get("Host", "")
+    if ":" in host:
+        candidate = host.rsplit(":", 1)[-1].strip()
+        if candidate.isdigit():
+            return candidate
+    return str(fallback)
+
+
 def token_auth_middleware(
     *,
     internal_paths: frozenset[str] = frozenset(),
@@ -688,7 +707,7 @@ def token_auth_middleware(
         auth flow has its own extraction with IP-binding and from_cookie
         tracking that this helper intentionally does not replicate.
         """
-        cookie_name = f"mc_token_{_port}"
+        cookie_name = f"mc_token_{_cookie_port_from_host(request, _port)}"
         token = request.query.get("token") or request.cookies.get(cookie_name, "")
         if not token:
             return False, "", "no token"
@@ -882,7 +901,7 @@ def token_auth_middleware(
             return await handler(request)  # type: ignore[operator]
 
         # Extract token from query param or cookie
-        cookie_name = f"mc_token_{port}"
+        cookie_name = f"mc_token_{_cookie_port_from_host(request, port)}"
         token = request.query.get("token") or ""
         from_cookie = False
         if not token:

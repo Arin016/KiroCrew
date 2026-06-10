@@ -283,6 +283,57 @@ async def test_cookie_not_reset_when_present() -> None:
     assert "mc_token_8765" not in resp.cookies
 
 
+# -- Cookie keyed by browser-facing (Host) port for tunneled multi-instance --
+
+
+@pytest.mark.asyncio
+async def test_cookie_named_by_host_port_under_tunnel() -> None:
+    """Server on 8765 reached via tunneled localhost:7778 -> cookie is
+    mc_token_7778 (Host port), not mc_token_8765 (server port). Lets two
+    same-server-port instances coexist without colliding in the localhost jar."""
+    mw = token_auth_middleware()  # default server port 8765
+    token = generate_token("tunneluser", ttl_seconds=300)
+    req = _make_request(
+        query={"token": token}, remote="10.0.0.1", headers={"Host": "localhost:7778"}
+    )
+
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 200
+    assert resp.cookies.get("mc_token_7778") is not None  # keyed by Host port
+    assert resp.cookies.get("mc_token_8765") is None  # not the server port
+
+
+@pytest.mark.asyncio
+async def test_cookie_read_uses_host_port() -> None:
+    """A cookie named by the Host port authenticates the matching dashboard."""
+    mw = token_auth_middleware()  # server port 8765
+    token = generate_token("readuser", ttl_seconds=300)
+    bind_token_ip(token, "127.0.0.1")
+    mark_consumed(token)
+
+    req = _make_request(
+        cookies={"mc_token_7778": token}, headers={"Host": "localhost:7778"}
+    )
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 200
+
+
+@pytest.mark.asyncio
+async def test_cookie_server_port_name_denied_when_host_differs() -> None:
+    """A server-port-named cookie does NOT authenticate a different Host port,
+    so a sibling instance's cookie can't be mistaken for this one."""
+    mw = token_auth_middleware()  # server port 8765
+    token = generate_token("wrongport", ttl_seconds=300)
+    bind_token_ip(token, "127.0.0.1")
+    mark_consumed(token)
+
+    req = _make_request(
+        cookies={"mc_token_8765": token}, headers={"Host": "localhost:7778"}
+    )
+    resp = await mw(req, _ok_handler)
+    assert resp.status != 200
+
+
 # -- Property 8: Static asset paths bypass token validation --
 
 
