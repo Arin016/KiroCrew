@@ -150,6 +150,15 @@ If unsure whether a fix is already in the fork, check by **content**, not SHA:
 read the upstream diff, then read the corresponding `kiro_claw` file. Verdicts:
 ALREADY_PRESENT / MISSING / PARTIAL / N/A_INTERNAL.
 
+**Scaling the triage:** a triage+verify Workflow (one analyzer + one verifier
+per commit) is the right tool for a big batch (dozens of candidates). For a
+**small** candidate set (≲8), triaging by reading each diff directly is faster
+and more reliable — a `{schema}` Workflow can flake (the analyzer finishes its
+reasoning but never calls `StructuredOutput`, so the agent returns empty). If
+that happens, don't re-spawn blindly; fall back to reading the diffs. Either
+way the verdict MUST be confirmed against fork **content**, not the agent's
+say-so.
+
 ## Step 3 — Port a KEEP commit
 
 Path map — **backend:** `src/mesh_claw/X` → `src/kiro_claw/X`. **frontend:**
@@ -233,6 +242,13 @@ Gotchas:
   clean by: (a) `flake8 <files>`, (b) a `>100`-char scan of *only your added
   lines*, (c) comparing black-`--diff` `+`-line counts mainline-vs-yours per
   file (equal ⇒ your edits add no new churn). `apps/builtins/*` also ignores E128.
+- **The fork's flake8 can be STRICTER than upstream's** — a faithful
+  COPY-not-rewrite port can pass upstream yet fail the fork gate. Seen: **F824**
+  (`nonlocal x` where `x` is only read, never rebound in that scope) flagged on a
+  verbatim-copied closure whose upstream repo didn't enable F824. Fix the ported
+  hunk (drop the read-only `nonlocal`), don't disable the check — always run
+  `flake8 <your files>` on the post-port image, never assume "upstream passed so
+  this passes."
 - **isort failures may be pre-existing** — if `isort --check` flags a file you
   only added a field/kwarg to (no import change), confirm it fails on `mainline`
   too (`git show mainline:<f> | isort --check -`) and leave it; don't churn.
