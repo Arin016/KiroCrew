@@ -1,4 +1,5 @@
 import { copyToClipboard } from '../utils/clipboard'
+import { resizeImageForModel, type ResizeInfo } from '../utils/resizeImage'
 import type { McpApplyChange } from '../types'
 
 export const SEARCH_MIN_CHARS = 2  // backend session search threshold (must match kiro_claw.history.SEARCH_MIN_CHARS)
@@ -513,15 +514,19 @@ export const api = {
   },
   /** Upload files via browser File API (cross-platform) */
   uploadFiles: async (files: File[]) => {
+    // Downscale oversized images client-side so they fit the model's image
+    // limits before they ever reach the server (see resizeImage.ts).
+    const prepared = await Promise.all(files.map(f => resizeImageForModel(f)))
+    const resized = prepared.map(p => p.info).filter((i): i is ResizeInfo => i !== null)
     const fd = new FormData()
-    files.forEach(f => fd.append('file', f))
+    prepared.forEach(p => fd.append('file', p.file))
     const res = await fetch('/api/upload/file', { method: 'POST', body: fd })
     checkSessionExpired(res)
     let body: any
     try { body = await res.json() } catch { body = {} }
-    if (!res.ok) return { paths: [] as string[], error: body.error || res.statusText }
-    if (!Array.isArray(body.paths)) return { paths: [] as string[], error: 'Unexpected server response' }
-    return body as { paths: string[]; error?: string }
+    if (!res.ok) return { paths: [] as string[], error: body.error || res.statusText, resized }
+    if (!Array.isArray(body.paths)) return { paths: [] as string[], error: 'Unexpected server response', resized }
+    return { ...(body as { paths: string[]; error?: string }), resized }
   },
   screenshot: () => post('/api/screenshot').then(j) as Promise<{ path: string }>,
   // Custom Themes

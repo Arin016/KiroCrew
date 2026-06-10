@@ -849,6 +849,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       : [])
     knowledgeFetchRef.current.clearResults()
     setUploadError('')
+    setUploadNotice('')
     flushDrafts()
   }, [activeSlot, flushDrafts])
   // Persist drafts on unmount (navigating away from chat page)
@@ -922,6 +923,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pasteBlocks, saveDraftsDebounced])
   const [uploadError, setUploadError] = useState('')
+  const [uploadNotice, setUploadNotice] = useState('')
   const isMac = useAppSelector(s => s.dashboard.status?.platform) === 'darwin'
   const { data: sttCfg } = useQuery({
     queryKey: ['stt-config'],
@@ -1195,6 +1197,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     // Same slot-capture pattern as takeScreenshot — see note there.
     const requestSlot = activeSlotRef.current
     setUploadError('')
+    setUploadNotice('')
     if (files.length > 20) { setUploadError('Too many files (max 20)'); return }
     const big = files.find(f => f.size > 50 * 1024 * 1024)
     if (big) { setUploadError(`File too large: ${big.name} (max 50 MB)`); return }
@@ -1211,6 +1214,15 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
           setFileDraft(fileDrafts.current, requestSlot, [...cur, ...res.paths])
           saveDrafts()
         }
+      }
+      if (!res.error && res.resized?.length) {
+        const n = res.resized.length
+        const first = res.resized[0]
+        setUploadNotice(
+          n === 1
+            ? `Resized ${first.name} (${first.fromW}×${first.fromH} → ${first.toW}×${first.toH}) to fit model limits.`
+            : `Resized ${n} images to fit model limits.`,
+        )
       }
     } catch { setUploadError('Upload failed — check file type and size (max 50 MB)') }
     setUploading(false)
@@ -2219,6 +2231,12 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
           <div className="mx-4 mt-2 mb-0 bg-danger/10 border border-danger/20 rounded-lg p-3 flex items-center gap-3 animate-rise">
             <span className="text-sm text-danger flex-1">{uploadError}</span>
             <button onClick={() => setUploadError('')} className="text-danger/60 hover:text-danger text-lg leading-none">&times;</button>
+          </div>
+        )}
+        {uploadNotice && (
+          <div className="mx-4 mt-2 mb-0 bg-info/10 border border-info/20 rounded-lg p-3 flex items-center gap-3 animate-rise">
+            <span className="text-sm text-info flex-1">{uploadNotice}</span>
+            <button onClick={() => setUploadNotice('')} className="text-info/60 hover:text-info text-lg leading-none">&times;</button>
           </div>
         )}
         {sidError && (
