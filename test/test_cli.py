@@ -2608,3 +2608,78 @@ class TestDoctorOllamaDocker:
             _doctor()
         out = capsys.readouterr().out
         assert "not installed" in out
+
+
+class TestPrintTokenUrl:
+    """Tests for _print_token_url (auto-token after restart)."""
+
+    def test_prints_token_on_success(self, tmp_path, capsys, monkeypatch):
+        from kiro_claw.cli_server import _print_token_url
+
+        secret_file = tmp_path / ".local_secret"
+        secret_file.write_text("test-secret")
+        monkeypatch.setattr("kiro_claw.cli_server.config_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            "kiro_claw.cli_server.KiroClawConfig.load",
+            lambda: MagicMock(dashboard=MagicMock(url="")),
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"token": "abc123"}'
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            _print_token_url(7777)
+
+        out = capsys.readouterr().out
+        assert "http://localhost:7777?token=abc123" in out
+
+    def test_prints_custom_origin(self, tmp_path, capsys, monkeypatch):
+        from kiro_claw.cli_server import _print_token_url
+
+        secret_file = tmp_path / ".local_secret"
+        secret_file.write_text("test-secret")
+        monkeypatch.setattr("kiro_claw.cli_server.config_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            "kiro_claw.cli_server.KiroClawConfig.load",
+            lambda: MagicMock(dashboard=MagicMock(url="http://kiroclaw.dev:7777")),
+        )
+        monkeypatch.setattr(
+            "kiro_claw.cli_server.dashboard_origin", lambda u: "http://kiroclaw.dev:7777"
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"token": "xyz789"}'
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            _print_token_url(7777)
+
+        out = capsys.readouterr().out
+        assert "http://kiroclaw.dev:7777/?token=xyz789" in out
+
+    def test_fallback_on_timeout(self, tmp_path, capsys, monkeypatch):
+        from kiro_claw.cli_server import _print_token_url
+
+        secret_file = tmp_path / ".local_secret"
+        secret_file.write_text("test-secret")
+        monkeypatch.setattr("kiro_claw.cli_server.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_claw.cli_server._RESTART_READY_TIMEOUT", 0)
+
+        _print_token_url(7777)
+
+        out = capsys.readouterr().out
+        assert "kiroclaw token" in out
+
+    def test_fallback_on_no_secret(self, tmp_path, capsys, monkeypatch):
+        from kiro_claw.cli_server import _print_token_url
+
+        monkeypatch.setattr("kiro_claw.cli_server.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_claw.cli_server._RESTART_READY_TIMEOUT", 0)
+
+        _print_token_url(7777)
+
+        out = capsys.readouterr().out
+        assert "kiroclaw token" in out

@@ -330,6 +330,35 @@ def _spawn_detached_gateway() -> int:
     return proc.pid
 
 
+_RESTART_TOKEN_TTL = "20h"
+_RESTART_READY_TIMEOUT = 15  # seconds to wait for gateway to become ready
+
+
+def _print_token_url(port: int) -> None:
+    """Wait for the gateway to come up, then print a fresh token URL."""
+    secret_path = config_dir() / ".local_secret"
+    deadline = time.monotonic() + _RESTART_READY_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            secret = secret_path.read_text().strip()
+            url = f"http://localhost:{port}/api/token/local?ttl={_RESTART_TOKEN_TTL}"
+            req = urllib.request.Request(url, headers={"X-Local-Secret": secret})
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read())
+                token = data.get("token", "")
+            if token:
+                print(f"\n🔑 http://localhost:{port}?token={token}")
+                origin = dashboard_origin(KiroClawConfig.load().dashboard.url)
+                if origin and "localhost" not in origin:
+                    print(f"   {origin}/?token={token}")
+                return
+        except (OSError, urllib.error.URLError, FileNotFoundError, ValueError):
+            pass
+        time.sleep(1)
+    # Non-fatal — gateway might just be slow to start
+    print("\n⚠️  Could not generate token (gateway still starting?). Run: kiroclaw token")
+
+
 def _restart(cli_port: int | None = None) -> None:
     """Restart a running KiroClaw gateway.
 
@@ -353,6 +382,7 @@ def _restart(cli_port: int | None = None) -> None:
             source="cli", resources=f"port={port} via=service",
         )
         print("✅ Restarted kiroclaw service.")
+        _print_token_url(port)
         return
 
     # No service active — bounce the foreground gateway and detach a fresh one.
@@ -385,6 +415,7 @@ def _restart(cli_port: int | None = None) -> None:
         source="cli", resources=f"port={port} via=fork pid={pid}",
     )
     print(f"✅ Started detached gateway (pid {pid}). Logs: kiroclaw logs -f")
+    _print_token_url(port)
 
 
 def _update() -> None:
