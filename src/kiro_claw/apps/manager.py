@@ -748,6 +748,40 @@ _BUILTIN_APPS: list[dict[str, Any]] = [
         "tags": ["dashboard", "sessions", "kanban"],
         "ui": {"pages": [{"route": "/board", "label": "Board", "icon": "KanbanSquare"}]},
     },
+    {
+        "name": "orchestrated",
+        "version": "1.0.0",
+        "displayName": "Autopilot",
+        "description": "Autonomous task execution — break down complex requests into plans and execute them step by step",
+        "author": "kiroclaw",
+        "tags": ["autonomy", "orchestration", "agents"],
+        # Existing users had Autopilot as a permanent nav item before it became
+        # a disableable builtin app. Default to enabled so the migration is
+        # transparent — they keep the tab; it just becomes toggleable in Browse.
+        "defaultEnabled": True,
+        "ui": {
+            "pages": [
+                {"route": "/orchestrated", "label": "Autopilot", "icon": "MessageSquareDot"}
+            ],
+        },
+    },
+    {
+        "name": "projects",
+        "version": "1.0.0",
+        "displayName": "Projects",
+        "description": "Autonomous multi-step task execution — compose ideas, generate plans, and run them to completion",
+        "author": "kiroclaw",
+        "tags": ["tasks", "autonomy", "execution"],
+        # Existing users had Projects as a permanent nav item before it became
+        # a disableable builtin app. Default to enabled so the migration is
+        # transparent — they keep the tab; it just becomes toggleable in Browse.
+        "defaultEnabled": True,
+        "ui": {
+            "pages": [
+                {"route": "/projects", "label": "Projects", "icon": "BookOpenText"}
+            ],
+        },
+    },
     # -------------------------------------------------------------------------
     # Example: opt-in builtin app (defaultEnabled: false)
     #
