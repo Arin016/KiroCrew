@@ -70,6 +70,7 @@ from kiro_claw.slack.client import SlackClientOps
 from kiro_claw.slack.format import (
     SLACK_MSG_LIMIT,
     TRUNCATION_NOTICE,
+    _convert_tables,
     split_message,
     strip_thinking_tags,
     to_slack_mrkdwn,
@@ -2368,6 +2369,7 @@ async def handle_message(
 
     use_slack_stream = False
     stream_ts: str | None = None
+    _stream_had_redaction = False  # True when per-chunk redaction modified a streamed chunk
 
     accumulated = ""
     thinking_accumulated = ""
@@ -2605,8 +2607,10 @@ async def handle_message(
                     first = event.text[:1]
                     if first and first not in ("\n", " "):
                         event.text = "\n\n" + event.text
-                event.text, _ = redact_exfiltration_urls(event.text)
-                event.text, _ = redact_credentials(event.text)
+                event.text, _exfil_w = redact_exfiltration_urls(event.text)
+                event.text, _cred_w = redact_credentials(event.text)
+                if _exfil_w or _cred_w:
+                    _stream_had_redaction = True
 
                 if event.text:
                     _tool_gap = False
@@ -3035,11 +3039,21 @@ async def handle_message(
             await _append_stream(stream_buffer)
         await slack.stop_stream(channel, stream_ts, clean_text or _NO_RESPONSE)
 
-    if stream_ts:
-        # Always finalize with clean accumulated text to strip streaming
-        # artifacts (whitespace drops, partial flushes).  (Mesh-509)
-        from kiro_claw.slack.format import _convert_tables
-
+    if use_slack_stream and stream_ts:
+        # Rich AI renderer is now locked in by stop_stream above.
+        # Only overwrite via chat_update when redaction modified the text —
+        # either per-chunk during streaming (_stream_had_redaction) or caught
+        # by the final scan (exfil_warnings/cred_warnings). The security
+        # invariant requires the final visible message reflect the redacted
+        # accumulated text; all other cases leave the rich render intact.
+        if _stream_had_redaction or exfil_warnings or cred_warnings:
+            fallback_text = _convert_tables(clean_text) if clean_text else _NO_RESPONSE
+            await _safe_final_update(
+                slack, channel, stream_ts, fallback_text or _NO_RESPONSE, reply_ts
+            )
+    elif stream_ts:
+        # Legacy fallback path (chat.startStream unavailable): replace the
+        # "Thinking…" placeholder with the clean accumulated text.
         final_text = _convert_tables(clean_text) if clean_text else _NO_RESPONSE
         await _safe_final_update(slack, channel, stream_ts, final_text or _NO_RESPONSE, reply_ts)
     else:

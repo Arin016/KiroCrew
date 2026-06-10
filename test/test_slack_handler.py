@@ -1216,14 +1216,14 @@ class TestStreamingAPI:
 
     @pytest.mark.asyncio
     async def test_no_update_message_on_streaming_path(self):
-        """After streaming, _safe_final_update fires once to replace artifacts."""
+        """After streaming, chat.update must NOT fire — stop_stream preserves the rich AI renderer."""
         slack = self._streaming_client()
         provider = FakeProvider([LLMEvent(kind="text_chunk", text="streamed")])
         sessions = FakeSessionManager(provider)
         await handle_message(slack, sessions, "C1", "hi", None, "msg1", "U1")
 
         updates = [a for a in slack.actions if a[0] == "update"]
-        assert len(updates) == 1
+        assert len(updates) == 0
 
     @pytest.mark.asyncio
     async def test_tool_call_appended_to_stream(self):
@@ -1976,7 +1976,7 @@ class TestStreamingTablePreservation:
 
     @pytest.mark.asyncio
     async def test_streaming_no_update_message_with_options(self):
-        """When streaming + OPTIONS, finalization update fires with converted tables."""
+        """When streaming + OPTIONS, chat.update must NOT fire — rich renderer is preserved."""
         slack = self._streaming_client()
         text_with_options = self.TABLE_RESPONSE + "\n\n[OPTIONS: A | B]"
         provider = FakeProvider([LLMEvent(kind="text_chunk", text=text_with_options)])
@@ -1984,7 +1984,7 @@ class TestStreamingTablePreservation:
         await handle_message(slack, sessions, "C1", "hi", None, "msg1", "U1")
 
         updates = [a for a in slack.actions if a[0] == "update"]
-        assert len(updates) == 1, "chat.update should fire once for finalization"
+        assert len(updates) == 0, "chat.update must not fire on the streaming path without redaction"
 
     @pytest.mark.asyncio
     async def test_stop_stream_text_preserves_tables(self):
