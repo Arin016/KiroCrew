@@ -2589,7 +2589,13 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               onChange={setInput}
               onSend={() => send()}
               onFollowUpSend={(text?: string) => send(text)}
-              disabled={slotStopping}
+              disabled={
+                /* Streaming, compaction (Mesh-1345), and stopping (Mesh-2004) all
+                   keep the input interactive: api_chat queues on slot.running and
+                   stop preserves the queue (Mesh-1889), so typing + Enter queues a
+                   follow-up during the stop window instead of being silently blocked. */
+                false
+              }
               autoFocusKey={activeSlot}
               prefillHint={prefillHint}
               onDismissHint={() => setPrefillHint(false)}
