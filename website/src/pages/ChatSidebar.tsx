@@ -797,7 +797,7 @@ function ChatSidebar({
               const isActive = activeSlot === s.key
               const nextIsActive = i < childSlots.length - 1 && activeSlot === childSlots[i + 1].key
               const showDivider = i < childSlots.length - 1 && !isActive && !nextIsActive
-              return renderSessionRow(s, 1, showDivider)
+              return renderSessionRow(s, 1, showDivider, `${columnId}:${folder.id}`)
             })}
           </div>
         </FolderBody>
@@ -805,7 +805,10 @@ function ChatSidebar({
     )
   }
 
-  const renderSessionRow = (s: Slot, _indent: number, showDivider: boolean) => {
+  // scope namespaces the Framer layoutId per render location. A multi-tag slot
+  // can render in several columns at once; same layoutId in one LayoutGroup
+  // collides (Framer paints one, hides the rest). Distinct scope = distinct id.
+  const renderSessionRow = (s: Slot, _indent: number, showDivider: boolean, scope = 'list') => {
     const agentName = s.agent || defaultAgent || ''
     const agentMeta = installedAgents.find(a => a.name === agentName)
     const isAim = agentMeta?.source === 'aim'
@@ -820,7 +823,7 @@ function ChatSidebar({
       if (boost.mutedColors[ci]) boostStyle['--session-muted'] = boost.mutedColors[ci]
     }
     return (
-      <motion.div key={s.key} layout="position" layoutId={`slot-${s.key}`}
+      <motion.div key={s.key} layout="position" layoutId={`slot-${scope}-${s.key}`}
         data-slot-key={s.key}
         initial={{ opacity: 0, x: -12 }}
         animate={{ opacity: 1, x: 0 }}
@@ -1393,7 +1396,7 @@ function ChatSidebar({
                             const isActive = activeSlot === s.key
                             const nextIsActive = i < ungrouped.length - 1 && activeSlot === ungrouped[i + 1].key
                             const showDivider = i < ungrouped.length - 1 && !isActive && !nextIsActive
-                            return renderSessionRow(s, 0, showDivider)
+                            return renderSessionRow(s, 0, showDivider, col.id)
                           })}
                           {!hasAny && <div className="text-muted text-[12px] text-center py-4">No sessions</div>}
                         </>
