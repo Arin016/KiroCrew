@@ -1,5 +1,5 @@
 import { api } from '../../api/client'
-import modelTokensRaw from '../../model_tokens.json'
+import { defaultModel, contextWindow as registryContextWindow, displayModels } from '../modelRegistry'
 import type {
   ProviderAdapter,
   ProviderCapabilities,
@@ -12,16 +12,10 @@ import type {
   PermissionMode,
 } from '../types'
 
-const MODEL_TOKENS: Record<string, number> = Object.fromEntries(
-  Object.entries(modelTokensRaw).filter(([k]) => !k.startsWith('_')) as [string, number][]
-)
-const DEFAULT_CONTEXT = 200_000
-
-// KiroClaw's resolved default CC model. Must match the backend
-// _CC_DEFAULT_MODEL (providers/claude_code.py). An empty cc_model resolves to
-// this rather than the bare 'opus' alias — the adapter expands 'opus' to its
-// own models[0], which on current claude-agent builds is an OLD Opus (4.1).
-const CC_DEFAULT_MODEL = 'global.anthropic.claude-opus-4-8[1m]'
+// KiroClaw's resolved default CC model — the canonical registry key. The
+// backend translates it to a provider id at the config.loader factory boundary.
+// Sourced from the shared model_registry.json so frontend and backend agree.
+const CC_DEFAULT_MODEL = defaultModel()
 
 export class ClaudeCodeAdapter implements ProviderAdapter {
   readonly id = 'claude_code' as const
@@ -208,9 +202,10 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
         // the dropdown is readable while selection still passes the real ID.
         const friendly = m.display_name && m.display_name !== m.model_name ? m.display_name : ''
         const desc = [friendly, m.description].filter(Boolean).join(' · ')
-        const ctx = m.model_name.includes('[1m]') || /(^|[^a-z])1m([^a-z]|$)/i.test(m.model_name)
-          ? 1_000_000
-          : MODEL_TOKENS[m.model_name] ?? DEFAULT_CONTEXT
+        // Resolve the window from the shared registry (canonical key, alias, or
+        // provider id); falls back to the 1m-heuristic, then 200k, for ids the
+        // registry does not list yet.
+        const ctx = registryContextWindow(m.model_name)
         return {
           name: m.model_name,
           description: desc,
@@ -225,13 +220,11 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
   }
 
   getContextWindow(model: string): number {
-    if (model.includes('[1m]') || model.includes('1m')) return 1_000_000
-    return MODEL_TOKENS[model] ?? DEFAULT_CONTEXT
+    return registryContextWindow(model)
   }
 
   getDefaultModel(): string {
-    // Opus 4.8 with the 1M context window. See claude-agent-acp docs for
-    // the explicit Bedrock model ID syntax: global.anthropic.<model>[<window>].
+    // Canonical registry key for the default model (e.g. opus-4.8-1m).
     return CC_DEFAULT_MODEL
   }
 
@@ -244,17 +237,15 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
   }
 
   private _defaultModels(): ModelInfo[] {
-    // Mirrors the set the `claude` CLI actually offers (Opus 4.8 1M, Opus 4.7,
-    // Opus 4.6, Sonnet 4.6), most-capable first. Used only when /api/models
-    // returns nothing; the live list comes from the backend (curated-first).
-    // Full Bedrock inference-profile ids (global.anthropic.…) — bare versioned
-    // ids are rejected by Bedrock with a 400. Matches the backend curated set
-    // so the dropdown never shows duplicates. [1m] = 1M context window.
-    return [
-      { name: 'global.anthropic.claude-opus-4-8[1m]', description: 'Claude Opus 4.8 (default, 1M context)', contextWindow: 1_000_000 },
-      { name: 'global.anthropic.claude-opus-4-8', description: 'Claude Opus 4.8 (200K context)', contextWindow: 200_000 },
-      { name: 'global.anthropic.claude-opus-4-7[1m]', description: 'Opus 4.7 · Most capable for complex work, 1M context', contextWindow: 1_000_000 },
-      { name: 'global.anthropic.claude-sonnet-4-6[1m]', description: 'Sonnet 4.6 · Best for everyday tasks, 1M context', contextWindow: 1_000_000 },
-    ]
+    // Sourced from the shared canonical registry (model_registry.json), most-
+    // capable first. Used only when /api/models returns nothing; the live list
+    // comes from the backend (registry-first). Names are canonical keys (the
+    // wire values); the backend translates them to provider ids.
+    return displayModels().map((m) => ({
+      name: m.name,
+      description: m.description,
+      contextWindow: m.contextWindow,
+      supportsExtendedContext: m.contextWindow >= 1_000_000,
+    }))
   }
 }

@@ -56,12 +56,12 @@ describe('ClaudeCodeAdapter.fetchAvailableModels', () => {
 describe('ClaudeCodeAdapter.resolveModel', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('resolves an empty cc_model to the Opus 4.8 (1M) default, not bare opus', async () => {
-    // Bare 'opus' would let the adapter expand to its own models[0] (an OLD
-    // Opus 4.1). An unconfigured user must get the explicit 4.8 1M default.
+  it('resolves an empty cc_model to the canonical default key, not bare opus', async () => {
+    // An unconfigured user must get the explicit canonical default; the backend
+    // translates it to the Opus 4.8 1M provider id at the factory boundary.
     ;(api.kiroclawConfig as any).mockResolvedValue({ agent: { cc_model: '' } })
     const model = await new ClaudeCodeAdapter().resolveModel('kiroclaw')
-    expect(model).toBe('global.anthropic.claude-opus-4-8[1m]')
+    expect(model).toBe('opus-4.8-1m')
   })
 
   it('honors an explicitly configured cc_model', async () => {
@@ -70,13 +70,30 @@ describe('ClaudeCodeAdapter.resolveModel', () => {
     expect(model).toBe('claude-opus-4.7')
   })
 
-  it('falls back to the 4.8 default when the config call throws', async () => {
+  it('falls back to the canonical default when the config call throws', async () => {
     ;(api.kiroclawConfig as any).mockRejectedValue(new Error('boom'))
     const model = await new ClaudeCodeAdapter().resolveModel('kiroclaw')
-    expect(model).toBe('global.anthropic.claude-opus-4-8[1m]')
+    expect(model).toBe('opus-4.8-1m')
   })
 
-  it('getDefaultModel returns Opus 4.8 (1M)', () => {
-    expect(new ClaudeCodeAdapter().getDefaultModel()).toBe('global.anthropic.claude-opus-4-8[1m]')
+  it('getDefaultModel returns the canonical default key', () => {
+    expect(new ClaudeCodeAdapter().getDefaultModel()).toBe('opus-4.8-1m')
+  })
+
+  it('getContextWindow resolves canonical key + provider id + [1m] to 1M', () => {
+    const a = new ClaudeCodeAdapter()
+    expect(a.getContextWindow('opus-4.8-1m')).toBe(1_000_000)
+    expect(a.getContextWindow('global.anthropic.claude-opus-4-8[1m]')).toBe(1_000_000)
+    expect(a.getContextWindow('opus-4.8')).toBe(200_000)
+  })
+
+  it('1m boundary excludes digits, matching the Python _has_1m_token', () => {
+    const a = new ClaudeCodeAdapter()
+    // A standalone 1m token still resolves to 1M (unlisted, forward-compat).
+    expect(a.getContextWindow('claude-future-1m')).toBe(1_000_000)
+    // "10m"/"21m" must NOT false-match the 1m token (digit boundary) — parity
+    // with the backend model_registry.window(), else FE shows 1M / BE 200K.
+    expect(a.getContextWindow('some-10m-model')).toBe(200_000)
+    expect(a.getContextWindow('weird-21m-thing')).toBe(200_000)
   })
 })
