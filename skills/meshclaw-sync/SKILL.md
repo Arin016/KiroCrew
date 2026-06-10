@@ -314,9 +314,33 @@ provenance is traceable across the history-less boundary:
 ```
 fix(<scope>): <summary>
 
-Ported from MeshClaw upstream <sha>.
 <what + why>. <Any internal hunks deliberately skipped and why.>
+
+Ported by content from MeshClaw[Website] upstream <short-sha>:
+https://code.amazon.com/packages/<Pkg>/commits/<FULL-sha>
+Upstream-CR: https://code.amazon.com/reviews/CR-<id>
+Task (<Mesh-NNNN>): https://taskei.amazon.dev/tasks/<Mesh-NNNN>
 ```
+
+### MANDATORY: every reference is a full clickable link
+
+In **commit messages, the CR description, AND the CR provenance comment**, never
+write a bare id — always the full `https://` URL (CRUX/Code Browser auto-links
+them). This is non-negotiable; a reviewer must be one click from every source.
+
+| Reference | Link format |
+|---|---|
+| upstream commit | `https://code.amazon.com/packages/<Pkg>/commits/<FULL-40-char-sha>` (NOT the short sha — the full SHA; `Pkg` = `MeshClaw` or `MeshClawWebsite`) |
+| any CR (upstream or this one) | `https://code.amazon.com/reviews/CR-<id>` |
+| Taskei task | `https://taskei.amazon.dev/tasks/<Mesh-NNNN>` |
+| SIM issue (if a commit cites one) | `https://sim.amazon.com/issues/<Mesh-NNNN>` |
+| package commit browser | `https://code.amazon.com/packages/<Pkg>/commits/mainline` |
+
+Pull the upstream CR / Task / SIM trailers straight from the source commit
+(`git -C <upstream> log -1 --format=%b <sha>` — they appear as `cr:` / `Task:` /
+`Issue:` / `SIM:` lines) and carry them through verbatim as links. Use the FULL
+40-char SHA in commit-browser URLs (a short sha 404s less reliably and isn't
+copy-paste stable).
 
 Do **not** `git commit`/`push` unless the user asks; push needs separate
 explicit approval.
@@ -388,8 +412,13 @@ with a build and a CR:
    KEEP/PARTIAL with its upstream SHA (note backend vs frontend) + one-line
    summary, and every SKIP/NA_INTERNAL/deferred with the reason (writing_review
    absent, builder-mcp internal, mcp_gateway/secretary/auto-research absent,
-   SKIP_NONKIROACP, etc.). Provenance across the history-less boundary lives
-   entirely in this description.
+   SKIP_NONKIROACP, etc.). **Every SHA / CR / Task / SIM id in the description
+   and the comment MUST be a full clickable `https://` link** — use the formats
+   in the Step 5 link table (the `cr` CLI description has a ~4KB cap, so put the
+   high-signal summary there and the EXHAUSTIVE per-commit provenance — every
+   commit/CR/task as a link — in a CR **comment**, which has no size cap; post it
+   with the builder-mcp `CRAddComment` tool, `publish=true`). Provenance across
+   the history-less boundary lives entirely in this description + comment.
 
    Origin = `ssh://git.amazon.com:2222/pkg/KiroClawExternal`. Per the global git
    rule, `commit`/`push`/CR need explicit user authorization — the recurring
