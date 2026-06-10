@@ -83,7 +83,12 @@ from kiro_claw.heartbeat import (
 from kiro_claw.history import ConversationLog, HistoryConsolidator
 from kiro_claw.hooks import HookManager, HooksConfig
 from kiro_claw.learn import LessonStore
-from kiro_claw.llm_helpers import PromptBusyExhaustedError, ToolApprovalPolicy, stream_and_collect
+from kiro_claw.llm_helpers import (
+    PromptBusyExhaustedError,
+    ToolApprovalPolicy,
+    save_conversation_turn,
+    stream_and_collect,
+)
 from kiro_claw.memory import MemoryStore
 from kiro_claw.providers.base import LLMEvent
 from kiro_claw.safety_override import safety_override
@@ -93,11 +98,13 @@ from kiro_claw.session import HEARTBEAT_KEY, SessionManager
 from kiro_claw.skills import SkillsLoader
 from kiro_claw.slack.client import RealSlackClient
 from kiro_claw.slack.format import build_cron_ack_block, split_message, to_slack_mrkdwn
+from kiro_claw.slack.handler import is_thread_incognito, is_thread_temporary
 from kiro_claw.subagent import (
     INJECTION_TIMEOUT,
     SubagentInfo,
     SubagentManager,
     ToolApprovalCallback,
+    resolve_max_subagents,
 )
 from kiro_claw.taskrunner import TaskRunner
 
@@ -2603,6 +2610,40 @@ class GatewayOrchestrator:
                             logger.exception(
                                 "Subagent %s: Slack posting failed (injection succeeded)", info.id,
                             )
+
+                        # Persist the subagent completion turn to the conversation
+                        # log so the dashboard replay shows it. Without this, Slack
+                        # subagent injections are visible in the thread but missing
+                        # from the dashboard session history.
+                        if self.conv_log and not (
+                            is_thread_temporary(parent_key) or is_thread_incognito(parent_key)
+                        ):
+                            try:
+                                # Defense-in-depth: `announce` is composed from
+                                # already-redacted parts plus identifiers such as
+                                # `info.agent`; we re-redact before persisting to the
+                                # dashboard replay (an external surface), mirroring the
+                                # dashboard branch. `response` is fresh LLM output from
+                                # stream_and_collect and is NOT yet redacted, so its
+                                # redaction here is strictly required.
+                                safe_announce, _ = redact_exfiltration_urls(announce)
+                                safe_announce, _ = redact_credentials(safe_announce)
+                                safe_response, _ = redact_exfiltration_urls(response or "")
+                                safe_response, _ = redact_credentials(safe_response)
+                                save_conversation_turn(
+                                    self.conv_log,
+                                    parent_key,
+                                    safe_announce,
+                                    safe_response,
+                                    source_thread=parent_key,
+                                    source_user="subagent",
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Failed to persist subagent turn for %s", parent_key,
+                                    exc_info=True,
+                                )
+
                         logger.info("Subagent %s → Slack session %s", info.id, parent_key)
                         break
                     except asyncio.TimeoutError:
@@ -2854,7 +2895,7 @@ class GatewayOrchestrator:
             sessions=self.sessions,
             ctx_builder=self.ctx_builder,
             on_done=_subagent_done,
-            max_concurrent=self._cfg.agent.max_subagents,
+            max_concurrent=resolve_max_subagents(self._cfg),
             default_turn_limit=self._cfg.agent.subagent_max_turns,
             default_timeout=self._cfg.agent.subagent_timeout_secs,
             on_tool_approval=_approve_subagent,

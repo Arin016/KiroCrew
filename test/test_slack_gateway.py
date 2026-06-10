@@ -3443,3 +3443,241 @@ class TestDeliverCronResponse:
         rurl.assert_called_once()
         rcred.assert_called_once()
         assert "REDACTED" in slack.post_message.call_args.args[1]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tests: Slack subagent completion persistence
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestSlackSubagentCompletionPersistence:
+    """Verify subagent completions injected into Slack sessions are persisted."""
+
+    def _setup(self):
+        orch = _make_orchestrator(slack_enabled=True, owner_id="U1")
+        orch.sessions = _mock_sessions()
+        orch.ctx_builder = MagicMock()
+        orch.ctx_builder.hooks = MagicMock()
+        orch.ctx_builder.build_message = MagicMock(return_value=("msg", None))
+        orch.dashboard_state = _mock_dashboard_state()
+        orch.slack = MagicMock()
+        orch.slack.open_dm = AsyncMock(return_value="D_U1")
+        orch.slack.post_message = AsyncMock()
+        orch.slack.post_blocks = AsyncMock(return_value="ts")
+        orch.conv_log = MagicMock()
+        with patch("kiro_claw.slack.handler.is_yolo_mode", return_value=False):
+            with patch("kiro_claw.slack.gateway.SubagentManager") as mock_sm:
+                mock_sm_inst = MagicMock()
+                mock_sm_inst.start_reaper = MagicMock()
+                mock_sm_inst.running = []
+                mock_sm_inst.running_agents_for = MagicMock(return_value=[])
+                mock_sm_inst.get = MagicMock(return_value=None)
+                mock_sm_inst.notify_injection_failed = MagicMock()
+                mock_sm.return_value = mock_sm_inst
+                orch._init_subagents()
+        return orch, mock_sm
+
+    def _make_info(self, parent_key="C123:1234567890.123456"):
+        info = MagicMock()
+        info.id = "agent-persist"
+        info.parent_session_key = parent_key
+        info.error = None
+        info.result = "synthesis result"
+        info.result_path = ""
+        info.task = "analyze code"
+        info.agent = "kiroclaw"
+        info.silent = False
+        info.elapsed = 5.0
+        info.started = time.time() - 5.0
+        return info
+
+    @pytest.mark.asyncio
+    async def test_slack_subagent_persists_to_conversation_log(self):
+        """Successful Slack injection persists both announce and response."""
+        orch, mock_sm = self._setup()
+        on_done = mock_sm.call_args[1]["on_done"]
+        info = self._make_info()
+
+        with patch(
+            "kiro_claw.slack.gateway.stream_and_collect",
+            new_callable=AsyncMock,
+            return_value="synthesized response",
+        ), patch(
+            "kiro_claw.slack.gateway.is_thread_temporary", return_value=False
+        ), patch(
+            "kiro_claw.slack.gateway.is_thread_incognito", return_value=False
+        ):
+            await on_done(info)
+
+        # conv_log.append should have been called (via save_conversation_turn)
+        assert orch.conv_log.append.call_count == 2
+        user_call = orch.conv_log.append.call_args_list[0]
+        assistant_call = orch.conv_log.append.call_args_list[1]
+        # First call: user role (the subagent completion event)
+        assert user_call[0][0] == info.parent_session_key
+        assert user_call[0][1] == "user"
+        assert "[Subagent completion event]" in user_call[0][2]
+        # Second call: assistant role (the LLM response)
+        assert assistant_call[0][0] == info.parent_session_key
+        assert assistant_call[0][1] == "assistant"
+        assert assistant_call[0][2] == "synthesized response"
+
+    @pytest.mark.asyncio
+    async def test_slack_subagent_redacts_response_before_persist(self):
+        """LLM response is redacted (credentials/exfil URLs) before persisting,
+        since the dashboard replay is an external surface."""
+        orch, mock_sm = self._setup()
+        on_done = mock_sm.call_args[1]["on_done"]
+        info = self._make_info()
+        # Response carries a credential-shaped token that must not reach disk raw.
+        leaked = "result aws_secret_access_key=AKIAIOSFODNN7EXAMPLE done"
+
+        with patch(
+            "kiro_claw.slack.gateway.stream_and_collect",
+            new_callable=AsyncMock,
+            return_value=leaked,
+        ), patch(
+            "kiro_claw.slack.gateway.is_thread_temporary", return_value=False
+        ), patch(
+            "kiro_claw.slack.gateway.is_thread_incognito", return_value=False
+        ):
+            await on_done(info)
+
+        assert orch.conv_log.append.call_count == 2
+        persisted_response = orch.conv_log.append.call_args_list[1][0][2]
+        # The raw secret value must not be persisted verbatim.
+        assert "AKIAIOSFODNN7EXAMPLE" not in persisted_response
+
+    @pytest.mark.asyncio
+    async def test_slack_subagent_skips_persistence_for_temporary_thread(self):
+        """Temporary (restricted) threads should not be persisted."""
+        orch, mock_sm = self._setup()
+        on_done = mock_sm.call_args[1]["on_done"]
+        info = self._make_info()
+
+        with patch(
+            "kiro_claw.slack.gateway.stream_and_collect",
+            new_callable=AsyncMock,
+            return_value="response",
+        ), patch(
+            "kiro_claw.slack.gateway.is_thread_temporary", return_value=True
+        ), patch(
+            "kiro_claw.slack.gateway.is_thread_incognito", return_value=False
+        ):
+            await on_done(info)
+
+        orch.conv_log.append.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_slack_subagent_skips_persistence_for_incognito_thread(self):
+        """Incognito threads should not be persisted."""
+        orch, mock_sm = self._setup()
+        on_done = mock_sm.call_args[1]["on_done"]
+        info = self._make_info()
+
+        with patch(
+            "kiro_claw.slack.gateway.stream_and_collect",
+            new_callable=AsyncMock,
+            return_value="response",
+        ), patch(
+            "kiro_claw.slack.gateway.is_thread_temporary", return_value=False
+        ), patch(
+            "kiro_claw.slack.gateway.is_thread_incognito", return_value=True
+        ):
+            await on_done(info)
+
+        orch.conv_log.append.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_slack_subagent_persistence_failure_does_not_break_flow(self):
+        """Persistence failure should not prevent Slack posting or break the flow."""
+        orch, mock_sm = self._setup()
+        on_done = mock_sm.call_args[1]["on_done"]
+        info = self._make_info()
+        orch.conv_log.append = MagicMock(side_effect=OSError("disk full"))
+
+        with patch(
+            "kiro_claw.slack.gateway.stream_and_collect",
+            new_callable=AsyncMock,
+            return_value="response",
+        ), patch(
+            "kiro_claw.slack.gateway.is_thread_temporary", return_value=False
+        ), patch(
+            "kiro_claw.slack.gateway.is_thread_incognito", return_value=False
+        ):
+            # Should not raise
+            await on_done(info)
+
+        # Slack posting should still have happened
+        orch.slack.post_message.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_slack_subagent_no_persistence_without_conv_log(self):
+        """When conv_log is None, persistence is skipped gracefully."""
+        orch, mock_sm = self._setup()
+        on_done = mock_sm.call_args[1]["on_done"]
+        info = self._make_info()
+        orch.conv_log = None
+
+        with patch(
+            "kiro_claw.slack.gateway.stream_and_collect",
+            new_callable=AsyncMock,
+            return_value="response",
+        ):
+            # Should not raise
+            await on_done(info)
+
+        # Slack posting should still work
+        orch.slack.post_message.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_slack_subagent_persists_even_when_slack_post_fails(self):
+        """Persistence is gated on ACP injection, not Slack delivery: a failed
+        Slack post must NOT prevent the completion turn from being persisted."""
+        orch, mock_sm = self._setup()
+        on_done = mock_sm.call_args[1]["on_done"]
+        info = self._make_info()
+        # Slack delivery fails (best-effort), but injection already succeeded.
+        orch.slack.post_message = AsyncMock(side_effect=RuntimeError("slack down"))
+
+        with patch(
+            "kiro_claw.slack.gateway.stream_and_collect",
+            new_callable=AsyncMock,
+            return_value="synthesized response",
+        ), patch(
+            "kiro_claw.slack.gateway.is_thread_temporary", return_value=False
+        ), patch(
+            "kiro_claw.slack.gateway.is_thread_incognito", return_value=False
+        ):
+            # Must not raise despite the Slack failure.
+            await on_done(info)
+
+        # Slack post was attempted and failed...
+        orch.slack.post_message.assert_called()
+        # ...yet the turn was still persisted because injection succeeded.
+        assert orch.conv_log.append.call_count == 2
+        assert orch.conv_log.append.call_args_list[0][0][1] == "user"
+        assert orch.conv_log.append.call_args_list[1][0][1] == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_slack_subagent_persists_exactly_once_after_timeout_retry(self):
+        """Unit guard: persistence fires once across a timeout-retry cycle."""
+        orch, mock_sm = self._setup()
+        on_done = mock_sm.call_args[1]["on_done"]
+        info = self._make_info()
+
+        with patch(
+            "kiro_claw.slack.gateway.stream_and_collect",
+            new_callable=AsyncMock,
+            side_effect=[asyncio.TimeoutError(), "response text"],
+        ), patch(
+            "kiro_claw.slack.gateway.is_thread_temporary", return_value=False
+        ), patch(
+            "kiro_claw.slack.gateway.is_thread_incognito", return_value=False
+        ), patch(
+            "asyncio.sleep", new_callable=AsyncMock
+        ):
+            await on_done(info)
+
+        # Exactly ONE completion persisted (2 appends: user + assistant), not 4.
+        assert orch.conv_log.append.call_count == 2
