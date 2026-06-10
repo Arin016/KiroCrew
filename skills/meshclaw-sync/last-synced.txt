@@ -12,9 +12,29 @@
 #                so frontend sync is by CONTENT within the post-snapshot window, not a
 #                clean SHA range. This SHA records the upstream tip last triaged.
 
-beta 599d6f64      # 2026-06-10 backend tip (batch-11). Tip is a SKIP (promptfarm) — boundary advances past resolved SKIPs.
-frontend-beta ed7c87f0322813bd262b2eb157bf8f6c8ddabc4c  # 2026-06-10 MeshClawWebsite beta tip (batch-11). Tip is a SKIP (PromptFarm UI).
-mainline 49633d05  # 2026-06-09 no mainline-only delta past this
+beta 527459a0      # 2026-06-10 backend tip (batch-12). Tip is a SKIP (config-baseline regen for promptfarm/AIM) — boundary advances past resolved SKIPs.
+frontend-beta 76a7fa3d1234aaac085953c9e9692e0ec0d00ba2  # 2026-06-10 MeshClawWebsite beta tip (batch-12). PORTED (force-kill debounce).
+mainline 796e21c5  # 2026-06-10 fork mainline tip (CR-281050885 merged); no mainline-only delta past this
+
+# --- Batch-12 (dual-repo sync 2026-06-10, after CR-281050885 merged) ---------
+# Fresh branch sync/beta-2026-06-10c off origin/mainline (prior CR merged, no
+# longer stacking). 6 candidates (3 backend + 3 frontend); 4 PORTED, 2 SKIP.
+# PORTED: d00e6ac6 (backend terminal scrollback ring buffer + reconnect replay —
+# RE-ANCHORED redaction: imports kiro_claw.security NOT mesh_claw.redaction, and
+# tuple-unpacks `text,_ = redact_*()` since the fork's redactors return
+# tuple[str,list[str]] while upstream's redaction module returns str — a verbatim
+# copy would have crashed; added _redact_terminal helper + 6 regression tests),
+# fbdf391 (frontend terminal session persistence/rename/reconnect — LABELS_KEY
+# symbol-mapped to kiroclaw-terminal-labels; renameSession already existed),
+# 2fee03d (input interactive while stopping, Mesh-2004 — test re-authored fork-
+# correct: dropped the absent secretarySlice the upstream test imported, matched
+# the fork's flat dashboard-slot shape), 76a7fa3 (force-kill arming debounce +
+# consequence-stating tooltip — new utils/stopDebounce.ts, per-slot Map ref).
+# SKIP: 527459a0 (config-baseline regen — adds ONLY promptfarm + auto_update_aim
+# (AIM) schema, both absent/internal; fork baseline correctly has neither),
+# 641a6f0c (per-agent provider override — SKIP_NONKIROACP: re-introduces the
+# deleted multi-provider dispatch factory with bedrock/claude_code branches;
+# meaningless under the enum ["acp"], no ungated generic hunk to salvage).
 
 # --- Batch-11 (cron dual-repo sync 2026-06-10) -------------------------------
 # 6h cron run. 8 candidates (3 backend + 5 frontend); 3 ported, 4 SKIP, 1 ALREADY_PRESENT.
