@@ -1,10 +1,13 @@
 # Last-synced upstream MeshClaw tips (one SHA per tracked branch).
-# Updated at the END of every sync run (Step 7). The meshclaw-sync skill bounds
+# Updated at the END of every sync run (Step 1/7). The meshclaw-sync skill bounds
 # the candidate set by these SHAs — see skills/meshclaw-sync/SKILL.md Step 1.
 # Format: "<branch> <sha>  # <date> <note>"
-beta 3a5af268      # 2026-06-09 boundary advanced to beta tip; backlog fully cleared.
-# Batch-8 ports (this run): b490c7e8 dynamic subagent auto-sizing (previously DEFERRED, now
-# ported — relocated the absent mcp_gateway.pool /proc helpers into subagent.py), 0632630e
-# doctor live-MCP-probe + redacted stderr drain, 3a5af268 slack subagent-completion persist.
-# 11973f4c (approval_policy on mode toggle) was already ported in batch-7. No DEFERRED items remain.
+beta e62422ae      # 2026-06-09 boundary advanced past a pure-SKIP run (batch-9). No ports.
+# Batch-9 (cron-fired): sole candidate e62422ae "fix(writing-review): send Midway cookie on
+# scanner sync fetch" = SKIP / NA_INTERNAL. Adversarially verified: whole commit serves the
+# ABSENT writing_review subsystem + STUBBED midway. No portable hunk — the new
+# hooks.safe_read_file_internal allowlist's only entry is scanner_sync.midway_cookie (dead
+# consumer), and re-adding ".midway" to security._SENSITIVE_HOME_DIRS is explicitly forbidden
+# by MIGRATION_PLAN.md L145/L382-384 + CLAUDE.md (de-Amazon decision). Boundary advances past
+# it (SKIP is resolved, unlike a DEFERRED commit). No b490c7e8-style hold needed — backlog clear.
 mainline 49633d05  # 2026-06-09 no mainline-only delta past this
