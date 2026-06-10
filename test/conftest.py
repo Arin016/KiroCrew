@@ -208,6 +208,7 @@ class MockSlackClient(SlackClientOps):
                     "task_id": task_id,
                     "title": title,
                     "status": status,
+                    "details": details,
                 },
             )
         )

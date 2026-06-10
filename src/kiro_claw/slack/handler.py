@@ -2379,6 +2379,8 @@ async def handle_message(
     _task_counter = 0  # incrementing task ID for task cards
     _active_task_id = ""  # current in-progress task
     _active_task_title = ""  # display title (purpose or tool name)
+    _tool_start_time = 0.0  # monotonic time when current tool started
+    _tool_timer_task: asyncio.Task | None = None  # periodic elapsed-time updater
     _status_dirty = False  # True when status needs reset to base on next text chunk
     _tool_gap = False
 
@@ -2427,6 +2429,49 @@ async def handle_message(
                     channel, stream_ts, task_id, title, status, details=details
                 )
         return ok
+
+    async def _tool_elapsed_updater() -> None:
+        """Periodically update the active task card with elapsed time (every 30s)."""
+        # reads _active_task_id/_active_task_title/_tool_start_time from the
+        # enclosing scope (no rebind here, so no nonlocal needed)
+        while True:
+            await asyncio.sleep(30)
+            if _active_task_id and _tool_start_time and use_slack_stream:
+                elapsed = time.monotonic() - _tool_start_time
+                mins, secs = divmod(int(elapsed), 60)
+                time_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+                await _append_task(
+                    _active_task_id,
+                    _active_task_title,
+                    "in_progress",
+                    details=f"⏱ {time_str}",
+                )
+
+    def _start_tool_timer() -> None:
+        """Start the 30s elapsed-time updater for the current tool."""
+        nonlocal _tool_timer_task, _tool_start_time
+        _cancel_tool_timer()
+        _tool_start_time = time.monotonic()
+        _tool_timer_task = asyncio.ensure_future(_tool_elapsed_updater())
+
+    def _cancel_tool_timer() -> None:
+        """Cancel the tool elapsed-time updater."""
+        nonlocal _tool_timer_task
+        if _tool_timer_task and not _tool_timer_task.done():
+            _tool_timer_task.cancel()
+        _tool_timer_task = None
+
+    def _tool_elapsed_str() -> str:
+        """Return formatted elapsed time for the current tool, or empty string."""
+        if not _tool_start_time:
+            return ""
+        elapsed = time.monotonic() - _tool_start_time
+        if elapsed < 1:
+            return ""
+        mins, secs = divmod(elapsed, 60)
+        if mins:
+            return f"⏱ {int(mins)}m {secs:.1f}s"
+        return f"⏱ {secs:.1f}s"
 
     async def _ensure_stream_started() -> None:
         """Lazy-start the stream on first event. Falls back to chat.update."""
@@ -2701,7 +2746,9 @@ async def handle_message(
                         stream_buffer = ""
                     # Mark previous task complete, start new one
                     if _active_task_id:
-                        await _append_task(_active_task_id, _active_task_title, "complete")
+                        _elapsed = _tool_elapsed_str()
+                        _cancel_tool_timer()
+                        await _append_task(_active_task_id, _active_task_title, "complete", details=_elapsed)
                     _task_counter += 1
                     _active_task_id = f"tool_{_task_counter}"
                     _active_task_title = event.tool_purpose or tool_name
@@ -2713,6 +2760,7 @@ async def handle_message(
                         status="in_progress",
                         details=tool_name if tool_detail else "",
                     )
+                    _start_tool_timer()
                 else:
                     accumulated += tool_status
                     assert stream_ts is not None
@@ -2726,7 +2774,9 @@ async def handle_message(
                 # the next text chunk arrives after wait returns.
                 if tool_name == "wait" and use_slack_stream and stream_ts:
                     if _active_task_id:
-                        await _append_task(_active_task_id, _active_task_title, "complete")
+                        _elapsed = _tool_elapsed_str()
+                        _cancel_tool_timer()
+                        await _append_task(_active_task_id, _active_task_title, "complete", details=_elapsed)
                         _active_task_id = ""
                     await slack.stop_stream(channel, stream_ts)
                     stream_ts = None
@@ -2860,6 +2910,7 @@ async def handle_message(
                 )
                 if outcome == _OUTCOME_REJECTED:
                     if use_slack_stream and _active_task_id:
+                        _cancel_tool_timer()
                         assert stream_ts is not None
                         await _append_task(_active_task_id, _active_task_title, "error")
                         _active_task_id = ""
@@ -3031,7 +3082,9 @@ async def handle_message(
     if use_slack_stream and stream_ts:
         # Mark last task complete
         if _active_task_id:
-            await _append_task(_active_task_id, _active_task_title, "complete")
+            _elapsed = _tool_elapsed_str()
+            _cancel_tool_timer()
+            await _append_task(_active_task_id, _active_task_title, "complete", details=_elapsed)
         # Flush remaining buffer (bracket_hold excluded — it's either
         # a suppressed OPTIONS tag or an unclosed bracket we drop)
         if stream_buffer:
