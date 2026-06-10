@@ -198,6 +198,26 @@ class TestConversationLog:
         meta = log.get_metadata("t1")
         assert meta.get("agent") == "beta"
 
+    def test_update_metadata_upserts_when_file_absent(self, tmp_path):
+        """update_metadata() on a not-yet-created session must create the file.
+
+        Regression: ``!ta <agent> --clean`` issued before the first message is
+        logged used to be silently dropped (the file did not exist yet), so the
+        agent/clean_mode selection lived only in memory and was lost on restart
+        -- the session then resumed under the default agent with full tools.
+        """
+        log = ConversationLog(base_dir=tmp_path)
+        log.update_metadata("fresh", {"agent": "artemis", "clean_mode": True})
+        meta = log.get_metadata("fresh")
+        assert meta.get("agent") == "artemis"
+        assert meta.get("clean_mode") is True
+        assert meta.get("_type") == "metadata"
+        # A subsequent append must NOT clobber the upserted metadata line.
+        log.append("fresh", "user", "hello")
+        meta2 = log.get_metadata("fresh")
+        assert meta2.get("agent") == "artemis"
+        assert meta2.get("clean_mode") is True
+
     def test_list_sessions_surfaces_agent(self, tmp_path):
         """list_sessions() should include the agent field when present."""
         log = ConversationLog(base_dir=tmp_path)

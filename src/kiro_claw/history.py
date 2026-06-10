@@ -653,19 +653,40 @@ class ConversationLog:
         self.update_metadata(key, {"title": title})
 
     def update_metadata(self, key: str, fields: dict) -> None:
-        """Merge *fields* into the session's metadata line and persist."""
+        """Merge *fields* into the session's metadata line and persist.
+
+        Upsert semantics: if the session file does not exist yet (e.g. ``!ta
+        <agent> --clean`` is issued before the first message is logged), the
+        file is created with a fresh metadata line carrying *fields*.  Without
+        this, the selection would live only in the in-memory caches and be lost
+        on restart -- the session would silently resume under the default agent
+        with the default toolset.
+        """
         path = self._path(key)
-        if not path.exists():
-            return
-        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-        if not lines:
-            return
-        try:
-            meta = json.loads(lines[0])
+        lines = (
+            path.read_text(encoding="utf-8").splitlines(keepends=True)
+            if path.exists()
+            else []
+        )
+        # Parse the existing metadata line, or synthesize a fresh one when the
+        # file is absent/empty (the upsert case). A first line that exists but
+        # isn't valid metadata is left untouched -- we never clobber it.
+        if lines:
+            try:
+                meta = json.loads(lines[0])
+            except json.JSONDecodeError:
+                return
             if meta.get("_type") != "metadata":
                 return
-        except json.JSONDecodeError:
-            return
+        else:
+            self._dir.mkdir(parents=True, exist_ok=True)
+            meta = {
+                "_type": "metadata",
+                "created_at": datetime.now().isoformat(),
+                "last_consolidated": 0,
+            }
+            lines = [""]  # placeholder; replaced below
+
         meta.update(fields)
         lines[0] = json.dumps(meta) + "\n"
         import os as _os
