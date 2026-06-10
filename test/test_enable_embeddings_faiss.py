@@ -70,7 +70,9 @@ def _common_patches(cfg_path, faiss_available=False, proc_rc=0, proc_stderr=b"")
         "subprocess": patch("asyncio.create_subprocess_exec", return_value=proc),
         "validate": patch("kiro_claw.embeddings._validate_url"),
         "embed_fn": patch("kiro_claw.embeddings.make_sync_embed_fn", return_value=lambda t: [0.0]),
-        "faiss": patch.dict("sys.modules", {"faiss": faiss_mod}),
+        # Inject a fake ``pip`` so ``_ensure_pip_available`` short-circuits and
+        # these faiss-focused tests see exactly one subprocess (the faiss install).
+        "faiss": patch.dict("sys.modules", {"faiss": faiss_mod, "pip": MagicMock()}),
         "store": patch(f"{_MOD}._get_vector_store", return_value=store),
         "wrap_argv": patch(f"{_MOD}.wrap_argv", side_effect=lambda argv, **kw: (argv, None)),
     }
@@ -205,3 +207,73 @@ class TestFaissInstallTimeout:
         proc.kill.assert_called_once()
         assert mem_mod._embedding_setup_status["step"] == "idle"
         assert "timed out" in mem_mod._embedding_setup_status["error"]
+
+
+class TestEnsurePipBootstrap:
+    """Some packaged/minimal Python runtimes have no pip; ensure it is
+    bootstrapped via ensurepip before the faiss-cpu install (else 'No module
+    named pip')."""
+
+    @pytest.mark.asyncio
+    async def test_noop_when_pip_importable(self) -> None:
+        # pip present -> no subprocess spawned, returns ok with empty error.
+        with patch.dict("sys.modules", {"pip": MagicMock()}):
+            with patch("asyncio.create_subprocess_exec") as mock_exec:
+                ok, err = await mem_mod._ensure_pip_available()
+        assert ok is True
+        assert err == ""
+        mock_exec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_bootstraps_pip_when_missing(self) -> None:
+        # pip absent -> ensurepip runs; success returns ok.
+        proc = _mock_proc(rc=0)
+        with patch.dict("sys.modules", {"pip": None}), \
+             patch(f"{_MOD}.wrap_argv", side_effect=lambda argv, **kw: (argv, None)), \
+             patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
+            ok, err = await mem_mod._ensure_pip_available()
+        assert ok is True
+        assert err == ""
+        argv = mock_exec.call_args[0]
+        assert "ensurepip" in argv
+        assert "--upgrade" in argv
+
+    @pytest.mark.asyncio
+    async def test_returns_error_when_ensurepip_fails(self) -> None:
+        # pip absent and ensurepip exits non-zero -> ok=False with a message.
+        proc = _mock_proc(rc=1, stderr=b"ensurepip is not available")
+        with patch.dict("sys.modules", {"pip": None}), \
+             patch(f"{_MOD}.wrap_argv", side_effect=lambda argv, **kw: (argv, None)), \
+             patch("asyncio.create_subprocess_exec", return_value=proc):
+            ok, err = await mem_mod._ensure_pip_available()
+        assert ok is False
+        assert "ensurepip" in err
+
+    @pytest.mark.asyncio
+    async def test_enable_returns_500_when_pip_bootstrap_fails(self, tmp_path: Path) -> None:
+        # End-to-end: faiss missing AND pip bootstrap fails -> handler 500s
+        # before attempting the faiss install, with status reset to idle.
+        cfg_path = tmp_path / "kiroclaw.json"
+        cfg_path.write_text("{}", encoding="utf-8")
+        # faiss_available=False, but do NOT inject a fake pip -> force the
+        # bootstrap path; make ensurepip (the only subprocess) fail.
+        store = MagicMock()
+        store.embed_fn = None
+        store.load_faiss_index = MagicMock()
+        proc = _mock_proc(rc=1, stderr=b"ensurepip is not available")
+
+        with patch("kiro_claw.embeddings.OllamaManager", return_value=_mock_mgr()), \
+             patch("kiro_claw.config.loader.KiroClawConfig.load", return_value=_mock_cfg()), \
+             patch("kiro_claw.config.loader.config_path", return_value=cfg_path), \
+             patch("asyncio.create_subprocess_exec", return_value=proc), \
+             patch.dict("sys.modules", {"faiss": None, "pip": None}), \
+             patch(f"{_MOD}._get_vector_store", return_value=store), \
+             patch(f"{_MOD}.wrap_argv", side_effect=lambda argv, **kw: (argv, None)):
+            async with TestClient(TestServer(_make_app())) as c:
+                resp = await c.post("/api/memory/enable-embeddings")
+                assert resp.status == 500
+                body = await resp.json()
+                assert "pip bootstrap" in body["error"]
+
+        assert mem_mod._embedding_setup_status["step"] == "idle"
+        assert "pip bootstrap" in mem_mod._embedding_setup_status["error"]

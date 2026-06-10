@@ -291,6 +291,51 @@ async def api_memory_embedding_status(request: web.Request) -> web.Response:
     )
 
 
+async def _ensure_pip_available() -> tuple[bool, str]:
+    """Ensure pip is importable in the runtime interpreter.
+
+    Some packaged or minimal Python runtimes ship without pip, so a bare
+    ``sys.executable -m pip install`` fails with "No module named pip" and the
+    faiss-cpu install below never runs. Bootstrap pip via ``ensurepip`` (shipped
+    with CPython) first. No-op when pip already imports. Returns
+    ``(ok, error_message)`` — ``error_message`` is empty on success.
+    """
+    try:
+        import pip  # noqa: F401
+        return True, ""
+    except ImportError:
+        pass
+    sandboxed_argv, cleanup = wrap_argv(
+        [sys.executable, "-m", "ensurepip", "--upgrade"],
+        mode="standard",
+    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *sandboxed_argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            logger.warning("ensurepip bootstrap timed out")
+            return False, "pip bootstrap (ensurepip) timed out"
+        if proc.returncode != 0:
+            logger.warning("ensurepip bootstrap failed: %s", stderr.decode()[:500])
+            return False, "pip bootstrap (ensurepip) failed"
+        importlib.invalidate_caches()
+        logger.info("Bootstrapped pip via ensurepip")
+        return True, ""
+    finally:
+        if cleanup:
+            try:
+                os.unlink(cleanup)
+            except OSError:
+                pass
+
+
 async def api_memory_enable_embeddings(request: web.Request) -> web.Response:
     """POST /api/memory/enable-embeddings — install Ollama if needed, start, pull model, update config."""
     global _embedding_setup_status
@@ -388,6 +433,17 @@ async def api_memory_enable_embeddings(request: web.Request) -> web.Response:
             import faiss  # noqa: F401
         except ImportError:
             _embedding_setup_status = {"step": "installing_faiss", "error": ""}
+            # Some packaged/minimal Python runtimes ship without pip — bootstrap
+            # it first, else the install below fails with "No module named pip".
+            pip_ok, pip_err = await _ensure_pip_available()
+            if not pip_ok:
+                _embedding_setup_status = {
+                    "step": "idle",
+                    "error": f"{pip_err} — click Enable to retry",
+                }
+                return web.json_response(
+                    {"error": f"{pip_err}. Click Enable to retry."}, status=500
+                )
             sandboxed_argv, cleanup = wrap_argv(
                 [sys.executable, "-m", "pip", "install", "-q",
                  "faiss-cpu", "--only-binary=:all:"],
