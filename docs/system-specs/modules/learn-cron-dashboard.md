@@ -348,6 +348,34 @@ The Agents page context window section shows per-session info:
 - **Agent config path discovery**: `_find_agent_config()` searches `$KIROCLAW_PROJECT_DIR` → `~/.kiroclaw/project_dir` saved path → package-relative fallback
 - **Static system info caching**: Hostname, OS, arch, CPU count, total memory computed once; only dynamic metrics (load, vm_stat, netstat) fetched per request
 
+### Tool-Refusal Recovery
+
+When `_run_chat` refuses a tool call for a **recoverable, system-side** reason —
+a host-gate policy deny (`hooks.on_tool_call` → `TOOL_DENY`) or the read-only
+bash safety gate (`is_read_only_bash` / `unsafe_bash_reason`) — kiro-cli ends
+the turn early by emitting the attribution-free marker `Tool uses were
+interrupted, waiting for the next user prompt`. Historically the refusal reason
+reached only the dashboard pill and the SEL audit log, never the model, so the
+agent stalled and the user had to manually prompt it to continue (and the model,
+lacking any cause in its context, often misattributed the stop to the user).
+
+`_run_chat` now records each recoverable refusal as a redacted `(title, reason)`
+tuple in a per-turn `_refusal_reasons` list. When the turn ends — and the user
+did **not** stop it (`slot._stopping` is false) and no session reset is already
+re-queuing — it builds a continuation via `context.build_refusal_recovery_prompt`,
+prepends `REFUSAL_RECOVERY_PREFIX`, and `queue_insert(0, …)`s it. The existing
+finally-block dequeue loop renders it as an `inject` message (not a user bubble)
+and re-dispatches it on the same session, so the model receives the reason and
+can adapt (an allowed alternative, a different tool) or stop on its own with a
+stated reason. The synthetic prompt is never mirrored to a linked Slack thread
+as user input (`_is_recovery` guard).
+
+By design there is **no retry cap**: the model decides when to stop, and the
+user's Stop button remains the hard breaker (a stop clears the queue and aborts
+the chain). Scope is the two reason-bearing gates above; pre-tool-use hook
+`BLOCKED:` results are not yet wired for recovery (consistent treatment across
+all three hook branches is a follow-up).
+
 ### Design
 
 - OpenClaw-inspired: Space Grotesk + JetBrains Mono, dark/light theme with amber accent
