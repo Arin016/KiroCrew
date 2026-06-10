@@ -10,9 +10,9 @@ its own `website/CLAUDE.md`.
 
 KiroClaw is an open-source personal AI agent that runs on your own machine —
 chat from Slack, a web dashboard, or the CLI; run multi-step tasks unattended;
-schedule cron jobs; persist memory across sessions. It drives an LLM through a
-pluggable provider layer (default: `claude-agent-acp`) over the ACP JSON-RPC
-protocol, plus MCP tools.
+schedule cron jobs; persist memory across sessions. It drives an LLM through
+the KiroACP provider — the ACP adapter running the `kiro-cli` backend over the
+ACP JSON-RPC protocol — plus MCP tools.
 
 - **Backend:** Python package `kiro_claw` in `src/kiro_claw/` (~216 modules).
 - **Frontend:** React + TS + Vite SPA in `website/`; built `dist/` is staged
@@ -35,14 +35,20 @@ changing code, **never reintroduce** any of the following (see
   `dashboard/handlers/mwinit.py`, `tunnel/manager.py`, `aim_agents.py`): their
   public symbols are preserved as no-ops so the import graph stays intact — keep
   them stubbed, don't wire them back to internal services.
-- Defaults that were flipped for OSS (keep these): provider default is
-  **`claude_code`** (public `claude-agent-acp`); `kiro-cli` is an *optional*
-  backend resolved via `PATH` (graceful `None` when absent); embeddings pull
-  from the **public** Ollama registry (`ollama pull qwen3-embedding:0.6b`);
-  voice TTS defaults to **Piper** (local), not Polly; Slack enterprise gate is
-  default-open (opt-in allowlist via `slack.allowed_enterprise_ids`); `boto3` /
-  `amazon-transcribe` / Bedrock are **optional** lazy imports
-  (`pip install kiroclaw[voice]` / `[aws]`).
+- KiroClaw is **KiroACP-only**: the sole provider is the ACP adapter driving
+  the **`kiro-cli`** backend (`agent.provider` is fixed to `acp` and kiro-cli is
+  REQUIRED). The standalone `ClaudeCodeProvider`, `BedrockProvider`, `cc_agent`,
+  and `mirror` modules were deleted; the `claude_code`/`bedrock` factory
+  branches, the `cc_*`/`bedrock_*` config fields, and the `[aws]` extra are
+  gone. The dormant `ACP_BACKEND_CLAUDE` / `_is_claude` protocol seam in
+  `acp/client.py` is intentionally kept so an internal companion can
+  re-register Claude Code — do NOT delete it, but do NOT re-add the public
+  registration glue either. (See the "Package Split" design.)
+- Other OSS-flipped defaults (keep these): embeddings pull from the **public**
+  Ollama registry (`ollama pull qwen3-embedding:0.6b`); voice TTS defaults to
+  **Piper** (local), not Polly; Slack enterprise gate is default-open (opt-in
+  allowlist via `slack.allowed_enterprise_ids`); `boto3` / `amazon-transcribe`
+  are **optional** lazy imports for STT only (`pip install kiroclaw[voice]`).
 
 **Keep** the generic security controls (these are not Amazon-specific): AKIA/ASIA
 credential redaction, destructive-command deny patterns, `~/.aws` / `~/.ssh`
@@ -90,8 +96,7 @@ python -m pytest -k "flush_segment" --override-ini="addopts=" -p no:cacheprovide
 ```
 
 - Async tests **must** carry `@pytest.mark.asyncio` (`asyncio_mode=strict`).
-- Mock external processes (`kiro-cli`, `claude-agent-acp`) — never spawn real
-  ones in tests.
+- Mock external processes (`kiro-cli`) — never spawn real ones in tests.
 - `TestCleanupLoopResilience` in `test_session.py` is timing-flaky under
   parallel load but passes in isolation.
 

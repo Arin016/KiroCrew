@@ -57,8 +57,9 @@ reintroduce**:
   Coverlay/jscpd-as-brazil-gate. The public build is plain **npm + Vite**, and
   `website/.npmrc` pins the **public** registry (`registry.npmjs.org`).
 - Identity/telemetry: live Cognito pools or RUM app ids (`src/rum.ts` is a
-  no-op telemetry stub — keep it inert), `aws-rum-web`,
-  `@agentclientprotocol/claude-agent-acp` as a web dependency.
+  no-op telemetry stub — keep it inert), `aws-rum-web`. The backend is
+  KiroACP (`kiro-cli`) only; the frontend never needs an ACP adapter as a web
+  dependency.
 - Removed product surfaces: TaskKeeper, secretary, mimir, code-reviewer pages /
   tabs / API client methods, and the Midway card on the Overview page. They were
   deleted with their backend; don't re-add the UI.

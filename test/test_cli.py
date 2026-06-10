@@ -121,52 +121,6 @@ class TestDoctor:
         out = capsys.readouterr().out
         assert "ssh -NL" in out
 
-    def test_doctor_warns_on_overbroad_cc_deny(self, tmp_path, capsys):
-        """Doctor surfaces an over-broad permissions.deny in ~/.claude that
-        would silently abort Claude Code commands upstream of KiroClaw."""
-        agent_file = tmp_path / "kiroclaw.json"
-        _healthy_agent_file(agent_file)
-        cc_settings = tmp_path / "settings.json"
-        cc_settings.write_text(json.dumps({"permissions": {"deny": ["Bash(*)"]}}))
-        mock_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
-        with (
-            patch("kiro_claw.cli_doctor.shutil.which", side_effect=lambda b: f"/usr/local/bin/{b}"),
-            patch("kiro_claw.cli_doctor.KIRO_AGENTS_DIR", tmp_path),
-            patch("kiro_claw.cli_doctor.subprocess.run", return_value=mock_run),
-            patch("urllib.request.urlopen", side_effect=urllib.error.URLError("no gateway")),
-            patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
-            patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
-            patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True),
-            patch("kiro_claw.cli_doctor.CC_SETTINGS_PATH", cc_settings),
-            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
-        ):
-            _doctor()
-        out = capsys.readouterr().out
-        assert "over-broad permissions.deny" in out
-        assert "Bash(*)" in out
-
-    def test_doctor_clean_cc_deny_reports_ok(self, tmp_path, capsys):
-        """With no over-broad deny rule, doctor reports the CC deny check OK."""
-        agent_file = tmp_path / "kiroclaw.json"
-        _healthy_agent_file(agent_file)
-        cc_settings = tmp_path / "settings.json"
-        cc_settings.write_text(json.dumps({"permissions": {"deny": ["Bash(git push*)"]}}))
-        mock_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
-        with (
-            patch("kiro_claw.cli_doctor.shutil.which", side_effect=lambda b: f"/usr/local/bin/{b}"),
-            patch("kiro_claw.cli_doctor.KIRO_AGENTS_DIR", tmp_path),
-            patch("kiro_claw.cli_doctor.subprocess.run", return_value=mock_run),
-            patch("urllib.request.urlopen", side_effect=urllib.error.URLError("no gateway")),
-            patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
-            patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
-            patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True),
-            patch("kiro_claw.cli_doctor.CC_SETTINGS_PATH", cc_settings),
-            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
-        ):
-            _doctor()
-        out = capsys.readouterr().out
-        assert "no over-broad" in out
-
 
 class TestSetupWorkspaceDir:
     """Tests for _setup_workspace_dir prompt default and label logic."""

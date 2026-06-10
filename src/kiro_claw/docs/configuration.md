@@ -87,14 +87,10 @@ Set via `kiroclaw config set sandbox.mode auto`.
 
 | Key | Description | Default |
 |-----|-------------|---------|
-| `agent.provider` | LLM provider backend: `"acp"` (claude-agent-acp, recommended), `"claude_code"` (Claude Code CLI), or `"bedrock"` (requires AWS credentials) | `"claude_code"` |
+| `agent.provider` | LLM provider backend: `"acp"` (KiroACP / kiro-cli) | `"acp"` |
 | `agent.default_agent` | Default agent name | `"kiroclaw"` |
 | `agent.approval_mode` | `"auto"` or `"interactive"` | `"interactive"` |
 | `agent.model` | LLM model override | `"auto"` |
-| `agent.cc_model` | Claude Code model (empty = CLI default). Only when provider=claude_code | `""` |
-| `agent.cc_permission_mode` | CC permission mode: `"bypassPermissions"`, `"plan"` | `"bypassPermissions"` |
-| `agent.cc_max_turns` | Max turns per CC session (0 = unlimited) | `0` |
-| `agent.cc_max_budget_usd` | Max spend per CC session in USD (0 = unlimited) | `0` |
 | `agent.bot_name` | Custom name the bot identifies as | `""` |
 | `agent.conductor_skill` | Enable agent delegation conductor | `false` |
 | `agent.max_channels` | Max concurrent agent channels (1-5) | `1` |

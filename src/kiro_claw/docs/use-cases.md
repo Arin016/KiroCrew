@@ -59,7 +59,7 @@ run automatically covers the gap. See [Cron Jobs](cron-and-scheduling.md#skippin
 
 Fan out research across multiple sources simultaneously:
 
-> "Research Bedrock pricing changes across all regions"
+> "Research EC2 pricing changes across all regions"
 
 KiroClaw spawns subagents — one per region or source — and synthesizes the
 results into a single summary.

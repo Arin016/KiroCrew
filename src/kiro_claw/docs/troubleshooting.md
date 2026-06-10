@@ -13,13 +13,16 @@ tools, credentials, gateway status, and vector memory.
 
 ### "agent backend not found"
 
-KiroClaw needs an agent backend on your PATH. Install the default ACP backend:
+KiroClaw needs the `kiro-cli` agent backend on your PATH. Install `kiro-cli`
+and make sure it resolves on your PATH:
 
 ```bash
-npm install -g @agentclientprotocol/claude-agent-acp
+which kiro-cli   # should print a path; if empty, kiro-cli is not on PATH
 ```
 
-Or install the Claude Code CLI and set `kiroclaw config set agent.provider claude_code`.
+`kiro-cli` (the ACP backend) is required — the agent provider is fixed to
+`acp`. If `which kiro-cli` prints nothing, install `kiro-cli` and add its
+install location to your PATH.
 
 ### Agent config missing or stale
 

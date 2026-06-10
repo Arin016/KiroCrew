@@ -2,17 +2,16 @@
 
 ## What Is KiroClaw?
 
-KiroClaw is an autonomous AI agent layer that runs on top of an agent backend
-(claude-agent-acp by default; kiro-cli optional). It adds persistent memory,
-scheduled jobs, background subagents, self-learning, and multi-session
-orchestration. You interact with it via Slack DMs or a web dashboard.
+KiroClaw is an autonomous AI agent layer that runs on top of the kiro-cli
+(KiroACP) backend. It adds persistent memory, scheduled jobs, background
+subagents, self-learning, and multi-session orchestration. You interact with it
+via Slack DMs or a web dashboard.
 
 ## Prerequisites
 
 - **Python 3.10+** and **pip** (backend)
 - **Node.js 18+** and **npm** (frontend dashboard)
-- **An agent backend** — `claude-agent-acp` (default) or the Claude Code CLI.
-  kiro-cli is supported but optional.
+- **The kiro-cli (KiroACP) backend** — required; must be on your `PATH`
 - **macOS or Linux** — Windows is not supported
 - *(Optional)* **Ollama** for local vector-memory embeddings
 
@@ -44,14 +43,10 @@ In development, `npm run dev` serves the dashboard with hot reload.
 
 ### Agent backend
 
-Install the default ACP backend (published to npm):
-
-```bash
-npm install -g @agentclientprotocol/claude-agent-acp
-```
-
-Alternatively, install the Claude Code CLI and set `agent.provider` to
-`claude_code`. See [Configuration](configuration.md) for provider options.
+KiroClaw runs the kiro-cli (KiroACP) backend, which is required. Install
+kiro-cli and make sure the `kiro-cli` binary is on your `PATH` — KiroClaw
+resolves it from `PATH` at startup. See [Configuration](configuration.md) for
+backend options.
 
 ## First-Time Setup
 
@@ -60,7 +55,7 @@ kiroclaw setup
 ```
 
 This interactive wizard:
-1. Detects the agent backend (claude-agent-acp / Claude Code) on your PATH
+1. Detects the kiro-cli (KiroACP) backend on your PATH
 2. Saves the project directory for future use
 3. Installs the agent config to `~/.kiro/agents/kiroclaw.json`
 4. Prompts for Slack credentials (app token, bot token, owner ID)

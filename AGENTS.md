@@ -169,7 +169,7 @@ Jane Doe (janedoe), John Smith (jsmith)
 | Error handling | Custom exceptions in `acp/client.py`; return error strings at tool boundaries |
 | Async | Use `asyncio` throughout; `async def` for all I/O operations |
 | Dataclasses | Use `@dataclass` for data containers |
-| Constants | No hardcoded strings/values in business logic. Protocol strings in `acp/types.py`, timeouts in `acp/client.py`, UX strings in `slack/handler.py`, credential keys in `config/loader.py`, hook results in `hooks.py`, memory paths in `memory.py`, lesson limits in `learn.py`, cron limits in `cron.py`, MCP protocol version in `mcp_cron.py`, MCP protocol version in `mcp_core.py`, dashboard port in `dashboard.py`, built-in skills in `skills/*/SKILL.md`, provider event kinds in `providers/base.py`, Bedrock defaults in `providers/bedrock.py`, session limits in `history.py`, context budgets in `context.py` (preferences 1k, projects 2k, history 6k, lessons 1k, conversation 8k, cross-tab 2k, per-message 800, total 50k), task states in `task.py`, heartbeat intervals in `heartbeat.py`, subagent limits in `subagent.py`, agent config in `agents/defaults.json`, shutdown signal in `__init__.py`, slot message cap (5000) in `dashboard/state.py`, JSONL rotation (2MB) in `history.py`, usage cache (600s) in `dashboard/handlers.py`, webhook hook limits (max 6 concurrent, 50KB message, 600s default / 3600s max timeout) in `dashboard/handlers.py`, embed cache (128) in `embeddings.py` |
+| Constants | No hardcoded strings/values in business logic. Protocol strings in `acp/types.py`, timeouts in `acp/client.py`, UX strings in `slack/handler.py`, credential keys in `config/loader.py`, hook results in `hooks.py`, memory paths in `memory.py`, lesson limits in `learn.py`, cron limits in `cron.py`, MCP protocol version in `mcp_cron.py`, MCP protocol version in `mcp_core.py`, dashboard port in `dashboard.py`, built-in skills in `skills/*/SKILL.md`, provider event kinds in `providers/base.py`, session limits in `history.py`, context budgets in `context.py` (preferences 1k, projects 2k, history 6k, lessons 1k, conversation 8k, cross-tab 2k, per-message 800, total 50k), task states in `task.py`, heartbeat intervals in `heartbeat.py`, subagent limits in `subagent.py`, agent config in `agents/defaults.json`, shutdown signal in `__init__.py`, slot message cap (5000) in `dashboard/state.py`, JSONL rotation (2MB) in `history.py`, usage cache (600s) in `dashboard/handlers.py`, webhook hook limits (max 6 concurrent, 50KB message, 600s default / 3600s max timeout) in `dashboard/handlers.py`, embed cache (128) in `embeddings.py` |
 | Naming | Module-level constants: `UPPER_SNAKE_CASE`. Private constants: `_UPPER_SNAKE_CASE` |
 | Icons | **Never use emojis in the UI.** Use `lucide-react` components with `className="lucide-inline"`. See `website/AGENTS.md` for full icon conventions. |
 
@@ -185,11 +185,9 @@ Jane Doe (janedoe), John Smith (jsmith)
 ## Architecture Principles
 
 - LLMProvider ABC is the interface for all LLM backends (`providers/base.py`)
-- ACP provider (default) wraps kiro-cli or claude-agent-acp (JSON-RPC 2.0 over stdio) — full tool execution, session management, and auto-compaction. Backend selection:
-  - `"acp"` (default): spawns `kiro-cli acp --agent <name>`
-  - `"claude_code"` (legacy): spawns `claude-agent-acp` via AcpProvider with `acp_backend="claude"`
-- Bedrock provider is text-only Q&A (no tools) via `converse_stream()`
-- Config-driven provider selection: `"provider": "acp"` (default, kiro-cli), `"claude_code"` (claude-agent-acp adapter), or `"bedrock"`
+- ACP provider wraps kiro-cli (JSON-RPC 2.0 over stdio) — full tool execution, session management, and auto-compaction. Backend selection:
+  - `"acp"` (required): spawns `kiro-cli acp --agent <name>`
+- Config-driven provider selection: `"provider": "acp"` (kiro-cli) is fixed/required
 - Tool permissions auto-approved in phase 1; interactive approval in phase 3
 - Config loaded from `~/.kiroclaw/config.json` with dataclass defaults
 - CLI uses `argparse` (stdlib only, no external deps)
@@ -233,8 +231,6 @@ Jane Doe (janedoe), John Smith (jsmith)
 | `dashboard/_types.py` | Dashboard type definitions |
 | `validation.py` | Input validation for cron, config, user actions |
 | `embeddings.py` | Embedding provider with LRU cache (128 entries) |
-| `providers/claude_code.py` | Claude Code CLI provider — legacy (per_session + ephemeral modes) |
-| `cc_agent.py` | Claude Code .mcp.json generation and agent config |
 | `session_map.py` | Session key → CWD/provider persistence (split from session.py) |
 | `session_pid.py` | PID tracking for ACP processes (split from session.py) |
 | `optimizer.py` | Native prompt optimizer (Cmd+Shift+Enter) |

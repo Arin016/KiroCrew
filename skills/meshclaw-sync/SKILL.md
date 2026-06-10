@@ -61,6 +61,7 @@ removed or stubbed. These have no public-fork equivalent:
 | `code_reviewer` / `secretary` / `taskkeeper` | deleted; `sync_aim_packages` is a no-op stub (`return None`) |
 | CodeArtifact / vendored `claude-agent-acp` | fork uses **public** `npm i -g @agentclientprotocol/claude-agent-acp` |
 | Cognito / RUM ids / AEA | removed identity/telemetry |
+| **non-KiroACP providers**: `providers/claude_code.py` (`ClaudeCodeProvider`), `providers/bedrock.py` (`BedrockProvider`), `cc_agent.py`, `mirror.py` | **KiroClaw is KiroACP (kiro-cli) ONLY.** These modules + the config `claude_code`/`bedrock` factory branches, the `cc_*`/`bedrock_*` `AgentConfig` fields, and the `provider` enum beyond `["acp"]` were deleted. Any upstream commit confined to them is SKIP/NA_INTERNAL. |
 
 **Confirm ABSENT by `ls`, not memory** — a commit confined to an absent dir is
 SKIP/NA_INTERNAL. A commit that merely *mentions* an internal name in a
@@ -216,9 +217,10 @@ Generic security controls are NOT Amazon-specific — keep them: AKIA/ASIA
 credential redaction, destructive-command deny patterns, `~/.aws`/`~/.ssh`
 sensitive-path blocking, the SEL HMAC audit log, command-trust matching.
 
-And keep the OSS-flipped defaults: provider `claude_code`, optional `kiro-cli`
-via PATH, Ollama public embeddings, Piper TTS default, Slack enterprise
-default-open, lazy boto3/transcribe imports.
+And keep the OSS-flipped defaults: provider **`acp` (kiro-cli, the only
+provider)**, Ollama public embeddings, Piper TTS default, Slack enterprise
+default-open, lazy boto3/transcribe imports (STT-only; the `[aws]`/Bedrock
+extra was removed with the providers).
 
 ## Step 7 — Build, verify, and ship (used by the recurring auto-sync)
 

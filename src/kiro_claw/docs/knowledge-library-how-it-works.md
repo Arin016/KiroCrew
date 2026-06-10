@@ -177,8 +177,6 @@ For the local Ollama provider, pull the model first:
 |----------|-------|-----------|------|----------|
 | `ollama` | `nomic-embed-text` | 768 | Free (local) | Ollama running locally |
 | `ollama` | `mxbai-embed-large` | 1024 | Free (local) | Ollama running locally |
-| `bedrock` *(optional, planned)* | `amazon.titan-embed-text-v2:0` | 1024 | usage-based | AWS credentials (install the `aws` extra) |
-| `bedrock` *(optional, planned)* | `cohere.embed-english-v3` | 1024 | usage-based | AWS credentials |
 | `none` | — | — | Free | Nothing (current default) |
 
 ### Graceful Degradation

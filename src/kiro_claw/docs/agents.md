@@ -81,7 +81,6 @@ This regenerates `kiroclaw.json` from the current defaults + user overrides.
 
 ## Architecture Note
 
-KiroClaw runs each agent as a session against a pluggable backend. The default
-backend is `claude-agent-acp`; the Claude Code CLI and kiro-cli are also
-supported (see `agent.provider` in [Configuration](configuration.md)). Each
-agent session has its own system prompt, tools, and MCP servers.
+KiroClaw runs each agent against kiro-cli (KiroACP) (see `agent.provider` in
+[Configuration](configuration.md)). Each agent session has its own system
+prompt, tools, and MCP servers.

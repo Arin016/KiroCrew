@@ -1,9 +1,8 @@
 # KiroClaw Documentation
 
 KiroClaw is a personal, autonomous AI agent that runs locally on your machine.
-It's powered by an agent backend (claude-agent-acp by default; Claude Code CLI
-or kiro-cli optional) and connects to tools over the Model Context Protocol
-(MCP).
+It's powered by kiro-cli (KiroACP) and connects to tools over the Model Context
+Protocol (MCP).
 
 ## Quick Start
 
