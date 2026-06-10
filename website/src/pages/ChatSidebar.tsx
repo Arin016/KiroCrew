@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, memo, useMemo, useCallback, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import { LayoutGroup, AnimatePresence, motion } from 'framer-motion'
-import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, FolderPlus, Folder, ChevronRight, Clock, ArrowDownNarrowWide, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns3, GripVertical, Zap, Check, Link2, Copy } from 'lucide-react'
+import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, Folder, ChevronRight, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns3, GripVertical, Zap, Check, Link2, Copy, ListFilter } from 'lucide-react'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy, useSortable, sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -11,9 +11,7 @@ import { switchSlot, createSlot, deleteSlot, fetchHistory, resumeFromHistory, de
 import { sseSlotTitle, updateSlotFolder, updateSlotPin, markSlotUnread, markSlotRead } from '../store/dashboardSlice'
 import { api, SEARCH_MIN_CHARS } from '../api/client'
 import { computeReorderedFolders } from '../utils/reorderFolders'
-import { useProvider } from '../providers'
 import { SearchInput, Input, Btn } from '../components/ui'
-import InfoTip from '../components/InfoTip'
 import { useSessionPalette } from '../hooks/useSessionPalette'
 import { useImeGuard } from '../hooks/useImeGuard'
 import { useIsMobile } from '../hooks/useIsMobile'
@@ -43,20 +41,16 @@ function fmtRelativeTime(ts: string | number | undefined): string {
 }
 
 /** Sortable wrapper for a folder block — enables drag-to-reorder */
-function SortableFolderBlock({ folder, renderFolderBlock }: { folder: ChatFolder; renderFolderBlock: (f: ChatFolder, depth: number) => React.ReactNode[] }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: folder.id })
+function SortableFolderBlock({ folder, renderFolderBlock }: { folder: ChatFolder; renderFolderBlock: (f: ChatFolder, depth: number, visited?: Set<string>, dragHandleProps?: React.HTMLAttributes<HTMLElement>, dragHandleRef?: (el: HTMLElement | null) => void) => React.ReactNode[] }) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id: folder.id })
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1, position: 'relative' as const }
+  // The drag handle lives INSIDE the folder header (see renderFolderHeader) so
+  // hovering it reuses the header's own :hover state — no separate highlight.
+  // setActivatorNodeRef marks that handle as the drag activator so dnd-kit's
+  // keyboard sensor can start a reorder from it (custom handle != sortable node).
   return (
-    <div ref={setNodeRef} style={style} className="group/folder relative" data-folder-sortable={folder.id}>
-      <div
-        className="absolute -left-3 top-0 h-9 w-3 flex items-center justify-center cursor-grab pointer-events-none group-hover/folder:pointer-events-auto opacity-0 group-hover/folder:opacity-100 hover:!opacity-100 transition-opacity z-10"
-        aria-label={`Reorder ${folder.name}`}
-        {...attributes}
-        {...listeners}
-      >
-        <GripVertical size={12} className="text-muted" />
-      </div>
-      {renderFolderBlock(folder, 0)}
+    <div ref={setNodeRef} style={style} className="relative" data-folder-sortable={folder.id}>
+      {renderFolderBlock(folder, 0, undefined, { ...attributes, ...listeners } as React.HTMLAttributes<HTMLElement>, setActivatorNodeRef)}
     </div>
   )
 }
@@ -73,6 +67,7 @@ interface Slot {
   slack_linked?: boolean
   color_index?: number | null
   memory_mode?: 'persistent' | 'incognito' | 'temporary'
+  clean_mode?: boolean
   folder_id?: string
   pinned?: boolean
   tags?: string[]
@@ -85,6 +80,7 @@ interface HistoryItem {
   modified?: number  // unix epoch seconds; backend's mtime — used for segmenting + display
   agent?: string  // persisted in JSONL metadata (set on session create + agent switch)
   memory_mode?: 'persistent' | 'incognito' | 'temporary'
+  clean_mode?: boolean
 }
 
 interface AgentInfo {
@@ -100,7 +96,7 @@ interface AgentInfo {
  */
 function useDebouncedSessionSearch<T>(
   query: string,
-  transform: (sessions: { key: string; title?: string; created?: string; modified?: number; agent?: string; memory_mode?: 'persistent' | 'incognito' | 'temporary' }[]) => T,
+  transform: (sessions: { key: string; title?: string; created?: string; modified?: number; agent?: string; memory_mode?: 'persistent' | 'incognito' | 'temporary'; clean_mode?: boolean }[]) => T,
 ): T | null {
   const [result, setResult] = useState<T | null>(null)
   const token = useRef(0)
@@ -206,7 +202,6 @@ function ChatSidebar({
   defaultAgent, installedAgents, mode, onWidthChange, onDragChange, onSelectSlot,
 }: ChatSidebarProps) {
   const dispatch = useAppDispatch()
-  const provider = useProvider()
   const queryClient = useQueryClient()
   const ime = useImeGuard()
   const isMobile = useIsMobile()
@@ -240,6 +235,7 @@ function ChatSidebar({
   // has arrived. Used by the auto-drain effect to distinguish "data not yet
   // loaded" from "data loaded and genuinely empty".
   const slotsLoaded = useAppSelector(s => s.dashboard.slotsLoaded)
+  const slotStatusDetail = useAppSelector(s => s.chat.slotStatusDetail)
   // O(1) lookup set for the filter predicate (mirrors the `pinned` and
   // `slotSearchKeys` patterns elsewhere in this file).
   const unreadSlotSet = useMemo(() => new Set(unreadSlots), [unreadSlots])
@@ -310,6 +306,8 @@ function ChatSidebar({
     document.body.style.userSelect = 'none'
   }, [historyHeight])
   const [cleanupOpen, setCleanupOpen] = useState(false)
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false)
+  const [filterSortOpen, setFilterSortOpen] = useState(false)
   const [cleanupDays, setCleanupDays] = useState(3)
   const [cleanupExpanded, setCleanupExpanded] = useState(false)
   const [cleanupError, setCleanupError] = useState('')
@@ -461,6 +459,30 @@ function ChatSidebar({
     const id = setTimeout(() => document.addEventListener('mousedown', handler), 0)
     return () => { clearTimeout(id); document.removeEventListener('mousedown', handler) }
   }, [columnEditId])
+
+  // Close header menu on outside click
+  useEffect(() => {
+    if (!headerMenuOpen) return
+    const handler = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null
+      if (t?.closest('[data-header-menu]')) return
+      setHeaderMenuOpen(false)
+    }
+    const id2 = setTimeout(() => document.addEventListener('mousedown', handler), 0)
+    return () => { clearTimeout(id2); document.removeEventListener('mousedown', handler) }
+  }, [headerMenuOpen])
+
+  // Close filter/sort popover on outside click
+  useEffect(() => {
+    if (!filterSortOpen) return
+    const handler = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null
+      if (t?.closest('[data-filter-sort]')) return
+      setFilterSortOpen(false)
+    }
+    const id3 = setTimeout(() => document.addEventListener('mousedown', handler), 0)
+    return () => { clearTimeout(id3); document.removeEventListener('mousedown', handler) }
+  }, [filterSortOpen])
 
   const setSlotTagsMutation = useMutation({
     mutationFn: ({ slot, nextTags }: { slot: string; nextTags: string[] }) => api.setSlotTags(slot, nextTags),
@@ -807,7 +829,7 @@ function ChatSidebar({
           style={boostStyle as React.CSSProperties}
           draggable
           onDragStart={e => { e.dataTransfer.setData('text/plain', s.key); e.dataTransfer.effectAllowed = 'move' }}
-          onClick={e => { if ((e.target as HTMLElement).closest?.('[data-fork]')) { forkMutation.mutate(s.key); return }; if ((e.target as HTMLElement).closest?.('[data-close]')) { if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(s.key)); return }; dispatch(switchSlot(s.key)); onSelectSlot?.(s.key) }}
+          onClick={() => { dispatch(switchSlot(s.key)); onSelectSlot?.(s.key) }}
           onContextMenu={e => { e.preventDefault(); setCtxMenu({ key: s.key, x: e.clientX, y: e.clientY }) }}>
           {unreadSlots.includes(s.key) && (
             <span className="absolute right-1.5 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full pointer-events-none" style={{ background: 'var(--info)' }} />
@@ -819,8 +841,12 @@ function ChatSidebar({
                 <motion.span key={agentName || 'empty'} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="truncate">{agentName || '\u00A0'}</motion.span>
               </AnimatePresence>
               {s.slack_linked && <span className="text-[10px]" title="Linked to Slack"><Link size={10} /></span>}
-              {s.memory_mode === 'incognito' && <span className="text-muted" title="Incognito — no memory writes"><EyeOff size={10} /></span>}
-                {s.memory_mode === 'temporary' && <span className="text-aim" title="Temporary — no memory reads or writes"><VenetianMask size={10} /></span>}
+              {s.clean_mode
+                ? <span className="text-accent" title="Clean — agent-only, no KiroClaw context or MCP"><Droplet size={10} /></span>
+                : <>
+                    {s.memory_mode === 'incognito' && <span className="text-muted" title="Incognito — no memory writes"><EyeOff size={10} /></span>}
+                    {s.memory_mode === 'temporary' && <span className="text-aim" title="Temporary — no memory reads or writes"><VenetianMask size={10} /></span>}
+                  </>}
               {(s.last_ts || s.created) && <span className="ml-auto text-[11px] text-muted font-normal shrink-0">{fmtRelativeTime(s.last_ts || s.created!)}</span>}
             </div>
             <div className="text-[13px] leading-snug line-clamp-2 break-words" title={s.title && s.title !== s.key ? s.title : s.key}>
@@ -828,7 +854,7 @@ function ChatSidebar({
                 <Input className="w-full bg-transparent border border-accent rounded px-1 py-0 text-text-strong outline-none text-[13px]" autoFocus value={renameValue} onChange={e => setRenameValue(e.target.value)} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => { (document.activeElement as HTMLInputElement)?.blur() }, onEscape: () => { cancelRenameRef.current = true; setRenamingSlot(null) }, onBlur: () => { if (!cancelRenameRef.current && renameValue.trim()) { dispatch(sseSlotTitle({ key: s.key, title: renameValue.trim() })); api.renameSlot(s.key, renameValue.trim()).catch(() => { queryClient.invalidateQueries({ queryKey: ['chat-slots'] }) }) } cancelRenameRef.current = false; setRenamingSlot(null) } })} onMouseDown={e => e.stopPropagation()} />
               ) : (s.title && s.title !== s.key ? s.title : s.key)}
             </div>
-            {s.running ? <div className="mt-0.5"><span className="pulse-bar-sm" /></div> : s.last_message && <div className="text-[12px] text-muted leading-snug truncate mt-0.5">{s.last_message}</div>}
+            {s.running ? <div className="text-[12px] text-accent leading-snug truncate mt-0.5 flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse shrink-0" />{slotStatusDetail[s.key]?.text || 'Thinking…'}</div> : s.last_message && <div className="text-[12px] text-muted leading-snug truncate mt-0.5">{s.last_message}</div>}
             {tagColumnsEnabled && s.tags && s.tags.length > 0 && (
               <div className="flex flex-wrap gap-1 mt-1">
                 {s.tags.map(tid => {
@@ -845,15 +871,15 @@ function ChatSidebar({
           </div>
           {isMobile ? (
             <div className="absolute top-1/2 -translate-y-1/2 right-1.5 flex items-center gap-0.5">
-              <span className="text-muted/50 active:text-text p-1 cursor-pointer" aria-label="More options" onMouseDown={e => { e.stopPropagation(); e.preventDefault(); const rect = (e.currentTarget as HTMLElement).getBoundingClientRect(); setCtxMenu({ key: s.key, x: rect.left, y: rect.bottom + 4 }) }}><MoreVertical size={14} /></span>
-              <span data-fork="1" className="text-muted/50 active:text-text p-1 cursor-pointer" title="Duplicate" aria-label="Duplicate"><Copy size={14} /></span>
-              <span data-close="1" className="text-muted/50 active:text-danger p-1 cursor-pointer"><X size={14} /></span>
+              <button type="button" className="text-muted/50 active:text-text p-1 cursor-pointer bg-transparent border-none" aria-label="More options" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); const rect = (e.currentTarget as HTMLElement).getBoundingClientRect(); setCtxMenu({ key: s.key, x: rect.left, y: rect.bottom + 4 }) }}><MoreVertical size={14} /></button>
+              <button type="button" className="text-muted/50 active:text-text p-1 cursor-pointer bg-transparent border-none" title="Duplicate" aria-label="Duplicate" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); forkMutation.mutate(s.key) }}><Copy size={14} /></button>
+              <button type="button" className="text-muted/50 active:text-danger p-1 cursor-pointer bg-transparent border-none" aria-label="Close session" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(s.key)) }}><X size={14} /></button>
             </div>
           ) : (
-            <div className={`absolute top-1/2 -translate-y-1/2 right-1.5 transition-all flex items-center gap-0.5 rounded-md p-1 bg-card border border-border shadow-sm ${ctxMenu?.key === s.key ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
-              <span className="text-muted cursor-pointer p-[4px] rounded hover:text-text hover:bg-bg-hover transition-all" title="More" aria-label="More options" onMouseDown={e => { e.stopPropagation(); e.preventDefault(); const rect = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect(); setCtxMenu({ key: s.key, x: rect.left, y: rect.bottom + 4 }) }}><MoreVertical size={12} /></span>
-              <span data-fork="1" className="text-muted cursor-pointer p-[4px] rounded hover:text-accent hover:bg-bg-hover transition-all" title="Duplicate" aria-label="Duplicate"><Copy size={12} /></span>
-              <span data-close="1" className="text-[12px] text-muted cursor-pointer p-[4px] rounded hover:text-danger hover:bg-danger-subtle transition-all" title="Close"><X size={12} /></span>
+            <div className={`absolute top-1/2 -translate-y-1/2 right-1.5 transition-all flex items-center gap-0.5 rounded-md p-1 bg-card border border-border shadow-sm ${ctxMenu?.key === s.key ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}`}>
+              <button type="button" className="text-muted cursor-pointer p-[4px] rounded hover:text-text hover:bg-bg-hover transition-all bg-transparent border-none" title="More" aria-label="More options" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); const rect = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect(); setCtxMenu({ key: s.key, x: rect.left, y: rect.bottom + 4 }) }}><MoreVertical size={12} /></button>
+              <button type="button" className="text-muted cursor-pointer p-[4px] rounded hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none" title="Duplicate" aria-label="Duplicate" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); forkMutation.mutate(s.key) }}><Copy size={12} /></button>
+              <button type="button" className="text-[12px] text-muted cursor-pointer p-[4px] rounded hover:text-danger hover:bg-danger-subtle transition-all bg-transparent border-none" title="Close" aria-label="Close session" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(s.key)) }}><X size={12} /></button>
             </div>
           )}
         </div>
@@ -863,7 +889,7 @@ function ChatSidebar({
   }
 
   // ── Folder row: matches session-row width (full width minus drawer padding) ──
-  const renderFolderHeader = (folder: ChatFolder) => {
+  const renderFolderHeader = (folder: ChatFolder, dragHandleProps?: React.HTMLAttributes<HTMLElement>, dragHandleRef?: (el: HTMLElement | null) => void) => {
     const childFolders = folders.filter(f => f.parent_id === folder.id)
     const childSlots = filteredSlots.filter(s => slotFolders[s.key] === folder.id)
     const count = childSlots.length + childFolders.length
@@ -872,6 +898,21 @@ function ChatSidebar({
         className={`group relative flex items-center gap-2 pr-2 py-2 rounded-md cursor-pointer text-sm text-muted hover:text-text hover:bg-bg-hover transition-all`}
         style={{ paddingLeft: '8px' }}
         onClick={() => toggleCollapse(folder.id)}>
+        {/* Drag-to-reorder handle. Rendered as a header child (not a wrapper
+         *  sibling) so hovering it triggers the header's own :hover — the whole
+         *  folder row highlights, no separate handle background needed. Sits in
+         *  the empty gutter left of the chevron, so it adds no layout shift. */}
+        {dragHandleProps && editingId !== folder.id && (
+          <div
+            ref={dragHandleRef}
+            className="absolute -left-2 inset-y-0 w-4 flex items-center justify-center cursor-grab opacity-0 group-hover:opacity-100 transition-opacity z-10"
+            aria-label={`Reorder ${folder.name}`}
+            onClick={e => e.stopPropagation()}
+            {...dragHandleProps}
+          >
+            <GripVertical size={14} className="text-muted" />
+          </div>
+        )}
         <span data-testid={`folder-collapse-${folder.id}`} className="shrink-0 text-muted transition-transform duration-150" style={{ transform: folder.collapsed ? 'rotate(0deg)' : 'rotate(90deg)' }}>
           <ChevronRight size={14} />
         </span>
@@ -901,7 +942,7 @@ function ChatSidebar({
     )
   }
 
-  const renderFolderBlock = (folder: ChatFolder, depth: number, visited = new Set<string>()): React.ReactNode[] => {
+  const renderFolderBlock = (folder: ChatFolder, depth: number, visited = new Set<string>(), dragHandleProps?: React.HTMLAttributes<HTMLElement>, dragHandleRef?: (el: HTMLElement | null) => void): React.ReactNode[] => {
     if (depth > 10 || visited.has(folder.id)) return []
     visited.add(folder.id)
     const childFolders = folders.filter(f => f.parent_id === folder.id)
@@ -944,7 +985,7 @@ function ChatSidebar({
         onDragOver={e => { e.preventDefault(); e.stopPropagation() }}
         onDragLeave={e => { e.stopPropagation(); folderDragCount.current[folder.id] = (folderDragCount.current[folder.id] || 0) - 1; if (folderDragCount.current[folder.id] <= 0) { folderDragCount.current[folder.id] = 0; e.currentTarget.classList.remove('ring-1', 'ring-accent') } }}
         onDrop={e => { e.preventDefault(); e.stopPropagation(); folderDragCount.current[folder.id] = 0; e.currentTarget.classList.remove('ring-1', 'ring-accent'); const k = e.dataTransfer.getData('text/plain'); if (k) assignToFolder(k, folder.id) }}>
-        {renderFolderHeader(folder)}
+        {renderFolderHeader(folder, dragHandleProps, dragHandleRef)}
         <FolderBody key={`folder-body-${folder.id}`} open={!folder.collapsed}>{wrapped}</FolderBody>
       </div>,
     ]
@@ -966,10 +1007,24 @@ function ChatSidebar({
 
       {/* Header */}
       <div className="flex justify-between items-center px-3 h-12 mt-1">
-        <span className="text-[13px] font-medium text-muted uppercase tracking-[.04em] flex items-center gap-1.5">Sessions <InfoTip text={`Each tab is an independent ${provider.labels.sessionProcess} session with its own context. Group sessions into folders via drag-drop.`} /></span>
+        <span className="text-[13px] font-medium text-muted uppercase tracking-[.04em]">Sessions</span>
         <div className="flex items-center gap-1.5">
+          <div className="relative" data-header-menu>
+            <button className="w-7 h-7 rounded-md border border-border bg-transparent text-muted cursor-pointer flex items-center justify-center hover:border-border-strong hover:text-text transition-all" onClick={() => setHeaderMenuOpen(!headerMenuOpen)} title="More options" aria-label="More options" aria-haspopup="menu" aria-expanded={headerMenuOpen}><MoreVertical size={14} /></button>
+            {headerMenuOpen && (
+              <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] rounded-lg border border-border bg-bg-elevated shadow-lg py-1 animate-rise" role="menu">
+                <button role="menuitem" className="w-full px-3 py-1.5 text-left text-[13px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors" onClick={() => { setHeaderMenuOpen(false); const isActive = tagColumnsEnabled && rawColumns.length > 0; const next = !isActive; const cfg = loadChatConfig(); saveChatConfig({ ...cfg, tagColumnsEnabled: next }); if (next && rawColumns.length === 0) { createColumnMutation.mutate({ name: '', tag_ids: [], mode: 'any' }) } }}>
+                  <Columns3 size={14} className={tagColumnsEnabled && rawColumns.length > 0 ? 'text-accent' : 'text-muted'} />
+                  {tagColumnsEnabled && rawColumns.length > 0 ? 'Switch to list view' : 'Switch to board view'}
+                </button>
+                <button role="menuitem" className="w-full px-3 py-1.5 text-left text-[13px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors" onClick={() => { setHeaderMenuOpen(false); setCleanupOpen(!cleanupOpen); setCleanupExpanded(false); setCleanupError('') }}>
+                  <BrushCleaning size={14} className="text-muted" />
+                  Clean up sessions
+                </button>
+              </div>
+            )}
+          </div>
           <button className="w-7 h-7 rounded-md border border-border bg-transparent text-muted cursor-pointer flex items-center justify-center hover:border-border-strong hover:text-text transition-all" onClick={() => { setCreatingIn('__root__'); setNewName('') }} title="New folder" aria-label="New folder"><FolderPlus size={14} /></button>
-          <button className="w-7 h-7 rounded-md border border-border bg-transparent text-muted cursor-pointer flex items-center justify-center hover:border-border-strong hover:text-text transition-all" onClick={() => { setCleanupOpen(!cleanupOpen); setCleanupExpanded(false); setCleanupError('') }} title="Clean up inactive sessions" aria-label="Clean up inactive sessions"><BrushCleaning size={14} /></button>
           <button className="w-7 h-7 rounded-md bg-accent text-accent-fg border-none cursor-pointer flex items-center justify-center hover:bg-accent-hover hover:shadow-[0_0_16px_var(--accent-glow)] hover:rotate-90 hover:scale-110 active:scale-95 transition-all" onClick={() => dispatch(createSlot({ agent: defaultAgent || undefined, mode })).then(() => requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus()))} title="New chat" aria-label="New chat session"><Plus size={16} /></button>
         </div>
       </div>
@@ -1036,67 +1091,79 @@ function ChatSidebar({
             <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text cursor-pointer bg-transparent border-none p-0 leading-none transition-colors" onClick={() => setSlotFilter('')} aria-label="Clear search"><X size={13} /></button>
           )}
         </div>
-        <button
-          type="button"
-          className={`relative w-7 h-7 rounded-md border bg-transparent flex items-center justify-center cursor-pointer transition-all ${showUnreadOnly ? 'border-[var(--info)] text-[var(--info)] shadow-[0_0_8px_rgba(59,130,246,.35)]' : 'border-border text-muted hover:border-border-strong hover:text-text'}`}
-          onClick={() => {
-            const nv = !showUnreadOnly
-            setShowUnreadOnly(nv)
-            localStorage.setItem('mc-session-unread-only', nv ? '1' : '0')
-          }}
-          title={showUnreadOnly ? `Showing only ${unreadSlots.length} session${unreadSlots.length === 1 ? '' : 's'} with unread activity — click to show all` : unreadSlots.length > 0 ? `Show only sessions with unread activity (${unreadSlots.length})` : 'No unread sessions — toggle filter anyway'}
-          aria-label={`Toggle unread filter${unreadSlots.length > 0 ? ` (${unreadSlots.length} unread)` : ''}`}
-          aria-pressed={showUnreadOnly}
-        >
-          <Circle
-            size={10}
-            {...(showUnreadOnly ? { strokeWidth: 0, fill: 'var(--info)' } : {})}
-          />
-          {unreadSlots.length > 0 && (
-            <span
-              aria-hidden="true"
-              className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-[3px] rounded-full bg-[var(--info)] text-white text-[10px] font-semibold leading-[14px] text-center pointer-events-none shadow-[0_0_4px_rgba(59,130,246,.5)]"
-            >
-              {unreadSlots.length > 99 ? '99+' : unreadSlots.length}
-            </span>
-          )}
-        </button>
-        {/* Board/list view toggle — single control flips between flat-list mode and column-strip mode. Columns persist across toggles. */}
-        <div className="relative shrink-0">
+        <div className="relative shrink-0" data-filter-sort>
           <button
             type="button"
-            data-testid="board-toggle"
-            className={`w-7 h-7 rounded-md border bg-transparent cursor-pointer flex items-center justify-center transition-all ${tagColumnsEnabled && rawColumns.length > 0 ? 'border-accent text-accent' : 'border-border text-muted hover:border-border-strong hover:text-text'}`}
-            onClick={() => {
-              const isActive = tagColumnsEnabled && rawColumns.length > 0
-              const next = !isActive
-              const cfg = loadChatConfig()
-              saveChatConfig({ ...cfg, tagColumnsEnabled: next })
-              // First-time board mode with no columns → seed a default unfiltered column
-              if (next && rawColumns.length === 0) {
-                createColumnMutation.mutate({ name: '', tag_ids: [], mode: 'any' })
-              }
-            }}
-            title={tagColumnsEnabled && rawColumns.length > 0 ? 'Switch to list view' : 'Switch to board view'}
-            aria-pressed={tagColumnsEnabled && rawColumns.length > 0}
-            aria-label={tagColumnsEnabled && rawColumns.length > 0 ? 'Switch to list view' : 'Switch to board view'}
+            className="relative w-7 h-7 rounded-md border border-border bg-transparent text-muted flex items-center justify-center cursor-pointer transition-all hover:border-border-strong hover:text-text"
+            onClick={() => setFilterSortOpen(o => !o)}
+            title="Sort & filter sessions"
+            aria-label="Sort and filter sessions"
+            aria-haspopup="menu"
+            aria-expanded={filterSortOpen}
           >
-            <Columns3 size={13} />
+            <ListFilter size={14} />
+            {unreadSlots.length > 0 && (
+              <span
+                aria-hidden="true"
+                className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-[3px] rounded-full bg-[var(--info)] text-white text-[10px] font-semibold leading-[14px] text-center pointer-events-none shadow-[0_0_4px_rgba(59,130,246,.5)]"
+              >
+                {unreadSlots.length > 99 ? '99+' : unreadSlots.length}
+              </span>
+            )}
           </button>
-        </div>
-        <div className="relative shrink-0">
-          <div className="w-7 h-7 rounded-md border border-border bg-transparent text-muted flex items-center justify-center cursor-pointer hover:border-border-strong hover:text-text transition-all" aria-hidden="true">
-            <ArrowDownNarrowWide size={14} />
-          </div>
-          <select className="absolute inset-0 opacity-0 cursor-pointer" value={sortKey} onChange={e => { const v = e.target.value as SortKey; setSortKey(v); localStorage.setItem(SORT_LS_KEY, v) }} aria-label="Sort sessions">
-            {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
+          {filterSortOpen && (
+            <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] rounded-lg border border-border bg-bg-elevated shadow-lg py-1 animate-rise" role="menu">
+              <div className="px-3 pt-1 pb-1 text-[11px] font-medium text-muted uppercase tracking-[.04em]">Filter</div>
+              <button
+                role="menuitemcheckbox"
+                aria-checked={showUnreadOnly}
+                className="w-full px-3 py-1.5 text-left text-[13px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors"
+                onClick={() => {
+                  const nv = !showUnreadOnly
+                  setShowUnreadOnly(nv)
+                  localStorage.setItem('mc-session-unread-only', nv ? '1' : '0')
+                }}
+              >
+                <Circle size={12} className={showUnreadOnly ? 'text-[var(--info)]' : 'text-muted'} {...(showUnreadOnly ? { strokeWidth: 0, fill: 'var(--info)' } : {})} />
+                <span className="flex-1">Unread only{unreadSlots.length > 0 ? ` (${unreadSlots.length})` : ''}</span>
+                {showUnreadOnly && <Check size={14} className="text-accent" />}
+              </button>
+              <div className="my-1 border-t border-border" />
+              <div className="px-3 pt-1 pb-1 text-[11px] font-medium text-muted uppercase tracking-[.04em]">Sort by</div>
+              {SORT_OPTIONS.map(o => (
+                <button
+                  key={o.value}
+                  role="menuitemradio"
+                  aria-checked={sortKey === o.value}
+                  className="w-full px-3 py-1.5 text-left text-[13px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors"
+                  onClick={() => { setSortKey(o.value); localStorage.setItem(SORT_LS_KEY, o.value); setFilterSortOpen(false) }}
+                >
+                  <span className="flex-1">{o.label}</span>
+                  {sortKey === o.value && <Check size={14} className="text-accent" />}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
+      {showUnreadOnly && (
+        <div className="px-3 pb-1 flex items-center gap-1.5 flex-wrap">
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full text-[11px] bg-[var(--info)]/10 text-[var(--info)] border border-[var(--info)]/30 cursor-pointer hover:bg-[var(--info)]/15 transition-colors"
+            onClick={() => { setShowUnreadOnly(false); localStorage.setItem('mc-session-unread-only', '0') }}
+            title="Clear unread filter"
+            aria-label="Clear unread filter"
+          >
+            Unread{unreadSlots.length > 0 ? ` (${unreadSlots.length})` : ''}
+            <X size={11} />
+          </button>
+        </div>
+      )}
       <LayoutGroup id="chat-slots">
         {orderedColumns.length === 0 ? (
           // Legacy single-lane layout (identical to pre-columns behavior)
-          <motion.div layoutScroll className="flex-1 overflow-y-auto pl-5 pr-2 py-2 flex flex-col"
+          <motion.div layoutScroll className="flex-1 min-h-0 overflow-y-auto p-2 flex flex-col"
             onDragOver={e => e.preventDefault()}
             onDrop={e => { e.preventDefault(); const k = e.dataTransfer.getData('text/plain'); if (k) assignToFolder(k, null) }}>
             {/* Root folders — drag to reorder */}
@@ -1202,7 +1269,7 @@ function ChatSidebar({
                       overflow-hidden ancestor cannot clip it; viewport-anchored
                       to the edit button via popoverPos. */}
                   {columnEditId === col.id && popoverPos && createPortal(
-                    <div data-column-popover={col.id}
+                    <div role="presentation" data-column-popover={col.id}
                       className="fixed z-[9100] bg-bg-elevated border border-border rounded-lg shadow-lg p-2 min-w-[240px] text-[13px]"
                       style={{ top: popoverPos.top, left: popoverPos.left }}
                       onClick={e => e.stopPropagation()}>
@@ -1450,11 +1517,10 @@ function ChatSidebar({
                           the same left column that session rows use for the unread dot — keeps widths aligned. */}
                       <div className="group relative flex items-start gap-2.5 pr-4 py-2 rounded-md cursor-pointer text-sm text-muted hover:text-text hover:bg-bg-hover transition-all select-none" style={{ paddingLeft: '10px' }} title={s.title || s.key} onMouseDown={e => {
                         e.preventDefault()
-                        if ((e.target as HTMLElement).closest?.('[data-close]')) { if (confirm('Are you sure you want to delete this history session?')) dispatch(deleteHistorySession(s.key)); return }
                         dispatch(resumeFromHistory({ key: s.key, title: s.title || s.key }))
                       }}>
                         {/* Platform glyph — fills the left column that session rows reserve for the unread dot */}
-                        <span className="shrink-0 flex items-center justify-center self-center text-muted" title={isDashboard ? 'Dashboard session' : 'Slack session'} aria-label={isDashboard ? 'Dashboard session' : 'Slack session'}>
+                        <span role="img" className="shrink-0 flex items-center justify-center self-center text-muted" title={isDashboard ? 'Dashboard session' : 'Slack session'} aria-label={isDashboard ? 'Dashboard session' : 'Slack session'}>
                           {isDashboard
                             ? <Monitor size={12} />
                             : <svg className="w-3 h-3 block" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 15a2 2 0 1 1 0-4h4v4a2 2 0 1 1-4 0Zm4-4V5a2 2 0 1 1 4 0v6h-4Z" fill="#E01E5A"/><path d="M18 9a2 2 0 1 1 0 4h-4V9a2 2 0 1 1 4 0Zm-4 4v6a2 2 0 1 1-4 0v-6h4Z" fill="#36C5F0"/><path d="M10 5a2 2 0 0 1 4 0v4h-4V5Z" fill="#2EB67D"/><path d="M14 19a2 2 0 0 1-4 0v-4h4v4Z" fill="#ECB22E"/></svg>
@@ -1463,15 +1529,19 @@ function ChatSidebar({
                         <div className="flex-1 min-w-0 overflow-hidden">
                           <div className={`text-[11px] font-semibold truncate leading-tight flex items-center gap-1 ${agentColor}`}>
                             <span className="truncate">{agentName || '\u00A0'}</span>
-                            {s.memory_mode === 'incognito' && <span className="text-muted" title="Incognito — no memory writes"><EyeOff size={10} /></span>}
-                            {s.memory_mode === 'temporary' && <span className="text-aim" title="Temporary — no memory reads or writes"><VenetianMask size={10} /></span>}
+                            {s.clean_mode
+                              ? <span className="text-accent" title="Clean — agent-only, no KiroClaw context or MCP"><Droplet size={10} /></span>
+                              : <>
+                                  {s.memory_mode === 'incognito' && <span className="text-muted" title="Incognito — no memory writes"><EyeOff size={10} /></span>}
+                                  {s.memory_mode === 'temporary' && <span className="text-aim" title="Temporary — no memory reads or writes"><VenetianMask size={10} /></span>}
+                                </>}
                             {displayDate && <span className="ml-auto text-[11px] text-muted font-normal shrink-0">{displayDate}</span>}
                           </div>
                           <div className="text-[13px] leading-snug line-clamp-2 break-words">{s.title || s.key}</div>
                         </div>
                         {/* Floating hover button group — matches session-row pattern */}
-                        <div className="absolute top-1/2 -translate-y-1/2 right-1.5 opacity-0 group-hover:opacity-100 transition-all flex items-center gap-0.5 rounded-md p-1 bg-card border border-border shadow-sm">
-                          <span data-close="1" title="Delete history session" aria-label="Delete history session" className="text-[12px] text-muted cursor-pointer p-[4px] rounded hover:text-danger hover:bg-danger-subtle transition-all"><X size={12} /></span>
+                        <div className="absolute top-1/2 -translate-y-1/2 right-1.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-all flex items-center gap-0.5 rounded-md p-1 bg-card border border-border shadow-sm">
+                          <button type="button" title="Delete history session" aria-label="Delete history session" className="text-[12px] text-muted cursor-pointer p-[4px] rounded hover:text-danger hover:bg-danger-subtle transition-all bg-transparent border-none" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); if (confirm('Are you sure you want to delete this history session?')) dispatch(deleteHistorySession(s.key)) }}><X size={12} /></button>
                         </div>
                       </div>
                       {showDivider && <div className="mx-3 border-b border-border" />}
@@ -1487,7 +1557,7 @@ function ChatSidebar({
 
       {/* Context menu */}
       {ctxMenu && (
-        <div className="fixed inset-0 z-[9999]" onClick={() => setCtxMenu(null)} onContextMenu={e => { e.preventDefault(); setCtxMenu(null) }} onKeyDown={e => { if (e.key === 'Escape') setCtxMenu(null) }}>
+        <div role="presentation" className="fixed inset-0 z-[9999]" onClick={() => setCtxMenu(null)} onContextMenu={e => { e.preventDefault(); setCtxMenu(null) }} onKeyDown={e => { if (e.key === 'Escape') setCtxMenu(null) }}>
           <div role="menu" className="absolute bg-bg-elevated border border-border rounded-lg shadow-lg py-1 min-w-[160px] text-[13px]"
             style={{ left: Math.min(ctxMenu.x, window.innerWidth - 170), top: Math.min(ctxMenu.y, window.innerHeight - 140) }}
             onClick={e => e.stopPropagation()}>

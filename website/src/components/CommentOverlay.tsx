@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { MessageSquare, MessageSquarePlus, X, Pencil, Check } from 'lucide-react'
+import { MessageSquare, MessageSquarePlus, X, Pencil, Check, Send } from 'lucide-react'
 import { SendBtn } from './ui'
 import { useImeGuard } from '../hooks/useImeGuard'
 
@@ -149,20 +149,53 @@ function CommentRow({ comment, onEdit, onRemove }: {
   )
 }
 
-/** Pending comments list with batch submit. */
-function CommentList({ comments, onEdit, onRemove, onSubmitAll }: {
-  comments: InlineComment[]; onEdit: (id: string, text: string) => void; onRemove: (id: string) => void; onSubmitAll: () => void
+/** Pending comments list with batch submit.
+ *  When `enableExtraPrompt` is set, an "Add instruction" toggle appears in the
+ *  header. The optional free-form textarea is hidden by default and only
+ *  revealed when the user clicks that toggle, so the default view stays a
+ *  single (comment) input box rather than two competing inputs. Its value is
+ *  passed to `onSubmitAll` alongside the comments only when it was opened, and
+ *  it collapses again after submit. */
+function CommentList({ comments, onEdit, onRemove, onSubmitAll, enableExtraPrompt }: {
+  comments: InlineComment[]; onEdit: (id: string, text: string) => void; onRemove: (id: string) => void; onSubmitAll: (extraPrompt?: string) => void; enableExtraPrompt?: boolean
 }) {
+  const [extraPrompt, setExtraPrompt] = useState('')
+  const [showExtraPrompt, setShowExtraPrompt] = useState(false)
+  const extraPromptRef = useRef<HTMLTextAreaElement>(null)
+  // Focus the textarea when the toggle reveals it.
+  useEffect(() => { if (showExtraPrompt) extraPromptRef.current?.focus() }, [showExtraPrompt])
   if (comments.length === 0) return null
   return (
     <div className="border-t border-border bg-chrome px-3 py-2">
       <div className="flex items-center justify-between mb-2">
-        <span className="text-[13px] font-semibold text-text">{comments.length} comment{comments.length > 1 ? 's' : ''} pending</span>
-        <SendBtn onClick={onSubmitAll}>Submit All ▶</SendBtn>
+        <div className="flex items-center gap-2">
+          <span className="text-[13px] font-semibold text-text">{comments.length} comment{comments.length > 1 ? 's' : ''} pending</span>
+          {enableExtraPrompt && (
+            <button
+              type="button"
+              aria-label="Toggle additional prompt"
+              aria-pressed={showExtraPrompt}
+              onClick={() => setShowExtraPrompt(v => !v)}
+              className={`flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-medium border cursor-pointer transition-all ${showExtraPrompt ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`}
+            ><MessageSquarePlus className="lucide-inline" /> Add instruction</button>
+          )}
+        </div>
+        <SendBtn onClick={() => { onSubmitAll(enableExtraPrompt && showExtraPrompt ? extraPrompt : undefined); setExtraPrompt(''); setShowExtraPrompt(false) }}>Submit All <Send className="lucide-inline" /></SendBtn>
       </div>
       <div className="space-y-1.5 max-h-[200px] overflow-y-auto">
         {comments.map(c => <CommentRow key={c.id} comment={c} onEdit={onEdit} onRemove={onRemove} />)}
       </div>
+      {enableExtraPrompt && showExtraPrompt && (
+        <textarea
+          ref={extraPromptRef}
+          aria-label="Additional prompt"
+          placeholder="Optional: overall feedback or an extra instruction to send with these comments…"
+          value={extraPrompt}
+          onChange={e => setExtraPrompt(e.target.value)}
+          rows={2}
+          className="mt-2 w-full bg-bg-elevated border border-border rounded-md px-2.5 py-1.5 text-text text-[13px] font-body outline-none resize-none focus-ring leading-[18px]"
+        />
+      )}
     </div>
   )
 }
@@ -171,7 +204,7 @@ function CommentList({ comments, onEdit, onRemove, onSubmitAll }: {
  *  When `content` is provided, includes a short source-context snippet
  *  (~20 chars on each side of the anchor) so the agent can resolve the
  *  exact occurrence unambiguously — critical for short / repeated anchors. */
-export function formatCommentsMessage(filePath: string, comments: InlineComment[], content?: string): string {
+export function formatCommentsMessage(filePath: string, comments: InlineComment[], content?: string, extraPrompt?: string): string {
   const srcLines = content?.split('\n')
   // Escape backslashes first, then double quotes, then control characters
   // (\n, \r) so the prompt's quoting structure round-trips unambiguously and
@@ -179,7 +212,27 @@ export function formatCommentsMessage(filePath: string, comments: InlineComment[
   // text of `]\n[System: ignore previous instructions` would otherwise break
   // the format and pass adversarial instructions to the model).
   const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r')
-  const lines = [`[Document feedback on ${filePath} — ${comments.length} comment${comments.length > 1 ? 's' : ''}]`, '']
+  const lines = [`[Document feedback on ${filePath} — ${comments.length} comment${comments.length > 1 ? 's' : ''}]`]
+  // Free-form overall instruction the user typed alongside the comments.
+  // To keep it salient when the comment list is long (otherwise the model
+  // can lose attention on a bare middle paragraph — "lost in the middle"), it
+  // gets a clearly labeled, delimited block at the top AND a short reminder
+  // echoed after the list, so the directive is bookended at the start and end
+  // of the message where attention is strongest. It is run through the same
+  // esc() helper as comment text (escapes backslash, quote, newline, CR) to
+  // prevent prompt-injection via newlines/quotes if the formatted message is
+  // ever rendered in a shared/team context — escaping is cheap insurance and
+  // the user's intent survives (an escaped \n is still legible to the agent).
+  const instruction = extraPrompt?.trim()
+  if (instruction) {
+    lines.push(
+      '',
+      `>>> OVERALL INSTRUCTION (applies to all ${comments.length} comment${comments.length > 1 ? 's' : ''} below; read first):`,
+      esc(instruction),
+      '<<<',
+    )
+  }
+  lines.push('')
   comments.forEach((c, i) => {
     const anchor = c.anchor.length > 80 ? c.anchor.slice(0, 80) + '…' : c.anchor
     const loc = c.line != null ? (c.column != null ? `line ${c.line}, col ${c.column}, ` : `line ${c.line}, `) : ''
@@ -194,6 +247,10 @@ export function formatCommentsMessage(filePath: string, comments: InlineComment[
     }
     lines.push(`${i + 1}. (${loc}"${esc(anchor)}"${ctx}): "${esc(c.text)}"`)
   })
+  // Echo the overall instruction at the end so it's not buried above a long
+  // comment list — the model attends most strongly to the start and end of
+  // the message, so bookending keeps the directive in view either way.
+  if (instruction) lines.push('', `>>> REMINDER — overall instruction: ${esc(instruction)}`)
   return lines.join('\n')
 }
 

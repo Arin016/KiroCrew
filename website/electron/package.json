@@ -62,7 +62,9 @@
         "from": "backend-dist/kiroclaw-backend",
         "to": "backend-dist/kiroclaw-backend",
         "filter": [
-          "**/*"
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc"
         ]
       }
     ]

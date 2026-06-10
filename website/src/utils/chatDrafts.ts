@@ -137,8 +137,14 @@ export function setDraft(drafts: Drafts, slot: string, value: string): void {
   }
 }
 
-/** @internal test-only: reset module state between tests. */
-export function __resetForTests(): void {
-  for (const k of Object.keys(timestamps)) delete timestamps[k]
-  timestampsLoaded = false
-}
+/** @internal test-only: reset module state between tests. Gated on
+ *  `!import.meta.env.PROD` so the helper is tree-shaken out of the production
+ *  bundle. PROD (not DEV) is the correct gate: DEV is false under vitest
+ *  (mode 'test'), so a DEV gate would make this `undefined` during the test
+ *  run itself and break the `beforeEach` callers. */
+export const __resetForTests: () => void = import.meta.env.PROD
+  ? (undefined as unknown as () => void)
+  : () => {
+      for (const k of Object.keys(timestamps)) delete timestamps[k]
+      timestampsLoaded = false
+    }

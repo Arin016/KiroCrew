@@ -301,6 +301,21 @@ function setupWindowContents(win, backendUrl) {
   win.on("resize", updateViewBounds);
   win.on("enter-full-screen", updateViewBounds);
   win.on("leave-full-screen", updateViewBounds);
+  // The initial updateViewBounds() above runs before win.show() and before the
+  // dashboard finishes loading, so getContentBounds() can return a pre-layout
+  // size — leaving the WebContentsView mis-sized (content overflows / gets cut
+  // off a few seconds in once the window settles to its real size). Recompute
+  // on every event that can change the final content size.
+  win.on("show", updateViewBounds);
+  win.on("restore", updateViewBounds);
+  win.on("move", updateViewBounds); // display / scale-factor changes
+  view.webContents.on("did-finish-load", () => {
+    updateViewBounds();
+    // The dashboard loads built-in apps and other content asynchronously after
+    // did-finish-load, which can drive a late layout pass; recompute once more
+    // shortly after so a content-triggered resize can't leave the view cut off.
+    setTimeout(updateViewBounds, 1500);
+  });
 
   // Expose webContents on the window for compatibility
   win.webContents = view.webContents;

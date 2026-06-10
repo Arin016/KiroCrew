@@ -18,26 +18,34 @@ export function useZoom() {
     () => (localStorage.getItem('mc-font-family') as FontFamily) || 'sans'
   )
 
-  // Zoom: transform scale on #root (layout zoom)
-  // useLayoutEffect ensures --mc-vh/--mc-vw and #root styles are set
-  // synchronously before paint, preventing layout flicker on first render.
+  // Zoom: the CSS `zoom` property on #root (a TRUE layout zoom).
+  //
+  // We deliberately use `zoom`, NOT `transform: scale()`. `transform: scale` is
+  // paint-only: it visually resizes pixels but leaves every element's layout box
+  // at its original size, so scroll math, text selection / hit-testing, and
+  // position:fixed all operate on the unscaled boxes — the UI looks scaled but
+  // you can't scroll to or click what you see (the reported bug). `zoom` instead
+  // reflows layout: every component gets a genuinely larger/smaller box, so
+  // scrolling, selection, and fixed positioning all work interactively. It is
+  // supported in all target browsers (Chrome/Edge/Safari always; Firefox 126+).
+  // Because `zoom` scales the coordinate system, the shell's `h-screen`/`100vh`
+  // resolves correctly at any level with no width/min-height compensation.
+  //
+  // useLayoutEffect sets it synchronously before paint to avoid first-render flicker.
   useLayoutEffect(() => {
     const el = document.getElementById('root') as HTMLElement | null
     if (!el) return
     const s = zoom / 100
+    // setProperty('zoom', …) avoids depending on `zoom` being in the TS DOM lib.
     if (s === 1) {
-      el.style.transform = ''
-      el.style.transformOrigin = ''
-      el.style.width = ''
-      el.style.minHeight = ''
-      el.style.height = ''
+      el.style.removeProperty('zoom')
     } else {
-      el.style.transform = `scale(${s})`
-      el.style.transformOrigin = 'top left'
-      el.style.width = `${100 / s}vw`
-      el.style.minHeight = `${100 / s}vh`
-      el.style.height = 'auto'
+      el.style.setProperty('zoom', String(s))
     }
+    // --mc-vh/--mc-vw: ChatInput caps its textarea against the usable viewport.
+    // Under `zoom`, a raw px value is read in the zoomed coordinate space, so
+    // innerHeight/s px still maps to the real viewport height — keep the existing
+    // semantics so the input cap stays correct at any zoom.
     const updateVh = () => {
       document.documentElement.style.setProperty('--mc-vh', `${window.innerHeight / s}px`)
       document.documentElement.style.setProperty('--mc-vw', `${window.innerWidth / s}px`)
@@ -48,11 +56,7 @@ export function useZoom() {
       window.removeEventListener('resize', updateVh)
       document.documentElement.style.removeProperty('--mc-vh')
       document.documentElement.style.removeProperty('--mc-vw')
-      el.style.transform = ''
-      el.style.transformOrigin = ''
-      el.style.width = ''
-      el.style.minHeight = ''
-      el.style.height = ''
+      el.style.removeProperty('zoom')
     }
   }, [zoom])
 
@@ -63,7 +67,27 @@ export function useZoom() {
   }, [fontScale])
 
   useEffect(() => {
-    document.documentElement.style.setProperty('--font-body', FAMILY_MAP[family])
+    // Apply --font-body from the user's Font Family preference, with one
+    // exception: when the dashboard is in CLI mode (data-ui="cli") AND the
+    // user is on the default 'sans' (i.e. has never explicitly picked a
+    // family), resolve to 'mono' so the CLI surface looks monospace by
+    // default. If the user explicitly picks Mono / Sans / System, that
+    // choice is honoured everywhere — including CLI mode.
+    const html = document.documentElement
+    const apply = () => {
+      const ui = html.dataset.ui
+      // Auto-resolve to mono in CLI mode for the default family ('sans').
+      // Explicit 'mono' / 'system' choices are always honoured.
+      const isDefaultFamily = family === 'sans'
+      const effective: FontFamily =
+        (ui === 'cli' && isDefaultFamily) ? 'mono' : family
+      html.style.setProperty('--font-body', FAMILY_MAP[effective])
+    }
+    apply()
+    // Re-apply on data-ui changes (e.g. user toggles Interface in Settings).
+    const obs = new MutationObserver(apply)
+    obs.observe(html, { attributes: true, attributeFilter: ['data-ui'] })
+    return () => obs.disconnect()
   }, [family])
 
   const set = useCallback((v: number) => {

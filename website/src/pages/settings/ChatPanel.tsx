@@ -23,16 +23,11 @@ type SttConfig = {
   language_codes: string[]
 }
 
-const VOICE_OPTIONS = [
+const VOICE_OPTIONS_FALLBACK = [
   { value: 'Ruth', label: 'Ruth (US F)' },
   { value: 'Matthew', label: 'Matthew (US M)' },
-  { value: 'Arthur', label: 'Arthur (UK M)' },
-  { value: 'Brian', label: 'Brian (UK M)' },
-  { value: 'Amy', label: 'Amy (UK F)' },
   { value: 'Joanna', label: 'Joanna (US F)' },
-  { value: 'Stephen', label: 'Stephen (US M)' },
-  { value: 'Gregory', label: 'Gregory (US M)' },
-  { value: 'Danielle', label: 'Danielle (US F)' },
+  { value: 'Amy', label: 'Amy (UK F)' },
 ]
 
 const ENGINE_OPTIONS = ['generative', 'neural', 'long-form', 'standard']
@@ -117,6 +112,13 @@ export function ChatPanel() {
     queryFn: () => api.voiceConfig(),
   })
 
+  type PollyVoice = { id: string; name: string; language: string; languageCode: string; gender: string; engines: string[] }
+  const voicesQ = useQuery<{ voices: PollyVoice[] }>({
+    queryKey: ['voiceVoices'],
+    queryFn: () => api.voiceVoices(),
+    staleTime: 3600_000,
+  })
+
   const initializedRef = useRef(false)
   useEffect(() => {
     if (voiceQ.data && !initializedRef.current) {
@@ -126,6 +128,10 @@ export function ChatPanel() {
     }
   }, [voiceQ.data])
   const voiceCfg = voiceQ.data ?? { enabled: false, voice: 'Ruth', engine: 'generative', rate: '100%', autoSpeak: false, aws_profile: '', region: '' }
+  const voiceOptions = voicesQ.data?.voices
+    ? voicesQ.data.voices.map(v => ({ value: v.id, label: `${v.name} (${v.languageCode} ${v.gender[0]})`, engines: v.engines }))
+    : VOICE_OPTIONS_FALLBACK.map(v => ({ ...v, engines: ENGINE_OPTIONS }))
+  const selectedVoiceEngines = voiceOptions.find(v => v.value === voiceCfg.voice)?.engines ?? ENGINE_OPTIONS
 
   const voiceMut = useMutation({
     mutationFn: (patch: Partial<VoiceConfig>) => api.updateVoiceConfig(patch),
@@ -333,8 +339,8 @@ export function ChatPanel() {
         <SettingsCard>
           {voiceQ.isError && <div className="text-[13px] text-danger mb-2">Failed to load voice config. <button className="underline cursor-pointer bg-transparent border-none text-danger" onClick={() => voiceQ.refetch()}>Retry</button></div>}
           <SettingsToggle label="Auto-speak Responses" description="Speak every assistant reply automatically" checked={voiceCfg.autoSpeak} onChange={v => setVoice({ autoSpeak: v, ...(v ? { enabled: true } : {}) })} disabled={voiceDisabled} />
-          <SettingsSelect label="Voice" description="AWS Polly voice for TTS" value={voiceCfg.voice} options={VOICE_OPTIONS.map(o => o.value)} optionLabels={VOICE_OPTIONS.map(o => o.label)} onChange={v => setVoice({ voice: v })} disabled={voiceDisabled} />
-          <SettingsSelect label="Engine" description="Polly engine type" value={voiceCfg.engine} options={ENGINE_OPTIONS} onChange={v => setVoice({ engine: v })} disabled={voiceDisabled} />
+          <SettingsSelect label="Voice" description="AWS Polly voice for TTS" value={voiceCfg.voice} options={voiceOptions.map(o => o.value)} optionLabels={voiceOptions.map(o => o.label)} onChange={v => { const engines = voiceOptions.find(o => o.value === v)?.engines ?? ENGINE_OPTIONS; const patch: Partial<VoiceConfig> = { voice: v }; if (!engines.includes(voiceCfg.engine)) patch.engine = engines[0]; setVoice(patch) }} disabled={voiceDisabled} />
+          <SettingsSelect label="Engine" description="Polly engine type" value={voiceCfg.engine} options={selectedVoiceEngines} onChange={v => setVoice({ engine: v })} disabled={voiceDisabled} />
           <SettingsSelect label="Speed" description="Speech rate" value={voiceCfg.rate} options={SPEED_OPTIONS} onChange={v => setVoice({ rate: v })} disabled={voiceDisabled} />
           <SettingsInput label="AWS Profile" description="AWS credentials profile for Polly" value={localProfile} onChange={setLocalProfile} onBlur={() => setVoice({ aws_profile: localProfile.trim() })} placeholder="default" disabled={voiceDisabled} />
           <SettingsInput label="AWS Region" description="AWS region for Polly API" value={localRegion} onChange={setLocalRegion} onBlur={() => setVoice({ region: localRegion.trim() })} placeholder="us-east-1" disabled={voiceDisabled} />

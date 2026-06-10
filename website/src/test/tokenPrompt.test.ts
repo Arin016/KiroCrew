@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { extractPromptFromToken } from '../utils/tokenPrompt'
+import { extractPromptFromToken, extractSlackContextFromToken } from '../utils/tokenPrompt'
 
 function fakeToken(payload: object): string {
   const encoded = btoa(JSON.stringify(payload)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
@@ -40,5 +40,44 @@ describe('extractPromptFromToken', () => {
     // Prompt that produces padding characters in base64
     const token = fakeToken({ sub: 'u', prompt: 'a' })
     expect(extractPromptFromToken(token)).toBe('a')
+  })
+})
+
+describe('extractSlackContextFromToken', () => {
+  it('extracts session_key, channel, thread_ts when present', () => {
+    const token = fakeToken({
+      sub: 'u', prompt: 'hi',
+      session_key: 'dashboard:chat-2-9', channel: 'C9', thread_ts: '1700.5',
+    })
+    expect(extractSlackContextFromToken(token)).toEqual({
+      sessionKey: 'dashboard:chat-2-9', channel: 'C9', threadTs: '1700.5',
+    })
+  })
+
+  it('returns nulls when claims absent', () => {
+    const token = fakeToken({ sub: 'u', prompt: 'hi' })
+    expect(extractSlackContextFromToken(token)).toEqual({
+      sessionKey: null, channel: null, threadTs: null,
+    })
+  })
+
+  it('returns only the claims that are present (fresh thread, no session)', () => {
+    const token = fakeToken({ sub: 'u', prompt: 'hi', channel: 'C9', thread_ts: '1800.9' })
+    expect(extractSlackContextFromToken(token)).toEqual({
+      sessionKey: null, channel: 'C9', threadTs: '1800.9',
+    })
+  })
+
+  it('rejects non-string / oversized claims', () => {
+    const token = fakeToken({ sub: 'u', channel: 123, thread_ts: 'x'.repeat(500) })
+    expect(extractSlackContextFromToken(token)).toEqual({
+      sessionKey: null, channel: null, threadTs: null,
+    })
+  })
+
+  it('returns nulls for malformed token', () => {
+    expect(extractSlackContextFromToken('not-a-token')).toEqual({
+      sessionKey: null, channel: null, threadTs: null,
+    })
   })
 })

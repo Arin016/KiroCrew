@@ -22,6 +22,7 @@ export function useWebSocket() {
   const subagentSubRef = useRef(false)
   const reconnectRef = useRef(1000)
   const wasConnectedRef = useRef(false)
+  const reconnectingRef = useRef(false)  // suppress markSlotUnread during reconnect catch-up
   const lastVersionRef = useRef<string | null>(null)
   const voiceQueueRef = useRef<string[]>([])
   const voicePlayingRef = useRef(false)
@@ -118,8 +119,19 @@ export function useWebSocket() {
         // Reconnecting after disconnect — re-fetch state instead of
         // reloading the page.  Preserves unsent messages, scroll
         // position, and form inputs.
+        // Suppress markSlotUnread during the post-reconnect catch-up burst.
+        // Assumption: the WS replay backlog flushes faster than the fetchSlots
+        // HTTP round-trip resolves (gateway pushes buffered events in ms; HTTP
+        // response takes tens of ms). If a very large backlog outlasts the
+        // round-trip, late catch-up events could still mark slots unread — an
+        // acceptable edge case vs. the common-case fix. A server-sent "replay
+        // done" marker would make this deterministic but requires gateway changes.
+        // Deliberate tradeoff: genuine unreads arriving mid-window are also
+        // suppressed (false-negative-over-false-positive for the "just reconnected,
+        // user is looking at the screen" scenario).
+        reconnectingRef.current = true
         dispatch(sseConnected())
-        dispatch(fetchSlots())
+        dispatch(fetchSlots()).finally(() => { reconnectingRef.current = false })
         dispatch(fetchNotifications()).then(() => syncPendingApprovals())
         // Re-fetch active slot messages to recover from missed chunks
         const active = store.getState().chat.activeSlot
@@ -262,7 +274,7 @@ export function useWebSocket() {
           }
           case 'chat_message':
             dispatch(sseChatMessage(data))
-            if (data.slot && data.slot !== store.getState().chat.activeSlot) dispatch(markSlotUnread(data.slot))
+            if (data.slot && data.slot !== store.getState().chat.activeSlot && !reconnectingRef.current) dispatch(markSlotUnread(data.slot))
             if (data.role === 'user' || data.role === 'inject' || data.role === 'subagent') { stopVoice(); spokenLenRef.current = 0; synthChainRef.current = Promise.resolve() }
             if (data.slot && (data.role === 'user' || data.role === 'inject' || data.role === 'subagent')) {
               dispatch(setSlotStatusDetail({ slot: data.slot, kind: 'thinking', text: 'Thinking…', ts: Date.now() }))
@@ -293,7 +305,7 @@ export function useWebSocket() {
             if (data.slot && store.getState().chat.slotStatusDetail[data.slot]?.kind !== 'streaming') {
               dispatch(setSlotStatusDetail({ slot: data.slot, kind: 'streaming', text: 'Streaming', ts: Date.now() }))
             }
-            if (data.slot && data.slot !== store.getState().chat.activeSlot) dispatch(markSlotUnread(data.slot))
+            if (data.slot && data.slot !== store.getState().chat.activeSlot && !reconnectingRef.current) dispatch(markSlotUnread(data.slot))
             // Streaming auto-speak: detect new complete sentences and synthesize
             if (autoSpeakRef.current && data.slot === store.getState().chat.activeSlot) {
               if (spokenLenRef.current === 0) voiceMutedRef.current = false

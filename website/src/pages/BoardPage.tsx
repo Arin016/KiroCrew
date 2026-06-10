@@ -6,8 +6,17 @@ import { deleteSlot, switchSlot } from '../store/chatSlice'
 import { api } from '../api/client'
 import { PageHeader, EmptyState } from '../components/ui'
 import type { ChatSlot, PendingApproval } from '../types'
-import { AlertTriangle, Ban, Check, CheckCircle, Clock, LayoutGrid, Loader2, MessageSquareDot, X, Zap } from 'lucide-react'
+import { AlertTriangle, ArrowUpDown, Ban, Check, CheckCircle, Clock, LayoutGrid, Loader2, MessageSquareDot, X, Zap } from 'lucide-react'
 import TrustDropdown from '../components/TrustDropdown'
+
+type BoardSort = 'newest' | 'oldest' | 'name' | 'messages'
+const SORT_OPTIONS: { value: BoardSort; label: string }[] = [
+  { value: 'newest', label: 'Newest first' },
+  { value: 'oldest', label: 'Oldest first' },
+  { value: 'name', label: 'Name A–Z' },
+  { value: 'messages', label: 'Most messages' },
+]
+const BOARD_SORT_KEY = 'mc-board-sort'
 
 type Lane = 'approval' | 'your_turn' | 'working' | 'idle'
 
@@ -121,14 +130,15 @@ function SlotCard({ slot, stall, approval, lane, locked, sentChoice, onOpen, onC
         aria-label={`Open session ${slot.title || slot.key}`}
         tabIndex={locked ? -1 : 0}
       />
-      <div className="relative z-10">
+      <div className="relative z-10 pointer-events-none">
       <div className="flex items-center justify-between gap-2 mb-1">
         <div className="text-sm font-medium text-text-strong truncate">{slot.title || slot.key}</div>
         <div className="flex items-center gap-1.5 shrink-0">
           <div className="text-[13px] text-muted whitespace-nowrap">{timeAgo(slot.last_ts)}</div>
           <button
             onClick={(e) => { e.stopPropagation(); e.preventDefault(); onClose() }}
-            className="text-muted hover:text-danger p-0.5 rounded transition-colors"
+            disabled={locked}
+            className="pointer-events-auto text-muted hover:text-danger p-0.5 rounded transition-colors disabled:opacity-50"
             title="Close session"
             aria-label="Close session"
           >
@@ -163,7 +173,7 @@ function SlotCard({ slot, stall, approval, lane, locked, sentChoice, onOpen, onC
         {lastActionText(slot, lane)}
       </div>
       {showApproval && (
-        <div className="mt-2 border border-warn/40 bg-warn/5 rounded p-2">
+        <div className="pointer-events-auto mt-2 border border-warn/40 bg-warn/5 rounded p-2">
           <div className="text-[13px] font-semibold text-text-strong mb-1">
             Tool call: <span className="font-mono text-accent">{approval?.tool || 'unknown'}</span>
           </div>
@@ -208,7 +218,7 @@ function SlotCard({ slot, stall, approval, lane, locked, sentChoice, onOpen, onC
         </div>
       )}
       {showOptions && (
-        <div className="mt-2 flex flex-wrap gap-1.5">
+        <div className="pointer-events-auto mt-2 flex flex-wrap gap-1.5">
           {slot.options!.map((opt, i) => {
             const isSent = sentChoice === opt
             return (
@@ -242,14 +252,14 @@ function LaneColumn({ lane, slots, stalled, approvals, lockedMap, onOpen, onChoo
   onClose: (key: string, title: string) => void
 }) {
   return (
-    <div role="region" aria-label={lane.label} className="flex flex-col min-w-0 bg-bg-accent border border-border rounded-lg p-3 h-full">
+    <div role="region" aria-label={lane.label} className="flex flex-col min-w-0 min-h-0 bg-bg-accent border border-border rounded-lg p-3 h-full">
       <div className="flex items-center gap-2 mb-3">
         <span className="text-muted">{lane.icon}</span>
         <h2 className="text-sm font-semibold text-text-strong">{lane.label}</h2>
         <span className="text-[13px] text-muted ml-auto">{slots.length}</span>
       </div>
       <p className="text-[13px] text-muted mb-3">{lane.hint}</p>
-      <div className="flex flex-col gap-2 overflow-y-auto">
+      <div className="flex flex-col gap-2 overflow-y-auto flex-1 min-h-0">
         {slots.length === 0 ? (
           <div className="text-[13px] text-muted italic py-4 text-center">—</div>
         ) : (
@@ -304,6 +314,17 @@ export default function BoardPage() {
 
   const byLane: Record<Lane, ChatSlot[]> = { approval: [], your_turn: [], working: [], idle: [] }
   for (const slot of slots) byLane[inferLane(slot, stalled)].push(slot)
+  const [boardSort, setBoardSort] = useState<BoardSort>(() => (localStorage.getItem(BOARD_SORT_KEY) as BoardSort) || 'newest')
+  const changeSort = (s: BoardSort) => { setBoardSort(s); localStorage.setItem(BOARD_SORT_KEY, s) }
+  const sortFn = (a: ChatSlot, b: ChatSlot) => {
+    switch (boardSort) {
+      case 'newest': return new Date(b.last_ts || 0).getTime() - new Date(a.last_ts || 0).getTime()
+      case 'oldest': return new Date(a.last_ts || 0).getTime() - new Date(b.last_ts || 0).getTime()
+      case 'name': return (a.title || a.key).localeCompare(b.title || b.key)
+      case 'messages': return (b.messages || 0) - (a.messages || 0)
+    }
+  }
+  for (const lane of Object.values(byLane)) lane.sort(sortFn)
 
   const openSlot = (key: string) => {
     const slot = slots.find(s => s.key === key)
@@ -402,7 +423,15 @@ export default function BoardPage() {
 
   return (
     <div data-testid="board-page" className="p-6 h-full flex flex-col">
-      <PageHeader title="Board" subtitle="Auto-sorted lanes for every active session" />
+      <div className="flex items-center justify-between mb-4">
+        <PageHeader title="Board" subtitle="Auto-sorted lanes for every active session" />
+        <div className="flex items-center gap-1.5 text-[13px]">
+          <ArrowUpDown className="lucide-inline text-muted" />
+          <select value={boardSort} onChange={e => changeSort(e.target.value as BoardSort)} className="bg-bg-elevated border border-border rounded-md px-2 py-1 text-[13px] text-text outline-none cursor-pointer transition-colors focus-ring">
+            {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+      </div>
       {healthLoading && (
         <div className="text-[13px] text-muted mb-2 flex items-center gap-1">
           <Loader2 size={12} className="animate-spin" /> Checking session health…

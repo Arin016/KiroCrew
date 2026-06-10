@@ -1,0 +1,404 @@
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useQuery, useQueryClient, useMutation, useQueries } from '@tanstack/react-query'
+import { AlertTriangle, MessageSquare, Eye, CornerDownRight, Copy, ArrowUpFromLine } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Skeleton } from '../../components/ui'
+import Clickable from '../../components/Clickable'
+import { fileExplorerApi } from './api'
+import { basename, dirname, loadState, saveState, isShortcut } from './utils'
+import { FE_CSS } from './styles'
+import TabStrip from './TabStrip'
+import PathBar from './PathBar'
+import TreeNode from './TreeNode'
+import FileViewer from './FileViewer'
+import SearchPanel from './SearchPanel'
+import type { FolderTab, FileTab, TreeEntry, GitInfo } from './types'
+
+const newFolderTab = (rootPath = '/', label = ''): FolderTab => ({
+  id: `ft-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+  rootPath, label,
+  expanded: { [rootPath]: true },
+  showSearch: false,
+})
+
+const newFileTab = (path: string, folderId: string): FileTab => ({
+  id: `of-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+  path, folderId,
+})
+
+export default function FileExplorerPage() {
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+
+  const [folderTabs, setFolderTabs] = useState<FolderTab[]>([])
+  const [fileTabs, setFileTabs] = useState<FileTab[]>([])
+  const [activeFolderId, setActiveFolderId] = useState<string | null>(null)
+  const [activeFileId, setActiveFileId] = useState<string | null>(null)
+  const [leftWidth, setLeftWidth] = useState(280)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: TreeEntry } | null>(null)
+  const [initialized, setInitialized] = useState(false)
+
+  const activeFolder = useMemo(() => folderTabs.find((t) => t.id === activeFolderId) || folderTabs[0] || null, [folderTabs, activeFolderId])
+  const activeFile = useMemo(() => fileTabs.find((t) => t.id === activeFileId) || null, [fileTabs, activeFileId])
+
+  // ── Health (React Query) ──
+  const { data: healthData, error: healthError } = useQuery({
+    queryKey: ['file-explorer', 'health'],
+    queryFn: () => fileExplorerApi.health(),
+  })
+
+  // ── Initialization from health data ──
+  useEffect(() => {
+    if (!healthData || initialized) return
+    const roots = healthData.allowedRoots || []
+    let defaultRoot = roots[0] || '/'
+    if (roots.length > 1) {
+      const home = roots.find((r) => r.includes('/home/'))
+      if (home) defaultRoot = home
+      else defaultRoot = roots.reduce((a, b) => a.length <= b.length ? a : b)
+    }
+    const saved = loadState()
+    if (saved && saved.folderTabs?.length) {
+      const ft = saved.folderTabs.map((t: any) => ({ ...newFolderTab(t.rootPath, t.label), id: t.id, expanded: t.expanded || { [t.rootPath]: true } }))
+      setFolderTabs(ft)
+      setActiveFolderId(saved.activeFolderId || ft[0].id)
+      if (saved.fileTabs?.length) {
+        setFileTabs(saved.fileTabs.map((f: any) => ({ ...newFileTab(f.path, f.folderId), id: f.id })))
+        setActiveFileId(saved.activeFileId || null)
+      }
+      if (saved.leftWidth) setLeftWidth(saved.leftWidth)
+    } else {
+      const t = newFolderTab(defaultRoot)
+      setFolderTabs([t])
+      setActiveFolderId(t.id)
+    }
+    setInitialized(true)
+  }, [healthData, initialized])
+
+  // ── Persist state (debounced to avoid jank during resize) ──
+  useEffect(() => {
+    if (!initialized) return
+    const timer = setTimeout(() => {
+      saveState({
+        folderTabs: folderTabs.map((t) => ({ id: t.id, rootPath: t.rootPath, label: t.label, expanded: t.expanded })),
+        fileTabs: fileTabs.map((f) => ({ id: f.id, path: f.path, folderId: f.folderId })),
+        activeFolderId, activeFileId, leftWidth,
+      })
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [folderTabs, fileTabs, activeFolderId, activeFileId, leftWidth, initialized])
+
+  // ── Tab updaters ──
+  const updateFolderTab = useCallback((id: string, patch: any) => {
+    setFolderTabs((tabs) => tabs.map((t) => (t.id === id ? (typeof patch === 'function' ? patch(t) : { ...t, ...patch }) : t)))
+  }, [])
+
+  // ── Tree (React Query) — consumed directly at render, no local state sync ──
+  const { data: treeData } = useQuery({
+    queryKey: ['file-explorer', 'tree', activeFolder?.rootPath],
+    queryFn: () => fileExplorerApi.tree(activeFolder!.rootPath, 2),
+    enabled: !!activeFolder?.rootPath && initialized,
+  })
+
+  // ── Git status (React Query — derived via useMemo, no local state) ──
+  const { data: rootGitData } = useQuery({
+    queryKey: ['file-explorer', 'git-status', activeFolder?.rootPath],
+    queryFn: () => fileExplorerApi.gitStatus(activeFolder!.rootPath),
+    enabled: !!activeFolder?.rootPath && initialized,
+    staleTime: 30_000,
+  })
+
+  // Git status for discovered repos in tree (useQueries)
+  const discoveredRoots = useMemo(() => {
+    const found = new Set<string>()
+    function walk(node: TreeEntry | null) {
+      if (!node) return
+      if (node.isGitRoot && node.path) found.add(node.path)
+      if (Array.isArray(node.children)) node.children.forEach(walk)
+    }
+    if (treeData?.entries) treeData.entries.forEach(walk)
+    return [...found]
+  }, [treeData])
+
+  const gitQueries = useQueries({
+    queries: discoveredRoots.map((p) => ({
+      queryKey: ['file-explorer', 'git-status', p],
+      queryFn: () => fileExplorerApi.gitStatus(p),
+      staleTime: 30_000,
+      enabled: !!activeFolder,
+    })),
+  })
+
+  // Derive gitMap directly from query results (no useState)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const gitQueryData = gitQueries.map(q => q.data)
+  const tabGitMap = useMemo(() => {
+    const map = new Map<string, GitInfo>()
+    if (rootGitData?.repoRoot) map.set(rootGitData.repoRoot, rootGitData)
+    for (const d of gitQueryData) {
+      if (d?.repoRoot) map.set(d.repoRoot, d)
+    }
+    return map
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rootGitData, ...gitQueryData])
+
+  const toggleExpand = useCallback(async (node: TreeEntry) => {
+    if (!activeFolder) return
+    const wasOpen = !!activeFolder.expanded[node.path]
+    updateFolderTab(activeFolder.id, (cur: FolderTab) => ({ ...cur, expanded: { ...cur.expanded, [node.path]: !wasOpen } }))
+  }, [activeFolder, updateFolderTab])
+
+  // ── File read (React Query) — consumed directly at render, no local state sync ──
+  const { data: fileData, error: fileError, isLoading: fileLoading } = useQuery({
+    queryKey: ['file-explorer', 'read', activeFile?.path],
+    queryFn: () => fileExplorerApi.read(activeFile!.path),
+    enabled: !!activeFile?.path,
+  })
+
+  // ── File operations ──
+  const fileTabsRef = useRef(fileTabs)
+  fileTabsRef.current = fileTabs
+
+  const openFile = useCallback(async (path: string, _opts: { reveal?: boolean } = {}) => {
+    if (!activeFolder) return
+    const folderId = activeFolder.id
+    const existing = fileTabsRef.current.find((ft) => ft.path === path && ft.folderId === folderId)
+    if (existing) { setActiveFileId(existing.id); return }
+    const ft = newFileTab(path, folderId)
+    setFileTabs((tabs) => [...tabs, ft])
+    setActiveFileId(ft.id)
+  }, [activeFolder])
+
+  const reloadFile = useCallback(() => {
+    if (!activeFile) return
+    queryClient.invalidateQueries({ queryKey: ['file-explorer', 'read', activeFile.path] })
+  }, [activeFile, queryClient])
+
+  const downloadFile = useCallback(() => {
+    if (!activeFile || !fileData) return
+    const content = fileData.content || ''
+    const blob = fileData.encoding === 'base64'
+      ? (() => { const b = atob(content); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return new Blob([u], { type: fileData.mime || 'application/octet-stream' }) })()
+      : new Blob([content], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url; a.download = basename(activeFile.path)
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url)
+  }, [activeFile, fileData])
+
+  // ── Tab management ──
+  const newFolderTabAction = useCallback(() => {
+    const root = activeFolder?.rootPath || '/'
+    const t = newFolderTab(root)
+    setFolderTabs((tabs) => [...tabs, t])
+    setActiveFolderId(t.id); setActiveFileId(null)
+  }, [activeFolder])
+
+  const closeFolderTab = useCallback((id: string) => {
+    setFileTabs((tabs) => tabs.filter((ft) => ft.folderId !== id))
+    setActiveFileId((cur) => {
+      if (!cur) return null
+      const ft = fileTabsRef.current.find(t => t.id === cur)
+      return ft?.folderId === id ? null : cur
+    })
+    setFolderTabs((tabs) => {
+      const remaining = tabs.filter((t) => t.id !== id)
+      if (remaining.length === 0) { const fresh = newFolderTab('/'); setActiveFolderId(fresh.id); return [fresh] }
+      setActiveFolderId((cur) => cur === id ? remaining[0].id : cur)
+      return remaining
+    })
+  }, [])
+
+  const closeFileTab = useCallback((id: string) => {
+    setFileTabs((prev) => {
+      const next = prev.filter((t) => t.id !== id)
+      setActiveFileId((curActive) => {
+        if (curActive !== id) return curActive
+        const remaining = next.filter((t) => t.folderId === activeFolderId)
+        return remaining.length > 0 ? remaining[remaining.length - 1].id : null
+      })
+      return next
+    })
+  }, [activeFolderId])
+
+  const activateFolder = useCallback((id: string) => { setActiveFolderId(id); setActiveFileId(null) }, [])
+  const activateFile = useCallback((id: string) => {
+    const ft = fileTabsRef.current.find((t) => t.id === id)
+    if (ft) { setActiveFolderId(ft.folderId); setActiveFileId(id) }
+  }, [])
+  const renameFolderTab = useCallback((id: string, label: string) => { updateFolderTab(id, { label }) }, [updateFolderTab])
+
+  // ── Path bar ──
+  const changeRoot = useCallback((newPath: string) => {
+    if (!newPath || !activeFolder || newPath === activeFolder.rootPath) return
+    setFileTabs((tabs) => tabs.filter((ft) => ft.folderId !== activeFolder.id))
+    setActiveFileId(null)
+    updateFolderTab(activeFolder.id, { rootPath: newPath, expanded: { [newPath]: true } })
+  }, [activeFolder, updateFolderTab])
+
+  // ── Resolve (React Query mutation) ──
+  const resolveMutation = useMutation({
+    mutationFn: (path: string) => fileExplorerApi.resolve(path),
+    onSuccess: (r, path) => {
+      if (r && r.exists && r.type === 'dir') changeRoot(path)
+      else if (r && r.exists && r.type === 'file') {
+        const parent = dirname(path)
+        if (activeFolder && parent !== activeFolder.rootPath) updateFolderTab(activeFolder.id, { rootPath: parent, expanded: { [parent]: true } })
+        openFile(path)
+      } else changeRoot(path)
+    },
+    onError: (_, path) => changeRoot(path),
+  })
+
+  const openMaybe = useCallback((path: string) => { resolveMutation.mutate(path) }, [resolveMutation])
+
+  const toggleSearch = useCallback(() => {
+    if (!activeFolder) return
+    updateFolderTab(activeFolder.id, (cur: FolderTab) => ({ ...cur, showSearch: !cur.showSearch }))
+  }, [activeFolder, updateFolderTab])
+
+  // ── Chat launcher ──
+  const chatAboutPath = useCallback((path: string, kind = 'file') => {
+    const noun = kind === 'dir' ? 'folder' : 'file'
+    const message = `I'd like to discuss the ${noun} \`${path}\`. Please read it and help me understand or modify it.`
+    navigate(`/chat?message=${encodeURIComponent(message)}`)
+  }, [navigate])
+
+  // ── Context menu ──
+  const onTreeContextMenu = useCallback((e: React.MouseEvent, node: TreeEntry) => { setContextMenu({ x: e.clientX, y: e.clientY, node }) }, [])
+  useEffect(() => {
+    if (!contextMenu) return
+    const onDoc = () => setContextMenu(null)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setContextMenu(null) }
+    document.addEventListener('mousedown', onDoc)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey) }
+  }, [contextMenu])
+
+  // ── Keyboard shortcuts ──
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (isShortcut(e) && e.key.toLowerCase() === 'f') { e.preventDefault(); toggleSearch() }
+      else if (isShortcut(e) && e.key.toLowerCase() === 't') { e.preventDefault(); newFolderTabAction() }
+      else if (isShortcut(e) && e.key.toLowerCase() === 'w') { e.preventDefault(); activeFile ? closeFileTab(activeFile.id) : activeFolder && closeFolderTab(activeFolder.id) }
+      else if (e.key === 'Escape' && activeFolder?.showSearch) { e.preventDefault(); toggleSearch() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [toggleSearch, newFolderTabAction, closeFolderTab, closeFileTab, activeFile, activeFolder])
+
+  // ── Resizer ──
+  const dragRef = useRef({ active: false, startX: 0, startW: 0 })
+  const onResizeStart = (e: React.MouseEvent) => {
+    dragRef.current = { active: true, startX: e.clientX, startW: leftWidth }
+    document.body.style.cursor = 'col-resize'
+  }
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!dragRef.current.active) return
+      setLeftWidth(Math.max(180, Math.min(640, dragRef.current.startW + (e.clientX - dragRef.current.startX))))
+    }
+    const onUp = () => { if (dragRef.current.active) { dragRef.current.active = false; document.body.style.cursor = '' } }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+  }, [])
+
+  // ── Derived state (must be above early returns for Rules of Hooks) ──
+  const rootGitInfo = useMemo(() => {
+    if (!activeFolder) return null
+    if (tabGitMap.has(activeFolder.rootPath)) return tabGitMap.get(activeFolder.rootPath)!
+    let best: GitInfo | null = null
+    for (const [root, info] of tabGitMap.entries()) {
+      if (activeFolder.rootPath === root || activeFolder.rootPath.startsWith(root + '/')) {
+        if (!best || root.length > best.repoRoot.length) best = info
+      }
+    }
+    return best
+  }, [tabGitMap, activeFolder?.rootPath])
+
+  // ── Render ──
+  if (!initialized) return <div className="mc-fe-root"><style>{FE_CSS}</style><div className="mc-fe-empty" style={{ height: '100%' }}><Skeleton className="h-full w-full" /></div></div>
+  if (!activeFolder) return null
+
+  const currentFileTabs = fileTabs.filter((ft) => ft.folderId === activeFolder.id)
+  const showSearch = activeFolder.showSearch
+  const viewingFile = activeFile && activeFile.folderId === activeFolder.id ? activeFile : null
+
+  // Derive treeRoot from React Query data — child lazy-loading handled by TreeNode's own useQuery
+  const treeRoot: TreeEntry | null = treeData
+    ? { name: basename(activeFolder.rootPath) || activeFolder.rootPath, path: activeFolder.rootPath, type: 'dir', children: treeData.entries }
+    : null
+
+  return (
+    <div className="mc-fe-root">
+      <style>{FE_CSS}</style>
+      <TabStrip
+        folderTabs={folderTabs}
+        fileTabs={currentFileTabs}
+        activeFolderId={activeFolderId}
+        activeFileId={viewingFile?.id || null}
+        onActivateFolder={activateFolder}
+        onActivateFile={activateFile}
+        onCloseFolder={closeFolderTab}
+        onCloseFile={closeFileTab}
+        onNewFolder={newFolderTabAction}
+        onRenameFolder={renameFolderTab}
+      />
+      {healthError && <div className="mc-fe-banner"><AlertTriangle size={12} /> Backend not reachable: {(healthError as Error).message}</div>}
+      <PathBar rootPath={activeFolder.rootPath} gitInfo={rootGitInfo} onChangeRoot={changeRoot} onNavigate={openMaybe} />
+      <div className="mc-fe-split">
+        <div className="mc-fe-left" style={{ width: leftWidth }}>
+          {treeRoot ? (
+            <div className="mc-fe-tree">
+              <TreeNode
+                node={treeRoot}
+                depth={0}
+                expanded={activeFolder.expanded}
+                toggleExpand={toggleExpand}
+                selectedPath={viewingFile?.path || ''}
+                onSelect={(n) => openFile(n.path)}
+                gitMap={tabGitMap}
+                onContextMenu={onTreeContextMenu}
+              />
+            </div>
+          ) : <div className="mc-fe-empty"><Skeleton className="h-full w-full" /></div>}
+        </div>
+        <div className="mc-fe-resizer" onMouseDown={onResizeStart} role="separator" tabIndex={-1} />
+        <div className="mc-fe-right">
+          {showSearch ? (
+            <SearchPanel
+              rootPath={activeFolder.rootPath}
+              onClose={toggleSearch}
+              onJump={(r) => { openFile(r.file, { reveal: true }); updateFolderTab(activeFolder.id, { showSearch: false }) }}
+            />
+          ) : (
+            <FileViewer
+              filePath={viewingFile?.path || null}
+              fileMeta={fileData || null}
+              content={fileData?.content ?? ''}
+              loading={fileLoading}
+              error={fileError ? (fileError as Error).message : null}
+              onReload={reloadFile}
+              onDownload={downloadFile}
+            />
+          )}
+        </div>
+      </div>
+      {contextMenu && (
+        <div className="mc-fe-ctx" style={{ left: Math.min(contextMenu.x, window.innerWidth - 220), top: Math.min(contextMenu.y, window.innerHeight - 160) }} onMouseDown={(e) => e.stopPropagation()}>
+          <Clickable className="mc-fe-ctx-row" onClick={() => { chatAboutPath(contextMenu.node.path, contextMenu.node.type); setContextMenu(null) }}>
+            <MessageSquare size={12} /> Chat about this {contextMenu.node.type === 'dir' ? 'folder' : 'file'}
+          </Clickable>
+          {contextMenu.node.type !== 'dir' && (
+            <Clickable className="mc-fe-ctx-row" onClick={() => { openFile(contextMenu.node.path); setContextMenu(null) }}><Eye size={12} /> Open</Clickable>
+          )}
+          {contextMenu.node.type === 'dir' && (
+            <Clickable className="mc-fe-ctx-row" onClick={() => { changeRoot(contextMenu.node.path); setContextMenu(null) }}><CornerDownRight size={12} /> Open as workspace root</Clickable>
+          )}
+          <Clickable className="mc-fe-ctx-row" onClick={() => { navigator.clipboard?.writeText(contextMenu.node.path); setContextMenu(null) }}><Copy size={12} /> Copy path</Clickable>
+          <Clickable className="mc-fe-ctx-row" onClick={() => { changeRoot(dirname(contextMenu.node.path)); setContextMenu(null) }}><ArrowUpFromLine size={12} /> Reveal parent</Clickable>
+        </div>
+      )}
+    </div>
+  )
+}

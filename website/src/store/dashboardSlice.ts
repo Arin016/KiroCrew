@@ -29,7 +29,24 @@ interface DashboardState {
 }
 
 const safeGet = (key: string, fallback: string) => { try { return localStorage.getItem(key) ?? fallback } catch { return fallback } }
-const safeSet = (key: string, value: string) => { try { localStorage.setItem(key, value) } catch { /* QuotaExceededError / SecurityError */ } }
+// When running embedded inside the Instances hub (an iframe), relay unread-count
+// changes to the parent so it can badge this instance's switcher chip (§5.3).
+// Only the count (a non-secret number) is sent; the parent validates event.origin
+// against its known tunnel origins before trusting it (§5.4). Posting to the
+// referrer's origin (the hub) when known, else '*', avoids broadcasting widely.
+const _relayUnreadToParent = (slotsJson: string): void => {
+  try {
+    if (typeof window === 'undefined' || window.parent === window) return
+    const count = (JSON.parse(slotsJson) as string[]).length
+    let target = '*'
+    try { if (document.referrer) target = new URL(document.referrer).origin } catch { /* keep '*' */ }
+    window.parent.postMessage({ source: 'kiroclaw', type: 'mc-unread-slots', count }, target)
+  } catch { /* never let the relay break a state update */ }
+}
+const safeSet = (key: string, value: string) => {
+  try { localStorage.setItem(key, value) } catch { /* QuotaExceededError / SecurityError */ }
+  if (key === 'mc-unread-slots') _relayUnreadToParent(value)
+}
 
 const initialState: DashboardState = {
   status: null,

@@ -40,8 +40,6 @@ const UserMessage = memo(function UserMessage({ content, meta, timestamp, render
       const ta = taRef.current
       ta.focus()
       ta.selectionStart = ta.selectionEnd = ta.value.length
-      ta.style.height = 'auto'
-      ta.style.height = ta.scrollHeight + 'px'
     }
   }, [editing])
 
@@ -100,31 +98,41 @@ const UserMessage = memo(function UserMessage({ content, meta, timestamp, render
 
   if (editing) {
     return (
-      <div className="flex flex-col items-end gap-1 max-w-[550px] min-w-[200px]">
-        <div className="w-full rounded-lg border-2 border-accent/60 bg-card overflow-hidden">
+      <div data-role="user" className="group/msg flex flex-col items-end">
+        {/* `edit-grow` is a CSS grid auto-sizer: a hidden ::after mirror (fed by
+            data-replicated-value) drives the grid track so the textarea grows
+            with its own content — width AND height — exactly like the read-only
+            bubble it replaces, capped by max-w-[550px]. No JS measurement. */}
+        <div
+          className="edit-grow px-4 py-1.5 text-sm leading-relaxed rounded-xl bg-card text-card-fg overflow-hidden min-w-0 max-w-[550px] ring-2 ring-accent/60"
+          data-replicated-value={draft}
+          style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
+        >
           <textarea
             ref={taRef}
-            className="w-full px-3.5 py-2.5 text-sm leading-relaxed bg-transparent text-card-fg resize-none overflow-hidden focus:outline-none"
-            style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
+            rows={1}
+            className="bg-transparent text-card-fg resize-none overflow-hidden focus:outline-none text-sm leading-relaxed"
             value={draft}
-            onChange={e => { setDraft(e.target.value); e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px' }}
+            onChange={e => setDraft(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit() } if (e.key === 'Escape') cancel() }}
           />
-          <div className="flex justify-end gap-1.5 px-2 pb-2">
-            <button onClick={cancel} className="px-2.5 py-1 text-[13px] text-muted hover:text-text rounded border border-border hover:bg-hover transition-colors" title="Cancel (Esc)">
-              Cancel
-            </button>
-            <button onClick={submit} className="flex items-center gap-1 px-2.5 py-1 text-[13px] bg-accent text-white rounded hover:bg-accent/80 transition-colors" title="Send (Enter)">
-              <Send size={10} /> Send
-            </button>
-          </div>
+        </div>
+        {/* Actions sit BELOW the bubble (like the read-only action row) so they
+            never impose a min-width floor on the auto-sized bubble. */}
+        <div className="flex justify-end gap-1.5 mt-1">
+          <button onClick={cancel} className="px-2.5 py-1 text-[13px] text-muted hover:text-text rounded border border-border hover:bg-hover transition-colors" title="Cancel (Esc)">
+            Cancel
+          </button>
+          <button onClick={submit} className="flex items-center gap-1 px-2.5 py-1 text-[13px] bg-accent text-white rounded hover:bg-accent/80 transition-colors" title="Send (Enter)">
+            <Send size={10} /> Send
+          </button>
         </div>
       </div>
     )
   }
 
   return (
-    <div className="group/msg flex flex-col items-end">
+    <div data-role="user" className="group/msg flex flex-col items-end">
       <div ref={userRef} onCopy={handleCopy} className="msg-content px-4 py-1.5 text-sm leading-relaxed rounded-xl bg-card text-card-fg overflow-hidden min-w-0 max-w-[550px]" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
         {renderContent(content, meta)}
       </div>

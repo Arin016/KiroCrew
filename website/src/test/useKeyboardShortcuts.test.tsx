@@ -92,6 +92,36 @@ describe('useKeyboardShortcuts — toggle behavior', () => {
     expect(onNewChat).not.toHaveBeenCalled()
   })
 
+  it('Ctrl+number does NOT switch chats when IS_MAC is false (non-Mac env)', () => {
+    // Verifies that the Ctrl+digit handler is gated by IS_MAC/ctrlDigits.
+    // In jsdom IS_MAC=false, so Ctrl+digit should be ignored.
+    const store = createTestStore({
+      dashboard: { slots: [{ key: 'slot-1', title: 'Chat 1', messages: 1, running: false }, { key: 'slot-2', title: 'Chat 2', messages: 0, running: false }, { key: 'slot-3', title: 'Chat 3', messages: 0, running: false }] } as any,
+      chat: { activeSlot: 'slot-1', slotHistory: [] } as any,
+    })
+    renderHookWithProviders(
+      () => useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat }),
+      { store },
+    )
+    fireEvent.keyDown(document, { code: 'Digit3', ctrlKey: true })
+    expect(store.getState().chat.activeSlot).toBe('slot-1')
+  })
+
+  it('Alt+number dispatches chat switch on Windows/Linux', () => {
+    const store = createTestStore({
+      dashboard: { slots: [{ key: 'slot-1', title: 'Chat 1', messages: 1, running: false }, { key: 'slot-2', title: 'Chat 2', messages: 0, running: false }, { key: 'slot-3', title: 'Chat 3', messages: 0, running: false }] } as any,
+      chat: { activeSlot: 'slot-1', slotHistory: [] } as any,
+    })
+    renderHookWithProviders(
+      () => useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat }),
+      { store },
+    )
+    // Alt+3 should be handled (preventDefault called) on non-Mac
+    const event = new KeyboardEvent('keydown', { code: 'Digit3', altKey: true, cancelable: true, bubbles: true })
+    const prevented = !document.dispatchEvent(event)
+    expect(prevented).toBe(true)
+  })
+
   it('responds to SHORTCUTS_ENABLED_EVENT to re-enable', () => {
     setup({ enabled: false })
     // Re-enable via event (wrapped in act since it triggers state update)
@@ -186,16 +216,16 @@ describe('Alt+Shift+A agent cycling', () => {
 
 
 
-describe('Alt+Shift+D approval mode cycling', () => {
-  it('calls onCycleApprovalMode on Alt+Shift+D', () => {
-    const onCycleApprovalMode = vi.fn()
+describe('Alt+Shift+D reasoning effort cycling', () => {
+  it('calls onCycleReasoningEffort on Alt+Shift+D', () => {
+    const onCycleReasoningEffort = vi.fn()
     const store = createTestStore()
     renderHookWithProviders(
-      () => useKeyboardShortcuts({ onToggleShortcutsModal: vi.fn(), onNewChat: vi.fn(), onCycleApprovalMode }),
+      () => useKeyboardShortcuts({ onToggleShortcutsModal: vi.fn(), onNewChat: vi.fn(), onCycleReasoningEffort }),
       { store }
     )
     fireEvent.keyDown(document, { code: 'KeyD', altKey: true, shiftKey: true })
-    expect(onCycleApprovalMode).toHaveBeenCalledTimes(1)
+    expect(onCycleReasoningEffort).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -214,15 +244,67 @@ describe('Alt+Shift+Z previous agent', () => {
 
 
 
-describe('Alt+Shift+C previous approval mode', () => {
-  it('calls onCyclePrevApprovalMode on Alt+Shift+C', () => {
+describe('Alt+Shift+C previous reasoning effort', () => {
+  it('calls onCyclePrevReasoningEffort on Alt+Shift+C', () => {
+    const onCyclePrevReasoningEffort = vi.fn()
+    const store = createTestStore()
+    renderHookWithProviders(
+      () => useKeyboardShortcuts({ onToggleShortcutsModal: vi.fn(), onNewChat: vi.fn(), onCyclePrevReasoningEffort }),
+      { store }
+    )
+    fireEvent.keyDown(document, { code: 'KeyC', altKey: true, shiftKey: true })
+    expect(onCyclePrevReasoningEffort).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('Alt+Shift+F approval mode cycling', () => {
+  it('calls onCycleApprovalMode on Alt+Shift+F', () => {
+    const onCycleApprovalMode = vi.fn()
+    const store = createTestStore()
+    renderHookWithProviders(
+      () => useKeyboardShortcuts({ onToggleShortcutsModal: vi.fn(), onNewChat: vi.fn(), onCycleApprovalMode }),
+      { store }
+    )
+    fireEvent.keyDown(document, { code: 'KeyF', altKey: true, shiftKey: true })
+    expect(onCycleApprovalMode).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('Alt+Shift+V previous approval mode', () => {
+  it('calls onCyclePrevApprovalMode on Alt+Shift+V', () => {
     const onCyclePrevApprovalMode = vi.fn()
     const store = createTestStore()
     renderHookWithProviders(
       () => useKeyboardShortcuts({ onToggleShortcutsModal: vi.fn(), onNewChat: vi.fn(), onCyclePrevApprovalMode }),
       { store }
     )
-    fireEvent.keyDown(document, { code: 'KeyC', altKey: true, shiftKey: true })
+    fireEvent.keyDown(document, { code: 'KeyV', altKey: true, shiftKey: true })
     expect(onCyclePrevApprovalMode).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('Alt+Shift+S cycle model', () => {
+  it('calls onCycleModel on Alt+Shift+S', () => {
+    const onCycleModel = vi.fn()
+    const store = createTestStore()
+    renderHookWithProviders(
+      () => useKeyboardShortcuts({ onToggleShortcutsModal: vi.fn(), onNewChat: vi.fn(), onCycleModel }),
+      { store }
+    )
+    fireEvent.keyDown(document, { code: 'KeyS', altKey: true, shiftKey: true })
+    expect(onCycleModel).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('Alt+Shift+X previous model', () => {
+  it('calls onCyclePrevModel on Alt+Shift+X', () => {
+    const onCyclePrevModel = vi.fn()
+    const store = createTestStore()
+    renderHookWithProviders(
+      () => useKeyboardShortcuts({ onToggleShortcutsModal: vi.fn(), onNewChat: vi.fn(), onCyclePrevModel }),
+      { store }
+    )
+    fireEvent.keyDown(document, { code: 'KeyX', altKey: true, shiftKey: true })
+    expect(onCyclePrevModel).toHaveBeenCalledTimes(1)
   })
 })

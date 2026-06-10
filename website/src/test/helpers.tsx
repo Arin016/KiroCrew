@@ -8,6 +8,7 @@ import dashboardReducer from '../store/dashboardSlice'
 import chatReducer from '../store/chatSlice'
 import notificationsReducer from '../store/notificationsSlice'
 import terminalReducer from '../store/terminalSlice'
+import instancesReducer from '../store/instancesSlice'
 import type { RootState } from '../store'
 import { ThemeProvider } from '../hooks/useTheme'
 
@@ -19,6 +20,7 @@ export function createTestStore(preloadedState?: Partial<RootState>) {
       chat: chatReducer,
       notifications: notificationsReducer,
       terminal: terminalReducer,
+      instances: instancesReducer,
     },
     preloadedState: preloadedState as any,
   })
@@ -48,7 +50,7 @@ export function renderWithProviders(
       </QueryClientProvider>
     )
   }
-  return { store, ...render(ui, { wrapper: Wrapper, ...renderOptions }) }
+  return { store, queryClient, ...render(ui, { wrapper: Wrapper, ...renderOptions }) }
 }
 
 /** renderHook with Redux Provider + MemoryRouter + ThemeProvider. */

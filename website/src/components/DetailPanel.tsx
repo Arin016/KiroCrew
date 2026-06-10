@@ -90,7 +90,7 @@ export default function DetailPanel({ title, onClose, footer, headerActions, sec
           {children}
         </div>
         {footer && (
-          <div className="shrink-0 px-5 py-3 border-t border-border flex items-center justify-between">
+          <div className="shrink-0 border-t border-border px-5 py-3 flex items-center justify-between">
             {footer}
           </div>
         )}

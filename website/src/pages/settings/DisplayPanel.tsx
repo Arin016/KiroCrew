@@ -2,6 +2,7 @@ import { X } from 'lucide-react'
 import { useZoomCtx } from '../../hooks/ZoomProvider'
 import { useTheme } from '../../hooks/useTheme'
 import type { ColorTheme } from '../../hooks/useTheme'
+import { useUIMode } from '../../hooks/useUIMode'
 import { SettingsSection, SettingsCard, SettingsSelect, SettingsStepper, SettingsButtonGroup } from '../../components/settings'
 import { useThemeEditor, ThemeEditorPanel } from '../../components/themeEditor'
 import { useAppSelector, useAppDispatch } from '../../store'
@@ -13,6 +14,7 @@ import type { DefaultColorSetting, PaletteName, IntensityName, SessionColorMode 
 export function DisplayPanel() {
   const { zoom, zoomIn, zoomOut, reset, fontScale, fontScaleUp, fontScaleDown, fontScaleReset, family, setFontFamily } = useZoomCtx()
   const { preference, setTheme, colorTheme, setColorTheme, allThemes } = useTheme()
+  const { uiMode, setUIMode } = useUIMode()
   const editor = useThemeEditor()
 
   const dispatch = useAppDispatch()
@@ -21,6 +23,17 @@ export function DisplayPanel() {
 
   return (
     <>
+      <SettingsSection title="View">
+        <SettingsCard>
+          <SettingsButtonGroup label="Interface" description="Chat bubbles or CLI-style line-by-line output" value={uiMode}
+            options={[
+              { value: 'chat', label: 'Chat' },
+              { value: 'cli', label: 'CLI' },
+            ]}
+            onChange={v => setUIMode(v as 'chat' | 'cli')} />
+        </SettingsCard>
+      </SettingsSection>
+
       <SettingsSection title="Zoom & Font">
         <SettingsCard>
           <SettingsStepper label="Zoom Level" description="Scale entire UI (80%–150%)" value={zoom} suffix="%" onIncrement={zoomIn} onDecrement={zoomOut} onReset={reset} />

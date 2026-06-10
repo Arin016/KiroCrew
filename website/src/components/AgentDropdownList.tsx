@@ -20,7 +20,7 @@ export default function AgentDropdownList({ agents, activeAgent, defaultAgent, o
     activeRef.current?.scrollIntoView({ block: 'center', behavior: 'instant' })
   }, [])
   return (
-    <div className="overflow-y-auto flex flex-col gap-0.5">
+    <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-0.5">
       {agents.map(a => {
         const active = activeAgent === a.name
         const isDefault = a.name === defaultAgent

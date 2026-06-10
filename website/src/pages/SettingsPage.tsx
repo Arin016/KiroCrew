@@ -1,7 +1,9 @@
-import { Bell, Code, Cpu, Globe, LayoutGrid, MessageCircle, MessageSquare, Palette, ShieldCheck } from 'lucide-react'
+import { Bell, Code, Cpu, Globe, LayoutGrid, MessageCircle, MessageSquare, Palette, Server, ShieldCheck } from 'lucide-react'
 import { useAppSelector } from '../store'
 import SidePanelLayout from '../components/SidePanelLayout'
 import { BrowserPanel } from './settings/BrowserPanel'
+import { InstancesPanel } from './settings/InstancesPanel'
+import { isEmbeddedPane } from '../lib/embedded'
 import { DisplayPanel } from './settings/DisplayPanel'
 import { ChatPanel } from './settings/ChatPanel'
 import { GeneralPanel } from './settings/GeneralPanel'
@@ -17,6 +19,7 @@ const TABS = [
   { key: 'chat', label: 'Chat', icon: <MessageSquare size={16} />, description: 'Message behavior, history, timestamps, and voice settings' },
   { key: 'display', label: 'Display', icon: <Palette size={16} />, description: 'Zoom, font, and color theme preferences' },
   { key: 'browser', label: 'Browser', icon: <Globe size={16} />, description: 'Playwright browser mode, extension token, and auth configuration' },
+  { key: 'instances', label: 'Instances', icon: <Server size={16} />, description: 'Manage remote KiroClaw instances over SSH tunnels; switch between them from the top header' },
   { key: 'security', label: 'Security', icon: <ShieldCheck size={16} />, description: 'Security posture, defense layers, certifications, and data classification' },
   { key: 'notifications', label: 'Notifications', icon: <Bell size={16} />, description: 'Sound effects and per-category alert preferences' },
   { key: 'slack', label: 'Slack', icon: <MessageCircle size={16} />, description: 'Slack integration, allowed users, channels, and STT settings' },
@@ -25,11 +28,15 @@ const TABS = [
 
 export default function SettingsPage() {
   const version = useAppSelector(s => s.dashboard.status?.version) || '—'
+  // An embedded instance pane can't manage remote instances (single-level by
+  // design) — hide the Instances tab so a pane can't connect onward.
+  const embedded = isEmbeddedPane()
+  const tabs = embedded ? TABS.filter(t => t.key !== 'instances') : TABS
 
   return (
     <SidePanelLayout
       title="Settings"
-      tabs={TABS}
+      tabs={tabs}
       footer={<span className="text-[12px] text-muted">KiroClaw v{version}</span>}
     >
       {tab => <>
@@ -38,11 +45,12 @@ export default function SettingsPage() {
         {tab === 'chat' && <ChatPanel />}
         {tab === 'display' && <DisplayPanel />}
         {tab === 'browser' && <BrowserPanel />}
+        {tab === 'instances' && !embedded && <InstancesPanel />}
         {tab === 'security' && <SecurityPanel />}
         {tab === 'notifications' && <NotificationsPanel />}
         {tab === 'slack' && <SlackPanel />}
         {tab === 'developer' && <GeneralPanel />}
-        {tab !== 'overview' && tab !== 'provider' && tab !== 'chat' && tab !== 'display' && tab !== 'browser' && tab !== 'security' && tab !== 'notifications' && tab !== 'slack' && tab !== 'developer' && (
+        {tab !== 'overview' && tab !== 'provider' && tab !== 'chat' && tab !== 'display' && tab !== 'browser' && tab !== 'instances' && tab !== 'security' && tab !== 'notifications' && tab !== 'slack' && tab !== 'developer' && (
           <div className="text-muted text-sm py-12 text-center">
             {TABS.find(t => t.key === tab)?.label} settings — coming soon
           </div>

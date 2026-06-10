@@ -48,7 +48,9 @@ function buildRemoteTokenCommand(binPath, candidates = REMOTE_BIN_CANDIDATES) {
   if (!binPath || binPath === DEFAULT_REMOTE_BIN) {
     return buildCandidateTokenCommand(candidates);
   }
-  return `export PATH="$HOME/.toolbox/bin:$PATH"; "${binPath}" token`;
+  // Rewrite leading `~/` to `$HOME/` since tilde doesn't expand inside double quotes.
+  const expanded = binPath.replace(/^~\//, "$HOME/");
+  return `export PATH="$HOME/.toolbox/bin:$PATH"; "${expanded}" token`;
 }
 
 // Extract the JWT from a `kiroclaw token` URL. The command prints:

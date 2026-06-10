@@ -14,29 +14,6 @@ const OPTIONS_RE = /\[OPTIONS:\s*(.+?)\]\s*$/
 const PLAN_HEADER_RE = /📋\s*Plan for:/i
 const STAGE_RE = /^Stage\s+\d+\s*:/m
 
-/** Inject a streaming-glow span around the last `tailChars` chars of the markdown string.
- *  Skips only if we're inside an unclosed code fence (where raw HTML would render as text). */
-function injectStreamingGlow(md: string, tailChars: number): string {
-  if (md.length < 10 || tailChars <= 0) return md
-  const fenceCount = (md.match(/^`{3}/gm) || []).length
-  if (fenceCount % 2 !== 0) return md
-  const lastNl = md.lastIndexOf('\n')
-  const lastLine = lastNl >= 0 ? md.slice(lastNl + 1) : md
-  if (!lastLine.trim()) return md
-  if (lastLine.length <= tailChars) return md // line too short to split meaningfully
-  // Find the minimum split point — after any markdown prefix (##, -, *, 1., >)
-  const prefixMatch = lastLine.match(/^(#{1,6}\s+|[*-]\s+|\d+\.\s+|>\s*)/)
-  const minCut = prefixMatch ? prefixMatch[0].length : 0
-  // Find split: last space within tailChars from end, but not before the prefix
-  let cutIdx = lastLine.lastIndexOf(' ', lastLine.length - tailChars)
-  if (cutIdx < minCut) cutIdx = lastLine.indexOf(' ', minCut)
-  if (cutIdx <= minCut || cutIdx >= lastLine.length - 1) return md
-  const before = lastLine.slice(0, cutIdx)
-  const tail = lastLine.slice(cutIdx)
-  const prefix = lastNl >= 0 ? md.slice(0, lastNl + 1) : ''
-  return prefix + before + '<span class="streaming-glow">' + tail + '</span>'
-}
-
 export function parseOptions(content: string): { text: string; options: string[]; multi: boolean; isPlan: boolean } {
   const mSingle = content.match(OPTION_RE)
   if (mSingle) {
@@ -83,7 +60,6 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
     return null
   }, [effectiveContent, isStreaming, planTaskId])
 
-  const streamText = isStreaming ? injectStreamingGlow(text, 30) : text
   const contentRef = useRef<HTMLDivElement>(null)
   const selectionActions = useSelectionActions(onQuote)
 
@@ -130,9 +106,9 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
     return () => { disposed = true; observer.disconnect() }
   }, [term, caseSensitive, currentOcc, effectiveContent, rawMode])
 
-  return <div className="group/msg">
+  return <div data-role="assistant" className="group/msg">
     <div ref={contentRef} className="msg-content group/bubble relative text-sm leading-relaxed text-text overflow-hidden" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
-      <MarkdownRenderer content={streamText} streaming={isStreaming} onFileOpen={onFileOpen} rawMode={rawMode} messageTs={messageTs} />
+      <MarkdownRenderer content={text} streaming={isStreaming} onFileOpen={onFileOpen} rawMode={rawMode} messageTs={messageTs} glow={isStreaming} />
       {!isStreaming && selectionActions.length > 0 && <SelectionToolbar containerRef={contentRef} actions={selectionActions} />}
     </div>
     {fileChanges && fileChanges.length > 0 && !isStreaming && (

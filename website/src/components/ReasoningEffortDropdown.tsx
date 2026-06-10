@@ -17,9 +17,10 @@ interface Props {
   slot: string
   currentEffort: string
   onClose: () => void
+  embedded?: boolean
 }
 
-export default function ReasoningEffortDropdown({ slot, currentEffort, onClose }: Props) {
+export default function ReasoningEffortDropdown({ slot, currentEffort, onClose, embedded }: Props) {
   // Keyed by slot: each slot's levels come from its own live ACP model, so the
   // cache must not bleed across slots. staleTime 0 + refetchOnMount means every
   // time the popover (re)mounts we fetch the slot's current levels, so a model
@@ -44,7 +45,7 @@ export default function ReasoningEffortDropdown({ slot, currentEffort, onClose }
     : [...levels, currentEffort]
 
   return (
-    <div className="rounded-lg bg-bg-elevated border border-border py-1 w-[200px]">
+    <div className={embedded ? '' : 'rounded-lg bg-bg-elevated border border-border py-1 w-[200px]'}>
       {shownLevels.map(level => {
         const active = currentEffort === level
         return (

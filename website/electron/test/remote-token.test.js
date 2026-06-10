@@ -79,6 +79,17 @@ describe("buildRemoteTokenCommand", () => {
     assert.match(cmd, /export PATH="\$HOME\/\.toolbox\/bin:\$PATH"/);
   });
 
+  it("rewrites a leading ~/ to $HOME/ so it expands inside double quotes", () => {
+    const cmd = buildRemoteTokenCommand("~/.local/bin/kiroclaw");
+    assert.match(cmd, /"\$HOME\/\.local\/bin\/kiroclaw" token/);
+    assert.doesNotMatch(cmd, /"~\//);
+  });
+
+  it("leaves absolute and $HOME-prefixed paths untouched", () => {
+    assert.match(buildRemoteTokenCommand("/opt/x/kiroclaw"), /"\/opt\/x\/kiroclaw" token/);
+    assert.match(buildRemoteTokenCommand("$HOME/x/kiroclaw"), /"\$HOME\/x\/kiroclaw" token/);
+  });
+
   it("accepts a custom candidate list for testing/extension", () => {
     const cmd = buildRemoteTokenCommand(DEFAULT_REMOTE_BIN, ["$HOME/x"]);
     assert.match(cmd, /"\$HOME\/x"/);

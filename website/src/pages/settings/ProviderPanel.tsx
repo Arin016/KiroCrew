@@ -4,7 +4,7 @@ import { Btn, Badge } from '../../components/ui'
 import { api } from '../../api/client'
 import { useProvider } from '../../providers'
 import { useState } from 'react'
-import { Server, Zap, Cloud, CheckCircle2, AlertTriangle, RefreshCw, Download, FolderInput } from 'lucide-react'
+import { Server, Zap, CheckCircle2, AlertTriangle, RefreshCw, Download, FolderInput } from 'lucide-react'
 
 type KiroClawConfig = {
   agent?: {
@@ -19,7 +19,10 @@ type KiroClawConfig = {
 const PROVIDER_OPTIONS = [
   { value: 'acp', label: 'Kiro ACP', icon: <Server size={14} /> },
   { value: 'claude_code', label: 'Claude Code', icon: <Zap size={14} /> },
-  { value: 'bedrock', label: 'Bedrock', icon: <Cloud size={14} /> },
+  // 'bedrock' intentionally hidden from the panel: the Bedrock provider is
+  // text-only (no tools/MCP) and not production-ready. Backend still accepts
+  // it, and the conditional Bedrock Settings block below stays as a graceful
+  // fallback so any config already on 'bedrock' can view it and switch away.
 ]
 
 const BEDROCK_REGION_OPTIONS = ['us-west-2', 'us-east-1', 'eu-west-1', 'ap-northeast-1']

@@ -56,6 +56,43 @@ if (typeof window !== 'undefined' && !window.matchMedia) {
   })
 }
 
+// jsdom polyfill: IntersectionObserver. Used by:
+//   - WidgetFrame (lazy-load gate — needs to fire so `visible` flips true
+//     and srcdoc/iframe gets built; otherwise theme/srcdoc tests inspect
+//     an empty wrapper)
+//   - usePaginatedMessages (top-of-list sentinel for load-more —
+//     immediate-fire is safe because the hook guards on
+//     visibleItems.length >= allItems.length and short-circuits when
+//     there's nothing more to load)
+// Fires synchronously on `observe()` with isIntersecting: true so both
+// behaviours work in the same tests.
+if (typeof window !== 'undefined' && !(window as unknown as { IntersectionObserver?: unknown }).IntersectionObserver) {
+  class StubIntersectionObserver {
+    private readonly cb: IntersectionObserverCallback
+    constructor(cb: IntersectionObserverCallback) { this.cb = cb }
+    observe(target: Element) {
+      // Fire once with isIntersecting=true. WidgetFrame disconnects after
+      // the first hit; usePaginatedMessages re-arms the same target which
+      // is fine — the load-more guard prevents runaway calls.
+      const entry = {
+        isIntersecting: true,
+        target,
+        intersectionRatio: 1,
+        boundingClientRect: target.getBoundingClientRect(),
+        intersectionRect: target.getBoundingClientRect(),
+        rootBounds: null,
+        time: 0,
+      } as unknown as IntersectionObserverEntry
+      this.cb([entry], this as unknown as IntersectionObserver)
+    }
+    unobserve() {}
+    disconnect() {}
+    takeRecords(): IntersectionObserverEntry[] { return [] }
+  }
+  ;(window as unknown as { IntersectionObserver: unknown }).IntersectionObserver = StubIntersectionObserver
+  ;(globalThis as unknown as { IntersectionObserver: unknown }).IntersectionObserver = StubIntersectionObserver
+}
+
 // jsdom polyfill: HTMLCanvasElement.getContext (used by scene canvases)
 // jsdom doesn't implement canvas — mock getContext to return a no-op 2d context
 const _origGetContext = HTMLCanvasElement.prototype.getContext
@@ -76,6 +113,14 @@ beforeAll(() => server.listen({ onUnhandledRequest: 'bypass' }))
 
 // Reset handlers after each test to prevent test pollution
 afterEach(() => server.resetHandlers())
+
+// Remove the session-expired banner api/client.ts appends to document.body on a
+// 403 — RTL doesn't clean up body-appended nodes, so it lingers and steals focus
+// from later tests. Don't click its dismiss button: that resets the module guard
+// and the banner resurfaces mid-userEvent.type elsewhere (broke CronTab).
+afterEach(() => {
+  document.getElementById('mc-session-expired')?.remove()
+})
 
 // Clean up after all tests are done
 afterAll(() => server.close())

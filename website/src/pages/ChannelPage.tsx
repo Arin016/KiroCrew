@@ -141,7 +141,7 @@ function MessageBubble({ msg, agents, onReply, onOpenThread, onApprove }: {
           )}
           {onReply && (
             <Btn onClick={onReply} className="!p-0 !border-none !rounded-none text-[13px] text-muted hover:text-text opacity-0 group-hover:opacity-100 transition-opacity">
-              ↩ Reply
+              <MessageSquare className="lucide-inline" /> Reply
             </Btn>
           )}
         </div>
@@ -253,14 +253,23 @@ function MentionInput({ agents, value, onChange, onSend }: {
   const [show, setShow] = useState(false)
   const [filter, setFilter] = useState('')
   const [sel, setSel] = useState(0)
-  const ref = useRef<HTMLInputElement>(null)
+  const ref = useRef<HTMLTextAreaElement>(null)
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const v = e.target.value
     onChange(v)
     const m = v.match(/@([A-Za-z][\w ]*)?$/)
     if (m) { setFilter((m[1] || '').trim().toLowerCase()); setShow(true); setSel(0) } else setShow(false)
   }
+
+  const applyHeight = () => {
+    const el = ref.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.3) + 'px'
+  }
+
+  useEffect(() => { applyHeight() }, [value])
 
   const pick = (a: ChannelAgent) => {
     onChange(value.replace(/@[\w ]*$/, `@${a.role} `))
@@ -282,8 +291,9 @@ function MentionInput({ agents, value, onChange, onSend }: {
           ))}
         </div>
       )}
-      <Input ref={ref} value={value} onChange={handleChange}
-        className="w-full"
+      <textarea ref={ref} value={value} onChange={handleChange}
+        rows={1}
+        className="w-full bg-bg-elevated border border-border rounded-md px-3 py-2 text-text text-sm font-body outline-none flex-1 transition-colors focus-ring resize-none"
         placeholder="Message the channel... (type @ to mention)"
         onKeyDown={e => {
           if (show && active.length > 0) {

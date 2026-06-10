@@ -20,7 +20,14 @@ import { ImageViewer, CsvViewer, JsonViewer, JsonlViewer, HtmlViewer, PdfViewer,
 import { monacoLang, useIsDark } from './MonacoCodeBlock'
 import { kiroclawDark, kiroclawLight } from './monacoTheme'
 
-const MonacoEditor = lazy(() => import('@monaco-editor/react'))
+// Route through ensureMonacoLocal() so Monaco loads from the locally-bundled
+// package instead of the default cdn.jsdelivr.net loader (blocked by CSP
+// connect-src). Mirrors DiffPanel/MarkdownPanel/MonacoCodeBlock.
+const MonacoEditor = lazy(async () => {
+  const { ensureMonacoLocal } = await import('../utils/monacoLocal')
+  await ensureMonacoLocal()
+  return import('@monaco-editor/react')
+})
 
 export const MD_EXTS = new Set(['.md', '.markdown', '.mdx', '.txt', ''])
 
@@ -93,6 +100,7 @@ export function CodeEditor({
             parameterHints: { enabled: autocomplete },
             automaticLayout: true,
             padding: { top: 8, bottom: 8 },
+            hover: { enabled: true },
           }}
         />
       </Suspense>
@@ -158,9 +166,9 @@ export const ContentRenderer = memo(function ContentRenderer({
         </div>
       )}
       {!isRichType && !editing && !isMarkdown && (
-        <div className="relative w-full h-full font-mono text-sm leading-[21px] bg-bg-elevated border border-border rounded-md overflow-hidden">
+        <div className="relative w-full h-full font-mono text-[13px] leading-[18px] border border-border rounded-md overflow-hidden">
           {lineNums && (
-            <div ref={gutterReadRef as React.RefObject<HTMLDivElement>} className="absolute left-0 top-0 bottom-0 w-[3em] bg-chrome border-r border-border text-right pr-2 pt-3 text-[11px] text-muted select-none overflow-hidden z-10 leading-[21px]" style={{ fontFamily: 'inherit' }}>
+            <div ref={gutterReadRef as React.RefObject<HTMLDivElement>} className="absolute left-0 top-0 bottom-0 w-[3em] text-right pr-2 pt-3 text-[13px] text-muted select-none overflow-hidden z-10 leading-[18px]" style={{ fontFamily: "Menlo, Monaco, 'Courier New', monospace" }}>
               {Array.from({ length: content.split('\n').length }, (_, i) => <div key={i}>{i + 1}</div>)}
             </div>
           )}

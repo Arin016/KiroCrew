@@ -99,7 +99,7 @@ export default function WorkspacePicker({ open, onOpenChange, anchorRef, onCreat
                 <input autoFocus type="text" placeholder="/path/to/project" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && input.trim()) selectDir(input.trim()); if (e.key === 'Escape') onOpenChange(false) }} className="flex-1 bg-bg-elevated border border-border rounded px-2 py-1.5 text-[13px] font-mono text-text placeholder:text-muted focus:outline-none focus:border-accent" />
                 <button onClick={() => selectDir(input.trim() || browsePath)} className="px-2 py-1 text-[11px] bg-accent/20 text-accent rounded hover:bg-accent/30 shrink-0">Select</button>
               </div>
-              <div className="overflow-y-auto flex-1">
+              <div className="overflow-y-auto flex-1 min-h-0">
                 {filteredBrowse.length === 0 && <div className="px-3 py-4 text-[12px] text-muted text-center">No subdirectories</div>}
                 {filteredBrowse.map(d => (
                   <button key={d.path} className="w-full text-left px-3 py-1.5 flex items-center gap-2 cursor-pointer hover:bg-bg-hover transition-colors" onClick={() => browse(d.path)}>

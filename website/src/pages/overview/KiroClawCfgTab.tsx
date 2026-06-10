@@ -18,7 +18,7 @@ interface KiroClawCfg {
   default_workspace: string
   memory_stores: Record<string, MemoryStoreCfg>
   default_memory_store: string
-  agent: { default_agent: string; provider: string; model: string; approval_mode: string; sandbox: string; subagent_max_turns?: number; max_subagents?: number; conductor_skill?: boolean; max_channels: number; max_channel_agents: number; enforce_denied_commands: string }
+  agent: { default_agent: string; provider: string; model: string; approval_mode: string; sandbox: string; subagent_max_turns?: number; max_subagents?: number; subagent_auto_max?: number; conductor_skill?: boolean; max_channels: number; max_channel_agents: number; enforce_denied_commands: string }
   session: { timeout_secs: number; pool_size: number; pool_agent: string; pool_ttl_secs: number }
   memory: { embedding_provider: string }
   auto_update: boolean
@@ -279,6 +279,7 @@ export default function KiroClawCfgTab() {
 function SubagentSettings({ cfg, onSaved }: { cfg: KiroClawCfg; onSaved: () => void }) {
   const [maxTurns, setMaxTurns] = useState(cfg.agent.subagent_max_turns ?? 100)
   const [maxSubs, setMaxSubs] = useState(cfg.agent.max_subagents ?? 3)
+  const hardCap = cfg.agent.subagent_auto_max ?? 16
   const [conductor, setConductor] = useState(cfg.agent.conductor_skill ?? false)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<ReactNode>('')
@@ -318,9 +319,12 @@ function SubagentSettings({ cfg, onSaved }: { cfg: KiroClawCfg; onSaved: () => v
             className="w-20 px-2 py-1 rounded border border-border bg-bg-elevated text-text font-mono text-[13px] text-right" />
         </label>
         <label className="flex justify-between items-center gap-3 py-1.5 border-b border-border text-sm">
-          <span className="text-muted inline-flex items-center gap-1">Max Concurrent Subagents <InfoTip text="Maximum subagents running at once (1–5). Default: 3." /></span>
-          <input type="number" min={1} max={5} value={maxSubs} onChange={e => setMaxSubs(parseInt(e.target.value) || 1)}
-            className="w-20 px-2 py-1 rounded border border-border bg-bg-elevated text-text font-mono text-[13px] text-right" />
+          <span className="text-muted inline-flex items-center gap-1">Max Concurrent Subagents <InfoTip text={`Maximum subagents running at once. 0 = auto-size from host memory/CPU (capped at ${hardCap}). Default: 3.`} /></span>
+          <span className="inline-flex items-center gap-2">
+            {maxSubs === 0 && <span className="text-[11px] text-muted">auto</span>}
+            <input type="number" min={0} max={hardCap} value={maxSubs} onChange={e => { const v = parseInt(e.target.value); setMaxSubs(Number.isNaN(v) ? 0 : Math.max(0, v)) }}
+              className="w-20 px-2 py-1 rounded border border-border bg-bg-elevated text-text font-mono text-[13px] text-right" />
+          </span>
         </label>
       </div>
       <div className="flex items-center gap-3 mt-3">

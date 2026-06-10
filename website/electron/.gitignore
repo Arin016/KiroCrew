@@ -2,3 +2,4 @@ node_modules/
 dist/
 out/
 *.dmg
+.DS_Store

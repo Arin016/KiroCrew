@@ -27,9 +27,11 @@ function renderInput(props: Partial<Parameters<typeof ChatInput>[0]> = {}) {
     value: '',
     onChange: vi.fn(),
     onSend: vi.fn(),
-    providerId: 'claude_code',
+    providerId: 'acp',
     reasoningEffort: 'high',
     onReasoningEffortClick: vi.fn(),
+    modelName: 'claude-opus-4.7',
+    onModelClick: vi.fn(),
   }
   return render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><Provider store={store}><ChatInput {...defaults} {...props} /></Provider></QueryClientProvider>)
 }
@@ -37,26 +39,26 @@ function renderInput(props: Partial<Parameters<typeof ChatInput>[0]> = {}) {
 describe('ChatInput reasoning effort button', () => {
   it('renders effort button with current level for claude_code provider', () => {
     renderInput()
-    expect(screen.getByTitle('Reasoning: High')).toBeInTheDocument()
+    expect(screen.getByTitle(/Reasoning: High/)).toBeInTheDocument()
   })
 
   it('does not render effort button when capability is off (prop undefined)', () => {
     renderInput({ onReasoningEffortClick: undefined })
-    expect(screen.queryByTitle('Reasoning: High')).not.toBeInTheDocument()
+    expect(screen.queryByTitle(/Reasoning: High/)).not.toBeInTheDocument()
   })
 
 
-  it('calls onReasoningEffortClick with rect on click', () => {
-    const onClick = vi.fn()
-    renderInput({ onReasoningEffortClick: onClick })
-    fireEvent.click(screen.getByTitle('Reasoning: High'))
-    expect(onClick).toHaveBeenCalledTimes(1)
-    expect(onClick.mock.calls[0][0]).toHaveProperty('x')
+  it('calls onModelClick with rect on click (reasoning effort merged into model button)', () => {
+    const onModelClick = vi.fn()
+    renderInput({ onModelClick })
+    fireEvent.click(screen.getByTitle(/Reasoning: High/))
+    expect(onModelClick).toHaveBeenCalledTimes(1)
+    expect(onModelClick.mock.calls[0][0]).toHaveProperty('x')
   })
 
   it('shows disabled state when running', () => {
     renderInput({ isRunning: true })
-    const btn = screen.getByTitle('Stop the current response to switch reasoning effort')
+    const btn = screen.getByTitle('Stop the current response to switch models')
     expect(btn).toBeDisabled()
   })
 

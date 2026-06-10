@@ -74,7 +74,7 @@ export default function AgentSelector({ agents, defaultAgent, value, onChange }:
               className="w-full px-2 py-1 text-[13px] font-mono"
             />
           </div>
-          <div className="overflow-y-auto divide-y divide-border">
+          <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-border">
             {items.map(a => {
               const isCurrent = active === a.name
               const isDefault = a.name === defaultAgent

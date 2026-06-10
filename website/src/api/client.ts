@@ -7,6 +7,21 @@ let _sessionExpiredShown = false
 
 function checkSessionExpired(r: Response): Response {
   if (r.status === 403 && r.headers.get('X-Auth-Required') === 'true' && !_sessionExpiredShown) {
+    // When this dashboard is running embedded in the Instances pane stack
+    // (an <iframe> inside the hub), don't show the paste-token banner here —
+    // the user can't easily fetch the remote token from inside the pane, and
+    // the hub owns recovery. Signal the parent, which force-mints a fresh
+    // token and reloads this iframe (mirrors the hub's auto-recovery).
+    // The message carries no secret; the parent validates event.origin before
+    // acting (see InstancesViewport / resolveTunnelOrigin).
+    if (window.parent && window.parent !== window) {
+      try {
+        window.parent.postMessage({ type: 'mc-auth-expired' }, '*')
+      } catch {
+        /* cross-origin parent unreachable — fall through to the banner below */
+      }
+      return r
+    }
     _sessionExpiredShown = true
     const el = document.createElement('div')
     el.id = 'mc-session-expired'
@@ -91,12 +106,86 @@ const del = (url: string, body?: object) =>
 const patch = (url: string, body: object) =>
   fetch(url, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify(body) })
 
+export interface InstanceTunnelStatus {
+  instance_id: string
+  state: 'disconnected' | 'connecting' | 'connected' | 'error' | 'stopped'
+  local_port?: number
+  remote_port?: number
+  error?: string
+  connected_at?: number
+  token_ttl_remaining?: number
+  diagnosis?: {
+    code: 'ok' | 'not_connected' | 'ssh_unreachable' | 'remote_down' | 'tunnel_down' | 'unknown'
+    ok: boolean
+    reason: string
+    probes: { name: string; ok: boolean }[]
+  }
+}
+
+export interface MidwayStatus {
+  state: 'ok' | 'expiring' | 'expired' | 'unknown'
+  seconds_remaining: number | null
+  expires_at: number | null
+  reason: string
+}
+
+export interface InstanceView {
+  id: string
+  name: string
+  ssh_host: string
+  remote_port: number
+  local_port: number
+  ttl: string
+  remote_bin: string
+  was_connected: boolean
+  status: InstanceTunnelStatus
+}
+
+export interface AddInstanceBody {
+  name: string
+  ssh_host: string
+  remote_port?: number
+  ttl?: string
+  remote_bin?: string
+  id?: string
+}
+
 export const api = {
   status: () => fetch('/api/status').then(j),
   system: () => fetch('/api/system').then(j),
   securityStats: () => fetch('/api/security/stats').then(j) as Promise<{ denied_commands: number; suspicious_patterns: number; tool_schemas: number; redaction_paths: number }>,
   suggestions: (force?: boolean) => fetch(`/api/suggestions${force ? '?force=1' : ''}`).then(j) as Promise<{ suggestions: string[]; generated_at: number; stale: boolean }>,
   branding: () => fetch('/api/dashboard/branding').then(j) as Promise<{ bot_name: string; avatar: string }>,
+  // Instances (multi-instance management) — owner-only, gated by instances.enabled.
+  // listInstances throws ApiError(403) when the feature is disabled; callers
+  // should catch and render the enable toggle rather than an error. `active`
+  // is true only when the SSH manager is actually running (the flag was on at
+  // gateway startup) — enabled-but-not-active means a restart is required.
+  listInstances: () => get('/api/instances').then(j) as Promise<{ active: boolean; instances: InstanceView[]; warm_set_cap: number; midway: MidwayStatus }>,
+  addInstance: (body: AddInstanceBody) => post('/api/instances', body).then(j) as Promise<InstanceView>,
+  updateInstance: (id: string, body: Partial<AddInstanceBody>) =>
+    patch('/api/instances/' + encodeURIComponent(id), body).then(j) as Promise<InstanceView>,
+  removeInstance: (id: string) => del('/api/instances/' + encodeURIComponent(id)).then(j),
+  instanceStatus: (id: string, diagnose = false) =>
+    get('/api/instances/' + encodeURIComponent(id) + '/status' + (diagnose ? '?diagnose=1' : '')).then(j) as Promise<InstanceTunnelStatus>,
+  connectInstance: (id: string) =>
+    post('/api/instances/' + encodeURIComponent(id) + '/connect').then(j) as Promise<
+      InstanceTunnelStatus & { token?: string }
+    >,
+  refreshInstanceToken: (id: string) =>
+    post('/api/instances/' + encodeURIComponent(id) + '/refresh-token').then(j) as Promise<
+      InstanceTunnelStatus & { token?: string }
+    >,
+  disconnectInstance: (id: string) =>
+    post('/api/instances/' + encodeURIComponent(id) + '/disconnect').then(j) as Promise<{
+      disconnected: string
+      was_connected: boolean
+    }>,
+  restartInstance: (id: string) =>
+    post('/api/instances/' + encodeURIComponent(id) + '/restart').then(j) as Promise<{
+      ok: boolean
+      message: string
+    }>,
   // Memory
   memoryPreferences: () => fetch('/api/memory/preferences').then(j),
   saveMemoryPreferences: (content: string) => put('/api/memory/preferences', { content }),
@@ -301,7 +390,7 @@ export const api = {
     if (before !== undefined) p.set('before', String(before))
     return fetch('/api/chat/slots/' + encodeURIComponent(slot) + '?' + p).then(j)
   },
-  createChatSlot: (name?: string, agent?: string, model?: string, mode?: string, memory_mode?: string, title?: string) => post('/api/chat/slots', { ...(name ? { name } : {}), ...(agent ? { agent } : {}), ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(memory_mode ? { memory_mode } : {}), ...(title ? { title } : {}) }).then(j),
+  createChatSlot: (name?: string, agent?: string, model?: string, mode?: string, memory_mode?: string, title?: string, clean_mode?: boolean) => post('/api/chat/slots', { ...(name ? { name } : {}), ...(agent ? { agent } : {}), ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(memory_mode ? { memory_mode } : {}), ...(title ? { title } : {}), ...(clean_mode !== undefined ? { clean_mode } : {}) }).then(j),
   deleteChatSlot: (slot: string) => del('/api/chat/slots/' + encodeURIComponent(slot)).then(j),
   cleanupSessions: (maxInactiveDays: number, activeSlot?: string, dryRun?: boolean) => post('/api/chat/slots/cleanup', { max_inactive_days: maxInactiveDays, active_slot: activeSlot || '', dry_run: !!dryRun }).then(j) as Promise<{ ok: boolean; archived: number; keys: string[]; failed: string[]; dry_run?: boolean; count?: number; active_is_stale?: boolean }>,
   stopChatSlot: (slot: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/stop').then(j),
@@ -323,7 +412,7 @@ export const api = {
   switchVariant: (slot: string, index: number) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/switch-variant', { index }).then(j),
   editResend: (slot: string, ts: string, content: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/edit-resend', { ts, content }).then(j),
   rewind: (slot: string, ts: string, content: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/rewind', { ts, content }).then(j),
-  slackLink: (slot: string, channel?: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/slack-link', channel ? { channel } : undefined).then(j),
+  slackLink: (slot: string, channel?: string, threadTs?: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/slack-link', (channel || threadTs) ? { ...(channel ? { channel } : {}), ...(threadTs ? { thread_ts: threadTs } : {}) } : undefined).then(j),
   slackChannels: () => fetch('/api/slack/channels').then(j),
   // Folders
   chatFolders: () => fetch('/api/chat/folders', { headers: { ..._sk } }).then(j),
@@ -415,6 +504,7 @@ export const api = {
   cancelUpdate: () => post('/api/update/cancel').then(j),
   simulateUpdate: (opts?: { delay?: number; fail_at?: string }) => post('/api/update/simulate', opts || {}).then(j),
   pickFiles: () => post('/api/upload').then(j) as Promise<{ paths: string[] }>,
+  fileDiff: (path: string) => fetch('/api/file-diff?path=' + encodeURIComponent(path)).then(j) as Promise<{ diff: string; original: string; status?: 'clean' | 'modified' | 'untracked' | 'not_git' }>,
   /** Fuzzy file search for @-mention picker */
   fileSearch: (q: string, project?: string, signal?: AbortSignal) => {
     const p = new URLSearchParams({ q })
@@ -446,6 +536,7 @@ export const api = {
   // Voice
   voiceConfig: () => fetch('/api/voice/config').then(j),
   updateVoiceConfig: (body: object) => put('/api/voice/config', body).then(j),
+  voiceVoices: () => fetch('/api/voice/voices').then(j),
   voiceSynthesize: (slot: string, text: string, opts?: { voice?: string; engine?: string; rate?: string; pitch?: string }) =>
     post('/api/voice/synthesize', { slot, text, ...opts }).then(j),
 

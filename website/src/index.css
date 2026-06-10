@@ -997,6 +997,17 @@ body::before{content:'';position:fixed;top:-50%;left:-50%;width:200%;height:200%
 .msg-content .diff-block>pre{padding:0}
 .msg-content .diff-block,.msg-content .code-block{margin:8px 0}
 
+/* Auto-sizing message-edit bubble (Mesh-1883). A hidden ::after mirror, fed by
+   the data-replicated-value attribute, drives the single grid track so the
+   overlapping <textarea> grows with its own content in BOTH dimensions —
+   matching the read-only bubble's width for any message length, capped by the
+   bubble's max-width. No JS measurement, no hardcoded width. The textarea and
+   the mirror must share identical font + wrapping so their line breaks agree. */
+.edit-grow{display:grid}
+.edit-grow::after{content:attr(data-replicated-value) " ";visibility:hidden}
+.edit-grow>textarea,.edit-grow::after{grid-area:1/1;font:inherit;line-height:inherit;letter-spacing:inherit;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+.edit-grow>textarea{width:100%;min-width:0}
+
 /* ── Auto-hiding scrollbar for code/diff blocks ── */
 .scroll-fade::-webkit-scrollbar{height:6px}
 .scroll-fade::-webkit-scrollbar-thumb{background:transparent;border-radius:3px;transition:background .2s}
@@ -1155,6 +1166,16 @@ body::before{content:'';position:fixed;top:-50%;left:-50%;width:200%;height:200%
   outline-offset: 1px;
 }
 
+/* Preview find (MarkdownPanel) uses the CSS Custom Highlight API — paints over
+   Range objects without mutating the react-markdown DOM. Only color /
+   background-color are honored by ::highlight(); box properties are ignored. */
+::highlight(mc-find) {
+  background-color: var(--search-highlight);
+}
+::highlight(mc-find-current) {
+  background-color: var(--search-highlight-current);
+}
+
 /* Mobile: force ChatSidebar to fill overlay drawer width */
 @media (max-width: 767px) {
   .mobile-sessions-overlay .sidebar-inner { width: 100% !important; }
@@ -1170,6 +1191,23 @@ body::before{content:'';position:fixed;top:-50%;left:-50%;width:200%;height:200%
 [data-theme*="dark"] .diff-panel-header {
   background-color: #1e1e1e;
   border-color: #333333;
+}
+
+/* ── Monaco find widget: prevent clipping and ensure buttons are visible ── */
+.monaco-editor .find-widget {
+  max-width: calc(100% - 28px) !important;
+}
+.monaco-editor .sticky-widget {
+  background-color: var(--vscode-editorStickyScroll-background, var(--color-chrome)) !important;
+  opacity: 1 !important;
+}
+.monaco-editor .find-widget .monaco-inputbox {
+  flex: 1 1 auto !important;
+  min-width: 50px !important;
+}
+.monaco-editor .find-widget .find-actions,
+.monaco-editor .find-widget .replace-actions {
+  flex-shrink: 0 !important;
 }
 
 /* ── Liquid-glass design system ──

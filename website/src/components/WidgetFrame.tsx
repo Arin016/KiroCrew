@@ -1,5 +1,4 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
-import { motion } from 'framer-motion'
 import { Maximize2, Minimize2, ExternalLink, Download, Bookmark } from 'lucide-react'
 import { useTheme } from '../hooks/useTheme'
 import { sanitizeCssValue } from '../lib/cssSanitize'
@@ -9,11 +8,83 @@ import { api, ApiError } from '../api/client'
 
 const MIN_HEIGHT = 80
 const MAX_HEIGHT = 500
+// Height shrinks are deferred this long. A reload / Tailwind JIT reflow briefly
+// reports a smaller height before the content settles; applying it immediately
+// collapses-then-regrows the row, which accumulates into a growing gap at the
+// bottom (see the height message handler).
+const HEIGHT_SHRINK_DEBOUNCE_MS = 250
+
+// A JUMP (↑ button / search / nav) lands several widgets near the viewport in
+// the same commit. Building each widget's Tailwind iframe is a synchronous,
+// frame-dropping burst, so a batch building together stacks their JITs into one
+// long task. During a jump we therefore stagger each widget in the batch onto
+// its own macrotask. Manual scroll has no jump signal, so widgets build
+// immediately as they near the viewport (one at a time, amortized across
+// frames) — building during the scroll means the content is ready by the time
+// it stops, with no skeleton→iframe flash on settle.
+const PROGRAMMATIC_BUILD_DELAY_MS = 450
+let lastProgrammaticScrollAt = 0
+if (typeof window !== 'undefined') {
+  window.addEventListener('mc-chat-scroll-jump', () => { lastProgrammaticScrollAt = Date.now() })
+}
+const BUILD_STAGGER_MS = 120
+let jumpBuildSlot = 0
+let jumpBuildResetAt = 0
 
 // Height cache is theme-independent: every entry in THEME_VAR_NAMES is a
 // color var, never a size. If a length/size var is ever added to the list,
 // include it in the cache key so heights don't get reused across themes.
-const heightCache = new Map<string, number>()
+// Persisted to localStorage so widgets don't jump on page reload.
+const CACHE_KEY = 'mc-widget-heights'
+const heightCache: Map<string, number> = (() => {
+  try {
+    const stored = localStorage.getItem(CACHE_KEY)
+    return stored ? new Map(JSON.parse(stored)) : new Map()
+  } catch { return new Map() }
+})()
+
+// Fallback height for a widget we've never measured. The first reveal of any
+// widget must reserve SOME height before its iframe builds and reports the real
+// one; if that reserve is wrong the row visibly corrects once (skeleton →
+// iframe). Using the median of heights we've already cached (this session or a
+// prior one, via localStorage) makes a brand-new widget reserve a typical
+// height, so the one-time correction is small. A truly first-ever widget (empty
+// cache) falls back to the fixed default. NOTE: this is why the correction only
+// showed on a cache-cold browser (fresh Firefox/Safari) and went away after one
+// view or a refresh — localStorage warms the cache.
+const DEFAULT_WIDGET_HEIGHT = 200
+function defaultWidgetHeight(): number {
+  if (heightCache.size === 0) return DEFAULT_WIDGET_HEIGHT
+  const vals = [...heightCache.values()].sort((a, b) => a - b)
+  return vals[Math.floor(vals.length / 2)]
+}
+
+function persistHeightCache() {
+  try {
+    // Keep only last 200 entries to bound storage
+    const entries = [...heightCache.entries()].slice(-200)
+    localStorage.setItem(CACHE_KEY, JSON.stringify(entries))
+  } catch (e) {
+    // Best-effort persistence (quota / private-mode / serialize failures).
+    // Surface it in dev so a persistent failure isn't completely invisible;
+    // there's no recovery to attempt, the next update retries the write.
+    if (import.meta.env.DEV) console.warn('widget height cache persist failed', e)
+  }
+}
+
+// localStorage.setItem is synchronous and JSON.stringify'ing up to 200 entries
+// is not free; writing it on every height update stalls the main thread. Batch
+// writes so a burst of resizes (a widget settling, or several widgets mounting
+// at once) persists at most once per window.
+const HEIGHT_PERSIST_DEBOUNCE_MS = 1000
+let persistTimer: ReturnType<typeof setTimeout> | null = null
+function schedulePersistHeightCache() {
+  if (persistTimer) return
+  persistTimer = setTimeout(() => {
+    persistTimer = null
+    persistHeightCache()
+  }, HEIGHT_PERSIST_DEBOUNCE_MS)
+}
 
 function contentHash(html: string): string {
   let h = 0
@@ -62,42 +133,126 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
   // loadCustomThemes completion and on every applyTheme.
   const { theme, colorTheme, themeVersion } = useTheme()
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
   const [expanded, setExpanded] = useState(false)
+  // Two-stage reveal. The IntersectionObserver marks the widget "near" the
+  // viewport; the expensive iframe build (Tailwind CDN runtime + JIT, on the
+  // parent's main thread) is normally done as soon as it's near — cheap for a
+  // single widget during a manual scroll. But right after a chat JUMP we delay
+  // it (see PROGRAMMATIC_BUILD_DELAY_MS) so a span full of widgets doesn't all
+  // build in the same frame. `visible` is one-way false→true; the chat
+  // virtualizer unmounts the whole row to actually free the iframe.
+  const [visible, setVisible] = useState(false)
+  const [near, setNear] = useState(false)
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    // SSR / environments without IO: render eagerly.
+    if (typeof IntersectionObserver === 'undefined') { setNear(true); return }
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setNear(true)
+          io.disconnect()
+        }
+      },
+      // Mark as near a bit before it scrolls into view so a scroll pause has a
+      // head start on building.
+      { rootMargin: '400px 0px' },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (visible || !near) return
+    const now = Date.now()
+    // Manual scroll (and tests): build immediately as the widget nears the
+    // viewport, so it's ready by the time scrolling stops — no skeleton→iframe
+    // flash on settle.
+    const baseWait = lastProgrammaticScrollAt + PROGRAMMATIC_BUILD_DELAY_MS - now
+    if (baseWait <= 0) {
+      setVisible(true)
+      return
+    }
+    // Jump path: stagger this batch so the widgets don't all JIT in one task.
+    // A fresh batch (no jump within the last delay window) resets the counter.
+    if (now > jumpBuildResetAt) jumpBuildSlot = 0
+    const slot = jumpBuildSlot++
+    jumpBuildResetAt = now + PROGRAMMATIC_BUILD_DELAY_MS
+    const wait = baseWait + slot * BUILD_STAGGER_MS
+    const id = setTimeout(() => setVisible(true), wait)
+    return () => clearTimeout(id)
+  }, [near, visible])
   const key = useMemo(() => contentHash(html), [html])
-  const [height, setHeight] = useState(() => heightCache.get(key) ?? 200)
-  // theme + colorTheme + themeVersion are deps, not inputs: readThemeVars
-  // pulls from document.documentElement, so the memo must re-run whenever
-  // anything upstream has mutated the computed CSS vars there. React's
-  // exhaustive-deps rule can't see through external state sync.
+  const [height, setHeight] = useState(() => heightCache.get(key) ?? defaultWidgetHeight())
+  // Mirror of `height` so the message handler (wired once per `key`) can
+  // compare against the live value, plus a timer used to defer shrinks.
+  const heightRef = useRef(height)
+  heightRef.current = height
+  const shrinkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const themeVars = useMemo(() => readThemeVars(), [theme, colorTheme, themeVersion])
   const srcdoc = useMemo(
-    () => buildSrcdoc({ html, themeVars, mode: theme, includeHeightReporter: true }),
-    [html, themeVars, theme],
+    () => visible ? buildSrcdoc({ html, themeVars, mode: theme, includeHeightReporter: true }) : '',
+    [html, themeVars, theme, visible],
   )
 
-  // Use blob: URL instead of srcdoc to avoid inheriting parent CSP.
-  // Parent CSP script-src 'self' blocks inline scripts in srcdoc iframes
-  // (per W3C spec, srcdoc inherits parent CSP). blob: has its own opaque
-  // origin and is not subject to the parent's CSP restrictions.
-  // Managed in useEffect (not useMemo) to ensure create/revoke are always
-  // paired, even under concurrent rendering or strict mode.
+  // Blob URL — only created when visible
   const [blobUrl, setBlobUrl] = useState<string | null>(null)
+  // Fade the iframe in once its document loads, so the reveal is a soft fade
+  // instead of an abrupt blink-then-appear. Reset to false whenever a new blob
+  // is built (first reveal, theme change, content rebuild) so each fresh render
+  // fades in too.
+  const [iframeLoaded, setIframeLoaded] = useState(false)
 
   useEffect(() => {
+    if (!visible || !srcdoc) return
+    setIframeLoaded(false)
     const blob = new Blob([srcdoc], { type: 'text/html;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     setBlobUrl(url)
     return () => URL.revokeObjectURL(url)
-  }, [srcdoc])
+  }, [srcdoc, visible])
 
   useEffect(() => {
     const handler = (e: MessageEvent) => {
       if (!iframeRef.current || e.source !== iframeRef.current.contentWindow) return
       if (e.data?.type === 'mc-widget-height' && typeof e.data.height === 'number') {
         const h = Math.min(Math.max(e.data.height, MIN_HEIGHT), MAX_HEIGHT)
-        setHeight(h)
-        heightCache.set(key, h)
+        // No-op when the clamped height is unchanged. An animated widget can
+        // post the same height every frame; without this guard each report
+        // re-ran applyHeight → persistHeightCache (synchronous localStorage
+        // write), a per-frame main-thread stall that showed up as scroll jank.
+        if (h === heightRef.current) {
+          if (shrinkTimerRef.current) { clearTimeout(shrinkTimerRef.current); shrinkTimerRef.current = null }
+          return
+        }
+        const applyHeight = (next: number) => {
+          heightRef.current = next
+          setHeight(next)
+          heightCache.set(key, next)
+          schedulePersistHeightCache()
+        }
+        // A pending shrink is always superseded by the newest reading.
+        if (shrinkTimerRef.current) { clearTimeout(shrinkTimerRef.current); shrinkTimerRef.current = null }
+        if (h > heightRef.current) {
+          // Growth applies immediately.
+          applyHeight(h)
+        } else {
+          // Defer shrinks. A reload / Tailwind JIT reflow briefly reports a
+          // smaller height before the content settles; applying it at once
+          // collapses-then-regrows the row, and at the bottom (where the
+          // follow-pin and overflow-anchor both write scrollTop) that leaves a
+          // residual gap which accumulates over repeated reloads. Only shrink
+          // once the smaller height holds.
+          shrinkTimerRef.current = setTimeout(() => {
+            shrinkTimerRef.current = null
+            applyHeight(h)
+          }, HEIGHT_SHRINK_DEBOUNCE_MS)
+        }
       }
       if (e.data?.type === 'mc-widget-action') {
         const { action, payload } = e.data
@@ -108,7 +263,13 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
       }
     }
     window.addEventListener('message', handler)
-    return () => window.removeEventListener('message', handler)
+    return () => {
+      window.removeEventListener('message', handler)
+      // The virtualizer can unmount this widget row (it leaves the window)
+      // while a deferred shrink is still pending; clear it so it can't fire
+      // applyHeight → setHeight / heightCache.set / persist after unmount.
+      if (shrinkTimerRef.current) { clearTimeout(shrinkTimerRef.current); shrinkTimerRef.current = null }
+    }
   }, [key])
 
   const openInNewTab = useCallback(() => {
@@ -304,11 +465,24 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
   const toggleArtifact = savedSlug ? removeArtifact : saveAsArtifact
 
   return (
-    <motion.div
-      initial={{ scale: 0.95, opacity: 0 }}
-      animate={{ scale: 1, opacity: 1 }}
-      className={`rounded-xl border border-border bg-card overflow-hidden transition-all my-2 ${expanded ? 'fixed inset-4 z-50 shadow-2xl' : 'max-h-[540px]'}`}
+    <div
+      ref={containerRef}
+      className={`rounded-xl border border-border bg-card overflow-hidden transition-colors my-2 ${expanded ? 'fixed inset-4 z-50 shadow-2xl' : 'max-h-[540px]'}`}
     >
+      {!visible ? (
+        /* Skeleton — mirrors the visible layout (same header bar + a reserved
+           body of the cached iframe height) so the row keeps EXACTLY the same
+           height when the iframe later mounts. Reserving only the iframe height
+           (without the header) made the row grow by the header's height on
+           becoming visible, which showed as a scroll-up "jump" as each widget
+           entered from the top. */
+        <>
+          <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-bg-elevated">
+            <span className="text-[13px] font-medium text-muted truncate">{title}</span>
+          </div>
+          <div aria-hidden style={{ height: Math.min(height, MAX_HEIGHT) }} />
+        </>
+      ) : (<>
       <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-bg-elevated">
         <span className="text-[13px] font-medium text-text truncate">
           {savedSlug ? (
@@ -353,15 +527,17 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
       {blobUrl && <iframe
         ref={iframeRef}
         src={blobUrl}
+        onLoad={() => setIframeLoaded(true)}
         sandbox="allow-scripts"
-        className="w-full border-none bg-card"
-        style={{ height: expanded ? 'calc(100% - 36px)' : Math.min(height, MAX_HEIGHT) }}
+        className="w-full border-none bg-card transition-opacity duration-200 ease-out motion-reduce:transition-none"
+        style={{ height: expanded ? 'calc(100% - 36px)' : Math.min(height, MAX_HEIGHT), opacity: iframeLoaded ? 1 : 0 }}
         title={title}
       />}
 
       {expanded && (
         <div className="fixed inset-0 bg-black/40 -z-10" onClick={() => setExpanded(false)} />
       )}
-    </motion.div>
+      </>)}
+    </div>
   )
 }

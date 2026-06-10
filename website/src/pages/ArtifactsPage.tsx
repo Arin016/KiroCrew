@@ -132,14 +132,14 @@ export default function ArtifactsPage() {
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
             />
-            <select className={sel} value={kindFilter} onChange={(e) => setKindFilter(e.target.value)}>
+            <select className={sel} value={kindFilter} aria-label="Filter by kind" onChange={(e) => setKindFilter(e.target.value)}>
               {KIND_OPTIONS.map((k) => (
                 <option key={k} value={k}>
                   {k ? `kind: ${k}` : 'all kinds'}
                 </option>
               ))}
             </select>
-            <select className={sel} value={tagFilter} onChange={(e) => setTagFilter(e.target.value)}>
+            <select className={sel} value={tagFilter} aria-label="Filter by tag" onChange={(e) => setTagFilter(e.target.value)}>
               <option value="">all tags</option>
               {allTags.map((t) => (
                 <option key={t} value={t}>

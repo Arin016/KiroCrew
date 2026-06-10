@@ -23,6 +23,8 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return
   const url = new URL(e.request.url)
+  // Skip cross-origin requests (CDN scripts, analytics, etc.)
+  if (url.origin !== self.location.origin) return
   // Skip API/WebSocket requests
   if (url.pathname.startsWith('/api')) return
   // Skip Vite hashed assets — they have unique filenames already

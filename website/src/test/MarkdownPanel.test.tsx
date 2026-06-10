@@ -8,6 +8,7 @@ import { api } from '../api/client'
 vi.mock('../api/client', () => ({
   api: {
     artifacts: vi.fn(),
+    artifact: vi.fn(),
     createArtifact: vi.fn(),
   },
 }))

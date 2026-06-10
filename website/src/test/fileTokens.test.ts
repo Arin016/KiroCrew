@@ -15,6 +15,42 @@ describe('prepareSendPayload', () => {
     expect(result.imgPaths).toEqual(['/tmp/photo.png'])
   })
 
+  it('separates the image from the message text with a blank line in displayTxt', () => {
+    const result = prepareSendPayload('my caption', ['/tmp/photo.png'])
+    // Blank line (Markdown paragraph break) so the image renders in its own
+    // block and the text drops to the next line, not inline after the image.
+    expect(result.displayTxt).toBe('![image](/tmp/photo.png)\n\nmy caption')
+    expect(result.displayTxt).toContain('![image](/tmp/photo.png)\n\nmy caption')
+  })
+
+  it('emits image-only displayTxt with no trailing separator when text is empty', () => {
+    const result = prepareSendPayload('', ['/tmp/photo.png'])
+    expect(result.displayTxt).toBe('![image](/tmp/photo.png)')
+  })
+
+  it('separates the image from the message text with a blank line in txt (LLM-facing)', () => {
+    const result = prepareSendPayload('my caption', ['/tmp/photo.png'])
+    // The blank-line separation is persisted in the LLM-facing `txt`, not just
+    // the optimistic displayTxt, so the image renders in its own block on every
+    // surface that replays stored content (dashboard re-render after a turn,
+    // gateway restart, Slack replay, exports) — the original bug was the
+    // single-'\n' persisted content collapsing image + caption onto one line.
+    expect(result.txt).toBe('![image](/tmp/photo.png)\n\nmy caption')
+  })
+
+  it('emits image-only txt with no trailing separator when text is empty', () => {
+    const result = prepareSendPayload('', ['/tmp/photo.png'])
+    expect(result.txt).toBe('![image](/tmp/photo.png)')
+  })
+
+  it('separates image from caption with a blank line but keeps single newline to appended file tokens', () => {
+    const result = prepareSendPayload('my caption', ['/tmp/photo.png', '/tmp/data.csv'])
+    // image block -> blank line -> caption -> single newline -> [attached_file].
+    expect(result.txt).toBe(
+      '![image](/tmp/photo.png)\n\nmy caption\n[attached_file 1] /tmp/data.csv',
+    )
+  })
+
   it('includes mixed image and non-image files', () => {
     const result = prepareSendPayload('here', ['/tmp/a.png', '/tmp/b.zip'])
     expect(result.imgPaths).toEqual(['/tmp/a.png'])

@@ -9,11 +9,21 @@ vi.mock('@monaco-editor/react', () => ({
   default: ({ value, onChange }: any) => (
     <textarea data-testid="monaco-editor" value={value} onChange={e => onChange(e.target.value)} />
   ),
+  loader: { config: () => {} },
+}))
+
+// Mock monaco-editor to avoid loading the real editor in jsdom.
+vi.mock('monaco-editor', () => ({}))
+
+// Mock the local Monaco setup utility.
+vi.mock('../utils/monacoLocal', () => ({
+  ensureMonacoLocal: async () => {},
 }))
 
 // Mock clipboard
 vi.mock('../utils/clipboard', () => ({
   copyToClipboard: vi.fn(),
+  copyCode: vi.fn(),
 }))
 
 // Mock hljs for CodeBlock

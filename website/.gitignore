@@ -21,3 +21,4 @@ tui/node_modules
 auth.json
 playwright/.auth/
 test-results/
+screenshot-cli.mjs

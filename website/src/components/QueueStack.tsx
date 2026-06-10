@@ -9,7 +9,7 @@ const PEEK = 6
 const EXPANDED_GAP = 4
 const SCALE_STEP = 0.04
 const HIDDEN_EXTRA_SCALE = 0.02
-const OVERLAP = 6 // overlap to fuse with input area below
+const OVERLAP = 11 // overlap to fuse with input area below
 
 const DEPTH_BRIGHTNESS = [1, 0.88, 0.76]
 const SPRING = { type: 'spring' as const, stiffness: 400, damping: 30 }

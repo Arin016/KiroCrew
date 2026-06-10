@@ -1,7 +1,14 @@
 import { memo, lazy, Suspense } from 'react'
 import { monacoLang, useIsDark } from './MonacoCodeBlock'
+import { kiroclawDark, kiroclawLight } from './monacoTheme'
+import Clickable from './Clickable'
 
-const MonacoDiffEditor = lazy(() => import('@monaco-editor/react').then(m => ({ default: m.DiffEditor })))
+const MonacoDiffEditor = lazy(async () => {
+  const { ensureMonacoLocal } = await import('../utils/monacoLocal')
+  await ensureMonacoLocal()
+  const { DiffEditor } = await import('@monaco-editor/react')
+  return { default: DiffEditor }
+})
 
 function extOf(fp: string) {
   const i = fp.lastIndexOf('.')
@@ -30,34 +37,32 @@ export default memo(function DiffPanel({ filePath, original, modified, sideBySid
             original={original}
             modified={modified}
             language={lang}
-            theme={isDark ? 'vs-dark' : 'vs'}
+            theme={isDark ? 'kiroclaw-dark' : 'kiroclaw-light'}
+            beforeMount={(monaco) => {
+              monaco.editor.defineTheme('kiroclaw-dark', kiroclawDark as any)
+              monaco.editor.defineTheme('kiroclaw-light', kiroclawLight as any)
+            }}
             options={{
               readOnly: true,
               renderSideBySide: sideBySide,
-              renderIndicators: false,
               minimap: { enabled: false },
               scrollBeyondLastLine: false,
               fontSize: 13,
               lineNumbers: lineNumbers ? 'on' : 'off',
+              automaticLayout: true,
               scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
             }}
             height="100%"
           />
         </Suspense>
       </div>
-      <div
-        className="shrink-0 flex items-center px-3 h-6 text-[11px] font-mono truncate"
-        style={{
-          background: isDark ? 'rgba(30,30,30,0.85)' : 'rgba(255,255,255,0.85)',
-          backdropFilter: 'blur(8px) saturate(1.2)',
-          WebkitBackdropFilter: 'blur(8px) saturate(1.2)',
-          color: isDark ? '#858585' : '#6a6a6a',
-          borderTop: isDark ? '1px solid #333' : '1px solid #ddd',
-        }}
-        title={filePath}
+      <Clickable
+        className="shrink-0 flex items-center px-5 py-3 border-t border-border text-[11px] font-mono truncate text-muted cursor-pointer hover:text-text transition-colors"
+        title="Click to copy path"
+        onClick={() => navigator.clipboard.writeText(filePath)}
       >
         {filePath}
-      </div>
+      </Clickable>
     </div>
   )
 })

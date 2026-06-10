@@ -60,18 +60,84 @@ const BASE_BODY_CSS =
   "body { margin: 0; padding: 16px; font-family: -apple-system, " +
   "BlinkMacSystemFont, 'Segoe UI', sans-serif; }"
 
-/** Body of the height-reporter script. Defined as a string literal *without*
- * any LLM/user content interpolation — the LLM `html` never reaches here.
- * Set as a script element via textContent below; the iframe re-parses and
- * executes it via the standard <script> mechanism. */
+/** Sub-threshold height jitter (px) the in-iframe reporter ignores. Animated
+ * widgets (canvas, CSS transitions) reflow the body by a pixel or two every
+ * frame; reporting those would flood the parent with postMessages. */
+const HEIGHT_REPORT_EPSILON_PX = 2
+/** A smaller height must hold this long (ms) before the iframe reports a
+ * shrink. A reload / Tailwind JIT reflow / animation frame briefly reports a
+ * smaller height before the content settles; an animated widget that bounces
+ * between a low and high value keeps cancelling this timer, so the shrink
+ * never fires and the reporter goes quiet on the high value. */
+const HEIGHT_REPORT_SHRINK_MS = 200
+
+/** Body of the height-reporter script. Defined as a string literal — the only
+ * interpolation is the two numeric tuning constants above (never LLM/user
+ * content; the LLM `html` never reaches here). Set as a script element via
+ * textContent below; the iframe re-parses and executes it via the standard
+ * <script> mechanism.
+ *
+ * The reporter is deliberately quiet: it coalesces ResizeObserver bursts into
+ * one measurement per animation frame, ignores sub-pixel jitter, applies
+ * growth eagerly, and defers/cancels shrinks. The net effect is that a
+ * continuously animating widget (lava lamp, starry night) reports its height
+ * once and then stops posting, instead of feeding a per-frame resize loop back
+ * to the parent. */
 const HEIGHT_REPORTER_BODY = `(function(){
-  function report(){
-    var h = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+  var EPS = ${HEIGHT_REPORT_EPSILON_PX};
+  var SHRINK_MS = ${HEIGHT_REPORT_SHRINK_MS};
+  var lastSent = -1;      // last height actually posted to the parent
+  var shrinkTimer = null;
+  var rafId = 0;
+  var raf = window.requestAnimationFrame || function(cb){ return setTimeout(cb, 16); };
+  function send(h){
+    lastSent = h;
     parent.postMessage({type:'mc-widget-height', height:h}, '*');
   }
-  new ResizeObserver(report).observe(document.body);
-  window.addEventListener('load', function(){ setTimeout(report, 100); });
-  report();
+  function measure(){
+    // Use body.scrollHeight (content height) — NOT max(body, documentElement).
+    // documentElement.scrollHeight is at least the iframe's own viewport
+    // height, so once the iframe grows it can never report smaller, ratcheting
+    // the frame taller and taller (capped at MAX_HEIGHT) and never shrinking
+    // back to the actual content. body is content-sized (margin:0, no height),
+    // so its scrollHeight tracks the real content and can shrink.
+    return document.body.scrollHeight;
+  }
+  function evaluate(){
+    rafId = 0;
+    var h = measure();
+    if (lastSent < 0){ send(h); return; }            // first measurement
+    if (Math.abs(h - lastSent) <= EPS){              // within deadband — ignore jitter
+      if (shrinkTimer){ clearTimeout(shrinkTimer); shrinkTimer = null; }
+      return;
+    }
+    if (h > lastSent){
+      // Growth applies eagerly so genuine expansion (streaming text, opening a
+      // section) isn't laggy. Cancel any pending shrink: an animated widget
+      // that oscillates low<->high bounces back here every frame, so the shrink
+      // below never commits and we stop posting once locked to the high value.
+      if (shrinkTimer){ clearTimeout(shrinkTimer); shrinkTimer = null; }
+      send(h);
+    } else {
+      // Shrink: defer until the smaller height has held for SHRINK_MS. Reset on
+      // every tick so a continuously oscillating widget never fires it.
+      if (shrinkTimer) clearTimeout(shrinkTimer);
+      shrinkTimer = setTimeout(function(){
+        shrinkTimer = null;
+        var cur = measure();
+        if (cur < lastSent && Math.abs(cur - lastSent) > EPS) send(cur);
+      }, SHRINK_MS);
+    }
+  }
+  function schedule(){
+    // Coalesce a burst of ResizeObserver callbacks (an animation can fire many
+    // per frame) into a single measurement per frame.
+    if (rafId) return;
+    rafId = raf(evaluate);
+  }
+  new ResizeObserver(schedule).observe(document.body);
+  window.addEventListener('load', function(){ setTimeout(schedule, 100); });
+  schedule();
   document.addEventListener('click', function(e){
     if (!e.isTrusted) return;
     var el = e.target.closest('[data-action]');

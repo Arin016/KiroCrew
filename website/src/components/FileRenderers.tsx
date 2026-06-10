@@ -214,15 +214,13 @@ export const PdfViewer = memo(function PdfViewer({ filePath }: { filePath: strin
   const url = '/api/file-raw?path=' + encodeURIComponent(filePath)
   return (
     <div className="h-full border border-border rounded-md overflow-hidden bg-white flex flex-col">
-      <object data={url} type="application/pdf" className="flex-1 w-full">
-        <div className="flex flex-col items-center justify-center h-full gap-4 text-muted">
-          <span className="text-sm">PDF preview not supported in this browser</span>
-          <button
-            className="px-3 py-1.5 rounded-md text-[12px] font-medium border border-accent text-accent bg-accent-subtle cursor-pointer hover:bg-accent hover:text-accent-fg transition-all"
-            onClick={() => window.open(url, '_blank')}
-          >Open in browser</button>
-        </div>
-      </object>
+      <iframe src={url} className="flex-1 w-full border-none" title="PDF Preview" />
+      <div className="flex justify-end p-1 bg-chrome border-t border-border">
+        <button
+          className="px-2 py-1 rounded text-[11px] text-muted hover:text-text cursor-pointer bg-transparent border-none"
+          onClick={() => window.open(url, '_blank')}
+        >Open in new tab</button>
+      </div>
     </div>
   )
 })

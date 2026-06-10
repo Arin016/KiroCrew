@@ -79,11 +79,11 @@ describe('ChatSidebar Folder Grouping', () => {
     renderWithProviders(<ChatSidebar {...defaultProps} />)
 
     await user.click(screen.getByTitle('New folder'))
-    const input = screen.getByPlaceholderText('Folder name…')
+    const input = await screen.findByPlaceholderText('Folder name…')
     await user.type(input, 'Oncall Work')
-    await user.keyboard('{Enter}')
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', keyCode: 13 })
 
-    await waitFor(() => expect(screen.getByText('Oncall Work')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Oncall Work')).toBeInTheDocument(), { timeout: 3000 })
   })
 
   it('cancels folder creation on Escape', async () => {
@@ -288,7 +288,7 @@ describe('ChatSidebar confirmCloseSession', () => {
     renderWithProviders(<ChatSidebar {...defaultProps} />)
     await waitFor(() => expect(screen.getByText('Pipeline debug')).toBeInTheDocument())
 
-    const closeBtn = screen.getByText('Pipeline debug').closest('[draggable]')!.querySelector('[data-close]')!
+    const closeBtn = screen.getByText('Pipeline debug').closest('[draggable]')!.querySelector('[aria-label="Close session"]')!
     fireEvent.click(closeBtn)
 
     expect(mockConfirm).not.toHaveBeenCalled()
@@ -305,7 +305,7 @@ describe('ChatSidebar confirmCloseSession', () => {
     renderWithProviders(<ChatSidebar {...defaultProps} />)
     await waitFor(() => expect(screen.getByText('Pipeline debug')).toBeInTheDocument())
 
-    const closeBtn = screen.getByText('Pipeline debug').closest('[draggable]')!.querySelector('[data-close]')!
+    const closeBtn = screen.getByText('Pipeline debug').closest('[draggable]')!.querySelector('[aria-label="Close session"]')!
     fireEvent.click(closeBtn)
 
     expect(mockConfirm).toHaveBeenCalledWith('Close this session?')
@@ -317,7 +317,7 @@ describe('ChatSidebar confirmCloseSession', () => {
     renderWithProviders(<ChatSidebar {...defaultProps} />)
     await waitFor(() => expect(screen.getByText('Pipeline debug')).toBeInTheDocument())
 
-    const closeBtn = screen.getByText('Pipeline debug').closest('[draggable]')!.querySelector('[data-close]')!
+    const closeBtn = screen.getByText('Pipeline debug').closest('[draggable]')!.querySelector('[aria-label="Close session"]')!
     fireEvent.click(closeBtn)
 
     expect(mockConfirm).toHaveBeenCalledWith('Close this session?')
@@ -340,22 +340,29 @@ describe('ChatSidebar Cleanup', () => {
     )
   })
 
-  it('shows cleanup button in sidebar header', async () => {
+  async function openCleanup(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByTitle('More options'))
+    await user.click(await screen.findByText('Clean up sessions'))
+  }
+
+  it('shows cleanup option in More options menu', async () => {
+    const user = userEvent.setup()
     renderWithProviders(<ChatSidebar {...defaultProps} />)
-    await waitFor(() => expect(screen.getByTitle('Clean up inactive sessions')).toBeInTheDocument())
+    await user.click(await screen.findByTitle('More options'))
+    await waitFor(() => expect(screen.getByText('Clean up sessions')).toBeInTheDocument())
   })
 
   it('opens cleanup dialog on click', async () => {
     const user = userEvent.setup()
     renderWithProviders(<ChatSidebar {...defaultProps} />)
-    await user.click(screen.getByTitle('Clean up inactive sessions'))
+    await openCleanup(user)
     await waitFor(() => expect(screen.getByText('Clean Up Sessions')).toBeInTheDocument())
   })
 
   it('shows day selector buttons', async () => {
     const user = userEvent.setup()
     renderWithProviders(<ChatSidebar {...defaultProps} />)
-    await user.click(screen.getByTitle('Clean up inactive sessions'))
+    await openCleanup(user)
     await waitFor(() => {
       expect(screen.getByText('1 day')).toBeInTheDocument()
       expect(screen.getByText('3 days')).toBeInTheDocument()
@@ -366,7 +373,7 @@ describe('ChatSidebar Cleanup', () => {
   it('closes dialog on Cancel', async () => {
     const user = userEvent.setup()
     renderWithProviders(<ChatSidebar {...defaultProps} />)
-    await user.click(screen.getByTitle('Clean up inactive sessions'))
+    await openCleanup(user)
     await waitFor(() => expect(screen.getByText('Clean Up Sessions')).toBeInTheDocument())
     await user.click(screen.getByText('Cancel'))
     expect(screen.queryByText('Clean Up Sessions')).not.toBeInTheDocument()
@@ -388,7 +395,7 @@ describe('ChatSidebar Cleanup', () => {
       }),
     )
     renderWithProviders(<ChatSidebar {...defaultProps} slots={slotsWithPinned} activeSlot="slot-1" />)
-    await user.click(screen.getByTitle('Clean up inactive sessions'))
+    await openCleanup(user)
     // slot-1 is active (excluded), slot-2 is pinned (excluded), only slot-3 is archivable
     await waitFor(() => expect(screen.getByText(/1 session will be moved/)).toBeInTheDocument())
   })
@@ -408,7 +415,7 @@ describe('ChatSidebar Cleanup', () => {
       { ...baseSlots[1], last_ts: oldTs },
     ]
     renderWithProviders(<ChatSidebar {...defaultProps} slots={staleSlots} activeSlot="slot-1" />)
-    await user.click(screen.getByTitle('Clean up inactive sessions'))
+    await openCleanup(user)
     await waitFor(() => expect(screen.getByText(/skipped.*currently selected/)).toBeInTheDocument())
   })
 
@@ -424,7 +431,7 @@ describe('ChatSidebar Cleanup', () => {
     const now = new Date().toISOString()
     const freshSlots = baseSlots.map(s => ({ ...s, last_ts: now, created: now }))
     renderWithProviders(<ChatSidebar {...defaultProps} slots={freshSlots} />)
-    await user.click(screen.getByTitle('Clean up inactive sessions'))
+    await openCleanup(user)
     await waitFor(() => expect(screen.getByText('No inactive sessions to archive.')).toBeInTheDocument())
   })
 
@@ -447,7 +454,7 @@ describe('ChatSidebar Cleanup', () => {
       { ...baseSlots[2], last_ts: oldTs },
     ]
     renderWithProviders(<ChatSidebar {...defaultProps} slots={slotsWithStale} />)
-    await user.click(screen.getByTitle('Clean up inactive sessions'))
+    await openCleanup(user)
     await waitFor(() => expect(screen.getByText(/1 session will be moved/)).toBeInTheDocument())
 
     const archiveBtn = screen.getByText(/Archive 1 session/)
@@ -484,7 +491,7 @@ describe('ChatSidebar Cleanup', () => {
       { ...baseSlots[2], last_ts: twoDaysAgo },
     ]
     renderWithProviders(<ChatSidebar {...defaultProps} slots={slotsWithMixed} />)
-    await user.click(screen.getByTitle('Clean up inactive sessions'))
+    await openCleanup(user)
 
     // Default 3 days: nothing stale (2 days < 3 days)
     await waitFor(() => expect(screen.getByText('No inactive sessions to archive.')).toBeInTheDocument())

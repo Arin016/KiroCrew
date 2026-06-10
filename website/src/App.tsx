@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo, createContext, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom'
-import { useQuery, useMutation } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAppSelector, useAppDispatch, store } from './store'
 import { fetchSlots, sseStatus, setUpdateProgress, setEnabledAppIds, changeApprovalMode } from './store/dashboardSlice'
 // Side-effect: registers every built-in surface in the registry. MUST run
@@ -19,7 +20,7 @@ import { useNotificationSound } from './hooks/useNotificationSound'
 import { recordSessionStart } from './rum'
 import { ZoomProvider } from './hooks/ZoomProvider'
 import { api } from './api/client'
-import { Rocket, Menu, Users, BookOpen, MessageSquareDot, Settings, Code, RefreshCw, Palette, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, Sparkles, X, Inbox, Gamepad2, KanbanSquare, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain } from 'lucide-react'
+import { Rocket, Menu, Users, BookOpen, BookOpenText, MessageSquareDot, Settings, Code, RefreshCw, Palette, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, Sparkles, X, Inbox, Gamepad2, KanbanSquare, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain, FolderTree, ChevronUp, MoreHorizontal } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ChatPage from './pages/ChatPage'
 import OrchestratedChatPage from './pages/OrchestratedChatPage'
@@ -37,6 +38,8 @@ import ArtifactDetailPage from './pages/ArtifactDetailPage'
 import SettingsPage from './pages/SettingsPage'
 import EmbedSettingsPage from './pages/EmbedSettingsPage'
 import KiroClawNavBridge from './components/KiroClawNavBridge'
+import InstanceTabBar from './components/InstanceTabBar'
+import InstancesViewport from './components/InstancesViewport'
 import EmbedTabStrip from './components/EmbedTabStrip'
 import DeveloperPage from './pages/DeveloperPage'
 import SchedulePage from './pages/SchedulePage'
@@ -51,6 +54,7 @@ import MigrationCheck from './components/MigrationCheck'
 import BuiltinAppRoute from './apps/BuiltinAppRoute'
 import { FEATURE_REQUEST_PROMPT } from './prompts/featureRequest'
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts'
+import { useProvider } from './providers/context'
 import { useAgents } from './hooks/useAgents'
 import ShortcutsModal from './components/ShortcutsModal'
 
@@ -89,7 +93,9 @@ const BUILTIN_ICONS: Record<string, React.ReactElement> = {
   KanbanSquare: <KanbanSquare size={16} />,
   ClipboardCheck: <ClipboardCheck size={16} />,
   BookOpen: <BookOpen size={16} />,
+  BookOpenText: <BookOpenText size={16} />,
   Brain: <Brain size={16} />,
+  FolderTree: <FolderTree size={16} />,
 }
 
 const UPDATE_STEPS: Record<string, { icon: ReactNode; label: string }> = {
@@ -103,6 +109,9 @@ const UPDATE_STEPS: Record<string, { icon: ReactNode; label: string }> = {
 
 const STEP_ORDER = ['pulling', 'syncing', 'building', 'installing', 'restarting']
 const STUCK_THRESHOLD_MS = 5 * 60 * 1000 // 5 minutes
+
+const REASONING_EFFORT_LEVELS = ['', 'low', 'medium', 'high', 'xhigh', 'max']
+const APPROVAL_MODE_LEVELS = ['normal', 'trust_reads', 'trust', 'yolo']
 
 function UpdateOverlay({ onCancel }: { onCancel: () => void }) {
   const progress = useAppSelector(s => s.dashboard.updateProgress)
@@ -223,29 +232,169 @@ function NavBadge({ navId, collapsed, appBadges }: { navId: string; collapsed: b
   )
 }
 
+/** Shared hover-label state for collapsed (icon-only) nav rows. The label is
+ *  rendered through a portal anchored to the row's screen position rather than
+ *  as an in-flow absolute child, because the nav's scroll container clips
+ *  vertically (so a tall icon list scrolls instead of spilling out of the rail)
+ *  and a vertical clip forces horizontal clipping too, which would chop the
+ *  flyout at the 58px rail edge. Repositions while shown so it follows the row
+ *  when the rail is scrolled/resized. */
+function useNavTip<T extends HTMLElement>(enabled: boolean) {
+  const [tip, setTip] = useState<{ top: number; left: number; height: number } | null>(null)
+  const [tipOn, setTipOn] = useState(false) // drives the opacity fade
+  const rowRef = useRef<T | null>(null)
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const rafId = useRef<number | null>(null)
+  const place = useCallback(() => {
+    if (!rowRef.current) return
+    const r = rowRef.current.getBoundingClientRect()
+    // Overlay the row exactly (same top-left + height) so the flyout reads as
+    // the collapsed row expanding in place. Bail out (return the same object) if
+    // nothing moved — the scroll listener fires on any document scroll, so this
+    // avoids needless re-renders when the rail itself didn't move.
+    setTip(prev =>
+      prev && prev.top === r.top && prev.left === r.left && prev.height === r.height
+        ? prev
+        : { top: r.top, left: r.left, height: r.height }
+    )
+  }, [])
+  const showTip = useCallback(() => {
+    if (!enabled || !rowRef.current) return
+    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null }
+    place()
+    // Mount at opacity 0, then flip next frame so the CSS opacity transition
+    // runs (a portal can't fade if it mounts already-visible). Track the handle
+    // so a fast hover-out can cancel it — otherwise the rAF fires after hideTip
+    // and flashes the label to full opacity before the unmount timer.
+    if (rafId.current != null) cancelAnimationFrame(rafId.current)
+    rafId.current = requestAnimationFrame(() => { rafId.current = null; setTipOn(true) })
+  }, [enabled, place])
+  const hideTip = useCallback(() => {
+    if (rafId.current != null) { cancelAnimationFrame(rafId.current); rafId.current = null }
+    setTipOn(false)
+    hideTimer.current = setTimeout(() => setTip(null), 150) // keep mounted for fade-out
+  }, [])
+  // While shown, follow the row on scroll/resize (capture:true catches the
+  // nav's inner scroll container, which doesn't bubble scroll to window).
+  // Depend on a stable boolean — not `tip` itself — so the listeners subscribe
+  // once when the label appears and unsubscribe once when it goes, instead of
+  // churning on every position update `place()` makes during a scroll.
+  const tipVisible = tip !== null
+  useEffect(() => {
+    if (!tipVisible) return
+    window.addEventListener('scroll', place, true)
+    window.addEventListener('resize', place)
+    return () => {
+      window.removeEventListener('scroll', place, true)
+      window.removeEventListener('resize', place)
+    }
+  }, [tipVisible, place])
+  // Reset when the row stops being collapsible (sidebar expands while a tip is
+  // up). mouseLeave may never fire if the cursor stays over the row as it grows,
+  // which would otherwise leave the scroll/resize listeners attached and firing
+  // place() on every document scroll even though the portal no longer renders.
+  useEffect(() => {
+    if (enabled) return
+    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null }
+    if (rafId.current != null) { cancelAnimationFrame(rafId.current); rafId.current = null }
+    setTip(null)
+    setTipOn(false)
+  }, [enabled])
+  useEffect(() => () => {
+    if (hideTimer.current) clearTimeout(hideTimer.current)
+    if (rafId.current != null) cancelAnimationFrame(rafId.current)
+  }, [])
+  return { tip, tipOn, rowRef, showTip, hideTip }
+}
+
 function NavItem({ path, label, icon, active, collapsed, badge, onClickOverride, onClick }: {
   path: string; label: string; icon: React.ReactNode; active: boolean; collapsed: boolean; badge?: React.ReactNode; onClickOverride?: () => void; onClick?: () => void
 }) {
   const navigate = useNavigate()
   const iconEl = <span className={`w-4 h-4 flex items-center justify-center shrink-0 transition-opacity ${active ? 'opacity-100 text-accent' : 'opacity-70'}`}>{icon}</span>
+  const { tip, tipOn, rowRef, showTip, hideTip } = useNavTip<HTMLDivElement>(collapsed)
+  const activate = () => { onClick?.(); (onClickOverride || (() => navigate(path)))() }
   return (
     <motion.div layout="position"
+      ref={rowRef}
+      // The row had only a mouse onClick; role+tabIndex+key handler make it a
+      // real keyboard-operable control (Enter/Space activate, preventing Space
+      // page-scroll). aria-label names it when collapsed (icon-only, no text).
+      role="button"
+      tabIndex={0}
       whileHover={collapsed ? undefined : { scale: 1.02 }}
       whileTap={{ scale: 0.97 }}
       transition={{ duration: 0.15 }}
       className={`group/nav relative flex items-center rounded-md cursor-pointer text-sm font-medium whitespace-nowrap gap-2.5 py-2 pl-3 pr-3 transition-colors duration-200 ${collapsed ? '' : 'overflow-hidden'} ${active ? 'text-text-strong bg-accent-subtle' : 'text-muted hover:text-text hover:bg-bg-hover'}`}
-      onClick={() => { onClick?.(); (onClickOverride || (() => navigate(path)))() }}
+      onClick={activate}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate() } }}
+      onMouseEnter={showTip}
+      onMouseLeave={hideTip}
+      // Keyboard-only users (no pointer) can't trigger the mouse-driven hover
+      // label, so surface it on focus too. showTip/hideTip no-op unless collapsed,
+      // making these inert in expanded mode where the text label is already shown.
+      onFocus={showTip}
+      onBlur={hideTip}
+      aria-label={collapsed ? label : undefined}
     >
       {badge}
       {iconEl}
       {!collapsed && <span className="whitespace-nowrap overflow-hidden">{label}</span>}
-      {collapsed && (
-        <div className="absolute left-0 top-0 bottom-0 flex items-center gap-2.5 pl-3 pr-3 rounded-md bg-card border border-border shadow-lg text-text opacity-0 pointer-events-none group-hover/nav:opacity-100 group-hover/nav:pointer-events-auto transition-opacity duration-150 z-50 whitespace-nowrap">
+      {collapsed && tip && createPortal(
+        <div
+          className={`fixed flex items-center gap-2.5 pl-3 pr-3 rounded-md bg-card border border-border shadow-lg text-text text-sm font-medium z-[9999] pointer-events-none whitespace-nowrap transition-opacity duration-150 ${tipOn ? 'opacity-100' : 'opacity-0'}`}
+          style={{ top: tip.top, left: tip.left, height: tip.height }}
+        >
           <span className={`w-4 h-4 flex items-center justify-center shrink-0 ${active ? 'text-accent' : ''}`}>{icon}</span>
           {label}
-        </div>
+        </div>,
+        document.body
       )}
     </motion.div>
+  )
+}
+
+/** The "N more" / "Show less" Apps-overflow toggle. Mirrors NavItem: a text row
+ *  when expanded, an icon-only button with a portaled hover label when the
+ *  sidebar is collapsed, so the collapse-to-more behavior works in both modes. */
+function NavToggle({ collapsed, expanded, hiddenCount, onClick }: {
+  collapsed: boolean; expanded: boolean; hiddenCount: number; onClick: () => void
+}) {
+  const { tip, tipOn, rowRef, showTip, hideTip } = useNavTip<HTMLButtonElement>(collapsed)
+  // `hiddenCount === 0 && !expanded` happens when the only overflow item is the
+  // active app (kept visible) — nothing is actually hidden, so the toggle just
+  // offers to re-collapse rather than reveal "0 more".
+  const showsCollapse = expanded || hiddenCount === 0
+  const Icon = showsCollapse ? ChevronUp : MoreHorizontal
+  const labelText = showsCollapse ? 'Show less' : `${hiddenCount} more`
+  const titleText = showsCollapse ? 'Show fewer apps' : `Show ${hiddenCount} more app${hiddenCount === 1 ? '' : 's'}`
+  return (
+    <button ref={rowRef}
+      className="group/nav relative flex items-center rounded-md cursor-pointer text-sm font-medium whitespace-nowrap gap-2.5 py-2 pl-3 pr-3 transition-colors duration-200 text-muted hover:text-text hover:bg-bg-hover bg-transparent border-none w-full"
+      onClick={onClick}
+      aria-expanded={expanded}
+      aria-label={titleText}
+      title={titleText}
+      onMouseEnter={showTip}
+      onMouseLeave={hideTip}
+      // Surface the collapsed-mode hover label on keyboard focus too (button is
+      // already focusable). Inert when expanded — showTip/hideTip gate on collapsed.
+      onFocus={showTip}
+      onBlur={hideTip}
+    >
+      <span className="w-4 h-4 flex items-center justify-center shrink-0 opacity-70"><Icon size={16} /></span>
+      {!collapsed && <span className="whitespace-nowrap overflow-hidden">{labelText}</span>}
+      {collapsed && tip && createPortal(
+        <div
+          className={`fixed flex items-center gap-2.5 pl-3 pr-3 rounded-md bg-card border border-border shadow-lg text-text text-sm font-medium z-[9999] pointer-events-none whitespace-nowrap transition-opacity duration-150 ${tipOn ? 'opacity-100' : 'opacity-0'}`}
+          style={{ top: tip.top, left: tip.left, height: tip.height }}
+        >
+          <span className="w-4 h-4 flex items-center justify-center shrink-0"><Icon size={16} /></span>
+          {labelText}
+        </div>,
+        document.body
+      )}
+    </button>
   )
 }
 
@@ -300,12 +449,22 @@ export default function App() {
   useNotificationSound()
   const [navCollapsed, setNavCollapsed] = useState(() => localStorage.getItem('mc-nav') === '1')
   const isMobile = useIsMobile()
+  // Multi-instance: which instance fills the pane below the tab bar. null = Local
+  // (the native dashboard); a non-null id means a remote instance's embedded
+  // dashboard is shown instead, so the Local pane is hidden (not unmounted).
+  const activeInstanceId = useAppSelector(s => s.instances.activeId)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
 
   // Dynamic app nav items — all apps (builtin + installed) with UI pages
   const [appNavItems, setAppNavItems] = useState<Array<{ path: string; id: string; label: string; group: string; icon: React.ReactElement }>>([])
   const [appNavOrder, setAppNavOrder] = useState<string[]>(() => { try { return JSON.parse(localStorage.getItem('mc-app-nav-order') || '[]') } catch { return [] } })
   const appDragRef = useRef<string | null>(null)
+  // Collapse a long Apps list behind a "N more" toggle so the nav can't grow
+  // unbounded. Above APPS_NAV_LIMIT visible entries the overflow is hidden until
+  // the user expands (persisted).
+  const APPS_NAV_LIMIT = 6
+  const [appsExpanded, setAppsExpanded] = useState(() => localStorage.getItem('mc-apps-expanded') === '1')
+  const toggleAppsExpanded = useCallback(() => setAppsExpanded(v => { const next = !v; localStorage.setItem('mc-apps-expanded', next ? '1' : '0'); return next }), [])
   const sortedAppGroup = useMemo(() => {
     const items = [...NAV_ITEMS.filter(n => n.group === 'Apps'), ...appNavItems]
     if (appNavOrder.length === 0) return items
@@ -405,6 +564,8 @@ export default function App() {
   })
   const refreshTrigger = useAppSelector(s => s.dashboard.refreshTrigger)
   const { agents: installedAgents, defaultAgent } = useAgents(refreshTrigger)
+  const queryClient = useQueryClient()
+  const provider = useProvider()
   useKeyboardShortcuts({ onToggleShortcutsModal: toggleShortcutsModal, onNewChat: () => newChatMutation.mutate(), disabled: shortcutsOpen,
     onCycleAgent: () => {
       const slots = store.getState().dashboard.slots
@@ -416,17 +577,6 @@ export default function App() {
       const nextIdx = (idx + 1) % installedAgents.length
       api.chatSlotAgent(activeSlot, installedAgents[nextIdx].name)
     },
-    onCycleApprovalMode: () => {
-      const state = store.getState()
-      const activeSlot = state.chat.activeSlot
-      if (!activeSlot) return
-      const modes = ['normal', 'trust_reads', 'trust', 'yolo']
-      const current = state.dashboard.approvalMode || 'normal'
-      const idx = modes.indexOf(current)
-      const next = modes[(idx + 1) % modes.length]
-      store.dispatch(changeApprovalMode({ mode: next, slot: activeSlot }))
-    },
-
     onCyclePrevAgent: () => {
       const slots = store.getState().dashboard.slots
       const activeSlot = store.getState().chat.activeSlot
@@ -437,16 +587,67 @@ export default function App() {
       const prevIdx = (idx - 1 + installedAgents.length) % installedAgents.length
       api.chatSlotAgent(activeSlot, installedAgents[prevIdx].name)
     },
-
+    onCycleReasoningEffort: () => {
+      const activeSlot = store.getState().chat.activeSlot
+      if (!activeSlot) return
+      const slots = store.getState().dashboard.slots
+      const currentSlot = slots.find((s: { key: string }) => s.key === activeSlot)
+      const current = currentSlot?.reasoning_effort || ''
+      const idx = REASONING_EFFORT_LEVELS.indexOf(current)
+      const nextIdx = (idx + 1) % REASONING_EFFORT_LEVELS.length
+      api.chatSlotReasoningEffort(activeSlot, REASONING_EFFORT_LEVELS[nextIdx])
+    },
+    onCyclePrevReasoningEffort: () => {
+      const activeSlot = store.getState().chat.activeSlot
+      if (!activeSlot) return
+      const slots = store.getState().dashboard.slots
+      const currentSlot = slots.find((s: { key: string }) => s.key === activeSlot)
+      const current = currentSlot?.reasoning_effort || ''
+      const idx = REASONING_EFFORT_LEVELS.indexOf(current)
+      const prevIdx = (idx - 1 + REASONING_EFFORT_LEVELS.length) % REASONING_EFFORT_LEVELS.length
+      api.chatSlotReasoningEffort(activeSlot, REASONING_EFFORT_LEVELS[prevIdx])
+    },
+    onCycleApprovalMode: () => {
+      const state = store.getState()
+      const activeSlot = state.chat.activeSlot
+      if (!activeSlot) return
+      const current = state.dashboard.approvalMode || 'normal'
+      const idx = APPROVAL_MODE_LEVELS.indexOf(current)
+      const next = APPROVAL_MODE_LEVELS[(idx + 1) % APPROVAL_MODE_LEVELS.length]
+      store.dispatch(changeApprovalMode({ mode: next, slot: activeSlot }))
+    },
     onCyclePrevApprovalMode: () => {
       const state = store.getState()
       const activeSlot = state.chat.activeSlot
       if (!activeSlot) return
-      const modes = ['normal', 'trust_reads', 'trust', 'yolo']
       const current = state.dashboard.approvalMode || 'normal'
-      const idx = modes.indexOf(current)
-      const prevIdx = (idx - 1 + modes.length) % modes.length
-      store.dispatch(changeApprovalMode({ mode: modes[prevIdx], slot: activeSlot }))
+      const idx = APPROVAL_MODE_LEVELS.indexOf(current)
+      const prev = APPROVAL_MODE_LEVELS[(idx - 1 + APPROVAL_MODE_LEVELS.length) % APPROVAL_MODE_LEVELS.length]
+      store.dispatch(changeApprovalMode({ mode: prev, slot: activeSlot }))
+    },
+    onCycleModel: () => {
+      const activeSlot = store.getState().chat.activeSlot
+      if (!activeSlot) return
+      const models = queryClient.getQueryData<{ name: string }[]>(['available-models', provider.id])
+      if (!models || models.length === 0) return
+      const slots = store.getState().dashboard.slots
+      const currentSlot = slots.find((s: { key: string }) => s.key === activeSlot)
+      const currentModel = currentSlot?.model || ''
+      const idx = currentModel ? models.findIndex(m => m.name === currentModel) : -1
+      const nextIdx = (idx + 1) % models.length
+      api.chatSlotModel(activeSlot, models[nextIdx].name)
+    },
+    onCyclePrevModel: () => {
+      const activeSlot = store.getState().chat.activeSlot
+      if (!activeSlot) return
+      const models = queryClient.getQueryData<{ name: string }[]>(['available-models', provider.id])
+      if (!models || models.length === 0) return
+      const slots = store.getState().dashboard.slots
+      const currentSlot = slots.find((s: { key: string }) => s.key === activeSlot)
+      const currentModel = currentSlot?.model || ''
+      const idx = currentModel ? models.findIndex(m => m.name === currentModel) : -1
+      const prevIdx = idx <= 0 ? models.length - 1 : idx - 1
+      api.chatSlotModel(activeSlot, models[prevIdx].name)
     },
   })
   const settingsMenuRef = useRef<HTMLDivElement>(null)
@@ -603,7 +804,16 @@ export default function App() {
         </div>
       </div>
     ) : (
-    <div className={`relative z-[1] h-screen grid animate-rise overflow-hidden bg-bg ${isMobile ? 'grid-cols-[minmax(0,1fr)] grid-rows-[52px_minmax(0,1fr)]' : 'grid-cols-[auto_minmax(0,1fr)] grid-rows-[52px_1fr]'}`}
+    <div className="h-screen w-screen flex flex-col overflow-hidden bg-bg">
+      {/* Thin instance tab bar — renders null unless >=1 remote is connected, so
+          the single-instance experience is unchanged. Everything below it is the
+          switchable window: the Local dashboard, or a remote's embedded one. */}
+      <InstanceTabBar />
+      <div className="flex-1 min-h-0 relative">
+      {/* Local pane: the native dashboard. Hidden (not unmounted) while a remote
+          instance tab is active, so local state/websocket survive the switch. */}
+      <div className="absolute inset-0" style={{ display: activeInstanceId === null ? 'block' : 'none' }}>
+    <div className={`relative z-[1] h-full grid animate-rise overflow-hidden bg-bg ${isMobile ? 'grid-cols-[minmax(0,1fr)] grid-rows-[52px_minmax(0,1fr)]' : 'grid-cols-[auto_minmax(0,1fr)] grid-rows-[52px_minmax(0,1fr)]'}`}
       style={{ gridTemplateAreas: isMobile ? '"topbar" "content"' : '"topbar topbar" "nav content"' }}>
 
       {/* Skip to content — visible only on focus for keyboard users */}
@@ -785,10 +995,19 @@ export default function App() {
         animate={{ width: isMobile ? 220 : effectiveCollapsed ? 58 : 220, x: 0 }}
         exit={{ x: -240 }}
         transition={{ duration: 0.25, ease: [0.32, 0.72, 0, 1] }}
-        className={`bg-bg-elevated border border-border rounded-xl flex flex-col scrollbar-none px-2 pb-4 m-2 shadow-sm z-50 ${isMobile ? 'fixed top-0 left-0 bottom-0' : ''} ${effectiveCollapsed ? 'overflow-visible' : 'overflow-y-auto'}`}
-        style={isMobile ? { scrollbarWidth: 'none' } : { gridArea: 'nav', scrollbarWidth: 'none' }}
+        className={`bg-bg-elevated border border-border rounded-xl flex flex-col m-2 shadow-sm z-50 overflow-hidden ${isMobile ? 'fixed top-0 left-0 bottom-0' : ''}`}
+        style={isMobile ? undefined : { gridArea: 'nav' }}
+        role="navigation"
         aria-label="Main navigation"
       >
+        {/* Scrolls vertically in BOTH expanded and collapsed (icon-only) modes —
+         *  collapsed hover labels are portaled to <body> (see NavItem/NavToggle)
+         *  so this vertical clip never chops them at the rail edge. Vertical only
+         *  (overflow-x-hidden) and overscroll-y-none kills the macOS rubber-band
+         *  bounce when scrolling past the ends. scrollbar-none + scrollbarWidth
+         *  hide the scrollbar here (where scrolling actually happens) across
+         *  Firefox, modern WebKit, and older Safari (<16). */}
+        <div className="flex flex-col h-full px-2 pb-4 overflow-y-auto overflow-x-hidden overscroll-y-none scrollbar-none" style={{ scrollbarWidth: 'none' }}>
         {!isMobile && (
         <button className="flex items-center w-full mt-2 py-2.5 pl-3 rounded-md bg-transparent border-none cursor-pointer text-muted hover:text-text hover:bg-bg-hover transition-colors mb-1 shrink-0" onClick={toggleNav} title={effectiveCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} aria-label={effectiveCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}>
           <Menu size={16} />
@@ -816,11 +1035,25 @@ export default function App() {
                 </motion.div>
               )}
             </AnimatePresence>
-            {(group === 'Apps' ? sortedAppGroup : NAV_ITEMS.filter(n => n.group === group)).map(n => {
-              const iconEl = n.icon
+            {(() => {
               const isAppsGroup = group === 'Apps'
+              const fullList = isAppsGroup ? sortedAppGroup : NAV_ITEMS.filter(n => n.group === group)
+              // Collapse a long Apps list behind a "N more" toggle (both expanded
+              // and collapsed modes). Keep the active item visible even when it's
+              // in the overflow, so navigation state is never hidden.
+              const overflowing = isAppsGroup && !appsExpanded && fullList.length > APPS_NAV_LIMIT
+              const visible = overflowing
+                ? fullList.filter((n, i) => i < APPS_NAV_LIMIT || activePath === n.path || activePath.startsWith(n.path + '/'))
+                : fullList
+              const hiddenCount = fullList.length - visible.length
+              return (<>
+              {visible.map(n => {
+              const iconEl = n.icon
+              // role=presentation: this wrapper only carries the pointer
+              // drag-reorder handlers; the interactive control is the nested
+              // NavItem (role=button), so don't expose the wrapper itself.
               return (
-                <div key={n.id} draggable={isAppsGroup} onDragStart={isAppsGroup ? () => { appDragRef.current = n.id } : undefined} onDragOver={isAppsGroup ? e => e.preventDefault() : undefined} onDrop={isAppsGroup ? () => handleAppDrop(n.id) : undefined}>
+                <div key={n.id} role="presentation" draggable={isAppsGroup} onDragStart={isAppsGroup ? () => { appDragRef.current = n.id } : undefined} onDragOver={isAppsGroup ? e => e.preventDefault() : undefined} onDrop={isAppsGroup ? () => handleAppDrop(n.id) : undefined}>
                 <NavItem
                   path={n.path}
                   label={n.label}
@@ -833,7 +1066,22 @@ export default function App() {
                 />
                 </div>
               )
-            })}
+              })}
+              {/* Show the toggle whenever the list is collapsible, NOT only when
+               *  hiddenCount > 0 — otherwise navigating to an app that's the sole
+               *  overflow item pulls it into `visible` (hiddenCount → 0) and the
+               *  toggle vanishes, causing a jarring layout shift as you move
+               *  between apps. The toggle stays put; only its label changes. */}
+              {isAppsGroup && fullList.length > APPS_NAV_LIMIT && (
+                <NavToggle
+                  collapsed={effectiveCollapsed}
+                  expanded={appsExpanded}
+                  hiddenCount={hiddenCount}
+                  onClick={toggleAppsExpanded}
+                />
+              )}
+              </>)
+            })()}
           </motion.div>
         ))}
 
@@ -881,6 +1129,7 @@ export default function App() {
                 <a href="https://github.com/YOUR_ORG/kiroclaw" target="_blank" rel="noopener noreferrer" className="text-[13px] text-muted/60 hover:text-accent transition-colors mt-1 inline-block">GitHub</a>
               </div>
         </div>
+        </div>
       </motion.nav>
       )}
       </AnimatePresence>
@@ -903,6 +1152,8 @@ export default function App() {
             <Route path="/logs" element={<LogsPage />} />
             <Route path="/hooks" element={<HooksPage />} />
             <Route path="/capabilities" element={<CapabilitiesPage />} />
+            {/* Instances setup moved into Settings; switching happens via the header tab strip. */}
+            <Route path="/instances" element={<Navigate to="/settings?tab=instances" replace />} />
             <Route path="/apps" element={<AppsPage />} />
             <Route path="/apps/detail/:name" element={<AppDetailPage />} />
             <Route path="/apps/migrate/:name" element={<MigrationPage />} />
@@ -922,6 +1173,12 @@ export default function App() {
           {terminalEnabled && terminalOpen && <CliPanel />}
         </AnimatePresence>
       </div>
+    </div>{/* /Local dashboard grid */}
+      </div>{/* /Local pane */}
+      {/* Remote instance panes — embedded dashboards kept warm (mounted, hidden)
+          so switching is instant; the active instance fills the pane. */}
+      <InstancesViewport />
+      </div>{/* /pane stack */}
     </div>
     )}
     </WsContext.Provider>

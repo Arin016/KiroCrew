@@ -3,11 +3,21 @@ import { render, screen, fireEvent, act } from '@testing-library/react'
 import { useRef } from 'react'
 import SelectionToolbar, { useSelectionActions, type SelectionAction } from '../src/components/SelectionToolbar'
 
-// Mock framer-motion to skip animations (immediate mount/unmount)
-vi.mock('framer-motion', () => ({
-  AnimatePresence: ({ children }: any) => children,
-  motion: { div: ({ children, ...props }: any) => <div {...props}>{children}</div> },
-}))
+// Mock framer-motion to skip animations (immediate mount/unmount).
+// motion.div forwards its ref so toolbarRef.current resolves to the rendered
+// node — the position-clamp layout effect measures it via offsetWidth, so a
+// dropped ref would silently no-op the clamp (and mask the bug it guards).
+vi.mock('framer-motion', async () => {
+  const { forwardRef } = await import('react')
+  return {
+    AnimatePresence: ({ children }: any) => children,
+    motion: {
+      div: forwardRef(({ children, ...props }: any, ref: any) => (
+        <div ref={ref} {...props}>{children}</div>
+      )),
+    },
+  }
+})
 
 // jsdom doesn't implement Range.getBoundingClientRect
 if (!Range.prototype.getBoundingClientRect) {
@@ -49,7 +59,7 @@ describe('SelectionToolbar', () => {
     const container = screen.getByTestId('container')
     mockSelection(container, 'Hello World')
     fireEvent.mouseUp(document, { clientX: 100, clientY: 50 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument()
   })
@@ -60,7 +70,7 @@ describe('SelectionToolbar', () => {
 
     window.getSelection()?.removeAllRanges()
     fireEvent.mouseUp(document, { clientX: 100, clientY: 50 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     expect(screen.queryByRole('button', { name: 'Copy' })).not.toBeInTheDocument()
   })
@@ -73,7 +83,7 @@ describe('SelectionToolbar', () => {
     const container = screen.getByTestId('container')
     mockSelection(container, 'Hello World')
     fireEvent.mouseUp(document, { clientX: 100, clientY: 50 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
     expect(onClick).toHaveBeenCalledWith('Hello World', expect.any(DOMRect))
@@ -86,7 +96,7 @@ describe('SelectionToolbar', () => {
     const container = screen.getByTestId('container')
     mockSelection(container, 'Hello World')
     fireEvent.mouseUp(document, { clientX: 100, clientY: 50 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
     expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument()
@@ -99,7 +109,7 @@ describe('SelectionToolbar', () => {
     const container = screen.getByTestId('container')
     mockSelection(container, 'Hello World')
     fireEvent.mouseUp(document, { clientX: 100, clientY: 50 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
     expect(screen.queryByRole('button', { name: 'Comment' })).not.toBeInTheDocument()
@@ -112,7 +122,7 @@ describe('SelectionToolbar', () => {
     const container = screen.getByTestId('container')
     mockSelection(container, 'Hello World')
     fireEvent.mouseUp(document, { clientX: 100, clientY: 50 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument()
     fireEvent.keyUp(document, { key: 'Escape' })
@@ -126,7 +136,7 @@ describe('SelectionToolbar', () => {
     const container = screen.getByTestId('container')
     mockSelection(container, 'Hello World')
     fireEvent.mouseUp(document, { clientX: 100, clientY: 50 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument()
     fireEvent.mouseDown(document.body)
@@ -140,7 +150,7 @@ describe('SelectionToolbar', () => {
     const container = screen.getByTestId('container')
     mockSelection(container, 'Hello World')
     fireEvent.mouseUp(document, { clientX: 100, clientY: 50 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument()
     fireEvent.mouseDown(container)
@@ -154,12 +164,12 @@ describe('SelectionToolbar', () => {
     const container = screen.getByTestId('container')
     mockSelection(container, 'Hello World')
     fireEvent.mouseUp(document, { clientX: 100, clientY: 50 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     const btn = screen.getByRole('button', { name: 'Copy' })
     // mouseup on toolbar button should not re-trigger checkSelection
     fireEvent.mouseUp(btn, { clientX: 200, clientY: 200 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     // Toolbar still there, not repositioned (if it had run checkSelection
     // with the new mouse position, it would have set pos to {200, 208})
@@ -173,7 +183,7 @@ describe('SelectionToolbar', () => {
     const container = screen.getByTestId('container')
     mockSelection(container, 'Hello World')
     fireEvent.mouseUp(document, { clientX: 100, clientY: 50 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     const btn = screen.getByRole('button', { name: 'Copy' })
     const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
@@ -191,7 +201,7 @@ describe('SelectionToolbar', () => {
     const container = screen.getByTestId('container')
     mockSelection(container, 'Hello World')
     fireEvent.mouseUp(document, { clientX: 100, clientY: 50 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     expect(screen.getByRole('button', { name: 'Comment' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument()
@@ -217,7 +227,7 @@ describe('SelectionToolbar', () => {
     sel.addRange(range)
 
     fireEvent.mouseUp(document, { clientX: 200, clientY: 100 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     expect(screen.queryByRole('button', { name: 'Copy' })).not.toBeInTheDocument()
   })
@@ -230,7 +240,7 @@ describe('SelectionToolbar', () => {
     mockSelection(container, 'Hello World')
     // Trigger via keyboard (Shift key up) instead of mouse
     fireEvent.keyUp(document, { key: 'ArrowRight', shiftKey: true })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument()
   })
@@ -251,7 +261,7 @@ describe('SelectionToolbar', () => {
     const container = screen.getByTestId('container')
     mockSelection(container, 'Some text')
     fireEvent.mouseUp(document, { clientX: 100, clientY: 50 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     expect(screen.queryByRole('button', { name: 'Copy' })).not.toBeInTheDocument()
   })
@@ -275,11 +285,50 @@ describe('SelectionToolbar', () => {
     const container = screen.getByTestId('container')
     mockSelection(container, 'Hello World')
     fireEvent.mouseUp(document, { clientX: 100, clientY: 50 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
     expect(writeText).toHaveBeenCalledWith('Hello World')
     expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument()
+  })
+
+  it('clamps left so the toolbar never hangs off the right edge', () => {
+    // jsdom reports offsetWidth/offsetHeight as 0; stub a realistic toolbar
+    // footprint so the clamp math (left = min(x - w/2, vw - w - margin)) has a
+    // non-zero width to work with.
+    const W = 220
+    const H = 36
+    const widthSpy = vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(W)
+    const heightSpy = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(H)
+    const origInnerWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 400 })
+
+    try {
+      const actions: SelectionAction[] = [{ id: 'copy', icon: null, label: 'Copy', onClick: vi.fn() }]
+      render(<Wrapper actions={actions}>Hello World</Wrapper>)
+
+      const container = screen.getByTestId('container')
+      mockSelection(container, 'Hello World')
+      // Mouse near the right edge — unclamped left would be 390 - 220/2 = 280,
+      // overflowing the 400px viewport. Clamp ceiling is vw - W - margin = 172.
+      fireEvent.mouseUp(document, { clientX: 390, clientY: 50 })
+      act(() => { vi.advanceTimersByTime(60) })
+
+      const button = screen.getByRole('button', { name: 'Copy' })
+      // The portal renders the toolbar as the motion.div ancestor of the button.
+      const toolbar = button.closest('.fixed') as HTMLElement
+      const left = parseFloat(toolbar.style.left)
+      const margin = 8
+      // Fully inside the viewport: left within [margin, vw - W - margin].
+      expect(left).toBeGreaterThanOrEqual(margin)
+      expect(left).toBeLessThanOrEqual(window.innerWidth - W - margin) // <= 172
+      // And no CSS transform is used for positioning (framer-motion owns it).
+      expect(toolbar.style.transform).toBe('')
+    } finally {
+      widthSpy.mockRestore()
+      heightSpy.mockRestore()
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: origInnerWidth })
+    }
   })
 })
 

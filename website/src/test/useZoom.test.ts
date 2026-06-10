@@ -1,3 +1,4 @@
+import { test, expect, beforeEach, vi } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useZoom } from '../hooks/useZoom'
 
@@ -41,6 +42,54 @@ test('reads persisted zoom from localStorage', () => {
   localStorage.setItem('mc-zoom', '120')
   const { result } = renderHook(() => useZoom())
   expect(result.current.zoom).toBe(120)
+})
+
+test('applies the CSS zoom property (true layout zoom), not transform: scale', () => {
+  // transform: scale is paint-only and breaks scroll/selection/fixed; the hook
+  // must use the CSS `zoom` property so layout reflows and the UI stays
+  // interactive. We spy on setProperty/removeProperty because jsdom's CSSOM
+  // does not recognize the `zoom` property (getPropertyValue('zoom') always
+  // returns '' under jsdom even though it applies in real browsers), so we
+  // assert the hook's CALLS rather than read the value back.
+  const root = document.createElement('div')
+  root.id = 'root'
+  document.body.appendChild(root)
+  const setSpy = vi.spyOn(root.style, 'setProperty')
+  const removeSpy = vi.spyOn(root.style, 'removeProperty')
+  try {
+    localStorage.setItem('mc-zoom', '120')
+    const { unmount } = renderHook(() => useZoom())
+    expect(setSpy).toHaveBeenCalledWith('zoom', '1.2')
+    // Must NOT fall back to the old transform-scale mechanism.
+    expect(root.style.transform).toBe('')
+    expect(setSpy).not.toHaveBeenCalledWith('transform', expect.anything())
+    unmount()
+    // Cleanup clears the zoom so an unmounted provider leaves no residue.
+    expect(removeSpy).toHaveBeenCalledWith('zoom')
+  } finally {
+    setSpy.mockRestore()
+    removeSpy.mockRestore()
+    root.remove()
+  }
+})
+
+test('clears the zoom property at 100% (no residual scaling)', () => {
+  const root = document.createElement('div')
+  root.id = 'root'
+  document.body.appendChild(root)
+  const setSpy = vi.spyOn(root.style, 'setProperty')
+  const removeSpy = vi.spyOn(root.style, 'removeProperty')
+  try {
+    localStorage.setItem('mc-zoom', '100')
+    renderHook(() => useZoom())
+    // At 100% the hook removes zoom and never sets it.
+    expect(removeSpy).toHaveBeenCalledWith('zoom')
+    expect(setSpy).not.toHaveBeenCalledWith('zoom', expect.anything())
+  } finally {
+    setSpy.mockRestore()
+    removeSpy.mockRestore()
+    root.remove()
+  }
 })
 
 test('defaults font family to sans', () => {

@@ -177,4 +177,29 @@ describe('dashboardSlice', () => {
       expect(selectUnreadByMode('orchestrator')).toBe(selectUnreadByMode('orchestrator'))
     })
   })
+
+  describe('reconnect unread suppression', () => {
+    // The useWebSocket hook uses a reconnectingRef (set directly in onopen,
+    // cleared on fetchSlots resolve) to suppress markSlotUnread during the
+    // post-reconnect catch-up window. These reducer-level tests verify the
+    // store invariants the hook relies on; the actual guard is pinned by
+    // useWebSocketReconnect.test.ts at the hook level.
+    it('sseConnected resets slotsLoaded to false (reconnect signal)', () => {
+      let state = reducer(initial, sseSlots([slot1, slot2]))
+      expect(state.slotsLoaded).toBe(true)
+      state = reducer(state, sseConnected())
+      expect(state.slotsLoaded).toBe(false)
+    })
+
+    it('fetchSlots.fulfilled after reconnect does not spuriously add unreads', () => {
+      // Simulates: reconnect → fetchSlots returns slots → no unreads added
+      // (markSlotUnread is guarded by reconnectingRef in the hook, not reducer)
+      let state = reducer(initial, markSlotUnread('chat-1'))
+      state = reducer(state, sseConnected()) // reconnect
+      state = reducer(state, fetchSlots.fulfilled([slot1, slot2], 'requestId'))
+      // Existing unread preserved, no new ones spuriously added
+      expect(state.unreadSlots).toEqual(['chat-1'])
+      expect(state.slotsLoaded).toBe(true)
+    })
+  })
 })

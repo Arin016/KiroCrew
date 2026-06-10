@@ -169,7 +169,7 @@ describe('CommentOverlay', () => {
       const user = userEvent.setup()
       const onSubmitAll = vi.fn()
       render(<CommentList comments={comments} onEdit={vi.fn()} onRemove={vi.fn()} onSubmitAll={onSubmitAll} />)
-      await user.click(screen.getByText('Submit All ▶'))
+      await user.click(screen.getByRole('button', { name: /submit all/i }))
       expect(onSubmitAll).toHaveBeenCalled()
     })
 
@@ -274,6 +274,64 @@ describe('CommentOverlay', () => {
     it('renders nothing when comments array is empty', () => {
       const { container } = render(<CommentList comments={[]} onEdit={vi.fn()} onRemove={vi.fn()} onSubmitAll={vi.fn()} />)
       expect(container.innerHTML).toBe('')
+    })
+
+    it('does not render the Additional prompt textarea by default', () => {
+      render(<CommentList comments={comments} onEdit={vi.fn()} onRemove={vi.fn()} onSubmitAll={vi.fn()} />)
+      expect(screen.queryByLabelText('Additional prompt')).not.toBeInTheDocument()
+    })
+
+    it('does not render the "Add instruction" toggle when enableExtraPrompt is not set', () => {
+      render(<CommentList comments={comments} onEdit={vi.fn()} onRemove={vi.fn()} onSubmitAll={vi.fn()} />)
+      expect(screen.queryByRole('button', { name: /instruction|prompt/i })).not.toBeInTheDocument()
+    })
+
+    it('keeps the Additional prompt textarea hidden until the toggle is clicked when enableExtraPrompt is set', async () => {
+      const user = userEvent.setup()
+      render(<CommentList comments={comments} onEdit={vi.fn()} onRemove={vi.fn()} onSubmitAll={vi.fn()} enableExtraPrompt />)
+      // Toggle present, textarea still hidden before the click.
+      expect(screen.queryByLabelText('Additional prompt')).not.toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: /instruction|prompt/i }))
+      expect(screen.getByLabelText('Additional prompt')).toBeInTheDocument()
+    })
+
+    it('calls onSubmitAll with the typed extra-prompt text after opening the toggle when enableExtraPrompt is set', async () => {
+      const user = userEvent.setup()
+      const onSubmitAll = vi.fn()
+      render(<CommentList comments={comments} onEdit={vi.fn()} onRemove={vi.fn()} onSubmitAll={onSubmitAll} enableExtraPrompt />)
+      await user.click(screen.getByRole('button', { name: /instruction|prompt/i }))
+      await user.type(screen.getByLabelText('Additional prompt'), 'Route to docs owner')
+      await user.click(screen.getByRole('button', { name: /submit all/i }))
+      expect(onSubmitAll).toHaveBeenCalledWith('Route to docs owner')
+    })
+
+    it('calls onSubmitAll with undefined when enableExtraPrompt is set but the toggle is never opened', async () => {
+      const user = userEvent.setup()
+      const onSubmitAll = vi.fn()
+      render(<CommentList comments={comments} onEdit={vi.fn()} onRemove={vi.fn()} onSubmitAll={onSubmitAll} enableExtraPrompt />)
+      await user.click(screen.getByRole('button', { name: /submit all/i }))
+      expect(onSubmitAll).toHaveBeenCalledWith(undefined)
+    })
+
+    it('calls onSubmitAll with undefined when enableExtraPrompt is not set', async () => {
+      const user = userEvent.setup()
+      const onSubmitAll = vi.fn()
+      render(<CommentList comments={comments} onEdit={vi.fn()} onRemove={vi.fn()} onSubmitAll={onSubmitAll} />)
+      await user.click(screen.getByRole('button', { name: /submit all/i }))
+      expect(onSubmitAll).toHaveBeenCalledWith(undefined)
+    })
+
+    it('collapses the extra-prompt textarea after Submit All so stale text is not re-sent', async () => {
+      // CommentList returns null when comments empty but stays mounted, so its
+      // textarea state must reset on submit — otherwise a later batch silently
+      // reuses the previous instruction. After submit the box collapses (the
+      // toggle resets), so the textarea is no longer in the document.
+      const user = userEvent.setup()
+      render(<CommentList comments={comments} onEdit={vi.fn()} onRemove={vi.fn()} onSubmitAll={vi.fn()} enableExtraPrompt />)
+      await user.click(screen.getByRole('button', { name: /instruction|prompt/i }))
+      await user.type(screen.getByLabelText('Additional prompt'), 'one-time instruction')
+      await user.click(screen.getByRole('button', { name: /submit all/i }))
+      expect(screen.queryByLabelText('Additional prompt')).not.toBeInTheDocument()
     })
   })
 

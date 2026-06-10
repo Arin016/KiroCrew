@@ -92,7 +92,7 @@ describe('MarkdownPanel comment/copy flow', () => {
     const preview = document.querySelector('.msg-content')!
     mockSelectionInContainer(preview as HTMLElement, 'test paragraph')
     fireEvent.mouseUp(document, { clientX: 100, clientY: 80 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     expect(screen.getByRole('button', { name: 'Comment' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument()
@@ -103,7 +103,7 @@ describe('MarkdownPanel comment/copy flow', () => {
     const preview = document.querySelector('.msg-content')!
     mockSelectionInContainer(preview as HTMLElement, 'test paragraph')
     fireEvent.mouseUp(document, { clientX: 100, clientY: 80 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     expect(screen.queryByRole('button', { name: 'Comment' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument()
@@ -114,7 +114,7 @@ describe('MarkdownPanel comment/copy flow', () => {
     const preview = document.querySelector('.msg-content')!
     mockSelectionInContainer(preview as HTMLElement, 'test paragraph')
     fireEvent.mouseUp(document, { clientX: 100, clientY: 80 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
     expect(writeText).toHaveBeenCalledWith('test paragraph')
@@ -125,7 +125,7 @@ describe('MarkdownPanel comment/copy flow', () => {
     const preview = document.querySelector('.msg-content')!
     mockSelectionInContainer(preview as HTMLElement, 'test paragraph')
     fireEvent.mouseUp(document, { clientX: 100, clientY: 80 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
 
     fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
     expect(screen.getByPlaceholderText('Write a comment…')).toBeInTheDocument()
@@ -173,10 +173,10 @@ describe('MarkdownPanel comment/copy flow', () => {
 
     await user.type(screen.getByPlaceholderText('Write a comment…'), 'Needs revision{enter}')
     await waitFor(() => {
-      expect(screen.getByText('Submit All ▶')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /submit all/i })).toBeInTheDocument()
     })
 
-    await user.click(screen.getByText('Submit All ▶'))
+    await user.click(screen.getByRole('button', { name: /submit all/i }))
     expect(defaultProps.onSubmitComments).toHaveBeenCalledWith(
       expect.stringContaining('test paragraph')
     )
@@ -196,7 +196,7 @@ describe('MarkdownPanel comment/copy flow', () => {
     fireEvent.click(screen.getByText('Edit'))
     // Attempt to trigger toolbar — preview container won't exist in edit mode
     fireEvent.mouseUp(document, { clientX: 100, clientY: 80 })
-    act(() => { vi.advanceTimersByTime(20) })
+    act(() => { vi.advanceTimersByTime(60) })
     expect(screen.queryByRole('button', { name: 'Comment' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Copy' })).not.toBeInTheDocument()
   })

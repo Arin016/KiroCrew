@@ -285,6 +285,74 @@ describe('ChatPage draft persistence', { timeout: 15_000 }, () => {
     })
   })
 
+  it('collapsed paste survives slot switch and sends expanded, not literal token', async () => {
+    // Regression for the dead-token bug: a collapsed paste becomes a
+    // `[ Paste #N · M lines ]` chip backed by an in-memory PasteBlock. Switching
+    // slots used to clear the blocks while the token text was restored from the
+    // text draft, so the chip went dead and the literal token was sent.
+    const { api } = await import('../api/client')
+    vi.mocked(api.sendChat).mockClear()
+
+    const store = makeStore('slot-a', [{ key: 'slot-a' }, { key: 'slot-b' }])
+    await renderAndWaitForInput(store)
+
+    const input = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    const pasted = 'line1\nline2\nline3\nline4\nline5'  // >= PASTE_THRESHOLD_LINES
+
+    // Fire a text paste — ChatInput collapses it into a token + PasteBlock.
+    await act(async () => {
+      fireEvent.paste(input, {
+        clipboardData: { items: [], getData: (t: string) => (t === 'text' ? pasted : '') },
+      })
+    })
+    // The textarea now holds the token, not the raw content.
+    await waitFor(() => expect(input.value).toMatch(/\[ Paste #1 · 5 lines \]/))
+
+    // Switch away and back WITHOUT sending.
+    act(() => { store.dispatch(setActiveSlot('slot-b')) })
+    act(() => { store.dispatch(setActiveSlot('slot-a')) })
+
+    // Token text is restored AND still backed by its block.
+    await waitFor(() => expect((screen.getByLabelText('Message input') as HTMLTextAreaElement).value).toMatch(/\[ Paste #1 · 5 lines \]/))
+
+    // Send — the LLM must receive the EXPANDED content, never the literal token.
+    await act(async () => { fireEvent.keyDown(screen.getByLabelText('Message input'), { key: 'Enter' }) })
+
+    await waitFor(() => expect(api.sendChat).toHaveBeenCalled())
+    const llmText = vi.mocked(api.sendChat).mock.calls[0][0] as string
+    expect(llmText).toContain('line1\nline2\nline3\nline4\nline5')
+    expect(llmText).not.toContain('[ Paste #1 · 5 lines ]')
+  })
+
+  it('restores paste blocks to the active slot on connection error', async () => {
+    // The Mesh-1468 restore path puts the token text back in the input; the
+    // backing blocks must come back too, or the restored draft shows a dead token.
+    const { api } = await import('../api/client')
+    vi.mocked(api.sendChat).mockRejectedValueOnce(new Error('Network error'))
+
+    const store = makeStore('slot-a', [{ key: 'slot-a' }])
+    await renderAndWaitForInput(store)
+
+    const input = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    const pasted = 'alpha\nbeta\ngamma\ndelta'
+    await act(async () => {
+      fireEvent.paste(input, {
+        clipboardData: { items: [], getData: (t: string) => (t === 'text' ? pasted : '') },
+      })
+    })
+    await waitFor(() => expect(input.value).toMatch(/\[ Paste #1 · 4 lines \]/))
+
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
+
+    // After the failed send, the paste draft must be persisted for the slot so a
+    // subsequent reload/switch can re-pair the token (not just left in the text).
+    await waitFor(() => {
+      const pasteDrafts = JSON.parse(localStorage.getItem('mc-chat-paste-drafts') || '{}')
+      expect(pasteDrafts['slot-a']).toBeTruthy()
+      expect(pasteDrafts['slot-a'][0].content).toBe(pasted)
+    })
+  })
+
   it('restores draft to localStorage on connection error (Mesh-1468)', async () => {
     // Override sendChat to simulate network failure for this test only
     const { api } = await import('../api/client')

@@ -16,6 +16,15 @@ vi.mock('@monaco-editor/react', () => ({
       data-line-numbers={String(options?.lineNumbers)}
     />
   ),
+  loader: { config: () => {} },
+}))
+
+// Mock monaco-editor to avoid loading the real editor in jsdom.
+vi.mock('monaco-editor', () => ({}))
+
+// Mock the local Monaco setup utility (depends on mocked modules above).
+vi.mock('../utils/monacoLocal', () => ({
+  ensureMonacoLocal: async () => {},
 }))
 
 // Stub useIsDark via the real module so the wrapper picks light/dark theme.
@@ -105,6 +114,6 @@ describe('DiffPanel', () => {
   it('uses light theme by default (useIsDark stubbed to false)', async () => {
     render(<DiffPanel filePath="/x/a.ts" original="" modified="" />)
     const editor = await screen.findByTestId('monaco-diff')
-    expect(editor.getAttribute('data-theme')).toBe('vs')
+    expect(editor.getAttribute('data-theme')).toBe('kiroclaw-light')
   })
 })

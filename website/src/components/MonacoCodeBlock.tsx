@@ -1,11 +1,15 @@
 import { memo, useState, useCallback, useEffect, useRef, lazy, Suspense } from 'react'
 import { Pencil, X, Copy, Check } from 'lucide-react'
-import { copyToClipboard } from '../utils/clipboard'
+import { copyCode } from '../utils/clipboard'
 import { CodeBlock } from './CodeBlock'
 import RunInTerminalBtn, { SHELL_LANGS } from './RunInTerminalBtn'
 import { useTerminalEnabled } from '../utils/terminalRegistry'
 
-const Editor = lazy(() => import('@monaco-editor/react'))
+const Editor = lazy(async () => {
+  const { ensureMonacoLocal } = await import('../utils/monacoLocal')
+  await ensureMonacoLocal()
+  return import('@monaco-editor/react')
+})
 
 const LANG_MAP: Record<string, string> = {
   js: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript',
@@ -55,7 +59,7 @@ const MonacoCodeBlock = memo(function MonacoCodeBlock(
   useEffect(() => () => clearTimeout(timerRef.current), [])
 
   const copy = useCallback(() => {
-    copyToClipboard(value)
+    copyCode(value)
     setCopied(true)
     clearTimeout(timerRef.current)
     timerRef.current = setTimeout(() => setCopied(false), 1500)

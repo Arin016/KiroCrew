@@ -68,6 +68,17 @@ import Clickable from '../components/Clickable'
 <div onClick={handler} className="...">Click me</div>
 ```
 
+For animated interactive elements, wrap `Clickable` with Framer Motion — it forwards refs and spreads props, so animation and a11y compose cleanly:
+
+```tsx
+import { motion } from 'framer-motion'
+import Clickable from '../components/Clickable'
+const MotionClickable = motion.create(Clickable)  // motion(Clickable) on older versions
+// <MotionClickable onClick={handler} whileHover={{ scale: 1.02 }}>…</MotionClickable>
+```
+
+Alternatively add `role="button"` + `tabIndex` + `onKeyDown` directly on the `motion.div`.
+
 Rules:
 - Never use `<div onClick>` or `<span onClick>` without `role="button"` + `tabIndex` + `onKeyDown`. Prefer `<Clickable>` which handles all three.
 - All icon-only buttons MUST have `aria-label` describing the action.

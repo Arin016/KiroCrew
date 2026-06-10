@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Repeat, X } from 'lucide-react'
+import { Goal, X } from 'lucide-react'
 
 export interface AutoNudgeLoop {
   id: string
@@ -77,11 +77,20 @@ export default function AutoNudgePopover({ slotKey, anchorRect, loop, onClose, o
     }
   }
 
-  // Position: above the toolbar button, aligned left.
+  // Position: above the toolbar button, clamped to the viewport so the popover
+  // never spills off the screen. Horizontal: keep the 420px panel on screen.
+  // Vertical: it grows upward from just above the button, so cap its height to
+  // the space above and scroll internally to keep the top edge on screen.
+  const POPOVER_WIDTH = 420
+  const MARGIN = 8
+  const MIN_HEIGHT = 120
+  const left = Math.max(MARGIN, Math.min(anchorRect.left, window.innerWidth - POPOVER_WIDTH - MARGIN))
   const style: React.CSSProperties = {
     position: 'fixed',
-    left: anchorRect.left,
+    left,
     bottom: window.innerHeight - anchorRect.top + 6,
+    maxHeight: Math.max(MIN_HEIGHT, anchorRect.top - 6 - MARGIN),
+    overflowY: 'auto',
     zIndex: 100,
   }
 
@@ -91,24 +100,25 @@ export default function AutoNudgePopover({ slotKey, anchorRect, loop, onClose, o
       style={style}
       className="bg-chrome border border-border rounded-lg shadow-xl p-4 w-[420px] text-[12px]"
     >
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2 font-medium text-text">
-          <Repeat size={14} className={loop?.active ? 'text-accent' : 'text-muted'} />
-          Auto-Nudge Loop
+          <Goal size={14} className={loop?.active ? 'text-accent' : 'text-muted'} />
+          Set a goal
           {loop?.active && <span className="text-muted text-[11px]">· cycle {loop.cycle_count}</span>}
         </div>
         <button aria-label="Close" onClick={onClose} className="text-muted hover:text-text bg-transparent border-none cursor-pointer">
           <X size={14} />
         </button>
       </div>
+      <p className="text-muted text-[11px] mb-3 leading-relaxed">Give the agent a goal and it will keep working toward it autonomously — nudging itself when idle until the goal is met or the cycle limit is reached.</p>
 
-      <div className="text-muted text-[11px] mb-1">Nudge message ({"{{…}}"} variables auto-filled)</div>
+      <div className="text-muted text-[11px] mb-1">Goal description</div>
       <textarea
         value={message}
         onChange={e => setMessage(e.target.value)}
         rows={6}
         className="w-full bg-bg border border-border rounded p-2 text-[12px] font-mono resize-y mb-3 text-text"
-        placeholder="What should the agent do when idle?"
+        placeholder="Describe what you want the agent to accomplish…"
       />
 
       <div className="flex gap-3 mb-3">

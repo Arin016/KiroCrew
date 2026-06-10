@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { X, Keyboard } from 'lucide-react'
-import { DEFAULT_SHORTCUTS, formatShortcut, SHORTCUTS_ENABLED_KEY, SHORTCUTS_ENABLED_EVENT } from '../hooks/useKeyboardShortcuts'
+import { DEFAULT_SHORTCUTS, formatShortcut, SHORTCUTS_ENABLED_KEY, SHORTCUTS_ENABLED_EVENT, IS_MAC, MAC_CTRL_DIGITS_KEY } from '../hooks/useKeyboardShortcuts'
 import { Toggle } from './ui'
 
 const GROUPS = ['Chat Navigation', 'Panel Navigation', 'Actions'] as const
@@ -11,6 +11,7 @@ function Kbd({ children }: { children: string }) {
 
 export default function ShortcutsModal({ onClose }: { onClose: () => void }) {
   const [enabled, setEnabled] = useState(() => localStorage.getItem(SHORTCUTS_ENABLED_KEY) !== '0')
+  const [macCtrl, setMacCtrl] = useState(() => localStorage.getItem(MAC_CTRL_DIGITS_KEY) !== '0')
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -24,6 +25,12 @@ export default function ShortcutsModal({ onClose }: { onClose: () => void }) {
     window.dispatchEvent(new Event(SHORTCUTS_ENABLED_EVENT))
   }
 
+  const toggleMacCtrl = (v: boolean) => {
+    localStorage.setItem(MAC_CTRL_DIGITS_KEY, v ? '1' : '0')
+    setMacCtrl(v)
+    window.dispatchEvent(new Event(SHORTCUTS_ENABLED_EVENT))
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg/60 backdrop-blur-sm animate-rise" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" onClick={onClose}>
       <div className="bg-card border border-border rounded-xl p-6 max-w-lg w-full mx-4 shadow-xl max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
@@ -32,7 +39,13 @@ export default function ShortcutsModal({ onClose }: { onClose: () => void }) {
           <button className="text-muted cursor-pointer hover:text-text bg-transparent border-none" onClick={onClose} aria-label="Close"><X size={16} /></button>
         </div>
         {GROUPS.map(group => {
-          const items = DEFAULT_SHORTCUTS.filter(s => s.group === group)
+          const items = DEFAULT_SHORTCUTS.filter(s => s.group === group).map(s => {
+            // When Mac user toggles back to Alt+digit, adjust the display
+            if (IS_MAC && !macCtrl && s.id.startsWith('chat-') && s.ctrl) {
+              return { ...s, ctrl: false, alt: true }
+            }
+            return s
+          })
           return (
             <div key={group} className="mb-5 last:mb-0">
               <div className="text-[12px] font-medium text-muted uppercase tracking-wider mb-2">{group}</div>
@@ -59,6 +72,14 @@ export default function ShortcutsModal({ onClose }: { onClose: () => void }) {
             <Kbd>{/Mac|iPhone|iPad/.test(navigator?.platform ?? '') ? '⌥' : 'Alt'}</Kbd> <span className="text-[11px]">+</span> <Kbd>K</Kbd> always works
           </span>
         </div>
+        {IS_MAC && (
+          <div className="mt-2 flex items-center">
+            <label className="flex items-center gap-2 text-[12px] text-muted cursor-pointer">
+              <Toggle checked={macCtrl} onChange={toggleMacCtrl} />
+              <span>Use ⌃ Ctrl (not ⌥ Option) for chat 1–9</span>
+            </label>
+          </div>
+        )}
       </div>
     </div>
   )

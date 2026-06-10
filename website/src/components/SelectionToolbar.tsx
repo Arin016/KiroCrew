@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { MessageSquareQuote, Copy, Check } from 'lucide-react'
@@ -17,16 +17,28 @@ interface SelectionToolbarProps {
   containerRef: React.RefObject<HTMLElement | null>
   /** Actions to show in the toolbar */
   actions: SelectionAction[]
+  /** External trigger (e.g. from Monaco) — shows toolbar at given position with given text */
+  externalSelection?: { text: string; x: number; y: number } | null
 }
 
 /** Generic floating toolbar that appears when user selects text within a container.
  *  Extensible — pass any actions (quote, copy, etc.) via the `actions` prop. */
-export default function SelectionToolbar({ containerRef, actions }: SelectionToolbarProps) {
+export default function SelectionToolbar({ containerRef, actions, externalSelection }: SelectionToolbarProps) {
   const [visible, setVisible] = useState(false)
   const [pos, setPos] = useState({ x: 0, y: 0 })
+  // Clamped top-left, computed after measuring the toolbar so it never clips
+  // the viewport edges. The layout effect below corrects this before paint,
+  // and framer-motion's `initial opacity: 0` hides the mount frame, so there's
+  // no visible jump from the pre-measure value.
+  const [clampedPos, setClampedPos] = useState({ x: 0, y: 0 })
+  // Mirrors clampedPos so the layout effect can compare against the last value
+  // without listing the effect's own output in its dependency array (which
+  // would fire the effect a second, redundant time on every reposition).
+  const clampedRef = useRef({ x: 0, y: 0 })
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const selectedTextRef = useRef('')
   const toolbarRef = useRef<HTMLDivElement>(null)
+  const sourceRef = useRef<'dom' | 'external' | null>(null)
 
   const selectionRectRef = useRef<DOMRect | null>(null)
 
@@ -36,7 +48,8 @@ export default function SelectionToolbar({ containerRef, actions }: SelectionToo
   const checkSelection = useCallback(() => {
     const sel = window.getSelection()
     if (!sel || sel.isCollapsed || !sel.toString().trim()) {
-      setVisible(false)
+      // Only dismiss if toolbar was shown by DOM selection (not external/Monaco)
+      if (sourceRef.current === 'dom') setVisible(false)
       return
     }
 
@@ -64,8 +77,52 @@ export default function SelectionToolbar({ containerRef, actions }: SelectionToo
       ? lastMouseRef.current.y + 8
       : rect.bottom + 8
     setPos({ x, y })
+    sourceRef.current = 'dom'
     setVisible(true)
   }, [containerRef])
+
+  // After the toolbar mounts/repositions, measure it and clamp its position so
+  // it stays fully inside the viewport. We position by the top-left (left/top)
+  // and deliberately do NOT use a CSS translate to center it: this is a
+  // framer-motion element, and framer-motion owns the `transform` property for
+  // its mount animation (scale/y) — it silently drops any `translate(-50%)` we
+  // set, which left the toolbar's left edge (not its center) at the anchor and
+  // clipped it by half its width near the right edge (the reported bug).
+  // `pos.x` is the desired horizontal center, so convert to a left edge
+  // (`pos.x - w/2`) and clamp into [margin, viewportWidth - w - margin].
+  // `offsetWidth/Height` report the layout footprint independent of the in-flight
+  // scale animation, so the clamp uses the toolbar's true size. Runs in a layout
+  // effect so the corrected position commits before paint — no visible jump.
+  useLayoutEffect(() => {
+    if (!visible) return
+    const el = toolbarRef.current
+    if (!el) return
+    const w = el.offsetWidth
+    const h = el.offsetHeight
+    const margin = 8
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const left = Math.max(margin, Math.min(pos.x - w / 2, vw - w - margin))
+    // Flip above the anchor when it would overflow the bottom edge.
+    const top = pos.y + h + margin > vh ? Math.max(margin, pos.y - h - margin) : pos.y
+    // Compare against the ref (not state) so clampedPos stays out of the deps —
+    // the effect runs once per pos change instead of twice.
+    if (left !== clampedRef.current.x || top !== clampedRef.current.y) {
+      clampedRef.current = { x: left, y: top }
+      setClampedPos({ x: left, y: top })
+    }
+  }, [visible, pos])
+
+  // External trigger (Monaco selections that don't use window.getSelection)
+  useEffect(() => {
+    if (externalSelection) {
+      selectedTextRef.current = externalSelection.text
+      selectionRectRef.current = new DOMRect(externalSelection.x, externalSelection.y, 0, 0)
+      setPos({ x: externalSelection.x, y: externalSelection.y + 8 })
+      sourceRef.current = 'external'
+      setVisible(true)
+    }
+  }, [externalSelection])
 
   useEffect(() => {
     const onMouseUp = (e: MouseEvent) => {
@@ -73,7 +130,7 @@ export default function SelectionToolbar({ containerRef, actions }: SelectionToo
       triggeredByMouseRef.current = true
       lastMouseRef.current = { x: e.clientX, y: e.clientY }
       // Small delay to let selection finalize
-      setTimeout(checkSelection, 10)
+      setTimeout(checkSelection, 50)
     }
 
     const onKeyUp = (e: KeyboardEvent) => {
@@ -81,15 +138,19 @@ export default function SelectionToolbar({ containerRef, actions }: SelectionToo
       // Check selection on Shift+Arrow keys (keyboard selection)
       if (e.shiftKey) {
         triggeredByMouseRef.current = false
-        setTimeout(checkSelection, 10)
+        setTimeout(checkSelection, 50)
       }
     }
 
     const onMouseDown = (e: MouseEvent) => {
       // Don't dismiss if clicking inside the toolbar
       if (toolbarRef.current && toolbarRef.current.contains(e.target as Node)) return
-      // Don't dismiss if starting a new selection inside our container
-      if (containerRef.current && containerRef.current.contains(e.target as Node)) return
+      // Clicking inside the container clears the selection (cursor reposition) —
+      // dismiss after a tick so the new (empty) selection state is readable.
+      if (containerRef.current && containerRef.current.contains(e.target as Node)) {
+        setTimeout(() => { if (!window.getSelection()?.toString().trim()) setVisible(false) }, 0)
+        return
+      }
       setVisible(false)
     }
 
@@ -127,7 +188,10 @@ export default function SelectionToolbar({ containerRef, actions }: SelectionToo
           exit={{ opacity: 0, y: 4, scale: 0.95 }}
           transition={{ duration: 0.15 }}
           className="fixed z-[9999] pointer-events-auto"
-          style={{ left: pos.x, top: pos.y, transform: 'translate(-50%, 0)' }}
+          // `clampedPos` is the true top-left after measurement. No CSS
+          // translate — framer-motion owns `transform` for its animation and
+          // would drop it (see the layout effect above).
+          style={{ left: clampedPos.x, top: clampedPos.y }}
         >
           <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-bg-elevated border border-border shadow-lg">
             {actions.map(action => (

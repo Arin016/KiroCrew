@@ -172,7 +172,7 @@ describe('ChatInput', () => {
     it('does not show attach/screenshot buttons by default', () => {
       renderWithProviders(<ChatInput {...defaultProps} />)
       expect(screen.queryByTitle('Attach file')).not.toBeInTheDocument()
-      expect(screen.queryByTitle(/Screenshot/)).not.toBeInTheDocument()
+      expect(screen.queryByTitle(/Screen snip/)).not.toBeInTheDocument()
     })
 
     it('shows attach button with onUploadFiles', () => {
@@ -180,9 +180,9 @@ describe('ChatInput', () => {
       expect(screen.getByTitle('Attach file')).toBeInTheDocument()
     })
 
-    it('shows screenshot button on macOS with onScreenshot', () => {
+    it('shows screen snip button on macOS with onScreenshot', () => {
       renderWithProviders(<ChatInput {...defaultProps} isMac onScreenshot={vi.fn()} />)
-      expect(screen.getByTitle(/Screenshot/)).toBeInTheDocument()
+      expect(screen.getByTitle(/Screen snip/)).toBeInTheDocument()
     })
 
     it('clicking attach button triggers hidden file input click', () => {
@@ -196,7 +196,7 @@ describe('ChatInput', () => {
     it('disables file buttons when uploading', () => {
       renderWithProviders(<ChatInput {...defaultProps} isMac onUploadFiles={vi.fn()} onScreenshot={vi.fn()} uploading />)
       expect(screen.getByTitle('Attach file')).toBeDisabled()
-      expect(screen.getByTitle(/Screenshot/)).toBeDisabled()
+      expect(screen.getByTitle(/Screen snip/)).toBeDisabled()
     })
   })
 
@@ -217,6 +217,81 @@ describe('ChatInput', () => {
       const handle = screen.getByTitle(/Drag to resize/)
       fireEvent.doubleClick(handle)
       expect(localStorage.getItem('mc-input-height')).toBeNull()
+    })
+  })
+
+  // Mesh-1940: applyHeight snaps an overflowing textarea to the bottom when the
+  // caret is at the end, so typing past the ~6-line cap keeps the caret visible.
+  // jsdom has no layout, so we stub the relevant props (and make height='0' zero
+  // scrollTop, as a real browser does) and stub document.activeElement rather
+  // than calling ta.focus() — real focus leaks into the autoFocusKey suite.
+  describe('caret-follow scroll (Mesh-1940)', () => {
+    afterEach(() => {
+      delete (document as unknown as { activeElement?: unknown }).activeElement
+    })
+    function setActive(el: Element | null) {
+      Object.defineProperty(document, 'activeElement', { configurable: true, get: () => el })
+    }
+
+    function instrument(
+      ta: HTMLTextAreaElement,
+      opts: { initialScrollTop: number; scrollHeight?: number; clientHeight?: number },
+    ) {
+      let scrollTop = opts.initialScrollTop
+      const scrollHeight = opts.scrollHeight ?? 400
+      const clientHeight = opts.clientHeight ?? 140
+      Object.defineProperty(ta, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: v => { scrollTop = v },
+      })
+      Object.defineProperty(ta, 'scrollHeight', { configurable: true, get: () => scrollHeight })
+      Object.defineProperty(ta, 'clientHeight', { configurable: true, get: () => clientHeight })
+      let heightVal = ta.style.height
+      Object.defineProperty(ta.style, 'height', {
+        configurable: true,
+        get: () => heightVal,
+        set: v => { heightVal = v; if (v === '0') scrollTop = 0 }, // mirror browser: collapse zeroes scrollTop
+      })
+    }
+
+    it('snaps to the bottom when typing at the end so the caret stays visible', () => {
+      const value = 'a\nb\nc\nd\ne\nf\ng\nh'
+      renderWithProviders(<ChatInput {...defaultProps} value={value} />)
+      const ta = screen.getByLabelText('Message input') as HTMLTextAreaElement
+      ta.setSelectionRange(value.length, value.length) // caret at end (forward typing)
+      setActive(ta)
+      // Pre-measurement scrollTop is stale (e.g. the value-commit just reset it).
+      instrument(ta, { initialScrollTop: 71, scrollHeight: 289 })
+      fireEvent.input(ta)
+      // Caret-at-end + overflowing ⇒ snap to bottom. Without the fix scrollTop
+      // would be stuck at 71 (the exact symptom seen live) and the caret line
+      // would sit below the fold.
+      expect(ta.scrollTop).toBe(289)
+    })
+
+    it('preserves scroll position for a mid-text caret (no jump to bottom)', () => {
+      const value = 'a\nb\nc\nd\ne\nf\ng\nh'
+      renderWithProviders(<ChatInput {...defaultProps} value={value} />)
+      const ta = screen.getByLabelText('Message input') as HTMLTextAreaElement
+      ta.setSelectionRange(2, 2) // caret mid-text, NOT at end
+      setActive(ta)
+      instrument(ta, { initialScrollTop: 120, scrollHeight: 289 })
+      fireEvent.input(ta)
+      // Mid-text edits must not yank the view to the bottom; keep the place.
+      expect(ta.scrollTop).toBe(120)
+    })
+
+    it('does not snap when content fits within the cap (not overflowing)', () => {
+      const value = 'a\nb'
+      renderWithProviders(<ChatInput {...defaultProps} value={value} />)
+      const ta = screen.getByLabelText('Message input') as HTMLTextAreaElement
+      ta.setSelectionRange(value.length, value.length)
+      setActive(ta)
+      // scrollHeight <= clientHeight ⇒ nothing to scroll.
+      instrument(ta, { initialScrollTop: 0, scrollHeight: 100, clientHeight: 140 })
+      fireEvent.input(ta)
+      expect(ta.scrollTop).toBe(0)
     })
   })
 
@@ -502,15 +577,17 @@ describe('ChatInput', () => {
     })
   })
 
-  // ── Reasoning effort button (Mesh-1412) ──
+  // ── Reasoning effort merged into model button (Mesh-1412) ──
   describe('reasoning effort button', () => {
-    it('renders for claude_code provider', () => {
+    it('renders for acp provider', () => {
       const onClick = vi.fn()
       renderWithProviders(
         <ChatInput {...defaultProps}
-          providerId="claude_code"
+          providerId="acp"
           reasoningEffort="high"
           onReasoningEffortClick={onClick}
+          modelName="claude-opus-4.7"
+          onModelClick={vi.fn()}
         />
       )
       expect(screen.getByTitle(/Reasoning: High/)).toBeInTheDocument()
@@ -519,9 +596,11 @@ describe('ChatInput', () => {
     it('renders Default label when effort is empty', () => {
       renderWithProviders(
         <ChatInput {...defaultProps}
-          providerId="claude_code"
+          providerId="acp"
           reasoningEffort=""
           onReasoningEffortClick={vi.fn()}
+          modelName="claude-opus-4.7"
+          onModelClick={vi.fn()}
         />
       )
       expect(screen.getByTitle(/Reasoning: Default/)).toBeInTheDocument()
@@ -533,6 +612,8 @@ describe('ChatInput', () => {
           providerId="acp"
           reasoningEffort="high"
           onReasoningEffortClick={vi.fn()}
+          modelName="claude-opus-4.7"
+          onModelClick={vi.fn()}
         />
       )
       expect(screen.getByTitle(/Reasoning: High/)).toBeInTheDocument()
@@ -540,14 +621,14 @@ describe('ChatInput', () => {
 
     it('hidden when handler missing even on supported provider', () => {
       renderWithProviders(
-        <ChatInput {...defaultProps} providerId="claude_code" reasoningEffort="high" />
+        <ChatInput {...defaultProps} providerId="acp" reasoningEffort="high" modelName="claude-opus-4.7" onModelClick={vi.fn()} />
       )
       expect(screen.queryByTitle(/Reasoning:/)).not.toBeInTheDocument()
     })
 
     it('shown when providerId is undefined but callback provided', () => {
       renderWithProviders(
-        <ChatInput {...defaultProps} reasoningEffort="high" onReasoningEffortClick={vi.fn()} />
+        <ChatInput {...defaultProps} reasoningEffort="high" onReasoningEffortClick={vi.fn()} modelName="claude-opus-4.7" onModelClick={vi.fn()} />
       )
       expect(screen.getByTitle(/Reasoning: High/)).toBeInTheDocument()
     })
@@ -555,29 +636,33 @@ describe('ChatInput', () => {
     it('disabled while running', () => {
       renderWithProviders(
         <ChatInput {...defaultProps}
-          providerId="claude_code"
+          providerId="acp"
           reasoningEffort="medium"
           onReasoningEffortClick={vi.fn()}
+          modelName="claude-opus-4.7"
+          onModelClick={vi.fn()}
           isRunning
         />
       )
-      const btn = screen.getByTitle(/Stop the current response to switch reasoning effort/)
+      const btn = screen.getByTitle('Stop the current response to switch models')
       expect(btn).toBeDisabled()
     })
 
-    it('invokes handler with click rect', () => {
-      const onClick = vi.fn()
+    it('invokes onModelClick with click rect', () => {
+      const onModelClick = vi.fn()
       renderWithProviders(
         <ChatInput {...defaultProps}
-          providerId="claude_code"
+          providerId="acp"
           reasoningEffort="low"
-          onReasoningEffortClick={onClick}
+          onReasoningEffortClick={vi.fn()}
+          modelName="claude-opus-4.7"
+          onModelClick={onModelClick}
         />
       )
       fireEvent.click(screen.getByTitle(/Reasoning: Low/))
-      expect(onClick).toHaveBeenCalledOnce()
+      expect(onModelClick).toHaveBeenCalledOnce()
       // First arg should be a DOMRect-like object
-      expect(onClick.mock.calls[0][0]).toBeTruthy()
+      expect(onModelClick.mock.calls[0][0]).toBeTruthy()
     })
   })
 
@@ -819,6 +904,79 @@ describe('ChatInput', () => {
       ta.focus()
       fireEvent.keyDown(ta, { key: '/' })
       expect(document.activeElement).toBe(ta)
+    })
+  })
+
+  describe('Project chip', () => {
+    it('does NOT render the project chip when onProjectClick is undefined', () => {
+      renderWithProviders(<ChatInput {...defaultProps} />)
+      expect(screen.queryByLabelText(/Project:/)).not.toBeInTheDocument()
+      expect(screen.queryByLabelText('Select project')).not.toBeInTheDocument()
+    })
+
+    it('renders "Project" label when project prop is empty', () => {
+      renderWithProviders(<ChatInput {...defaultProps} onProjectClick={vi.fn()} />)
+      const btn = screen.getByLabelText('Select project')
+      expect(btn).toBeInTheDocument()
+      expect(btn.getAttribute('title')).toBe('Select project…')
+      expect(btn.textContent).toContain('Project')
+    })
+
+    it('renders the project basename as label when project is set', () => {
+      renderWithProviders(
+        <ChatInput {...defaultProps} onProjectClick={vi.fn()} project="/home/u/workplace/KiroClaw" />
+      )
+      const btn = screen.getByLabelText('Project: /home/u/workplace/KiroClaw')
+      expect(btn).toBeInTheDocument()
+      expect(btn.getAttribute('title')).toBe('Project: /home/u/workplace/KiroClaw')
+      expect(btn.textContent).toContain('KiroClaw')
+      expect(btn.textContent).not.toContain('/home/u/workplace')
+    })
+
+    it('falls back to full path label when project has no basename', () => {
+      // project = "/" → split('/').filter(Boolean) = [] → pop() = undefined → falls back to project itself
+      renderWithProviders(
+        <ChatInput {...defaultProps} onProjectClick={vi.fn()} project="/" />
+      )
+      const btn = screen.getByLabelText('Project: /')
+      expect(btn.textContent).toContain('/')
+    })
+
+    it('strips trailing slashes when computing the basename label', () => {
+      // project = "/home/u/foo/" → filter(Boolean) drops empty trailing chunk → 'foo'
+      renderWithProviders(
+        <ChatInput {...defaultProps} onProjectClick={vi.fn()} project="/home/u/foo/" />
+      )
+      const btn = screen.getByLabelText('Project: /home/u/foo/')
+      expect(btn.textContent).toContain('foo')
+    })
+
+    it('calls onProjectClick with the chip\'s bounding rect when clicked', () => {
+      const onProjectClick = vi.fn()
+      renderWithProviders(
+        <ChatInput {...defaultProps} onProjectClick={onProjectClick} project="/home/u/proj" />
+      )
+      const btn = screen.getByLabelText('Project: /home/u/proj')
+      fireEvent.click(btn)
+      expect(onProjectClick).toHaveBeenCalledTimes(1)
+      const arg = onProjectClick.mock.calls[0][0]
+      // jsdom returns a 0,0,0,0 rect but it MUST be a DOMRect-shaped object
+      expect(arg).toBeDefined()
+      expect(typeof arg.top).toBe('number')
+      expect(typeof arg.left).toBe('number')
+      expect(typeof arg.right).toBe('number')
+      expect(typeof arg.bottom).toBe('number')
+      expect(typeof arg.width).toBe('number')
+      expect(typeof arg.height).toBe('number')
+    })
+
+    it('still calls onProjectClick when no project is set (chip in placeholder mode)', () => {
+      const onProjectClick = vi.fn()
+      renderWithProviders(
+        <ChatInput {...defaultProps} onProjectClick={onProjectClick} />
+      )
+      fireEvent.click(screen.getByLabelText('Select project'))
+      expect(onProjectClick).toHaveBeenCalledTimes(1)
     })
   })
 })

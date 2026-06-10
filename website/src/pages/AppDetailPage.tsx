@@ -338,7 +338,7 @@ export default function AppDetailPage() {
         {error && (
           <div className="mb-4 bg-danger/10 border border-danger/20 rounded-lg p-3 flex items-center gap-3 animate-rise">
             <span className="text-danger text-sm flex-1">{error}</span>
-            <button className="text-danger/60 hover:text-danger text-sm" onClick={() => setError('')}>✕</button>
+            <button aria-label="Dismiss error" className="text-danger/60 hover:text-danger text-sm" onClick={() => setError('')}><X className="lucide-inline" /></button>
           </div>
         )}
 

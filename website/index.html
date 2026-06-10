@@ -12,6 +12,12 @@
   <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" onload="this.rel='stylesheet'" />
   <noscript><link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" /></noscript>
   <title>KiroClaw</title>
+  <script>
+    // Set data-ui from localStorage before React hydrates to prevent flash of
+    // chat layout when the user's preferred mode is 'cli'. Mirrors the
+    // pattern used by data-theme bootstrapping. Synced by useUIMode.
+    try { var u = localStorage.getItem('mc-ui'); if (u === 'cli') document.documentElement.dataset.ui = 'cli'; } catch (e) {}
+  </script>
 </head>
 <body>
   <div id="root"></div>

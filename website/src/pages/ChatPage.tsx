@@ -1,6 +1,5 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
+import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import { createPortal } from 'react-dom'
-import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useIsMobile } from '../hooks/useIsMobile'
@@ -11,7 +10,7 @@ import {
   appendMessage, resumeFromHistory, forkSlot,
   setSlotRunning, setSlotStopping, setPendingInput, resolveByApprovalId, clearPendingPermissions, cancelQueuedMessage,
   setVoiceAudio,
-  toggleActivity,
+  toggleActivity, openActivityToTab,
   setActiveSlot, truncateAfterIndex, replaceMessages,
   requestStop, clearQuestionCard,
 } from '../store/chatSlice'
@@ -26,16 +25,19 @@ import { fileReadUrl } from '../utils/fileReadUrl'
 import { EmptyState, Btn, Input } from '../components/ui'
 import MarkdownPanel from '../components/MarkdownPanel'
 import DiffPanel from '../components/DiffPanel'
-import type { FileChangeEntry } from '../components/FileChangeChips'
+import { type FileChangeEntry, countLines } from '../components/FileChangeChips'
 import PastedChip from '../components/PastedChip'
+import SnipOverlay from '../components/SnipOverlay'
+import { captureScreen, screenSnipSupported } from '../hooks/useScreenSnip'
 import { useTouchedFiles } from '../hooks/useTouchedFiles'
 import { useTheme } from '../hooks/useTheme'
 import CollapsibleToolGroup from './chat/CollapsibleToolGroup'
 import type { DisplayItem, TurnItem } from './chat/types'
-import { scrollToTrueBottom } from './chat/scrollBottom'
+import { useScrollManager } from './chat/useScrollManager'
+import { useVirtualChat } from '../hooks/virtualizer/useVirtualChat'
 import { parseFiles, buildRelMap, prepareSendPayload } from '../utils/fileTokens'
 import { type PasteBlock, expandAll as expandPasteTokens, findTokenRanges, pruneBlocks as pruneBlocksUtil, saveStoredPaste } from '../utils/pasteTokens'
-import { extractPromptFromToken } from '../utils/tokenPrompt'
+import { extractPromptFromToken, extractSlackContextFromToken } from '../utils/tokenPrompt'
 const GROUPABLE = new Set(['thinking', 'permission'])
 /** Delay (ms) before scrolling to bottom after a state update, giving React time to commit. */
 const SCROLL_AFTER_RENDER_MS = 100
@@ -46,6 +48,7 @@ import { useBranding } from '../hooks/useBranding'
 import { useFilteredDropdown } from '../hooks/useFilteredDropdown'
 import { useAgents } from '../hooks/useAgents'
 import AgentDropdownList from '../components/AgentDropdownList'
+import ProjectPicker from '../components/ProjectPicker'
 import ModelDropdownList from '../components/ModelDropdownList'
 
 import ChatInput from '../components/ChatInput'
@@ -69,22 +72,23 @@ import ChatSidebar, { SIDEBAR_MIN, SIDEBAR_MAX } from './ChatSidebar'
 import { copySessionLink, toSlug } from '../utils/shareUrl'
 import { DRAFT_SAVE_DEBOUNCE_MS, loadDrafts, saveDrafts as persistDrafts, setDraft } from '../utils/chatDrafts'
 import { loadFileDrafts, saveFileDrafts as persistFileDrafts, setFileDraft } from '../utils/chatFileDrafts'
+import { loadPasteDrafts, savePasteDrafts as persistPasteDrafts, setPasteDraft } from '../utils/chatPasteDrafts'
 import { findPrevUserMsgDisplayIdx } from '../utils/findPrevUserMsgDisplayIdx'
 import OverlayDrawer from '../components/OverlayDrawer'
 import { loadChatConfig, CONTENT_WIDTH, type ChatConfig } from './chat/ChatSettings'
 import { useKnowledgeFetch, extractKnowledgeQuery, expandKnowledgeBlock } from './chat/useKnowledgeFetch'
 import { KnowledgePicker } from './chat/KnowledgePicker'
 import { useSessionPalette } from '../hooks/useSessionPalette'
-import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, Pen, MessageSquareShare, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Locate, ListTree, Link2, Hash, Rows2 } from 'lucide-react'
+import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, Pen, MessageSquareShare, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Locate, ListTree, Link2, Hash, Undo2, Check } from 'lucide-react'
 
 import InfoTip from '../components/InfoTip'
 import { FileCard } from '../components/FileCard'
 
 const APPROVAL_SEGMENTS = [
-  { key: 'normal' as const, label: 'Normal', icon: <ShieldCheck size={13} />, tooltip: 'Prompt for approval on every tool call' },
-  { key: 'trust_reads' as const, label: 'Reads', icon: <BookOpen size={13} />, tooltip: 'Auto-approve read-only bash commands (ls, cat, grep, git status, etc.) — all other tools still prompt' },
-  { key: 'trust' as const, label: 'Trust', icon: <Handshake size={13} />, tooltip: 'Auto-approve all tools in this chat tab' },
-  { key: 'yolo' as const, label: 'YOLO', icon: <Rocket size={13} />, tooltip: 'Auto-approve all tools in every chat tab — no prompts at all' },
+  { key: 'normal' as const, label: 'Normal', icon: <ShieldCheck size={13} />, tooltip: 'KiroClaw asks you before doing anything', desc: 'KiroClaw checks with you before doing anything' },
+  { key: 'trust_reads' as const, label: 'Reads', icon: <BookOpen size={13} />, tooltip: 'KiroClaw looks things up on its own, but asks before making changes', desc: 'KiroClaw looks things up on its own, but asks before making any changes' },
+  { key: 'trust' as const, label: 'Trust', icon: <Handshake size={13} />, tooltip: 'In this chat, KiroClaw works without asking you first', desc: 'In this chat, KiroClaw works without asking you first' },
+  { key: 'yolo' as const, label: 'YOLO', icon: <Rocket size={13} />, tooltip: 'In every chat, KiroClaw works without asking you first', desc: 'In every chat, KiroClaw works without asking you first' },
 ]
 import { AnimatePresence, motion } from 'framer-motion'
 import DetailPanel from '../components/DetailPanel'
@@ -234,12 +238,6 @@ function SessionStatus() {
   )
 }
 
-
-function VirtuosoHeader() {
-  // Backend loads full chained history on switchSlot — no pagination needed.
-  // This header is just a spacer so the first message isn't pinned to the top edge.
-  return <div className="h-16" />
-}
 
 /** Render user message content with file chips and image markdown. Handles:
  *  - Fresh messages: meta.files present, displayTxt has @relative/path tokens
@@ -493,8 +491,13 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   if (drafts.current === null) drafts.current = loadDrafts()
   const fileDrafts = useRef<Record<string, string[]>>(null!)
   if (fileDrafts.current === null) fileDrafts.current = loadFileDrafts()
+  // Per-slot collapsed-paste blocks backing the `[ Paste #N · M lines ]` tokens
+  // in `input`. Persisted (localStorage, same TTL as text drafts) so the chip
+  // survives slot switches / refresh instead of degrading to literal text.
+  const pasteDrafts = useRef<Record<string, PasteBlock[]>>(null!)
+  if (pasteDrafts.current === null) pasteDrafts.current = loadPasteDrafts()
   const saveDraftsTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const saveDrafts = useCallback(() => { persistDrafts(drafts.current); persistFileDrafts(fileDrafts.current) }, [])
+  const saveDrafts = useCallback(() => { persistDrafts(drafts.current); persistFileDrafts(fileDrafts.current); persistPasteDrafts(pasteDrafts.current) }, [])
   const saveDraftsDebounced = useCallback(() => {
     if (saveDraftsTimer.current) clearTimeout(saveDraftsTimer.current)
     saveDraftsTimer.current = setTimeout(() => { saveDraftsTimer.current = null; saveDrafts() }, DRAFT_SAVE_DEBOUNCE_MS)
@@ -511,6 +514,31 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   // silently appearing in whatever slot is now active.
   const activeSlotRef = useRef(activeSlot); activeSlotRef.current = activeSlot
   const [input, setInput] = useState(() => activeSlot ? drafts.current[activeSlot] ?? '' : '')
+
+  // History suggestions ("Continue a previous chat?") shown above the input on the welcome screen.
+  const sendingRef = useRef(false)
+  const [historyQuery, setHistoryQuery] = useState('')
+  const [historyDismissed, setHistoryDismissed] = useState(false)
+  useEffect(() => {
+    const q = input.trim()
+    if (!q) { setHistoryQuery(''); setHistoryDismissed(false); return }
+    setHistoryDismissed(false)
+    const t = setTimeout(() => setHistoryQuery(q.toLowerCase()), 300)
+    return () => clearTimeout(t)
+  }, [input])
+  const historySuggestions = useMemo(() =>
+    historyQuery && history.length
+      ? history.filter(s => (s.title || '').toLowerCase().includes(historyQuery) || s.key.toLowerCase().includes(historyQuery)).slice(0, 5)
+      : [],
+    [historyQuery, history])
+  const isWelcomeState = messages.length === 0 && !slotRunning && !slotLoading && !sendingRef.current && !knowledgeFetch.results.length && !knowledgeFetch.loading && !knowledgeFetch.pendingKnowledge
+  const showHistorySuggestions = isWelcomeState && historySuggestions.length > 0 && !historyDismissed
+  useEffect(() => {
+    if (!showHistorySuggestions) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setHistoryDismissed(true) }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [showHistorySuggestions])
   const [browseMode, setBrowseMode] = useState(false)
   const pendingInput = useAppSelector(s => s.chat.pendingInput)
 
@@ -538,9 +566,8 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const [pendingModel, _setPendingModel] = useState('')  // model for next new slot
   const pendingModelRef = useRef('')
   const setPendingModel = useCallback((v: string) => { pendingModelRef.current = v; _setPendingModel(v) }, [])
-  const [pendingProject, _setPendingProject] = useState('')  // project for next new slot
   const pendingProjectRef = useRef('')
-  const setPendingProject = useCallback((v: string) => { pendingProjectRef.current = v; _setPendingProject(v) }, [])
+  const setPendingProject = useCallback((v: string) => { pendingProjectRef.current = v }, [])
   const [resolvedModel, setResolvedModel] = useState('')  // resolved model for slots without model
   // Sync pendingModel with default agent's model on initial load
   const _initAgent = pendingAgent || defaultAgent || 'default'
@@ -643,12 +670,30 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     window.addEventListener('autonudge_state', onEvent)
     return () => { cancelled = true; window.removeEventListener('autonudge_state', onEvent) }
   }, [activeSlot])
-  const virtuosoRef = useRef<VirtuosoHandle>(null)
+  const {
+    scrollerRef,
+    scrollToDisplayIndex,
+  } = useScrollManager()
+
+  // Single scroll controller: the virtualizer (`virt`, created below) owns
+  // follow + scroll-to-bottom. These refs bridge the early effects/handlers
+  // (declared before `virt` in source order) to the virtualizer's API without
+  // a temporal-dead-zone hazard — they are populated right after `virt` is
+  // created and only read inside callbacks/effects that run post-render.
+  const isAtBottomRef = useRef(true)
+  const vScrollToBottomRef = useRef<(behavior?: ScrollBehavior) => void>(() => {})
+  const mountIndexRef = useRef<(index: number) => boolean>(() => false)
+  const scrollToIndexSmoothRef = useRef<(index: number, opts?: { align?: 'start' | 'center'; offset?: number }) => void>(() => {})
 
   const [prefillHint, setPrefillHint] = useState(false)
   const autoSendRef = useRef<string | null>(null)
   const newSessionRef = useRef(false)
-  const sendingRef = useRef(false)
+  // True while the challenge-redirect token effect is creating/linking its
+  // session. Blocks the auto-select effect from switching to a different slot
+  // (which would orphan the freshly slack-linked session and break mirroring).
+  const tokenConsumingRef = useRef(
+    typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('token'),
+  )
   const inputRef = useRef(input)
   inputRef.current = input
   const browseModeRef = useRef(browseMode)
@@ -687,20 +732,84 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
 
   // Consume prompt from token payload (channel challenge-and-redirect flow).
   // The prompt is HMAC-signed in the token — server validates the signature
-  // and sets the session cookie before the SPA loads. We pre-fill the input
-  // and let the user press Enter (no auto-send — user must confirm).
+  // and sets the session cookie before the SPA loads. No auto-send — the user
+  // must press Enter to confirm.
+  //
+  // Three cases, driven by signed claims in the token:
+  //  1. session_key present → the originating Slack thread is already linked to
+  //     a dashboard session; reconnect to THAT session instead of making a new
+  //     one (fixes "thread reply spawns a disconnected session").
+  //  2. channel + thread_ts present (no session_key) → fresh thread; create a
+  //     new session and auto-link it back to that Slack thread so agent
+  //     responses flow into the thread.
+  //  3. neither → plain new session (e.g. a top-level channel message).
+  // In all cases the prompt is seeded via PREFILL_STORAGE_KEY (the channel the
+  // slot-restore effect honors) AND set directly once the target slot is
+  // active, so the previous slot's draft can't clobber it.
   useEffect(() => {
-    if (embedded) return
+    // tokenConsumingRef is initialized true when a token is in the URL; every
+    // early return below MUST clear it, or the auto-select guard stays engaged
+    // for the whole session and blocks slot selection.
+    if (embedded) { tokenConsumingRef.current = false; return }
     const token = new URLSearchParams(window.location.search).get('token')
-    if (!token) return
+    if (!token) { tokenConsumingRef.current = false; return }
     // Always strip token from URL to prevent leakage via referrer/history
     window.history.replaceState({}, '', window.location.pathname)
     const prompt = extractPromptFromToken(token)
-    if (prompt) {
+    if (!prompt) { tokenConsumingRef.current = false; return }
+    const { sessionKey, channel, threadTs } = extractSlackContextFromToken(token)
+    // Backend session keys are history keys (dashboard:chat-…); the frontend
+    // slot key is the bare form.
+    const targetSlot = sessionKey ? sessionKey.replace(/^dashboard:/, '') : null
+    tokenConsumingRef.current = true
+    ;(async () => {
+     try {
+      let slotKey: string | null = null
+      if (targetSlot) {
+        // Case 1: reconnect to the existing linked session.
+        try {
+          await dispatch(switchSlot(targetSlot)).unwrap()
+          slotKey = targetSlot
+        } catch {
+          // Session vanished (deleted/expired) — fall back to a new one.
+        }
+      }
+      if (!slotKey) {
+        // No targetSlot (or reconnect failed): create the session HERE and,
+        // for a fresh thread, slack-link it so responses mirror to Slack.
+        try {
+          const slot: any = await dispatch(createSlot({ mode })).unwrap()
+          slotKey = slot?.key ?? null
+        } catch {
+          // ignore — fall back to prefilling the current slot
+        }
+        // Case 2: auto-link the new session back to the originating thread so
+        // responses flow into Slack. Best-effort; failure just leaves it
+        // unlinked.
+        if (slotKey && channel && threadTs) {
+          try { await api.slackLink(slotKey, channel, threadTs) } catch { /* non-fatal */ }
+        }
+      }
+      // We have created/reconnected AND made the target slot active. Critically,
+      // clear newSessionRef and pin activeSlot to this slot so send() reuses it
+      // on Enter — otherwise send()'s forceNew path would spawn a SECOND,
+      // unlinked slot and break Slack mirroring.
+      if (slotKey) {
+        newSessionRef.current = false
+        dispatch(switchSlot(slotKey))
+        sessionStorage.setItem(
+          PREFILL_STORAGE_KEY,
+          JSON.stringify({ slotKey, prompt, ts: Date.now() }),
+        )
+      }
       setInput(prompt)
       setPrefillHint(true)
-      newSessionRef.current = true
-    }
+     } finally {
+      // Release the auto-select guard once the session is created/linked (or
+      // failed), so normal slot selection resumes.
+      tokenConsumingRef.current = false
+     }
+    })()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { inputRef.current = input; if (activeSlot) { setDraft(drafts.current, activeSlot, input); saveDraftsDebounced() } }, [input, saveDraftsDebounced]) // eslint-disable-line react-hooks/exhaustive-deps -- activeSlot intentionally omitted; slot-change effect handles that transition
@@ -712,8 +821,11 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     for (const [k, v] of Object.entries(stored)) { if (!(k in drafts.current)) drafts.current[k] = v }
     const storedFiles = loadFileDrafts()
     for (const [k, v] of Object.entries(storedFiles)) { if (!(k in fileDrafts.current)) fileDrafts.current[k] = v }
+    const storedPastes = loadPasteDrafts()
+    for (const [k, v] of Object.entries(storedPastes)) { if (!(k in pasteDrafts.current)) pasteDrafts.current[k] = v }
     if (prevSlot.current) setDraft(drafts.current, prevSlot.current, inputRef.current)
     if (prevSlot.current) setFileDraft(fileDrafts.current, prevSlot.current, pendingFilesRef.current)
+    if (prevSlot.current) setPasteDraft(pasteDrafts.current, prevSlot.current, pasteBlocksRef.current)
     prevSlot.current = activeSlot
     const raw = sessionStorage.getItem(PREFILL_STORAGE_KEY)
     const draftFallback = activeSlot ? drafts.current[activeSlot] ?? '' : ''
@@ -728,7 +840,13 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     // Restore the incoming slot's staged file attachments (copy so the
     // live state array and the stored draft don't share a reference).
     setPendingFiles(activeSlot ? (fileDrafts.current[activeSlot] ?? []).slice() : [])
-    setPasteBlocks([])
+    // Restore the incoming slot's collapsed-paste blocks (deep copy so the live
+    // state and the stored draft don't share references). Without this the
+    // token text rehydrates from the text draft but its backing block is gone,
+    // leaving a dead `[ Paste #N · M lines ]` literal in the input.
+    setPasteBlocks(activeSlot
+      ? (pasteDrafts.current[activeSlot] ?? []).map(b => ({ ...b }))
+      : [])
     knowledgeFetchRef.current.clearResults()
     setUploadError('')
     flushDrafts()
@@ -738,6 +856,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     if (saveDraftsTimer.current) { clearTimeout(saveDraftsTimer.current); saveDraftsTimer.current = null }
     if (prevSlot.current) setDraft(drafts.current, prevSlot.current, inputRef.current)
     if (prevSlot.current) setFileDraft(fileDrafts.current, prevSlot.current, pendingFilesRef.current)
+    if (prevSlot.current) setPasteDraft(pasteDrafts.current, prevSlot.current, pasteBlocksRef.current)
     flushDrafts()
   }, [flushDrafts])
   // Flush pending draft save on tab close / refresh (debounce may not fire)
@@ -745,12 +864,15 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     const h = () => {
       if (prevSlot.current) setDraft(drafts.current, prevSlot.current, inputRef.current)
       if (prevSlot.current) setFileDraft(fileDrafts.current, prevSlot.current, pendingFilesRef.current)
+      if (prevSlot.current) setPasteDraft(pasteDrafts.current, prevSlot.current, pasteBlocksRef.current)
       flushDrafts()
     }
     window.addEventListener('beforeunload', h)
     return () => window.removeEventListener('beforeunload', h)
   }, [flushDrafts])
   const [agentBtnRect, setAgentBtnRect] = useState<DOMRect | null>(null)
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false)
+  const [projectBtnRect, setProjectBtnRect] = useState<DOMRect | null>(null)
 
   // Prevent Chrome from navigating to dropped files.
   // Must be on document to catch drops anywhere on the page.
@@ -772,6 +894,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const [dragOver, setDragOver] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [pendingFiles, setPendingFiles] = useState<string[]>([])
+  const [snipFrame, setSnipFrame] = useState<HTMLCanvasElement | null>(null)
   const pendingFilesRef = useRef(pendingFiles)
   useEffect(() => {
     pendingFilesRef.current = pendingFiles
@@ -782,10 +905,22 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- activeSlot
     // intentionally omitted; slot-change effect handles that transition
   }, [pendingFiles, saveDraftsDebounced])
-  // Collapsed paste blocks backing `⌜🗒 Pasted N lines⌟` tokens in `input`. Session-only, cleared on send / slot switch.
+  // Collapsed paste blocks backing the `[ Paste #N · M lines ]` tokens in
+  // `input`. Persisted per-slot via chatPasteDrafts (localStorage, 30-day TTL)
+  // so they survive slot switches / refresh; cleared on send and slot delete.
   const [pasteBlocks, setPasteBlocks] = useState<PasteBlock[]>([])
   const pasteBlocksRef = useRef(pasteBlocks)
-  useEffect(() => { pasteBlocksRef.current = pasteBlocks }, [pasteBlocks])
+  useEffect(() => {
+    pasteBlocksRef.current = pasteBlocks
+    // Live-persist the active slot's blocks so a slot switch / refresh restores
+    // them alongside the text draft (mirrors the pendingFiles effect above).
+    if (activeSlot) {
+      setPasteDraft(pasteDrafts.current, activeSlot, pasteBlocks)
+      saveDraftsDebounced()
+    }
+    // activeSlot intentionally omitted; slot-change effect handles that transition.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pasteBlocks, saveDraftsDebounced])
   const [uploadError, setUploadError] = useState('')
   const isMac = useAppSelector(s => s.dashboard.status?.platform) === 'darwin'
   const { data: sttCfg } = useQuery({
@@ -855,7 +990,6 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
 
   const panel = usePanelState()
   const diffPanel = useDiffPanel()
-  const [forceUnified, setForceUnified] = useState(false)
   const [diffLineNumbers, setDiffLineNumbers] = useState(false)
   const touchedFiles = useTouchedFiles(activeSlot ?? undefined)
 
@@ -906,24 +1040,30 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     try { window.dispatchEvent(new CustomEvent('kiroclaw-file-open', { detail: { path: filePath } })) } catch { /* ignore */ }
     if ((window as unknown as { __kiroclawPluginHandlesFiles?: boolean }).__kiroclawPluginHandlesFiles) return
     try {
-      const { text, ok } = await queryClient.fetchQuery({
-        queryKey: ['file-read', filePath],
-        queryFn: async () => {
-          const url = fileReadUrl(filePath)
-          const res = await fetch(url)
-          const text = res.ok
-            ? await res.text()
-            : res.status === 404 ? '_File not found on disk. It may have been moved or deleted._'
-            : '_Unable to read file._'
-          return { text, ok: res.ok }
-        },
-        staleTime: 10_000,
-      })
-      panel.openPanel(filePath, text)
+      const [{ text, ok }] = await Promise.all([
+        queryClient.fetchQuery({
+          queryKey: ['file-read', filePath],
+          queryFn: async () => {
+            const url = fileReadUrl(filePath)
+            const res = await fetch(url)
+            const text = res.ok
+              ? await res.text()
+              : res.status === 404 ? '_File not found on disk. It may have been moved or deleted._'
+              : '_Unable to read file._'
+            return { text, ok: res.ok }
+          },
+          staleTime: 10_000,
+        }),
+        queryClient.prefetchQuery({
+          queryKey: ['file-diff', filePath],
+          queryFn: () => api.fileDiff(filePath),
+        }),
+      ])
+      panel.openPanel(filePath, text, activeSlotRef.current ?? null)
       diffPanel.closeDiff()
       if (ok) touchedFiles.addFile(filePath, 'history')
     } catch {
-      panel.openPanel(filePath, '_Error reading file_')
+      panel.openPanel(filePath, '_Error reading file_', activeSlotRef.current ?? null)
     }
   }, [queryClient, panel, diffPanel, touchedFiles])
 
@@ -1042,6 +1182,13 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     setUploading(false)
   }, [saveDrafts])
 
+  /** Screen capture entry: cross-platform snip+crop when supported, else native macOS screenshot. */
+  const handleCapture = useCallback(async () => {
+    if (!screenSnipSupported) { takeScreenshot(); return }
+    const canvas = await captureScreen()
+    if (canvas) setSnipFrame(canvas)
+  }, [takeScreenshot])
+
   /** Upload files via browser File API (cross-platform) */
   const uploadFiles = useCallback(async (files: File[]) => {
     if (!files.length) return
@@ -1077,59 +1224,96 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     }
   }, [uploadFiles])
 
-  // See `chat/scrollBottom.ts` for the rationale on `instant` and the
-  // post-scrollToIndex Footer-overhang nudge.
+  // Scroll to bottom helper — delegates to the virtualizer (single controller).
   const scrollBottom = useCallback((instant: boolean = false) => {
-    scrollToTrueBottom(virtuosoRef.current, instant)
+    vScrollToBottomRef.current(instant ? 'auto' : 'smooth')
   }, [])
 
-  // "Scroll to previous user message" pill — mirrors the scroll-to-bottom
-  // pill on the top of the chat. Tracks the topmost visible displayItem
-  // index via Virtuoso's rangeChanged so we can (a) flip the pill visible
-  // only when there IS a user message above the viewport, and (b) find
-  // the jump target on click. A refs-backed copy of displayItems keeps
-  // handleRangeChanged's identity stable (no re-subscribe per render).
+  // Navigate to a (possibly off-window) display index: mount it first via the
+  // virtualizer so the DOM-based scroll can find it, then scroll next frame.
+  const navToDisplayIndex = useCallback((
+    idx: number,
+    opts?: { behavior?: ScrollBehavior; align?: ScrollLogicalPosition; offset?: number },
+  ) => {
+    // Signal WidgetFrames that a jump is starting so the span of widgets
+    // mountIndex is about to union doesn't all build their iframes in one
+    // frame (see PROGRAMMATIC_BUILD_DELAY_MS in WidgetFrame).
+    window.dispatchEvent(new Event('mc-chat-scroll-jump'))
+    const jumpedFar = mountIndexRef.current(idx)
+    // A FAR jump replaces the window, so the rows between the old viewport and
+    // the target are NOT mounted — a smooth glide would scrub the scroller
+    // through blank spacer (the "occasional flicker" on the ↑/jump pills when
+    // the target is past a long turn). Teleport instantly instead: the target
+    // block is already mounted so it shows immediately, and overflow-anchor
+    // keeps it stable as its rows measure. NEAR jumps keep their smooth glide
+    // (mountIndex unioned the whole path, so there's nothing blank to scrub).
+    const behavior: ScrollBehavior = jumpedFar ? 'auto' : (opts?.behavior ?? 'smooth')
+    requestAnimationFrame(() => scrollToDisplayIndex(idx, { ...opts, behavior }))
+  }, [scrollToDisplayIndex])
+
+  // "Scroll to previous user message" pill — tracks topmost visible item
   const topmostIdxRef = useRef(0)
   const [hasUserMsgAbove, setHasUserMsgAbove] = useState(false)
   const displayItemsRef = useRef<DisplayItem[]>([])
-  const handleRangeChanged = useCallback((range: { startIndex: number; endIndex: number }) => {
-    topmostIdxRef.current = range.startIndex
-    setHasUserMsgAbove(findPrevUserMsgDisplayIdx(displayItemsRef.current, range.startIndex) >= 0)
-  }, [])
+  // Update topmost index from scroll position (replaces Virtuoso rangeChanged)
+  const updateTopmostIdx = useCallback(() => {
+    const el = scrollerRef.current
+    if (!el) return
+    // First item whose bottom is still below the scroller's top edge = the
+    // topmost item not yet fully scrolled past the fold. Measure with
+    // getBoundingClientRect (viewport-relative) so the origin matches the
+    // scroller regardless of which ancestor is the items' offsetParent —
+    // consistent with useScrollManager, which also deliberately avoids offsetTop.
+    const items = el.querySelectorAll('[data-display-index]')
+    const cTop = el.getBoundingClientRect().top
+    for (const item of items) {
+      const htmlItem = item as HTMLElement
+      if (htmlItem.getBoundingClientRect().bottom > cTop) {
+        const idx = parseInt(htmlItem.getAttribute('data-display-index') || '0', 10)
+        topmostIdxRef.current = idx
+        setHasUserMsgAbove(findPrevUserMsgDisplayIdx(displayItemsRef.current, idx) >= 0)
+        break
+      }
+    }
+  }, [scrollerRef])
+  // rAF-throttle the per-scroll topmost recompute: updateTopmostIdx does a
+  // querySelectorAll + getBoundingClientRect loop (a forced layout read), and a
+  // fling fires scroll dozens of times/sec. Coalesce to at most once per frame,
+  // mirroring the virtualizer's own scroll-listener throttle so this handler
+  // doesn't reintroduce the scroll-time main-thread cost this CR removes.
+  const topmostRafRef = useRef(false)
+  const onScrollTopmost = useCallback(() => {
+    if (topmostRafRef.current) return
+    topmostRafRef.current = true
+    requestAnimationFrame(() => {
+      topmostRafRef.current = false
+      updateTopmostIdx()
+    })
+  }, [updateTopmostIdx])
   const scrollToPrevUserMessage = useCallback(() => {
     const target = findPrevUserMsgDisplayIdx(displayItemsRef.current, topmostIdxRef.current)
     if (target < 0) return
-    // offset clears the absolute title row + gradient fade (~72 px) so
-    // the jumped-to user message doesn't land hidden behind the header.
-    virtuosoRef.current?.scrollToIndex({ index: target, behavior: 'smooth', align: 'start', offset: -72 })
+    // Signal WidgetFrames that a programmatic jump is starting so any widget
+    // the smooth scroll sweeps PAST defers building its (expensive) Tailwind
+    // iframe until the glide settles (see PROGRAMMATIC_BUILD_DELAY_MS in
+    // WidgetFrame). Without this, the native smooth scroll crosses the span
+    // fast enough to mount+build several widget iframes synchronously mid-glide
+    // — the ↑-button jank (a 100ms+ 'message' handler stall). navToDisplayIndex
+    // already emits this for its mountIndex path; the smooth path had dropped it.
+    window.dispatchEvent(new Event('mc-chat-scroll-jump'))
+    // Human-like smooth scroll (no wide window pre-mount) — see
+    // scrollToIndexSmooth. Avoids leaving a broad span of animated widgets
+    // mounted+oscillating after the jump.
+    scrollToIndexSmoothRef.current(target, { align: 'start', offset: -72 })
   }, [])
 
-  // Sticky-bottom scroll state
-  const [isAtBottom, setIsAtBottom] = useState(true)
-  const isAtBottomRef = useRef(true)
-  const handleAtBottom = useCallback((atBottom: boolean) => {
-    setIsAtBottom(atBottom)
-    isAtBottomRef.current = atBottom
-  }, [])
+  // Sticky-bottom scroll state is owned by the virtualizer (`virt.isAtBottom`,
+  // wired below). No local mirror — a single source of truth avoids the
+  // dual-controller drift that caused the follow/yank regressions.
 
-  // followOutput: only auto-scroll when pinned to bottom
-  const followOutput = useCallback((isAtBottom: boolean) => {
-    return isAtBottom ? 'smooth' : false
-  }, [])
-
-  // Scroll to bottom when messages change but displayItems count doesn't
-  // (e.g. tool added to existing turn group). followOutput only fires on
-  // new Virtuoso rows, so we need this for in-place updates.
-  // Note: chunk appends mutate content in-place without changing length,
-  // so this won't fire on every chunk — only on new messages (tool, segment, etc).
-  useEffect(() => {
-    if (initialMsgRef.current) return
-    if (isAtBottomRef.current && messages.length > 0) {
-      requestAnimationFrame(() => {
-        virtuosoRef.current?.scrollToIndex({ index: 'LAST', behavior: 'smooth', align: 'end' })
-      })
-    }
-  }, [messages.length])
+  // New content while following is handled inside the virtualizer (RO re-pin
+  // for in-place growth + append layout-effect pin for new items), so ChatPage
+  // no longer runs its own message-length scroll effect.
   useEffect(() => { dispatch(fetchHistory(false)) }, [dispatch])
   // Persist active slot to localStorage for refresh recovery (per-mode)
   const slotStorageKey = `mc-active-slot-${mode || 'chat'}`
@@ -1260,6 +1444,10 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const autoCreatedRef = useRef(false)
   useEffect(() => {
     if (activeSlot) return
+    // Don't auto-select/auto-create while the challenge-redirect token effect
+    // is still creating + slack-linking its session; otherwise we'd switch to
+    // a different slot and orphan the linked one (breaking Slack mirroring).
+    if (tokenConsumingRef.current) return
     if (searchParams.get('slot') || searchParams.get('sid') || initialSidRef.current) return
     if (filteredSlots.length > 0) {
       const saved = localStorage.getItem(slotStorageKey)
@@ -1272,16 +1460,14 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     }
   }, [activeSlot, filteredSlots, searchParams, dispatch, slotStorageKey, connected, slotsLoaded, defaultAgent, mode])
 
-  // Scroll to bottom on tab switch or new messages
+  // Slot switch: the virtualizer (keyed on sessionId = activeSlot) force-pins
+  // to the true bottom itself in a layout effect. Here we just re-arm the
+  // local at-bottom ref used by the gating effects below.
   const prevSlotRef = useRef<string | null>(null)
   useEffect(() => {
     if (activeSlot !== prevSlotRef.current) {
       prevSlotRef.current = activeSlot
-      setIsAtBottom(true)
       isAtBottomRef.current = true
-      requestAnimationFrame(() => {
-        virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end' })
-      })
     }
   }, [activeSlot])
 
@@ -1316,9 +1502,6 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     }
     return ''
   }, [messages])
-  useEffect(() => {
-    if (isStreaming && isAtBottomRef.current) scrollBottom()
-  }, [isStreaming, lastMsg?.content, scrollBottom])
 
   // Scroll to show Footer when agent starts running (loading indicator appears)
   const prevRunningRef = useRef(false)
@@ -1342,7 +1525,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     try {
       await dispatch(resumeFromHistory({ key, title })).unwrap()
       if (activeSlot && activeSlot !== key) {
-        delete drafts.current[activeSlot]; delete fileDrafts.current[activeSlot]; prevSlot.current = null; saveDrafts()
+        delete drafts.current[activeSlot]; delete fileDrafts.current[activeSlot]; delete pasteDrafts.current[activeSlot]; prevSlot.current = null; saveDrafts()
         dispatch(deleteSlot(activeSlot)).unwrap().catch(() => {})
       }
     } catch { /* resume failed — keep current slot */ }
@@ -1353,7 +1536,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const planActionMutationRef = useRef(planActionMutation)
   planActionMutationRef.current = planActionMutation
 
-  const send = useCallback(async (optionText?: string) => {
+  const send = useCallback(async (optionText?: string, targetSlot?: string) => {
     const raw = (optionText || inputRef.current).trim()
     if (!raw && !pendingFilesRef.current.length) return
 
@@ -1390,9 +1573,16 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     if (bubblePastes.length) saveStoredPaste(llmTxt, displayTxt, bubblePastes, filePaths)
 
     setPrefillHint(false)
-    if (!optionText) { setInput(''); setPendingFiles([]); setPasteBlocks([]); if (activeSlot) { delete drafts.current[activeSlot]; delete fileDrafts.current[activeSlot]; saveDrafts() } }
-    let slot = activeSlot
-    const forceNew = newSessionRef.current; newSessionRef.current = false
+    if (!optionText) { setInput(''); setPendingFiles([]); setPasteBlocks([]); if (activeSlot) { delete drafts.current[activeSlot]; delete fileDrafts.current[activeSlot]; delete pasteDrafts.current[activeSlot]; saveDrafts() } }
+    let slot = targetSlot ?? activeSlot
+    // Only a normal (non-targeted) send consumes the one-shot "new session"
+    // intent. A targeted send — e.g. submitting document comments to the
+    // document's origin slot — must leave it intact for the user's next send.
+    let forceNew = false
+    if (!targetSlot) {
+      forceNew = newSessionRef.current
+      newSessionRef.current = false
+    }
     if (!slot || forceNew) {
       sendingRef.current = true;
       const result = await dispatch(createSlot({ agent: pendingAgentRef.current || defaultAgent || undefined, model: pendingModelRef.current || undefined, mode: modeRef.current })).unwrap();
@@ -1413,7 +1603,6 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     }
     window.dispatchEvent(new Event('voice-stop'))
     sendingRef.current = false
-    setIsAtBottom(true)
     isAtBottomRef.current = true
     setTimeout(() => scrollBottom(), SCROLL_AFTER_RENDER_MS)
     dispatch(setSlotRunning(true))
@@ -1434,11 +1623,39 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       } else {
         dispatch(setSlotRunning(false))
         dispatch(appendMessage({ role: 'error', content: 'Connection error', cls: '' }))
-        // Restore draft so the user doesn't lose their message (Mesh-1468)
-        if (slot) { setDraft(drafts.current, slot, txt); saveDrafts(); setInput(txt) }
+        // Restore draft so the user doesn't lose their message (Mesh-1468).
+        // Also restore the paste blocks backing any tokens in `txt`, otherwise
+        // the restored text shows a dead `[ Paste #N · M lines ]` literal.
+        // Persist for `slot` unconditionally (recoverable on disk), but only
+        // touch the live input/blocks when `slot` is the one on screen. Compare
+        // against activeSlotRef.current, NOT the closure's `activeSlot`: a
+        // new-session/forceNew send creates a fresh slot and switches the UI to
+        // it, so the closure value is stale — using it would leave the user's
+        // just-typed message empty on the very session they're now viewing.
+        // The ref reflects what's actually on screen, so it restores the text
+        // visibly for a new-session failure while still not splicing a targeted
+        // send's text into an unrelated slot the user is looking at.
+        if (slot) {
+          setDraft(drafts.current, slot, txt)
+          setPasteDraft(pasteDrafts.current, slot, activePastes)
+          saveDrafts()
+          if (slot === activeSlotRef.current) { setInput(txt); setPasteBlocks(activePastes) }
+        }
       }
     }
   }, [activeSlot, dispatch])
+
+  // Submit inline document comments to the session the file was opened from,
+  // not the currently-active one. If the user switched sessions while the
+  // panel was open, switch back to the origin session so the prompt + reply
+  // land where the document belongs. switchSlot.pending sets activeSlot
+  // synchronously, but send()'s closure activeSlot is stale until re-render,
+  // so the origin slot is passed to send() explicitly.
+  const submitComments = useCallback((message: string) => {
+    const target = panel.slot
+    if (target && target !== activeSlot) dispatch(switchSlot(target))
+    send(message, target ?? undefined)
+  }, [panel.slot, activeSlot, dispatch, send])
 
   // Auto-send when navigated with ?autoSend=1 or ?token= with prompt
   useEffect(() => { if (connected && autoSendRef.current) { const txt = autoSendRef.current; autoSendRef.current = null; send(txt) } }, [send, connected]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -1497,7 +1714,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   })
   useEffect(() => { setResolvedModel(_slotResolvedModel || '') }, [_slotResolvedModel])
   const [navPanelOpen, setNavPanelOpen] = useState(() => loadChatConfig().navPanelOpen)
-  const [sidebarPinned, setSidebarPinned] = useState(() => localStorage.getItem('mc-sidebar-pinned') !== 'false')
+  const [sidebarPinned, setSidebarPinned] = useState(() => localStorage.getItem('mc-sidebar-pinned') === 'true')
   const isMobile = useIsMobile()
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const v = parseInt(localStorage.getItem('mc-sidebar-width') || '', 10)
@@ -1602,14 +1819,6 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const lastRole = messages[messages.length - 1]?.role ?? ''
   // Precompute: index of last finalized assistant message (tools after this are "trailing")
   const toggleAct = useCallback(() => { panel.closePanel(); diffPanel.closeDiff(); dispatch(toggleActivity()) }, [dispatch, panel, diffPanel])
-  const virtuosoComponents = useMemo(() => ({
-    Header: VirtuosoHeader,
-    Footer: () => <>
-      <ChatFooter running={slotRunning} stopping={slotStopping} state={slotState} lastRole={lastRole} regenerating={regenerating} stopState={currentSlot?.stop_state} />
-      <div style={{height: '2vh'}} />
-    </>
-  }), [slotRunning, slotStopping, slotState, lastRole, regenerating, currentSlot?.stop_state])
-
   const displayItems = useMemo<DisplayItem[]>(() => {
     // Phase 1: build raw items (singles + groups)
     const raw: TurnItem[] = []
@@ -1663,11 +1872,71 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   // after commit, by which point the ref has caught up.
   useEffect(() => { displayItemsRef.current = displayItems }, [displayItems])
 
-  // Reset scroll-navigation state on slot switch. Virtuoso is re-keyed
-  // on activeSlot so its internal state clears, but our ChatPage-level
-  // state persists — without this reset, the pill can flash on slot
-  // switch between the React re-render and Virtuoso's first
-  // rangeChanged/atBottomStateChange on the remount.
+  // Virtualized display — only mounts items in the viewport window. The
+  // virtualizer shares `scrollerRef` with useScrollManager so the legacy
+  // scroll APIs (scrollToDisplayIndex, scrollToBottom) operate on the
+  // same DOM element. Its own follow-output handles streaming auto-pin
+  // and append-pin, so the legacy useStreamingScroll/useFollowOutput
+  // calls below are no-ops in this configuration but are kept invoked
+  // for hook-call stability.
+  const virtualKey = useCallback((it: DisplayItem, _i: number) => {
+    if (it.kind === 'turn') {
+      const first = it.items[0]
+      if (!first) return `turn-empty-${_i}`
+      return first.kind === 'single'
+        ? `turn-${first.msg.ts || first.idx}`
+        : `turn-g-${first.startIdx}`
+    }
+    return it.kind === 'single' ? `s-${it.msg.ts || it.idx}` : `g-${it.startIdx}`
+  }, [])
+
+  // (Sticky widget detection removed — widgets now unmount with the
+  // window like any other item. See useVirtualChat call below for the
+  // memory-vs-flicker trade-off rationale.)
+
+  const virt = useVirtualChat<DisplayItem>({
+    items: displayItems,
+    getKey: virtualKey,
+    sessionId: activeSlot ?? '__no_slot__',
+    estimatedHeight: 100,
+    // Overscan tradeoff (experimental):
+    //   smaller (3)   → least memory, frequent widget remounts on small scrolls
+    //   medium  (12)  → screenful of buffer, ~290MB baseline / 450MB while scrolling
+    //   larger  (25)  → fewer remounts but inflated RAM from warm iframe pool
+    // Currently testing 6 — middle ground between memory and remount frequency.
+    overscan: 6,
+    // No isSticky: widget messages unmount along with everything else
+    // when they leave the viewport window. Trade-off: scrolling back to
+    // an old widget causes its iframe to reload (1-2 frames of flicker).
+    // Memory benefit: only widgets in the active window are kept alive,
+    // ~290MB baseline instead of 500MB+ with all-widgets-sticky.
+    externalScrollerRef: scrollerRef,
+  })
+
+  // Single scroll controller wiring: expose the virtualizer's follow API to
+  // the early effects/handlers (declared above) via refs, and derive the
+  // at-bottom state for the jump-to-bottom pill. The virtualizer owns slot
+  // entry, streaming follow, and append-pin; ChatPage only triggers explicit
+  // jumps (send, jump-to-latest pill) through these.
+  const isAtBottom = virt.isAtBottom
+  // Mirror the virtualizer's follow API into the refs the early effects/handlers
+  // (declared above) read. Done in a layout effect rather than the render body
+  // so a concurrent render React throws away can't write stale callbacks into
+  // the refs. Layout effects run before passive effects, so the gating effect
+  // that reads isAtBottomRef.current still sees this commit's value.
+  useLayoutEffect(() => {
+    isAtBottomRef.current = isAtBottom
+    vScrollToBottomRef.current = virt.scrollToBottom
+    mountIndexRef.current = virt.mountIndex
+    scrollToIndexSmoothRef.current = virt.scrollToIndexSmooth
+  })
+
+  // Legacy aliases so the JSX below keeps reading the same names.
+  const visibleDisplayItems = virt.virtualItems
+  // No "load more" pagination indicator with virtualization — the
+  // windowing engine swaps mounted/placeholder automatically.
+
+  // Reset scroll-navigation state on slot switch.
   useEffect(() => {
     setHasUserMsgAbove(false)
     topmostIdxRef.current = 0
@@ -1707,16 +1976,16 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const chatNav = useChatNavigation(messages, messageToDisplayIdx)
 
   const scrollToNavSection = useCallback((displayIdx: number) => {
-    virtuosoRef.current?.scrollToIndex({ index: displayIdx, behavior: 'smooth', align: 'start', offset: -72 })
-  }, [])
+    navToDisplayIndex(displayIdx, { behavior: 'smooth', align: 'start', offset: -72 })
+  }, [navToDisplayIndex])
 
   useEffect(() => {
     if (search.currentMessageIdx < 0) return
     const di = messageToDisplayIdx.get(search.currentMessageIdx)
     if (di !== undefined) {
-      virtuosoRef.current?.scrollToIndex({ index: di, align: 'center', behavior: 'smooth' })
+      navToDisplayIndex(di, { behavior: 'smooth', align: 'center' })
     }
-  }, [search.currentMessageIdx, search.currentIdx, messageToDisplayIdx])
+  }, [search.currentMessageIdx, search.currentIdx, messageToDisplayIdx, navToDisplayIndex])
 
   // "Show in chat" button on the approval bar dispatches openActivityToTool,
   // which sets `focusToolCallId`. Pulling a virtualised pill back into the DOM
@@ -1732,8 +2001,8 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     if (msgIdx < 0) return
     const di = messageToDisplayIdx.get(msgIdx)
     if (di === undefined) return
-    virtuosoRef.current?.scrollToIndex({ index: di, align: 'center', behavior: 'smooth' })
-  }, [focusToolCallId, messages, messageToDisplayIdx])
+    navToDisplayIndex(di, { behavior: 'smooth', align: 'center' })
+  }, [focusToolCallId, messages, messageToDisplayIdx, navToDisplayIndex])
 
   // Deep-link: scroll to ?msg= timestamp on cold load.
   // The scroll-to-bottom effect above is suppressed while initialMsgRef is set.
@@ -1752,7 +2021,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     if (di === undefined) return
     initialMsgRef.current = null
     setTimeout(() => {
-      virtuosoRef.current?.scrollToIndex({ index: di, align: 'center', behavior: 'auto' })
+      navToDisplayIndex(di, { behavior: 'auto', align: 'center' })
       setHighlightTs(targetTs)
       setTimeout(() => setHighlightTs(null), 3000)
     }, 500)
@@ -1760,7 +2029,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
 
   // Precomputed O(n) map from message index → visible (user/assistant) index,
   // used by the fork button. Replaces per-row O(i) filter that made the
-  // renderer O(n²) overall (AutoSDE rev 4).
+  // renderer O(n²) overall.
   const visibleIndexMap = useMemo(() => {
     const map = new Map<number, number>()
     let count = 0
@@ -1852,7 +2121,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                 }
                 // End of messages — show footer only if agent is done
                 return !slotRunning
-              })()} onSpeak={() => { dispatch(setVoiceAudio(null)); api.voiceSynthesize(activeSlot || '', m.content).catch(() => {}) }} onRegenerate={i === lastTextIdx && !slotRunning && !regenerating && activeSlot ? handleRegenerate : undefined} variants={m.variants} variantIdx={m.variant_idx} onSwitchVariant={i === lastTextIdx && m.variants && m.variants.length > 1 && activeSlot ? (idx: number) => { api.switchVariant(activeSlot, idx).catch((e: unknown) => console.warn('switch-variant failed', e)) } : undefined} onFork={handleFork} onPlanFromHere={handlePlanFromHere} forkIndex={forkIndex} onApplyPlan={async (steps: any[]) => {
+              })()} onSpeak={() => { const playing = store.getState().chat.voicePlaying; if (playing) { window.dispatchEvent(new Event('voice-stop')); dispatch(setVoiceAudio(null)); return }; dispatch(setVoiceAudio(null)); api.voiceSynthesize(activeSlot || '', m.content).catch(() => {}) }} onRegenerate={i === lastTextIdx && !slotRunning && !regenerating && activeSlot ? handleRegenerate : undefined} variants={m.variants} variantIdx={m.variant_idx} onSwitchVariant={i === lastTextIdx && m.variants && m.variants.length > 1 && activeSlot ? (idx: number) => { api.switchVariant(activeSlot, idx).catch((e: unknown) => console.warn('switch-variant failed', e)) } : undefined} onFork={handleFork} onPlanFromHere={handlePlanFromHere} forkIndex={forkIndex} onApplyPlan={async (steps: any[]) => {
                 try {
                   const r = await api.planFromChat(steps, planTaskId)
                   if (r.ok) { navigate('/projects?applied=' + (r.task_id || planTaskId)); return true }
@@ -1938,6 +2207,14 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       {/* Chat pane */}
       {embedMode !== 'sessions' && (
       <div className={`relative flex flex-col bg-bg min-w-0 min-h-0 h-full overflow-hidden ${panel.isOpen || activityOpen ? 'flex-[1_1_60%]' : 'flex-1'}`} style={{ transition: 'flex 0.2s', ...(!sidebarOpen && !isMobile ? { marginLeft: '-0.5rem' } : {}), '--mc-content-width': CONTENT_WIDTH[chatConfig.contentWidth].messages, '--mc-input-width': CONTENT_WIDTH[chatConfig.contentWidth].input } as React.CSSProperties}>
+        {snipFrame && (
+          <SnipOverlay
+            frame={snipFrame}
+            onComplete={f => { uploadFiles([f]); setSnipFrame(null) }}
+            onCancel={() => setSnipFrame(null)}
+            onError={setUploadError}
+          />
+        )}
         {uploadError && (
           <div className="mx-4 mt-2 mb-0 bg-danger/10 border border-danger/20 rounded-lg p-3 flex items-center gap-3 animate-rise">
             <span className="text-sm text-danger flex-1">{uploadError}</span>
@@ -1962,48 +2239,6 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
             <EmptyState icon={<MessageSquare className="lucide-inline" />} title="What can I do for you?" subtitle="Start a new chat to begin" />
             <Btn primary onClick={() => dispatch(createSlot({ agent: pendingAgent || defaultAgent || undefined, model: pendingModel || undefined, mode }))}>Start a new chat</Btn>
           </div>
-        ) : messages.length === 0 && !slotRunning && !slotLoading && !sendingRef.current && !knowledgeFetch.results.length && !knowledgeFetch.loading && !knowledgeFetch.pendingKnowledge ? (
-          <WelcomeView
-            mode={mode}
-            input={input}
-            setInput={setInput}
-            send={() => send()}
-            currentAgent={currentSlot?.agent || pendingAgent || 'default'}
-            switchAgent={agentName => switchAgent(agentName)}
-            installedAgents={installedAgents}
-            defaultAgent={defaultAgent}
-            currentModel={currentSlot?.model || resolvedModel || pendingModel || ''}
-            switchModel={switchModel}
-            availableModels={availableModels}
-            prefillHint={prefillHint}
-            onDismissHint={() => setPrefillHint(false)}
-            onUploadFiles={uploadFiles}
-            uploading={uploading}
-            history={history}
-            onResumeSession={handleResumeSession}
-            voiceRecording={voice.recording}
-            voiceTranscribing={voice.transcribing}
-            onVoiceToggle={voiceInputSupported ? toggleVoice : undefined}
-            onFileSelect={path => setPendingFiles(prev => prev.includes(path) ? prev : [...prev, path])}
-            onFileOpen={handleFileOpen}
-            pendingFiles={pendingFiles}
-            onRemoveFile={p => setPendingFiles(prev => prev.filter(x => x !== p))}
-            memoryMode={currentSlot?.memory_mode ?? 'persistent'}
-            onSwitchMode={async (newMode) => {
-              if (!activeSlot) return
-              const base = { agent: currentSlot?.agent || defaultAgent || undefined, model: currentSlot?.model || undefined, mode }
-              const opts = { ...base, memory_mode: newMode }
-              try { await dispatch(deleteSlot(activeSlot)).unwrap() } catch { return }
-              try { await dispatch(createSlot(opts)).unwrap() } catch { return }
-            }}
-            project={currentSlot?.project || pendingProject}
-            onProjectChange={setProject}
-            sendOnEnter={isMobile ? 'ctrl-enter' : chatConfig.sendOnEnter}
-            pasteBlocks={pasteBlocks}
-            onPasteBlocksChange={setPasteBlocks}
-            browseMode={browseMode}
-            onBrowseToggle={() => setBrowseMode(m => !m)}
-          />
         ) : (
           <SearchHighlightContext.Provider value={searchCtxValue}>
           <div className="relative flex flex-col flex-1 min-h-0">
@@ -2011,15 +2246,18 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
             <AnimatePresence>
               {navPanelOpen && <ChatNavPanel links={chatNav.links} sections={chatNav.sections} onScrollToSection={scrollToNavSection} onClose={() => setNavPanelOpen(false)} searchOpen={search.isOpen} resolving={chatNav.resolving} />}
             </AnimatePresence>
-            {/* Claude-style title row — absolute overlay, solid top fading to transparent */}
-            <div className="absolute top-0 left-0 right-0 z-10 pointer-events-none" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-              <div className="px-5 pt-3 pb-2 flex items-center gap-2 bg-bg pointer-events-auto">
+            {/* Claude-style title row — absolute overlay, solid top fading to transparent.
+                Inset on the right by the 6px scrollbar width (see ::-webkit-scrollbar
+                in index.css) so the overlay never paints over the scroller's scrollbar
+                track — otherwise the thumb is hidden/un-grabbable when scrolled to top. */}
+            <div className="absolute top-0 left-0 right-1.5 z-10 pointer-events-none" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+              <div className="px-5 pt-3 pb-2 flex items-center gap-2 bg-bg pointer-events-none">
                 {embedMode !== 'chat' && isMobile && (
-                  <button className="p-1 rounded-md text-muted hover:text-text cursor-pointer bg-transparent border-none" onClick={() => setMobileSessions(p => !p)} aria-label="Toggle sessions">
+                  <button className="p-1 rounded-md text-muted hover:text-text cursor-pointer bg-transparent border-none pointer-events-auto" onClick={() => setMobileSessions(p => !p)} aria-label="Toggle sessions">
                     {mode === 'orchestrator' ? <MessageSquareDot size={16} /> : <MessageSquare size={16} />}
                   </button>
                 )}
-                <div className="group/header flex items-stretch gap-0.5">
+                <div className="group/header flex items-stretch gap-0.5 pointer-events-auto">
                 <div className="rounded-l-md rounded-r-[2px] px-1.5 py-0.5 group-hover/header:bg-bg-hover transition-colors">
                 <ChatHeaderMenu
                   activeSlot={activeSlot}
@@ -2047,11 +2285,11 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                 </div>
               )}
                 </div>
-              {mode === 'orchestrator' && <InfoTip text="Autopilot plans before executing. Each stage needs your approval (or select 'Go All' to run autonomously). Sub-agents are delegated automatically. Plan lessons persist across sessions." />}
-              <Clickable className="ml-auto opacity-40 hover:opacity-100 transition-opacity cursor-pointer" onClick={() => setNavPanelOpen(p => !p)} title="Chat navigation" aria-label="Toggle chat navigation">
+              {mode === 'orchestrator' && <span className="pointer-events-auto"><InfoTip text="Autopilot plans before executing. Each stage needs your approval (or select 'Go All' to run autonomously). Sub-agents are delegated automatically. Plan lessons persist across sessions." /></span>}
+              <Clickable className="ml-auto opacity-40 hover:opacity-100 transition-opacity cursor-pointer pointer-events-auto" onClick={() => setNavPanelOpen(p => !p)} title="Chat navigation" aria-label="Toggle chat navigation">
                 <ListTree size={14} />
               </Clickable>
-              {embedMode !== 'chat' && !activityOpen && <Clickable className="opacity-40 hover:opacity-100 transition-opacity cursor-pointer" onClick={toggleAct} aria-label="Toggle activity panel">
+              {embedMode !== 'chat' && !activityOpen && <Clickable className="opacity-40 hover:opacity-100 transition-opacity cursor-pointer pointer-events-auto" onClick={toggleAct} aria-label="Toggle activity panel">
                 <SessionStatus />
               </Clickable>}
               </div>
@@ -2081,23 +2319,102 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                 ><ArrowUp size={14} strokeWidth={2.5} /></button>
               </div>
             )}
-            {slotLoading ? (
-              <div className="flex-1 flex items-center justify-center">
+            {slotLoading && (
+              <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none">
                 <Loader size={20} className="animate-spin text-muted" />
               </div>
+            )}
+            {isWelcomeState ? (
+              <motion.div
+                key="welcome-hero"
+                layout
+                className="flex-1 flex flex-col items-center justify-center gap-6 px-8 min-h-0 overflow-y-auto"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.18 }}
+              >
+                <WelcomeView
+                  mode={mode}
+                  setInput={setInput}
+                  memoryMode={currentSlot?.memory_mode ?? 'persistent'}
+                  cleanMode={currentSlot?.clean_mode}
+                  onSwitchMode={async (newMode) => {
+                    if (!activeSlot) return
+                    // Create-first-then-delete: deleting the active slot first
+                    // would make deleteSlot jump focus to a sibling. Creating
+                    // first keeps the new slot active, so the delete skips the
+                    // sibling navigation. Carry agent/project/folder/color so
+                    // the recreated slot keeps its identity and placement.
+                    const old = currentSlot
+                    const opts = {
+                      agent: old?.agent || defaultAgent || undefined,
+                      model: old?.model || undefined,
+                      mode,
+                      memory_mode: newMode,
+                      folder_id: old?.folder_id ?? null,
+                      color_index: old?.color_index ?? null,
+                      project: old?.project ?? null,
+                    }
+                    try { await dispatch(createSlot(opts)).unwrap() } catch { return }
+                    try { await dispatch(deleteSlot(activeSlot)).unwrap() } catch { /* new slot already active */ }
+                  }}
+                  onToggleClean={async (clean) => {
+                    if (!activeSlot) return
+                    const old = currentSlot
+                    const opts = {
+                      agent: old?.agent || defaultAgent || undefined,
+                      model: old?.model || undefined,
+                      mode,
+                      clean_mode: clean,
+                      folder_id: old?.folder_id ?? null,
+                      color_index: old?.color_index ?? null,
+                      project: old?.project ?? null,
+                    }
+                    try { await dispatch(createSlot(opts)).unwrap() } catch { return }
+                    try { await dispatch(deleteSlot(activeSlot)).unwrap() } catch { /* new slot already active */ }
+                  }}
+                />
+              </motion.div>
             ) : (
-            <Virtuoso
-              ref={virtuosoRef}
-              style={{ flex: 1, paddingBottom: 8, overflowY: 'overlay' as any }}
+            <div
+              ref={scrollerRef}
+              style={{
+                flex: 1,
+                paddingBottom: 8,
+                overflowY: 'auto',
+                // Reserve a stable scrollbar gutter so the 6px scrollbar always
+                // occupies the same right-edge column the title overlay is inset
+                // from (see the right-1.5 inset above) — keeps the thumb visible
+                // and grabbable at the top instead of hidden behind the header.
+                scrollbarGutter: 'stable',
+                // Native scroll anchoring: when items above the viewport
+                // resize (e.g. widget iframes loading async), the browser
+                // adjusts scrollTop to keep the user's content stable.
+                // This is more precise than item-level anchoring because
+                // it works at the DOM-element granularity.
+                overflowAnchor: 'auto',
+              } as React.CSSProperties}
               aria-label="Chat messages"
-              data={displayItems}
-              followOutput={followOutput}
-              atBottomThreshold={10}
-              atBottomStateChange={handleAtBottom}
-              rangeChanged={handleRangeChanged}
-              initialTopMostItemIndex={displayItems.length - 1}
-              components={virtuosoComponents}
-              itemContent={(i, item) => {
+              aria-live="polite"
+              onScroll={onScrollTopmost}
+            >
+              {/* Header spacer */}
+              <div className="h-16" />
+              {/* Top sentinel: drives upward window expansion via virtualizer's IO. */}
+              <div ref={virt.topSentinelRef} aria-hidden style={{ height: 1 }} />
+              {/* Top spacer — reserves the height of all items above the mounted
+                  window so the scrollbar stays accurate while only the window
+                  renders real DOM (keeps fast scroll cheap — O(window) nodes).
+                  overflow-anchor:none so the browser anchors on real content,
+                  not on this spacer (which resizes as the window moves). */}
+              <div aria-hidden style={{ height: virt.offsetBefore, overflowAnchor: 'none' }} />
+              {/* Message items — only the mounted window renders; everything
+                  else is represented by the top/bottom spacers. */}
+              {visibleDisplayItems.map((vi) => {
+                if (!vi.mounted) return null
+                const item = vi.data
+                const displayIdx = vi.index
                 if (item.kind === 'turn') {
                   const renderTurnItem = (it: TurnItem, _j: number) => {
                     // Skip hidden tool messages (✅/🚫 completions) to avoid empty py-1 wrappers
@@ -2125,16 +2442,16 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                       })() : renderMessage(it.idx, it.msg)}
                     </div>
                   }
-                  return <TurnBlock key={item.items[0]?.kind === 'single' ? (item.items[0].msg.ts || item.items[0].idx) : `g-${item.items[0]?.startIdx}`} turn={item} renderItem={renderTurnItem} collapseAll={chatConfig.collapseAllSteps} />
+                  return <div key={vi.key} ref={virt.measureRef(vi.index)} data-display-index={displayIdx}><TurnBlock turn={item} renderItem={renderTurnItem} collapseAll={chatConfig.collapseAllSteps} /></div>
                 }
-                return <div className={`px-5 mx-auto w-full py-1`} style={{ maxWidth: 'var(--mc-content-width, 900px)' }}>{item.kind === 'group' ? (() => {
+                return <div key={vi.key} ref={virt.measureRef(vi.index)} data-display-index={displayIdx} className={`px-5 mx-auto w-full py-1`} style={{ maxWidth: 'var(--mc-content-width, 900px)' }}>{item.kind === 'group' ? (() => {
                 const unresolvedGroupPerms = item.msgs.filter(m => m.role === 'permission' && !m.meta?.resolved)
                 if (item.msgs.every(m => m.role === 'permission')) return null
                 return (
                 <CollapsibleToolGroup
                   count={item.msgs.filter(m => m.role !== 'permission').length}
                   hasPermission={false}
-                  isRunning={slotRunning && i === displayItems.length - 1}
+                  isRunning={slotRunning && displayIdx === displayItems.length - 1}
                   permissionMeta={unresolvedGroupPerms.at(-1)?.meta as Record<string, unknown> | undefined}
                   pendingPermCount={unresolvedGroupPerms.length}
                   onApprove={(() => {
@@ -2148,8 +2465,17 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                   onViewActivity={toggleAct}
                   activityOpen={activityOpen}
                 >{item.msgs.map((m, j) => <div key={m.ts || j}>{renderMessage(item.startIdx + j, m)}</div>)}</CollapsibleToolGroup>)
-              })() : renderMessage(item.idx, item.msg)}</div>}}
-            />
+              })() : renderMessage(item.idx, item.msg)}</div>
+              })}
+              {/* Bottom spacer — reserves the height of all items below the
+                  mounted window. overflow-anchor:none (see top spacer). */}
+              <div aria-hidden style={{ height: virt.offsetAfter, overflowAnchor: 'none' }} />
+              {/* Bottom sentinel: drives downward window expansion when in jump mode. */}
+              <div ref={virt.bottomSentinelRef} aria-hidden style={{ height: 1 }} />
+              {/* Footer */}
+              <ChatFooter running={slotRunning} stopping={slotStopping} state={slotState} lastRole={lastRole} regenerating={regenerating} stopState={currentSlot?.stop_state} />
+              <div style={{height: '2vh'}} />
+            </div>
             )}
             <div className="h-6 bg-gradient-to-t from-bg to-transparent pointer-events-none -mt-6 relative z-[1]" />
             <div className="relative">
@@ -2170,7 +2496,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                         '0 2px 6px rgba(0,0,0,0.12)',                 // close shadow
                       ].join(', '),
                     }}
-                    onClick={() => { setIsAtBottom(true); isAtBottomRef.current = true; scrollBottom(true) }}
+                    onClick={() => { isAtBottomRef.current = true; scrollBottom(true) }}
                     aria-label="Scroll to bottom"
                   ><ArrowDown size={14} strokeWidth={2.5} /></button>
                 </div>
@@ -2179,6 +2505,35 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               <QueueStack messages={queuedMessages} onCancel={handleCancelQueued} onInterrupt={handleInterruptQueued} />
               {flyingQuote && <FlyingQuote text={flyingQuote.text} from={flyingQuote.from} targetRef={inputAreaRef} onComplete={() => setFlyingQuote(null)} />}
               <div ref={inputAreaRef} className="relative z-10">
+              {showHistorySuggestions && (
+                <div className="absolute left-0 right-0 bottom-full mb-1 mx-auto w-full max-w-[760px] border border-border rounded-lg bg-card overflow-hidden animate-scale-in z-50 shadow-lg flex flex-col max-h-[min(300px,40vh)]">
+                  <div className="px-3.5 py-2.5 border-b border-border shrink-0">
+                    <span className="text-[12px] font-semibold text-muted tracking-[.02em]">Continue a previous chat?</span>
+                  </div>
+                  <div className="overflow-y-auto flex-1 min-h-0" role="listbox" aria-label="Previous chats">
+                    {historySuggestions.map((s) => (
+                      <div
+                        key={s.key}
+                        role="option"
+                        tabIndex={0}
+                        aria-selected={false}
+                        className="w-full text-left px-3.5 py-2.5 flex items-center gap-3 cursor-pointer transition-all border-b border-border last:border-0 hover:bg-bg-hover"
+                        onMouseDown={(e) => { e.preventDefault(); handleResumeSession(s.key, s.title || s.key) }}
+                        onKeyDown={(e) => { if (e.key === 'Enter') handleResumeSession(s.key, s.title || s.key) }}
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="font-mono text-[13px] text-text truncate">{s.title || s.key}</div>
+                          {s.created && <div className="text-[11px] text-muted font-mono mt-0.5">{new Date(s.created).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' })}</div>}
+                        </div>
+                        <Undo2 size={14} className="text-accent shrink-0" />
+                      </div>
+                    ))}
+                  </div>
+                  <div className="px-3.5 py-2 border-t border-border flex justify-end shrink-0">
+                    <span className="text-[11px] text-muted-strong">Esc to dismiss</span>
+                  </div>
+                </div>
+              )}
               {knowledgeFetch.results.length > 0 || knowledgeFetch.loading ? (
                 <KnowledgePicker
                   results={knowledgeFetch.results}
@@ -2208,11 +2563,12 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               value={input}
               onChange={setInput}
               onSend={() => send()}
+              onFollowUpSend={(text?: string) => send(text)}
               disabled={slotStopping}
               autoFocusKey={activeSlot}
               prefillHint={prefillHint}
               onDismissHint={() => setPrefillHint(false)}
-              onScreenshot={takeScreenshot}
+              onScreenshot={handleCapture}
               onUploadFiles={uploadFiles}
               uploading={uploading}
               pendingFiles={pendingFiles}
@@ -2233,6 +2589,10 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               modelName={currentSlot?.model || resolvedModel || 'auto'}
               onAgentClick={provider.capabilities.agentTemplates ? (rect) => { setAgentBtnRect(rect); setAgentDropdown(!agentDropdown) } : undefined}
               onModelClick={(rect) => { setModelBtnRect(rect); setModelDropdown(!modelDropdown) }}
+              onProjectClick={(rect) => {
+                setProjectBtnRect(rect)
+                setProjectPickerOpen(o => !o)
+              }}
               contextPct={contextPct}
               contextUsedTokens={contextTokens?.used}
               contextWindowTokens={contextTokens?.window}
@@ -2251,6 +2611,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               browseMode={browseMode}
               onBrowseToggle={() => setBrowseMode(m => !m)}
               memoryMode={currentSlot?.memory_mode ?? 'persistent'}
+              cleanMode={currentSlot?.clean_mode}
               sentMessages={sentMessages}
               sendOnEnter={isMobile ? 'ctrl-enter' : chatConfig.sendOnEnter}
               followUpOptions={followUpOptions}
@@ -2308,17 +2669,39 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               document.body
             )}
             {/* Model dropdown portal — triggered from input bar */}
-            {modelDropdown && modelBtnRect && createPortal(
-              <div ref={modelDropdownRef} className="fixed z-[9999] bg-bg-elevated border border-border rounded-xl shadow-xl min-w-[260px] max-w-[340px] flex flex-col p-1 gap-0.5 animate-slide-up" style={(() => { const left = Math.max(8, Math.min(modelBtnRect.left, window.innerWidth - 348)); return { bottom: window.innerHeight - modelBtnRect.top + 4, left } })()}>
-                <div className="px-1.5 pt-1.5 pb-1">
-                  <Input ref={modelInputRef} type="text" placeholder="Type to filter…" value={modelFilter} onChange={e => setModelFilter(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') setModelDropdown(false); if (e.key === 'Enter' && filteredModels.length === 1) { switchModel(filteredModels[0].name); setModelDropdown(false) } }} className="w-full px-2 py-1 text-[13px] font-mono" />
+            {modelDropdown && modelBtnRect && createPortal((() => {
+              const hasEffort = !!(activeSlot && provider.capabilities.reasoningEffort && modelSupportsEffort(currentSlot?.model || resolvedModel))
+              const popWidth = hasEffort ? 460 : 348
+              return (
+              <div ref={modelDropdownRef} className="fixed z-[9999] bg-bg-elevated border border-border rounded-xl shadow-xl flex flex-row p-1 gap-1 animate-slide-up" style={(() => { const left = Math.max(8, Math.min(modelBtnRect.left, window.innerWidth - popWidth)); return { bottom: window.innerHeight - modelBtnRect.top + 4, left } })()}>
+                <div className="flex flex-col gap-0.5 flex-1 min-w-[252px]">
+                  <div className="px-1.5 pt-1.5 pb-1">
+                    <Input ref={modelInputRef} type="text" placeholder="Type to filter…" value={modelFilter} onChange={e => setModelFilter(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') setModelDropdown(false); if (e.key === 'Enter' && filteredModels.length === 1) { switchModel(filteredModels[0].name); setModelDropdown(false) } }} className="w-full px-2 py-1 text-[13px] font-mono" />
+                  </div>
+                  <div className="overflow-y-auto max-h-[280px]">
+                    <ModelDropdownList models={filteredModels} activeModel={currentSlot?.model || resolvedModel || 'auto'} onSelect={name => { switchModel(name); setModelDropdown(false) }} />
+                  </div>
                 </div>
-                <div className="overflow-y-auto max-h-[280px]">
-                <ModelDropdownList models={filteredModels} activeModel={currentSlot?.model || resolvedModel || 'auto'} onSelect={name => { switchModel(name); setModelDropdown(false) }} />
-                </div>
-              </div>,
+                {hasEffort && activeSlot && (
+                  <div className="flex flex-col gap-0.5 border-l border-border pl-1 w-[180px] shrink-0">
+                    <div className="px-3 pt-2.5 pb-1 text-[11px] font-medium text-muted uppercase tracking-[.04em]">Reasoning effort</div>
+                    <div className="overflow-y-auto max-h-[280px]">
+                      <ReasoningEffortDropdown slot={activeSlot} currentEffort={currentSlot?.reasoning_effort || ''} onClose={() => setModelDropdown(false)} embedded />
+                    </div>
+                  </div>
+                )}
+              </div>
+              )
+            })(),
               document.body
             )}
+            {/* Project picker — triggered from input bar */}
+            <ProjectPicker
+              open={projectPickerOpen}
+              onOpenChange={setProjectPickerOpen}
+              anchorRect={projectBtnRect}
+              onSelect={path => { setProject(path); setProjectPickerOpen(false) }}
+            />
             {/* Auto-nudge popover — triggered from input bar */}
             {autoNudgeOpen && autoNudgeBtnRect && activeSlot && createPortal(
               <AutoNudgePopover
@@ -2333,7 +2716,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
             {/* Approval mode dropdown portal — triggered from input bar */}
             {approvalDropdown && approvalBtnRect && createPortal(
               <div ref={approvalDropdownRef} className="fixed z-[9999] animate-slide-up flex items-end gap-2" style={(() => { const left = Math.max(8, Math.min(approvalBtnRect.left, window.innerWidth - 520)); return { bottom: window.innerHeight - approvalBtnRect.top + 4, left: isMobile ? 8 : left, ...(isMobile ? { flexDirection: 'column-reverse' as const, alignItems: 'flex-start', right: 8, maxWidth: 'calc(100vw - 16px)' } : {}) } })()}>
-                <div className="rounded-lg bg-bg-elevated border border-border py-1 w-[200px] shrink-0">
+                <div className="rounded-lg bg-bg-elevated border border-border py-1 w-[280px] shrink-0">
                   {APPROVAL_SEGMENTS.map(s => (
                     <Btn
                       key={s.key}
@@ -2353,9 +2736,12 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                         s.key === displayMode ? 'text-accent' : 'text-text'
                       }`}
                     >
-                      {s.icon}
-                      <span>{s.label}</span>
-                      {s.key === displayMode && <span className="ml-auto text-accent text-[11px]">✓</span>}
+                      <span className="shrink-0">{s.icon}</span>
+                      <span className="flex flex-col min-w-0 flex-1">
+                        <span>{s.label}</span>
+                        <span className="text-[11px] font-normal text-muted leading-snug">{s.desc}</span>
+                      </span>
+                      {s.key === displayMode && <Check size={12} className="shrink-0 text-accent" />}
                     </Btn>
                   ))}
                 </div>
@@ -2400,10 +2786,11 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                 <button className="truncate hover:text-accent cursor-pointer transition-colors" onClick={() => { diffPanel.closeDiff(); handleFileOpen(diffPanel.filePath) }}>
                   {diffPanel.filePath.split('/').pop() || 'Diff'}
                 </button>
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent/15 text-accent font-medium shrink-0">DIFF</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent/15 text-accent font-medium shrink-0">CHANGE</span>
+                {(() => { const { added, removed } = countLines(diffPanel.original, diffPanel.modified); return (added > 0 || removed > 0) ? <span className="text-[10px] font-mono shrink-0">{added > 0 && <span className="text-ok">+{added}</span>}{removed > 0 && <span className="text-danger ml-0.5">-{removed}</span>}</span> : null })()}
               </span>
             }
-            onClose={diffPanel.closeDiff}
+            onClose={() => { diffPanel.closeDiff(); dispatch(openActivityToTab('files')) }}
             initialWidth={600}
             storageKey="mc-panel-width"
             noPadding
@@ -2411,19 +2798,18 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
             headerActions={
               <>
                 <button onClick={() => setDiffLineNumbers(v => !v)} className={`p-1 rounded cursor-pointer transition-colors ${diffLineNumbers ? 'text-accent' : 'text-muted hover:text-text'}`} title={diffLineNumbers ? 'Hide line numbers' : 'Show line numbers'} aria-label={diffLineNumbers ? 'Hide line numbers' : 'Show line numbers'}><Hash size={14} /></button>
-                <button onClick={() => setForceUnified(v => !v)} className={`p-1 rounded cursor-pointer transition-colors ${forceUnified ? 'text-accent' : 'text-muted hover:text-text'}`} title={forceUnified ? 'Auto split/unified' : 'Force unified view'} aria-label={forceUnified ? 'Switch to split view' : 'Switch to unified view'}><Rows2 size={14} /></button>
               </>
             }
           >
-            <DiffPanel filePath={diffPanel.filePath} original={diffPanel.original} modified={diffPanel.modified} sideBySide={!forceUnified} lineNumbers={diffLineNumbers} />
+            <DiffPanel filePath={diffPanel.filePath} original={diffPanel.original} modified={diffPanel.modified} lineNumbers={diffLineNumbers} />
           </DetailPanel>
         )}
         {panel.isOpen && !diffPanel.isOpen && (
-          <MarkdownPanel key="md-panel" filePath={panel.filePath} content={panel.content} onContentChange={panel.setContent} onSave={handleFileSave} onClose={panel.closePanel} liveWatch onSubmitComments={send} />
+          <MarkdownPanel key="md-panel" filePath={panel.filePath} content={panel.content} onContentChange={panel.setContent} onSave={handleFileSave} onClose={panel.closePanel} liveWatch onSubmitComments={submitComments} />
         )}
         {activityOpen && !panel.isOpen && !diffPanel.isOpen && (
           <DetailPanel key="activity-panel" title="Activity" onClose={toggleAct} initialWidth={420} storageKey="mc-activity-width">
-            <ActivityViewer subagents={subagents} toolLog={toolLog} open={true} onToggle={toggleAct} slot={activeSlot || ''} files={touchedFiles.files} onFileOpen={handleFileOpen} onFileRemove={touchedFiles.removeFile} onFilesClear={touchedFiles.clearBySource} />
+            <ActivityViewer subagents={subagents} toolLog={toolLog} open={true} onToggle={toggleAct} slot={activeSlot || ''} files={touchedFiles.files} onFileOpen={handleFileOpen} onFileRemove={touchedFiles.removeFile} onFilesClear={touchedFiles.clearBySource} projectDir={currentSlot?.project || undefined} />
           </DetailPanel>
         )}
       </AnimatePresence>

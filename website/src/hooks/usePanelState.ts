@@ -4,12 +4,16 @@ export function usePanelState() {
   const [isOpen, setIsOpen] = useState(false)
   const [filePath, setFilePath] = useState('')
   const [content, setContent] = useState('')
+  // Chat slot the panel was opened from. Comment submission routes here so
+  // it lands in the document's originating session, not whatever session is
+  // active when the user clicks "Submit All" after switching sessions.
+  const [slot, setSlot] = useState<string | null>(null)
 
-  const openPanel = useCallback((fp: string, c: string) => {
-    setFilePath(fp); setContent(c); setIsOpen(true)
+  const openPanel = useCallback((fp: string, c: string, originSlot: string | null = null) => {
+    setFilePath(fp); setContent(c); setSlot(originSlot); setIsOpen(true)
   }, [])
   const closePanel = useCallback(() => {
-    setIsOpen(false); setFilePath(''); setContent('')
+    setIsOpen(false); setFilePath(''); setContent(''); setSlot(null)
   }, [])
 
   // Memoize the returned object so consumers wrapping it in useCallback /
@@ -22,8 +26,8 @@ export function usePanelState() {
   // setters are stable across renders — kept for exhaustive-deps lint
   // compliance and to mirror the pattern in useTouchedFiles.
   return useMemo(
-    () => ({ isOpen, filePath, content, openPanel, closePanel, setContent }),
-    [isOpen, filePath, content, openPanel, closePanel, setContent],
+    () => ({ isOpen, filePath, content, slot, openPanel, closePanel, setContent }),
+    [isOpen, filePath, content, slot, openPanel, closePanel, setContent],
   )
 }
 

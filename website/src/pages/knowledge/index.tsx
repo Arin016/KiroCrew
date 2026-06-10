@@ -484,17 +484,17 @@ export default function KnowledgePage() {
                     <EntityAutocomplete query={searchInput} onSelect={handleEntitySelect} />
                   )}
                 </div>
-                <select value={typeFilter} onChange={e => { setTypeFilter(e.target.value); setPage(1) }}
+                <select value={typeFilter} aria-label="Filter by type" onChange={e => { setTypeFilter(e.target.value); setPage(1) }}
                   className="bg-bg-elevated border border-border rounded-md px-2 py-1.5 text-[13px] text-text outline-none">
                   <option value="">All types</option>
                   {ITEM_TYPES.map(t => <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>)}
                 </select>
-                <select value={statusFilter} onChange={e => { setStatusFilter(e.target.value); setPage(1) }}
+                <select value={statusFilter} aria-label="Filter by status" onChange={e => { setStatusFilter(e.target.value); setPage(1) }}
                   className="bg-bg-elevated border border-border rounded-md px-2 py-1.5 text-[13px] text-text outline-none">
                   <option value="">All statuses</option>
                   {STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
                 </select>
-                <select value={namespaceFilter} onChange={e => { setNamespaceFilter(e.target.value); setPage(1) }}
+                <select value={namespaceFilter} aria-label="Filter by namespace" onChange={e => { setNamespaceFilter(e.target.value); setPage(1) }}
                   className="bg-bg-elevated border border-border rounded-md px-2 py-1.5 text-[13px] text-text outline-none">
                   <option value="">All namespaces</option>
                   {namespaces.map(ns => <option key={ns.name} value={ns.name}>{ns.name} ({ns.count})</option>)}

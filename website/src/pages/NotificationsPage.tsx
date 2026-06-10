@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, type ReactNode } from 'react'
+import { useState, useMemo, useCallback, useEffect, type ReactNode } from 'react'
 import { ClipboardList, Anchor, Heart, Bot, Lock, GitBranch, Bell, X, MailOpen, Check, MessageSquare, CheckCircle, Ban, ArrowLeft, Clock } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useIsMobile } from '../hooks/useIsMobile'
@@ -15,7 +15,10 @@ import { CronAckBar } from './chat'
 import { api } from '../api/client'
 import type { Notification } from '../types'
 
-type Category = 'all' | 'cron' | 'hook' | 'heartbeat' | 'agent' | 'approval' | 'subagent' | 'taskrunner'
+type Kind = 'cron' | 'hook' | 'heartbeat' | 'agent' | 'approval' | 'subagent' | 'taskrunner'
+type Category = 'all' | Kind
+
+const KIND_KEYS: Kind[] = ['cron', 'hook', 'heartbeat', 'agent', 'approval', 'subagent', 'taskrunner']
 
 const CATEGORIES: { key: Category; label: string; icon: ReactNode }[] = [
   { key: 'all', label: 'All', icon: <ClipboardList className="lucide-inline" /> },
@@ -27,6 +30,22 @@ const CATEGORIES: { key: Category; label: string; icon: ReactNode }[] = [
   { key: 'subagent', label: 'Subagent', icon: <GitBranch className="lucide-inline" /> },
   { key: 'taskrunner', label: 'Tasks', icon: <ClipboardList className="lucide-inline" /> },
 ]
+
+const KINDS_STORAGE_KEY = 'mc:notif:activeKinds'
+
+function loadActiveKinds(): Set<Kind> {
+  try {
+    const raw = localStorage.getItem(KINDS_STORAGE_KEY)
+    if (raw) {
+      const arr = JSON.parse(raw)
+      if (Array.isArray(arr)) {
+        const valid = arr.filter((k: unknown): k is Kind => typeof k === 'string' && (KIND_KEYS as string[]).includes(k))
+        return new Set(valid)
+      }
+    }
+  } catch { /* fall through to default */ }
+  return new Set(KIND_KEYS)
+}
 
 function parseTs(ts: string): Date {
   let d = new Date(ts)
@@ -186,20 +205,47 @@ export default function NotificationsPage() {
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
   const items = useAppSelector(s => s.notifications.items)
-  const [category, setCategory] = useState<Category>('all')
+  const [activeKinds, setActiveKinds] = useState<Set<Kind>>(loadActiveKinds)
   const [filter, setFilter] = useState('')
   const [selectedTs, setSelectedTs] = useState<string | null>(null)
   const isMobile = useIsMobile()
 
+  const allActive = activeKinds.size === KIND_KEYS.length
+  const noneActive = activeKinds.size === 0
+
+  // Persist filter selection across page reloads
+  useEffect(() => {
+    try {
+      localStorage.setItem(KINDS_STORAGE_KEY, JSON.stringify(Array.from(activeKinds)))
+    } catch { /* ignore quota errors */ }
+  }, [activeKinds])
+
+  const toggleCategory = useCallback((key: Category) => {
+    if (key === 'all') {
+      // "All" is a meta-toggle: if everything is on, clear; otherwise select all.
+      setActiveKinds(prev => prev.size === KIND_KEYS.length ? new Set<Kind>() : new Set<Kind>(KIND_KEYS))
+      return
+    }
+    setActiveKinds(prev => {
+      const next = new Set<Kind>(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [])
+
   const filtered = useMemo(() => {
     let list = [...items].reverse()
-    if (category !== 'all') list = list.filter(n => n.kind === category)
+    // When every known kind is selected, behave like the old "All" state
+    // and include notifications with unknown kinds too. Otherwise filter
+    // strictly against the active set.
+    if (!allActive) list = list.filter(n => activeKinds.has(n.kind as Kind))
     if (filter) {
       const q = filter.toLowerCase()
       list = list.filter(n => ((n.title || '') + (n.body || '')).toLowerCase().includes(q))
     }
     return list
-  }, [items, category, filter])
+  }, [items, activeKinds, allActive, filter])
 
   const groups = useMemo(() => {
     const map = new Map<string, Notification[]>()
@@ -240,13 +286,23 @@ export default function NotificationsPage() {
             <Card className="flex flex-col flex-1 min-h-0">
               <CardTitle>Activity Feed <InfoTip text="Click a notification to view details. Jump to the source chat or job from the detail panel." /></CardTitle>
 
-              {/* Category tabs */}
-              <div className="flex gap-1 mb-2 flex-wrap shrink-0">
-                {CATEGORIES.map(c => (
-                  <button key={c.key} className={`px-2 py-1 rounded-md text-[12px] font-medium cursor-pointer border transition-all font-body ${category === c.key ? 'bg-accent-subtle text-accent border-accent' : 'bg-transparent text-muted border-border hover:text-text hover:border-border-strong'}`} onClick={() => setCategory(c.key)}>
-                    {c.icon} {c.label}
-                  </button>
-                ))}
+              {/* Category tabs (multi-select). "All" toggles every kind on/off; individual chips toggle that kind. */}
+              <div className="flex gap-1 mb-2 flex-wrap shrink-0" role="group" aria-label="Filter notifications by kind">
+                {CATEGORIES.map(c => {
+                  const isActive = c.key === 'all' ? allActive : activeKinds.has(c.key as Kind)
+                  return (
+                    <button
+                      key={c.key}
+                      type="button"
+                      aria-pressed={isActive}
+                      title={c.key === 'all' ? (allActive ? 'Clear all filters' : 'Select all categories') : `Toggle ${c.label}`}
+                      className={`px-2 py-1 rounded-md text-[12px] font-medium cursor-pointer border transition-all font-body ${isActive ? 'bg-accent-subtle text-accent border-accent' : 'bg-transparent text-muted border-border hover:text-text hover:border-border-strong'}`}
+                      onClick={() => toggleCategory(c.key)}
+                    >
+                      {c.icon} {c.label}
+                    </button>
+                  )
+                })}
               </div>
 
               {/* Search + actions */}
@@ -259,7 +315,7 @@ export default function NotificationsPage() {
               {/* List */}
               <div className="flex-1 overflow-y-auto scroll-shadow">
                 {filtered.length === 0 ? (
-                  <EmptyState icon={<Bell className="lucide-inline" />} title="No notifications" subtitle={filter ? 'Try a different search' : 'Activity will appear here'} />
+                  <EmptyState icon={<Bell className="lucide-inline" />} title="No notifications" subtitle={noneActive ? 'No categories selected — click a category above' : filter ? 'Try a different search' : 'Activity will appear here'} />
                 ) : (
                   Array.from(groups.entries()).map(([group, notes]) => (
                     <div key={group} className="mb-3">

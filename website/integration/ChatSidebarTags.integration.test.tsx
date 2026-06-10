@@ -150,45 +150,48 @@ describe('ChatSidebar tag/column UI', () => {
     localStorage.setItem('mc-chat-config', JSON.stringify({ tagColumnsEnabled: true }))
   })
 
-  it('renders the board-toggle button in the header', async () => {
+  it('renders the More options button which reveals board toggle menuitem', async () => {
+    const user = userEvent.setup()
+    backend.state.columns = [
+      { id: 'c1', name: '', tag_ids: [], mode: 'any', order: 0, include_untagged: false },
+    ]
     renderWithProviders(<ChatSidebar {...defaultProps} />)
-    await waitFor(() => {
-      expect(screen.getByTestId('board-toggle')).toBeInTheDocument()
-    })
+    const moreBtn = await screen.findByTitle('More options')
+    expect(moreBtn).toBeInTheDocument()
+    await user.click(moreBtn)
+    expect(await screen.findByRole('menuitem', { name: /Switch to list view/ })).toBeInTheDocument()
   })
 
   it('shows the empty-state seed prompt when no columns exist and toggling on creates a default column', async () => {
     backend.state.columns = []
     renderWithProviders(<ChatSidebar {...defaultProps} />)
-    await waitFor(() => expect(screen.getByTestId('board-toggle')).toBeInTheDocument())
-    // With 0 columns, the legacy flat list renders — board-toggle still visible
+    await screen.findByTitle('More options')
+    // With 0 columns, the legacy flat list renders — board-toggle menuitem still accessible via menu
     expect(screen.queryByTestId('column-strip')).not.toBeInTheDocument()
   })
 
-  it('clicking board-toggle when inactive enables board mode', async () => {
+  it('clicking board-toggle menuitem when inactive enables board mode', async () => {
     backend.state.columns = []
     localStorage.setItem('mc-chat-config', JSON.stringify({ tagColumnsEnabled: false }))
     const user = userEvent.setup()
     renderWithProviders(<ChatSidebar {...defaultProps} />)
-    await waitFor(() => expect(screen.getByTestId('board-toggle')).toBeInTheDocument())
-    const btn = screen.getByTestId('board-toggle')
-    expect(btn).toHaveAttribute('aria-pressed', 'false')
-    await user.click(btn)
+    await user.click(await screen.findByTitle('More options'))
+    const menuitem = await screen.findByRole('menuitem', { name: /Switch to board view/ })
+    await user.click(menuitem)
     // After click, config should have tagColumnsEnabled: true
     const cfg = JSON.parse(localStorage.getItem('mc-chat-config') || '{}')
     expect(cfg.tagColumnsEnabled).toBe(true)
   })
 
-  it('clicking board-toggle when active with columns disables board mode', async () => {
+  it('clicking board-toggle menuitem when active with columns disables board mode', async () => {
     backend.state.columns = [
       { id: 'c1', name: '', tag_ids: [], mode: 'any', order: 0, include_untagged: false },
     ]
     const user = userEvent.setup()
     renderWithProviders(<ChatSidebar {...defaultProps} />)
-    await waitFor(() => expect(screen.getByTestId('board-toggle')).toBeInTheDocument())
-    const btn = screen.getByTestId('board-toggle')
-    await waitFor(() => expect(btn).toHaveAttribute('aria-pressed', 'true'))
-    await user.click(btn)
+    await user.click(await screen.findByTitle('More options'))
+    const menuitem = await screen.findByRole('menuitem', { name: /Switch to list view/ })
+    await user.click(menuitem)
     const cfg = JSON.parse(localStorage.getItem('mc-chat-config') || '{}')
     expect(cfg.tagColumnsEnabled).toBe(false)
   })
@@ -208,16 +211,15 @@ describe('ChatSidebar tag/column UI', () => {
     expect(within(screen.getByTestId('column-c2')).getAllByText('Done').length).toBeGreaterThan(0)
   })
 
-  it('clicking board-toggle in orphan state (enabled, no cols) creates default column', async () => {
+  it('clicking board-toggle menuitem in orphan state (enabled, no cols) creates default column', async () => {
     backend.state.columns = []
     localStorage.setItem('mc-chat-config', JSON.stringify({ tagColumnsEnabled: true }))
     const user = userEvent.setup()
     renderWithProviders(<ChatSidebar {...defaultProps} />)
-    await waitFor(() => expect(screen.getByTestId('board-toggle')).toBeInTheDocument())
-    const btn = screen.getByTestId('board-toggle')
-    // Orphan state should display as inactive
-    expect(btn).toHaveAttribute('aria-pressed', 'false')
-    await user.click(btn)
+    await user.click(await screen.findByTitle('More options'))
+    // Orphan state (enabled but no columns) shows "Switch to board view"
+    const menuitem = await screen.findByRole('menuitem', { name: /Switch to board view/ })
+    await user.click(menuitem)
     // Config stays enabled, but a default column is now created
     const cfg = JSON.parse(localStorage.getItem('mc-chat-config') || '{}')
     expect(cfg.tagColumnsEnabled).toBe(true)

@@ -213,10 +213,25 @@ function ApprovalEntry({ entry, slot }: { entry: ToolActivity; slot: string }) {
 /* ── Main component ── */
 
 
+export function countDiffStats(diff: string): { added: number; removed: number } {
+  let added = 0, removed = 0
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) added++
+    else if (line.startsWith('-') && !line.startsWith('---')) removed++
+  }
+  return { added, removed }
+}
+
 function FileTile({ f, onFileOpen, onFileRemove }: { f: TouchedFile; onFileOpen?: (p: string) => void; onFileRemove?: (p: string) => void }) {
   const name = f.path.split('/').pop() || f.path
   const Icon = fileIcon(f.path)
   const colorCls = colorForExt(f.path)
+  const { data } = useQuery({
+    queryKey: ['file-diff', f.path, f.lastWrite],
+    queryFn: () => api.fileDiff(f.path),
+    placeholderData: (prev: any) => prev,
+  })
+  const stats = data?.diff ? countDiffStats(data.diff) : null
   return (
     <div
       className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-border bg-bg-elevated text-[12px] cursor-pointer hover:bg-bg-hover hover:border-border-strong transition-all max-w-full"
@@ -240,16 +255,33 @@ function FileTile({ f, onFileOpen, onFileRemove }: { f: TouchedFile; onFileOpen?
         )}
       </span>
       <span className="truncate text-text max-w-[140px]">{name}</span>
+      {stats && (stats.added > 0 || stats.removed > 0) && (
+        <span className="flex items-center gap-1 text-[10px] font-mono shrink-0 ml-0.5">
+          {stats.added > 0 && <span className="text-ok">+{stats.added}</span>}
+          {stats.removed > 0 && <span className="text-danger">-{stats.removed}</span>}
+        </span>
+      )}
     </div>
   )
 }
 
 /* ── FileBrowser: inline filesystem browser body, rendered inside the Files tab card. ── */
-function FileBrowser({ onFileOpen }: { onFileOpen?: (path: string) => void }) {
+function FileBrowser({ onFileOpen, initialPath = '' }: { onFileOpen?: (path: string) => void; initialPath?: string }) {
   // Empty string targets the user's home dir (server expands ~). Tracking
   // path as state keeps React Query's cache key in sync — revisiting a
   // directory is instant on cache hit.
-  const [path, setPath] = useState<string>('')
+  const [path, setPath] = useState<string>(initialPath)
+  // Sync with initialPath changes (e.g. folder switch)
+  const prevInit = useRef(initialPath)
+  useEffect(() => {
+    if (initialPath !== prevInit.current) {
+      setPath(initialPath)
+      prevInit.current = initialPath
+      historyRef.current = []
+      forwardRef.current = []
+      tickNav()
+    }
+  }, [initialPath])
   const [search, setSearch] = useState('')
   // Browser-style nav stack: history (Back) and forward (Forward). Mutated
   // in place so cross-render closures stay stable; we tick `force` to push
@@ -340,15 +372,16 @@ function FileBrowser({ onFileOpen }: { onFileOpen?: (path: string) => void }) {
   )
 }
 
-export default function ActivityViewer({ subagents, toolLog, open, onToggle, slot, files, onFileOpen, onFileRemove, onFilesClear }: {
+export default function ActivityViewer({ subagents, toolLog, open, onToggle, slot, files, onFileOpen, onFileRemove, onFilesClear, projectDir }: {
   subagents: Record<string, SubagentActivity>; toolLog: ToolActivity[]; open: boolean; onToggle: () => void; slot: string
   files?: TouchedFile[]; onFileOpen?: (path: string) => void; onFileRemove?: (path: string) => void; onFilesClear?: (source: 'history' | 'tool') => void
+  projectDir?: string
 }) {
   const dispatch = useAppDispatch()
   const [, setSelected] = useState(0)
   const reduxTab = useAppSelector(s => s.chat.activityTab)
   // Files-tab inline browser state
-  const [browserOpen, setBrowserOpen] = useState(false)
+  const [browserOpen, setBrowserOpen] = useState(!!projectDir)
   const [browserHeight, setBrowserHeight] = useState(320)
   const [browserDragging, setBrowserDragging] = useState(false)
   const [tab, setTab] = useState<'subagents' | 'logs' | 'files' | 'side'>(reduxTab)
@@ -442,7 +475,7 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
                   <ChevronLeft size={12} className={`text-muted transition-transform duration-200 ${browserOpen ? 'rotate-90' : '-rotate-90'}`} />
                 </button>
               </div>
-              {browserOpen && <FileBrowser onFileOpen={onFileOpen} />}
+              {browserOpen && <FileBrowser onFileOpen={onFileOpen} initialPath={projectDir} />}
               {browserOpen && (
                 <div
                   className="relative shrink-0 h-1.5 cursor-row-resize z-10 group/drag"

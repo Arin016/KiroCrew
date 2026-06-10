@@ -4,6 +4,8 @@ export interface TouchedFile {
   path: string
   /** First seen timestamp (Date.now() at add time) */
   ts: number
+  /** Last write timestamp — updates when agent writes to this file again */
+  lastWrite?: number
   /** How the file was accessed:
    *  - 'history' — viewed by the user (file viewer panel, etc.)
    *  - 'tool'    — read/written by the agent during a turn
@@ -64,8 +66,14 @@ export function useTouchedFiles(sessionKey: string | undefined) {
 
   const addFile = useCallback((path: string, source: 'history' | 'tool' = 'history') => {
     setFiles(prev => {
-      if (prev.some(f => f.path === path)) return prev
-      const next = [...prev, { path, ts: Date.now(), source }]
+      const existing = prev.find(f => f.path === path)
+      if (existing) {
+        if (source !== 'tool') return prev
+        const next = prev.map(f => f.path === path ? { ...f, lastWrite: Date.now() } : f)
+        persist(next)
+        return next
+      }
+      const next = [...prev, { path, ts: Date.now(), lastWrite: source === 'tool' ? Date.now() : undefined, source }]
       persist(next)
       return next
     })

@@ -146,17 +146,39 @@ export const refreshSlot = createAsyncThunk(
 
 export const createSlot = createAsyncThunk(
   'chat/createSlot',
-  async (opts: { agent?: string; model?: string; mode?: string; memory_mode?: string } | string | undefined, { dispatch, getState }) => {
+  async (opts: { agent?: string; model?: string; mode?: string; memory_mode?: string; clean_mode?: boolean; folder_id?: string | null; color_index?: number | null; project?: string | null } | string | undefined, { dispatch, getState }) => {
     const agent = typeof opts === 'string' ? opts : opts?.agent
     const model = typeof opts === 'string' ? undefined : opts?.model
     const mode = typeof opts === 'string' ? undefined : opts?.mode
     const memory_mode = typeof opts === 'string' ? undefined : opts?.memory_mode
-    const slot = await api.createChatSlot(undefined, agent, model, mode, memory_mode)
+    const clean_mode = typeof opts === 'string' ? undefined : opts?.clean_mode
+    const folderId = typeof opts === 'string' ? undefined : opts?.folder_id
+    const explicitColor = typeof opts === 'string' ? undefined : opts?.color_index
+    const project = typeof opts === 'string' ? undefined : opts?.project
+    const slot = await api.createChatSlot(undefined, agent, model, mode, memory_mode, undefined, clean_mode)
     const dashState = (getState() as RootState).dashboard
-    const ci = resolveDefaultColor(dashState.sessionDefaultColor, dashState.slots.length)
+    // An explicit color (e.g. carried from a slot being recreated on a
+    // mode switch) wins; otherwise fall back to the default-color policy.
+    const ci = explicitColor != null ? explicitColor : resolveDefaultColor(dashState.sessionDefaultColor, dashState.slots.length)
     if (ci != null) {
       slot.color_index = ci
       api.setSlotColor(slot.key, ci).catch(() => {})
+    }
+    // Carry folder membership so a recreated slot stays in its folder
+    // instead of popping out to the top level.
+    if (folderId) {
+      slot.folder_id = folderId
+      api.setSlotFolder(slot.key, folderId).catch(() => {})
+    }
+    // Carry the project directory. The create endpoint ignores `project` and
+    // defaults it to the workspace dir, so a recreated slot would otherwise
+    // lose its project — re-apply it via the dedicated endpoint. (We do NOT
+    // re-issue setSlotAgent here: that endpoint resets the project back to the
+    // workspace default, which would clobber this carry. Agent rides the
+    // create payload instead.)
+    if (project) {
+      slot.project = project
+      api.chatSlotProject(slot.key, project).catch(() => {})
     }
     dispatch(addSlotOptimistic(slot))
     return slot

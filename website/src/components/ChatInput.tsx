@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, memo } from 'react'
-import { ArrowUpFromLine, ArrowUp, Loader2, Plus, Scan, Bot, Mic, Square, ShieldCheck, BookOpen, Handshake, Rocket, X, ClipboardList, CheckCircle, Ban, Repeat, Sparkles, Target, Gauge, Lock, Globe } from 'lucide-react'
+import { ArrowUpFromLine, ArrowUp, Loader2, Plus, Crop, Bot, Mic, Square, ShieldCheck, BookOpen, Handshake, Rocket, X, ClipboardList, CheckCircle, Ban, Sparkles, Goal, Target, Lock, Globe, FolderOpen } from 'lucide-react'
 import { useMutation } from '@tanstack/react-query'
 import { useBranding } from '../hooks/useBranding'
 import { useAppSelector, useAppDispatch } from '../store'
@@ -14,6 +14,7 @@ import { sanitizeLlmOutput } from '../utils/sanitize'
 import { useSimplifiedToolNames } from '../hooks/useSimplifiedToolNames'
 import TrustDropdown from './TrustDropdown'
 import { useIsMobile } from '../hooks/useIsMobile'
+import { isScreenSnipSupported } from '../hooks/useScreenSnip'
 import { useImeGuard } from '../hooks/useImeGuard'
 import ContextRing from './ContextRing'
 import FollowUpBar from './FollowUpBar'
@@ -103,11 +104,20 @@ function applyHeight(
   const cap = prefillHint ? INPUT_PREFILL_MAX_H : INPUT_DEFAULT_MAX_H
   const prev = el.style.height
   const prevOverflow = el.style.overflow
+  const prevScrollTop = el.scrollTop // height:0 below resets scroll; preserve for non-typing callers
   el.style.overflow = 'hidden'
   el.style.height = '0'
   const next = Math.max(INPUT_MIN_H, Math.min(el.scrollHeight, cap)) + 'px'
   el.style.height = next === prev ? prev : next
   el.style.overflow = prevOverflow
+  el.scrollTop = prevScrollTop
+  // When typing at the end of overflowing content, snap to the bottom so the caret
+  // stays visible — restoring prevScrollTop loses it (the value-commit re-resets
+  // scrollTop after this runs). Mesh-1940.
+  const caretAtEnd = el.selectionStart === el.value.length && el.selectionEnd === el.value.length
+  if (document.activeElement === el && el.scrollHeight > el.clientHeight && caretAtEnd) {
+    el.scrollTop = el.scrollHeight
+  }
 }
 
 interface ChatInputProps {
@@ -148,6 +158,7 @@ interface ChatInputProps {
   modelName?: string
   onAgentClick?: (rect: DOMRect) => void
   onModelClick?: (rect: DOMRect) => void
+  onProjectClick?: (rect: DOMRect) => void
   contextPct?: number
   contextUsedTokens?: number
   contextWindowTokens?: number
@@ -164,6 +175,7 @@ interface ChatInputProps {
   onFileOpen?: (path: string) => void
   project?: string
   memoryMode?: string
+  cleanMode?: boolean
   /** User-sent messages for ↑/↓ history navigation (oldest → newest). */
   sentMessages?: string[]
   /** Auto-nudge loop state for this slot (if any) */
@@ -178,6 +190,8 @@ interface ChatInputProps {
   followUpPicked?: Set<string>
   /** Select a follow-up option — handler toggles text in input (see ChatPage wiring) */
   onFollowUpSelect?: (option: string, event: React.MouseEvent) => void
+  /** Double-click a follow-up option — send with option text directly (bypasses setInput race) */
+  onFollowUpSend?: (text?: string) => void
   /** Quick Send enabled — clicking sends immediately */
   quickSend?: boolean
   /** Layout mode for the follow-up bar: 'multiline' (default) or 'scroll' (original single-line). */
@@ -258,6 +272,7 @@ function ChatInput({
   modelName,
   onAgentClick,
   onModelClick,
+  onProjectClick,
   contextPct,
   contextUsedTokens,
   contextWindowTokens,
@@ -274,6 +289,7 @@ function ChatInput({
   onFileOpen,
   project,
   memoryMode,
+  cleanMode,
   sentMessages,
   autoNudgeActive = false,
   autoNudgeCycleCount = 0,
@@ -282,6 +298,7 @@ function ChatInput({
   followUpOptions,
   followUpPicked,
   onFollowUpSelect,
+  onFollowUpSend,
   quickSend,
   followUpLayout,
   pasteBlocks = [],
@@ -829,12 +846,15 @@ function ChatInput({
 
   /** Intercept clipboard paste — files go to upload path, big text gets collapsed into a token. */
   const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    // File paste takes precedence
+    // File paste takes precedence — but not when text is also available (macOS Office
+    // apps include an image rendering alongside the copied text in the clipboard).
+    const clipTypes = e.clipboardData.types || []
+    const hasText = clipTypes.includes('text/plain') || clipTypes.includes('text/html')
     const files = Array.from(e.clipboardData.items)
       .filter(i => i.kind === 'file')
       .map(i => i.getAsFile())
       .filter((f): f is File => f !== null)
-    if (files.length && onUploadFiles) {
+    if (files.length && onUploadFiles && !hasText) {
       e.preventDefault()
       onUploadFiles(files)
       return
@@ -1028,7 +1048,7 @@ function ChatInput({
 
       {/* Ghost follow-up bubbles floating above input */}
       {!showGhost && followUpOptions && followUpOptions.length > 0 && onFollowUpSelect && (
-          <FollowUpBar options={followUpOptions} picked={followUpPicked ?? new Set()} onSelect={onFollowUpSelect} quickSend={quickSend} layout={followUpLayout} />
+          <FollowUpBar options={followUpOptions} picked={followUpPicked ?? new Set()} onSelect={onFollowUpSelect} onSend={onFollowUpSend} quickSend={quickSend} layout={followUpLayout} />
       )}
 
       {/* Drag handle — always visible, sits above approval bar or input */}
@@ -1175,7 +1195,7 @@ function ChatInput({
       ><div
         data-testid="input-wrapper"
         ref={wrapperRef}
-        className={`${hasApproval ? 'rounded-b-2xl rounded-t-none' : 'rounded-2xl'} relative transition-colors overflow-hidden ${manualHeight !== null ? 'flex flex-col min-h-0' : ''} ${(memoryMode === 'incognito' || memoryMode === 'temporary') ? 'border-2' : 'border'} ${dragOver ? 'border-accent bg-accent-subtle' : memoryMode === 'temporary' ? 'border-aim bg-bg-elevated' : memoryMode === 'incognito' ? 'border-warn bg-bg-elevated' : 'border-border bg-bg-elevated focus-within:border-accent/50'}`}
+        className={`${hasApproval ? 'rounded-b-2xl rounded-t-none' : 'rounded-2xl'} relative transition-colors overflow-hidden ${manualHeight !== null ? 'flex flex-col min-h-0' : ''} ${(cleanMode || memoryMode === 'incognito' || memoryMode === 'temporary') ? 'border-2' : 'border'} ${dragOver ? 'border-accent bg-accent-subtle' : cleanMode ? 'border-accent bg-bg-elevated' : memoryMode === 'temporary' ? 'border-aim bg-bg-elevated' : memoryMode === 'incognito' ? 'border-warn bg-bg-elevated' : 'border-border bg-bg-elevated focus-within:border-accent/50'}`}
 
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
@@ -1222,12 +1242,12 @@ function ChatInput({
                 {uploading ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} />}
               </button>
             )}
-            {isMac && !isMobile && onScreenshot && (
-              <button className="w-8 h-8 rounded-lg text-muted hover:text-text hover:bg-bg-hover flex items-center justify-center cursor-pointer transition-all disabled:opacity-30 bg-transparent border-none shrink-0" onClick={onScreenshot} disabled={uploading} title="Screenshot">
-                <Scan size={16} />
+            {(isScreenSnipSupported() || isMac) && !isMobile && onScreenshot && (
+              <button aria-label="Screen snip" className="w-8 h-8 rounded-lg text-muted hover:text-text hover:bg-bg-hover flex items-center justify-center cursor-pointer transition-all disabled:opacity-30 bg-transparent border-none shrink-0" onClick={onScreenshot} disabled={uploading} title="Screen snip">
+                <Crop size={16} />
               </button>
             )}
-            <div className="flex items-center gap-0.5 min-w-0 overflow-hidden flex-1">
+            <div className="flex items-center gap-0.5 min-w-0 overflow-x-auto flex-1">
               {onAgentClick && agentName && (
                 <button
                   className={`h-7 px-2 rounded-lg text-[12px] font-mono hover:bg-bg-hover flex items-center gap-1 transition-all bg-transparent border-none shrink-0 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent ${agentSource === 'aim' ? 'text-[var(--aim)] hover:text-[var(--aim)]' : 'text-muted hover:text-text'} ${!isRunning ? 'cursor-pointer' : ''}`}
@@ -1244,25 +1264,30 @@ function ChatInput({
                   className="h-7 px-2 rounded-lg text-[12px] font-mono text-muted hover:text-text hover:bg-bg-hover flex items-center gap-1.5 transition-all bg-transparent border-none shrink-0 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted cursor-pointer"
                   onClick={e => onModelClick(e.currentTarget.getBoundingClientRect())}
                   disabled={isRunning}
-                  title={isRunning ? 'Stop the current response to switch models' : `Model: ${modelName}`}
+                  title={isRunning ? 'Stop the current response to switch models' : onReasoningEffortClick ? `Model: ${modelName} · Reasoning: ${effortLabel(reasoningEffort || '')}` : `Model: ${modelName}`}
+                  aria-label={`Model: ${modelName}${onReasoningEffortClick ? ` · Reasoning: ${effortLabel(reasoningEffort || '')}` : ''}`}
                 >
                   {contextPct !== undefined && <ContextRing pct={contextPct} usedTokens={contextUsedTokens} windowTokens={contextWindowTokens} />}
                   {!isMobile && modelName}
+                  {onReasoningEffortClick && !isMobile && (
+                    <span className="text-muted/70">
+                      {effortLabel(reasoningEffort || '')}
+                    </span>
+                  )}
                 </button>
               )}
-              {onReasoningEffortClick && (() => {
-                const label = effortLabel(reasoningEffort || '')
-                const d = { label }
+              {onProjectClick && (() => {
+                const projLabel = project ? (project.split('/').filter(Boolean).pop() || project) : 'Project'
                 return (
                   <button
-                    aria-label={`Reasoning effort: ${d.label}`}
-                    className="h-7 px-2 rounded-lg text-[12px] font-mono text-muted hover:text-text hover:bg-bg-hover flex items-center gap-1 cursor-pointer transition-all bg-transparent border-none shrink-0 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
-                    onClick={e => onReasoningEffortClick(e.currentTarget.getBoundingClientRect())}
+                    className={`h-7 px-2 rounded-lg text-[12px] font-mono hover:bg-bg-hover flex items-center gap-1 transition-all bg-transparent border-none shrink-0 whitespace-nowrap text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted ${!isRunning ? 'cursor-pointer' : ''}`}
+                    onClick={e => onProjectClick(e.currentTarget.getBoundingClientRect())}
                     disabled={isRunning}
-                    title={isRunning ? 'Stop the current response to switch reasoning effort' : `Reasoning: ${d.label}`}
+                    title={isRunning ? 'Stop the current response to switch projects' : (project ? `Project: ${project}` : 'Select project…')}
+                    aria-label={project ? `Project: ${project}` : 'Select project'}
                   >
-                    <Gauge size={13} className="shrink-0" />
-                    {!isMobile && d.label}
+                    <FolderOpen size={13} className="shrink-0" />
+                    {!isMobile && <span className="truncate max-w-[140px]">{projLabel}</span>}
                   </button>
                 )
               })()}
@@ -1277,15 +1302,16 @@ function ChatInput({
               })()}
               {onAutoNudgeClick && (
                 <button
-                  className={`h-7 px-2 rounded-lg text-[12px] font-mono flex items-center gap-1 cursor-pointer transition-all bg-transparent border-none shrink-0 whitespace-nowrap ${
+                  className={`h-8 px-2 rounded-lg text-[12px] font-mono flex items-center gap-1 cursor-pointer transition-all bg-transparent border-none shrink-0 whitespace-nowrap ${
                     autoNudgeActive
                       ? 'text-accent hover:text-accent hover:bg-accent/10 animate-pulse'
                       : 'text-muted hover:text-text hover:bg-bg-hover'
                   }`}
                   onClick={e => onAutoNudgeClick(e.currentTarget.getBoundingClientRect())}
-                  title={autoNudgeActive ? `Auto-nudge active (cycle ${autoNudgeCycleCount})` : 'Auto-nudge (off)'}
+                  title={autoNudgeActive ? `Goal active (cycle ${autoNudgeCycleCount})` : 'Set a goal'}
+                  aria-label={autoNudgeActive ? `Goal active (cycle ${autoNudgeCycleCount})` : 'Set a goal'}
                 >
-                  <Repeat size={13} className="shrink-0" />
+                  <Goal size={16} className="shrink-0" />
                   {autoNudgeActive && autoNudgeCycleCount > 0 ? autoNudgeCycleCount : null}
                 </button>
               )}

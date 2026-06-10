@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen, act } from '@testing-library/react'
+import { render, screen, act, waitFor } from '@testing-library/react'
 import { renderWithProviders, createTestStore } from './helpers'
 import App from '../App'
 import SegmentedControl from '../components/SegmentedControl'
@@ -17,6 +17,7 @@ vi.mock('../pages/SchedulePage', () => ({ default: () => <div data-testid="sched
 vi.mock('../pages/BoardPage', () => ({ default: () => <div data-testid="board-page">BoardPage</div> }))
 vi.mock('../hooks/useWebSocket', () => ({ useWebSocket: () => ({ subscribeLogs: () => {} }) }))
 vi.mock('../hooks/useAgents', () => ({ useAgents: vi.fn(() => ({ agents: [{ name: 'kiroclaw' }, { name: 'reviewer' }, { name: 'oracle' }], defaultAgent: 'kiroclaw' })) }))
+vi.mock('../providers/context', () => ({ useProvider: () => ({ id: 'acp' }) }))
 vi.mock('../components/MarkdownRenderer', () => ({ default: ({ content }: { content: string }) => <span>{content}</span>, Lightbox: () => null }))
 vi.mock('../api/client', () => ({
   api: {
@@ -26,7 +27,17 @@ vi.mock('../api/client', () => ({
     listApps: vi.fn().mockResolvedValue([]),
     system: vi.fn().mockResolvedValue({ mem_used_gb: 4.0, mem_total_gb: 16.0, cpu_pct: 25.0, disk_total_gb: 100.0, disk_free_gb: 60.0 }),
     chatSlotAgent: vi.fn().mockResolvedValue({}),
+    chatSlotReasoningEffort: vi.fn().mockResolvedValue({}),
+    chatSlotModel: vi.fn().mockResolvedValue({}),
     chatMode: vi.fn().mockResolvedValue({}),
+    listInstances: vi.fn().mockResolvedValue({ instances: [], warm_set_cap: 5 }),
+  },
+  ApiError: class ApiError extends Error {
+    status: number
+    constructor(status: number, message: string) {
+      super(message)
+      this.status = status
+    }
   },
 }))
 
@@ -83,7 +94,6 @@ describe('App routing', () => {
     renderWithProviders(<App />, { route: '/chat' })
     expect(screen.getByText('Chat')).toBeInTheDocument()
     expect(screen.getByText('Agents')).toBeInTheDocument()
-    expect(screen.getByText('Projects')).toBeInTheDocument()
     expect(screen.getByText('Settings')).toBeInTheDocument()
   })
 
@@ -111,6 +121,100 @@ describe('App routing', () => {
     // would silently fire if both NAV_ITEMS and appNavItems contributed an
     // entry; this assertion catches the visible regression.
     expect(screen.getAllByText('Secretary')).toHaveLength(1)
+  })
+
+  it('collapses a long Apps list behind a "more" toggle so the nav cannot grow unbounded', async () => {
+    // Regression for the nav-overflow bug: with many enabled apps the rail used
+    // to grow past the viewport. The Apps group now shows up to APPS_NAV_LIMIT
+    // (6) and hides the rest behind a "show more" toggle.
+    const { api } = await import('../api/client')
+    const manyApps = Array.from({ length: 10 }, (_, i) => ({
+      name: `app${i}`,
+      displayName: `App ${i}`,
+      enabled: true,
+      origin: 'installed',
+      manifest: { ui: { pages: [{ route: `/apps/app${i}`, icon: 'Package', label: `App ${i}` }] } },
+    }))
+    ;(api.listApps as ReturnType<typeof vi.fn>).mockResolvedValueOnce(manyApps)
+    localStorage.setItem('mc-apps-expanded', '0')
+    renderWithProviders(<App />, { route: '/chat' })
+    // The "more" toggle appears once the list overflows.
+    const moreToggle = await screen.findByTitle(/more app/i)
+    expect(moreToggle).toBeInTheDocument()
+    // Some later app is hidden while collapsed...
+    expect(screen.queryByText('App 9')).not.toBeInTheDocument()
+    // ...and revealed after expanding.
+    act(() => { moreToggle.click() })
+    expect(await screen.findByText('App 9')).toBeInTheDocument()
+    // Toggle now offers to collapse again.
+    expect(screen.getByTitle(/show fewer apps/i)).toBeInTheDocument()
+  })
+
+  it('keeps the overflow toggle visible while expanded (no disappear / layout shift)', async () => {
+    // Regression for the toggle-disappears bug: the toggle must render whenever
+    // the Apps list is collapsible (length > APPS_NAV_LIMIT), not only when
+    // hiddenCount > 0 — otherwise it vanishes (e.g. when the active app is the
+    // sole overflow item, pulled into the visible set), causing a layout shift.
+    const { api } = await import('../api/client')
+    const apps = Array.from({ length: 8 }, (_, i) => ({
+      name: `ovf${i}`,
+      displayName: `Ovf ${i}`,
+      enabled: true,
+      origin: 'installed',
+      manifest: { ui: { pages: [{ route: `/apps/ovf${i}`, icon: 'Package', label: `Ovf ${i}` }] } },
+    }))
+    ;(api.listApps as ReturnType<typeof vi.fn>).mockResolvedValueOnce(apps)
+    // Expanded: hiddenCount is 0 but the list is still collapsible — the toggle
+    // must remain (reading "Show less"), proving it doesn't hinge on hiddenCount.
+    localStorage.setItem('mc-apps-expanded', '1')
+    renderWithProviders(<App />, { route: '/chat' })
+    expect(await screen.findByTitle(/show fewer apps/i)).toBeInTheDocument()
+  })
+
+  it('shows a portaled hover label for a collapsed (icon-only) nav item', async () => {
+    // Covers useNavTip: in collapsed mode nav rows hide their text label and
+    // instead show it via a portal to <body> on hover (so the rail's vertical
+    // scroll-clip can't chop it). Hover -> the label text appears.
+    const { fireEvent } = await import('@testing-library/react')
+    localStorage.setItem('mc-nav', '1') // start sidebar collapsed
+    const { container } = renderWithProviders(<App />, { route: '/chat' })
+    // Collapsed nav items have no visible text; find a row by its class.
+    const rows = await waitFor(() => {
+      const found = container.querySelectorAll('nav [class*="group/nav"]')
+      if (found.length === 0) throw new Error('no nav rows yet')
+      return found
+    })
+    // The icon-only row still names itself for assistive tech via aria-label,
+    // since the visible text only mounts on hover (no permanent DOM text node).
+    expect(screen.getByLabelText('Chat')).toBeInTheDocument()
+    // Hover the first row -> its portaled label text should mount.
+    fireEvent.mouseEnter(rows[0])
+    expect(await screen.findByText('Chat')).toBeInTheDocument()
+    // Leave -> label begins fade-out (still present until the timer).
+    fireEvent.mouseLeave(rows[0])
+  })
+
+  it('surfaces the collapsed hover label on keyboard focus and is Enter-activatable', async () => {
+    // Keyboard-only users (no pointer) must still be able to identify icon-only
+    // rows: the label appears on focus, not just mouseenter. The row is also a
+    // real control (role=button + tabIndex) operable with Enter.
+    const { fireEvent } = await import('@testing-library/react')
+    localStorage.setItem('mc-nav', '1') // start sidebar collapsed
+    const { container } = renderWithProviders(<App />, { route: '/chat' })
+    const rows = await waitFor(() => {
+      const found = container.querySelectorAll('nav [role="button"][class*="group/nav"]')
+      if (found.length === 0) throw new Error('no focusable nav rows yet')
+      return found
+    })
+    // Focusable as a button.
+    expect(rows[0].getAttribute('tabindex')).toBe('0')
+    // Focus -> the portaled label mounts (parity with hover).
+    fireEvent.focus(rows[0])
+    expect(await screen.findByText('Chat')).toBeInTheDocument()
+    // Blur -> begins fade-out (still mounted until the unmount timer).
+    fireEvent.blur(rows[0])
+    // Enter activates without throwing (navigates to the row's route).
+    fireEvent.keyDown(rows[0], { key: 'Enter' })
   })
 
   it('renders KIROCLAW branding', () => {
@@ -274,7 +378,7 @@ describe('onCycleApprovalMode and onCyclePrevApprovalMode no-slot cases', () => 
     store.dispatch({ type: 'chat/setActiveSlot', payload: null })
     renderWithProviders(<App />, { route: '/chat' })
     await act(async () => {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'D', code: 'KeyD', altKey: true, shiftKey: true, bubbles: true }))
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F', code: 'KeyF', altKey: true, shiftKey: true, bubbles: true }))
     })
     expect(api.chatMode).not.toHaveBeenCalled()
   })
@@ -286,21 +390,47 @@ describe('onCycleApprovalMode and onCyclePrevApprovalMode no-slot cases', () => 
     store.dispatch({ type: 'chat/setActiveSlot', payload: null })
     renderWithProviders(<App />, { route: '/chat' })
     await act(async () => {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'C', code: 'KeyC', altKey: true, shiftKey: true, bubbles: true }))
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'V', code: 'KeyV', altKey: true, shiftKey: true, bubbles: true }))
     })
     expect(api.chatMode).not.toHaveBeenCalled()
   })
 })
 
+describe('onCycleReasoningEffort no-slot cases', () => {
+  it('does not cycle reasoning effort when no active slot', async () => {
+    const { api } = await import('../api/client')
+    const { store } = await import('../store')
+    ;(api.chatSlotReasoningEffort as ReturnType<typeof vi.fn>).mockClear()
+    store.dispatch({ type: 'chat/setActiveSlot', payload: null })
+    renderWithProviders(<App />, { route: '/chat' })
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'D', code: 'KeyD', altKey: true, shiftKey: true, bubbles: true }))
+    })
+    expect(api.chatSlotReasoningEffort).not.toHaveBeenCalled()
+  })
+
+  it('does not cycle prev reasoning effort when no active slot', async () => {
+    const { api } = await import('../api/client')
+    const { store } = await import('../store')
+    ;(api.chatSlotReasoningEffort as ReturnType<typeof vi.fn>).mockClear()
+    store.dispatch({ type: 'chat/setActiveSlot', payload: null })
+    renderWithProviders(<App />, { route: '/chat' })
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'C', code: 'KeyC', altKey: true, shiftKey: true, bubbles: true }))
+    })
+    expect(api.chatSlotReasoningEffort).not.toHaveBeenCalled()
+  })
+})
+
 describe('onCycleApprovalMode and onCyclePrevAgent shortcuts', () => {
-  it('cycles approval mode forward on Alt+Shift+D', async () => {
+  it('cycles approval mode forward on Alt+Shift+F', async () => {
     const { api } = await import('../api/client')
     const { store } = await import('../store')
     store.dispatch({ type: 'dashboard/sseSlots', payload: [{ key: 'slot-1', messages: 0, running: false }] })
     store.dispatch({ type: 'chat/setActiveSlot', payload: 'slot-1' })
     renderWithProviders(<App />, { route: '/chat' })
     await act(async () => {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'D', code: 'KeyD', altKey: true, shiftKey: true, bubbles: true }))
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F', code: 'KeyF', altKey: true, shiftKey: true, bubbles: true }))
     })
     expect(api.chatMode).toHaveBeenCalledWith('trust_reads', 'slot-1')
   })
@@ -318,7 +448,7 @@ describe('onCycleApprovalMode and onCyclePrevAgent shortcuts', () => {
     expect(api.chatSlotAgent).toHaveBeenCalledWith('slot-1', 'kiroclaw')
   })
 
-  it('cycles approval mode backward on Alt+Shift+C', async () => {
+  it('cycles approval mode backward on Alt+Shift+V', async () => {
     const { api } = await import('../api/client')
     const { store } = await import('../store')
     ;(api.chatMode as ReturnType<typeof vi.fn>).mockClear()
@@ -328,8 +458,90 @@ describe('onCycleApprovalMode and onCyclePrevAgent shortcuts', () => {
     store.dispatch({ type: 'chat/setActiveSlot', payload: 'slot-1' })
     renderWithProviders(<App />, { route: '/chat' })
     await act(async () => {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'C', code: 'KeyC', altKey: true, shiftKey: true, bubbles: true }))
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'V', code: 'KeyV', altKey: true, shiftKey: true, bubbles: true }))
     })
     expect(api.chatMode).toHaveBeenCalledWith('trust', 'slot-1')
+  })
+
+  it('cycles reasoning effort forward on Alt+Shift+D', async () => {
+    const { api } = await import('../api/client')
+    const { store } = await import('../store')
+    ;(api.chatSlotReasoningEffort as ReturnType<typeof vi.fn>).mockClear()
+    store.dispatch({ type: 'dashboard/sseSlots', payload: [{ key: 'slot-1', messages: 0, running: false, reasoning_effort: '' }] })
+    store.dispatch({ type: 'chat/setActiveSlot', payload: 'slot-1' })
+    renderWithProviders(<App />, { route: '/chat' })
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'D', code: 'KeyD', altKey: true, shiftKey: true, bubbles: true }))
+    })
+    expect(api.chatSlotReasoningEffort).toHaveBeenCalledWith('slot-1', 'low')
+  })
+
+  it('cycles reasoning effort backward on Alt+Shift+C', async () => {
+    const { api } = await import('../api/client')
+    const { store } = await import('../store')
+    ;(api.chatSlotReasoningEffort as ReturnType<typeof vi.fn>).mockClear()
+    store.dispatch({ type: 'dashboard/sseSlots', payload: [{ key: 'slot-1', messages: 0, running: false, reasoning_effort: 'low' }] })
+    store.dispatch({ type: 'chat/setActiveSlot', payload: 'slot-1' })
+    renderWithProviders(<App />, { route: '/chat' })
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'C', code: 'KeyC', altKey: true, shiftKey: true, bubbles: true }))
+    })
+    expect(api.chatSlotReasoningEffort).toHaveBeenCalledWith('slot-1', '')
+  })
+})
+
+describe('Alt+Shift+S/X model cycling via React Query cache', () => {
+  it('does not call chatSlotModel on Alt+Shift+S without cache', async () => {
+    const { api } = await import('../api/client')
+    const { store } = await import('../store')
+    ;(api.chatSlotModel as ReturnType<typeof vi.fn>).mockClear()
+    store.dispatch({ type: 'dashboard/sseSlots', payload: [{ key: 'slot-1', messages: 0, running: false, model: 'claude-3' }] })
+    store.dispatch({ type: 'chat/setActiveSlot', payload: 'slot-1' })
+    renderWithProviders(<App />, { route: '/chat' })
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'S', code: 'KeyS', altKey: true, shiftKey: true, bubbles: true }))
+    })
+    expect(api.chatSlotModel).not.toHaveBeenCalled()
+  })
+
+  it('does not call chatSlotModel on Alt+Shift+X without cache', async () => {
+    const { api } = await import('../api/client')
+    const { store } = await import('../store')
+    ;(api.chatSlotModel as ReturnType<typeof vi.fn>).mockClear()
+    store.dispatch({ type: 'dashboard/sseSlots', payload: [{ key: 'slot-1', messages: 0, running: false, model: 'claude-3' }] })
+    store.dispatch({ type: 'chat/setActiveSlot', payload: 'slot-1' })
+    renderWithProviders(<App />, { route: '/chat' })
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'X', code: 'KeyX', altKey: true, shiftKey: true, bubbles: true }))
+    })
+    expect(api.chatSlotModel).not.toHaveBeenCalled()
+  })
+
+  it('cycles to next model on Alt+Shift+S', async () => {
+    const { api } = await import('../api/client')
+    const { store } = await import('../store')
+    ;(api.chatSlotModel as ReturnType<typeof vi.fn>).mockClear()
+    store.dispatch({ type: 'dashboard/sseSlots', payload: [{ key: 'slot-1', messages: 0, running: false, model: 'auto' }] })
+    store.dispatch({ type: 'chat/setActiveSlot', payload: 'slot-1' })
+    const { queryClient } = renderWithProviders(<App />, { route: '/chat' })
+    queryClient.setQueryData(['available-models', 'acp'], [{ name: 'auto' }, { name: 'opus' }, { name: 'sonnet' }])
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'S', code: 'KeyS', altKey: true, shiftKey: true, bubbles: true }))
+    })
+    expect(api.chatSlotModel).toHaveBeenCalledWith('slot-1', 'opus')
+  })
+
+  it('cycles to previous model on Alt+Shift+X', async () => {
+    const { api } = await import('../api/client')
+    const { store } = await import('../store')
+    ;(api.chatSlotModel as ReturnType<typeof vi.fn>).mockClear()
+    store.dispatch({ type: 'dashboard/sseSlots', payload: [{ key: 'slot-1', messages: 0, running: false, model: 'opus' }] })
+    store.dispatch({ type: 'chat/setActiveSlot', payload: 'slot-1' })
+    const { queryClient } = renderWithProviders(<App />, { route: '/chat' })
+    queryClient.setQueryData(['available-models', 'acp'], [{ name: 'auto' }, { name: 'opus' }, { name: 'sonnet' }])
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'X', code: 'KeyX', altKey: true, shiftKey: true, bubbles: true }))
+    })
+    expect(api.chatSlotModel).toHaveBeenCalledWith('slot-1', 'auto')
   })
 })

@@ -43,6 +43,12 @@ function initMermaid(): void {
     },
     securityLevel: 'strict',
     fontFamily: 'inherit',
+    // Throw on parse errors instead of injecting mermaid's error diagram into
+    // a temp <div id="dmermaid-*"> on document.body. That temp node is leaked
+    // when render() throws (cleanup only runs on success), so failed blocks
+    // accumulated orphaned 512px error SVGs in the DOM. With this on, the
+    // MermaidBlock .catch() shows a clean inline <pre> and nothing leaks.
+    suppressErrorRendering: true,
   })
 }
 
@@ -261,6 +267,68 @@ const REHYPE_PLUGINS_WITH_SOURCEPOS: PluggableList = [[rehypeRaw, { passThrough:
 // NOTE: remark plugin config is shared via REMARK_PLUGINS above (singleDollarTextMath:
 // false). The sourcepos variant only differs in the rehype chain.
 
+/** Number of trailing characters glowed while a message streams. */
+const GLOW_TAIL_CHARS = 30
+
+/**
+ * Rehype plugin: wrap the message's trailing text in a
+ * `<span class="streaming-glow">` so the newest streamed words shimmer.
+ *
+ * Operates on the parsed HAST tree (not the markdown source and not the live
+ * DOM), so it: (a) never builds a raw HTML string with LLM content — the span
+ * is a real element node react-markdown renders as a React `<span>`; (b) never
+ * bisects a markdown token — by this stage `**bold**` is already a `<strong>`
+ * element, so splitting the last *text* node is always safe; (c) doesn't mutate
+ * React-owned DOM, so it can't cause reconciliation crashes.
+ *
+ * Glows the whole last text node when it's short, else its last GLOW_TAIL_CHARS
+ * on a space boundary (never mid-word). Skips text inside code/pre.
+ */
+function rehypeStreamingGlow(options?: { tailChars?: number }) {
+  const tailChars = options?.tailChars ?? GLOW_TAIL_CHARS
+  return (tree: any) => {
+    // Collect every eligible text node (non-whitespace, not inside code/pre);
+    // the streaming tail is the last one. Using an array (rather than a
+    // closure-mutated `let`) keeps TypeScript's control-flow narrowing happy.
+    const candidates: { parent: any; index: number; value: string }[] = []
+    const walk = (node: any, parent: any, index: number, inCode: boolean) => {
+      if (node.type === 'text') {
+        if (!inCode && node.value && node.value.trim()) {
+          candidates.push({ parent, index, value: node.value })
+        }
+        return
+      }
+      const code = inCode || node.tagName === 'code' || node.tagName === 'pre'
+      if (node.children) {
+        for (let i = 0; i < node.children.length; i++) walk(node.children[i], node, i, code)
+      }
+    }
+    if (tree.children) {
+      for (let i = 0; i < tree.children.length; i++) walk(tree.children[i], tree, i, false)
+    }
+    const target = candidates[candidates.length - 1]
+    if (!target) return
+    const { parent, index, value } = target
+    let cut: number
+    if (value.length <= tailChars) {
+      cut = 0
+    } else {
+      const sp = value.lastIndexOf(' ', value.length - tailChars)
+      cut = sp > 0 ? sp : value.length - tailChars
+    }
+    const before = value.slice(0, cut)
+    const tail = value.slice(cut)
+    if (!tail.trim()) return
+    const span = {
+      type: 'element',
+      tagName: 'span',
+      properties: { className: ['streaming-glow'] },
+      children: [{ type: 'text', value: tail }],
+    }
+    parent.children.splice(index, 1, ...(before ? [{ type: 'text', value: before }, span] : [span]))
+  }
+}
+
 export function fixCodeFences(s: string): string {
   // Escape bare "N." lines so markdown doesn't render them as ordered lists.
   // CommonMark: 0-3 leading spaces = list item, 4+ = indented code block.
@@ -325,13 +393,19 @@ function stripStrayWidgetTags(content: string): string {
   return out
 }
 
-const MarkdownBlock = memo(function MarkdownBlock({ content, sourcePos, startLine }: { content: string; sourcePos?: boolean; startLine?: number }) {
+const MarkdownBlock = memo(function MarkdownBlock({ content, sourcePos, startLine, glow }: { content: string; sourcePos?: boolean; startLine?: number; glow?: boolean }) {
   // Strip any <mcwidget> tags that leak through during streaming transitions,
   // but preserve tag mentions inside inline-code spans.
   const clean = stripStrayWidgetTags(content)
   if (!clean.trim()) return null
+  const baseRehype = sourcePos ? REHYPE_PLUGINS_WITH_SOURCEPOS : REHYPE_PLUGINS
+  // Append the glow plugin (last, so it runs on the final tree) only for the
+  // streaming tail block — see MarkdownRenderer's `glow` prop.
+  const rehypePlugins: PluggableList = glow
+    ? [...baseRehype, [rehypeStreamingGlow, { tailChars: GLOW_TAIL_CHARS }]]
+    : baseRehype
   const md = (
-    <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={sourcePos ? REHYPE_PLUGINS_WITH_SOURCEPOS : REHYPE_PLUGINS} urlTransform={urlTransform} components={MD_COMPONENTS}>
+    <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={rehypePlugins} urlTransform={urlTransform} components={MD_COMPONENTS}>
       {fixCodeFences(clean)}
     </ReactMarkdown>
   )
@@ -370,7 +444,7 @@ function extractPathHintFromText(text: string | undefined): string | undefined {
   return undefined
 }
 
-function BlockRenderer({ block, prevBlock, onFileOpen, sourcePos, messageTs, widgetIndex }: { block: ContentBlock; prevBlock?: ContentBlock; onFileOpen?: (path: string) => void; sourcePos?: boolean; messageTs?: string; widgetIndex?: number }) {
+function BlockRenderer({ block, prevBlock, onFileOpen, sourcePos, messageTs, widgetIndex, glow }: { block: ContentBlock; prevBlock?: ContentBlock; onFileOpen?: (path: string) => void; sourcePos?: boolean; messageTs?: string; widgetIndex?: number; glow?: boolean }) {
   switch (block.type) {
     case 'diff': {
       const pathHint = prevBlock?.type === 'markdown'
@@ -389,11 +463,11 @@ function BlockRenderer({ block, prevBlock, onFileOpen, sourcePos, messageTs, wid
         ? <WidgetFrame html={block.content} title={block.language} slug={block.slug} messageTs={messageTs} widgetIndex={widgetIndex} />
         : <WidgetPlaceholder title={block.language} />
     case 'markdown':
-      return <MarkdownBlock content={block.content} sourcePos={sourcePos} startLine={block.startLine} />
+      return <MarkdownBlock content={block.content} sourcePos={sourcePos} startLine={block.startLine} glow={glow} />
   }
 }
 
-export default memo(function MarkdownRenderer({ content, streaming = false, onFileOpen, rawMode = false, sourcePos = false, messageTs }: { content: string; streaming?: boolean; onFileOpen?: (path: string) => void; rawMode?: boolean; sourcePos?: boolean; messageTs?: string }) {
+export default memo(function MarkdownRenderer({ content, streaming = false, onFileOpen, rawMode = false, sourcePos = false, messageTs, glow = false }: { content: string; streaming?: boolean; onFileOpen?: (path: string) => void; rawMode?: boolean; sourcePos?: boolean; messageTs?: string; glow?: boolean }) {
   const blocks = useBlockAssembler(content, streaming)
 
   const handleClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -425,6 +499,13 @@ export default memo(function MarkdownRenderer({ content, streaming = false, onFi
     return out
   }, [blocks])
 
+  // Index of the last markdown block — the streaming tail that gets the glow
+  // (only when `glow` is set). -1 if the message ends in a non-markdown block.
+  const lastMarkdownIdx = useMemo(() => {
+    for (let i = blocks.length - 1; i >= 0; i--) if (blocks[i].type === 'markdown') return i
+    return -1
+  }, [blocks])
+
   if (rawMode) {
     return <pre className="text-[13px] font-mono whitespace-pre-wrap break-words leading-relaxed text-muted">{content}</pre>
   }
@@ -442,6 +523,7 @@ export default memo(function MarkdownRenderer({ content, streaming = false, onFi
           block={block} prevBlock={blocks[i - 1]} onFileOpen={onFileOpen} sourcePos={sourcePos}
           messageTs={messageTs}
           widgetIndex={widgetIndices[i] >= 0 ? widgetIndices[i] : undefined}
+          glow={glow && i === lastMarkdownIdx}
         />
       ))}
     </div>

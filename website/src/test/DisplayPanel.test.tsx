@@ -42,6 +42,17 @@ vi.mock('../hooks/useTheme', () => ({
   CUSTOM_THEMES_CHANGED_EVENT: 'custom-themes-changed',
 }))
 
+// Mock useUIMode — provides chat/cli interface paradigm. UIModeProvider is a
+// passthrough so the test doesn't need real provider wiring.
+vi.mock('../hooks/useUIMode', () => ({
+  useUIMode: () => ({
+    uiMode: 'chat',
+    setUIMode: vi.fn(),
+    toggleUIMode: vi.fn(),
+  }),
+  UIModeProvider: ({ children }: { children: React.ReactNode }) => children,
+}))
+
 // Mock useSessionPalette — provides sidebar color palette data
 vi.mock('../hooks/useSessionPalette', () => ({
   useSessionPalette: () => ({

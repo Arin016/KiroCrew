@@ -7,10 +7,13 @@ import { store } from './store'
 import { BrandingProvider } from './hooks/useBranding'
 import { ProviderProvider } from './providers'
 import { ThemeProvider } from './hooks/useTheme'
+import { UIModeProvider } from './hooks/useUIMode'
 import { initRum } from './rum'
 import App from './App'
 import 'katex/dist/katex.min.css'
+import 'monaco-editor/esm/vs/base/browser/ui/codicons/codicon/codicon.css'
 import './index.css'
+import './styles/cli-mode.css'
 // Register shared modules for federated app bundles (must be before any app loads)
 import './app-sdk/shared-modules'
 
@@ -33,12 +36,14 @@ createRoot(document.getElementById('root')!).render(
     <QueryClientProvider client={queryClient}>
       <Provider store={store}>
         <ThemeProvider>
-          <BrowserRouter>
-            <Routes>
-              <Route path="/worlds-popout" element={<BrandingProvider><ProviderProvider><Suspense fallback={null}><WorldsPopout /></Suspense></ProviderProvider></BrandingProvider>} />
-              <Route path="*" element={<BrandingProvider><ProviderProvider><App /></ProviderProvider></BrandingProvider>} />
-            </Routes>
-          </BrowserRouter>
+          <UIModeProvider>
+            <BrowserRouter>
+              <Routes>
+                <Route path="/worlds-popout" element={<BrandingProvider><ProviderProvider><Suspense fallback={null}><WorldsPopout /></Suspense></ProviderProvider></BrandingProvider>} />
+                <Route path="*" element={<BrandingProvider><ProviderProvider><App /></ProviderProvider></BrandingProvider>} />
+              </Routes>
+            </BrowserRouter>
+          </UIModeProvider>
         </ThemeProvider>
       </Provider>
     </QueryClientProvider>

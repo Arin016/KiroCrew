@@ -11,7 +11,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   Package, Power, PowerOff, Trash2, RefreshCw, FolderOpen,
   Download, Bot, Tag, Users, Zap, ChevronRight,
-  ExternalLink, Clock, ShoppingBag, Lock,
+  ExternalLink, Clock, ShoppingBag, Lock, X,
 } from 'lucide-react'
 import { api } from '../api/client'
 import {
@@ -254,14 +254,14 @@ export default function AppsPage() {
         {displayError && (
           <div className="mb-4 bg-danger/10 border border-danger/20 rounded-lg p-3 flex items-center gap-3 animate-rise">
             <span className="text-danger text-sm flex-1">{displayError}</span>
-            <button className="text-danger/60 hover:text-danger text-sm" onClick={() => { setError(''); setDismissedQueryError(true); setDismissedRegistryError(true) }}>✕</button>
+            <button aria-label="Dismiss error" className="text-danger/60 hover:text-danger text-sm" onClick={() => { setError(''); setDismissedQueryError(true); setDismissedRegistryError(true) }}><X className="lucide-inline" /></button>
           </div>
         )}
 
         {successMsg && (
           <div className="mb-4 bg-ok/10 border border-ok/20 rounded-lg p-3 flex items-center gap-3 animate-rise">
             <span className="text-ok text-sm flex-1">{successMsg}</span>
-            <button className="text-ok/60 hover:text-ok text-sm" onClick={() => setSuccessMsg('')}>✕</button>
+            <button aria-label="Dismiss message" className="text-ok/60 hover:text-ok text-sm" onClick={() => setSuccessMsg('')}><X className="lucide-inline" /></button>
           </div>
         )}
 
@@ -609,7 +609,7 @@ function AppCard({
                 <p className="text-muted mt-1">Run this on your local machine:</p>
                 <code className="block mt-1.5 bg-bg-elevated px-2 py-1 rounded text-[12px] font-mono select-all">{remoteCmd}</code>
               </div>
-              <button className="text-muted hover:text-text text-sm shrink-0" onClick={() => setRemoteCmd('')}>✕</button>
+              <button aria-label="Dismiss" className="text-muted hover:text-text text-sm shrink-0" onClick={() => setRemoteCmd('')}><X className="lucide-inline" /></button>
             </div>
           </div>
         </div>

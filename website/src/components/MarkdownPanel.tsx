@@ -1,21 +1,47 @@
-import { memo, useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { memo, useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
-import { RefreshCw, ExternalLink, MoreVertical, Hash, WrapText, Zap, Maximize2, Minimize2, MessageSquare, MessageSquarePlus, Copy, BookOpen, BookmarkPlus, Camera, Check, X } from 'lucide-react'
+import { RefreshCw, ExternalLink, MoreVertical, Hash, WrapText, Zap, Maximize2, Minimize2, MessageSquare, MessageSquarePlus, Copy, BookOpen, BookmarkPlus, Camera, Check, X, GitBranch, CaseSensitive, ChevronUp, ChevronDown } from 'lucide-react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import hljs from 'highlight.js'
 import DOMPurify from 'dompurify'
 import DetailPanel from './DetailPanel'
+import Clickable from './Clickable'
 import { CommentPopover, CommentList, formatCommentsMessage, type InlineComment } from './CommentOverlay'
 import SelectionToolbar, { type SelectionAction } from './SelectionToolbar'
-import MarkdownToc, { TocToggle, extractHeadingsFromDOM } from './MarkdownToc'
+import MarkdownOutlineRail from './MarkdownToc'
 import { useFileWatch } from '../hooks/useFileWatch'
 import { detectFileType } from './FileRenderers'
 import { ContentRenderer, MD_EXTS, extOf, langFor, wrapCode } from './ContentRenderer'
 import { api } from '../api/client'
-import { fileReadUrl } from '../utils/fileReadUrl'
+import { fileReadUrl, fileDownloadUrl } from '../utils/fileReadUrl'
 import { loadCommentDrafts, saveCommentDrafts, setCommentsForFile } from '../utils/commentDrafts'
 import { copyToClipboard } from '../utils/clipboard'
+
+// ── CSS Custom Highlight API accessors ───────────────────────────────────────
+// Preview find highlights matches via the browser-native CSS Custom Highlight
+// API (CSS.highlights + Range) instead of injecting <mark> nodes. The preview
+// is React-reconciled (react-markdown), so mutating its DOM would crash React
+// on the next re-render; ranges live outside the DOM and never touch it.
+// These types aren't in this TS lib yet, so we reach them through narrow casts
+// and feature-detect at runtime (graceful no-highlight fallback when absent).
+type FindHighlight = object
+const FindHighlightCtor: (new (...ranges: Range[]) => FindHighlight) | undefined =
+  typeof window !== 'undefined'
+    ? (window as unknown as { Highlight?: new (...r: Range[]) => FindHighlight }).Highlight
+    : undefined
+const cssHighlights: { set(n: string, h: FindHighlight): void; delete(n: string): boolean } | undefined =
+  typeof CSS !== 'undefined'
+    ? (CSS as unknown as { highlights?: { set(n: string, h: FindHighlight): void; delete(n: string): boolean } }).highlights
+    : undefined
+const FIND_HL_SUPPORTED = !!FindHighlightCtor && !!cssHighlights
+// Global registry names. Assumes a single active markdown preview at a time
+// (the panel's findActiveRef already encodes that assumption); a second
+// concurrent preview find would share these names — a harmless visual overlap,
+// never a crash.
+const FIND_HL_ALL = 'mc-find'
+const FIND_HL_CURRENT = 'mc-find-current'
+
 /**
  * Locate the first char of `selected` in the raw source `content` and return
  * 1-based (line, column). Works perfectly for code files where rendered text
@@ -125,6 +151,15 @@ interface Props {
   onRefresh?: (filePath: string) => Promise<void>
 }
 
+import { monacoLang, useIsDark } from './MonacoCodeBlock'
+import { kiroclawDark, kiroclawLight } from './monacoTheme'
+const MonacoDiffEditor = lazy(async () => {
+  const { ensureMonacoLocal } = await import('../utils/monacoLocal')
+  await ensureMonacoLocal()
+  const { DiffEditor } = await import('@monaco-editor/react')
+  return { default: DiffEditor }
+})
+
 /** Comment hint banner — shown once per session for markdown files */
 function CommentHint({ onDismiss }: { onDismiss: () => void }) {
   return (
@@ -144,7 +179,7 @@ const DOWNLOAD_FAILED = 'Download failed'
 
 async function downloadFile(filePath: string) {
   try {
-    const res = await fetch(fileReadUrl(filePath))
+    const res = await fetch(fileDownloadUrl(filePath))
     if (!res.ok) { console.error('downloadFile failed', res.status, res.statusText); alert(DOWNLOAD_FAILED); return }
     const blob = await res.blob()
     const a = document.createElement('a')
@@ -417,10 +452,53 @@ function useFileArtifactState(filePath: string, content: string) {
   return { existing, add, adding, added, resetAdd, snapshot, snapshotting, snapshotted }
 }
 
+let diffThemesRegistered = false
+
+/** Monaco diff editor for side-by-side git diff viewing */
+function DiffEditorBlock({ diffMode, lang, originalContent, content, dark, diffActiveRef, handleChange, editing, lineNums, wordWrap, autocomplete, onSelect }: {
+  diffMode: boolean; lang: string; originalContent: string; content: string; dark: boolean
+  diffActiveRef: React.MutableRefObject<boolean>; handleChange: (v: string) => void; editing: boolean; lineNums: boolean; wordWrap: boolean; autocomplete: boolean
+  onSelect?: (text: string, rect: DOMRect) => void
+}) {
+  const handleChangeRef = useRef(handleChange); handleChangeRef.current = handleChange
+  const onSelectRef = useRef(onSelect); onSelectRef.current = onSelect
+  const disposableRef = useRef<any>(null)
+  const selDisposableRef = useRef<any>(null)
+  useEffect(() => () => { disposableRef.current?.dispose(); selDisposableRef.current?.dispose() }, [])
+  if (!diffMode) return null
+  return (
+    <div className="w-full h-full border border-border rounded-md overflow-hidden">
+      <Suspense fallback={<div className="p-3 text-muted text-[12px] animate-pulse">Loading diff…</div>}>
+        <MonacoDiffEditor height="100%" language={monacoLang(lang)} original={originalContent} modified={content}
+          beforeMount={(monaco) => { if (!diffThemesRegistered) { monaco.editor.defineTheme('kiroclaw-dark', kiroclawDark as any); monaco.editor.defineTheme('kiroclaw-light', kiroclawLight as any); diffThemesRegistered = true } }}
+          theme={dark ? 'kiroclaw-dark' : 'kiroclaw-light'} onMount={(editor) => {
+            const mod = editor.getModifiedEditor()
+            disposableRef.current = mod.onDidChangeModelContent(() => { if (!diffActiveRef.current) return; handleChangeRef.current(mod.getValue()) })
+            selDisposableRef.current = mod.onMouseUp(() => {
+              setTimeout(() => {
+                const sel = mod.getSelection()
+                if (!sel || sel.isEmpty()) return
+                const text = mod.getModel()?.getValueInRange(sel)
+                if (!text?.trim()) return
+                const pos = mod.getScrolledVisiblePosition(sel.getEndPosition())
+                if (!pos) return
+                const domNode = mod.getDomNode()
+                if (!domNode) return
+                const editorRect = domNode.getBoundingClientRect()
+                const rect = new DOMRect(editorRect.left + pos.left, editorRect.top + pos.top + pos.height, 0, 0)
+                onSelectRef.current?.(text.trim(), rect)
+              }, 10)
+            })
+          }} options={{ minimap: { enabled: false }, readOnly: !editing, renderSideBySide: true, scrollBeyondLastLine: false, fontSize: 13, lineNumbers: lineNums ? 'on' : 'off', wordWrap: wordWrap ? 'on' : 'off', quickSuggestions: autocomplete, automaticLayout: true, hover: { enabled: editing } }} />
+      </Suspense>
+    </div>
+  )
+}
+
 /** Shared comment overlay — popover + comment list */
 const CommentOverlayBlock = memo(function CommentOverlayBlock({ popover, addComment, setPopover, onSubmitComments, comments, editComment, removeComment, submitAllComments, containerRef, scrollRef }: {
   popover: { x: number; y: number } | null; addComment: (text: string) => void; setPopover: (v: null) => void
-  onSubmitComments?: (message: string) => void; comments: InlineComment[]; editComment: (id: string, text: string) => void; removeComment: (id: string) => void; submitAllComments: () => void; containerRef?: React.RefObject<HTMLElement | null>; scrollRef?: React.RefObject<HTMLElement | null>
+  onSubmitComments?: (message: string) => void; comments: InlineComment[]; editComment: (id: string, text: string) => void; removeComment: (id: string) => void; submitAllComments: (extraPrompt?: string) => void; containerRef?: React.RefObject<HTMLElement | null>; scrollRef?: React.RefObject<HTMLElement | null>
 }) {
   return (
     <>
@@ -429,14 +507,21 @@ const CommentOverlayBlock = memo(function CommentOverlayBlock({ popover, addComm
           onCancel={() => { setPopover(null); window.getSelection()?.removeAllRanges() }} />
       )}
       {onSubmitComments && (
-        <CommentList comments={comments} onEdit={editComment} onRemove={removeComment} onSubmitAll={submitAllComments} />
+        <CommentList comments={comments} onEdit={editComment} onRemove={removeComment} onSubmitAll={submitAllComments} enableExtraPrompt />
       )}
     </>
   )
 })
 
 export default memo(function MarkdownPanel({ filePath, content, onContentChange, onSave, onClose, liveWatch, onSubmitComments, onRefresh }: Props) {
+  const qc = useQueryClient()
   const [editing, setEditing] = useState(false)
+  const [diffMode, setDiffMode] = useState(false)
+  const [monacoSelection, setMonacoSelection] = useState<{ text: string; x: number; y: number } | null>(null)
+  const diffActiveRef = useRef(false)
+  diffActiveRef.current = diffMode && editing
+  const diffInitFileRef = useRef<string | null>(null)
+  const dark = useIsDark()
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -502,7 +587,6 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
   const [refreshing, setRefreshing] = useState(false)
   const [hintDismissed, setHintDismissed] = useState(() => localStorage.getItem(HINT_KEY) === '1')
   const [fullscreen, setFullscreen] = useState(false)
-  const [tocOpen, setTocOpen] = useState(false)
   const fileName = filePath.split('/').pop() || filePath
   // Mesh-1654 round 8: surface artifact / knowledge state in the row 2
   // toolbar — same hooks the overflow ⋮ uses, so the cache stays warm
@@ -519,10 +603,170 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
   const ext = extOf(filePath)
   const fileType = detectFileType(filePath)
   const isMarkdown = MD_EXTS.has(ext)
-  const [hasHeadings, setHasHeadings] = useState(false)
   const isRichType = fileType === 'image' || fileType === 'csv' || fileType === 'json' || fileType === 'jsonl' || fileType === 'html' || fileType === 'pdf'
+  useEffect(() => { if (isRichType) setDiffMode(false) }, [isRichType])
+  // ── Preview-mode find (Cmd+F) ─────────────────────────────────────────────
+  // Three surfaces compete for Cmd+F: Monaco owns it while editing (it stops
+  // propagation before anything else sees the key), and ChatPage's chat-find
+  // owns it via a document-level *bubble* listener. The rendered markdown
+  // PREVIEW is the only surface with no editor to capture the key, so today it
+  // falls through to chat-find — the reported bug. This adds a find scoped to
+  // the preview that wins over chat-find using a *capture-phase* listener +
+  // stopImmediatePropagation, but only when this panel is the active region
+  // and we're in markdown preview (edit/Monaco and non-markdown are untouched).
+  // Highlights paint via the CSS Custom Highlight API (Range objects outside
+  // the DOM) so the react-markdown subtree is never mutated.
+  const [findOpen, setFindOpen] = useState(false)
+  const [findTerm, setFindTerm] = useState('')
+  const [findCase, setFindCase] = useState(false)
+  const [findIdx, setFindIdx] = useState(0)
+  const [findCount, setFindCount] = useState(0)
+  const findInputRef = useRef<HTMLInputElement>(null)
+  const findRangesRef = useRef<Range[]>([])
+  // Is this panel the region the cursor is in? Defaults true so Cmd+F right
+  // after opening the doc searches the doc (the reported expectation). Flips
+  // based on where the last pointer-down landed.
+  const findActiveRef = useRef(true)
+
+  useEffect(() => {
+    const onPointer = (e: Event) => {
+      const t = e.target as Element | null
+      findActiveRef.current = !!t?.closest?.('[data-mc-mdpanel]')
+    }
+    document.addEventListener('pointerdown', onPointer, true)
+    return () => document.removeEventListener('pointerdown', onPointer, true)
+  }, [])
+
+  // Highlights are external (CSS.highlights), so clearing never touches the
+  // React-owned DOM — no reconciliation hazard.
+  const clearFindMarks = useCallback(() => {
+    findRangesRef.current = []
+    if (cssHighlights) { cssHighlights.delete(FIND_HL_ALL); cssHighlights.delete(FIND_HL_CURRENT) }
+  }, [])
+
+  // Re-register the two highlights so `idx` paints as the current match and the
+  // rest paint as plain matches. Cheap; called on every step.
+  const paintFind = useCallback((ranges: Range[], idx: number) => {
+    if (!FIND_HL_SUPPORTED || !FindHighlightCtor || !cssHighlights) return
+    const others = ranges.filter((_, i) => i !== idx)
+    cssHighlights.set(FIND_HL_ALL, new FindHighlightCtor(...others))
+    const cur = ranges[idx]
+    cssHighlights.set(FIND_HL_CURRENT, new FindHighlightCtor(...(cur ? [cur] : [])))
+  }, [])
+
+  const paintFindCurrent = useCallback((idx: number) => {
+    const ranges = findRangesRef.current
+    paintFind(ranges, idx)
+    // Range has no scrollIntoView; scroll the match's nearest element instead.
+    ranges[idx]?.startContainer.parentElement?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [paintFind])
+
+  const runFind = useCallback((term: string, caseSensitive: boolean) => {
+    clearFindMarks()
+    const root = fullscreen ? fullscreenPreviewRef.current : previewRef.current
+    if (!root || !term) { setFindCount(0); setFindIdx(0); return }
+    const re = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? 'g' : 'gi')
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.nodeValue && n.nodeValue.trim()) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT,
+    })
+    const nodes: Text[] = []
+    let node: Node | null
+    while ((node = walker.nextNode())) nodes.push(node as Text)
+    const ranges: Range[] = []
+    for (const tn of nodes) {
+      const text = tn.nodeValue ?? ''
+      let m: RegExpExecArray | null
+      re.lastIndex = 0
+      while ((m = re.exec(text))) {
+        const r = document.createRange()
+        r.setStart(tn, m.index)
+        r.setEnd(tn, m.index + m[0].length)
+        ranges.push(r)
+        if (m.index === re.lastIndex) re.lastIndex++
+      }
+    }
+    findRangesRef.current = ranges
+    setFindCount(ranges.length)
+    setFindIdx(0)
+    if (ranges.length) { paintFind(ranges, 0); ranges[0].startContainer.parentElement?.scrollIntoView({ block: 'center', behavior: 'smooth' }) }
+  }, [clearFindMarks, paintFind, fullscreen])
+
+  const stepFind = useCallback((dir: number) => {
+    const n = findRangesRef.current.length
+    if (!n) return
+    setFindIdx((prev) => { const next = (prev + dir + n) % n; paintFindCurrent(next); return next })
+  }, [paintFindCurrent])
+
+  const closeFind = useCallback(() => {
+    clearFindMarks()
+    setFindOpen(false)
+    setFindTerm('')
+    setFindCount(0)
+    setFindIdx(0)
+  }, [clearFindMarks])
+
+  // Recompute matches as the term/case/content/view changes while open. With
+  // the CSS Highlight API there's no DOM to clean up if `content` re-renders
+  // mid-find — stale ranges simply stop painting and are rebuilt here.
+  useEffect(() => {
+    if (!findOpen) return
+    runFind(findTerm, findCase)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runFind is stable per `fullscreen`; listing it would re-run on every match repaint
+  }, [findOpen, findTerm, findCase, content, fullscreen])
+
+  // Highlight names are global; clear them if the panel unmounts while find is
+  // open so a stale highlight can't leak onto the next preview.
+  useEffect(() => () => {
+    if (cssHighlights) { cssHighlights.delete(FIND_HL_ALL); cssHighlights.delete(FIND_HL_CURRENT) }
+  }, [])
+
+  // Leaving preview (edit/diff) has no rendered DOM to search — close find so
+  // Monaco's own find takes over cleanly.
+  useEffect(() => { if (editing || diffMode) closeFind() }, [editing, diffMode, closeFind])
+
+  // Capture-phase Cmd+F: fires before ChatPage's bubble-phase chat-find. We
+  // only steal the key in markdown preview when this panel is the active
+  // region; otherwise we let it bubble (chat-find) or let Monaco handle it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'f') return
+      if (editing || diffMode || !isMarkdown) return       // Monaco/edit owns it; non-markdown skip
+      if (!findActiveRef.current) return                    // cursor is in chat → let chat-find handle
+      e.preventDefault()
+      e.stopImmediatePropagation()                          // beat ChatPage's bubble-phase chat-find
+      setFindOpen(true)
+      requestAnimationFrame(() => { findInputRef.current?.focus(); findInputRef.current?.select() })
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => document.removeEventListener('keydown', onKey, true)
+  }, [editing, diffMode, isMarkdown])
+
+  const findBar = findOpen ? (
+    <div data-mc-mdpanel className="absolute top-2 right-3 z-30 flex items-center gap-1.5 bg-bg-elevated border border-border rounded-lg shadow-md px-2.5 py-1.5 text-[13px]">
+      <input
+        ref={findInputRef}
+        type="text"
+        value={findTerm}
+        onChange={(e) => setFindTerm(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); stepFind(e.shiftKey ? -1 : 1) }
+          if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeFind() }
+        }}
+        placeholder="Find in document…"
+        className="bg-transparent border-none outline-none text-text placeholder:text-muted w-[170px] text-[13px]"
+        aria-label="Find in document"
+      />
+      <button onClick={() => setFindCase((c) => !c)} className={`p-0.5 rounded cursor-pointer border-none transition-colors ${findCase ? 'bg-accent/20 text-accent' : 'bg-transparent text-muted hover:text-text'}`} title="Case sensitive" aria-label="Case sensitive"><CaseSensitive size={15} /></button>
+      {findTerm && <span className="text-muted text-[12px] whitespace-nowrap tabular-nums">{findCount > 0 ? `${findIdx + 1} of ${findCount}` : 'No results'}</span>}
+      <button onClick={() => stepFind(-1)} className="p-0.5 rounded text-muted hover:text-text cursor-pointer border-none bg-transparent" title="Previous (Shift+Enter)" aria-label="Previous match"><ChevronUp size={15} /></button>
+      <button onClick={() => stepFind(1)} className="p-0.5 rounded text-muted hover:text-text cursor-pointer border-none bg-transparent" title="Next (Enter)" aria-label="Next match"><ChevronDown size={15} /></button>
+      <button onClick={closeFind} className="p-0.5 rounded text-muted hover:text-text cursor-pointer border-none bg-transparent" title="Close (Esc)" aria-label="Close find"><X size={15} /></button>
+    </div>
+  ) : null
+
   const lang = langFor(ext)
   const displayContent = isMarkdown ? content : wrapCode(content, ext)
+
   const highlightedHtml = useMemo(() => {
     if (isMarkdown || editing || isRichType) return ''
     try { return DOMPurify.sanitize(hljs.highlight(content, { language: lang }).value) + '\n' }
@@ -534,18 +778,19 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
     useCallback((c: string) => { onContentChange(c) }, [onContentChange]),
   )
 
-  // Detect headings from rendered DOM for TOC toggle visibility
-  useEffect(() => {
-    if (!isMarkdown || editing) { setHasHeadings(false); return }
-    if (tocOpen) { setHasHeadings(true); return } // MarkdownToc handles extraction when open
-    const container = sidePanelScrollRef.current ?? fullscreenBodyRef.current
-    if (!container) return
-    const check = () => setHasHeadings(extractHeadingsFromDOM(container).length > 0)
-    check()
-    const mo = new MutationObserver(check)
-    mo.observe(container, { childList: true, subtree: true })
-    return () => mo.disconnect()
-  }, [isMarkdown, editing, content, fullscreen, tocOpen])
+  // Detect if file has uncommitted changes and pre-fetch HEAD content
+  const { data: diffData, isFetching: diffChecking } = useQuery({
+    queryKey: ['file-diff', filePath],
+    queryFn: () => api.fileDiff(filePath),
+    enabled: !!filePath && !isRichType,
+    staleTime: 10_000,
+  })
+  const originalContent = diffData?.original ?? ''
+  // Auto-open diff mode on first load if file has changes; don't override user toggle on refetch
+  if (diffData && diffInitFileRef.current !== filePath) {
+    diffInitFileRef.current = filePath
+    if (diffData.diff) setDiffMode(true)
+  }
 
   const revealOrCopy = useCallback(async (path: string, action: 'open' | 'reveal') => {
     try {
@@ -614,10 +859,14 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
 
   const handleCommentAction = useCallback((text: string, rect: DOMRect) => {
     const info = resolveSelectionCoords(text)
-    if (!info) return
-    if (info.range) applyHighlightMarks(info.range)
-    const popRect = info.rect.width > 0 ? info.rect : rect
-    setPopover({ x: popRect.left, y: popRect.bottom, anchor: info.anchor, line: info.line, column: info.column })
+    if (info) {
+      if (info.range) applyHighlightMarks(info.range)
+      const popRect = info.rect.width > 0 ? info.rect : rect
+      setPopover({ x: popRect.left, y: popRect.bottom, anchor: info.anchor, line: info.line, column: info.column })
+    } else {
+      // Monaco path — no DOM selection available, use rect directly
+      setPopover({ x: rect.left, y: rect.top, anchor: text, line: undefined, column: undefined })
+    }
     window.getSelection()?.removeAllRanges()
   }, [resolveSelectionCoords, applyHighlightMarks])
 
@@ -649,9 +898,9 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
     setComments(prev => prev.map(c => c.id === id ? { ...c, text } : c))
   }, [])
 
-  const submitAllComments = useCallback(() => {
+  const submitAllComments = useCallback((extraPrompt?: string) => {
     if (!onSubmitComments || comments.length === 0) return
-    onSubmitComments(formatCommentsMessage(filePath, comments, displayContent))
+    onSubmitComments(formatCommentsMessage(filePath, comments, displayContent, extraPrompt))
     setComments([])
   }, [onSubmitComments, comments, filePath, displayContent])
 
@@ -675,7 +924,7 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
 
   const handleSave = useCallback(async () => {
     setSaving(true); setSaveError(null)
-    try { await onSave(filePath, content); setDirty(false) }
+    try { await onSave(filePath, content); setDirty(false); qc.invalidateQueries({ queryKey: ['file-diff', filePath] }) }
     catch (err) { setSaveError(err instanceof Error ? err.message : 'Save failed') }
     finally { setSaving(false) }
   }, [filePath, content, onSave])
@@ -707,6 +956,27 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
     return () => { document.body.style.overflow = '' }
   }, [fullscreen])
 
+  const editorToolbarButtons = (<>
+    {!isRichType && (
+      <button className={`p-1.5 rounded-md border cursor-pointer ${diffMode ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`} onClick={() => { setDiffMode(!diffMode) }} title="Toggle git diff" aria-label="Toggle git diff"><GitBranch size={14} /></button>
+    )}
+    {!isRichType && (
+      <button className={`p-1.5 rounded-md border cursor-pointer transition-all ${wordWrap ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`} onClick={() => setWordWrap(!wordWrap)} title="Toggle word wrap" aria-label="Toggle word wrap"><WrapText size={14} /></button>
+    )}
+    {!isRichType && (
+      <button className={`p-1.5 rounded-md border cursor-pointer transition-all ${autocomplete ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`} onClick={() => setAutocomplete(!autocomplete)} title="Toggle autocomplete" aria-label="Toggle autocomplete"><Zap size={14} /></button>
+    )}
+    {!isRichType && (
+      <button className={`p-1.5 rounded-md border cursor-pointer transition-all ${lineNums ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`} onClick={() => setLineNums(!lineNums)} title="Toggle line numbers" aria-label="Toggle line numbers"><Hash size={14} /></button>
+    )}
+    {!isRichType && (
+      <button className={`px-2 py-1 rounded-md text-[12px] font-medium border cursor-pointer transition-all ${editing ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`} onClick={() => { setEditing(!editing) }}>{editing ? 'Preview' : 'Edit'}</button>
+    )}
+    {!isRichType && (
+      <button className={`px-2 py-1 rounded-md text-[12px] font-medium border transition-all disabled:opacity-40 ${dirty ? 'border-accent text-accent-fg bg-accent cursor-pointer hover:bg-accent-hover' : 'border-border text-muted cursor-default'}`} disabled={saving || !dirty} onClick={handleSave}>{saving ? 'Saving…' : 'Save'}</button>
+    )}
+  </>)
+
   return (
     <>
     <DetailPanel
@@ -726,7 +996,6 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
           title={dirty ? 'Save or discard changes first' : 'Refresh file (re-read from disk)'}
           aria-label={dirty ? 'Save or discard changes first' : 'Refresh file (re-read from disk)'}
         ><RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} /></button>
-        {isMarkdown && !editing && <TocToggle visible={tocOpen} hasHeadings={hasHeadings} onClick={() => setTocOpen(v => !v)} />}
         <button
           className="p-1.5 rounded-md border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all"
           onClick={() => setFullscreen(f => !f)}
@@ -790,17 +1059,20 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
             )}
           </div>
           <div className="flex items-center gap-1.5">
-            {/* Edit-mode action order matches the artifact detail page
-                (round 9 polish): Save | Snapshot | Cancel | Preview.
-                In view mode only Snapshot + Edit/Preview are relevant. */}
+            {/* Edit-mode action order: Save | Cancel | Snapshot | Diff | Preview */}
             <button className={`px-2 py-1 rounded-md text-[12px] font-medium border transition-all disabled:opacity-40 ${dirty ? 'border-accent text-accent-fg bg-accent cursor-pointer hover:bg-accent-hover' : 'border-border text-muted cursor-default'}`} disabled={saving || !dirty || !editing} onClick={handleSave} style={!editing ? { display: 'none' } : undefined}>
               {saving ? 'Saving…' : 'Save'}
             </button>
-            {/* Snapshot — round 8 spec: only when the file is an artifact
-                (no overflow entry anymore). Visible in both view and edit
-                mode but disabled until there's something to snapshot
-                (live drift OR pending edits). Saves the buffer first if
-                dirty so the snapshot captures what the user just typed. */}
+            {editing && (
+              <button
+                className="px-2 py-1 rounded-md text-[12px] font-medium border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all disabled:opacity-40 inline-flex items-center gap-1"
+                onClick={handleCancel}
+                disabled={refreshing}
+                title="Cancel — discard unsaved edits"
+              >
+                <X size={12} /> Cancel
+              </button>
+            )}
             {artifactState.existing && (
               <button
                 className="p-1.5 rounded-md border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all disabled:opacity-40"
@@ -817,23 +1089,19 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
                 aria-label="Snapshot"
                 onClick={async () => {
                   if (dirty) {
-                    // Save first so the snapshot reflects the buffer.
                     await handleSave()
                   }
                   artifactState.snapshot()
                 }}
               ><Camera size={14} /></button>
             )}
-            {editing && (
-              <button
-                className="px-2 py-1 rounded-md text-[12px] font-medium border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all disabled:opacity-40 inline-flex items-center gap-1"
-                onClick={handleCancel}
-                disabled={refreshing}
-                title="Cancel — discard unsaved edits"
-              >
-                <X size={12} /> Cancel
-              </button>
-            )}
+            <button
+              className={`p-1.5 rounded-md border cursor-pointer transition-all ${diffMode ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`}
+              onClick={() => setDiffMode(!diffMode)}
+              title="Toggle git diff"
+              aria-label="Toggle git diff"
+              aria-pressed={diffMode}
+            ><GitBranch size={14} /></button>
             <button
               className={`px-2 py-1 rounded-md text-[12px] font-medium border cursor-pointer transition-all ${editing ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`}
               onClick={() => setEditing(!editing)}
@@ -842,10 +1110,10 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
         </>
       ) : undefined}
       footer={<>
-        <div className="text-[11px] text-muted font-mono truncate flex items-center gap-2" title={filePath}>
+        <Clickable className="flex items-center gap-2 text-[11px] text-muted font-mono truncate cursor-pointer hover:text-text transition-colors" title="Click to copy path" onClick={() => navigator.clipboard.writeText(filePath)}>
           {watchStatus === 'open' && <span className="inline-block w-1.5 h-1.5 rounded-full bg-ok animate-pulse" title="Live watching" />}
           {filePath}
-        </div>
+        </Clickable>
       </>}
     >
       {saveError && <div className="text-[11px] text-danger">{saveError}</div>}
@@ -853,12 +1121,23 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
       {isMarkdown && !editing && onSubmitComments && !hintDismissed && (
         <CommentHint onDismiss={dismissHint} />
       )}
-      <div className="flex-1 overflow-hidden -mx-5 -my-4 px-4 py-4 flex">
-        {!fullscreen && <div ref={sidePanelScrollRef} className="flex-1 overflow-auto"><ContentRenderer isRichType={isRichType} fileType={fileType} filePath={filePath} content={content} editing={editing} lang={lang} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onChange={handleChange}
-          previewRef={previewRef} displayContent={displayContent} isMarkdown={isMarkdown} highlightedHtml={highlightedHtml} gutterReadRef={gutterReadRef} markdownClassName="msg-content text-sm leading-relaxed" /></div>}
-        {!fullscreen && tocOpen && isMarkdown && !editing && <MarkdownToc containerRef={sidePanelScrollRef} onClose={() => setTocOpen(false)} />}
+      <div className={`flex-1 overflow-hidden -mx-5 -my-4 py-4 flex pl-4 ${isMarkdown && !editing ? 'pr-0' : 'pr-4'}`}>
+        {!fullscreen && <div data-mc-mdpanel className="relative flex-1 min-w-0 min-h-0">
+          {findBar}
+          {/* In markdown preview the scroll box runs flush to the panel's right
+              border so the overlay scrollbar and outline rail share that edge;
+              pr-6 keeps the text clear of the ticks. */}
+          <div ref={sidePanelScrollRef} className={`h-full overflow-auto ${isMarkdown && !editing ? 'scrollbar-overlay pr-6' : ''}`}>
+            {!diffChecking && !isRichType && (
+              <DiffEditorBlock diffMode={diffMode} lang={lang} originalContent={originalContent} content={content} dark={dark} diffActiveRef={diffActiveRef} handleChange={handleChange} editing={editing} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onSelect={onSubmitComments ? (text, rect) => setMonacoSelection({ text, x: rect.x, y: rect.y }) : undefined} />
+            )}
+            {!diffMode && <ContentRenderer isRichType={isRichType} fileType={fileType} filePath={filePath} content={content} editing={editing} lang={lang} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onChange={handleChange}
+              previewRef={previewRef} displayContent={displayContent} isMarkdown={isMarkdown} highlightedHtml={highlightedHtml} gutterReadRef={gutterReadRef} markdownClassName="msg-content text-sm leading-relaxed" />}
+          </div>
+          {isMarkdown && !editing && <MarkdownOutlineRail containerRef={sidePanelScrollRef} />}
+        </div>}
       </div>
-      {!fullscreen && !editing && <SelectionToolbar containerRef={sidePanelScrollRef} actions={selectionActions} />}
+      {!fullscreen && !editing && <SelectionToolbar containerRef={sidePanelScrollRef} actions={selectionActions} externalSelection={monacoSelection} />}
       {!fullscreen && <CommentOverlayBlock popover={popover} addComment={addComment} setPopover={clearPopover} onSubmitComments={onSubmitComments} comments={comments} editComment={editComment} removeComment={removeComment} submitAllComments={submitAllComments} />}
     </DetailPanel>
     {fullscreen && createPortal(
@@ -871,40 +1150,27 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
           <span className="text-base font-semibold text-text-strong truncate">{fileName}</span>
           <div className="flex items-center gap-1.5">
             <button className="p-1.5 rounded-md border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all disabled:opacity-40" onClick={handleRefresh} disabled={refreshing || dirty} title={dirty ? 'Save or discard changes first' : 'Refresh file'} aria-label="Refresh file"><RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} /></button>
-            {isMarkdown && !editing && <TocToggle visible={tocOpen} hasHeadings={hasHeadings} onClick={() => setTocOpen(v => !v)} />}
             <OverflowMenu filePath={filePath} content={content} revealOrCopy={revealOrCopy} />
-            {!isRichType && editing && (
-              <button className={`p-1.5 rounded-md border cursor-pointer transition-all ${wordWrap ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`} onClick={() => setWordWrap(!wordWrap)} title="Toggle word wrap"><WrapText size={14} /></button>
-            )}
-            {!isRichType && editing && (
-              <button className={`p-1.5 rounded-md border cursor-pointer transition-all ${autocomplete ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`} onClick={() => setAutocomplete(!autocomplete)} title="Toggle autocomplete"><Zap size={14} /></button>
-            )}
-            {!isRichType && editing && (
-              <button className={`p-1.5 rounded-md border cursor-pointer transition-all ${lineNums ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`} onClick={() => setLineNums(!lineNums)} title="Toggle line numbers"><Hash size={14} /></button>
-            )}
-            {!isRichType && (
-              <button className={`px-2 py-1 rounded-md text-[12px] font-medium border cursor-pointer transition-all ${editing ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`} onClick={() => setEditing(!editing)}>{editing ? 'Preview' : 'Edit'}</button>
-            )}
-            {!isRichType && (
-              <button className={`px-2 py-1 rounded-md text-[12px] font-medium border transition-all disabled:opacity-40 ${dirty ? 'border-accent text-accent-fg bg-accent cursor-pointer hover:bg-accent-hover' : 'border-border text-muted cursor-default'}`} disabled={saving || !dirty} onClick={handleSave}>{saving ? 'Saving…' : 'Save'}</button>
-            )}
+            {editorToolbarButtons}
             <button className="p-1.5 rounded-md border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all" onClick={() => setFullscreen(false)} title="Exit full screen (Esc)" aria-label="Exit full screen"><Minimize2 size={14} /></button>
           </div>
         </div>
         {saveError && <div className="px-16 text-[11px] text-danger">{saveError}</div>}
         {isMarkdown && !editing && onSubmitComments && !hintDismissed && <div className="px-16"><CommentHint onDismiss={dismissHint} /></div>}
         {/* Body */}
-        <div className="flex-1 flex overflow-hidden">
-          <div ref={fullscreenBodyRef} className="flex-1 overflow-auto px-16 py-4">
-            <ContentRenderer isRichType={isRichType} fileType={fileType} filePath={filePath} content={content} editing={editing} lang={lang} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onChange={handleChange}
-              previewRef={fullscreenPreviewRef} displayContent={displayContent} isMarkdown={isMarkdown} highlightedHtml={highlightedHtml} gutterReadRef={gutterFullscreenRef} />
+        <div data-mc-mdpanel className="relative flex-1 overflow-hidden min-h-0">
+          {findBar}
+          <div ref={fullscreenBodyRef} className="h-full overflow-auto px-16 py-4">
+            {!isRichType && <DiffEditorBlock diffMode={diffMode} lang={lang} originalContent={originalContent} content={content} dark={dark} diffActiveRef={diffActiveRef} handleChange={handleChange} editing={editing} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onSelect={onSubmitComments ? (text, rect) => setMonacoSelection({ text, x: rect.x, y: rect.y }) : undefined} />}
+            {!diffMode && <ContentRenderer isRichType={isRichType} fileType={fileType} filePath={filePath} content={content} editing={editing} lang={lang} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onChange={handleChange}
+              previewRef={fullscreenPreviewRef} displayContent={displayContent} isMarkdown={isMarkdown} highlightedHtml={highlightedHtml} gutterReadRef={gutterFullscreenRef} />}
           </div>
-          {tocOpen && isMarkdown && !editing && <MarkdownToc containerRef={fullscreenBodyRef} onClose={() => setTocOpen(false)} />}
+          {isMarkdown && !editing && <MarkdownOutlineRail containerRef={fullscreenBodyRef} />}
         </div>
-        {!editing && <SelectionToolbar containerRef={fullscreenBodyRef} actions={selectionActions} />}
+        {!editing && <SelectionToolbar containerRef={fullscreenBodyRef} actions={selectionActions} externalSelection={monacoSelection} />}
         <CommentOverlayBlock popover={popover} addComment={addComment} setPopover={clearPopover} onSubmitComments={onSubmitComments} comments={comments} editComment={editComment} removeComment={removeComment} submitAllComments={submitAllComments} scrollRef={fullscreenBodyRef} />
         {/* Footer */}
-        <div className="shrink-0 px-6 py-2 border-t border-border text-[11px] text-muted font-mono truncate">{filePath}</div>
+        <Clickable className="shrink-0 flex items-center px-3 h-6 text-[11px] text-muted font-mono truncate cursor-pointer hover:text-text transition-colors" title="Click to copy path" onClick={() => navigator.clipboard.writeText(filePath)}>{filePath}</Clickable>
       </div>,
       document.body
     )}

@@ -7,7 +7,7 @@
  * Order in this file = order in the rail (within each group). Add new
  * built-in surfaces here; do not add hardcoded badge logic to `App.tsx`.
  */
-import { MessageSquare, Bell, BookOpen, BookOpenText, Bookmark, CalendarDays, MessageSquareDot, Users, Plug, Store, Settings } from 'lucide-react'
+import { MessageSquare, Bell, BookOpen, BookOpenText, Component, CalendarDays, MessageSquareDot, Users, Plug, Store, Settings } from 'lucide-react'
 import { createSelector } from '@reduxjs/toolkit'
 import { registerBuiltinSurface } from './registry'
 import type { RootState } from '../store'
@@ -48,7 +48,8 @@ registerBuiltinSurface({
   route: '/projects',
   label: 'Projects',
   icon: <BookOpenText size={16} />,
-  group: 'Main',
+  group: 'Apps',
+  appOnly: true,
   // Stub surface — no slotMode and no unreadSelector. The Projects badge
   // (global task-gate approval count) comes from a React Query result that
   // lives outside Redux; App.tsx mirrors it into `appBadges['projects']`
@@ -72,6 +73,7 @@ registerBuiltinSurface({
   label: 'Autopilot',
   icon: <MessageSquareDot size={16} />,
   group: 'Apps',
+  appOnly: true,
   // Slot-bearing: orchestrator slots route here.
   slotMode: 'orchestrator',
   badgeLabel: 'unread autopilot conversations',
@@ -110,11 +112,15 @@ registerBuiltinSurface({
   group: 'Platform',
 })
 
+// Instances (multi-instance management) is configured under Settings → Instances
+// (after Browser, before Security) and switched via the top-header tab strip —
+// it intentionally has no left-rail surface of its own.
+
 registerBuiltinSurface({
   navId: 'artifacts',
   route: '/artifacts',
   label: 'Artifacts',
-  icon: <Bookmark size={16} />,
+  icon: <Component size={16} />,
   group: 'Main',
 })
 

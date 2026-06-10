@@ -15,7 +15,7 @@ export interface FileChangeEntry {
  * cost; that fallback can under-report pure moves but only on files we
  * already cap at 200KB, so the cap is rarely hit in practice.
  */
-function countLines(before: string, after: string): { added: number; removed: number } {
+export function countLines(before: string, after: string): { added: number; removed: number } {
   if (before === after) return { added: 0, removed: 0 }
   // Guard empty strings: ''.split('\n') yields [''] (1 phantom line), which would
   // mis-count a new file as +1/-1 instead of +1, and a fully cleared file as
