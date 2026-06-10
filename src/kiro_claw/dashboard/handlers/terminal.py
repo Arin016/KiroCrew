@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from aiohttp import web
 
 from kiro_claw.config.loader import config_path
+from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 
 if TYPE_CHECKING:
     from kiro_claw.dashboard.state import DashboardState
@@ -27,6 +28,17 @@ logger = logging.getLogger(__name__)
 
 _MAX_SESSIONS = 3
 _ORPHAN_TIMEOUT_S = 300  # 5 min with no WS → reap PTY
+_SCROLLBACK_MAX = 50 * 1024  # 50KB ring buffer per session for reconnect replay
+
+
+def _redact_terminal(data: bytes) -> bytes:
+    """Strip credentials/exfiltration URLs from PTY output before it reaches a
+    client. ``kiro_claw.security`` redactors return ``(text, warnings)`` tuples
+    (unlike upstream's str-returning ``redaction`` module), so unpack both."""
+    text = data.decode("utf-8", errors="replace")
+    text, _ = redact_exfiltration_urls(text)
+    text, _ = redact_credentials(text)
+    return text.encode("utf-8")
 
 
 def _sel():
@@ -48,6 +60,7 @@ class _TerminalSession:
     last_ws_disconnect: float | None = None  # set when WS drops, cleared on reconnect
     ws: web.WebSocketResponse | None = None
     reader_task: asyncio.Task | None = None
+    scrollback: bytearray = field(default_factory=bytearray)
 
 
 def _get_registry(request: web.Request) -> dict[str, _TerminalSession | None]:
@@ -195,7 +208,11 @@ async def api_terminal_ws(request: web.Request) -> web.WebSocketResponse | web.R
         raise
 
     if existing:
-        # Reconnect to existing PTY
+        # Reconnect to existing PTY.
+        # Replay scrollback BEFORE assigning ws to prevent read_pty from
+        # forwarding live data before replay completes.
+        if existing.scrollback:
+            await ws.send_bytes(_redact_terminal(existing.scrollback))
         existing.ws = ws
         existing.last_ws_disconnect = None
         sess = existing
@@ -288,8 +305,11 @@ async def api_terminal_ws(request: web.Request) -> web.WebSocketResponse | web.R
                 )
                 if not data:
                     break
+                sess.scrollback.extend(data)
+                if len(sess.scrollback) > _SCROLLBACK_MAX:
+                    sess.scrollback = sess.scrollback[-_SCROLLBACK_MAX:]
                 if sess.ws and not sess.ws.closed:
-                    await sess.ws.send_bytes(data)
+                    await sess.ws.send_bytes(_redact_terminal(data))
         except OSError:
             pass
 

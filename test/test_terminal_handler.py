@@ -389,6 +389,87 @@ class TestApiTerminalWs:
         assert registry.get("abc123") is not dead_sess
 
 
+# ── scrollback ring buffer + redaction ──
+
+
+class TestScrollbackRedaction:
+    """The reconnect-replay scrollback feature (ported from MeshClaw d00e6ac6).
+
+    The port re-anchors redaction onto ``kiro_claw.security`` whose redactors
+    return ``(text, warnings)`` tuples (upstream's ``redaction`` module returns
+    a bare ``str``), so the helper must unpack both — a verbatim copy would
+    have crashed treating the tuple as a string.
+    """
+
+    def test_redact_terminal_strips_credentials(self):
+        # An AKIA access-key id in PTY output must be redacted before it is
+        # sent to any client (live frame or replayed scrollback).
+        out = terminal._redact_terminal(b"export AWS_KEY=AKIAIOSFODNN7EXAMPLE\n")
+        assert b"AKIAIOSFODNN7EXAMPLE" not in out
+        assert isinstance(out, bytes)
+
+    def test_redact_terminal_passes_clean_output_through(self):
+        assert terminal._redact_terminal(b"$ ls -la\n") == b"$ ls -la\n"
+
+    def test_redact_terminal_handles_invalid_utf8(self):
+        # errors="replace" keeps a stray byte from raising; output is still bytes.
+        out = terminal._redact_terminal(b"\xff\xfeok")
+        assert isinstance(out, bytes)
+        assert b"ok" in out
+
+    def test_scrollback_default_is_empty_bytearray(self):
+        sess = _make_session()
+        assert sess.scrollback == bytearray()
+
+    @pytest.mark.asyncio
+    async def test_scrollback_captured_and_replayed_on_reconnect(self, monkeypatch, tmp_path):
+        """PTY output accumulates in the scrollback ring buffer and is replayed
+        (redacted) to a client that reconnects to the same session."""
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"dashboard": {"terminal": {"enabled": True}}}))
+        monkeypatch.setattr(terminal, "config_path", lambda: cfg_file)
+        monkeypatch.setattr(terminal, "_sel", lambda: MagicMock())
+
+        registry: dict = {}
+        app = _make_app(registry=registry)
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(app)) as client:
+            async with client.ws_connect("/api/ws/terminal/sb-sess") as ws:
+                await ws.send_bytes(b"echo marker-xyz\n")
+                # Drain at least one frame so read_pty runs and fills scrollback.
+                msg = await ws.receive(timeout=3)
+                assert msg.type == web.WSMsgType.BINARY
+                await ws.close()
+
+            sess = registry["sb-sess"]
+            # Scrollback retained after disconnect, bounded by the ring buffer.
+            assert len(sess.scrollback) > 0
+            assert len(sess.scrollback) <= terminal._SCROLLBACK_MAX
+
+            # Reconnect: the first frame must be the replayed scrollback.
+            async with client.ws_connect("/api/ws/terminal/sb-sess") as ws:
+                replay = await ws.receive(timeout=3)
+                assert replay.type == web.WSMsgType.BINARY
+                assert len(replay.data) > 0
+                await ws.close()
+
+            await terminal._kill_session(registry["sb-sess"])
+
+    @pytest.mark.asyncio
+    async def test_scrollback_trims_to_max(self, monkeypatch):
+        """When PTY output exceeds _SCROLLBACK_MAX, the buffer keeps only the
+        most recent _SCROLLBACK_MAX bytes (the trimming branch in read_pty)."""
+        sess = _make_session()
+        # Simulate the read_pty capture/trim logic directly.
+        for _ in range(0, terminal._SCROLLBACK_MAX * 2, 4096):
+            sess.scrollback.extend(b"x" * 4096)
+            if len(sess.scrollback) > terminal._SCROLLBACK_MAX:
+                sess.scrollback = sess.scrollback[-terminal._SCROLLBACK_MAX:]
+        assert len(sess.scrollback) == terminal._SCROLLBACK_MAX
+
+
 # ── reap_orphaned_terminals ──
 
 
