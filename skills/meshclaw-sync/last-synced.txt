@@ -1,13 +1,43 @@
-# Last-synced upstream MeshClaw tips (one SHA per tracked branch).
+# Last-synced upstream tips (one SHA per tracked branch/repo).
 # Updated at the END of every sync run (Step 1/7). The meshclaw-sync skill bounds
 # the candidate set by these SHAs — see skills/meshclaw-sync/SKILL.md Step 1.
-# Format: "<branch> <sha>  # <date> <note>"
-beta e62422ae      # 2026-06-09 boundary advanced past a pure-SKIP run (batch-9). No ports.
-# Batch-9 (cron-fired): sole candidate e62422ae "fix(writing-review): send Midway cookie on
-# scanner sync fetch" = SKIP / NA_INTERNAL. Adversarially verified: whole commit serves the
-# ABSENT writing_review subsystem + STUBBED midway. No portable hunk — the new
-# hooks.safe_read_file_internal allowlist's only entry is scanner_sync.midway_cookie (dead
-# consumer), and re-adding ".midway" to security._SENSITIVE_HOME_DIRS is explicitly forbidden
-# by MIGRATION_PLAN.md L145/L382-384 + CLAUDE.md (de-Amazon decision). Boundary advances past
-# it (SKIP is resolved, unlike a DEFERRED commit). No b490c7e8-style hold needed — backlog clear.
+# Format: "<branch-or-repo> <sha>  # <date> <note>"
+#
+# TWO upstream repos are tracked (the fork bundles both into one package):
+#   - backend  = MeshClaw          (package mesh_claw  → src/kiro_claw/)
+#   - frontend = MeshClawWebsite    (the React/Vite SPA → website/src/)
+# Boundary semantics differ per repo (see SKILL.md Step 1):
+#   - backend  : SHA-range incremental (the fork shares the backend's content lineage).
+#   - frontend : the fork's website/ is a DIVERGED partial content-snapshot (~2026-06-02),
+#                so frontend sync is by CONTENT within the post-snapshot window, not a
+#                clean SHA range. This SHA records the upstream tip last triaged.
+
+beta 29ad9776      # 2026-06-10 backend tip. Dual-repo sync batch-10.
+frontend-beta 94e92af4b69a151681a9cab503ad4110d2346bcd  # 2026-06-10 MeshClawWebsite beta tip; first frontend sync.
 mainline 49633d05  # 2026-06-09 no mainline-only delta past this
+
+# --- Batch-10 (dual-repo sync 2026-06-10) ------------------------------------
+# First sync to cover BOTH repos. Backend window e62422ae..29ad9776; frontend window =
+# MeshClawWebsite beta since the 2026-06-02 fork snapshot through 94e92af. 97 commits
+# triaged. Ported 67: 11 backend (9 KEEP + instances feat 38864fd9/d17306e1 + Projects/
+# Autopilot apps 29ad9776) + 56 frontend (54 wave-ported + instances UI e341b727/8406d8da
+# + 94e92af). The 6h auto-sync cron fired mid-batch and surfaced 29ad9776 + 94e92af (a
+# matched pair, CR-280786172) — folded into this batch rather than run as a competing
+# pipeline (the tree was mid-port). The rest were SKIP_INTERNAL (absent subsystems),
+# SKIP_NONKIROACP, or ALREADY_PRESENT — see the CR.
+#
+# instances/ feature: previously DEFERRED, now owner-cleared for external release.
+# Ported as a PARTIAL de-Amazon port (backend 38864fd9 + d17306e1, frontend e341b727 +
+# 8406d8d): kept the generic multi-instance registry / port-allocator / SSH tunnel
+# manager (plain OpenSSH, not coupled to the stubbed outbound tunnel/manager.py) + UI;
+# DROPPED the Midway SSH-cert watchdog (instances/midway.py) and its security.py
+# carve-out — porting it would re-open ~/.ssh, forbidden by MIGRATION_PLAN.md L383.
+#
+# Backend SKIPs in-window: 437262df (Midway connectivity docs), 5c7b2c93 +
+# 1408ca73 (real tunnel-probe machinery the fork omits), 33658c12 (GitFarm app
+# registry). Frontend SKIPs: writing-review, secretary, code-reviewer, auto-research,
+# mcp_gateway UI, GitFarm sync, RUM telemetry, AIM, Harmony Artifactory, lcars +
+# bikini-bottom themes (absent subsystems); Bedrock image-limits + Claude-Code agent
+# picker (SKIP_NONKIROACP). The fork's website/ provider selector was de-Amazoned to
+# KiroACP-only in this batch (f1883d2e — Bedrock removed from the UI to match the
+# backend enum ["acp"]).

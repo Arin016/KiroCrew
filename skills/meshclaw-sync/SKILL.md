@@ -17,34 +17,68 @@ removed.
 
 ## Repo locations
 
-- **Upstream (internal):** `/Volumes/workplace/MeshClaw/src/MeshClaw` (package `mesh_claw`)
-- **Fork (this repo):** `/Volumes/workplace/KiroClawExternal/src/KiroClawExternal` (package `kiro_claw`)
+The fork bundles **two** upstream packages into one repo, so a full sync tracks
+**both**:
+
+- **Backend upstream (internal):** `/Volumes/workplace/MeshClaw/src/MeshClaw`
+  (package `mesh_claw`) → fork `src/kiro_claw/`.
+- **Frontend upstream (internal):** `/Volumes/workplace/MeshClaw/src/MeshClawWebsite`
+  (the React/Vite SPA, package dir `src/`) → fork `website/src/`. The `mesh_claw`
+  backend ships only a server-rendered `static/dashboard.html`; the fork's SPA's
+  real upstream is **MeshClawWebsite**, a separate package — sync it too or the
+  dashboard silently drifts behind.
+- **Fork (this repo):** `/Volumes/workplace/KiroClawExternal/src/KiroClawExternal`
+  (package `kiro_claw` + `website/`).
 
 ## Step 1 — Find the candidate commits
 
-There is no merge-base. The fork tracks the upstream **`origin/beta-braveheart`**
-branch (beta lands fixes before mainline). Sync is **incremental**: bound the
-candidate set by the last-synced upstream tip, recorded in the state file
-`skills/meshclaw-sync/last-synced.txt` (one SHA per tracked branch). List the
-new non-merge commits on each branch since its last-synced tip:
+There is no merge-base. Both upstreams track **`origin/beta-braveheart`** (beta
+lands fixes before mainline). Sync is **incremental**: bound the candidate set
+by the last-synced tips in `skills/meshclaw-sync/last-synced.txt` (one SHA per
+tracked repo/branch). **Scan BOTH repos every run.**
+
+### Backend (`mesh_claw`) — SHA-range incremental
+The fork shares the backend's content lineage, so a plain SHA range works:
 
 ```bash
 cd /Volumes/workplace/MeshClaw/src/MeshClaw
 git fetch -q
-BETA=$(grep '^beta ' /Volumes/workplace/KiroClawExternal/src/KiroClawExternal/skills/meshclaw-sync/last-synced.txt | awk '{print $2}')
-MAIN=$(grep '^mainline ' /Volumes/workplace/KiroClawExternal/src/KiroClawExternal/skills/meshclaw-sync/last-synced.txt | awk '{print $2}')
+STATE=/Volumes/workplace/KiroClawExternal/src/KiroClawExternal/skills/meshclaw-sync/last-synced.txt
+BETA=$(grep '^beta ' "$STATE" | awk '{print $2}')
+MAIN=$(grep '^mainline ' "$STATE" | awk '{print $2}')
 git log --no-merges --oneline "$BETA"..origin/beta-braveheart      # new beta commits
 git log --no-merges --oneline "$MAIN"..origin/mainline             # new mainline-only commits
 ```
 
 A mainline-only commit (not reachable from beta) is also a candidate — check
-`git merge-base --is-ancestor <sha> origin/beta-braveheart`. For each commit,
-get the touched files: `git show --stat <sha>`.
+`git merge-base --is-ancestor <sha> origin/beta-braveheart`.
 
-**At the END of every sync, update `last-synced.txt`** to the new branch tips
-so the next run only sees genuinely-new commits. (The fork was originally cut
-from the v2.6.0 release merge `72301c08`; that is history now — the state file
-is the live boundary.)
+### Frontend (`MeshClawWebsite`) — CONTENT window, not a clean SHA range
+The fork's `website/` is a **diverged partial content-snapshot** taken ~2026-06-02
+(it was hand-built, not cloned — some post-snapshot upstream commits are present,
+some pre-snapshot ones are absent). So **do NOT** trust a SHA range to mean
+"not yet present." Instead:
+
+```bash
+cd /Volumes/workplace/MeshClaw/src/MeshClawWebsite
+git fetch -q
+FE=$(grep '^frontend-beta ' "$STATE" | awk '{print $2}')
+# Candidate window = commits since the last triaged frontend tip:
+git log --no-merges --oneline "$FE"..origin/beta-braveheart
+# First-ever frontend sync (or to re-baseline): use the snapshot DATE as the lower bound
+# git log --no-merges --oneline origin/beta-braveheart --since='2026-06-02 00:00'
+```
+
+For **every** frontend candidate, decide ALREADY_PRESENT vs MISSING **by content**
+(read the fork file under `website/src/`), never by SHA reachability. The fork
+pre-image often differs from upstream's (divergence), so apply intent, not a patch.
+
+For each candidate in either repo, get the touched files: `git show --stat <sha>`.
+
+**At the END of every sync, update `last-synced.txt`** for BOTH repos (`beta`,
+`mainline`, `frontend-beta`) to the new tips. (The fork was originally cut from
+the backend v2.6.0 release merge `72301c08`; that is history — the state file is
+the live boundary.)
 
 ## Step 2 — Triage each commit (KEEP vs SKIP)
 
@@ -57,11 +91,31 @@ removed or stubbed. These have no public-fork equivalent:
 | Midway / `mwinit` / MCS / Kerberos / federate / AEA tunnel | auth stubs (`midway.py`, `browser/auth.py`, `tunnel/manager.py`) |
 | `builder-mcp` / `arcc` / Quip / Taskei / SIM / mimir | removed integrations |
 | `writing_review/` + `dashboard/handlers_writing_review.py` | dir ABSENT in fork (deleted subsystem) |
-| `mcp_gateway/` + `promptfarm/` + `instances/` | dirs ABSENT in fork (the upstream `instances/` SSH-tunnel feature was deferred, not ported) |
+| `mcp_gateway/` + `promptfarm/` | dirs ABSENT in fork |
 | `code_reviewer` / `secretary` / `taskkeeper` | deleted; `sync_aim_packages` is a no-op stub (`return None`) |
 | CodeArtifact / vendored `claude-agent-acp` | fork uses **public** `npm i -g @agentclientprotocol/claude-agent-acp` |
 | Cognito / RUM ids / AEA | removed identity/telemetry |
 | **non-KiroACP providers**: `providers/claude_code.py` (`ClaudeCodeProvider`), `providers/bedrock.py` (`BedrockProvider`), `cc_agent.py`, `mirror.py` | **KiroClaw is KiroACP (kiro-cli) ONLY.** These modules + the config `claude_code`/`bedrock` factory branches, the `cc_*`/`bedrock_*` `AgentConfig` fields, and the `provider` enum beyond `["acp"]` were deleted. Any upstream commit confined to them is SKIP/NA_INTERNAL. |
+
+### Frontend (`MeshClawWebsite`) SKIP rubric
+
+The SPA mirrors the backend's removals. **SKIP** a frontend commit confined to
+any of these (confirm ABSENT by `ls website/src/...`):
+
+| Frontend area | Why skip |
+|---|---|
+| `apps/code-reviewer/`, `apps/mimir/`, `apps/team-manager/`, `apps/writing-review/`, `apps/auto-research/` | builtin-app dirs ABSENT in fork (their backends are absent/stubbed) |
+| `pages/SecretaryPage*`, `pages/writing-review/`, `*Secretary*` slices/tests | Secretary/writing-review absent |
+| `meshclaw-ui/` Claude-Code panels, `providers/adapters/claude-code.ts`, `providers/adapters/bedrock*`, Bedrock image/model UI, "agent picker on the Claude Code backend" | **SKIP_NONKIROACP** — fork is kiro-cli only; the provider selector must offer only `acp`. (Porting a commit that *removes* Bedrock from the UI is KEEP — it aligns the SPA to the backend enum `["acp"]`.) |
+| `McpGatewayCard`/`SharedMcpGatewayToggle`/`McpPoolable*` (Shared MCP gateway UI) | `mcp_gateway/` backend ABSENT |
+| GitFarm workspace-sync (`SyncPanel`, `/api/workspace-sync`), AIM auto-update toggle | absent/stubbed subsystems |
+| Harmony Artifactory artifact browse/share UI (`/api/artifactory/*`, `/api/artifacts/*/publish`) | absent subsystem |
+| `lcars/` theme, Bikini-Bottom/parody theme refactors, RUM telemetry (`rum.ts` is an inert stub) | cosmetic/internal, no generic core fix |
+
+A commit that adds a **generic SPA mechanism** (a surface, a hook, a renderer)
+plus an absent-app wiring line is **PARTIAL**: port the generic part, drop the
+absent-app hunk (e.g. a `builtinRegistry.ts` change — port only the lines for
+apps the fork HAS, like `/file-explorer`).
 
 **Confirm ABSENT by `ls`, not memory** — a commit confined to an absent dir is
 SKIP/NA_INTERNAL. A commit that merely *mentions* an internal name in a
@@ -98,14 +152,27 @@ ALREADY_PRESENT / MISSING / PARTIAL / N/A_INTERNAL.
 
 ## Step 3 — Port a KEEP commit
 
-Path map: `src/mesh_claw/X` → `src/kiro_claw/X`. Symbol/string map (apply
-everywhere, including comments and test bodies):
+Path map — **backend:** `src/mesh_claw/X` → `src/kiro_claw/X`. **frontend:**
+`MeshClawWebsite` `src/X` → fork `website/src/X` (tests: upstream `src/test/` or
+`integration/` → fork `website/src/test/` or `website/integration/` — check which
+exists). Symbol/string map (apply everywhere, including comments and test bodies):
 
 ```
 mesh_claw → kiro_claw      MeshClaw → KiroClaw      meshclaw → kiroclaw
 MESHCLAW_ → KIROCLAW_      .meshclaw → .kiroclaw    meshclaw-lite → kiroclaw-lite
 _meshclaw_managed → _kiroclaw_managed     CLI `meshclaw` → `kiroclaw`
+# frontend-specific:
+meshclaw-ui → kiroclaw-ui  MeshClawNavBridge → KiroClawNavBridge
+source: 'meshclaw' → 'kiroclaw'   /api/config/meshclaw → /api/config/kiroclaw
+# KEEP verbatim (load-bearing literals, NOT brand tokens):
+'mc-*' localStorage/postMessage keys (mc-nav, mc-unread-slots, mc-auth-expired),
+the 'mc_token_' cookie prefix, and inert tool-name allowlist strings.
 ```
+
+**Frontend divergence:** the fork's `website/` diverged from a ~2026-06-02
+snapshot, so a hot file (e.g. `ChatPage.tsx`) is often hundreds of lines off
+upstream. Apply the *intent* by content; for big multi-file frontend features,
+port files in chronological commit order so later hunks land on earlier context.
 
 **Source hunks:** read the fork file around each hunk first — the fork's
 pre-image often differs from upstream's (de-Amazon edits, prior renames), so
@@ -139,18 +206,25 @@ Brand renames and "is this already fixed" judgments have burned us before by
 relying on grep alone. **Run the tests.**
 
 ```bash
-# Per-fix: run the touched test files (override the hardcoded --cov in setup.cfg)
+# BACKEND per-fix: run the touched test files (override the hardcoded --cov in setup.cfg)
 python -m pytest test/test_x.py --override-ini="addopts=" -p no:cacheprovider -q
-black src/kiro_claw/<files> test/<files>
-isort src/kiro_claw/<files>
-flake8 src/kiro_claw/<files> test/<files>
+flake8 src/kiro_claw/<files> test/<files>      # the real gate (NOT black --check)
+
+# FRONTEND per-fix: typecheck + the touched vitest files (from website/)
+cd website
+npx tsc -b                                     # project refs — the real typecheck (NOT --noEmit)
+npx vitest run src/test/<File>.test.tsx        # or integration/<File>.integration.test.tsx
 ```
 
 Gotchas:
 - `setup.cfg` hardcodes `--cov` in `addopts` — always override for fast runs.
 - This machine runs **free-threaded CPython 3.13t**; prefix `PYTHON_GIL=0` to
   silence the GIL-re-enable warning. Async tests need `@pytest.mark.asyncio`.
-- `tsc -b` (not `--noEmit`) is the real frontend typecheck.
+- `tsc -b` (not `--noEmit`) is the real frontend typecheck. Do NOT run
+  `prettier`/`eslint --fix` to "clean up" — like black, they churn untouched
+  code and are not the gate. A frontend port that adds an import MUST ensure the
+  target exists in the fork (port the prerequisite helper in the same wave, e.g.
+  `utils/monacoLocal.ts` for the Monaco-local commits).
 - **The installed `black` (25.1.0) is NEWER than the repo's formatter** — it
   wants to reformat ~300 untouched files AND upstream's own post-image fails it
   too. So `black --check` is NOT the gate. **Do not run black to "fix"
@@ -253,12 +327,14 @@ with a build and a CR:
    #   cr -r CR-XXXXX --destination-branch mainline
    ```
    The CR **title** names the batch (e.g. `[KiroClaw] MeshClaw beta sync
-   <date>: N commits ported`). The **description MUST list, per commit, both
-   what was synced AND what was left out** — every KEEP/PARTIAL with its
-   upstream SHA + one-line summary, and every SKIP/NA_INTERNAL/deferred with the
-   reason (writing_review absent, builder-mcp internal, instances deferred,
-   etc.). Provenance across the history-less boundary lives entirely in this
-   description.
+   <date>: N commits ported`). When the batch spans both repos, say so (e.g.
+   `... dual-repo sync: N backend + M frontend ported`). The **description MUST
+   list, per commit, both what was synced AND what was left out** — every
+   KEEP/PARTIAL with its upstream SHA (note backend vs frontend) + one-line
+   summary, and every SKIP/NA_INTERNAL/deferred with the reason (writing_review
+   absent, builder-mcp internal, mcp_gateway/secretary/auto-research absent,
+   SKIP_NONKIROACP, etc.). Provenance across the history-less boundary lives
+   entirely in this description.
 
    Origin = `ssh://git.amazon.com:2222/pkg/KiroClawExternal`. Per the global git
    rule, `commit`/`push`/CR need explicit user authorization — the recurring
@@ -269,8 +345,9 @@ with a build and a CR:
 
 A durable cron job runs this whole skill every 6 hours (scan → triage+verify →
 port → build → commit → CR). It is the standing authorization for commit/push/CR.
-If a run finds **zero** new candidates, it does nothing and exits (no empty
-commit, no CR). If it hits an ambiguous large/PARTIAL commit it can't confidently
-de-Amazon, it ports the clean KEEPs, leaves the ambiguous one un-ported, and
-**notes it in the CR description** as deferred-for-human-review rather than
-guessing.
+It **scans BOTH repos** (`mesh_claw` backend + `MeshClawWebsite` frontend) each
+run. If a run finds **zero** new candidates across both, it does nothing and
+exits (no empty commit, no CR). If it hits an ambiguous large/PARTIAL commit it
+can't confidently de-Amazon, it ports the clean KEEPs, leaves the ambiguous one
+un-ported, and **notes it in the CR description** as deferred-for-human-review
+rather than guessing.
