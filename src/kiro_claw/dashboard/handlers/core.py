@@ -635,6 +635,10 @@ _EDITABLE_CONFIG: dict[str, dict] = {
     "session.pool_ttl_secs": {"type": "int", "min": 0, "max": 7200},
     "auto_update": {"type": "bool"},
     "dashboard.mcp_probe_timeout_secs": {"type": "int", "min": 5, "max": 120},
+    # Instances (multi-instance management). Toggling enabled needs a gateway
+    # restart to take effect (the SSH manager + CSP relaxation init at startup),
+    # so the Instances settings panel surfaces a "restart required" hint.
+    "instances.enabled": {"type": "bool"},
 }
 
 

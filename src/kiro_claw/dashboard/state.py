@@ -826,6 +826,8 @@ class DashboardState:
         self.subagents = subagents
         self.channel_manager: Any = None  # lazy-init in server.py
         self.tunnel_manager: Any = None  # lazy-init in server.py (TunnelManager)
+        self.instances_manager: Any = None  # lazy-init in server.py (SshTunnelManager)
+        self.instances_registry: Any = None  # lazy-init in server.py (InstancesRegistry)
         # Secretary subsystem removed; kept as permanent None for apps/routes.py
         # builtin-service restart lookup (getattr-based, no-op when None).
         self._secretary_restart: Any = None  # restart callback (always None — service removed)

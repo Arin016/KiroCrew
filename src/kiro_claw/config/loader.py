@@ -43,6 +43,8 @@ from kiro_claw.config.paths import (  # noqa: F401
     config_package_dir,
 )
 from kiro_claw.effort import is_valid_effort, model_supports_effort
+from kiro_claw.instances.constants import DEFAULT_TUNNEL_BASE_PORT as _DEFAULT_TUNNEL_BASE_PORT
+from kiro_claw.instances.constants import DEFAULT_WARM_SET_CAP as _DEFAULT_WARM_SET_CAP
 
 # Schema validation + the validated-data cache live in ``config.validation``.
 # Re-exported here for backward compatibility — callers and tests still
@@ -1417,6 +1419,61 @@ class TaskKeeperConfig:
 
 
 @dataclass
+class InstancesConfig:
+    """Multi-instance management (the *Instances* feature).
+
+    Gates and tunes the gateway's ability to manage/switch between several
+    remote KiroClaw instances over SSH tunnels. Off by default — opt-in only,
+    since enabling it allows the gateway to open SSH ``-L`` forwards and relaxes
+    the dashboard CSP ``frame-src`` for the active loopback tunnel ports.
+
+    The numeric tunables default to constants defined in
+    ``kiro_claw.instances.constants`` so the canonical default lives in one
+    place and cannot drift from this dataclass.
+    """
+
+    enabled: bool = field(
+        default=False,
+        metadata=_meta(
+            "Enabled",
+            "Enable multi-instance management — lets this gateway open SSH tunnels "
+            "to remote KiroClaws and embed their dashboards. Default off (opt-in). "
+            "Enabling also scopes a CSP frame-src relaxation to active tunnel ports.",
+        ),
+    )
+    warm_set_cap: int = field(
+        default=_DEFAULT_WARM_SET_CAP,
+        metadata=_meta(
+            "Warm Set Cap",
+            "Max number of remote instances kept warm (iframe mounted + tunnel live) "
+            "at once. Least-recently-used instances beyond this are evicted and "
+            "reconnected on demand. Bounds memory/socket use (each warm instance is a "
+            "full dashboard SPA).",
+        ),
+    )
+    tunnel_base_port: int = field(
+        default=_DEFAULT_TUNNEL_BASE_PORT,
+        metadata=_meta(
+            "Tunnel Base Port",
+            "First local loopback port used for an SSH -L forward. The allocator "
+            "increments from here, skipping ports already in use.",
+        ),
+    )
+
+    def __post_init__(self) -> None:
+        if self.warm_set_cap < 1:
+            logger.warning("instances.warm_set_cap %d < 1, using 1", self.warm_set_cap)
+            object.__setattr__(self, "warm_set_cap", 1)
+        if not (1 <= self.tunnel_base_port <= 65535):
+            logger.warning(
+                "instances.tunnel_base_port %d out of range [1, 65535], using %d",
+                self.tunnel_base_port,
+                _DEFAULT_TUNNEL_BASE_PORT,
+            )
+            object.__setattr__(self, "tunnel_base_port", _DEFAULT_TUNNEL_BASE_PORT)
+
+
+@dataclass
 class TunnelConfig:
     enabled: bool = field(
         default=False,
@@ -1482,6 +1539,12 @@ class KiroClawConfig:
     taskkeeper: TaskKeeperConfig = field(
         default_factory=TaskKeeperConfig,
         metadata=_meta("TaskKeeper", "TaskKeeper task management with triage and To-Do sync."),
+    )
+    instances: InstancesConfig = field(
+        default_factory=InstancesConfig,
+        metadata=_meta(
+            "Instances", "Multi-instance management — manage/switch remote KiroClaws over SSH."
+        ),
     )
 
     slack: SlackConfig = field(
@@ -1702,6 +1765,9 @@ class KiroClawConfig:
         taskkeeper_data = data.get("taskkeeper", {})
         if not isinstance(taskkeeper_data, dict):
             taskkeeper_data = {}
+        instances_data = data.get("instances", {})
+        if not isinstance(instances_data, dict):
+            instances_data = {}
         tunnel_data = data.get("tunnel", {})
         if not isinstance(tunnel_data, dict):
             tunnel_data = {}
@@ -1947,6 +2013,13 @@ class KiroClawConfig:
                 ),
                 auto_scan_enabled=bool(taskkeeper_data.get("auto_scan_enabled", False)),
             ),
+            instances=InstancesConfig(
+                enabled=bool(instances_data.get("enabled", False)),
+                warm_set_cap=int(instances_data.get("warm_set_cap", _DEFAULT_WARM_SET_CAP)),
+                tunnel_base_port=int(
+                    instances_data.get("tunnel_base_port", _DEFAULT_TUNNEL_BASE_PORT)
+                ),
+            ),
             skills=SkillsConfig(
                 max_triggered=int(skills_data.get("max_triggered", 3)),
                 auto_create_from_sessions=bool(skills_data.get("auto_create_from_sessions", False)),
@@ -2039,6 +2112,7 @@ class KiroClawConfig:
             "stt": asdict(self.stt),
             "secretary": asdict(self.secretary),
             "taskkeeper": asdict(self.taskkeeper),
+            "instances": asdict(self.instances),
             "taskrunner": asdict(self.taskrunner),
             "orchestrator": asdict(self.orchestrator),
             "cron_history": asdict(self.cron_history),

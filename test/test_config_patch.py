@@ -155,6 +155,18 @@ class TestBoolValidator:
             resp = await _patch(c, "auto_update", "true")
             assert resp.status == 400
 
+    @pytest.mark.asyncio
+    async def test_instances_enabled_toggle(self, tmp_config) -> None:
+        # The Instances settings panel flips instances.enabled via this endpoint.
+        async with TestClient(TestServer(_make_app())) as c:
+            resp = await _patch(c, "instances.enabled", True)
+            assert resp.status == 200
+            resp = await _patch(c, "instances.enabled", "yes")  # non-bool rejected
+            assert resp.status == 400
+        # value is written nested under the instances section
+        written = json.loads(tmp_config.read_text(encoding="utf-8"))
+        assert written["instances"]["enabled"] is True
+
 
 # ── Str validator (pool_agent) ───────────────────────────────────────────
 

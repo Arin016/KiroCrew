@@ -1653,6 +1653,66 @@
       "defaultValue": false
     },
     {
+      "path": "instances",
+      "kind": "core",
+      "type": "object",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Instances",
+      "help": "Multi-instance management — manage/switch remote KiroClaws over SSH.",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": {
+        "enabled": false,
+        "warm_set_cap": 5,
+        "tunnel_base_port": 7778
+      }
+    },
+    {
+      "path": "instances.enabled",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Enabled",
+      "help": "Enable multi-instance management — lets this gateway open SSH tunnels to remote KiroClaws and embed their dashboards. Default off (opt-in). Enabling also scopes a CSP frame-src relaxation to active tunnel ports.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
+    },
+    {
+      "path": "instances.warm_set_cap",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Warm Set Cap",
+      "help": "Max number of remote instances kept warm (iframe mounted + tunnel live) at once. Least-recently-used instances beyond this are evicted and reconnected on demand. Bounds memory/socket use (each warm instance is a full dashboard SPA).",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 5
+    },
+    {
+      "path": "instances.tunnel_base_port",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Tunnel Base Port",
+      "help": "First local loopback port used for an SSH -L forward. The allocator increments from here, skipping ports already in use.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 7778
+    },
+    {
       "path": "slack",
       "kind": "core",
       "type": "object",

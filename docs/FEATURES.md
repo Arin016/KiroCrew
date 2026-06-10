@@ -229,6 +229,16 @@ Full-featured React SPA at `localhost:8765` (or `http://kiroclaw.localhost:8765`
 - **Tool I/O detail panel** — tool input/output persisted on message meta for inline inspection
 - **Steering resource loading** — workspace `.kiro/steering` resources loaded into dashboard sessions
 
+### Instances — Multi-Instance Management
+
+Manage and switch between several **remote** KiroClaw instances (dev hosts, EC2, home servers) from one hub gateway over SSH tunnels, embedding each remote dashboard in a single `/instances` page. Opt-in (`kiroclaw config set instances.enabled true`).
+
+- **Auto-tunneling** — opens `ssh -N -L` to each remote's loopback dashboard and mints a short-lived token on connect
+- **Warm set** — keeps the K most-recently-used instances live (hide-not-unmount); evicts LRU beyond `instances.warm_set_cap`
+- **Self-healing** — health probe + 2-tier recovery + proactive token refresh; on-demand Diagnose and remote Restart
+- **Owner-only** — SEL-audited control plane, never reachable via Slack; loopback-only forwards, tokens never logged
+- See [docs/INSTANCES.md](INSTANCES.md) for the full guide
+
 ### Desktop App (Electron)
 
 Native desktop app (macOS DMG / Linux AppImage) wrapping the web dashboard. Bundles a PyInstaller backend so end users need no Python, pip, or npm; auto-starts the gateway and connects to `localhost:8765`.

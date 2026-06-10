@@ -27,10 +27,12 @@ from kiro_claw.browser.setup import (
     patch_mcp_headless,
 )
 from kiro_claw.config import config_dir
+from kiro_claw.config.loader import KiroClawConfig
 from kiro_claw.dashboard import (
     chat,
     handlers,
     handlers_channel,
+    handlers_instances,
     handlers_project,
     stt_stream,
     ws,
@@ -52,6 +54,8 @@ from kiro_claw.dashboard.origin import bind_address_for, build_allowed_origins, 
 from kiro_claw.dashboard.state import _DEFAULT_PORT, DashboardState
 from kiro_claw.dashboard.token_auth import token_auth_middleware
 from kiro_claw.hooks import ScriptHookStore, set_global_hook_store
+from kiro_claw.instances.registry import InstancesRegistry
+from kiro_claw.instances.ssh_tunnel_manager import SshTunnelManager
 from kiro_claw.safety_override import safety_override
 from kiro_claw.sel import sel
 from kiro_claw.suggestions import api_suggestions
@@ -267,6 +271,60 @@ def _apply_startup_yolo(state: DashboardState, cfg: Any) -> None:
         "Safety override enabled at startup (agent.yolo=true, expires in %ds)",
         result.ttl,
     )
+
+
+def _register_instances_hooks(
+    app: web.Application, state: DashboardState, port: int
+) -> None:
+    """Register the opt-in Instances (multi-instance) startup/cleanup hooks.
+
+    These MUST be attached before ``runner.setup()`` freezes the app's
+    ``on_startup`` / ``on_cleanup`` signal lists. Appending after setup raises
+    ``RuntimeError: Cannot modify frozen list`` AND the ``on_startup`` signal
+    would have already fired, so a hook added late would never run.
+
+    The registry + SSH tunnel manager are created lazily inside the startup
+    hook (which fires during ``runner.setup()``), gated on ``instances.enabled``
+    (default off). We then revive ONLY the last-active instance so an unattended
+    restart with stale credentials doesn't spawn an ssh failure herd; other
+    instances render "disconnected — click to reconnect".
+    """
+
+    async def _instances_startup(app_: web.Application) -> None:
+        _cfg = KiroClawConfig.load()
+        if not _cfg.instances.enabled:
+            return
+        registry = InstancesRegistry()
+        manager = SshTunnelManager(registry, base_port=_cfg.instances.tunnel_base_port)
+        state.instances_registry = registry
+        state.instances_manager = manager
+        # First-party cookies: embedded instances load from
+        # http://127.0.0.1:<port>, so the hub itself should be reached at
+        # http://127.0.0.1:<port> (NOT localhost / kiroclaw.localhost) — mixing
+        # hosts makes the iframes render logged-out. The dashboard already binds
+        # 127.0.0.1; we recommend (not force) the loopback-IP URL here so the
+        # existing localhost / Slack-link flows are left untouched.
+        logger.info(
+            "Instances enabled — open the dashboard at http://127.0.0.1:%d for "
+            "embedded instances to share first-party cookies.",
+            port,
+        )
+        last = registry.get_last_active()
+        if last is None or not last.was_connected:
+            return
+        try:
+            logger.info("Lazy-reviving last-active instance %s", last.id)
+            await manager.connect(last.id)
+        except Exception:
+            logger.warning("Lazy reconnect of %s failed", last.id, exc_info=True)
+
+    async def _instances_shutdown(app_: web.Application) -> None:
+        manager = getattr(state, "instances_manager", None)
+        if manager is not None:
+            await manager.shutdown()
+
+    app.on_startup.append(_instances_startup)
+    app.on_cleanup.append(_instances_shutdown)
 
 
 async def start_dashboard(
@@ -668,6 +726,23 @@ async def start_dashboard(
         "/api/channels/{id}/agents/{aid}/approve", handlers_channel.api_channel_approve_agent
     )
 
+    # Instances (multi-instance management) — owner-only, gated by instances.enabled
+    app.router.add_get("/api/instances", handlers_instances.api_instances_list)
+    app.router.add_post("/api/instances", handlers_instances.api_instances_add)
+    app.router.add_patch("/api/instances/{id}", handlers_instances.api_instances_update)
+    app.router.add_delete("/api/instances/{id}", handlers_instances.api_instances_remove)
+    app.router.add_get("/api/instances/{id}/status", handlers_instances.api_instances_status)
+    app.router.add_post("/api/instances/{id}/connect", handlers_instances.api_instances_connect)
+    app.router.add_post(
+        "/api/instances/{id}/refresh-token", handlers_instances.api_instances_refresh_token
+    )
+    app.router.add_post(
+        "/api/instances/{id}/disconnect", handlers_instances.api_instances_disconnect
+    )
+    app.router.add_post(
+        "/api/instances/{id}/restart", handlers_instances.api_instances_restart
+    )
+
     # Misc (notifications GET/clear and send-message via _register_mcp_routes)
     app.router.add_get("/api/notifications", handlers.api_notifications)
     app.router.add_delete("/api/notifications", handlers.api_notification_delete)
@@ -822,6 +897,23 @@ async def start_dashboard(
             # inherit parent CSP per W3C spec — inline scripts in widgets need it.
             # Widget isolation is enforced by sandbox="allow-scripts" (no parent DOM
             # access) + widget-level CSP meta (connect-src 'none').
+            # Instances feature: when enabled, allow framing of loopback origins
+            # so embedded remote dashboards render. We MUST use a loopback
+            # wildcard rather than enumerating connected ports: CSP is fixed at
+            # document-load time, but tunnels are connected dynamically *after*
+            # the page loads and get fresh allocator ports — enumerating only
+            # currently-connected ports would never include a port connected
+            # later in the same page session, so the iframe would be blocked.
+            # Scope stays local: 127.0.0.1 / localhost / *.localhost only, gated
+            # on the manager existing (i.e. instances.enabled), never a public
+            # wildcard. *.localhost is required because the embedded pane uses the
+            # parent dashboard's own hostname (see InstancesViewport srcFor) and
+            # users commonly open the dashboard on names like kiroclaw.localhost.
+            _frame_src_extra = ""
+            _st = request.app.get("state")
+            _imgr = getattr(_st, "instances_manager", None) if _st else None
+            if _imgr is not None:
+                _frame_src_extra = " http://127.0.0.1:* http://localhost:* http://*.localhost:*"
             resp.headers.setdefault(
                 "Content-Security-Policy",
                 "default-src 'self'; "
@@ -833,7 +925,7 @@ async def start_dashboard(
                 "connect-src 'self' ws://localhost:* ws://127.0.0.1:*; "
                 "media-src 'self' blob:; "
                 "worker-src 'self' blob:; "
-                "frame-src 'self' blob:; "
+                "frame-src 'self' blob:" + _frame_src_extra + "; "
                 "object-src 'none'; base-uri 'self'",
             )
         return resp  # type: ignore[return-value]
@@ -972,6 +1064,12 @@ async def start_dashboard(
             )
             raise RuntimeError("dashboard_url requires token auth middleware")
 
+    # ── Instances (multi-instance management) ────────────────────────────────
+    # Register the opt-in instances startup/cleanup hooks HERE, before
+    # ``runner.setup()`` freezes the app's signal lists. See
+    # ``_register_instances_hooks`` for why ordering matters.
+    _register_instances_hooks(app, state, port)
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, bind_address_for(local_only), port)
@@ -998,8 +1096,6 @@ async def start_dashboard(
     # Restore sessions — always restore foldered/pinned sessions; optionally restore recent ones.
     # NOTE: Even with restore_sessions=false, foldered and pinned sessions are restored
     # so the Explorer tree stays populated.  Users can unpin or remove from folder to dismiss.
-    from kiro_claw.config.loader import KiroClawConfig
-
     cfg = KiroClawConfig.load()
     _apply_startup_yolo(state, cfg)
 
