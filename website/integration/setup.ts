@@ -93,6 +93,30 @@ if (typeof window !== 'undefined' && !(window as unknown as { IntersectionObserv
   ;(globalThis as unknown as { IntersectionObserver: unknown }).IntersectionObserver = StubIntersectionObserver
 }
 
+// jsdom polyfill: EventSource. jsdom doesn't implement the SSE Web API; the
+// useFileWatch / useLogSSE / useSSE hooks open an EventSource. Provide a
+// minimal no-op stub so any component that opens a stream doesn't crash under
+// test. Tests that need to drive SSE events install their own richer per-test
+// mock, which overrides this stub.
+if (typeof (globalThis as unknown as { EventSource?: unknown }).EventSource === 'undefined') {
+  class StubEventSource {
+    static readonly CONNECTING = 0
+    static readonly OPEN = 1
+    static readonly CLOSED = 2
+    url: string
+    readyState = 0
+    onmessage: ((ev: MessageEvent) => void) | null = null
+    onerror: ((ev: Event) => void) | null = null
+    onopen: ((ev: Event) => void) | null = null
+    constructor(url: string) { this.url = url }
+    close() {}
+    addEventListener() {}
+    removeEventListener() {}
+    dispatchEvent() { return false }
+  }
+  ;(globalThis as unknown as { EventSource: unknown }).EventSource = StubEventSource
+}
+
 // jsdom polyfill: HTMLCanvasElement.getContext (used by scene canvases)
 // jsdom doesn't implement canvas — mock getContext to return a no-op 2d context
 const _origGetContext = HTMLCanvasElement.prototype.getContext
