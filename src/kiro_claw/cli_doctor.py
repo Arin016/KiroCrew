@@ -17,7 +17,6 @@ from kiro_claw import __version__ as _mc_version
 from kiro_claw.acp.client import KIRO_CLI_BIN
 from kiro_claw.agent import AGENT_FILENAME, KIRO_AGENTS_DIR
 from kiro_claw.atomic_write import atomic_write
-from kiro_claw.cc_agent import CC_SETTINGS_PATH, find_overbroad_cc_deny_rules
 from kiro_claw.config import KiroClawConfig
 from kiro_claw.config.loader import config_dir
 from kiro_claw.constants import OLLAMA_DOCKER_CONTAINER
@@ -572,42 +571,6 @@ def _doctor() -> None:
                         print(f"  auth check:  ⚠️  HTTP {he.code}")
             except Exception:
                 print("  auth check:  ⏭  could not reach external interface")
-
-    # ── Claude Code permissions.deny (over-broad rule detection) ──
-    # The claude_code backend's native engine reads permissions.deny from the
-    # user-global ~/.claude/settings.json and project .claude/settings.json and
-    # hard-blocks matching commands BEFORE KiroClaw's approval gate — an
-    # over-broad rule like Bash(*) silently surfaces as "Tool use aborted" with
-    # no prompt, upstream of and invisible to KiroClaw. Surface it here since
-    # KiroClaw cannot override the user's own config.
-    print("\nClaude Code permissions")
-    _cc_settings_paths = [
-        (CC_SETTINGS_PATH, "~/.claude/settings.json"),
-        (Path.cwd() / ".claude" / "settings.json", "./.claude/settings.json"),
-    ]
-    _saw_overbroad = False
-    for _path, _label in _cc_settings_paths:
-        try:
-            if not _path.is_file():
-                continue
-            _data = json.loads(_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            print(f"  deny rules:  ⚠️  could not parse {_label}")
-            continue
-        _overbroad = find_overbroad_cc_deny_rules(_data)
-        if _overbroad:
-            _saw_overbroad = True
-            print(
-                f"  deny rules:  ⚠️  {_label} has over-broad permissions.deny: "
-                f"{', '.join(_overbroad)}"
-            )
-            print(
-                "               These block bash commands inside Claude Code "
-                "BEFORE KiroClaw can prompt — commands abort with 'Tool use "
-                "aborted' and no approval dialog. Remove or narrow them."
-            )
-    if not _saw_overbroad:
-        print("  deny rules:  ✅ no over-broad Bash(*) deny rules found")
 
     # ── Summary ──
     print()

@@ -33,7 +33,6 @@ from kiro_claw.dashboard.chat_persistence import get_reasoning_effort_ordered
 from kiro_claw.dashboard.chat_utils import _SLASH_COMMANDS, _history_key_for
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.env import augmented_path
-from kiro_claw.mirror import mirror_kiro_to_cc
 
 _VALID_PACKAGE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$")
 
@@ -786,18 +785,7 @@ def _cc_models(request: web.Request, configured_default: str = "") -> list[dict]
 
 
 async def api_models(request: web.Request) -> web.Response:
-    """GET /api/models — list available models (provider-aware).
-
-    For claude_code provider: the canonical model registry leads, merged with
-    any models reported by an active ACP session (live from ACP configOptions).
-    """
-    cfg = KiroClawConfig.load()
-    if cfg.agent.provider == "claude_code":
-        # Surface the real versioned Claude set (Opus 4.8/4.7, Sonnet 4.6, …),
-        # merging the backend's advertised list with Opus 4.8 (which the
-        # adapter does not yet advertise) and the configured default.
-        return web.json_response(_cc_models(request, cfg.agent.cc_model or ""))
-
+    """GET /api/models — list available models from the live kiro-cli ACP session."""
     try:
         from kiro_claw.acp.client import _resolve_kiro_bin, _resolve_ssh_auth_sock  # noqa: F811
         from kiro_claw.env import augmented_path  # noqa: F811
@@ -1524,84 +1512,6 @@ async def api_agent_metadata_delete(request: web.Request) -> web.Response:
     except Exception:
         logger.warning("SEL logging failed", exc_info=True)
     return web.json_response({"ok": True, "name": name})
-
-
-# ── Claude Code migration (kiro → CC) ──
-
-
-def _summarize_mirror_result(result: dict[str, Any]) -> dict[str, int]:
-    """Reduce a ``mirror_kiro_to_cc`` result dict to scalar counts for the UI."""
-    mirrored = (
-        sum(1 for a in result["agents"] if a["action"] == "mirrored")
-        + sum(1 for m in result["mcp"] if "mirrored" in m["action"])
-        + sum(1 for s in result["skills"] if s["action"] == "mirrored")
-    )
-    skipped = (
-        sum(1 for a in result["agents"] if "skipped" in a["action"])
-        + sum(1 for m in result["mcp"] if "skipped" in m["action"])
-        + sum(1 for s in result["skills"] if "skipped" in s["action"])
-    )
-    return {
-        "agents_total": len(result["agents"]),
-        "mcp_total": len(result["mcp"]),
-        "skills_total": len(result["skills"]),
-        "mirrored": mirrored,
-        "skipped": skipped,
-        "errors": len(result["errors"]),
-    }
-
-
-async def api_cc_mirror_preview(request: web.Request) -> web.Response:
-    """GET /api/cc/mirror/preview — dry-run kiro→CC mirror; report counts."""
-    try:
-        result = await asyncio.to_thread(mirror_kiro_to_cc, dry_run=True, force=False)
-    except Exception as exc:
-        logger.warning("mirror preview failed", exc_info=True)
-        return web.json_response({"error": str(exc)[:500]}, status=500)
-    summary = _summarize_mirror_result(result)
-    try:
-        _sel().log_api_access(
-            caller=request.get("user", "anonymous"),
-            operation="cc_mirror.preview",
-            outcome="ok",
-            source="dashboard",
-            resources=(
-                f"{summary['mirrored']}/"
-                f"{summary['agents_total'] + summary['mcp_total'] + summary['skills_total']}"
-            ),
-        )
-    except Exception:
-        logger.warning("SEL logging failed for cc_mirror.preview", exc_info=True)
-    return web.json_response({"summary": summary, **result})
-
-
-async def api_cc_mirror_run(request: web.Request) -> web.Response:
-    """POST /api/cc/mirror/run — apply kiro→CC mirror to disk."""
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    force = bool(body.get("force", False))
-    try:
-        result = await asyncio.to_thread(mirror_kiro_to_cc, dry_run=False, force=force)
-    except Exception as exc:
-        logger.warning("mirror run failed", exc_info=True)
-        return web.json_response({"error": str(exc)[:500]}, status=500)
-    summary = _summarize_mirror_result(result)
-    try:
-        _sel().log_api_access(
-            caller=request.get("user", "anonymous"),
-            operation="cc_mirror.run",
-            outcome="ok" if not result["errors"] else "partial",
-            source="dashboard",
-            resources=(f"force={force} mirrored={summary['mirrored']} errors={summary['errors']}"),
-        )
-    except Exception:
-        logger.warning("SEL logging failed for cc_mirror.run", exc_info=True)
-    state: DashboardState = request.app["state"]
-    state.push_refresh("agents")
-    state.push_refresh("skills")
-    return web.json_response({"summary": summary, **result})
 
 
 async def api_cc_aim_missing(request: web.Request) -> web.Response:

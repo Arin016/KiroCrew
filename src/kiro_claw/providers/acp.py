@@ -21,7 +21,7 @@ from kiro_claw.providers.base import (
     LLMEvent,
     LLMProvider,
 )
-from kiro_claw.providers.cleanup import _cleanup_cc_session, _is_safe_path
+from kiro_claw.providers.cleanup import _is_safe_path
 
 logger = logging.getLogger(__name__)
 
@@ -570,22 +570,12 @@ class AcpProvider(LLMProvider):
         return self._client._session_id if self._client and self._client._session_id else ""
 
     async def cleanup_session(self, session_id: str) -> None:
-        """Delete session files (.json + .jsonl).
+        """Delete kiro-cli session files (.json + .jsonl) at ~/.kiro/sessions/cli.
 
-        claude-agent-acp stores sessions via Claude Code SDK (~/.claude/projects/),
-        not at ~/.kiro/sessions/. For claude backend, clean the correct path.
+        (The claude seam's SDK transcript cleanup, ~/.claude/projects/, is
+        re-added by the internal companion alongside the Claude Code provider.)
         """
         if not session_id:
-            return
-        if self._client and self._client.backend == ACP_BACKEND_CLAUDE:
-            # Clean CC session transcript + subagents + tool-results + file-history
-            _cleanup_cc_session(self._client._work_dir, session_id)
-            # Also remove ephemeral settings file injected for the session
-            settings_file = self._client._work_dir / ".claude" / "settings.local.json"
-            try:
-                settings_file.unlink(missing_ok=True)
-            except OSError:
-                pass
             return
         sessions_dir = Path.home() / ".kiro" / "sessions" / "cli"
         for suffix in (".json", ".jsonl"):

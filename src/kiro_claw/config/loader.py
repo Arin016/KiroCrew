@@ -3,9 +3,10 @@
 Config location: ~/.kiroclaw/config.json (overridden by KIROCLAW_HOME)
 Credentials:    ~/.kiroclaw/.env (overridden by KIROCLAW_HOME)
 
-Supports provider selection (``claude_code``, ``acp``, or ``bedrock``), session
-timeouts, hook rules, and the dashboard URL via the config file. (The dashboard
-*port* is set with the ``KIROCLAW_PORT`` env var, not a config key.)
+KiroClaw is KiroACP-only: the sole provider is the ACP adapter driving the
+kiro-cli backend. This module handles session timeouts, hook rules, and the
+dashboard URL via the config file. (The dashboard *port* is set with the
+``KIROCLAW_PORT`` env var, not a config key.)
 """
 
 from __future__ import annotations
@@ -19,8 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from kiro_claw import __version__, model_registry
-from kiro_claw.acp.types import ACP_BACKEND_CLAUDE
+from kiro_claw import __version__
 
 # Pure path primitives live in the leaf module ``config.paths`` (stdlib-only,
 # no ``kiro_claw`` imports) so the modules that only need ``config_dir()`` can
@@ -286,10 +286,6 @@ def resolve_agent_config_path() -> Path:
     return config_package_dir() / "defaults.json"
 
 
-DEFAULT_BEDROCK_MODEL = "anthropic.claude-sonnet-4-20250514"
-DEFAULT_BEDROCK_REGION = "us-west-2"
-
-
 def _meta(label: str, help: str, **kwargs: object) -> dict:
     """Helper to build field metadata dicts with safe defaults."""
     return {"label": label, "help": help, **kwargs}
@@ -340,16 +336,8 @@ class AgentConfig:
         metadata=_meta("Model", "LLM model identifier. 'auto' resolves from agent config."),
     )
     provider: str = field(
-        default="claude_code",
-        metadata=_meta("Provider", "LLM provider backend.", enum=["acp", "bedrock", "claude_code"]),
-    )
-    bedrock_model_id: str = field(
-        default=DEFAULT_BEDROCK_MODEL,
-        metadata=_meta("Bedrock Model ID", "AWS Bedrock model identifier."),
-    )
-    bedrock_region: str = field(
-        default=DEFAULT_BEDROCK_REGION,
-        metadata=_meta("Bedrock Region", "AWS region for Bedrock API calls."),
+        default="acp",
+        metadata=_meta("Provider", "LLM provider backend (KiroACP / kiro-cli).", enum=["acp"]),
     )
     default_agent: str = field(
         default="",
@@ -358,32 +346,6 @@ class AgentConfig:
     sandbox: str = field(
         default="auto",
         metadata=_meta("Sandbox", "Sandbox mode for ACP provider.", enum=["auto", "off"]),
-    )
-    # Claude Code specific (only used when provider="claude_code")
-    cc_model: str = field(
-        default="opus-4.8-1m",
-        metadata=_meta(
-            "CC Model",
-            "Claude Code model — a canonical registry key (default 'opus-4.8-1m', "
-            "Opus 4.8 with the 1M context window). Translated to a provider id at "
-            "the config.loader factory. Aliases: opus, sonnet, auto (empty).",
-        ),
-    )
-    cc_connection_mode: str = field(
-        default="per_session",
-        metadata=_meta(
-            "CC Connection Mode",
-            "Session lifecycle: per_session (resume across messages, ACP-style) or ephemeral (fresh per message).",
-            enum=["per_session", "ephemeral"],
-        ),
-    )
-    cc_max_turns: int = field(
-        default=0,
-        metadata=_meta("CC Max Turns", "Max turns for Claude Code sessions. 0 = unlimited."),
-    )
-    cc_max_budget_usd: float = field(
-        default=0.0,
-        metadata=_meta("CC Max Budget USD", "Max spend per session in USD. 0 = unlimited."),
     )
     yolo: bool = field(
         default=False,
@@ -1793,9 +1755,7 @@ class KiroClawConfig:
                 approval_mode=agent_data.get("approval_mode", "auto"),
                 streaming=agent_data.get("streaming", True),
                 model=agent_data.get("model", DEFAULT_MODEL),
-                provider=agent_data.get("provider", "claude_code"),
-                bedrock_model_id=agent_data.get("bedrock_model_id", DEFAULT_BEDROCK_MODEL),
-                bedrock_region=agent_data.get("bedrock_region", DEFAULT_BEDROCK_REGION),
+                provider=agent_data.get("provider", "acp"),
                 default_agent=agent_data.get("default_agent", ""),
                 sandbox=agent_data.get("sandbox", "auto"),
                 yolo=agent_data.get("yolo", False),
@@ -1830,10 +1790,6 @@ class KiroClawConfig:
                 soft_stop_budget_secs=max(
                     0.5, min(60.0, float(agent_data.get("soft_stop_budget_secs", 10.0)))
                 ),
-                cc_model=agent_data.get("cc_model", "opus-4.8-1m"),
-                cc_connection_mode=agent_data.get("cc_connection_mode", "per_session"),
-                cc_max_turns=int(agent_data.get("cc_max_turns", 0)),
-                cc_max_budget_usd=float(agent_data.get("cc_max_budget_usd", 0.0)),
             ),
             session=SessionConfig(
                 timeout_secs=session_data.get("timeout_secs", DEFAULT_SESSION_TIMEOUT),
@@ -2170,45 +2126,6 @@ class KiroClawConfig:
                 pass
         return DEFAULT_MODEL
 
-    @staticmethod
-    def _resolve_agent_cc_model(agent: str) -> str:
-        """Resolve a custom agent's Claude Code model from its kiro agent json.
-
-        Mirrors ``SessionManager._resolve_agent_model`` but is used by the
-        claude_code provider factory: the claude backend passes neither
-        ``--agent`` nor ``session/set_mode``, so (unlike kiro-cli) it cannot
-        pick up a per-agent model from the agent id alone — the model must be
-        resolved here and threaded into the provider.
-
-        Prefers an explicit ``cc_model`` field, falling back to the agent's
-        ``model``. Returns the RAW stored value (a canonical registry key, a kiro
-        dotted id like ``claude-opus-4.6``, or an already-resolved provider id);
-        the ``_claude_code`` factory translates it to a provider id exactly once
-        via ``model_registry.to_provider_id`` (the translation boundary). This is
-        necessary because a kiro dotted id is NOT a valid claude-agent-acp /
-        Bedrock model — sent verbatim to ``set_config_option("model", …)`` the
-        backend rejects the session with ``-32603`` — and the registry's alias
-        map resolves it (e.g. the AIM-managed ``kiroclaw-lite`` agent's
-        ``claude-sonnet-4.6`` → the Sonnet provider id). Returns ``""`` when no
-        per-agent model is found so the caller can fall back to global ``cc_model``.
-        """
-        try:
-            from kiro_claw.agent import (
-                KIRO_AGENTS_DIR,  # circular import: agent imports config.loader
-            )
-        except Exception:
-            return ""
-        for af in KIRO_AGENTS_DIR.glob("*.json"):
-            try:
-                ad = json.loads(af.read_text(encoding="utf-8"))
-            except (ValueError, OSError):
-                continue
-            if ad.get("name") == agent or af.stem == agent:
-                # Return the raw stored value (canonical key or provider id);
-                # the factory's to_provider_id translates it at the boundary.
-                return ad.get("cc_model") or ad.get("model") or ""
-        return ""
-
     def load_credentials(self) -> dict[str, str]:
         """Load credentials from ~/.kiroclaw/.env and environment variables.
 
@@ -2251,129 +2168,11 @@ class KiroClawConfig:
     def create_provider_factory(self) -> Callable:
         """Return a factory that creates LLMProvider instances from config.
 
-        The factory accepts an optional ``session_key`` to create a
-        per-session subdirectory under ``workspace_root()``.
+        KiroClaw is KiroACP-only: the sole provider is the ACP adapter driving
+        the kiro-cli backend. The factory accepts an optional ``session_key`` to
+        create a per-session subdirectory under ``workspace_root()``.
         """
-        if self.agent.provider == "bedrock":
-            from kiro_claw.providers.bedrock import BedrockProvider
-
-            model_id = self.agent.bedrock_model_id
-            region = self.agent.bedrock_region
-
-            def _bedrock(session_key: str | None = None, **_kwargs: object) -> BedrockProvider:
-                return BedrockProvider(model_id=model_id, region=region)
-
-            return _bedrock
-
-        if self.agent.provider == "claude_code":
-            # An empty/unset cc_model must NOT be passed through as "" — the
-            # claude-agent-acp adapter then falls back to its own models[0],
-            # which on current builds is an OLD Opus (4.1). Resolve to the
-            # KiroClaw default (canonical key) so an unconfigured user still gets
-            # the intended flagship model; it is translated to a provider id at
-            # the boundary below.
-            from kiro_claw.providers.acp import (
-                AcpProvider,  # circular: acp -> client -> session -> config.loader
-            )
-
-            cc_model = self.agent.cc_model or model_registry.default("claude_code")
-            sandbox = self.agent.sandbox
-
-            def _claude_code(
-                session_key: str | None = None,
-                agent: str | None = None,
-                model_override: str | None = None,
-                channel_id: str | None = None,
-                cwd: str | None = None,
-                extra_env: dict[str, str] | None = None,
-                reasoning_effort_override: str | None = None,
-                **_kwargs: object,
-            ) -> AcpProvider:
-                wdir = Path(cwd) if cwd else _session_work_dir(session_key)
-                cc_env = {
-                    "CLAUDE_CODE_USE_BEDROCK": "1",
-                    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
-                }
-                # Isolate the spawned claude-agent-acp subprocess from the user's
-                # global ~/.claude install (enabledPlugins → ~17x duplicated
-                # builder-mcp blocks + ~80 agents + ~100 skills of base-prompt
-                # bloat). CLAUDE_CONFIG_DIR points the adapter's SettingsManager
-                # and the SDK at a KiroClaw-seeded dir that keeps Bedrock creds
-                # (awsCredentialExport) + the 1M model allowlist but drops plugins.
-                # Set BEFORE the extra_env merge so a caller-supplied override wins.
-                # The same cc_config_root() value drives the resume guard and
-                # cleanup (providers/cleanup.py), so transcript storage agrees.
-                # circular import: cc_agent._isolated_cc_config_dir imports
-                # config.loader.config_dir, so a module-level import of cc_agent
-                # here would cycle (config.loader → cc_agent → config.loader).
-                # Deferred to call time to break it.
-                from kiro_claw import cc_agent as _cc_agent
-
-                if _cc_agent.cc_isolation_enabled():
-                    cc_env["CLAUDE_CONFIG_DIR"] = str(_cc_agent.cc_config_root())
-                if extra_env:
-                    cc_env.update(extra_env)
-                # Effort for the claude-agent-acp backend is applied live via
-                # session/set_config_option after start (see AcpProvider.start →
-                # _apply_initial_effort), keyed per-model. CLAUDE_CODE_EFFORT_LEVEL
-                # is NOT read by claude-agent-acp, so we thread the level as a
-                # per-model override instead of an (ineffective) env var.
-                #
-                # Per-agent CC model: the default kiroclaw agent keeps the
-                # global cc_model, but custom agents (e.g. kiroclaw-lite for
-                # cheap background work — title/compaction/heartbeat) declare
-                # their own model in their kiro agent json. The claude backend
-                # passes neither --agent nor set_mode, so it cannot resolve a
-                # per-agent model the way kiro-cli does — resolve it here.
-                if model_override:
-                    _cc_m = model_override
-                elif agent and agent != "kiroclaw":
-                    _cc_m = self._resolve_agent_cc_model(agent) or cc_model or ""
-                else:
-                    _cc_m = cc_model or ""
-                # Translation boundary: cc_model / overrides may be a canonical
-                # registry key (e.g. "opus-4.8-1m") OR an already-resolved
-                # provider id. Translate to a provider id exactly here; every
-                # consumer below (AcpProvider, settings.local.json) uses ids.
-                _cc_m = model_registry.to_provider_id(_cc_m, "claude_code") if _cc_m else ""
-                _eff_per_model: dict[str, str] = {}
-                if (
-                    _cc_m
-                    and reasoning_effort_override
-                    and is_valid_effort(reasoning_effort_override)
-                    and model_supports_effort(_cc_m)
-                ):
-                    _eff_per_model[_cc_m] = reasoning_effort_override
-                # Seed the isolated config dir before spawn so the subprocess
-                # reads creds/models/deny at startup (before Bedrock cred
-                # resolution). Idempotent + cheap; safe under warm-pool churn.
-                # Seed the EXACT dir the child will read: extra_env may have
-                # overridden CLAUDE_CONFIG_DIR above, so derive the root from the
-                # final cc_env value rather than re-deriving the default — else
-                # the child reads an unseeded dir.
-                if _cc_agent.cc_isolation_enabled():
-                    _seed_root = cc_env.get("CLAUDE_CONFIG_DIR")
-                    try:
-                        _cc_agent.seed_isolated_cc_config(Path(_seed_root) if _seed_root else None)
-                    except Exception:
-                        logger.warning("CC isolation seed failed; continuing", exc_info=True)
-                return AcpProvider(
-                    work_dir=wdir,
-                    model=_cc_m,
-                    agent=agent or "kiroclaw",
-                    sandbox_mode=sandbox,
-                    session_key=session_key,
-                    channel_id=channel_id,
-                    extra_env=cc_env,
-                    acp_backend=ACP_BACKEND_CLAUDE,
-                    effort_per_model=_eff_per_model,
-                )
-
-            return _claude_code
-
-        from kiro_claw.providers.acp import (  # noqa: F811 — circular import, conditional branch
-            AcpProvider,
-        )
+        from kiro_claw.providers.acp import AcpProvider  # circular: acp -> client -> session -> config.loader
 
         model = self.agent.model
         if model == DEFAULT_MODEL:

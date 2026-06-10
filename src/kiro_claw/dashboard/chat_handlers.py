@@ -7,7 +7,6 @@ import contextlib
 import json
 import logging
 import os
-import re
 import tempfile
 import time
 import uuid
@@ -17,7 +16,6 @@ from pathlib import Path
 from aiohttp import web
 from aiohttp.client_exceptions import ClientConnectionResetError
 
-from kiro_claw.cc_agent import cc_config_root
 from kiro_claw.config.loader import (
     KiroClawConfig,
     _workspace_name_for_dir,
@@ -1835,155 +1833,3 @@ async def api_chat_slot_context(request: web.Request) -> web.Response:
     )
 
     return web.json_response({"ok": True, "pending": len(slot._pending_context)})
-
-
-def _find_session_file(cc_root: Path, session_id: str) -> tuple[Path | None, str]:
-    """Scan ``~/.claude/projects/`` for a session JSONL file.
-
-    This performs blocking filesystem I/O (``is_dir``/``iterdir``/``exists``)
-    and MUST be called off the event loop via ``asyncio.to_thread``.
-
-    Returns:
-        ``(session_file, derived_cwd)`` — ``session_file`` is the matching
-        JSONL path or ``None`` if not found. ``derived_cwd`` is a best-effort
-        CWD reconstructed from the project directory name (empty string when
-        not found); the caller should prefer an explicit ``cwd`` over this.
-    """
-    projects_dir = cc_root / "projects"
-    if not projects_dir.is_dir():
-        return None, ""
-    for project_dir in projects_dir.iterdir():
-        if not project_dir.is_dir():
-            continue
-        candidate = project_dir / f"{session_id}.jsonl"
-        if candidate.exists():
-            # Claude Code encodes '/' as '-' in project dir names, but this is
-            # not reversible for paths with natural hyphens. The derived cwd is
-            # a fallback only; callers should prefer an explicit cwd parameter.
-            derived_cwd = "/" + project_dir.name.replace("-", "/")
-            return candidate, derived_cwd
-    return None, ""
-
-
-async def api_chat_takeover(request: web.Request) -> web.Response:
-    """POST /api/chat/takeover — take over an external Claude Code session.
-
-    Registers an external session ID (from a terminal ``claude`` process or
-    another interface) into the session map so the dashboard can resume it
-    with full context.  Creates a new chat slot linked to the session.
-
-    Body:
-        session_id: str — UUID of the CC session (from ~/.claude/projects/...)
-        cwd: str — working directory the session was running in (optional,
-                   used for project label and CWD override on resume)
-        title: str — optional display title for the new slot
-
-    Returns:
-        {ok, slot} on success — slot name to navigate to.
-    """
-    state: DashboardState = request.app["state"]
-    try:
-        body = await request.json()
-    except Exception:
-        return web.json_response({"error": "invalid JSON"}, status=400)
-
-    session_id = (body.get("session_id") or "").strip()
-    cwd = (body.get("cwd") or "").strip()
-    title = (body.get("title") or "").strip()[:200]
-
-    if not session_id:
-        return web.json_response({"error": "session_id is required"}, status=400)
-
-    # Validate UUID format
-    if not re.match(r"^[a-f0-9-]{36}$", session_id):
-        return web.json_response({"error": "invalid session_id format"}, status=400)
-
-    # Verify the session JSONL exists somewhere under ~/.claude/projects/.
-    # The scan does blocking filesystem I/O, so run it off the event loop.
-    session_file, derived_cwd = await asyncio.to_thread(
-        _find_session_file, cc_config_root(), session_id
-    )
-    if session_file and not cwd:
-        cwd = derived_cwd
-
-    if not session_file:
-        logger.warning(
-            "Session takeover: %s not found under %s",
-            session_id,
-            cc_config_root() / "projects",
-        )
-        sel().log_api_access(
-            caller="dashboard",
-            operation="session_takeover",
-            outcome="not_found",
-            source="lookup",
-            resources=f"sid={session_id}",
-        )
-        return web.json_response(
-            {"error": f"session {session_id} not found"},
-            status=404,
-        )
-
-    # Check the session is not already actively managed by the gateway
-    existing_key = state.sessions._session_map.find_key_by_sid(session_id)
-    if existing_key:
-        # Session already in map — check if there's an active provider
-        provider = state.sessions.get_provider(existing_key)
-        if provider is not None:
-            sel().log_api_access(
-                caller="dashboard",
-                operation="session_takeover",
-                outcome="denied",
-                source="conflict",
-                resources=f"sid={session_id} existing_key={existing_key}",
-                error="session is already active",
-            )
-            return web.json_response(
-                {"error": "session is already active", "existing_key": existing_key},
-                status=409,
-            )
-
-    # Create a new slot and link it to the external session
-    state._slot_counter += 1
-    ts = int(time.time())
-    slot_name = f"takeover-{state._slot_counter}-{ts}"
-
-    slot = state.get_or_create_slot(slot_name)
-    session_key = f"dashboard:{slot_name}"
-    slot.linked_session_key = session_key
-
-    if title:
-        title, _ = redact_exfiltration_urls(title)
-        title, _ = redact_credentials(title)
-        slot.title = title
-        slot._titled = True
-    elif cwd:
-        derived_title = f"Takeover: {Path(cwd).name}"
-        derived_title, _ = redact_exfiltration_urls(derived_title)
-        derived_title, _ = redact_credentials(derived_title)
-        slot.title = derived_title
-        slot._titled = True
-
-    raw_cwd = cwd
-    if cwd:
-        cwd_display, _ = redact_exfiltration_urls(cwd)
-        cwd_display, _ = redact_credentials(cwd_display)
-        slot.project = cwd_display
-
-    # Register the session ID in the session map so get_or_create resumes it
-    state.sessions._session_map.set(session_key, session_id, provider="claude_code", cwd=raw_cwd)
-
-    logger.info(
-        "Session takeover: slot=%s session_id=%s cwd=%s",
-        slot_name, session_id, cwd,
-    )
-    sel().log_api_access(
-        caller="dashboard",
-        operation="session_takeover",
-        outcome="ok",
-        source="dashboard",
-        resources=f"sid={session_id} slot={slot_name}",
-    )
-
-    state.push_slots_update()
-    return web.json_response({"ok": True, "slot": slot_name})

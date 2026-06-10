@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 from kiro_claw.config.paths import config_dir
-from kiro_claw.providers.cleanup import _cleanup_cc_session, _is_safe_path
+from kiro_claw.providers.cleanup import _is_safe_path
 
 logger = logging.getLogger(__name__)
 
@@ -258,14 +258,6 @@ def _cleanup_session_files_sync(
                         target,
                         exc_info=True,
                     )
-        elif provider == "claude_code":
-            if not cwd:
-                logger.debug(
-                    "_cleanup_session_files_sync: no cwd for CC session %s, skipping",
-                    session_id,
-                )
-                return
-            _cleanup_cc_session(cwd, session_id)
     except Exception:
         logger.warning(
             "_cleanup_session_files_sync: unexpected error cleaning session %s",

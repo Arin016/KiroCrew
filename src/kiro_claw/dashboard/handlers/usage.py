@@ -15,10 +15,7 @@ from typing import Any
 from aiohttp import web
 
 from kiro_claw import model_registry
-from kiro_claw.config.loader import KiroClawConfig
-from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.hooks import validate_file_path
-from kiro_claw.stats import Stats
 
 logger = logging.getLogger(__name__)
 
@@ -591,80 +588,5 @@ async def api_kiro_usage(request: web.Request) -> web.Response:
 
 
 async def api_usage(request: web.Request) -> web.Response:
-    """GET /api/usage — provider-aware usage stats.
-
-    For ACP: delegates to api_kiro_usage.
-    For claude_code/bedrock: returns token stats from Stats singleton,
-    including real cost_usd from Claude Code's result events.
-    """
-    state: DashboardState = request.app["state"]
-    provider = getattr(state, "_provider_type", None)
-    if not provider:
-        try:
-            provider = KiroClawConfig.load().agent.provider or "claude_code"
-        except Exception:
-            provider = "claude_code"
-
-    if provider == "acp":
-        return await api_kiro_usage(request)
-
-    stats_instance = Stats()
-    stats = stats_instance.snapshot()
-    # Cached + off-loop (was an inline, uncached _parse_sessions on the event loop).
-    sessions = await _cached_parse_sessions()
-
-    # Token history from persisted JSONL records (survives restarts).
-    # Since we persist on every EVENT_COMPLETE, JSONL is the source of truth.
-    token_history = _parse_token_history()
-    input_tokens = token_history.get("total_input", 0)
-    output_tokens = token_history.get("total_output", 0)
-    cache_creation_tokens = token_history.get("cache_creation", 0)
-    cache_read_tokens = token_history.get("cache_read", 0)
-    total_tokens = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens
-    cost_usd = token_history.get("cost_usd", 0.0)
-
-    budget: dict[str, Any] | None = None
-    if provider == "claude_code":
-        try:
-            cfg = KiroClawConfig.load()
-            max_budget = cfg.agent.cc_max_budget_usd or 0
-            budget = {
-                "spent_usd": round(cost_usd, 6),
-                "max_usd": max_budget,
-            }
-        except Exception:
-            budget = {"spent_usd": round(cost_usd, 6), "max_usd": 0}
-
-    response = {
-        "username": getpass.getuser(),
-        "sessions": (
-            sessions
-            if isinstance(sessions, dict) and "error" not in sessions
-            else {
-                "total_sessions": stats.get("sessions_created", 0),
-                "today": {"sessions": 0, "messages": 0, "tool_calls": 0},
-                "this_week": {"sessions": 0, "messages": 0, "tool_calls": 0},
-                "this_month": {"sessions": 0, "messages": 0, "tool_calls": 0},
-                "avg_msgs_per_session": 0,
-                "daily_history": [],
-            }
-        ),
-        "tokens": {
-            "total_input": input_tokens,
-            "total_output": output_tokens,
-            "cache_creation": cache_creation_tokens,
-            "cache_read": cache_read_tokens,
-            "total": total_tokens,
-        },
-        "cost_usd": round(cost_usd, 6),
-        "total_turns": stats.get("total_turns", 0),
-        "total_duration_ms": stats.get("total_duration_ms", 0),
-        "token_daily_history": token_history.get("daily_history", []),
-        "token_providers": token_history.get("providers", []),
-        "token_models": token_history.get("models", []),
-        "token_provider_models": token_history.get("provider_models", {}),
-    }
-    if budget:
-        response["budget"] = budget
-
-    return web.json_response(response)
+    """GET /api/usage — usage stats for the kiro-cli (KiroACP) provider."""
+    return await api_kiro_usage(request)

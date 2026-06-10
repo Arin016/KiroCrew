@@ -31,7 +31,6 @@ from kiro_claw.apps.manager import (
     uninstall_app,
 )
 from kiro_claw.apps.scaffold import scaffold_app
-from kiro_claw.cc_agent import CC_SETTINGS_PATH, revert_user_model_settings
 from kiro_claw.config import config_dir
 from kiro_claw.config.loader import (
     DASHBOARD_PORT,
@@ -47,7 +46,6 @@ from kiro_claw.eval.runner import EvalRunner, format_results, score_by_dimension
 from kiro_claw.eval.scenario import AssertionType, load_scenario, load_scenarios
 from kiro_claw.hooks import safe_read_file
 from kiro_claw.learn import Lesson, LessonStore
-from kiro_claw.mirror import mirror_kiro_to_cc
 from kiro_claw.security import (
     BUILTIN_DENY_PATTERNS,
     is_sensitive_path,
@@ -1287,83 +1285,6 @@ def _artifact(args: argparse.Namespace) -> None:
         file=sys.stderr,
     )
     sys.exit(2)
-
-
-def _handle_mirror(args: argparse.Namespace) -> None:
-    """Dispatch mirror subcommands."""
-    action = getattr(args, "mirror_action", None)
-
-    if action == "kiro-to-cc":
-        dry_run = getattr(args, "dry_run", False)
-        force = getattr(args, "force", False)
-
-        if dry_run:
-            print("Dry run -- no files will be written.\n")
-
-        result = mirror_kiro_to_cc(dry_run=dry_run, force=force)
-
-        # Print summary table
-        print(f"{'CATEGORY':<12} {'NAME':<30} {'ACTION'}")
-        print("-" * 60)
-
-        for entry in result["agents"]:
-            print(f"{'agent':<12} {entry['name']:<30} {entry['action']}")
-            if entry.get("hint"):
-                print(f"{'':>12} (hint: {entry['hint']})")
-
-        for entry in result["mcp"]:
-            action_str = entry["action"]
-            if entry.get("count"):
-                action_str += f" ({entry['count']} entries)"
-            print(f"{'mcp':<12} {entry['name']:<30} {action_str}")
-
-        for entry in result["skills"]:
-            print(f"{'skill':<12} {entry['name']:<30} {entry['action']}")
-
-        if result["errors"]:
-            print(f"\n{'ERRORS':}")
-            for err in result["errors"]:
-                print(f"  {err['source']}: {err['error']}")
-
-        # Summary counts
-        mirrored = (
-            sum(1 for a in result["agents"] if a["action"] == "mirrored")
-            + sum(1 for m in result["mcp"] if "mirrored" in m["action"])
-            + sum(1 for s in result["skills"] if s["action"] == "mirrored")
-        )
-        skipped = (
-            sum(1 for a in result["agents"] if "skipped" in a["action"])
-            + sum(1 for m in result["mcp"] if "skipped" in m["action"])
-            + sum(1 for s in result["skills"] if "skipped" in s["action"])
-        )
-        errors = len(result["errors"])
-        print(f"\nSummary: {mirrored} mirrored, {skipped} skipped, {errors} errors")
-    else:
-        print("Usage: kiroclaw mirror {kiro-to-cc}", file=sys.stderr)
-        sys.exit(2)
-
-
-def _handle_cc(args: argparse.Namespace) -> None:
-    """Dispatch cc subcommands: revert-settings."""
-    action = getattr(args, "cc_action", None)
-    if action == "revert-settings":
-        dry_run = getattr(args, "dry_run", False)
-        changed = revert_user_model_settings(dry_run=dry_run)
-        if not changed:
-            print(
-                f"No KiroClaw-written model keys found in {CC_SETTINGS_PATH} "
-                f"(nothing to revert)."
-            )
-        elif dry_run:
-            print(
-                f"[dry-run] Would remove KiroClaw model keys from {CC_SETTINGS_PATH} "
-                f"(deny patterns kept)."
-            )
-        else:
-            print(f"Removed KiroClaw model keys from {CC_SETTINGS_PATH} " f"(deny patterns kept).")
-    else:
-        print("Usage: kiroclaw cc {revert-settings}", file=sys.stderr)
-        sys.exit(2)
 
 
 def _handle_aim(args: argparse.Namespace) -> None:

@@ -103,19 +103,22 @@ from kiro_claw.session_pid import (  # noqa: F401
 )
 from kiro_claw.stats import Stats
 
-try:
-    from kiro_claw.providers.claude_code import ClaudeCodeProvider
-except ImportError:
-    ClaudeCodeProvider = None  # type: ignore[assignment,misc]
+# The standalone ClaudeCodeProvider was removed in the KiroACP-only refactor;
+# the public core ships kiro-cli (ACP) only. The name is kept (always None) so
+# the legacy ``ClaudeCodeProvider is not None and isinstance(...)`` guards below
+# short-circuit cleanly. The claude-agent-acp seam survives via
+# ``_is_claude_backend`` (the internal companion re-registers Claude Code).
+ClaudeCodeProvider = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
 
 def _is_claude_backend(provider: Any) -> bool:
-    """Check if a provider is Claude Code via the ACP adapter (not old ClaudeCodeProvider).
+    """Check if a provider drives the claude-agent-acp seam via the ACP adapter.
 
     Returns True when an AcpProvider wraps claude-agent-acp (backend="claude").
-    Returns False on older codebases where the backend attribute doesn't exist.
+    Dormant in the public core (the factory never selects it); the internal
+    companion re-registers the Claude Code provider over this same seam.
     """
     from kiro_claw.providers.acp import AcpProvider  # circular import: providers -> session
 
@@ -872,14 +875,8 @@ class SessionManager:
         # no value but would trigger the warm-pool post-claim set_model
         # path with no real change.
         if model is None:
-            # Provider-aware fallback: claude_code reads cc_model (its own
-            # config slot — agent.model is the kiro/ACP slot and may legitimately
-            # be "auto" while cc_model is set). For non-cc providers, keep the
-            # original behavior and fall back to agent.model.
-            if self._cfg.agent.provider == "claude_code":
-                global_model = self._cfg.agent.cc_model
-            else:
-                global_model = self._cfg.agent.model
+            # KiroACP-only: the effective model is the kiro/ACP slot.
+            global_model = self._cfg.agent.model
             if global_model and global_model not in _SENTINEL_MODELS:
                 model = global_model
 

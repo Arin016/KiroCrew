@@ -39,14 +39,6 @@ from pathlib import Path
 from typing import Any
 
 from kiro_claw.aim_agents import installed_kiro_packages_missing_from_cc
-from kiro_claw.cc_agent import (
-    cc_isolation_enabled,
-    generate_mcp_json,
-    install_cc_agent,
-    install_cc_global_deny_settings,
-    revert_user_model_settings,
-    seed_isolated_cc_config,
-)
 from kiro_claw.config import KiroClawConfig
 from kiro_claw.config import config_path as _mc_config_path
 from kiro_claw.security import is_sensitive_path, redact
@@ -1528,15 +1520,6 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
     # Security: enforce deniedCommands + sanitize invalid hook keys
     repair_agent_configs()
 
-    # Always render CC agent artifacts (~/.claude/agents/kiroclaw.md and
-    # kiroclaw.mcp.json) regardless of active provider, so Claude Code
-    # sessions see the same merged MCP server set the moment the user
-    # switches to the CC provider. See install_cc_agent_config docstring.
-    try:
-        install_cc_agent_config(config)
-    except Exception:
-        logger.debug("CC agent config install skipped or failed", exc_info=True)
-
     return path
 
 
@@ -1867,140 +1850,10 @@ def sync_aim_packages() -> None:
     return None
 
 
-CC_MCP_FILE = Path.home() / ".claude" / "agents" / "kiroclaw.mcp.json"
-
-
-def _toolbox_cc_defaults_dir() -> Path | None:
-    """Return ``None`` on public installs (Amazon Toolbox absent).
-
-    Symbol preserved for callers and tests.  Previously located the
-    Amazon Toolbox-managed Claude Code ``configuration/`` directory that
-    shipped org-level per-MCP-server defaults; there is no such directory
-    on a public install, so there are no org defaults to merge.
-    """
-    return None
-
-
-def _resolve_toolbox_exec_passthrough(command: str) -> str:
-    """Return *command* unchanged on public installs (no Toolbox shims).
-
-    Symbol preserved for callers and tests.  Previously resolved an
-    Amazon Toolbox ``toolbox-exec`` shim symlink to the underlying real
-    binary; public installs have no Toolbox shims, so the command is
-    passed through verbatim.
-    """
-    return command
-
-
-def _apply_cc_provider_defaults(servers: dict[str, Any]) -> dict[str, Any]:
-    """Return *servers* unchanged (no org-shipped CC defaults on public installs).
-
-    Symbol preserved for callers and tests.  Previously merged Amazon
-    Toolbox-shipped per-server defaults (e.g. ``builder-mcp-defaults.json``)
-    and collapsed ``toolbox-exec`` shim paths.  Neither exists on a public
-    install, so the merged server map is returned as-is.
-    """
-    return servers
-
-
-def install_cc_agent_config(merged_config: dict | None = None) -> "Path | None":
-    """Render Claude Code's agent artifacts from the KiroClaw merged config.
-
-    Writes two files under ``~/.claude/agents/``:
-      - ``kiroclaw.md`` — YAML-frontmatter agent definition (name-only
-        ``mcpServers`` list scoping which servers are active)
-      - ``kiroclaw.mcp.json`` — full MCP server definitions that CC loads
-        via the ``--mcp-config`` CLI flag at session spawn
-
-    This mirrors Kiro's single-file layout (``~/.kiro/agents/kiroclaw.json``
-    embeds mcpServers directly).  CC's frontmatter is name-only so the
-    definitions must live in a companion file.  Both are KiroClaw-owned
-    and never touch ``~/.claude.json`` (the user's interactive CC global).
-
-    Args:
-        merged_config: The fully-merged Kiro agent config (output of
-            ``rebuild_agent_config``).  If ``None``, the current on-disk
-            Kiro agent file is read as the source.  Callers inside
-            ``rebuild_agent_config`` should pass the in-memory config to
-            avoid the extra disk read.
-
-    Returns:
-        Path to the agent markdown, or ``None`` if CC provider is not
-        configured.
-    """
-    # Always render CC agent artifacts so the file is current regardless of
-    # which provider is active. When the user switches to claude_code the
-    # config is immediately usable; servers installed while on kiro are not
-    # left stale on the CC side. File I/O is ~5KB — cheap to keep synced.
-
-    if merged_config is None:
-        kiro_agent_path = KIRO_AGENTS_DIR / AGENT_FILENAME
-        if kiro_agent_path.is_file():
-            merged_config = _load_json(kiro_agent_path)
-        else:
-            merged_config = build_agent_config()
-    # Work on a shallow copy so we don't mutate the caller's dict.
-    agent_cfg = dict(merged_config)
-    # Deep-copy the mcpServers block — we apply provider-defaults inline.
-    agent_cfg["mcpServers"] = {
-        name: dict(spec) if isinstance(spec, dict) else spec
-        for name, spec in (merged_config.get("mcpServers") or {}).items()
-    }
-
-    # Install agent markdown (~/.claude/agents/kiroclaw.md) — CC reads this
-    # for model, tool, and server-name scoping.
-    agent_path = install_cc_agent(agent_cfg)
-
-    # Translate to CC's stdio format.  (_apply_cc_provider_defaults is a
-    # pass-through on public installs — no org-shipped defaults to merge.)
-    mcp_data, _allow, _disallowed = generate_mcp_json(agent_cfg)
-    mcp_data["mcpServers"] = _apply_cc_provider_defaults(mcp_data.get("mcpServers", {}))
-
-    # Write the companion MCP registry next to the agent markdown. The default
-    # claude-agent-acp backend reads this at session/new (via
-    # acp/client._claude_acp_mcp_servers); the legacy `claude` CLI consumed it
-    # via --mcp-config (providers/claude_code.py).
-    CC_MCP_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_json_write(CC_MCP_FILE, mcp_data)
-    logger.info(
-        "Installed CC agent config: %s (%d servers), %s",
-        agent_path,
-        len(mcp_data["mcpServers"]),
-        CC_MCP_FILE,
-    )
-
-    return agent_path
-
-
 def repair_agent_configs() -> None:
     """Enforce security controls and sanitize invalid keys in all agent configs."""
     _enforce_denied_commands()
     _sanitize_agent_hooks()
-    try:
-        # Re-assert security deny patterns + managed marker into the user-global
-        # ~/.claude. Model config is NOT written here (it lives in the per-session
-        # settings.local.json) so KiroClaw never mutates the user's model config.
-        install_cc_global_deny_settings()
-    except Exception:
-        logger.debug("CC global deny settings install failed", exc_info=True)
-    try:
-        # Idempotent cleanup: un-pollute the user's ~/.claude of model keys
-        # KiroClaw wrote in earlier versions (model config now lives in the
-        # KiroClaw-owned per-session settings.local.json). On boot we run
-        # MARKER-GATED so we never delete a value the operator set themselves
-        # that merely matches our constant — legacy pollution (no marker) is left
-        # for the explicit `kiroclaw cc revert-settings` command.
-        revert_user_model_settings(require_marker=True)
-    except Exception:
-        logger.debug("CC user model-settings revert failed", exc_info=True)
-    try:
-        # Seed the isolated CC config dir so the spawned claude-agent-acp
-        # subprocess reads creds/models/deny (plugins stripped) on first spawn.
-        if cc_isolation_enabled():
-            seed_isolated_cc_config()
-    except Exception:
-        logger.debug("CC isolation seed failed", exc_info=True)
-    _ensure_cc_parity_for_kiro_packages()
 
 
 def _ensure_cc_parity_for_kiro_packages() -> None:

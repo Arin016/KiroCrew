@@ -980,49 +980,6 @@ Examples:
     app_init.add_argument("--ui", action="store_true", help="Include UI frontend (ESM + Vite)")
     app_init.add_argument("--cron", action="store_true", help="Include sample cron job")
 
-    # mirror
-    mirror_parser = sub.add_parser(
-        "mirror",
-        help="Mirror configuration between providers",
-        epilog="""
-Examples:
-  kiroclaw mirror kiro-to-cc              # Mirror ~/.kiro/ to ~/.claude/
-  kiroclaw mirror kiro-to-cc --dry-run    # Preview without writing
-  kiroclaw mirror kiro-to-cc --force      # Overwrite existing files
-""",
-        formatter_class=_fmt,
-    )
-    mirror_sub = mirror_parser.add_subparsers(dest="mirror_action")
-    mirror_k2c = mirror_sub.add_parser(
-        "kiro-to-cc", help="Mirror ~/.kiro/ agents, MCP, and skills to ~/.claude/"
-    )
-    mirror_k2c.add_argument(
-        "--dry-run", action="store_true", help="Preview changes without writing files"
-    )
-    mirror_k2c.add_argument(
-        "--force", action="store_true", help="Overwrite existing files in ~/.claude/"
-    )
-
-    # cc (Claude Code provider maintenance)
-    cc_parser = sub.add_parser(
-        "cc",
-        help="Claude Code provider maintenance",
-        epilog="""
-Examples:
-  kiroclaw cc revert-settings            # Remove KiroClaw-written model keys from ~/.claude
-  kiroclaw cc revert-settings --dry-run  # Preview without writing
-""",
-        formatter_class=_fmt,
-    )
-    cc_sub = cc_parser.add_subparsers(dest="cc_action")
-    cc_revert = cc_sub.add_parser(
-        "revert-settings",
-        help="Remove KiroClaw-written model keys from ~/.claude/settings.json (deny kept)",
-    )
-    cc_revert.add_argument(
-        "--dry-run", action="store_true", help="Show what would change without writing"
-    )
-
     # config
     cfg_parser = sub.add_parser(
         "config",
@@ -1230,10 +1187,6 @@ Examples:
         _handle_app(args)
     elif args.command == "aim":
         _handle_aim(args)
-    elif args.command == "mirror":
-        _handle_mirror(args)
-    elif args.command == "cc":
-        _handle_cc(args)
     else:
         print(BANNER)
         parser.print_help()
@@ -1249,8 +1202,6 @@ from kiro_claw.cli_commands import (  # noqa: E402
     _handle_agent,
     _handle_aim,
     _handle_app,
-    _handle_cc,
-    _handle_mirror,
     _handle_workspace,
     _learn,
     _memory_cmd,

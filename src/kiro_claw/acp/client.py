@@ -31,7 +31,6 @@ from collections import deque
 from pathlib import Path
 from typing import AsyncIterator
 
-from kiro_claw import model_registry
 from kiro_claw.acp.types import (
     ACP_BACKEND_CLAUDE,
     EVENT_AGENT_SWITCHED,
@@ -85,7 +84,6 @@ from kiro_claw.acp.types import (
     JsonRpcRequest,
 )
 from kiro_claw.env import augmented_path
-from kiro_claw.providers.cleanup import _cc_session_paths
 from kiro_claw.sandbox import wrap_argv
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 
@@ -132,11 +130,6 @@ _CLAUDE_ACP_PKG_ENTRY = Path(CLAUDE_ACP_NPM_PKG) / "dist" / "index.js"
 # incomplete root and fall through to the next candidate.
 _CLAUDE_ACP_DEP_MARKER = Path("@agentclientprotocol") / "sdk"
 
-# KiroClaw-owned CC MCP registry, kept current by agent.install_cc_agent_config.
-# Read fresh at session/new time for the claude backend (claude-agent-acp does
-# NOT read this file itself — it takes mcpServers as a session/new param).
-_CC_MCP_FILE = Path.home() / ".claude" / "agents" / "kiroclaw.mcp.json"
-
 # High-frequency, content-free adapter stderr diagnostics that _drain_stderr()
 # drops instead of forwarding as per-line WARNINGs.  The driving case is the
 # claude-agent-acp "Unexpected case: {...thinking_tokens...}" line.  Mechanism
@@ -179,45 +172,6 @@ _SUPPRESSED_STDERR_MARKERS = ("thinking_tokens",)
 # Minimum seconds between throttled debug summaries of the suppressed-line count,
 # so the suppression itself stays observable without re-introducing a flood.
 _SUPPRESSED_STDERR_SUMMARY_INTERVAL_SECS = 60.0
-
-
-def _claude_acp_mcp_servers() -> list[dict]:
-    """Build the ACP ``session/new`` mcpServers array for the claude backend.
-
-    Reads the KiroClaw-owned ``~/.claude/agents/kiroclaw.mcp.json`` (written by
-    ``agent.install_cc_agent_config`` whenever the agent config is rebuilt) and
-    reshapes it into the ACP array the claude-agent-acp adapter expects. Read
-    per spawn so MCP installs/toggles take effect on the next session without a
-    gateway restart. Never raises — a missing or malformed registry degrades to
-    just KiroClaw's own core/cron servers (always injected below).
-    """
-    cc_servers: dict = {}
-    try:
-        raw = _CC_MCP_FILE.read_text(encoding="utf-8")
-        data = json.loads(raw)
-        if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict):
-            cc_servers = data["mcpServers"]
-    except OSError:
-        logger.info(
-            "CC MCP registry not found at %s; loading kiroclaw core/cron only", _CC_MCP_FILE
-        )
-    except (json.JSONDecodeError, AttributeError):
-        logger.warning(
-            "CC MCP registry at %s is not valid JSON; loading core/cron only", _CC_MCP_FILE
-        )
-
-    # circular import: cc_agent transitively reaches config.loader →
-    # providers.acp → this module, so a module-top import would cycle.
-    from kiro_claw.cc_agent import acp_servers_from_cc_map, kiroclaw_stdio_servers
-
-    # Force kiroclaw's own servers to their canonical stdio form, and guarantee
-    # their presence even when the registry is missing. An older on-disk
-    # registry may carry a stale ``url`` (an abandoned gateway HTTP-MCP endpoint
-    # that no route serves) — overwrite so core/cron always load over stdio
-    # regardless of what the file says.
-    cc_servers.update(kiroclaw_stdio_servers())
-
-    return acp_servers_from_cc_map(cc_servers)
 
 
 def _is_safe_oauth_url(url: str) -> bool:
@@ -1103,59 +1057,22 @@ class AcpClient:
 
     # ── Process Management ──
 
-    def _write_claude_local_settings(self) -> None:
-        """Write the per-session ``<work_dir>/.claude/settings.local.json``.
-
-        Highest-precedence project source the claude-agent-acp adapter reads.
-        Carries (1) ``permissions.defaultMode='default'`` so every tool routes
-        through the host canUseTool gate, and (2) the full ``availableModels``
-        allowlist + resolved ``model`` so the adapter resolves the versioned
-        ``[1m]`` id (1M window) by EXACT match — even when the user's
-        ``~/.claude`` is polluted with ``['opus','sonnet']`` (the adapter merges
-        availableModels union+dedup across sources). KiroClaw-owned; removed on
-        session cleanup (providers/acp.py). Never touches the user's ~/.claude.
-        """
-        settings_dir = self._work_dir / ".claude"
-        settings_dir.mkdir(parents=True, exist_ok=True)
-        local_settings = settings_dir / "settings.local.json"
-        data: dict = {"permissions": {"defaultMode": "default"}}
-        allowlist = model_registry.available_models("claude_code")
-        # circular import: cc_agent → agent → … → acp.client would cycle at module top
-        from kiro_claw.cc_agent import _atomic_settings_write
-
-        if allowlist:
-            data["availableModels"] = allowlist
-        else:
-            # Only reachable if model_registry.json is corrupt/missing (which the
-            # registry already warns about at import). Without the allowlist the
-            # adapter can collapse the [1m] id to 200k — surface it so it's
-            # diagnosable rather than silently degrading.
-            logger.warning(
-                "model registry availableModels empty (corrupt/missing registry?); "
-                "settings.local.json written without an allowlist — 1M window may not resolve",
-            )
-        # self._model is a resolved provider id (translated at the factory).
-        if self._model and self._model != DEFAULT_MODEL:
-            data["model"] = self._model
-        # Reuse the shared atomic writer (tmp+fsync+os.replace, random tmp name
-        # unlinked on error → no orphaned .tmp, no torn read). Force 0o600 so the
-        # file is created restrictive from the start.
-        _atomic_settings_write(local_settings, data, mode=0o600)
-
     async def _spawn(self) -> None:
-        """Start the ACP backend subprocess (kiro-cli or claude-agent-acp) with stdio pipes."""
+        """Start the ACP backend subprocess with stdio pipes.
+
+        KiroClaw's public core only ever drives the kiro-cli backend. The
+        claude-agent-acp branch below is the dormant protocol seam (see
+        ``ACP_BACKEND_CLAUDE``): the public provider factory never selects it,
+        so it is unreachable here, but an internal companion that re-registers
+        the Claude Code provider reuses this same client over the seam.
+        """
         self._work_dir.mkdir(parents=True, exist_ok=True)
 
         if self._is_claude:
-            # claude-agent-acp: route every tool decision back to the host
-            # (KiroClaw) via session/request_permission so the same approve /
-            # trust_reads / trust / yolo protocol used for kiro-cli applies.
-            # The adapter only short-circuits when defaultMode is
-            # "bypassPermissions"; "default" preserves its canUseTool callback,
-            # which forwards to the ACP host as session/request_permission.
-            # KiroClaw still enforces deny-pattern hooks on top of this.
-            self._write_claude_local_settings()
-
+            # Dormant seam — see method docstring. Binary resolution only; the
+            # ~/.claude registration glue (settings.local.json, the MCP-registry
+            # reader) lived in the deleted cc_agent module and is re-added by the
+            # internal companion, not the public core.
             global _claude_acp_argv_cache  # noqa: PLW0603
             if _claude_acp_argv_cache is _UNRESOLVED:
                 _claude_acp_argv_cache = await asyncio.to_thread(_resolve_claude_acp_bin)
@@ -1183,20 +1100,17 @@ class AcpClient:
             env.update(self._extra_env)
         env["PATH"] = augmented_path(env.get("PATH", ""))
         if self._is_claude and not env.get("CLAUDE_CODE_EXECUTABLE"):
-            # The adapter's SDK needs a native Claude binary we don't vendor
-            # (~250 MB/platform) and does NOT search PATH for `claude` itself,
-            # so point it at one explicitly.  Only set when unset so an operator
-            # override always wins.  Left unset (with a warning) if none is
-            # found — the adapter then surfaces its native-binary error, which
-            # is more actionable than us injecting a bad path.
+            # Dormant seam (see _spawn docstring): the adapter's SDK needs a
+            # native Claude binary we don't vendor and does NOT search PATH for
+            # `claude` itself, so point it at one explicitly when the seam is
+            # driven. Only set when unset so an operator override always wins.
             claude_exe = _resolve_claude_code_executable()
             if claude_exe:
                 env["CLAUDE_CODE_EXECUTABLE"] = claude_exe
             else:
                 logger.warning(
                     "%s not found on PATH; the claude-agent-acp adapter will "
-                    "fail with 'Claude native binary not found'. Install Claude "
-                    "Code (https://www.anthropic.com/claude-code) or set "
+                    "fail with 'Claude native binary not found'. Set "
                     "CLAUDE_CODE_EXECUTABLE.",
                     CLAUDE_CODE_BIN,
                 )
@@ -1470,17 +1384,15 @@ class AcpClient:
             # session/load that REPLAYS the old transcript on top of the fresh
             # system prompt + memory injection — inflating base context to
             # ~38% on turn 1. kiro-cli stores transcripts at ~/.kiro/sessions/
-            # cli/<sid>.json; claude-agent-acp stores them via the Claude Code
-            # SDK under CLAUDE_CONFIG_DIR — i.e. the isolated <config_dir>/
-            # cc-config/projects/<encoded-cwd>/<sid>.jsonl when isolation is on,
-            # else ~/.claude/projects/... . _cc_session_paths resolves the same
-            # cc_config_root() the spawn env injected, so resume looks exactly
-            # where the SDK wrote. A missing transcript falls back to session/new
-            # (a genuinely fresh start) for BOTH backends.
+            # cli/<sid>.json; a missing transcript falls back to session/new
+            # (a genuinely fresh start).
             if self._is_claude:
-                session_file = ""  # claude session/load does not take a file path
-                cc_transcript = _cc_session_paths(self._work_dir, resume_sid)[0]
-                file_ok = cc_transcript.exists()
+                # Dormant seam: claude session/load takes no file path, and the
+                # SDK transcript-path resolver lived in the deleted cc cleanup
+                # helper. The internal companion re-adds it; the public core
+                # simply attempts the load.
+                session_file = ""
+                file_ok = True
             else:
                 session_file = str(
                     Path.home() / ".kiro" / "sessions" / "cli" / f"{resume_sid}.json"
@@ -1494,7 +1406,7 @@ class AcpClient:
                         # kiro-cli gets its servers via --agent; the claude
                         # backend must receive them here (it does not read
                         # kiroclaw.mcp.json itself).
-                        "mcpServers": _claude_acp_mcp_servers() if self._is_claude else [],
+                        "mcpServers": [],
                     }
                     if self._is_claude:
                         load_params["_meta"] = {"claudeCode": {"options": {}}}
@@ -1521,7 +1433,7 @@ class AcpClient:
                 "cwd": str(self._work_dir),
                 # kiro-cli loads servers from --agent; claude-agent-acp must be
                 # told here — it does not read kiroclaw.mcp.json on its own.
-                "mcpServers": _claude_acp_mcp_servers() if self._is_claude else [],
+                "mcpServers": [],
             }
             if self._is_claude:
                 new_params["_meta"] = {"claudeCode": {"options": {}}}

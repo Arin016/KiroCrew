@@ -621,19 +621,13 @@ def _agent_values() -> set[str]:
 
 
 _EDITABLE_CONFIG: dict[str, dict] = {
-    "agent.provider": {"type": "enum", "values": ["acp", "bedrock", "claude_code"]},
+    "agent.provider": {"type": "enum", "values": ["acp"]},
     "agent.approval_mode": {"type": "enum", "values": ["auto", "interactive"]},
     "agent.sandbox": {"type": "enum", "values": ["auto", "off"]},
     "agent.enforce_denied_commands": {"type": "enum", "values": ["all", "kiroclaw"]},
     "agent.completion_keep": {"type": "enum", "values": ["head", "tail", "both"]},
     "agent.completion_keep_chars": {"type": "int", "min": 0, "max": RESULT_FILE_MAX_BYTES},
     "agent.soft_stop_budget_secs": {"type": "float", "min": 0.5, "max": 60.0},
-    "agent.cc_model": {"type": "str"},
-    "agent.cc_permission_mode": {"type": "enum", "values": ["bypassPermissions", "default", "plan"]},
-    "agent.cc_max_turns": {"type": "int", "min": 0, "max": 1000},
-    "agent.cc_max_budget_usd": {"type": "float", "min": 0.0, "max": 100.0},
-    "agent.bedrock_model_id": {"type": "str"},
-    "agent.bedrock_region": {"type": "str"},
     "session.timeout_secs": {"type": "int", "min": 0, "max": 86400},
     "session.autocompact_pct": {"type": "float", "min": 5.0, "max": 90.0},
     "session.pool_size": {"type": "int", "min": 0, "max": 10},

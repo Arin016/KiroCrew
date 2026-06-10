@@ -68,10 +68,10 @@ from kiro_claw.subagent_persistence import (
 )
 from kiro_claw.validation import _AGENT_NAME_RE
 
-try:
-    from kiro_claw.providers.claude_code import ClaudeCodeProvider
-except ImportError:
-    ClaudeCodeProvider = None  # type: ignore[assignment,misc]
+# Standalone ClaudeCodeProvider removed (KiroACP-only). Name kept as None so the
+# legacy isinstance guards short-circuit; the claude-agent-acp seam lives in
+# providers.acp.is_claude_backend.
+ClaudeCodeProvider = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 

@@ -85,8 +85,6 @@ from kiro_claw.dashboard.handlers.agents import (  # noqa: E402, F401
     api_aim_update,
     api_cc_aim_missing,
     api_cc_aim_sync,
-    api_cc_mirror_preview,
-    api_cc_mirror_run,
     api_config_schema,
     api_default_agent,
     api_effort_levels,
