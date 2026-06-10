@@ -146,6 +146,45 @@ internal ones. Examples:
   `sync_aim_packages` iterdir loop the fork replaced with `return None`) has
   **no anchor — drop it.**
 
+### Anti-miss: a NAME is not a verdict (the #1 cause of wrongly-dropped fixes)
+
+Every wrongly-SKIPped commit we have found was dropped by reading the
+**commit title, file path, or symbol name** instead of the **diff**. Before any
+SKIP/ALREADY_PRESENT, you MUST open the diff and apply these checks:
+
+1. **Is the change GATED on the internal thing, or merely NAMED for it?** A
+   commit titled "…for Bedrock" / "fix(secretary): …" / "fix(promptfarm): …"
+   often contains a generic, ungated hunk wired into a SHARED choke point.
+   Real misses we shipped late:
+   - `d7271865` "downscale images for **Bedrock**" → the resize was at the
+     single `uploadFiles()` choke point with **no provider gate**; it helps the
+     kiro-cli image path too. Was KEEP. (Renamed `*ForBedrock`→`*ForModel`.)
+   - `599d6f64` "fix(**promptfarm**): …" → bundled a generic `SkillsLoader`
+     cache-invalidation bug (mutators didn't call `_invalidate_iter_cache()`,
+     so the dashboard's skill CRUD showed stale lists). PARTIAL: port the
+     generic hunk, drop the promptfarm handler.
+   - `7342c6e` "fix(**secretary**): …" → first hunk was a guard in the SHARED
+     `timeAgo()` helper (ts=0 → "~20602d"), reached by `ArtifactsPage`. PARTIAL.
+2. **Does a SHARED helper / choke point change?** `utils/`, `api/client.ts`
+   `uploadFiles`, `skills.py` mutators, `security.py`, `hooks.py`, a renderer —
+   a change here is almost never confined to the internal feature that occasioned
+   it. Grep the fork for the helper's other callers before dropping.
+3. **ALREADY_PRESENT means the BEHAVIOR is present, not a similar name.** Read
+   the cited fork file and confirm the actual change. And a commit can be
+   ALREADY_PRESENT in its production code yet still carry a **missing generic
+   test** worth porting (e.g. `dfbc99cd`: feature present, regression-guard
+   tests absent → PARTIAL, test-only).
+4. **Provenance ≠ port.** A fork commit *citing* an upstream SHA may be a
+   `chore(meshclaw-sync)` boundary-advance that records it as SKIPPED, not a
+   real port. When auditing history, only a non-chore feat/fix commit citing the
+   SHA proves it was actually ported.
+
+Genuine SKIP still holds when the change is **truly confined** to something the
+fork lacks: an endpoint that 404s (`/api/mcp-gateway/*`, `/api/artifactory/*`), a
+page/dir that's absent (`SecretaryPage`, `apps/auto-research/`), or a hunk whose
+only effect re-adds a forbidden coupling (`e62422ae`'s `_INTERNAL_READ_ALLOWLIST`
+existed solely to read `~/.midway/cookie` for the absent `scanner_sync`).
+
 If unsure whether a fix is already in the fork, check by **content**, not SHA:
 read the upstream diff, then read the corresponding `kiro_claw` file. Verdicts:
 ALREADY_PRESENT / MISSING / PARTIAL / N/A_INTERNAL.
@@ -367,3 +406,27 @@ exits (no empty commit, no CR). If it hits an ambiguous large/PARTIAL commit it
 can't confidently de-Amazon, it ports the clean KEEPs, leaves the ambiguous one
 un-ported, and **notes it in the CR description** as deferred-for-human-review
 rather than guessing.
+
+## Periodic re-audit of the SKIP backlog
+
+SKIP is reversible — a commit dropped on a name, or one whose owner later clears
+an internal feature for external release (e.g. `instances/`), should be caught
+without waiting for someone to notice. Periodically (and any time the SKIP rubric
+or an absent/stubbed subsystem changes) **re-audit every left-out commit by
+content**:
+
+```bash
+# Reconstruct the full left-out set across all batches: upstream commits in the
+# synced window with NO real (non-chore) fork port commit citing them.
+#   window = <first-ever beta sha>..<current beta boundary>
+# For each, open the diff and apply the "Anti-miss" checks above. A
+# triage+verify Workflow with a SKEPTICAL confirm pass (high bar to add to a
+# shipped CR) is the right tool — bias toward rescuing a wrongly-dropped GENERIC
+# hunk, but uphold a SKIP that is truly confined to an absent endpoint/dir.
+```
+
+Rescues are almost always **PARTIAL** (the headline was correctly internal; a
+bundled generic hunk was the miss). Port the generic part with de-Amazon renames
+(`*ForBedrock`→`*ForModel`), drop the internal part, and add/adapt the test.
+Record the re-audit outcome in the `kiroclaw-meshclaw-sync` memory so the backlog
+state is durable.
