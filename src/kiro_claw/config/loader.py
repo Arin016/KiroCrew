@@ -405,13 +405,60 @@ class AgentConfig:
     )
     max_subagents: int = field(
         default=3,
-        metadata=_meta("Max SubAgents", "Maximum amount of subagents at one time."),
+        metadata=_meta(
+            "Max SubAgents",
+            "Maximum amount of subagents at one time. 0 = auto-size the cap at "
+            "startup from host memory/CPU and a learned per-agent cost "
+            "(see dynamic-subagent-sizing docs).",
+        ),
     )
     spawn_min_memory_gb: float = field(
         default=4.0,
         metadata=_meta(
             "Spawn Min Memory GB",
             "Minimum available memory (GB) required to spawn a subagent. 0 disables the check.",
+        ),
+    )
+    subagent_mem_buffer_pct: int = field(
+        default=20,
+        metadata=_meta(
+            "SubAgent Memory Buffer %",
+            "Percent of available memory and CPU reserved for the OS and other "
+            "processes when auto-sizing the subagent cap (max_subagents=0).",
+        ),
+    )
+    subagent_cost_gb: float = field(
+        default=0.5,
+        metadata=_meta(
+            "SubAgent Memory Cost (GB)",
+            "First-boot per-agent memory-cost fallback (GB) used to auto-size the "
+            "cap until a learned value accumulates.",
+        ),
+    )
+    subagent_cpu_cost_cores: float = field(
+        default=1.0,
+        metadata=_meta(
+            "SubAgent CPU Cost (cores)",
+            "First-boot per-agent CPU-cost fallback (cores) used to auto-size the "
+            "cap until a learned value accumulates.",
+        ),
+    )
+    subagent_auto_max: int = field(
+        default=16,
+        metadata=_meta(
+            "SubAgent Auto-Size Max",
+            "Ceiling on the auto-sized subagent cap (only applies when "
+            "max_subagents=0). Stands in for the LLM-provider concurrency limit "
+            "the local memory/CPU formula does not model. Ignored when "
+            "max_subagents is set explicitly.",
+        ),
+    )
+    subagent_spawn_stagger_secs: float = field(
+        default=2.0,
+        metadata=_meta(
+            "SubAgent Spawn Stagger (seconds)",
+            "Delay between successive subagent spawns (initial fill and queued "
+            "drain) to bound cold-start CPU/memory spikes.",
         ),
     )
     subagent_max_turns: int = field(
@@ -1754,6 +1801,13 @@ class KiroClawConfig:
                 yolo=agent_data.get("yolo", False),
                 conductor_skill=agent_data.get("conductor_skill", False),
                 max_subagents=agent_data.get("max_subagents", 3),
+                subagent_mem_buffer_pct=int(agent_data.get("subagent_mem_buffer_pct", 20)),
+                subagent_cost_gb=float(agent_data.get("subagent_cost_gb", 0.5)),
+                subagent_cpu_cost_cores=float(agent_data.get("subagent_cpu_cost_cores", 1.0)),
+                subagent_auto_max=int(agent_data.get("subagent_auto_max", 16)),
+                subagent_spawn_stagger_secs=float(
+                    agent_data.get("subagent_spawn_stagger_secs", 2.0)
+                ),
                 subagent_max_turns=agent_data.get("subagent_max_turns", 100),
                 subagent_timeout_secs=agent_data.get("subagent_timeout_secs", 1800),
                 completion_keep=_validated_completion_keep(

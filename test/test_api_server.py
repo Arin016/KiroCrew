@@ -260,7 +260,7 @@ class TestApiKiroclawConfig:
         monkeypatch.setattr("kiro_claw.dashboard.handlers.sel", lambda: MagicMock())
         (tmp_path / "config.json").write_text('{"agent": {}}')
         async with TestClient(TestServer(self._make_app(tmp_path))) as c:
-            resp = await c.put("/api/config/kiroclaw", json={"agent": {"max_subagents": 6}})
+            resp = await c.put("/api/config/kiroclaw", json={"agent": {"max_subagents": 999}})
             assert resp.status == 400
 
     @pytest.mark.asyncio

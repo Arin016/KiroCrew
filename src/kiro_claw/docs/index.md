@@ -34,6 +34,7 @@ agent backend and Slack credentials.
 |------------|-------------|
 | [Cron Jobs](cron-and-scheduling.md) | Schedule recurring tasks — "every weekday at 9am give me a pipeline briefing" |
 | [Subagents](subagents.md) | Spawn parallel background workers for fan-out research and multi-package work |
+| [Dynamic Sub-Agent Sizing](dynamic-subagent-sizing.md) | Auto-size the concurrent sub-agent cap from host memory/CPU and a learned per-agent cost |
 | [Memory](memory-and-learning.md) | Persistent preferences, project context, and learned corrections across sessions |
 | [Task Runner](task-runner.md) | Autonomous multi-step execution from spec files — hand it a task, walk away |
 | [Dashboard](dashboard.md) | React web UI with multi-session chat, memory management, and live system metrics |

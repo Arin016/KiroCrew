@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import signal
 import time
@@ -18,7 +19,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Optional, Protocol
 
 from kiro_claw.config.loader import KiroClawConfig
 from kiro_claw.context import ContextBuilder
@@ -49,6 +50,11 @@ from kiro_claw.session import SessionManager
 from kiro_claw.session_workspace import result_path as _ws_result_path
 from kiro_claw.slack.format import extract_options
 from kiro_claw.stats import Stats
+from kiro_claw.subagent_cost import (
+    append_cost_sample,
+    compact_cost_log,
+    read_learned_cost,
+)
 from kiro_claw.subagent_persistence import (
     _agent_dir,
     _cleanup_session_files_sync,
@@ -175,6 +181,272 @@ def check_memory_available(min_gb: float = 4.0, path: str = "/proc/meminfo") -> 
     return (True, -1.0)
 
 
+# Process-subtree RSS readers (relocated from the upstream mcp_gateway pool,
+# which is absent in this fork). Pure-stdlib /proc walkers: on non-Linux hosts
+# every /proc access raises OSError and these degrade to -1 / [] gracefully.
+_RSS_SUBTREE_MAX_PROCS = 256
+
+
+def _single_proc_rss_kb(pid: int) -> int:
+    """RSS (KiB) of a single ``pid`` from /proc/<pid>/status, or -1."""
+    try:
+        with open(f"/proc/{pid}/status", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return -1
+
+
+def _proc_children(pid: int) -> list[int]:
+    """Direct child PIDs of ``pid`` via /proc/<pid>/task/<tid>/children.
+
+    Uses the kernel-provided children list (CONFIG_PROC_CHILDREN), so no
+    ``pgrep``/full-table scan. Returns ``[]`` if the file is unavailable.
+    """
+    kids: list[int] = []
+    task_dir = f"/proc/{pid}/task"
+    try:
+        tids = os.listdir(task_dir)
+    except OSError:
+        return kids
+    for tid in tids:
+        try:
+            with open(f"{task_dir}/{tid}/children", encoding="ascii") as fh:
+                kids.extend(int(tok) for tok in fh.read().split())
+        except (OSError, ValueError):
+            continue
+    return kids
+
+
+def _proc_rss_kb(pid: Optional[int]) -> int:
+    """Resident set size (KiB) for ``pid`` **and all its descendants**.
+
+    A subagent's kiro-cli process is frequently a thin launcher whose real
+    memory lives in a child process. Counting only ``pid``'s own ``VmRSS``
+    under-reports the true footprint, so we sum the whole subtree.
+
+    Returns -1 if ``pid`` is falsy or its own status cannot be read; otherwise
+    the summed KiB (descendants that vanish mid-walk are simply skipped, so the
+    result degrades gracefully to parent-only when ``children`` is unreadable).
+    """
+    if not pid:
+        return -1
+    own = _single_proc_rss_kb(pid)
+    if own < 0:
+        return -1
+    total = own
+    seen = {pid}
+    frontier = [pid]
+    while frontier and len(seen) < _RSS_SUBTREE_MAX_PROCS:
+        nxt: list[int] = []
+        for parent in frontier:
+            for child in _proc_children(parent):
+                if child in seen:
+                    continue
+                seen.add(child)
+                kb = _single_proc_rss_kb(child)
+                if kb > 0:
+                    total += kb
+                nxt.append(child)
+        frontier = nxt
+    return total
+
+
+# Legacy hard-coded concurrent cap; also the lower clamp bound for auto-sizing
+# so dynamic sizing never regresses below today's behavior.
+_LEGACY_DEFAULT_MAX = 3
+
+
+def _available_memory_gb() -> float:
+    """Effective available memory (GB) = ``min(MemAvailable, cgroup headroom)``.
+
+    Returns -1.0 when host memory is unreadable (non-Linux / read error) so the
+    caller fails open to the legacy default. The cgroup clamp is a no-op on
+    unconstrained hosts (no controller / unlimited).
+    """
+    _ok, host_gb = check_memory_available(min_gb=0.0)
+    if host_gb <= 0:
+        return host_gb  # unreadable → caller fails open
+    cg_gb = _cgroup_available_gb()
+    if cg_gb < 0:
+        return host_gb  # no cgroup cap (unconstrained / non-Linux)
+    return min(host_gb, cg_gb)
+
+
+# Values at/above this are the kernel's "no limit" sentinel (PAGE_COUNTER_MAX).
+_CGROUP_UNLIMITED = 1 << 62
+
+
+def _read_int_file(path: str) -> int | None:
+    """Read a single integer from *path*; None on absence/garbage. 'max' → None."""
+    try:
+        with open(path, encoding="ascii") as fh:
+            txt = fh.read().strip()
+    except OSError:
+        return None
+    if txt == "max":  # cgroup v2 unlimited sentinel
+        return None
+    try:
+        return int(txt)
+    except ValueError:
+        return None
+
+
+def _cgroup_available_gb() -> float:
+    """Container memory headroom (GB) = limit − current, or -1.0 if unlimited/unknown.
+
+    Reads cgroup v2 (``memory.max``/``memory.current``) then v1
+    (``memory.limit_in_bytes``/``memory.usage_in_bytes``). A sentinel-large
+    limit means unlimited. Returns -1.0 on unconstrained / non-Linux hosts so
+    the caller ignores the clamp (``dynamic-subagent-sizing.md`` §9).
+    """
+    # cgroup v2
+    limit = _read_int_file("/sys/fs/cgroup/memory.max")
+    if limit is not None:
+        if limit >= _CGROUP_UNLIMITED:
+            return -1.0
+        current = _read_int_file("/sys/fs/cgroup/memory.current") or 0
+        return max(0.0, (limit - current) / (1024 ** 3))
+    # cgroup v1
+    limit = _read_int_file("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    if limit is not None:
+        if limit >= _CGROUP_UNLIMITED:
+            return -1.0
+        current = _read_int_file("/sys/fs/cgroup/memory/memory.usage_in_bytes") or 0
+        return max(0.0, (limit - current) / (1024 ** 3))
+    return -1.0  # no cgroup memory controller
+
+
+def compute_max_subagents(cfg: KiroClawConfig) -> int:
+    """Compute the concurrent sub-agent cap from host memory and CPU.
+
+    Memory- and CPU-symmetric: each resource yields a candidate count from a
+    buffered budget divided by a per-agent cost, and the tighter one binds.
+    The result is clamped to ``[3, hard_cap]`` — never below the legacy
+    default (the per-spawn ``spawn_min_memory_gb`` gate is the real-time
+    memory guard), never above the absolute ``subagent_auto_max`` (which
+    stands in for the unmodeled LLM-provider concurrency limit).
+
+    Per-agent costs come from the learned cost store (``read_learned_cost``);
+    when no learned value exists yet, the configured first-boot fallbacks
+    (``subagent_cost_gb`` / ``subagent_cpu_cost_cores``) are used. Fails open to
+    the legacy default when memory can't be read (e.g. non-Linux hosts).
+
+    See ``dynamic-subagent-sizing.md`` §3.
+    """
+    agent = cfg.agent
+    hard_cap = max(1, agent.subagent_auto_max)
+    lo = min(_LEGACY_DEFAULT_MAX, hard_cap)  # keeps clamp well-formed if hard_cap < 3
+
+    avail_gb = _available_memory_gb()
+    if avail_gb <= 0:
+        # Memory unreadable (non-Linux / read error) — fail open.
+        logger.info(
+            "dynamic subagent cap = %d (memory unreadable; fail-open to legacy default)",
+            lo,
+        )
+        return lo
+
+    buf = 1.0 - agent.subagent_mem_buffer_pct / 100.0
+    mem_cost = read_learned_cost("mem_gb") or agent.subagent_cost_gb or 0.5
+    cpu_cost = read_learned_cost("cpu_cores") or agent.subagent_cpu_cost_cores or 1.0
+    pool_size = cfg.session.pool_size
+
+    mem_term = math.floor((avail_gb * buf - pool_size * mem_cost) / mem_cost)
+    cpu_count = os.cpu_count() or 1
+    cpu_term = math.floor((cpu_count * buf) / cpu_cost)
+
+    candidate = min(mem_term, cpu_term)
+    result = max(lo, min(candidate, hard_cap))
+
+    # Name the active bound for an explainable startup log (§5.2).
+    if candidate >= hard_cap:
+        reason = "hard_cap"
+    elif candidate <= lo:
+        reason = "floor"
+    elif mem_term <= cpu_term:
+        reason = "mem_term"
+    else:
+        reason = "cpu_term"
+    logger.info(
+        "dynamic subagent cap = %d (%s; mem_term=%d, cpu_term=%d, floor=%d, hard_cap=%d)",
+        result,
+        reason,
+        mem_term,
+        cpu_term,
+        lo,
+        hard_cap,
+    )
+    return result
+
+
+def resolve_max_subagents(cfg: KiroClawConfig) -> int:
+    """Resolve the effective cap: explicit value when > 0, else auto-compute.
+
+    ``agent.max_subagents == 0`` is the "auto" sentinel that triggers
+    :func:`compute_max_subagents`. See ``dynamic-subagent-sizing.md`` §5.1.
+    """
+    try:
+        configured = int(cfg.agent.max_subagents)
+    except (AttributeError, TypeError, ValueError):
+        configured = _LEGACY_DEFAULT_MAX
+    if configured > 0:
+        return configured
+    return compute_max_subagents(cfg)
+
+
+_CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+_CPU_SUBTREE_MAX_PROCS = 256
+
+
+def _parse_cpu_jiffies(stat: bytes) -> int:
+    """Sum utime+stime (clock ticks) from raw ``/proc/<pid>/stat`` bytes.
+
+    Splits after the final ``)`` so a ``comm`` containing spaces/parens is
+    handled. utime/stime are fields 14/15 (1-indexed) → indices 11/12 of the
+    post-comm tokens. Returns 0 on any parse error.
+    """
+    try:
+        rparen = stat.rindex(b")")
+        fields = stat[rparen + 2:].split()
+        return int(fields[11]) + int(fields[12])
+    except (ValueError, IndexError):
+        return 0
+
+
+def _proc_cpu_jiffies(pid: int) -> int:
+    """utime+stime (clock ticks) for a single pid, 0 on error."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            return _parse_cpu_jiffies(fh.read())
+    except OSError:
+        return 0
+
+
+def _subtree_cpu_jiffies(pid: int) -> int:
+    """Sum utime+stime across ``pid`` and its descendants (clock ticks).
+
+    Walks the same kernel children list as ``pool._proc_rss_kb`` so the CPU
+    subtree matches the RSS subtree.
+    """
+    total = _proc_cpu_jiffies(pid)
+    seen = {pid}
+    frontier = [pid]
+    while frontier and len(seen) < _CPU_SUBTREE_MAX_PROCS:
+        nxt: list[int] = []
+        for parent in frontier:
+            for child in _proc_children(parent):
+                if child in seen:
+                    continue
+                seen.add(child)
+                total += _proc_cpu_jiffies(child)
+                nxt.append(child)
+        frontier = nxt
+    return total
+
+
 def validate_cwd(cwd: str, allowed_roots: list[str]) -> tuple[str, str]:
     """Validate a caller-supplied ``cwd`` for ``spawn_run``.
 
@@ -254,6 +526,12 @@ class SubagentInfo:
     # ``AgentConfig.subagent_cwd_allowed_roots``.
     cwd: str = ""
     _pid: int | None = None  # PID of kiro-cli child process, for tombstone diagnostics
+    # Learned-cost high-water marks (dynamic-subagent-sizing.md §4.1), sampled
+    # periodically by the reaper loop and folded into the cost store at exit.
+    peak_rss_gb: float = 0.0
+    peak_cpu_cores: float = 0.0
+    _cpu_jiffies_prev: int = 0  # last subtree utime+stime sample (clock ticks)
+    _cpu_sample_ts: float = 0.0  # monotonic time of the last CPU sample
 
 
 # Callback: (subagent_info) -> None
@@ -310,6 +588,7 @@ class SubagentManager:
         self._completion_keep = completion_keep
         self._completion_keep_chars = completion_keep_chars
         self._running_count = 0
+        self._last_spawn_ts: float = 0.0  # monotonic time of the last actual start (stagger gate)
         self.hook_store: Any = None  # Optional ScriptHookStore, set by server.py
         self._agents: dict[str, SubagentInfo] = {}
         self._tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
@@ -325,6 +604,14 @@ class SubagentManager:
                 exc_info=True,
             )
             self._global_approval_mode = ""
+        # Spawn stagger interval — bounds the cold-start ramp rate so a high cap
+        # never bursts (dynamic-subagent-sizing.md §5.3).
+        try:
+            self._spawn_stagger_secs = max(
+                0.0, float(KiroClawConfig.load().agent.subagent_spawn_stagger_secs)
+            )
+        except Exception:
+            self._spawn_stagger_secs = 2.0
 
     @staticmethod
     async def _approve_and_log(
@@ -586,6 +873,44 @@ class SubagentManager:
         """
         logger.warning("Orphan notification (Slack DM pending): %s", msg[:200])
 
+    def _sample_live_costs(self) -> None:
+        """Sample high-water RSS/CPU for each live agent (reaper-loop piggyback).
+
+        Updates per-run peaks on ``SubagentInfo`` (dynamic-subagent-sizing.md
+        §4.1). RSS is the subtree VmRSS in GB; CPU is cores used since the last
+        sample = Δ(utime+stime jiffies) / (CLK_TCK × Δt). The first sample only
+        seeds the CPU baseline (no delta yet). Best-effort: a dead/unreadable
+        pid is simply skipped.
+        """
+        now = time.monotonic()
+        for info in list(self._agents.values()):
+            if info.done or not info._pid:
+                continue
+            pid = info._pid
+            rss_kb = _proc_rss_kb(pid)
+            if rss_kb > 0:
+                gb = rss_kb / (1024 * 1024)
+                if gb > info.peak_rss_gb:
+                    info.peak_rss_gb = gb
+            jiffies = _subtree_cpu_jiffies(pid)
+            if info._cpu_sample_ts > 0.0 and jiffies >= info._cpu_jiffies_prev:
+                dt = now - info._cpu_sample_ts
+                if dt > 0:
+                    cores = (jiffies - info._cpu_jiffies_prev) / (_CLK_TCK * dt)
+                    if cores > info.peak_cpu_cores:
+                        info.peak_cpu_cores = cores
+            info._cpu_jiffies_prev = jiffies
+            info._cpu_sample_ts = now
+
+    def _record_cost(self, info: SubagentInfo) -> None:
+        """Persist this run's high-water RSS/CPU to the learned-cost store."""
+        if info.peak_rss_gb <= 0 and info.peak_cpu_cores <= 0:
+            return  # never sampled (e.g. finished before the first reaper sweep)
+        try:
+            append_cost_sample(info.agent, info.peak_rss_gb, info.peak_cpu_cores)
+        except Exception:
+            logger.debug("Failed to record subagent cost for %s", info.id, exc_info=True)
+
     async def _reaper_loop(self) -> None:
         """Periodically force-kill subagents that exceed the timeout.
 
@@ -593,9 +918,18 @@ class SubagentManager:
         ``_run()`` fails to fire (event-loop saturation, orphaned tasks,
         or ``reset()`` hanging in the finally block).
         """
+        try:
+            compact_cost_log()  # startup FIFO trim (§4.2)
+        except Exception:
+            logger.debug("Reaper: startup cost-log compaction failed", exc_info=True)
         while True:
             await asyncio.sleep(_REAPER_INTERVAL)
             now = time.time()
+            self._sample_live_costs()
+            try:
+                compact_cost_log()  # periodic FIFO trim (also bounds a long-running gateway)
+            except Exception:
+                logger.debug("Reaper: cost-log compaction failed", exc_info=True)
             for agent_id, info in list(self._agents.items()):
                 if info.done:
                     continue
@@ -645,6 +979,7 @@ class SubagentManager:
             self._running_count = max(0, self._running_count - 1)
             Stats().inc_subagent_failed()
             self._write_tombstone(info, "reaped")
+            self._record_cost(info)
         info.reaped = True
 
         try:
@@ -973,11 +1308,25 @@ class SubagentManager:
                 )
                 return info
 
-        if self._running_count >= self._max_concurrent:
+        now = time.monotonic()
+        should_queue, slot_free = self._should_stagger_queue(now)
+        if should_queue:
             self._queue.append((task, parent_session_key, agent, max_turns, resolved_cwd))
             logger.info(
-                "Subagent queued (%d running, %d queued)", self._running_count, len(self._queue)
+                "Subagent queued (%d running, %d queued, slot_free=%s)",
+                self._running_count,
+                len(self._queue),
+                slot_free,
             )
+            # If a slot is free, no running agent will trigger the drain on
+            # completion — schedule the staggered pump at the interval boundary
+            # so the queued spawn still launches.
+            if slot_free:
+                delay = max(0.0, self._spawn_stagger_secs - (now - self._last_spawn_ts))
+                try:
+                    asyncio.get_event_loop().call_later(delay, self._drain_queue)
+                except RuntimeError:
+                    pass  # no running loop (sync/test context)
             info = SubagentInfo(id=f"q{len(self._queue)}", task=_redacted_task, agent=agent)
             return info
 
@@ -1006,6 +1355,7 @@ class SubagentManager:
         info._raw_task = task  # unredacted prompt for kiro-cli execution
         self._agents[agent_id] = info
         self._running_count += 1
+        self._last_spawn_ts = time.monotonic()  # stagger gate: one start per interval
 
         # Check parent session trust (approval_policy="auto") set by dashboard trust toggle.
         parent_trusted = (
@@ -1094,18 +1444,51 @@ class SubagentManager:
         except Exception:
             logger.exception("Subagent announce failed for %s", info.id)
 
-    def _drain_queue(self) -> None:
-        """Spawn the next queued task if a slot is available.
+    def _should_stagger_queue(self, now: float) -> tuple[bool, bool]:
+        """Decide whether a spawn arriving at *now* must be queued.
 
-        Staggers spawns by 2 seconds to avoid CPU/memory spikes.
+        Returns ``(should_queue, slot_free)``. A spawn is queued when either no
+        slot is free (at capacity) OR a spawn started within the stagger window
+        (``subagent_spawn_stagger_secs``) — so the initial fill never bursts and
+        no two agents start within the interval (dynamic-subagent-sizing.md §5.3).
+        """
+        slot_free = self._running_count < self._max_concurrent
+        too_soon = (now - self._last_spawn_ts) < self._spawn_stagger_secs
+        return (not slot_free or too_soon, slot_free)
+
+    def _drain_queue(self) -> None:
+        """Spawn the next queued task if a slot is available and the stagger
+        interval has elapsed.
+
+        This is the single staggered pump: at most one start per
+        ``subagent_spawn_stagger_secs`` (dynamic-subagent-sizing.md §5.3). If a
+        slot is free but a spawn started too recently, it reschedules itself at
+        the interval boundary rather than bursting.
         """
         if not self._queue or self._running_count >= self._max_concurrent:
             return
+        elapsed = time.monotonic() - self._last_spawn_ts
+        if elapsed < self._spawn_stagger_secs:
+            # Too soon since the last start — reschedule at the boundary.
+            try:
+                asyncio.get_event_loop().call_later(
+                    self._spawn_stagger_secs - elapsed, self._drain_queue
+                )
+            except RuntimeError:
+                pass  # no running loop (sync/test context)
+            return
         task, parent, agent, max_turns, cwd = self._queue.pop(0)
         logger.info("Draining queue: spawning '%s' (%d left)", task[:40], len(self._queue))
+        # spawn() re-checks the gate; since elapsed >= stagger and a slot is
+        # free, it starts immediately and updates _last_spawn_ts.
         self.spawn(task, parent_session_key=parent, agent=agent, max_turns=max_turns, cwd=cwd)
         if self._queue and self._running_count < self._max_concurrent:
-            asyncio.get_event_loop().call_later(2.0, self._drain_queue)
+            try:
+                asyncio.get_event_loop().call_later(
+                    self._spawn_stagger_secs, self._drain_queue
+                )
+            except RuntimeError:
+                pass
 
     async def _spawn_with_approval(self, info: SubagentInfo) -> None:
         """Request approval before starting the subagent.
@@ -1237,6 +1620,7 @@ class SubagentManager:
                 # Fire WS event immediately so Activity Viewer updates
                 # before the slow reset + on_done path.
                 info.elapsed = time.time() - info.started
+                self._record_cost(info)
                 await self._fire_event(
                     "subagent_done",
                     info,

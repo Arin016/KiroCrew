@@ -542,7 +542,10 @@ async def api_kiroclaw_config(request: web.Request) -> web.Response:
         if not isinstance(data.get("agent"), dict):
             data["agent"] = {}
         agent = data["agent"]
-        limits = {"subagent_max_turns": 200, "max_subagents": 5}
+        # subagent_max_turns keeps the generic 1..N validation; max_subagents is
+        # special — 0 is the "auto-size" sentinel and its upper bound is the
+        # configured hard cap (dynamic-subagent-sizing.md §5.5/§6).
+        limits = {"subagent_max_turns": 200}
         applied: list[str] = []
         for key, upper in limits.items():
             if key in agent_settings:
@@ -551,6 +554,23 @@ async def api_kiroclaw_config(request: web.Request) -> web.Response:
                     return _deny(f"{key} must be an integer between 1 and {upper}")
                 agent[key] = val
                 applied.append(key)
+        # max_subagents: 0 = auto-size; otherwise 1..hard_cap. The hard cap is the
+        # security ceiling and MUST come from the *persisted* config only — never
+        # from the same (untrusted) request being validated, or a caller could send
+        # {"subagent_auto_max": 9999, "max_subagents": 9999} to bypass it. (This
+        # endpoint does not persist subagent_auto_max, so the request value has no
+        # legitimate use as a bound anyway.)
+        if "max_subagents" in agent_settings:
+            val = agent_settings["max_subagents"]
+            hard_cap = agent.get("subagent_auto_max", 16)
+            if not isinstance(hard_cap, int) or isinstance(hard_cap, bool) or hard_cap < 1:
+                hard_cap = 16
+            if isinstance(val, bool) or not isinstance(val, int) or val < 0 or val > hard_cap:
+                return _deny(
+                    f"max_subagents must be an integer between 0 (auto) and {hard_cap}"
+                )
+            agent["max_subagents"] = val
+            applied.append("max_subagents")
         # Boolean toggles
         for key in ("conductor_skill",):
             if key in agent_settings:

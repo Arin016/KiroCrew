@@ -1,0 +1,468 @@
+"""Tests for dynamic sub-agent cap sizing (subagent.compute/resolve_max_subagents).
+
+Validates the formula against the worked examples in
+``dynamic-subagent-sizing.md`` §3.3 plus routing/clamp/reservation edge cases.
+Stage 2 uses fallback costs only (learned costs land in a later stage), and the
+cgroup clamp lands in Stage 8 — here we feed effective memory directly via the
+patched ``_available_memory_gb``.
+"""
+
+from __future__ import annotations
+
+import types
+
+import pytest
+
+import kiro_claw.subagent as subagent
+from kiro_claw.subagent import compute_max_subagents, resolve_max_subagents
+
+
+def _cfg(
+    *,
+    max_subagents: int = 0,
+    buffer_pct: int = 20,
+    mem_cost: float = 0.315,
+    cpu_cost: float = 0.8,
+    hard_cap: int = 16,
+    pool_size: int = 0,
+) -> types.SimpleNamespace:
+    """Minimal duck-typed stand-in for KiroClawConfig (agent + session)."""
+    return types.SimpleNamespace(
+        agent=types.SimpleNamespace(
+            max_subagents=max_subagents,
+            subagent_mem_buffer_pct=buffer_pct,
+            subagent_cost_gb=mem_cost,
+            subagent_cpu_cost_cores=cpu_cost,
+            subagent_auto_max=hard_cap,
+        ),
+        session=types.SimpleNamespace(pool_size=pool_size),
+    )
+
+
+@pytest.fixture
+def patch_host(monkeypatch):
+    """Patch available memory + cpu_count to deterministic values."""
+
+    def _apply(avail_gb: float, cpu_count: int) -> None:
+        monkeypatch.setattr(subagent, "_available_memory_gb", lambda: avail_gb)
+        monkeypatch.setattr(subagent.os, "cpu_count", lambda: cpu_count)
+
+    return _apply
+
+
+# --- Worked examples from dynamic-subagent-sizing.md §3.3 -------------------
+
+
+def test_example_a_hard_cap_binds(patch_host) -> None:
+    # 174.7 GB / 48 cores: mem_term=443, cpu_term=48, clamp(min,3,16) = 16
+    patch_host(174.7, 48)
+    cfg = _cfg(mem_cost=0.315, cpu_cost=0.8, hard_cap=16)
+    assert compute_max_subagents(cfg) == 16
+
+
+def test_example_b_floor(patch_host) -> None:
+    # 8 GB / 4 cores, fallback costs: mem_term=12, cpu_term=3, floor = 3
+    patch_host(8.0, 4)
+    cfg = _cfg(mem_cost=0.5, cpu_cost=1.0, hard_cap=16)
+    assert compute_max_subagents(cfg) == 3
+
+
+def test_example_c_cpu_binds_with_pool(patch_host) -> None:
+    # 32 GB / 12 cores, pool=5: mem_term=59, cpu_term=12, min = 12
+    patch_host(32.0, 12)
+    cfg = _cfg(mem_cost=0.4, cpu_cost=0.8, hard_cap=16, pool_size=5)
+    assert compute_max_subagents(cfg) == 12
+
+
+def test_example_d_memory_binds(patch_host) -> None:
+    # Effective 4 GB (cgroup headroom fed directly) / 48 cores:
+    # mem_term=10, cpu_term=48, min = 10
+    patch_host(4.0, 48)
+    cfg = _cfg(mem_cost=0.315, cpu_cost=0.8, hard_cap=16)
+    assert compute_max_subagents(cfg) == 10
+
+
+# --- Edge cases ------------------------------------------------------------
+
+
+def test_pool_reservation_reduces_memory_budget(patch_host) -> None:
+    # Same host, with vs without a warm pool: reservation lowers mem_term.
+    patch_host(20.0, 64)  # CPU generous so memory binds
+    no_pool = compute_max_subagents(_cfg(mem_cost=0.5, cpu_cost=0.1, pool_size=0, hard_cap=100))
+    with_pool = compute_max_subagents(_cfg(mem_cost=0.5, cpu_cost=0.1, pool_size=10, hard_cap=100))
+    # no_pool: floor(20*0.8/0.5)=32 ; with_pool: floor((16-5)/0.5)=22
+    assert no_pool == 32
+    assert with_pool == 22
+
+
+def test_hard_cap_clamps_high(patch_host) -> None:
+    patch_host(174.7, 48)
+    cfg = _cfg(mem_cost=0.315, cpu_cost=0.8, hard_cap=8)
+    assert compute_max_subagents(cfg) == 8
+
+
+def test_floor_never_below_three(patch_host) -> None:
+    patch_host(1.0, 1)  # tiny host
+    cfg = _cfg(mem_cost=0.5, cpu_cost=1.0, hard_cap=16)
+    assert compute_max_subagents(cfg) == 3
+
+
+def test_hard_cap_below_floor_does_not_exceed_hard_cap(patch_host) -> None:
+    # Misconfigured hard_cap < 3 must still not exceed hard_cap.
+    patch_host(174.7, 48)
+    cfg = _cfg(hard_cap=2)
+    assert compute_max_subagents(cfg) == 2
+
+
+def test_unreadable_memory_fails_open_to_legacy_default(patch_host) -> None:
+    patch_host(-1.0, 48)  # /proc/meminfo unreadable
+    cfg = _cfg(hard_cap=16)
+    assert compute_max_subagents(cfg) == 3
+
+
+# --- Sentinel routing ------------------------------------------------------
+
+
+def test_resolve_explicit_value_bypasses_compute(patch_host) -> None:
+    patch_host(174.7, 48)
+    cfg = _cfg(max_subagents=5, hard_cap=16)
+    assert resolve_max_subagents(cfg) == 5  # explicit, not the computed 16
+
+
+def test_resolve_zero_sentinel_triggers_compute(patch_host) -> None:
+    patch_host(174.7, 48)
+    cfg = _cfg(max_subagents=0, mem_cost=0.315, cpu_cost=0.8, hard_cap=16)
+    assert resolve_max_subagents(cfg) == 16
+
+
+# --- Gateway wiring contract (Stage 3) -------------------------------------
+
+
+def test_manager_reports_resolved_cap_for_auto_sentinel(patch_host) -> None:
+    """The cap the gateway feeds SubagentManager is what `.max_concurrent` reports."""
+    from unittest.mock import MagicMock
+
+    from kiro_claw.subagent import SubagentManager
+
+    patch_host(174.7, 48)
+    cfg = _cfg(max_subagents=0, mem_cost=0.315, cpu_cost=0.8, hard_cap=16)
+    cap = resolve_max_subagents(cfg)
+    assert cap == 16  # computed, not the raw 0 sentinel
+
+    mgr = SubagentManager(
+        sessions=MagicMock(),
+        ctx_builder=MagicMock(),
+        max_concurrent=cap,
+    )
+    assert mgr.max_concurrent == 16  # live manager is the source of truth (§5.2)
+
+
+# ---------------------------------------------------------------------------
+# Unified spawn staggering (Stage 4, dynamic-subagent-sizing.md §5.3)
+# ---------------------------------------------------------------------------
+
+
+def _mgr(*, running: int, max_concurrent: int, last_ts: float, stagger: float = 2.0):
+    """Build a SubagentManager with stagger state set, mock heavy deps."""
+    from unittest.mock import MagicMock
+
+    from kiro_claw.subagent import SubagentManager
+
+    m = SubagentManager(
+        sessions=MagicMock(),
+        ctx_builder=MagicMock(),
+        max_concurrent=max_concurrent,
+    )
+    m._running_count = running
+    m._last_spawn_ts = last_ts
+    m._spawn_stagger_secs = stagger
+    return m
+
+
+class TestStaggerGate:
+    """_should_stagger_queue: capacity + stagger gate (initial-fill burst guard)."""
+
+    def test_at_capacity_always_queues(self) -> None:
+        import time as _t
+
+        m = _mgr(running=4, max_concurrent=4, last_ts=0.0)
+        should_queue, slot_free = m._should_stagger_queue(_t.monotonic())
+        assert should_queue is True
+        assert slot_free is False
+
+    def test_slot_free_but_too_soon_queues(self) -> None:
+        import time as _t
+
+        now = _t.monotonic()
+        m = _mgr(running=1, max_concurrent=16, last_ts=now)  # just spawned
+        should_queue, slot_free = m._should_stagger_queue(now)
+        assert should_queue is True  # stagger gate
+        assert slot_free is True
+
+    def test_slot_free_and_interval_elapsed_starts(self) -> None:
+        import time as _t
+
+        now = _t.monotonic()
+        m = _mgr(running=1, max_concurrent=16, last_ts=now - 5.0, stagger=2.0)
+        should_queue, _ = m._should_stagger_queue(now)
+        assert should_queue is False  # ok to start now
+
+    def test_first_ever_spawn_starts_immediately(self) -> None:
+        import time as _t
+
+        m = _mgr(running=0, max_concurrent=16, last_ts=0.0)
+        should_queue, _ = m._should_stagger_queue(_t.monotonic())
+        assert should_queue is False  # last_ts=0 → interval long elapsed
+
+
+class TestDrainPump:
+    """_drain_queue: one start per interval, reschedules when too soon."""
+
+    def test_too_soon_does_not_pop(self) -> None:
+        import asyncio
+        import time as _t
+        from unittest.mock import MagicMock
+
+        async def run() -> None:
+            now = _t.monotonic()
+            m = _mgr(running=0, max_concurrent=16, last_ts=now, stagger=2.0)
+            m._queue = [("task", "", "", 0, "")]
+            m.spawn = MagicMock()  # type: ignore[method-assign]
+            m._drain_queue()
+            m.spawn.assert_not_called()  # too soon → no burst
+            assert len(m._queue) == 1  # item retained
+
+        asyncio.run(run())
+
+    def test_ready_pops_and_spawns_one(self) -> None:
+        import asyncio
+        import time as _t
+        from unittest.mock import MagicMock
+
+        async def run() -> None:
+            now = _t.monotonic()
+            m = _mgr(running=0, max_concurrent=16, last_ts=now - 5.0, stagger=2.0)
+            m._queue = [("task-a", "", "", 0, ""), ("task-b", "", "", 0, "")]
+            m.spawn = MagicMock()  # type: ignore[method-assign]
+            m._drain_queue()
+            assert m.spawn.call_count == 1  # exactly one per pump cycle
+            assert len(m._queue) == 1  # one popped
+
+        asyncio.run(run())
+
+    def test_at_capacity_does_not_pop(self) -> None:
+        import asyncio
+        import time as _t
+        from unittest.mock import MagicMock
+
+        async def run() -> None:
+            m = _mgr(running=16, max_concurrent=16, last_ts=_t.monotonic() - 99, stagger=2.0)
+            m._queue = [("task", "", "", 0, "")]
+            m.spawn = MagicMock()  # type: ignore[method-assign]
+            m._drain_queue()
+            m.spawn.assert_not_called()
+            assert len(m._queue) == 1
+
+        asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# Learned-cost sampling (Stage 6, dynamic-subagent-sizing.md §4.1)
+# ---------------------------------------------------------------------------
+
+
+class TestCpuJiffiesParser:
+    """_parse_cpu_jiffies: utime+stime from raw /proc/<pid>/stat bytes."""
+
+    def test_parses_utime_stime(self) -> None:
+        from kiro_claw.subagent import _parse_cpu_jiffies
+
+        # comm with spaces + an embedded ')' — rindex must find the real close.
+        # post-comm tokens: state(0) ... utime(11)=120 stime(12)=60
+        stat = b"1234 (kiro cli (node)) S 2 3 4 5 6 7 8 9 10 11 120 60 0 0"
+        assert _parse_cpu_jiffies(stat) == 180
+
+    def test_malformed_returns_zero(self) -> None:
+        from kiro_claw.subagent import _parse_cpu_jiffies
+
+        assert _parse_cpu_jiffies(b"garbage") == 0
+        assert _parse_cpu_jiffies(b"") == 0
+
+
+class TestSubtreeCpuJiffies:
+    """_subtree_cpu_jiffies: sums pid + descendants."""
+
+    def test_sums_tree(self, monkeypatch) -> None:
+        import kiro_claw.subagent as sub
+
+        # tree: 1 -> [2, 3]; 2 -> [4]
+        children = {1: [2, 3], 2: [4], 3: [], 4: []}
+        jiffies = {1: 100, 2: 50, 3: 25, 4: 10}
+        monkeypatch.setattr(sub, "_proc_children", lambda pid: children.get(pid, []))
+        monkeypatch.setattr(sub, "_proc_cpu_jiffies", lambda pid: jiffies.get(pid, 0))
+        assert sub._subtree_cpu_jiffies(1) == 185
+
+
+class TestSampleLiveCosts:
+    """_sample_live_costs: high-water RSS/CPU tracking across polls."""
+
+    def _agent(self):
+        from kiro_claw.subagent import SubagentInfo
+
+        info = SubagentInfo(id="a1", task="t", agent="kiroclaw")
+        info._pid = 4242
+        return info
+
+    def test_rss_high_water(self, monkeypatch) -> None:
+        import kiro_claw.subagent as sub
+
+        m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
+        info = self._agent()
+        m._agents = {"a1": info}
+        monkeypatch.setattr(sub, "_subtree_cpu_jiffies", lambda pid: 0)
+        # Two polls: 2 GB then 1 GB — peak must stick at 2.
+        rss_seq = iter([2 * 1024 * 1024, 1 * 1024 * 1024])
+        monkeypatch.setattr(sub, "_proc_rss_kb", lambda pid: next(rss_seq))
+        m._sample_live_costs()
+        m._sample_live_costs()
+        assert info.peak_rss_gb == pytest.approx(2.0, abs=0.01)
+
+    def test_cpu_high_water_uses_delta(self, monkeypatch) -> None:
+        import kiro_claw.subagent as sub
+
+        m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
+        info = self._agent()
+        m._agents = {"a1": info}
+        monkeypatch.setattr(sub, "_proc_rss_kb", lambda pid: -1)  # ignore RSS
+        monkeypatch.setattr(sub, "_CLK_TCK", 100)
+
+        # Control wall-clock: poll1 t=10, poll2 t=11 (dt=1s).
+        times = iter([10.0, 11.0])
+        monkeypatch.setattr(sub.time, "monotonic", lambda: next(times))
+        # jiffies: 1000 then 1100 → 100 jiffies / (100 tck * 1s) = 1.0 core.
+        jiff = iter([1000, 1100])
+        monkeypatch.setattr(sub, "_subtree_cpu_jiffies", lambda pid: next(jiff))
+
+        m._sample_live_costs()  # seeds baseline, no delta
+        assert info.peak_cpu_cores == 0.0
+        m._sample_live_costs()  # delta → 1.0 core
+        assert info.peak_cpu_cores == pytest.approx(1.0, abs=0.01)
+
+    def test_done_or_pidless_agents_skipped(self, monkeypatch) -> None:
+        import kiro_claw.subagent as sub
+
+        m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
+        done = self._agent()
+        done.done = True
+        m._agents = {"d": done}
+        called = {"n": 0}
+
+        def _rss(pid):
+            called["n"] += 1
+            return 1024 * 1024
+
+        monkeypatch.setattr(sub, "_proc_rss_kb", _rss)
+        monkeypatch.setattr(sub, "_subtree_cpu_jiffies", lambda pid: 0)
+        m._sample_live_costs()
+        assert called["n"] == 0  # done agent not sampled
+        assert done.peak_rss_gb == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Container / cgroup hardening (Stage 8, dynamic-subagent-sizing.md §9)
+# ---------------------------------------------------------------------------
+
+
+class TestReadIntFile:
+    def test_reads_int(self, tmp_path) -> None:
+        from kiro_claw.subagent import _read_int_file
+
+        p = tmp_path / "v"
+        p.write_text("12345\n")
+        assert _read_int_file(str(p)) == 12345
+
+    def test_max_returns_none(self, tmp_path) -> None:
+        from kiro_claw.subagent import _read_int_file
+
+        p = tmp_path / "v"
+        p.write_text("max\n")
+        assert _read_int_file(str(p)) is None
+
+    def test_missing_and_garbage_return_none(self, tmp_path) -> None:
+        from kiro_claw.subagent import _read_int_file
+
+        assert _read_int_file(str(tmp_path / "nope")) is None
+        g = tmp_path / "g"
+        g.write_text("not-a-number\n")
+        assert _read_int_file(str(g)) is None
+
+
+class TestCgroupAvailable:
+    def test_v2_headroom(self, monkeypatch) -> None:
+        import kiro_claw.subagent as sub
+
+        vals = {
+            "/sys/fs/cgroup/memory.max": 16 * 1024 ** 3,
+            "/sys/fs/cgroup/memory.current": 2 * 1024 ** 3,
+        }
+        monkeypatch.setattr(sub, "_read_int_file", lambda p: vals.get(p))
+        assert sub._cgroup_available_gb() == pytest.approx(14.0, abs=0.01)
+
+    def test_v2_unlimited_max_falls_through_to_minus_one(self, monkeypatch) -> None:
+        import kiro_claw.subagent as sub
+
+        # memory.max == 'max' → _read_int_file None; v1 absent → -1.0 (unlimited)
+        monkeypatch.setattr(sub, "_read_int_file", lambda p: None)
+        assert sub._cgroup_available_gb() == -1.0
+
+    def test_sentinel_large_limit_is_unlimited(self, monkeypatch) -> None:
+        import kiro_claw.subagent as sub
+
+        vals = {"/sys/fs/cgroup/memory.max": sub._CGROUP_UNLIMITED + 1}
+        monkeypatch.setattr(sub, "_read_int_file", lambda p: vals.get(p))
+        assert sub._cgroup_available_gb() == -1.0
+
+    def test_v1_headroom(self, monkeypatch) -> None:
+        import kiro_claw.subagent as sub
+
+        vals = {
+            "/sys/fs/cgroup/memory.max": None,  # v2 absent
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes": 8 * 1024 ** 3,
+            "/sys/fs/cgroup/memory/memory.usage_in_bytes": 3 * 1024 ** 3,
+        }
+        monkeypatch.setattr(sub, "_read_int_file", lambda p: vals.get(p))
+        assert sub._cgroup_available_gb() == pytest.approx(5.0, abs=0.01)
+
+
+class TestAvailableMemoryClamp:
+    def test_clamps_to_cgroup_when_smaller(self, monkeypatch) -> None:
+        import kiro_claw.subagent as sub
+
+        monkeypatch.setattr(sub, "check_memory_available", lambda **k: (True, 100.0))
+        monkeypatch.setattr(sub, "_cgroup_available_gb", lambda: 14.0)
+        assert sub._available_memory_gb() == pytest.approx(14.0, abs=0.01)
+
+    def test_unconstrained_uses_host(self, monkeypatch) -> None:
+        import kiro_claw.subagent as sub
+
+        monkeypatch.setattr(sub, "check_memory_available", lambda **k: (True, 100.0))
+        monkeypatch.setattr(sub, "_cgroup_available_gb", lambda: -1.0)
+        assert sub._available_memory_gb() == pytest.approx(100.0, abs=0.01)
+
+    def test_non_linux_fails_open(self, monkeypatch) -> None:
+        import kiro_claw.subagent as sub
+
+        monkeypatch.setattr(sub, "check_memory_available", lambda **k: (True, -1.0))
+        # cgroup not even consulted when host is unreadable
+        assert sub._available_memory_gb() == -1.0
+
+    def test_cgroup_clamp_lowers_computed_cap(self, monkeypatch) -> None:
+        """End-to-end: a 6 GB cgroup cap on a big host caps the count via memory."""
+        import kiro_claw.subagent as sub
+
+        monkeypatch.setattr(sub, "check_memory_available", lambda **k: (True, 174.7))
+        monkeypatch.setattr(sub, "_cgroup_available_gb", lambda: 4.0)  # headroom 4 GB
+        monkeypatch.setattr(sub.os, "cpu_count", lambda: 48)
+        cfg = _cfg(mem_cost=0.315, cpu_cost=0.8, hard_cap=16)
+        # mem_term = floor(4*0.8/0.315)=10 ; cpu_term=48 → min 10, clamp(10,3,16)=10
+        assert compute_max_subagents(cfg) == 10

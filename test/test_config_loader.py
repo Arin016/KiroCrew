@@ -2327,3 +2327,76 @@ class TestConfigCache:
         ):
             second = KiroClawConfig.load()
         assert second.agent.model == "v1", "stale config served from poisoned cache"
+
+
+# ---------------------------------------------------------------------------
+# Dynamic sub-agent sizing config fields (dynamic-subagent-sizing.md §6)
+# ---------------------------------------------------------------------------
+
+
+class TestDynamicSubagentSizingFields:
+    """The 5 auto-sizing config fields load, default, and round-trip."""
+
+    def test_defaults(self) -> None:
+        cfg = _load_from_dict({})
+        a = cfg.agent
+        assert a.max_subagents == 3  # legacy default unchanged
+        assert a.subagent_mem_buffer_pct == 20
+        assert a.subagent_cost_gb == 0.5
+        assert a.subagent_cpu_cost_cores == 1.0
+        assert a.subagent_auto_max == 16
+        assert a.subagent_spawn_stagger_secs == 2.0
+
+    def test_explicit_values_load(self) -> None:
+        cfg = _load_from_dict(
+            {
+                "agent": {
+                    "max_subagents": 0,  # auto sentinel
+                    "subagent_mem_buffer_pct": 30,
+                    "subagent_cost_gb": 0.4,
+                    "subagent_cpu_cost_cores": 0.8,
+                    "subagent_auto_max": 24,
+                    "subagent_spawn_stagger_secs": 1.5,
+                }
+            }
+        )
+        a = cfg.agent
+        assert a.max_subagents == 0
+        assert a.subagent_mem_buffer_pct == 30
+        assert a.subagent_cost_gb == 0.4
+        assert a.subagent_cpu_cost_cores == 0.8
+        assert a.subagent_auto_max == 24
+        assert a.subagent_spawn_stagger_secs == 1.5
+
+    def test_to_dict_round_trip(self) -> None:
+        cfg = _load_from_dict(
+            {
+                "agent": {
+                    "max_subagents": 0,
+                    "subagent_mem_buffer_pct": 25,
+                    "subagent_cost_gb": 0.6,
+                    "subagent_cpu_cost_cores": 0.9,
+                    "subagent_auto_max": 12,
+                    "subagent_spawn_stagger_secs": 3.0,
+                }
+            }
+        )
+        agent_dict = cfg.to_dict()["agent"]
+        for key in (
+            "subagent_mem_buffer_pct",
+            "subagent_cost_gb",
+            "subagent_cpu_cost_cores",
+            "subagent_auto_max",
+            "subagent_spawn_stagger_secs",
+        ):
+            assert key in agent_dict, f"{key} missing from to_dict()"
+
+        # Re-load the serialized form and confirm values survive the round-trip.
+        reloaded = _load_from_dict(cfg.to_dict())
+        a = reloaded.agent
+        assert a.max_subagents == 0
+        assert a.subagent_mem_buffer_pct == 25
+        assert a.subagent_cost_gb == 0.6
+        assert a.subagent_cpu_cost_cores == 0.9
+        assert a.subagent_auto_max == 12
+        assert a.subagent_spawn_stagger_secs == 3.0
