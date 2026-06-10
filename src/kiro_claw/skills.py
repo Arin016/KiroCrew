@@ -392,6 +392,7 @@ class SkillsLoader:
             return False
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+        self._invalidate_iter_cache()  # so the new skill shows in list_skills() now
         logger.info("Created skill: %s", name)
         return True
 
@@ -403,6 +404,7 @@ class SkillsLoader:
         if not skill_file.exists():
             return False
         skill_file.write_text(content, encoding="utf-8")
+        self._invalidate_iter_cache()  # so the edit is reflected in list_skills() now
         logger.info("Updated skill: %s", name)
         return True
 
@@ -414,6 +416,7 @@ class SkillsLoader:
         if not skill_dir.is_dir():
             return False
         shutil.rmtree(skill_dir)
+        self._invalidate_iter_cache()  # so the removal is reflected in list_skills() now
         logger.info("Deleted skill: %s", name)
         return True
 

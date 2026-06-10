@@ -90,6 +90,27 @@ class TestSkillsLoader:
         loader = SkillsLoader(skills_path=tmp_path / "empty", install_builtins=False)
         assert loader.get_context() == ""
 
+    def test_mutators_invalidate_iter_cache(self, tmp_path):
+        """create/update/delete must invalidate the TTL'd _iter cache so a
+        subsequent list_skills() reflects the change immediately (not after the
+        TTL). Each step primes the cache via list_skills() first, mutates, then
+        re-lists in the same tick — without invalidation these would be stale."""
+        loader = SkillsLoader(skills_path=tmp_path / "skills", install_builtins=False)
+        body = "---\nname: x\ndescription: X\n---\n# X\n"
+
+        # create: prime empty, create, must appear now
+        assert loader.list_skills() == []
+        assert loader.create_skill("alpha", body) is True
+        assert any(s["key"] == "alpha" for s in loader.list_skills())
+
+        # update: prime, overwrite, new description must appear now
+        assert loader.update_skill("alpha", body.replace("X", "Updated")) is True
+        assert any(s["description"] == "Updated" for s in loader.list_skills())
+
+        # delete: prime, remove, must disappear now
+        assert loader.delete_skill("alpha") is True
+        assert all(s["key"] != "alpha" for s in loader.list_skills())
+
 
 class TestTriggeredSkills:
     """Tests for fuzzy trigger matching (P397239580)."""
