@@ -348,16 +348,26 @@ If you use Raycast scripts, you can use the below snippet to start an SSH tunnel
 # Documentation:
 # @raycast.description Get token and start KiroClaw
 REMOTE_HOST="user@your-host.example.com"
+REMOTE_CMD='source ~/.zshrc; kiroclaw token'
+DEBUG_LOG="/tmp/kiroclaw_debug.log"
+
 if lsof -i :8765 -sTCP:LISTEN > /dev/null 2>&1; then
   echo "Tunnel already opened, accessing KiroClaw"
-  URL="$(ssh "${REMOTE_HOST}" 'source ~/.zshrc; kiroclaw token')"
-  open "$URL"
 else
   ssh -fNT -L 8765:localhost:8765 "${REMOTE_HOST}"
   echo "Tunnel opened, accessing KiroClaw!"
-  URL="$(ssh "${REMOTE_HOST}" 'source ~/.zshrc; kiroclaw token')"
-  open "$URL"
 fi
+
+SECONDS=0
+URL="$(ssh -o ConnectTimeout=10 "${REMOTE_HOST}" "${REMOTE_CMD}" 2>"${DEBUG_LOG}")"
+echo "Token fetch took ${SECONDS}s (debug: ${DEBUG_LOG})"
+
+if [[ -z "$URL" ]]; then
+  echo "ERROR: empty token. Check ${DEBUG_LOG}"
+  exit 1
+fi
+
+open "$URL"
 ```
 
 ## Troubleshooting
