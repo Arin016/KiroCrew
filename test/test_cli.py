@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import urllib.error
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,10 +15,66 @@ from kiro_claw.cli_doctor import _doctor
 from kiro_claw.cli_server import _update
 
 
+async def _noop_probe_server(server):
+    """Default probe stub for tests that call ``_doctor()`` but aren't
+    specifically exercising the MCP handshake. Marks the target healthy
+    so doctor renders the MCP section cleanly without spawning a real
+    child process.
+
+    Tests that care about specific probe outcomes (success with tool
+    count, failure with stderr, etc.) build their own probe mocks via
+    ``TestDoctorMcpTools._mock_probe``.
+    """
+    server.status = "ok"
+    server.tools = []
+    return server
+
+
+def _write_agent_config(
+    path: Path, *, tools: list[str], allowed: list[str], servers: dict
+) -> None:
+    """Write a ``kiroclaw.json`` agent config with the given managed
+    servers + tool references. Typed keyword arguments make it obvious
+    which fields each test cares about.
+    """
+    path.write_text(
+        json.dumps(
+            {
+                "name": "kiroclaw",
+                "tools": tools,
+                "allowedTools": allowed,
+                "mcpServers": servers,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _healthy_agent_file(path: Path) -> None:
+    """Write a ``kiroclaw.json`` whose managed MCP servers are all present
+    so ``_doctor()``'s MCP section passes its static config check and only
+    the (mocked) live probe remains. Used by doctor tests that exercise an
+    unrelated section and must not trip the MCP exit path on an empty config.
+    """
+    _write_agent_config(
+        path,
+        tools=["@kiroclaw-core", "@kiroclaw-cron"],
+        allowed=["@kiroclaw-core", "@kiroclaw-cron"],
+        servers={
+            "kiroclaw-core": {"command": "/usr/local/bin/kiroclaw", "args": ["mcp-core"]},
+            "kiroclaw-cron": {"command": "/usr/local/bin/kiroclaw", "args": ["mcp-cron"]},
+        },
+    )
+
+
 class TestDoctor:
     def test_doctor_with_kiro(self, tmp_path):
         agent_file = tmp_path / "kiroclaw.json"
-        agent_file.write_text("{}")
+        # A minimally healthy agent config so doctor walks the whole MCP
+        # section cleanly and doesn't exit on "missing from mcpServers".
+        _healthy_agent_file(agent_file)
         mock_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
         with (
             patch("kiro_claw.cli_doctor.shutil.which", side_effect=lambda b: f"/usr/local/bin/{b}"),
@@ -27,6 +84,7 @@ class TestDoctor:
             patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
             patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True),
+            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
         ):
             _doctor()
 
@@ -67,7 +125,7 @@ class TestDoctor:
         """Doctor surfaces an over-broad permissions.deny in ~/.claude that
         would silently abort Claude Code commands upstream of KiroClaw."""
         agent_file = tmp_path / "kiroclaw.json"
-        agent_file.write_text("{}")
+        _healthy_agent_file(agent_file)
         cc_settings = tmp_path / "settings.json"
         cc_settings.write_text(json.dumps({"permissions": {"deny": ["Bash(*)"]}}))
         mock_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
@@ -80,6 +138,7 @@ class TestDoctor:
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
             patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True),
             patch("kiro_claw.cli_doctor.CC_SETTINGS_PATH", cc_settings),
+            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
         ):
             _doctor()
         out = capsys.readouterr().out
@@ -89,7 +148,7 @@ class TestDoctor:
     def test_doctor_clean_cc_deny_reports_ok(self, tmp_path, capsys):
         """With no over-broad deny rule, doctor reports the CC deny check OK."""
         agent_file = tmp_path / "kiroclaw.json"
-        agent_file.write_text("{}")
+        _healthy_agent_file(agent_file)
         cc_settings = tmp_path / "settings.json"
         cc_settings.write_text(json.dumps({"permissions": {"deny": ["Bash(git push*)"]}}))
         mock_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
@@ -102,6 +161,7 @@ class TestDoctor:
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
             patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True),
             patch("kiro_claw.cli_doctor.CC_SETTINGS_PATH", cc_settings),
+            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
         ):
             _doctor()
         out = capsys.readouterr().out
@@ -1685,6 +1745,7 @@ class TestDoctorStaleProjectDir:
             patch("urllib.request.urlopen"),
             patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
+            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
             patch.dict("os.environ", {"KIROCLAW_PROJECT_DIR": "", "SLACK_APP_TOKEN": "", "SLACK_BOT_TOKEN": ""}, clear=False),
         ):
             with pytest.raises(SystemExit):
@@ -1694,51 +1755,221 @@ class TestDoctorStaleProjectDir:
         assert "project dir: ⚠️  not set" not in out  # should NOT show fallback message
 
 
-class TestDoctorMcpCmdFixed:
-    """Tests for doctor auto-fixing stale MCP binary paths."""
+class TestDoctorMcpTools:
+    """Tests for the `_doctor_mcp_tools` helper — the MCP section of doctor.
 
-    def test_doctor_fixes_stale_mcp_path(self, tmp_path, capsys):
-        agent_file = tmp_path / "kiroclaw.json"
-        # kiroclaw-cron has valid path, kiroclaw-core has stale path
-        valid_bin = tmp_path / "kiroclaw"
-        valid_bin.write_text("#!/bin/sh")
-        valid_bin.chmod(0o755)
-        agent_data = {
-            "tools": ["@kiroclaw-core", "@kiroclaw-cron"],
-            "allowedTools": ["@kiroclaw-core", "@kiroclaw-cron"],
-            "mcpServers": {
-                "kiroclaw-core": {"command": "/nonexistent/kiroclaw", "args": ["mcp-core"]},
-                "kiroclaw-cron": {"command": str(valid_bin), "args": ["mcp-cron"]},
+    The helper live-probes only the managed servers (`kiroclaw-core`,
+    `kiroclaw-cron`) via `probe_server`; tests monkey-patch that call so
+    no child processes are spawned.
+    """
+
+    def _mock_probe(self, results: dict[str, tuple[str, list[str], str]]):
+        """Return a patch target for `probe_server` that yields per-name
+        results. `results[name] = (status, tools, error)`."""
+        from kiro_claw.mcp_discovery import McpServerInfo
+
+        async def fake(target: McpServerInfo) -> McpServerInfo:
+            status, tools, error = results.get(target.name, ("ok", [], ""))
+            target.status = status
+            target.tools = list(tools)
+            target.error = error
+            return target
+
+        return patch("kiro_claw.cli_doctor.probe_server", side_effect=fake)
+
+    def test_success_shows_tool_counts(self, tmp_path, capsys):
+        from kiro_claw.cli_doctor import _doctor_mcp_tools
+
+        agent_path = tmp_path / "kiroclaw.json"
+        _write_agent_config(
+            agent_path,
+            tools=["@kiroclaw-core", "@kiroclaw-cron"],
+            allowed=["@kiroclaw-core", "@kiroclaw-cron"],
+            servers={
+                "kiroclaw-core": {"command": "/bin/kiroclaw", "args": ["mcp-core"]},
+                "kiroclaw-cron": {"command": "/bin/kiroclaw", "args": ["mcp-cron"]},
             },
-        }
-        agent_file.write_text(json.dumps(agent_data))
-        mock_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
-
-        def which_side_effect(b):
-            if b == "kiroclaw":
-                return "/usr/bin/kiroclaw"
-            return f"/usr/local/bin/{b}"
-
-        with (
-            patch("kiro_claw.cli_doctor.shutil.which", side_effect=which_side_effect),
-            patch("kiro_claw.cli_doctor.KIRO_AGENTS_DIR", tmp_path),
-            patch("kiro_claw.cli_doctor.subprocess.run", return_value=mock_run),
-            patch("urllib.request.urlopen"),
-            patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
-            patch.dict("os.environ", {"KIROCLAW_PROJECT_DIR": "", "SLACK_APP_TOKEN": "", "SLACK_BOT_TOKEN": ""}, clear=False),
+        )
+        issues: list[str] = []
+        with self._mock_probe(
+            {
+                "kiroclaw-core": ("ok", ["spawn_run", "learn_add", "task_run"], ""),
+                "kiroclaw-cron": ("ok", ["cron_add"], ""),
+            }
         ):
-            # _doctor() may sys.exit on unmocked env checks; output assertions still hold.
-            try:
-                _doctor()
-            except SystemExit:
-                pass
+            _doctor_mcp_tools(agent_path, issues)
         out = capsys.readouterr().out
-        assert "fixed stale path" in out
-        assert "Auto-fixed stale binary" in out
-        # Verify it did NOT print the tools/allowedTools message
-        assert "Auto-fixed tools/allowedTools" not in out
+        assert "@kiroclaw-core: ✅ 3 tools" in out
+        assert "@kiroclaw-cron: ✅ 1 tool" in out
+        assert issues == []
+
+    def test_failure_shows_error_head_and_indented_stderr(self, tmp_path, capsys):
+        from kiro_claw.cli_doctor import _doctor_mcp_tools
+
+        agent_path = tmp_path / "kiroclaw.json"
+        _write_agent_config(
+            agent_path,
+            tools=["@kiroclaw-core", "@kiroclaw-cron"],
+            allowed=["@kiroclaw-core", "@kiroclaw-cron"],
+            servers={
+                "kiroclaw-core": {"command": "/bin/kiroclaw", "args": ["mcp-core"]},
+                "kiroclaw-cron": {"command": "/bin/kiroclaw", "args": ["mcp-cron"]},
+            },
+        )
+        issues: list[str] = []
+        fail_err = (
+            "no response\n"
+            "stderr: Directory isn't within a workspace: '/home/u/.kiroclaw-app' "
+            "(Amazon::Brazil::Cli::FindupException)"
+        )
+        with self._mock_probe(
+            {
+                "kiroclaw-core": ("error", [], fail_err),
+                "kiroclaw-cron": ("ok", [], ""),
+            }
+        ):
+            _doctor_mcp_tools(agent_path, issues)
+        out = capsys.readouterr().out
+        # First line of error becomes the head; subsequent lines indent.
+        assert "@kiroclaw-core: ❌ no response" in out
+        assert "      stderr: Directory isn't within a workspace" in out
+        assert "FindupException" in out
+        assert "@kiroclaw-cron: ✅ 0 tools" in out
+        assert "@kiroclaw-core probe" in issues
+        # Healthy server must not pollute the issue list.
+        assert "@kiroclaw-cron probe" not in issues
+
+    def test_missing_mcp_server_cannot_auto_fix(self, tmp_path, capsys):
+        """A missing `mcpServers` entry is install-specific; doctor reports
+        the user needs to re-run setup and does not attempt to probe."""
+        from kiro_claw.cli_doctor import _doctor_mcp_tools
+
+        agent_path = tmp_path / "kiroclaw.json"
+        _write_agent_config(
+            agent_path,
+            tools=[],
+            allowed=[],
+            servers={},
+        )
+        issues: list[str] = []
+        with self._mock_probe({}) as probe_mock:
+            _doctor_mcp_tools(agent_path, issues)
+        out = capsys.readouterr().out
+        assert "@kiroclaw-core: ❌ missing from mcpServers" in out
+        assert "@kiroclaw-cron: ❌ missing from mcpServers" in out
+        assert "re-run `kiroclaw setup`" in out
+        assert "@kiroclaw-core config" in issues
+        assert "@kiroclaw-cron config" in issues
+        probe_mock.assert_not_called()
+
+    def test_auto_fix_adds_missing_tools_and_allowed(self, tmp_path, capsys):
+        """Missing `tools` / `allowedTools` entries are added to the agent
+        config and persisted in-place."""
+        from kiro_claw.cli_doctor import _doctor_mcp_tools
+
+        agent_path = tmp_path / "kiroclaw.json"
+        _write_agent_config(
+            agent_path,
+            tools=[],
+            allowed=[],
+            servers={
+                "kiroclaw-core": {"command": "/bin/kiroclaw", "args": ["mcp-core"]},
+                "kiroclaw-cron": {"command": "/bin/kiroclaw", "args": ["mcp-cron"]},
+            },
+        )
+        issues: list[str] = []
+        with self._mock_probe(
+            {
+                "kiroclaw-core": ("ok", [], ""),
+                "kiroclaw-cron": ("ok", [], ""),
+            }
+        ):
+            _doctor_mcp_tools(agent_path, issues)
+        out = capsys.readouterr().out
+        assert "Auto-fixed agent config" in out
+        updated = json.loads(agent_path.read_text())
+        assert updated["tools"] == ["@kiroclaw-cron", "@kiroclaw-core"]
+        assert updated["allowedTools"] == ["@kiroclaw-cron", "@kiroclaw-core"]
+
+    def test_probe_exception_does_not_crash(self, tmp_path, capsys):
+        """If `probe_server` itself raises (e.g. event-loop oddity), doctor
+        prints a warning and returns cleanly instead of propagating."""
+        from kiro_claw.cli_doctor import _doctor_mcp_tools
+
+        agent_path = tmp_path / "kiroclaw.json"
+        _write_agent_config(
+            agent_path,
+            tools=["@kiroclaw-core", "@kiroclaw-cron"],
+            allowed=["@kiroclaw-core", "@kiroclaw-cron"],
+            servers={
+                "kiroclaw-core": {"command": "/bin/kiroclaw", "args": ["mcp-core"]},
+                "kiroclaw-cron": {"command": "/bin/kiroclaw", "args": ["mcp-cron"]},
+            },
+        )
+        issues: list[str] = []
+        with patch(
+            "kiro_claw.cli_doctor.probe_server",
+            side_effect=RuntimeError("asyncio is on fire"),
+        ):
+            _doctor_mcp_tools(agent_path, issues)
+        out = capsys.readouterr().out
+        assert "probe failed: asyncio is on fire" in out
+
+    def test_only_managed_servers_are_probed(self, tmp_path, capsys):
+        """Third-party MCPs in the agent config must not be probed — this
+        keeps doctor output focused on KiroClaw's own servers and avoids
+        false negatives for optional MCPs."""
+        from kiro_claw.cli_doctor import _doctor_mcp_tools
+
+        agent_path = tmp_path / "kiroclaw.json"
+        _write_agent_config(
+            agent_path,
+            tools=["@kiroclaw-core", "@kiroclaw-cron", "@builder-mcp"],
+            allowed=["@kiroclaw-core", "@kiroclaw-cron", "@builder-mcp"],
+            servers={
+                "kiroclaw-core": {"command": "/bin/kiroclaw", "args": ["mcp-core"]},
+                "kiroclaw-cron": {"command": "/bin/kiroclaw", "args": ["mcp-cron"]},
+                "builder-mcp": {"command": "/bin/builder-mcp"},
+            },
+        )
+        issues: list[str] = []
+        probed_names: list[str] = []
+
+        async def recording_probe(target):
+            probed_names.append(target.name)
+            target.status = "ok"
+            target.tools = []
+            return target
+
+        with patch("kiro_claw.cli_doctor.probe_server", side_effect=recording_probe):
+            _doctor_mcp_tools(agent_path, issues)
+        assert probed_names == ["kiroclaw-cron", "kiroclaw-core"]
+        out = capsys.readouterr().out
+        assert "@builder-mcp" not in out
+
+    def test_malformed_agent_config_does_not_crash(self, tmp_path, capsys):
+        """If kiroclaw.json is truncated or otherwise unparseable, doctor
+        must fall back to an empty config and surface missing-server
+        errors cleanly rather than raising out of the MCP section."""
+        from kiro_claw.cli_doctor import _doctor_mcp_tools
+
+        agent_path = tmp_path / "kiroclaw.json"
+        # Truncated mid-write, half-written JSON, totally broken content —
+        # the exact failure mode the atomic_write change is meant to
+        # prevent from ever landing on disk, but we still need doctor to
+        # cope if it encounters one (legacy installs, disk corruption).
+        agent_path.write_text("{\"tools\": [\"@kiroclaw-c")
+
+        issues: list[str] = []
+        with self._mock_probe({}) as probe_mock:
+            _doctor_mcp_tools(agent_path, issues)
+
+        out = capsys.readouterr().out
+        # Empty config → both managed servers report missing from mcpServers.
+        assert "@kiroclaw-core: ❌ missing from mcpServers" in out
+        assert "@kiroclaw-cron: ❌ missing from mcpServers" in out
+        # No probe attempted since no server spec survived the parse failure.
+        probe_mock.assert_not_called()
 
 
 class TestDoctorStt:
@@ -1771,6 +2002,7 @@ class TestDoctorStt:
             patch("kiro_claw.cli_doctor.ensure_ffmpeg_in_path"),
             patch("kiro_claw.cli_doctor.KiroClawConfig.load", return_value=cfg),
             patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True),
+            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
         ):
             try:
                 _doctor()
@@ -1807,6 +2039,7 @@ class TestDoctorStt:
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
             patch("kiro_claw.cli_doctor.KiroClawConfig.load", return_value=cfg),
             patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True),
+            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
             patch("kiro_claw.cli_doctor._find_whisper", return_value=None),
             patch("kiro_claw.cli_doctor.ensure_ffmpeg_in_path"),
         ):
@@ -1848,6 +2081,7 @@ class TestDoctorStt:
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
             patch("kiro_claw.cli_doctor.KiroClawConfig.load", return_value=cfg),
             patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True),
+            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
             patch("kiro_claw.cli_doctor._find_whisper", return_value=None),
             patch("kiro_claw.cli_doctor.ensure_ffmpeg_in_path"),
             patch.dict("sys.modules", fake_modules),
@@ -1899,6 +2133,7 @@ class TestDoctorStt:
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
             patch("kiro_claw.cli_doctor.KiroClawConfig.load", return_value=cfg),
             patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True),
+            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
             patch("kiro_claw.cli_doctor._find_whisper", return_value=None),
             patch("kiro_claw.cli_doctor.ensure_ffmpeg_in_path"),
         ):
@@ -1944,6 +2179,7 @@ class TestDoctorStt:
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
             patch("kiro_claw.cli_doctor.KiroClawConfig.load", return_value=cfg),
             patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True),
+            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
             patch("kiro_claw.cli_doctor._find_whisper", return_value=None),
             patch("kiro_claw.cli_doctor.ensure_ffmpeg_in_path"),
         ):
@@ -2300,7 +2536,7 @@ class TestDoctorOllamaDocker:
     def test_doctor_detects_ollama_docker(self, tmp_path, capsys):
         """When native ollama is missing but Docker container exists, report as installed."""
         agent_file = tmp_path / "kiroclaw.json"
-        agent_file.write_text("{}")
+        _healthy_agent_file(agent_file)
 
         def which_side_effect(binary):
             if binary == "ollama":
@@ -2323,6 +2559,7 @@ class TestDoctorOllamaDocker:
             patch("urllib.request.urlopen", side_effect=urllib.error.URLError("no")),
             patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
+            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
         ):
             _doctor()
         out = capsys.readouterr().out
@@ -2333,7 +2570,7 @@ class TestDoctorOllamaDocker:
     def test_doctor_no_ollama_no_docker(self, tmp_path, capsys):
         """When neither native ollama nor Docker container exists, report not installed."""
         agent_file = tmp_path / "kiroclaw.json"
-        agent_file.write_text("{}")
+        _healthy_agent_file(agent_file)
 
         def which_side_effect(binary):
             if binary in ("ollama", "docker"):
@@ -2349,6 +2586,7 @@ class TestDoctorOllamaDocker:
             patch("urllib.request.urlopen", side_effect=urllib.error.URLError("no")),
             patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
+            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
         ):
             _doctor()
         out = capsys.readouterr().out
@@ -2357,7 +2595,7 @@ class TestDoctorOllamaDocker:
     def test_doctor_docker_container_not_found(self, tmp_path, capsys):
         """When docker exists but container doesn't, fall through to not installed."""
         agent_file = tmp_path / "kiroclaw.json"
-        agent_file.write_text("{}")
+        _healthy_agent_file(agent_file)
 
         def which_side_effect(binary):
             if binary == "ollama":
@@ -2380,6 +2618,7 @@ class TestDoctorOllamaDocker:
             patch("urllib.request.urlopen", side_effect=urllib.error.URLError("no")),
             patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
+            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
         ):
             _doctor()
         out = capsys.readouterr().out
@@ -2388,7 +2627,7 @@ class TestDoctorOllamaDocker:
     def test_doctor_docker_inspect_timeout(self, tmp_path, capsys):
         """When docker inspect times out, fall through gracefully to not installed."""
         agent_file = tmp_path / "kiroclaw.json"
-        agent_file.write_text("{}")
+        _healthy_agent_file(agent_file)
 
         def which_side_effect(binary):
             if binary == "ollama":
@@ -2410,6 +2649,7 @@ class TestDoctorOllamaDocker:
             patch("urllib.request.urlopen", side_effect=urllib.error.URLError("no")),
             patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
+            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
         ):
             _doctor()
         out = capsys.readouterr().out

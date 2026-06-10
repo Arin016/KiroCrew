@@ -23,7 +23,9 @@ _KIRO_MCP_JSON = Path.home() / ".kiro" / "settings" / "mcp.json"
 
 # Managed servers whose command is the kiroclaw binary itself.
 # Only these are affected by install-method path changes.
-KIROCLAW_BIN_MCP_SERVERS = frozenset({"kiroclaw-cron", "kiroclaw-core"})
+# Ordered tuple (not a set) so consumers that iterate — e.g. `kiroclaw
+# doctor`'s MCP probe — get a deterministic order.
+KIROCLAW_BIN_MCP_SERVERS = ("kiroclaw-cron", "kiroclaw-core")
 
 # MeshClaw was the predecessor of KiroClaw. The rename left these managed
 # server entries — pointing at now-dead MeshClaw build paths — behind in the
@@ -32,7 +34,7 @@ PREDECESSOR_BIN_MCP_SERVERS = frozenset({"meshclaw-cron", "meshclaw-core"})
 
 # Every managed-binary server name KiroClaw is responsible for removing from
 # the user's global mcp.json (KiroClaw never legitimately writes these there).
-STALE_MANAGED_MCP_SERVERS = KIROCLAW_BIN_MCP_SERVERS | PREDECESSOR_BIN_MCP_SERVERS
+STALE_MANAGED_MCP_SERVERS = frozenset(KIROCLAW_BIN_MCP_SERVERS) | PREDECESSOR_BIN_MCP_SERVERS
 
 
 def _invokes_meshclaw(spec: object) -> bool:

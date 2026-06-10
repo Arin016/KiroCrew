@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import platform as _plat
@@ -15,6 +16,7 @@ from pathlib import Path
 from kiro_claw import __version__ as _mc_version
 from kiro_claw.acp.client import KIRO_CLI_BIN
 from kiro_claw.agent import AGENT_FILENAME, KIRO_AGENTS_DIR
+from kiro_claw.atomic_write import atomic_write
 from kiro_claw.cc_agent import CC_SETTINGS_PATH, find_overbroad_cc_deny_rules
 from kiro_claw.config import KiroClawConfig
 from kiro_claw.config.loader import config_dir
@@ -24,6 +26,8 @@ from kiro_claw.dashboard.origin import (
     machine_hostname,
     parse_dashboard_url,
 )
+from kiro_claw.mcp_cleanup import KIROCLAW_BIN_MCP_SERVERS as _MANAGED_MCPS
+from kiro_claw.mcp_discovery import McpServerInfo, probe_server
 from kiro_claw.slack.enterprise import validate_enterprise
 from kiro_claw.transcribe import _find_whisper, ensure_ffmpeg_in_path
 
@@ -52,6 +56,91 @@ def _detect_docker_ollama() -> str | None:
     except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
         pass
     return None
+
+
+def _doctor_mcp_tools(agent_path: Path, issues: list[str]) -> None:
+    """Render the `MCP Tools` section of `kiroclaw doctor`.
+
+    Two passes scoped to the managed servers (`kiroclaw-core`,
+    `kiroclaw-cron`):
+
+    1. Static sanity check of the agent config: each server must be present
+       in ``mcpServers``, ``tools`` and ``allowedTools``. Missing ``tools``
+       / ``allowedTools`` entries are auto-appended and the file is
+       rewritten atomically. A missing ``mcpServers`` entry cannot be
+       auto-added because the command path is install-specific.
+    2. Live handshake probe via :func:`mcp_discovery.probe_server`. Reports
+       per-server status with tool count on success, and on failure shows
+       the error head plus any captured stderr tail from the child — which
+       usually contains the real cause (FindupException, ImportError, etc.)
+       that would otherwise only exist in kiro-cli's per-session log.
+    """
+    try:
+        agent_data = json.loads(agent_path.read_text(encoding="utf-8"))
+    except Exception:
+        agent_data = {}
+
+    tools = agent_data.get("tools", [])
+    allowed = agent_data.get("allowedTools", [])
+    mcps = agent_data.get("mcpServers", {})
+    config_changed = False
+
+    probe_targets = []
+    for name in _MANAGED_MCPS:
+        ref = f"@{name}"
+        if name not in mcps:
+            print(f"  {ref}: ❌ missing from mcpServers (re-run `kiroclaw setup`)")
+            issues.append(f"{ref} config")
+            continue
+        if ref not in tools:
+            tools.append(ref)
+            config_changed = True
+        if ref not in allowed:
+            allowed.append(ref)
+            config_changed = True
+
+        spec = mcps[name]
+        probe_targets.append(
+            McpServerInfo(
+                name=name,
+                command=spec.get("command", ""),
+                args=list(spec.get("args", []) or []),
+                env=dict(spec.get("env", {}) or {}),
+            )
+        )
+
+    if config_changed:
+        agent_data["tools"] = tools
+        agent_data["allowedTools"] = allowed
+        agent_data["mcpServers"] = mcps
+        atomic_write(agent_path, json.dumps(agent_data, indent=2) + "\n")
+        print("  → Auto-fixed agent config")
+
+    if not probe_targets:
+        return
+
+    try:
+        async def _probe_all() -> list:
+            return await asyncio.gather(*(probe_server(t) for t in probe_targets))
+
+        probed = asyncio.run(_probe_all())
+    except Exception as exc:
+        print(f"  ⚠️  probe failed: {exc}")
+        return
+
+    for server in probed:
+        ref = f"@{server.name}"
+        if server.status == "ok":
+            count = len(server.tools)
+            noun = "tool" if count == 1 else "tools"
+            print(f"  {ref}: ✅ {count} {noun}")
+            continue
+        head, _, detail = (server.error or "unknown error").partition("\n")
+        print(f"  {ref}: ❌ {head or 'unknown error'}")
+        if detail:
+            for line in detail.splitlines():
+                print(f"      {line}")
+        issues.append(f"{ref} probe")
 
 
 def _doctor_ollama_install(issues: list[str]) -> None:
@@ -262,60 +351,7 @@ def _doctor() -> None:
     # ── MCP Tools ──
     print("\nMCP Tools")
     if agent_path.exists():
-
-        try:
-            agent_data = json.loads(agent_path.read_text(encoding="utf-8"))
-        except Exception:
-            agent_data = {}
-        tools = agent_data.get("tools", [])
-        allowed = agent_data.get("allowedTools", [])
-        mcps = agent_data.get("mcpServers", {})
-        mcp_fixed = False
-        mcp_cmd_fixed = False
-        for ref in ("@kiroclaw-cron", "@kiroclaw-core"):
-            name = ref[1:]
-            in_tools = ref in tools
-            in_allowed = ref in allowed
-            in_servers = name in mcps
-            if in_tools and in_allowed and in_servers:
-                cmd = mcps[name].get("command", "")
-                exists = Path(cmd).is_file() if cmd else False
-                if exists:
-                    print(f"  {ref}: ✅")
-                else:
-                    resolved = shutil.which("kiroclaw")
-                    if resolved:
-                        mcps[name]["command"] = resolved
-                        mcp_cmd_fixed = True
-                        print(f"  {ref}: 🔧 fixed stale path: {cmd} → {resolved}")
-                    else:
-                        print(f"  {ref}: ❌ binary not found: {cmd}")
-                        issues.append(f"{ref} binary")
-            else:
-                missing: list[str] = []
-                if not in_servers:
-                    missing.append("mcpServers")
-                if not in_tools:
-                    missing.append("tools")
-                if not in_allowed:
-                    missing.append("allowedTools")
-                print(f"  {ref}: ❌ missing from {', '.join(missing)}")
-                issues.append(f"{ref} config")
-                # Auto-fix
-                if not in_tools:
-                    tools.append(ref)
-                if not in_allowed:
-                    allowed.append(ref)
-                mcp_fixed = True
-        if mcp_fixed or mcp_cmd_fixed:
-            agent_data["tools"] = tools
-            agent_data["allowedTools"] = allowed
-            agent_path.write_text(json.dumps(agent_data, indent=2) + "\n", encoding="utf-8")
-            if mcp_fixed:
-                print("  → Auto-fixed tools/allowedTools in kiroclaw.json")
-                issues = [i for i in issues if "config" not in i]
-            if mcp_cmd_fixed:
-                print("  → Auto-fixed stale binary path(s) in kiroclaw.json")
+        _doctor_mcp_tools(agent_path, issues)
 
     # ── Python Runtime ──
     print("\nRuntime")

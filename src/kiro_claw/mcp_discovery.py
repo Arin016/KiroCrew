@@ -25,6 +25,7 @@ import aiohttp
 
 from kiro_claw.env import augmented_path
 from kiro_claw.hooks import safe_read_file
+from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 
 logger = logging.getLogger(__name__)
 
@@ -631,6 +632,26 @@ async def probe_server(server: McpServerInfo) -> McpServerInfo:
         server.error = str(exc)[:200]
         logger.warning("MCP probe failed [%s]: %s", server.name, server.error)
     finally:
+        # When the probe failed, drain any stderr the child wrote and append
+        # a redacted tail to the error message. Most MCP servers print a
+        # useful diagnostic (Python traceback, ModuleNotFoundError,
+        # brazil-runtime-exec FindupException, etc.) on startup failure;
+        # without this, callers only see opaque strings like "timeout" or
+        # "no response" with no hint of the underlying cause.
+        #
+        # stderr is untrusted process output that could contain leaked
+        # credentials or exfiltration URLs, so scrub it with the security
+        # redactors before it reaches doctor output / dashboard / Slack.
+        if proc is not None and proc.stderr is not None and server.status == "error":
+            try:
+                stderr_bytes = await asyncio.wait_for(proc.stderr.read(4096), timeout=1.0)
+                stderr_tail = stderr_bytes.decode(errors="replace").strip()
+                if stderr_tail:
+                    clean, _ = redact_exfiltration_urls(stderr_tail)
+                    clean, _ = redact_credentials(clean)
+                    server.error = f"{server.error}\nstderr: {clean[:500]}"
+            except (asyncio.TimeoutError, Exception):
+                pass
         if proc is not None and proc.returncode is None:
             try:
                 if proc.stdin:
