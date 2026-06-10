@@ -554,6 +554,18 @@ Examples:
     cron_trigger = cron_sub.add_parser("trigger", help="Trigger a cron job immediately")
     cron_trigger.add_argument("job_id", help="Job ID to trigger")
 
+    cron_preview = cron_sub.add_parser(
+        "preview",
+        help="Run a script cron locally with real MCP tools; notifications are captured and printed instead of delivered",
+    )
+    cron_preview.add_argument(
+        "script", help="Script path in module:function format (e.g. ~/.kiroclaw/crons/my.py:run)"
+    )
+    cron_preview.add_argument("--message", "-m", default="", help="ctx.message value")
+    cron_preview.add_argument(
+        "--env", "-e", action="append", metavar="K=V", help="Extra env vars (repeatable)"
+    )
+
     # spawn
     spawn_parser = sub.add_parser(
         "spawn",

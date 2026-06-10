@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import inspect
 import json
+import os
 import shutil
 import sys
 import time as _time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -777,8 +782,120 @@ def _cron(args: argparse.Namespace) -> None:
             resources=f"job_id={args.job_id}",
         )
 
+    elif action == "preview":
+        _cron_preview(args)
+
     else:
-        print("Usage: kiroclaw cron {list|add|update|remove|pause|resume|trigger}")
+        print("Usage: kiroclaw cron {list|add|update|remove|pause|resume|trigger|preview}")
+
+
+def _cron_preview(args: argparse.Namespace) -> None:
+    """Dry-run a script cron with real MCP tools but suppressed hooks."""
+    # Imported here (not at module top) to avoid a cron_script import cycle.
+    from kiro_claw.cron_script import Done, McpToolClient, Report, Skip, resolve_script_path
+
+    # Resolve and validate script path (same validation as production cron runner:
+    # format, existence, sensitive path, containment under ~/.kiroclaw/crons/)
+    try:
+        script_path, func_name = resolve_script_path(args.script)
+    except (ValueError, FileNotFoundError, PermissionError) as e:
+        sel().log_api_access(
+            caller="cli", operation="cron.preview",
+            outcome="denied", source="cli",
+            resources=f"script={args.script} reason={type(e).__name__}",
+        )
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    # Set env vars before loading module so top-level code can see them
+    for kv in (args.env or []):
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            os.environ[k] = v
+
+    # Load the script module
+    spec = importlib.util.spec_from_file_location("_cron_preview_module", script_path)
+    if spec is None or spec.loader is None:
+        print(f"Error: cannot load {script_path}")
+        sys.exit(1)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    func = getattr(module, func_name, None)
+    if func is None:
+        print(f"Error: function '{func_name}' not found in {script_path}")
+        sys.exit(1)
+    if inspect.iscoroutinefunction(func):
+        print(f"Error: function '{func_name}' is async; cron preview only supports synchronous functions")
+        sys.exit(1)
+
+    @dataclass
+    class _PreviewJob:
+        id: str = "preview-dry-run"
+
+    class _LiveTestCtx:
+        """Dry-run ctx: real MCP tools, suppressed hooks.
+
+        Runs in-process (not sandboxed) unlike production's run_script_sandboxed.
+        Acceptable because: scripts are constrained to ~/.kiroclaw/crons/ via
+        resolve_script_path, and the command is user-initiated from their terminal."""
+
+        def __init__(self, message: str):
+            self.message = message
+            self.job = _PreviewJob()
+
+        def call_tool(self, server: str, tool: str, tool_args: dict) -> str:
+            # Redact credentials/exfiltration URLs (same as production ScriptContext.call_tool)
+            args_str = json.dumps(tool_args)
+            args_str = redact_exfiltration_urls(redact_credentials(args_str)[0])[0]
+            safe_args = json.loads(args_str)
+            # Per-call spawn + close (same lifecycle as production ScriptContext.call_tool)
+            client = McpToolClient(server)
+            outcome = "ok"
+            try:
+                result = client.call_tool(tool, safe_args)
+            except Exception:
+                outcome = "error"
+                raise
+            finally:
+                client.close()
+                sel().log_tool_invocation(
+                    session_key=f"cron:{self.job.id}",
+                    tool_name=f"{server}/{tool}",
+                    tool_kind="cron_preview_tool",
+                    outcome=outcome,
+                )
+            return result
+
+        def notify(self, message: str) -> None:
+            print(f"[notify suppressed]: {message}")
+
+        def close(self):
+            pass
+
+    ctx = _LiveTestCtx(message=args.message)
+    outcome = "ok"
+    try:
+        func(ctx)
+        print("\n✅ Completed (no exception raised)")
+    except Skip:
+        print("\n⏭️  Skip (nothing to report)")
+    except Report as r:
+        print(f"\n📢 Report:\n{r}")
+    except Done as d:
+        print(f"\n🏁 Done:\n{d}")
+    except Exception as e:
+        outcome = "error"
+        print(f"\n❌ Error: {type(e).__name__}: {e}")
+        traceback.print_exc()
+    finally:
+        ctx.close()
+        sel().log_api_access(
+            caller="cli", operation="cron.preview",
+            outcome=outcome, source="cli",
+            resources=f"script={script_path}:{func_name}",
+        )
+    if outcome == "error":
+        sys.exit(1)
 
 
 def _security(args: argparse.Namespace) -> None:
