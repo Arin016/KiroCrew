@@ -12,9 +12,19 @@
 #                so frontend sync is by CONTENT within the post-snapshot window, not a
 #                clean SHA range. This SHA records the upstream tip last triaged.
 
-beta 29ad9776      # 2026-06-10 backend tip. Dual-repo sync batch-10.
-frontend-beta 94e92af4b69a151681a9cab503ad4110d2346bcd  # 2026-06-10 MeshClawWebsite beta tip; first frontend sync.
+beta 599d6f64      # 2026-06-10 backend tip (batch-11). Tip is a SKIP (promptfarm) — boundary advances past resolved SKIPs.
+frontend-beta ed7c87f0322813bd262b2eb157bf8f6c8ddabc4c  # 2026-06-10 MeshClawWebsite beta tip (batch-11). Tip is a SKIP (PromptFarm UI).
 mainline 49633d05  # 2026-06-09 no mainline-only delta past this
+
+# --- Batch-11 (cron dual-repo sync 2026-06-10) -------------------------------
+# 6h cron run. 8 candidates (3 backend + 5 frontend); 3 ported, 4 SKIP, 1 ALREADY_PRESENT.
+# Stacked on batch-10 (CR-280980741 still pending — origin/mainline lacks it + the
+# KiroACP-only refactor, so the existing sync branch is the correct base, NOT a fresh
+# branch from origin/mainline). PORTED: 03e2ba43 (slack tool-card elapsed time),
+# 0dc8ff1a (kiroclaw cron preview), 964b7e5 (board card layoutId per column). SKIP:
+# 599d6f64 + ed7c87f (promptfarm publish — absent), 7342c6e (secretary — absent),
+# 7eb7d6c (Cloud Sync SyncPanel — absent). ALREADY_PRESENT: a673571 (MCP OAuth banner
+# — fork ChatPage already routes m.role==='mcp_oauth').
 
 # --- Batch-10 (dual-repo sync 2026-06-10) ------------------------------------
 # First sync to cover BOTH repos. Backend window e62422ae..29ad9776; frontend window =
