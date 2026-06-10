@@ -1362,8 +1362,8 @@ function ChatInput({
                 <motion.button
                   className="w-8 h-8 rounded-lg bg-transparent border-none text-danger hover:bg-danger/10 flex items-center justify-center cursor-pointer transition-all"
                   onClick={onStop}
-                  title="Force stop"
-                  aria-label="Force stop"
+                  title="Force kill — discards in-progress work and queued messages"
+                  aria-label="Force kill session (discards in-progress work and queued messages)"
                   animate={{ opacity: [0.6, 1, 0.6] }}
                   transition={{ duration: 1.2, repeat: Infinity }}
                   data-testid="stop-button-pulsing"

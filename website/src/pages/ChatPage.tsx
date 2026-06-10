@@ -22,6 +22,7 @@ import { api } from '../api/client'
 import { useProvider } from '../providers'
 import AutoNudgePopover, { type AutoNudgeLoop } from '../components/AutoNudgePopover'
 import { fileReadUrl } from '../utils/fileReadUrl'
+import { handleStopPress } from '../utils/stopDebounce'
 import { EmptyState, Btn, Input } from '../components/ui'
 import MarkdownPanel from '../components/MarkdownPanel'
 import DiffPanel from '../components/DiffPanel'
@@ -449,6 +450,13 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   // stays referentially stable and doesn't re-run downstream effects.
   const sentMessagesRef = useRef<string[]>([])
   const sentMessagesSlotRef = useRef<string | null>(null)
+  // Per-slot timestamp (ms) of the last soft-stop press, used to arm the
+  // force-kill. A force press (second click while soft_pending) arriving
+  // within FORCE_KILL_ARMING_MS of that slot's soft stop is treated as an
+  // accidental rapid double-tap and ignored, so users can't hard-kill by
+  // mashing Stop. Keyed by slot so switching slots can't measure one slot's
+  // press against another slot's timestamp.
+  const softStopAtMapRef = useRef<Map<string, number>>(new Map())
   const sentMessages = useMemo(() => {
     const out: string[] = []
     for (const m of messages) {
@@ -2628,7 +2636,27 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               contextUsedTokens={contextTokens?.used}
               contextWindowTokens={contextTokens?.window}
               isRunning={slotRunning}
-              onStop={() => { const slot = activeSlot; if (slot) { dispatch(requestStop({ slotId: slot, force: currentSlot?.stop_state === 'soft_pending' })); dispatch(clearPendingPermissions()) } }}
+              onStop={() => {
+                const slot = activeSlot
+                if (!slot) return
+                const isSoftPending = currentSlot?.stop_state === 'soft_pending'
+                // Per-slot view over the map, satisfying SoftStopRef so the
+                // arming window is measured against THIS slot's soft press.
+                const map = softStopAtMapRef.current
+                const slotRef = {
+                  get current() { return map.get(slot) ?? 0 },
+                  set current(v: number) { map.set(slot, v) },
+                }
+                const action = handleStopPress(
+                  isSoftPending,
+                  Date.now(),
+                  slotRef,
+                  () => dispatch(requestStop({ slotId: slot, force: false })),
+                  () => dispatch(requestStop({ slotId: slot, force: true })),
+                )
+                // 'ignore' = accidental rapid double-tap during the arming window
+                if (action !== 'ignore') dispatch(clearPendingPermissions())
+              }}
               isQueued={slotStopping}
               stopState={currentSlot?.stop_state}
               approvalMode={displayMode}

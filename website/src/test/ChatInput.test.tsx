@@ -851,11 +851,11 @@ describe('ChatInput', () => {
       expect(onStop).toHaveBeenCalled()
     })
 
-    it('shows pulsing Force stop button when soft_pending, click calls onStop', () => {
+    it('shows pulsing force-kill button when soft_pending, click calls onStop', () => {
       const onStop = vi.fn()
       renderWithProviders(<ChatInput {...defaultProps} isRunning onStop={onStop} stopState="soft_pending" />)
       const btn = screen.getByTestId('stop-button-pulsing')
-      expect(btn).toHaveAttribute('aria-label', 'Force stop')
+      expect(btn).toHaveAttribute('aria-label', 'Force kill session (discards in-progress work and queued messages)')
       fireEvent.click(btn)
       expect(onStop).toHaveBeenCalled()
     })
