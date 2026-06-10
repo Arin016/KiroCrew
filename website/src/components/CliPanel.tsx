@@ -12,6 +12,11 @@ import {
   addSession,
   removeSession,
   setActiveSession,
+  renameSession,
+  setSessions,
+  loadLabels,
+  saveLabels,
+  removeLabel,
   type TerminalSession,
 } from '../store/terminalSlice'
 import { useTerminalWs } from '../hooks/useTerminalWs'
@@ -85,15 +90,31 @@ const SessionChip = memo(function SessionChip({
   active,
   onSelect,
   onClose,
+  onRename,
 }: {
   session: TerminalSession
   active: boolean
   onSelect: () => void
   onClose: (e: React.MouseEvent) => void
+  onRename: (label: string) => void
 }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(session.label)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => { if (editing) inputRef.current?.select() }, [editing])
+
+  const commit = () => {
+    setEditing(false)
+    const trimmed = draft.trim()
+    if (trimmed && trimmed !== session.label) onRename(trimmed)
+    else setDraft(session.label)
+  }
+
   return (
     <button
       onClick={onSelect}
+      onDoubleClick={() => { setDraft(session.label); setEditing(true) }}
       className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[13px] whitespace-nowrap shrink-0 transition-colors ${
         active
           ? 'bg-accent/20 text-accent border border-accent/40'
@@ -101,9 +122,22 @@ const SessionChip = memo(function SessionChip({
       }`}
     >
       <TerminalSquare size={12} />
-      <span className="max-w-[120px] truncate">{session.label}</span>
+      {editing ? (
+        <input
+          ref={inputRef}
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') { setDraft(session.label); setEditing(false) } }}
+          className="w-[80px] bg-transparent border-none outline-none text-[13px] p-0"
+          onClick={e => e.stopPropagation()}
+        />
+      ) : (
+        <span className="max-w-[120px] truncate">{session.label}</span>
+      )}
       <span
         role="button"
+        aria-label="Close tab"
         onClick={onClose}
         className="ml-0.5 hover:text-red-400 transition-colors"
       >
@@ -206,7 +240,32 @@ export default function CliPanel() {
   }
 
   useEffect(() => {
-    if (sessions.length === 0) createSession()
+    let cancelled = false
+    async function reconnect() {
+      try {
+        const r = await fetch('/api/terminal/sessions')
+        if (cancelled) return
+        if (!r.ok) { createSession(); return }
+        const data = await r.json()
+        const alive = (data.sessions ?? []).filter((s: { alive: boolean }) => s.alive)
+        if (alive.length === 0) { createSession(); return }
+        const labels = loadLabels()
+        const restored: TerminalSession[] = alive.map((s: { session_id: string }) => ({
+          id: s.session_id,
+          label: labels[s.session_id] || 'bash',
+        }))
+        // Clean labels for dead sessions
+        const aliveIds = new Set(alive.map((s: { session_id: string }) => s.session_id))
+        for (const id of Object.keys(labels)) {
+          if (!aliveIds.has(id)) removeLabel(id)
+        }
+        if (!cancelled) dispatch(setSessions(restored))
+      } catch {
+        if (!cancelled) createSession()
+      }
+    }
+    if (sessions.length === 0) reconnect()
+    return () => { cancelled = true }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Refresh terminal theme colors when the user switches themes
@@ -226,8 +285,15 @@ export default function CliPanel() {
     e.stopPropagation()
     // Optimistic: instant UI cleanup, backend delete is fire-and-forget
     destroyTerm(id)
+    removeLabel(id)
     dispatch(removeSession(id))
     fetch(`/api/terminal/sessions/${id}`, { method: 'DELETE' }).catch(() => {})
+  }, [dispatch])
+  const handleRename = useCallback((id: string, label: string) => {
+    dispatch(renameSession({ id, label }))
+    const labels = loadLabels()
+    labels[id] = label
+    saveLabels(labels)
   }, [dispatch])
 
   // ── Resize drag — use refs for size to avoid recreating on every pixel ──
@@ -297,10 +363,12 @@ export default function CliPanel() {
                 active={s.id === activeSessionId}
                 onSelect={() => handleSelect(s.id)}
                 onClose={(e) => handleClose(s.id, e)}
+                onRename={(label) => handleRename(s.id, label)}
               />
             ))}
             <button
               onClick={createSession}
+              aria-label={sessions.length >= MAX_TABS ? `Max ${MAX_TABS} terminals` : 'New terminal'}
               className={`p-1 rounded transition-colors shrink-0 ${sessions.length >= MAX_TABS ? 'text-text-muted/40 cursor-not-allowed' : 'text-text-muted hover:text-text-strong hover:bg-bg-hover'}`}
               title={sessions.length >= MAX_TABS ? `Max ${MAX_TABS} terminals` : 'New terminal'}
             >

@@ -13,6 +13,7 @@ interface TerminalState {
 }
 
 const STORAGE_KEY = 'kiroclaw-terminal'
+const LABELS_KEY = 'kiroclaw-terminal-labels'
 
 function loadPersistedState(): Partial<TerminalState> {
   try {
@@ -20,6 +21,24 @@ function loadPersistedState(): Partial<TerminalState> {
     if (raw) return JSON.parse(raw)
   } catch { /* ignore */ }
   return {}
+}
+
+export function loadLabels(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(LABELS_KEY)
+    if (raw) return JSON.parse(raw)
+  } catch { /* ignore */ }
+  return {}
+}
+
+export function saveLabels(labels: Record<string, string>) {
+  try { localStorage.setItem(LABELS_KEY, JSON.stringify(labels)) } catch { /* ignore */ }
+}
+
+export function removeLabel(id: string) {
+  const labels = loadLabels()
+  delete labels[id]
+  saveLabels(labels)
 }
 
 const persisted = loadPersistedState()
@@ -68,6 +87,10 @@ const terminalSlice = createSlice({
       const s = state.sessions.find(s => s.id === action.payload.id)
       if (s) s.label = action.payload.label
     },
+    setSessions(state, action: PayloadAction<TerminalSession[]>) {
+      state.sessions = action.payload
+      state.activeSessionId = action.payload[0]?.id ?? null
+    },
   },
 })
 
@@ -89,6 +112,7 @@ export const {
   removeSession,
   setActiveSession,
   renameSession,
+  setSessions,
 } = terminalSlice.actions
 
 export default terminalSlice.reducer
