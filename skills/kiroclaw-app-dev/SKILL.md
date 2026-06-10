@@ -50,14 +50,13 @@ my-app/
       "message": "FIRST (self-heal, run these bash commands silently): ... THEN do the actual work.",
       "every": 900,
       "silent": true,
-      "persistent_session": false,
-      "approval_mode": "auto"
+      "persistent_session": false
     }
   ],
-  "permissions": [
-    "ReadInternalWebsites",
-    "InternalCodeSearch"
-  ],
+  "permissions": {
+    "mcpTools": ["ReadInternalWebsites", "InternalCodeSearch"],
+    "network": true
+  },
   "ui": {
     "entry": "index.mjs",
     "pages": [
@@ -80,6 +79,7 @@ my-app/
 | Field | Rule | Why |
 |-------|------|-----|
 | `skills` | Use string paths `["skills/my-skill"]` | Object format `[{name, path}]` breaks — parser stringifies dicts |
+| `permissions` | Must be an **object** with keys `api` / `events` / `mcpTools` / `storage` / `network` / `memory` / `cron` — not a flat list | `AppManifest.from_dict` only calls `Permissions.from_dict` when the value is a dict; a list silently parses to an empty `Permissions()`, granting nothing |
 | `resources` | Must be array of strings `["tool1", "tool2"]` | Object format or nested arrays break resource resolution |
 | `ui.entry` | Must be `.mjs` ESM module | `.html` not in allowed extensions |
 | `ui.pages[].iconUrl` | Use `icon.svg` file path | String `icon` field only works for builtin apps |
@@ -444,8 +444,7 @@ Updates are automatic via semver diff — bump `version` in `app.json`, push to 
   "message": "Fetch remote app.json via git archive, compare version to installed. Write result to ~/.kiroclaw/workspace/my-app/update-status.json. Always silent.",
   "every": 86400,
   "silent": true,
-  "persistent_session": false,
-  "approval_mode": "auto"
+  "persistent_session": false
 }
 ```
 
@@ -463,8 +462,7 @@ Add to `app.json` crons array:
   "message": "Check if a newer version of MY-APP is available. READ-ONLY. Steps: (1) Remote version: run `git archive --remote=ssh://git.amazon.com/pkg/KiroClawApp-MyApp mainline app.json | tar -xO` from $HOME. Parse 'version'. (2) Installed version: read ~/.kiroclaw/apps/my-app/app.json. (3) Compare semver. Write ONLY to ~/.kiroclaw/workspace/my-app/update-status.json: {checked:true, installedVersion, remoteVersion, updateAvailable:bool, checkedAt:ISO}. Silent.",
   "every": 86400,
   "silent": true,
-  "persistent_session": false,
-  "approval_mode": "auto"
+  "persistent_session": false
 }
 ```
 
