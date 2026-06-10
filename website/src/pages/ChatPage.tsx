@@ -1027,6 +1027,13 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   }, [toolLog.length, touchedFiles.addFile, touchedFiles.shouldScanAdd])
 
   const { colorTheme } = useTheme()
+  // Mirror colorTheme into a ref so the `send` callback (which does not depend
+  // on colorTheme, to avoid re-creating on every theme switch) can always read
+  // the current theme without going stale — otherwise a theme change with no
+  // activeSlot change sends the previous theme's color_theme to the backend,
+  // mis-injecting the persona.
+  const colorThemeRef = useRef(colorTheme)
+  useEffect(() => { colorThemeRef.current = colorTheme }, [colorTheme])
   // Read file content via queryClient.fetchQuery so we get React Query's
   // caching/deduplication on repeated opens (re-opening the same file is
   // instant for ~10s) AND proper error semantics (queryFn throws → catch
@@ -1621,7 +1628,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 10_000)
     try {
-      const r = await api.sendChat(llmTxt, slot ?? undefined, colorTheme, controller.signal, metaPayload, browsing)
+      const r = await api.sendChat(llmTxt, slot ?? undefined, colorThemeRef.current, controller.signal, metaPayload, browsing)
       clearTimeout(timeout)
       const body = await r.json().catch(() => ({}))
       if (!body.queued && !body.ok) {
