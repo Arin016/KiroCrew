@@ -15,30 +15,6 @@ from kiro_claw.slack.events import _publish_home_tab
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _warm_usage_cache(monkeypatch):
-    """Stop the Home Tab's usage status line from spawning a real kiro-cli
-    subprocess.
-
-    ``_build_usage_status_line`` fires a fire-and-forget background task
-    (``_fetch_usage_bg`` -> ``kiro-cli chat /usage``) whenever the usage
-    cache is cold. In tests that subprocess never completes, leaving a
-    pending task that hangs the asyncio event-loop teardown. Returning a
-    pre-populated cache keeps the line on the warm (no-fetch) path, which is
-    the public OSS behavior once a usage snapshot exists.
-    """
-    monkeypatch.setattr(
-        "kiro_claw.slack.events.get_usage_cache",
-        lambda: {
-            "credits_used": 0.0,
-            "credits_plan": 10,
-            "cost_usd": 0.0,
-            "resets": "",
-            "raw": "cached",
-        },
-    )
-
-
 @dataclass
 class FakeCronJob:
     name: str = "test-job"

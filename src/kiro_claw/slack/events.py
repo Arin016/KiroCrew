@@ -42,8 +42,6 @@ from kiro_claw.config.loader import (
 )
 from kiro_claw.cron import format_schedule
 from kiro_claw.dashboard.handlers import get_update_info
-from kiro_claw.dashboard.handlers import sessions as _sessions
-from kiro_claw.dashboard.handlers.usage import get_usage_cache
 from kiro_claw.dashboard.token_auth import LINK_WINDOW_SECS, MAX_SESSION_TTL_SECS, parse_duration
 from kiro_claw.hooks import safe_read_file
 from kiro_claw.mcp_discovery import list_servers
@@ -103,10 +101,9 @@ logger = logging.getLogger(__name__)
 _skills_loader: SkillsLoader | None = None
 
 # Strong references to fire-and-forget asyncio.Tasks scheduled from
-# synchronous render paths (e.g. the Home Tab usage-line cold-cache prime).
-# Python's event loop only keeps *weak* references to tasks, so without a
-# strong reference the task can be garbage-collected mid-execution. Tasks
-# remove themselves on completion via ``add_done_callback``.
+# synchronous paths. Python's event loop keeps only *weak* references to
+# tasks, so without a strong reference a task can be garbage-collected
+# mid-execution. Tasks remove themselves on completion via add_done_callback.
 _bg_tasks: set[asyncio.Task[object]] = set()
 
 
@@ -832,85 +829,6 @@ def init_socket_mode(orch: GatewayOrchestrator, seen: SeenCache) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_usage_status_line() -> str:
-    """Render the kiro-cli plan-usage status line for the Home Tab.
-
-    Reads the cached ``/usage`` snapshot maintained by
-    :mod:`kiro_claw.dashboard.handlers.sessions`. When the cache is cold,
-    fires a fire-and-forget background refresh so the next tab render has
-    data, and returns a loading placeholder.
-
-    Format matches neighbouring status lines — single mrkdwn line starting
-    with ``*Plan usage:*``. Two render modes:
-
-    - **Under plan:**  ``*Plan usage:* 4.3 / 10 credits · $0.85 · resets 2026-06-01``
-    - **Over plan:**   ``*Plan usage:* ⚠️ 12249 / 10000 credits (over plan) · $89.95 · resets 2026-06-01``
-
-    The final string is run through :func:`redact_credentials` and
-    :func:`redact_exfiltration_urls` before being returned, since the
-    ``resets`` / ``plan`` fields are raw strings parsed from a
-    subprocess's stdout.
-    """
-    try:
-        cache = get_usage_cache() or {}
-        used = cache.get("credits_used")
-        plan = cache.get("credits_plan")
-        covered = cache.get("credits_covered")
-        cost = cache.get("cost_usd")
-        resets = cache.get("resets")
-
-        if used is None or plan is None:
-            # Cache cold — kick off bg fetch, render placeholder.
-            try:
-                if not getattr(_sessions, "_usage_fetching", False):
-                    loop = asyncio.get_running_loop()
-                    # Strong-ref the task so the event loop's weak-ref
-                    # GC can't collect it mid-execution; discard on done.
-                    task = loop.create_task(_sessions._fetch_usage_bg())
-                    _bg_tasks.add(task)
-                    task.add_done_callback(_bg_tasks.discard)
-            except Exception:
-                logger.debug("usage line: bg prime skipped", exc_info=True)
-            return "*Plan usage:* _loading… reopen the tab in a moment_"
-
-        try:
-            used_f = float(used)
-            plan_f = float(plan)
-        except (TypeError, ValueError):
-            return "*Plan usage:* _unavailable_"
-
-        parts: list[str] = []
-        if covered is not None:
-            try:
-                if float(covered) >= plan_f - 0.01:
-                    total = plan_f + used_f
-                    parts.append(f"⚠️ {total:.0f} / {plan_f:.0f} credits (over plan)")
-                else:
-                    parts.append(f"{used_f:.2f} / {plan_f:.0f} credits")
-            except (TypeError, ValueError):
-                parts.append(f"{used_f:.2f} / {plan_f:.0f} credits")
-        else:
-            parts.append(f"{used_f:.2f} / {plan_f:.0f} credits")
-
-        if cost is not None:
-            try:
-                parts.append(f"${float(cost):.2f}")
-            except (TypeError, ValueError):
-                pass
-        if isinstance(resets, str) and resets:
-            parts.append(f"resets {resets}")
-        line = "*Plan usage:* " + " · ".join(parts)
-        # Defence-in-depth: `resets` / `plan` fields are raw subprocess
-        # output, not LLM-generated, but apply the same redaction pipeline
-        # used for every other Slack-bound string to be safe.
-        line, _ = redact_exfiltration_urls(line)
-        line, _ = redact_credentials(line)
-        return line
-    except Exception:
-        logger.debug("usage line: render failed", exc_info=True)
-        return "*Plan usage:* _unavailable_"
-
-
 async def _publish_home_tab(orch: GatewayOrchestrator, user_id: str) -> None:
     """Build and publish the Block Kit Home Tab view."""
     try:
@@ -945,7 +863,6 @@ async def _publish_home_tab(orch: GatewayOrchestrator, user_id: str) -> None:
             status_lines.append(f"*Active sessions:* {orch.sessions.count}")
         status_lines.append(f"*Uptime:* {Stats().uptime_str()}")
         status_lines.append(await get_midway_status_line())
-        status_lines.append(_build_usage_status_line())
         blocks.append(
             {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(status_lines)}}
         )
