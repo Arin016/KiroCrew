@@ -3842,6 +3842,21 @@ class TestPythonStageLoop:
     subagent mid-stage, normal chat unaffected, stage timeout.
     """
 
+    @pytest.fixture(autouse=True)
+    def _isolate_config_dir(self, tmp_path, monkeypatch):
+        """Redirect every config_dir used by the stage loop to a per-test tmp dir.
+
+        ``_capture_stage_result`` (in ``chat_orchestrator``) writes stage results
+        under ``config_dir() / "sessions" / slot.key``. The orchestrator imports
+        ``config_dir`` into its own namespace, so patching only the ``chat`` /
+        ``state`` namespaces leaves results writing to the live
+        ``~/.kiroclaw/sessions/`` dir, and parallel (xdist) runs then race on the
+        shared fixed ``loop-test`` key. Patching all three namespaces to a unique
+        ``tmp_path`` isolates every test in this class.
+        """
+        for module in ("state", "chat", "chat_orchestrator"):
+            monkeypatch.setattr(f"kiro_claw.dashboard.{module}.config_dir", lambda: tmp_path)
+
     def _make_slot(self, key="loop-test", max_stages=3, titles=None, goal="Test goal"):
         slot = _ChatSlot(key, mode="orchestrator")
         slot._auto_run = False
