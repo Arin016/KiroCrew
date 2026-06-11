@@ -176,7 +176,13 @@ export default function ArtifactsPage() {
                     <tr
                       key={a.slug}
                       className="hover:bg-bg-hover transition-colors cursor-pointer"
-                      onClick={() => navigate(`/artifacts/${a.slug}`)}
+                      onClick={(e) => {
+                        if (e.metaKey || e.ctrlKey) {
+                          window.open(`/artifacts/${a.slug}`, '_blank')
+                        } else {
+                          navigate(`/artifacts/${a.slug}`)
+                        }
+                      }}
                     >
                       <td className="px-2.5 py-2 border-b border-border">
                         <div className="text-sm text-text-strong font-medium">{a.name}</div>

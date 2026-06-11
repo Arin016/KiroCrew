@@ -514,7 +514,13 @@ export default function AppsPage() {
                     <div
                       key={app.name}
                       className="border border-border rounded-xl p-4 hover:border-accent/40 hover:shadow-md transition-all cursor-pointer group"
-                      onClick={() => navigate(`/apps/detail/${app.name}`)}
+                      onClick={(e) => {
+                        if (e.metaKey || e.ctrlKey) {
+                          window.open(`/apps/detail/${app.name}`, '_blank')
+                        } else {
+                          navigate(`/apps/detail/${app.name}`)
+                        }
+                      }}
                     >
                       <div className="flex items-center gap-3 mb-3">
                         <div className="w-12 h-12 rounded-xl bg-accent/10 flex items-center justify-center group-hover:bg-accent/20 transition-colors overflow-hidden shrink-0">
