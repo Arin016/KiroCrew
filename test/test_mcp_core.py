@@ -79,16 +79,43 @@ class TestSendMessageCronSession:
     """
 
     def test_default_notification_only(self):
-        """Bare send_message(text=...) → no session in payload, notification only."""
+        """Non-cron bare send_message(text=...) → no session in payload, notification only."""
         with patch("kiro_claw.mcp_core._post") as mock_post, patch.dict(
-            "os.environ", {"KIROCLAW_SESSION_KEY": "cron:abc123"}
+            "os.environ", {"KIROCLAW_SESSION_KEY": "dashboard:chat-1"}
         ):
             mock_post.return_value = {"ok": True}
             result = _call_tool("send_message", {"text": "build passed"})
 
             payload = mock_post.call_args[0][1]
             assert "session" not in payload
+            assert "caller_session" not in payload
             assert "Notification delivered" in result
+
+    def test_cron_bare_send_attaches_caller_session(self):
+        """A cron bare send attaches caller_session so the gateway can apply
+        the cron→Slack default, and reports the Slack landing site."""
+        with patch("kiro_claw.mcp_core._post") as mock_post, patch.dict(
+            "os.environ", {"KIROCLAW_SESSION_KEY": "cron:abc123"}
+        ):
+            mock_post.return_value = {"ok": True, "slack": True, "delivered_to": "slack", "ts": "9.9"}
+            result = _call_tool("send_message", {"text": "sweep done"})
+
+            payload = mock_post.call_args[0][1]
+            assert payload["caller_session"] == "cron:abc123"
+            assert "session" not in payload
+            assert "Slack" in result and "9.9" in result
+
+    def test_cron_send_notification_only_warns(self):
+        """When a cron send only reaches the dashboard (no Slack), surface a
+        loud warning instead of a success string."""
+        with patch("kiro_claw.mcp_core._post") as mock_post, patch.dict(
+            "os.environ", {"KIROCLAW_SESSION_KEY": "cron:abc123"}
+        ):
+            mock_post.return_value = {"ok": True, "delivered_to": "notification"}
+            result = _call_tool("send_message", {"text": "sweep done"})
+
+            assert "⚠️" in result
+            assert "NOT posted to Slack" in result
 
     def test_explicit_session_origin_passes_through(self):
         """LLM explicitly passes session=origin → origin in payload."""

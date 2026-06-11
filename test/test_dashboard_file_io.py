@@ -266,7 +266,7 @@ class TestSendMessage:
             resp = await client.post("/api/send-message", json={"text": "hello"})
             assert resp.status == 200
             data = await resp.json()
-            assert data == {"ok": True, "slack": False, "session": False}
+            assert data == {"ok": True, "slack": False, "session": False, "delivered_to": "notification"}
             state.notify.assert_called_once_with("agent", "Agent Message", "hello")
 
     @pytest.mark.asyncio
@@ -282,7 +282,7 @@ class TestSendMessage:
             )
             assert resp.status == 200
             data = await resp.json()
-            assert data == {"ok": True, "slack": True, "session": False, "ts": "1712793600.000001"}
+            assert data == {"ok": True, "slack": True, "session": False, "delivered_to": "slack", "ts": "1712793600.000001"}
             state.notify.assert_called_once_with("agent", "Test", "hello")
             slack.open_dm.assert_called_once_with("U123")
             slack.post_message.assert_called_once_with(
@@ -341,7 +341,7 @@ class TestSendMessage:
             )
             assert resp.status == 200
             data = await resp.json()
-            assert data == {"ok": True, "slack": True, "session": False, "ts": "1712793600.000001"}
+            assert data == {"ok": True, "slack": True, "session": False, "delivered_to": "slack", "ts": "1712793600.000001"}
             slack.post_blocks.assert_called_once_with(
                 "C123",
                 blocks,
@@ -430,7 +430,7 @@ class TestSendMessage:
                 )
                 assert resp.status == 200
                 data = await resp.json()
-                assert data == {"ok": True, "slack": False, "session": True}
+                assert data == {"ok": True, "slack": False, "session": True, "delivered_to": "session"}
                 # Hot-path: in-memory slot found, no rehydrate needed.
                 state.get_slot.assert_called_once_with("chat-1-1712793600")
                 mock_rehydrate.assert_not_called()
@@ -531,7 +531,7 @@ class TestSendMessage:
                 assert resp.status == 200
                 data = await resp.json()
                 # Session delivery succeeded — no Slack DM fallback.
-                assert data == {"ok": True, "slack": False, "session": True}
+                assert data == {"ok": True, "slack": False, "session": True, "delivered_to": "session"}
                 # Hot-path miss: get_slot called first, then rehydrate helper.
                 state.get_slot.assert_called_once_with("chat-1-1712793600")
                 mock_rehydrate.assert_called_once_with(state, "chat-1-1712793600")
@@ -623,7 +623,7 @@ class TestSendMessage:
                 )
                 assert resp.status == 200
                 data = await resp.json()
-                assert data == {"ok": True, "slack": False, "session": True}
+                assert data == {"ok": True, "slack": False, "session": True, "delivered_to": "session"}
                 state.get_slot.assert_called_once_with("chat-1-1712793600")
                 mock_run.assert_called_once()
 

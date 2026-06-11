@@ -34,6 +34,7 @@ from kiro_claw.subagent_persistence import _agent_dir, read_state
 from kiro_claw.validation import (
     _EMOJI_NAME_RE,
     CHANNEL_ID_RE,
+    CRON_SESSION_RE,
     SPAWN_RUN_SCHEMA,
     ValidationError,
     validate_tool_args,
@@ -529,12 +530,28 @@ async def api_send_message(request: web.Request) -> web.Response:
         #   - "slack":  Slack DM + notification
         #   - omitted:  dashboard notification only (default)
         # ───────────────────────────────────────────────────────────────────
-        send_to_slack = target_session == "slack" or bool(target_channel) or bool(target_user)
+        # B: cron-originated sends deliver to the owner Slack DM by default —
+        # the documented "cron → Slack DM + dashboard" behavior — even on a
+        # bare send with no explicit session/channel/user. For session=origin
+        # this only takes effect as the fallback when the origin slot is
+        # unreachable (see the contract above). Non-cron bare sends remain
+        # dashboard-notification-only.
+        caller_session = body.get("caller_session", "")
+        # Validate the cron session format before trusting it to escalate
+        # routing from notification-only to owner Slack DM — a malformed or
+        # injected value must not abuse that upgrade.
+        is_cron_caller = bool(CRON_SESSION_RE.match(caller_session))
+        send_to_slack = (
+            target_session == "slack"
+            or bool(target_channel)
+            or bool(target_user)
+            or is_cron_caller
+        )
         if target_session == "slack":
             target_session = None
         if target_session:
             slot_key, job_name = _resolve_session_target(
-                state, target_session, body.get("caller_session", "")
+                state, target_session, caller_session
             )
             if slot_key:
                 # Resolve the origin slot. get_slot is the hot path (fast,
@@ -669,7 +686,21 @@ async def api_send_message(request: web.Request) -> web.Response:
             {"ok": False, "error": f"Slack delivery failed: {safe_error}", "slack": False},
             status=502,
         )
-    resp_body: dict[str, Any] = {"ok": True, "slack": sent_slack, "session": sent_session}
+    # A: report the actual delivery channel so callers (and the read-back
+    # steering) can distinguish a real Slack post from a notification-only
+    # send. "ok: true" alone previously masked notification-only outcomes.
+    if sent_session:
+        delivered_to = "session"
+    elif sent_slack:
+        delivered_to = "slack"
+    else:
+        delivered_to = "notification"
+    resp_body: dict[str, Any] = {
+        "ok": True,
+        "slack": sent_slack,
+        "session": sent_session,
+        "delivered_to": delivered_to,
+    }
     if slack_ts:
         resp_body["ts"] = slack_ts
     return web.json_response(resp_body)

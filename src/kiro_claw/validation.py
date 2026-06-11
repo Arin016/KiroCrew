@@ -73,6 +73,12 @@ JIRA_SITE_URL_RE = re.compile(r"^https://[a-zA-Z0-9][a-zA-Z0-9._-]{0,253}\.atlas
 # Valid cron job ID pattern (hex)
 _JOB_ID_RE = re.compile(r"^[a-f0-9]{1,16}$")
 
+# A cron caller_session is "cron:<job_id>" or "cron:<job_id>:<run_id>".
+# Used to validate the field before it escalates send_message routing from
+# notification-only to owner Slack DM delivery (a malformed/injected value
+# must not abuse that upgrade).
+CRON_SESSION_RE = re.compile(r"^cron:[a-zA-Z0-9]+(?::[a-zA-Z0-9]+)?$")
+
 # Hidden Unicode categories to strip (control chars, format chars, etc.)
 # Keeps: letters, numbers, punctuation, symbols, separators (space/newline)
 _HIDDEN_CATEGORIES = frozenset(

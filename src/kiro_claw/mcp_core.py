@@ -1541,31 +1541,42 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             if args["session"] not in ("origin", "slack"):
                 return 'Error: session must be "origin" or "slack".'
             payload["session"] = args["session"]
-            caller_session = _resolve_session_key()
-            if caller_session.startswith("cron:"):
-                payload["caller_session"] = caller_session
+        # Always tell the gateway when the caller is a cron — even on a bare
+        # send (no session/channel) — so it can apply the documented
+        # "cron → Slack DM by default" routing and report where the message
+        # actually landed.
+        caller_session = _resolve_session_key()
+        is_cron = caller_session.startswith("cron:")
+        if is_cron:
+            payload["caller_session"] = caller_session
         resp = _post("/api/send-message", payload)
         if not resp.get("ok"):
             return f"Failed: {resp}"
-        if resp.get("session"):
-            return "Message injected into target session."
-        if args.get("session") == "slack":
-            ts = resp.get("ts", "")
-            if resp.get("slack"):
-                return (
-                    f"Message sent to Slack + notification. ts={ts}"
-                    if ts
-                    else "Message sent to Slack + notification."
-                )
-            return "Message delivered as notification (Slack unavailable)."
-        if args.get("session"):
-            return "Session injection unavailable — delivered as notification."
+        # Prefer the gateway's explicit delivery channel when present
+        # (delivered_to ∈ {"slack", "session", "notification"}); fall back to
+        # the legacy slack/session booleans for older gateways.
+        delivered_to = resp.get("delivered_to")
         ts = resp.get("ts", "")
-        if resp.get("slack"):
+        if delivered_to == "session" or (delivered_to is None and resp.get("session")):
+            return "Message injected into target session."
+        if delivered_to == "slack" or (delivered_to is None and resp.get("slack")):
             return (
                 f"Message sent to Slack + notification. ts={ts}"
                 if ts
                 else "Message sent to Slack + notification."
+            )
+        # Reached the dashboard notification only. Warn loudly when Slack was
+        # intended (explicit session=slack, or a cron — which now defaults to
+        # Slack) so the caller can detect the miss and retry instead of
+        # reading a success string for a notification-only send.
+        if args.get("session") == "slack":
+            return "⚠️ Slack unavailable — delivered as dashboard notification only (NOT in Slack)."
+        if args.get("session"):
+            return "Session injection unavailable — delivered as notification."
+        if is_cron:
+            return (
+                "⚠️ Cron send reached the dashboard notification only — NOT posted to Slack "
+                "(owner DM unavailable: no Slack client or owner_id). Verify Slack delivery."
             )
         return "Notification delivered."
 

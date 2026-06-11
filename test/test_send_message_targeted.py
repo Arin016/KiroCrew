@@ -68,6 +68,7 @@ class TestTargetedChannel:
                     "ok": True,
                     "slack": True,
                     "session": False,
+                    "delivered_to": "slack",
                     "ts": "1712793600.000001",
                 }
                 slack.post_message.assert_called_once_with(
@@ -120,6 +121,7 @@ class TestTargetedUser:
                     "ok": True,
                     "slack": True,
                     "session": False,
+                    "delivered_to": "slack",
                     "ts": "1712793600.000001",
                 }
                 slack.open_dm.assert_called_once_with("U0123ABC456")
@@ -192,7 +194,7 @@ class TestFallbackToOwnerDM:
             )
             assert resp.status == 200
             data = await resp.json()
-            assert data == {"ok": True, "slack": True, "session": False, "ts": "1712793600.000001"}
+            assert data == {"ok": True, "slack": True, "session": False, "delivered_to": "slack", "ts": "1712793600.000001"}
             slack.open_dm.assert_called_once_with("U_OWNER")
             slack.post_message.assert_called_once_with(
                 "D_OWNER",
@@ -616,3 +618,80 @@ class TestThreadTsAndBroadcast:
                     reply_broadcast=True,
                 )
                 slack.open_dm.assert_not_called()
+
+
+# ── cron Slack-default (B) + delivered_to reporting (A) ──
+
+
+class TestCronSlackDefault:
+    @pytest.mark.asyncio
+    async def test_cron_bare_send_routes_to_owner_dm(self, mock_sel):
+        """A cron-originated bare send (caller_session=cron:*, no channel/user/
+        session) delivers to the owner Slack DM by default and reports
+        delivered_to=slack."""
+        slack = MagicMock()
+        slack.open_dm = AsyncMock(return_value="D_OWNER")
+        slack.post_message = AsyncMock(return_value="1712793600.000009")
+        state = _mock_state(slack_client=slack, owner_id="U_OWNER")
+        app = _make_app(state)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/send-message",
+                json={"text": "sweep done", "caller_session": "cron:job1"},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data == {
+                "ok": True, "slack": True, "session": False,
+                "delivered_to": "slack", "ts": "1712793600.000009",
+            }
+            slack.open_dm.assert_called_once_with("U_OWNER")
+            slack.post_message.assert_called_once_with(
+                "D_OWNER", "sweep done", thread_ts=None,
+                unfurl_links=None, unfurl_media=None, reply_broadcast=None,
+            )
+
+    @pytest.mark.asyncio
+    async def test_noncron_bare_send_is_notification_only(self, mock_sel):
+        """A non-cron bare send stays dashboard-notification-only and reports
+        delivered_to=notification (no Slack post)."""
+        slack = MagicMock()
+        slack.open_dm = AsyncMock(return_value="D_OWNER")
+        slack.post_message = AsyncMock(return_value="1712793600.000009")
+        state = _mock_state(slack_client=slack, owner_id="U_OWNER")
+        app = _make_app(state)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/send-message", json={"text": "fyi"},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data == {
+                "ok": True, "slack": False, "session": False,
+                "delivered_to": "notification",
+            }
+            slack.post_message.assert_not_called()
+            state.notify.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_malformed_caller_session_not_routed_to_slack(self, mock_sel):
+        """A caller_session that fails CRON_SESSION_RE does not escalate to
+        Slack — it stays notification-only."""
+        slack = MagicMock()
+        slack.open_dm = AsyncMock(return_value="D_OWNER")
+        slack.post_message = AsyncMock(return_value="1712793600.000009")
+        state = _mock_state(slack_client=slack, owner_id="U_OWNER")
+        app = _make_app(state)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/send-message",
+                json={"text": "x", "caller_session": "cron:has spaces!"},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["delivered_to"] == "notification"
+            assert data["slack"] is False
+            slack.post_message.assert_not_called()
