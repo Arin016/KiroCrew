@@ -2440,11 +2440,13 @@ async def handle_message(
                 elapsed = time.monotonic() - _tool_start_time
                 mins, secs = divmod(int(elapsed), 60)
                 time_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+                # Elapsed goes in the TITLE (Slack replaces title on same
+                # task_id) — NOT details, which Slack APPENDS, causing the
+                # "⏱ 30s ⏱ 1m 0s ⏱ 1m 30s" accumulation bug.
                 await _append_task(
                     _active_task_id,
-                    _active_task_title,
+                    f"{_active_task_title}  ⏱ {time_str}",
                     "in_progress",
-                    details=f"⏱ {time_str}",
                 )
 
     def _start_tool_timer() -> None:
@@ -2748,7 +2750,8 @@ async def handle_message(
                     if _active_task_id:
                         _elapsed = _tool_elapsed_str()
                         _cancel_tool_timer()
-                        await _append_task(_active_task_id, _active_task_title, "complete", details=_elapsed)
+                        _ct = f"{_active_task_title}  {_elapsed}" if _elapsed else _active_task_title
+                        await _append_task(_active_task_id, _ct, "complete")
                     _task_counter += 1
                     _active_task_id = f"tool_{_task_counter}"
                     _active_task_title = event.tool_purpose or tool_name
@@ -2776,7 +2779,8 @@ async def handle_message(
                     if _active_task_id:
                         _elapsed = _tool_elapsed_str()
                         _cancel_tool_timer()
-                        await _append_task(_active_task_id, _active_task_title, "complete", details=_elapsed)
+                        _ct = f"{_active_task_title}  {_elapsed}" if _elapsed else _active_task_title
+                        await _append_task(_active_task_id, _ct, "complete")
                         _active_task_id = ""
                     await slack.stop_stream(channel, stream_ts)
                     stream_ts = None
@@ -3084,7 +3088,8 @@ async def handle_message(
         if _active_task_id:
             _elapsed = _tool_elapsed_str()
             _cancel_tool_timer()
-            await _append_task(_active_task_id, _active_task_title, "complete", details=_elapsed)
+            _ct = f"{_active_task_title}  {_elapsed}" if _elapsed else _active_task_title
+            await _append_task(_active_task_id, _ct, "complete")
         # Flush remaining buffer (bracket_hold excluded — it's either
         # a suppressed OPTIONS tag or an unclosed bracket we drop)
         if stream_buffer:

@@ -84,6 +84,9 @@ def app_env(tmp_path, monkeypatch):
     kiro_agents.mkdir()
     import kiro_claw.apps.bridges as bridges_mod
     monkeypatch.setattr(bridges_mod, "KIRO_AGENTS_DIR", kiro_agents)
+    # Patch _MCP_JSON_PATH to avoid file descriptor errors in tests
+    mcp_path = tmp_path / "mcp.json"
+    monkeypatch.setattr(bridges_mod, "_MCP_JSON_PATH", mcp_path)
     import kiro_claw.apps.backend as bmod
     bmod._processes.clear()
     bmod._allocated_ports.clear()

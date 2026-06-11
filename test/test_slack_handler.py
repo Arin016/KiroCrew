@@ -2553,9 +2553,13 @@ class TestToolElapsedTimer:
 
         task_appends = [a for a in slack.actions if a[0] == "append_task"]
         complete_tasks = [t for t in task_appends if t[1].get("status") == "complete"]
-        # Should show minutes format
+        # Elapsed time is shown in the TITLE (Slack replaces title on same
+        # task_id; details would APPEND and accumulate ⏱ stamps).
+        title_list = [str(t[1].get("title", "")) for t in complete_tasks]
+        assert any("1m" in t for t in title_list), f"Expected '1m' in title but got: {title_list}"
+        # Regression guard: elapsed must NOT be in details (append bug)
         details_list = [str(t[1].get("details", "")) for t in complete_tasks]
-        assert any("1m" in d for d in details_list), f"Expected '1m' in details but got: {details_list}"
+        assert all("⏱" not in d for d in details_list), f"⏱ leaked into details: {details_list}"
 
     @pytest.mark.asyncio
     async def test_elapsed_updater_fires_after_30s(self, monkeypatch):
@@ -2600,3 +2604,41 @@ class TestToolElapsedTimer:
 
         # Verify the 30s sleep was attempted (updater was started)
         assert 30 in sleep_calls
+
+    @pytest.mark.asyncio
+    async def test_tool_transition_completion_shows_elapsed_in_title(self, monkeypatch):
+        """When a new tool starts, the previous tool's task card is marked
+        complete with elapsed time in the TITLE (not details)."""
+        from kiro_claw.slack import handler
+
+        slack = MockSlackClient()
+        slack._stream_enabled = True
+
+        calls = [0]
+        base = handler.time.monotonic()
+
+        def fake_monotonic():
+            calls[0] += 1
+            # Early calls (tool 1 timer start) return base; later calls
+            # (transition completion elapsed calc) return base + 42s.
+            return base if calls[0] <= 10 else base + 42.0
+
+        monkeypatch.setattr(handler.time, "monotonic", fake_monotonic)
+        provider = FakeProvider(
+            [
+                LLMEvent(kind="tool_call", title="Read File", tool_kind="read"),
+                LLMEvent(kind="tool_call", title="Run Shell", tool_kind="execute"),
+                LLMEvent(kind="text_chunk", text="done"),
+            ]
+        )
+        sessions = FakeSessionManager(provider)
+        await handle_message(slack, sessions, "C1", "do two things", None, "msg1", "U1")
+
+        task_appends = [a for a in slack.actions if a[0] == "append_task"]
+        complete_tasks = [t for t in task_appends if t[1].get("status") == "complete"]
+        # The first tool's completion (at transition) should carry elapsed in title
+        title_list = [str(t[1].get("title", "")) for t in complete_tasks]
+        assert any("⏱" in t for t in title_list), f"No elapsed in any title: {title_list}"
+        # Regression guard: elapsed never leaks into details
+        details_list = [str(t[1].get("details", "")) for t in complete_tasks]
+        assert all("⏱" not in d for d in details_list), f"⏱ leaked into details: {details_list}"
