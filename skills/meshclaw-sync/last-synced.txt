@@ -12,12 +12,38 @@
 #                so frontend sync is by CONTENT within the post-snapshot window, not a
 #                clean SHA range. This SHA records the upstream tip last triaged.
 
-beta 80c564f5      # 2026-06-11 MeshClaw backend beta tip (batch-14). SKIP-only advance (no ports).
-frontend-beta 9099180d2b6a080346eceedfd71320b3741c2830  # 2026-06-11 MeshClawWebsite beta tip (batch-14). SKIP-only advance (no ports).
+beta 202268a3      # 2026-06-11 MeshClaw backend beta tip (batch-15). PORTED (stop re-queue guard).
+frontend-beta d12eb8c39f815e478093c7bd2d39408ceafb74b8  # 2026-06-11 MeshClawWebsite beta tip (batch-15). PORTED (completion_keep Chat panel).
 mainline 49633d05  # 2026-06-11 MeshClaw mainline tip (upstream); unchanged since batch-13, fully contained in beta-braveheart, no mainline-only delta.
 # NOTE: this 'mainline' SHA is the UPSTREAM MeshClaw mainline tip (for the mainline-only
 # candidate check), NOT the fork's mainline — batch-12 mistakenly recorded the fork SHA
 # (796e21c5) here, which broke the `$MAIN..origin/mainline` scan. Corrected in batch-13.
+
+# --- Batch-15 (cron dual-repo sync 2026-06-11) -------------------------------
+# Fresh branch sync/beta-2026-06-11b off origin/mainline (batch-14 CR-281228622 merged, tip 7b1530a).
+# 8 candidates (7 backend + 1 frontend); 8 PORTED, 0 SKIP — the biggest real-port batch in a while.
+# PORTED (backend): cbd32c91 (test isolation: subagent + stage-loop autouse fixtures),
+#   80ba942f (send_message cron Slack delivery + delivered_to reporting),
+#   82cf9907 (remove Slack Home Tab plan-usage line — also dropped a fork-only
+#   _warm_usage_cache fixture in test_slack_home_tab.py to match upstream HEAD),
+#   632b5731 (slack tool-timer elapsed -> title, not details, fixes accumulation),
+#   2745c65b (multi-session gateway freeze: per-client _turn_lock in _prompt_loop +
+#   aclosing() in send_message_stream; session.py get_or_create claim-under-lock /
+#   acquire-after-release on BOTH fast path + cold-start won-race, bounded retry;
+#   event-loop heartbeat + consolidation timing logs. ~600 LOC, riskiest port —
+#   486 session/acp tests green. ClaudeCodeProvider guards ported VERBATIM as the
+#   dormant KiroACP seam, inert in OSS),
+#   499818c7 (completion_keep hot-reload setter on SubagentManager + config-patch wiring),
+#   202268a3 (stop re-queue zombie-retry guard — _should_suppress_requeue on all 3 paths).
+# PORTED (frontend): d12eb8c (completion_keep Chat-panel UI — matched PAIR with 499818c7,
+#   committed together as one feature: Subagents settings section, mode select + chars input).
+# Symbol map applied throughout (mesh_claw->kiro_claw, MeshClawConfig->KiroClawConfig,
+# api_meshclaw_config_patch->api_kiroclaw_config_patch, meshclawConfig->kiroclawConfig,
+# /api/config/meshclaw->/api/config/kiroclaw, MESHCLAW_SESSION_KEY env already KIROCLAW_).
+# Verify: backend 939 tests + flake8 clean; frontend tsc -b clean + 2521 vitest (+4);
+# de-Amazon audit clean (only the inert ClaudeCodeProvider seam in session.py). CR-281NNNNNN.
+# GOTCHA: chat_runner re-exports PromptBusyExhaustedError (from llm_helpers) so the upstream
+# test import path works verbatim. test_acp_turn_lock.py regenerated-from-post-image.
 
 # --- Batch-14 (cron dual-repo sync 2026-06-11) -------------------------------
 # Fresh branch sync/beta-2026-06-11 off origin/mainline (prior CR-281120970 merged, tip dc42d0d).
