@@ -64,6 +64,17 @@ const FILE_PREVIEW_H = 81 // h-16 (64px) + py-2 (16px) + border-t (1px)
 const INPUT_DRAG_MAX_RATIO = 0.5
 const INPUT_HEIGHT_LS_KEY = 'mc-input-height'
 
+// Prompt undo/redo tuning. The chat textarea is a controlled component, so any
+// programmatic value reset (send-clear, ↑/↓ history recall, prompt optimize)
+// wipes the browser's native undo stack. We keep an explicit snapshot history
+// so Ctrl/Cmd+Z can always restore prior text — including after an accidental
+// full erase.
+const UNDO_COALESCE_MS = 400 // merge keystrokes within this window into one undo step
+const UNDO_BULK_DELTA = 8 // an insert/delete of >= this many chars is its own boundary
+const UNDO_MAX_HISTORY = 200 // cap snapshots to bound memory
+
+type UndoSnap = { value: string; selStart: number; selEnd: number }
+
 function toApiDecision(d: string): 'approve' | 'reject' {
   return (d === 'approved' || d === 'trust' || d === 'trust_reads') ? 'approve' : 'reject'
 }
@@ -403,6 +414,17 @@ function ChatInput({
   // so it doesn't re-create on every keystroke.
   const valueRef = useRef(value)
   valueRef.current = value
+  // --- Prompt undo/redo history (per slot) ---
+  // Explicit snapshot stack: undoHistoryRef[undoPointerRef] always mirrors the
+  // live value. Rapid keystrokes coalesce into one entry; bulk deletes and
+  // programmatic resets become their own restorable boundary. applyingUndoRef
+  // suppresses re-recording the value we set during an undo/redo.
+  const undoHistoryRef = useRef<UndoSnap[]>([{ value, selStart: value.length, selEnd: value.length }])
+  const undoPointerRef = useRef(0)
+  const undoLastEditRef = useRef(0)
+  const applyingUndoRef = useRef(false)
+  const prevUndoAfkRef = useRef(autoFocusKey)
+  const slotSettlingRef = useRef(false)
   const slashMenuOpenRef = useRef(false)
   slashMenuOpenRef.current = slashMenuOpen
   const filePickerOpenRef = useRef(false)
@@ -533,6 +555,73 @@ function ChatInput({
     prevValueRef.current = value
   }, [value, resetHeight, sentMessages])
 
+  // Record undo snapshots as the controlled value changes.
+  useEffect(() => {
+    const el = inputRef.current
+    const seed = () => {
+      undoHistoryRef.current = [{
+        value,
+        selStart: el?.selectionStart ?? value.length,
+        selEnd: el?.selectionEnd ?? value.length,
+      }]
+      undoPointerRef.current = 0
+      undoLastEditRef.current = 0
+    }
+    // Skip the change we just made via undo/redo — the pointer is already
+    // correct. Keep slot tracking in sync so a coincident switch can't trigger
+    // a spurious reset on a later pass.
+    if (applyingUndoRef.current) {
+      applyingUndoRef.current = false
+      prevUndoAfkRef.current = autoFocusKey
+      return
+    }
+    // Slot/session switch. ChatPage updates the draft (`value`) in a *separate*
+    // commit after `activeSlot` (`autoFocusKey`) changes, so on this pass
+    // `value` may still be the previous slot's text. Reseed now and mark the
+    // next value change as the settling draft so it reseeds the base rather
+    // than being recorded as an undoable transition from the prior slot's stale
+    // text — otherwise Ctrl+Z in the new slot would restore the old slot's draft.
+    if (autoFocusKey !== prevUndoAfkRef.current) {
+      prevUndoAfkRef.current = autoFocusKey
+      seed()
+      slotSettlingRef.current = true
+      return
+    }
+    if (slotSettlingRef.current) {
+      slotSettlingRef.current = false
+      if (undoHistoryRef.current[undoPointerRef.current]?.value !== value) seed()
+      return
+    }
+    const hist = undoHistoryRef.current
+    const ptr = undoPointerRef.current
+    const prev = hist[ptr]?.value
+    if (prev === value) return // selection-only re-render, no text change
+    const snap: UndoSnap = {
+      value,
+      selStart: el?.selectionStart ?? value.length,
+      selEnd: el?.selectionEnd ?? value.length,
+    }
+    const now = Date.now()
+    // Coalesce only small, incremental, recent edits at the tip of the history.
+    // A bulk change (clear, recall, optimize, select-all-delete) or a pause
+    // starts a new boundary so it can be undone on its own. The `prev !== ''`
+    // guard also makes the first char typed from empty its own boundary.
+    const incremental =
+      prev !== undefined && prev !== '' && value !== '' &&
+      Math.abs(value.length - prev.length) < UNDO_BULK_DELTA
+    const recent = now - undoLastEditRef.current < UNDO_COALESCE_MS
+    const atTip = ptr === hist.length - 1
+    if (atTip && incremental && recent) {
+      hist[ptr] = snap // merge typing burst into the current entry
+    } else {
+      hist.splice(ptr + 1) // editing discards any redo branch
+      hist.push(snap)
+      if (hist.length > UNDO_MAX_HISTORY) hist.shift()
+      undoPointerRef.current = hist.length - 1
+    }
+    undoLastEditRef.current = now
+  }, [value, autoFocusKey])
+
   const handleInput = useCallback((e: React.FormEvent<HTMLTextAreaElement>) => {
     if (!dragging.current) applyHeight(e.target as HTMLTextAreaElement, manualHeight, prefillHint)
   }, [manualHeight, prefillHint])
@@ -590,6 +679,35 @@ function ChatInput({
   }, [runOptimize, chatMessages])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Undo / redo — drive the explicit per-slot history so Ctrl/Cmd+Z restores
+    // text even after a programmatic reset (send-clear, ↑/↓ recall, optimize)
+    // wiped the browser's native undo stack. We own the gesture and
+    // preventDefault native undo so behaviour is deterministic regardless of how
+    // `value` changed. Cmd/Ctrl+Z = undo, Cmd/Ctrl+Shift+Z or Ctrl+Y = redo.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !ime.isComposing(e) && !optimizingRef.current) {
+      const k = e.key.toLowerCase()
+      const isUndo = k === 'z' && !e.shiftKey
+      const isRedo = (k === 'z' && e.shiftKey) || k === 'y'
+      if (isUndo || isRedo) {
+        e.preventDefault()
+        const hist = undoHistoryRef.current
+        let ptr = undoPointerRef.current
+        if (isUndo && ptr > 0) ptr -= 1
+        else if (isRedo && ptr < hist.length - 1) ptr += 1
+        else return // nothing to undo/redo
+        undoPointerRef.current = ptr
+        const snap = hist[ptr]
+        applyingUndoRef.current = true
+        onChange(snap.value)
+        requestAnimationFrame(() => {
+          const el = inputRef.current
+          if (!el) return
+          el.focus()
+          el.setSelectionRange(snap.selStart, snap.selEnd)
+        })
+        return
+      }
+    }
     // Atomic paste-token handling — keep caret out of token interior and
     // treat tokens as single deletable units. Runs before Enter/history so
     // edits on or around a token never reach the default textarea handling.

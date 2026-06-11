@@ -1,3 +1,4 @@
+import React from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { screen, fireEvent } from '@testing-library/react'
 import { renderWithProviders } from './helpers'
@@ -978,5 +979,136 @@ describe('ChatInput', () => {
       fireEvent.click(screen.getByLabelText('Select project'))
       expect(onProjectClick).toHaveBeenCalledTimes(1)
     })
+  })
+})
+
+// --- Prompt undo/redo (Mesh-2029) ---
+// A controlled harness so onChange -> value round-trips exactly like ChatPage,
+// which is what makes the explicit undo history observable end-to-end.
+function ControlledInput({ initial = '', extra = {} }: { initial?: string; extra?: Record<string, unknown> }) {
+  const [v, setV] = React.useState(initial)
+  return <ChatInput {...defaultProps} value={v} onChange={setV} {...extra} />
+}
+
+describe('ChatInput undo/redo (Mesh-2029)', () => {
+  const undo = (ta: HTMLElement) => fireEvent.keyDown(ta, { key: 'z', ctrlKey: true })
+  const redoShift = (ta: HTMLElement) => fireEvent.keyDown(ta, { key: 'z', ctrlKey: true, shiftKey: true })
+
+  it('restores text with Ctrl+Z after an accidental full erase', () => {
+    renderWithProviders(<ControlledInput />)
+    const ta = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    fireEvent.change(ta, { target: { value: 'hello world' } })
+    fireEvent.change(ta, { target: { value: '' } }) // select-all + delete
+    expect(ta.value).toBe('')
+    undo(ta)
+    expect(ta.value).toBe('hello world')
+  })
+
+  it('supports Cmd+Z on macOS (metaKey)', () => {
+    renderWithProviders(<ControlledInput />)
+    const ta = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    fireEvent.change(ta, { target: { value: 'draft text here' } })
+    fireEvent.change(ta, { target: { value: '' } })
+    fireEvent.keyDown(ta, { key: 'z', metaKey: true })
+    expect(ta.value).toBe('draft text here')
+  })
+
+  it('Ctrl+Shift+Z redoes an undone change', () => {
+    renderWithProviders(<ControlledInput />)
+    const ta = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    fireEvent.change(ta, { target: { value: 'redo me please' } })
+    fireEvent.change(ta, { target: { value: '' } })
+    undo(ta)
+    expect(ta.value).toBe('redo me please')
+    redoShift(ta)
+    expect(ta.value).toBe('')
+  })
+
+  it('Ctrl+Y redoes (Windows convention)', () => {
+    renderWithProviders(<ControlledInput />)
+    const ta = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    fireEvent.change(ta, { target: { value: 'windows redo' } })
+    fireEvent.change(ta, { target: { value: '' } })
+    undo(ta)
+    expect(ta.value).toBe('windows redo')
+    fireEvent.keyDown(ta, { key: 'y', ctrlKey: true })
+    expect(ta.value).toBe('')
+  })
+
+  it('collapses a rapid typing burst into a single undo step', () => {
+    renderWithProviders(<ControlledInput />)
+    const ta = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    // Incremental keystrokes within the coalesce window merge into one entry.
+    for (const v of ['a', 'ab', 'abc', 'abcd']) fireEvent.change(ta, { target: { value: v } })
+    undo(ta)
+    expect(ta.value).toBe('') // one undo clears the whole burst
+  })
+
+  it('is a no-op at the base of the history (nothing to undo)', () => {
+    renderWithProviders(<ControlledInput />)
+    const ta = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    undo(ta)
+    expect(ta.value).toBe('')
+  })
+
+  it('does not undo while an IME composition is active', () => {
+    renderWithProviders(<ControlledInput />)
+    const ta = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    fireEvent.change(ta, { target: { value: 'こんにちは' } })
+    fireEvent.compositionStart(ta)
+    fireEvent.keyDown(ta, { key: 'z', ctrlKey: true })
+    expect(ta.value).toBe('こんにちは') // composition guard suppressed undo
+  })
+
+  it('discards the redo branch after a new edit following undo', () => {
+    renderWithProviders(<ControlledInput />)
+    const ta = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    fireEvent.change(ta, { target: { value: 'first version' } })
+    fireEvent.change(ta, { target: { value: '' } })
+    undo(ta)
+    expect(ta.value).toBe('first version')
+    fireEvent.change(ta, { target: { value: 'different text' } }) // drops redo branch
+    redoShift(ta)
+    expect(ta.value).toBe('different text') // redo is now a no-op
+  })
+
+  it('reseeds across a deferred slot draft restore (no cross-slot bleed)', () => {
+    const drafts: Record<string, string> = { 'slot-a': 'slot A draft', 'slot-b': '' }
+    function Lagged() {
+      const [afk, setAfk] = React.useState('slot-a')
+      const [v, setV] = React.useState(drafts['slot-a'])
+      // Mimic ChatPage: activeSlot changes first; the draft is restored in a
+      // SEPARATE commit by an [activeSlot]-keyed effect — so `value` lags
+      // `autoFocusKey` by one commit.
+      React.useEffect(() => { setV(drafts[afk]) }, [afk])
+      return (
+        <>
+          <button onClick={() => setAfk('slot-b')}>switch</button>
+          <ChatInput {...defaultProps} value={v} onChange={setV} autoFocusKey={afk} />
+        </>
+      )
+    }
+    renderWithProviders(<Lagged />)
+    const ta = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    expect(ta.value).toBe('slot A draft')
+    fireEvent.click(screen.getByText('switch'))
+    expect(ta.value).toBe('') // slot B's draft settled in the second commit
+    undo(ta)
+    expect(ta.value).toBe('') // MUST NOT restore slot A's draft
+  })
+
+  it('starts a new undo step after a pause longer than the coalesce window', () => {
+    vi.useFakeTimers()
+    try {
+      renderWithProviders(<ControlledInput />)
+      const ta = screen.getByLabelText('Message input') as HTMLTextAreaElement
+      fireEvent.change(ta, { target: { value: 'aa' } })
+      vi.advanceTimersByTime(450) // past UNDO_COALESCE_MS (400)
+      fireEvent.change(ta, { target: { value: 'aabb' } })
+      undo(ta)
+      expect(ta.value).toBe('aa') // the pause made 'aabb' its own undo step
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
