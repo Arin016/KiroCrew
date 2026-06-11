@@ -2002,6 +2002,15 @@ class KiroClawConfig:
                     for r in (secretary_data.get("quick_reactions") or DEFAULT_QUICK_REACTIONS)
                     if isinstance(r, str)
                 ],
+                auto_cleanup_enabled=bool(
+                    secretary_data.get("auto_cleanup_enabled", True)
+                ),
+                dm_retention_days=max(
+                    1, int(secretary_data.get("dm_retention_days", 90))
+                ),
+                channel_retention_days=max(
+                    1, int(secretary_data.get("channel_retention_days", 365))
+                ),
                 keyword_hooks=secretary_data.get("keyword_hooks") or [],
             ),
             taskkeeper=TaskKeeperConfig(

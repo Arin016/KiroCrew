@@ -51,6 +51,34 @@ def test_save_load_roundtrip_secretary(cfg_file):
     assert raw["secretary"]["alert_keywords"] == ["sev", "outage"]
 
 
+def test_save_load_roundtrip_secretary_retention(cfg_file):
+    """Secretary retention fields must survive a save/LOAD cycle.
+
+    Regression for the bug where the UI saved dm_retention_days /
+    channel_retention_days / auto_cleanup_enabled to config.json, but
+    KiroClawConfig.load() never read them back into SecretaryConfig —
+    so the settings appeared to "not save" and cleanup used stale defaults.
+    """
+    cfg = KiroClawConfig()
+    cfg.secretary.enabled = True
+    cfg.secretary.auto_cleanup_enabled = False
+    cfg.secretary.dm_retention_days = 30
+    cfg.secretary.channel_retention_days = 90
+    cfg.save()
+
+    # On-disk write half
+    raw = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert raw["secretary"]["auto_cleanup_enabled"] is False
+    assert raw["secretary"]["dm_retention_days"] == 30
+    assert raw["secretary"]["channel_retention_days"] == 90
+
+    # Read-back (load) half — the part that was broken
+    loaded = KiroClawConfig.load()
+    assert loaded.secretary.auto_cleanup_enabled is False
+    assert loaded.secretary.dm_retention_days == 30
+    assert loaded.secretary.channel_retention_days == 90
+
+
 def test_save_load_roundtrip_taskrunner(cfg_file):
     """TaskRunner config must survive a save/load cycle."""
     cfg = KiroClawConfig()
