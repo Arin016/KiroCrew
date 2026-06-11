@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 from aiohttp import web
@@ -16,6 +17,31 @@ def _make_app() -> web.Application:
     app = web.Application()
     app.router.add_patch("/api/config/kiroclaw", api_kiroclaw_config_patch)
     return app
+
+
+_UNSET: object = object()
+
+
+def _make_app_with_state(
+    subagents: object = _UNSET,
+) -> tuple[web.Application, MagicMock | None]:
+    """Build a PATCH-handler app with a stubbed ``state.subagents``.
+
+    Returns the app and the subagents mock so tests can assert call args.
+    The ``agent.completion_keep`` / ``agent.completion_keep_chars`` PATCH
+    paths consult ``request.app["state"].subagents`` to hot-reload the
+    cached values; without the stub the handler raises ``KeyError``.
+
+    The default builds a fresh ``MagicMock``. Pass ``subagents=None``
+    explicitly to exercise the gateway-during-startup case where the
+    manager is not yet wired up. The ``_UNSET`` sentinel distinguishes
+    that from the default so an explicit ``None`` is preserved end-to-end.
+    """
+    app = _make_app()
+    if subagents is _UNSET:
+        subagents = MagicMock(spec=["update_completion_keep"])
+    app["state"] = SimpleNamespace(subagents=subagents)
+    return app, subagents  # type: ignore[return-value]
 
 
 def _seed_config() -> dict:
@@ -202,3 +228,73 @@ class TestStrValidator:
             assert resp.status == 400
             data = await resp.json()
             assert "invalid value" in data["error"]
+
+
+# ── completion_keep hot-reload ───────────────────────────────────────────
+
+
+class TestCompletionKeepHotReload:
+    """Settings UI changes must propagate to the live SubagentManager."""
+
+    @pytest.mark.asyncio
+    async def test_mode_change_calls_setter_with_loader_validated_value(
+        self, tmp_config
+    ) -> None:
+        """PATCH agent.completion_keep invokes update_completion_keep with the
+        loader-validated mode and the current chars value."""
+        app, subagents = _make_app_with_state()
+        async with TestClient(TestServer(app)) as c:
+            resp = await _patch(c, "agent.completion_keep", "tail")
+            assert resp.status == 200
+        subagents.update_completion_keep.assert_called_once()
+        mode, chars = subagents.update_completion_keep.call_args.args
+        assert mode == "tail"
+        # Default chars come from the loader since the seed config doesn't
+        # set agent.completion_keep_chars.
+        assert isinstance(chars, int)
+
+    @pytest.mark.asyncio
+    async def test_chars_change_calls_setter(self, tmp_config) -> None:
+        """PATCH agent.completion_keep_chars invokes update_completion_keep."""
+        app, subagents = _make_app_with_state()
+        async with TestClient(TestServer(app)) as c:
+            resp = await _patch(c, "agent.completion_keep_chars", 7500)
+            assert resp.status == 200
+        subagents.update_completion_keep.assert_called_once()
+        mode, chars = subagents.update_completion_keep.call_args.args
+        assert chars == 7500
+        assert mode in ("head", "tail", "both")  # whatever the loader settled on
+
+    @pytest.mark.asyncio
+    async def test_invalid_mode_does_not_call_setter(self, tmp_config) -> None:
+        """A 400 from the validator must short-circuit before the hot-reload."""
+        app, subagents = _make_app_with_state()
+        async with TestClient(TestServer(app)) as c:
+            resp = await _patch(c, "agent.completion_keep", "bogus")
+            assert resp.status == 400
+        subagents.update_completion_keep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unrelated_field_does_not_call_setter(self, tmp_config) -> None:
+        """PATCHes to other config fields must NOT touch the subagent manager."""
+        app, subagents = _make_app_with_state()
+        async with TestClient(TestServer(app)) as c:
+            resp = await _patch(c, "session.timeout_secs", 600)
+            assert resp.status == 200
+        subagents.update_completion_keep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_subagent_manager_is_no_op(self, tmp_config) -> None:
+        """When state.subagents is None, the hot-reload silently no-ops.
+
+        This matches the gateway-during-startup case and prevents a 500 if
+        the manager is not yet wired up.
+        """
+        app, subagents = _make_app_with_state(subagents=None)
+        # Sanity-check the helper actually preserved None end-to-end so this
+        # test exercises the real None-guard path in the handler.
+        assert subagents is None
+        assert app["state"].subagents is None
+        async with TestClient(TestServer(app)) as c:
+            resp = await _patch(c, "agent.completion_keep", "both")
+            assert resp.status == 200

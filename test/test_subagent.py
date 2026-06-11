@@ -412,6 +412,41 @@ class TestSubagentManagerConstructor:
         assert manager._on_spawn_approval is None
 
 
+class TestUpdateCompletionKeep:
+    """Verify the live setter for completion_keep / completion_keep_chars."""
+
+    def test_setter_updates_both_fields(self) -> None:
+        """update_completion_keep mutates both cached fields atomically."""
+        manager = SubagentManager(
+            sessions=_mock_sessions(),
+            ctx_builder=_mock_ctx_builder(),
+            completion_keep="head",
+            completion_keep_chars=3000,
+        )
+        assert manager._completion_keep == "head"
+        assert manager._completion_keep_chars == 3000
+
+        manager.update_completion_keep("both", 8000)
+
+        assert manager._completion_keep == "both"
+        assert manager._completion_keep_chars == 8000
+
+    def test_setter_overwrites_existing_value(self) -> None:
+        """Repeat calls overwrite, not accumulate."""
+        manager = SubagentManager(
+            sessions=_mock_sessions(),
+            ctx_builder=_mock_ctx_builder(),
+            completion_keep="head",
+            completion_keep_chars=3000,
+        )
+
+        manager.update_completion_keep("tail", 5000)
+        manager.update_completion_keep("head", 1000)
+
+        assert manager._completion_keep == "head"
+        assert manager._completion_keep_chars == 1000
+
+
 class TestSpawnYoloBypass:
     """When is_yolo returns True, spawn skips approval even with callback set."""
 

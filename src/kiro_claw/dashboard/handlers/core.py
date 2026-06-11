@@ -749,6 +749,8 @@ async def api_kiroclaw_config_patch(request: web.Request) -> web.Response:
 
     _log_sel("success", f"{path_key}={value}")
 
+    cfg = KiroClawConfig.load()
+
     # If provider changed, reload the factory so new sessions use the new provider
     if path_key == "agent.provider":
         state: DashboardState = request.app["state"]
@@ -771,7 +773,24 @@ async def api_kiroclaw_config_patch(request: web.Request) -> web.Response:
         state.push_slots_update()
         logger.info("Provider switched to %s — config rebuilt, factory reloaded, slot models cleared", value)
 
-    cfg = KiroClawConfig.load()
+    # If completion-keep mode or budget changed, propagate to the live
+    # SubagentManager so the next subagent to complete uses the new value.
+    # Without this the manager keeps the values it cached at gateway
+    # startup and the Settings UI change would only take effect after a
+    # gateway restart.
+    if path_key in ("agent.completion_keep", "agent.completion_keep_chars"):
+        state = request.app["state"]
+        if state.subagents is not None:
+            state.subagents.update_completion_keep(
+                cfg.agent.completion_keep,
+                cfg.agent.completion_keep_chars,
+            )
+            logger.info(
+                "completion_keep hot-reloaded: mode=%s chars=%d",
+                cfg.agent.completion_keep,
+                cfg.agent.completion_keep_chars,
+            )
+
     return web.json_response(cfg.to_dict())
 
 

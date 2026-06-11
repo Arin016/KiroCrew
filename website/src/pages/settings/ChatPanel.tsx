@@ -47,6 +47,18 @@ const SOFT_STOP_MIN = 0.5
 const SOFT_STOP_MAX = 60
 const SOFT_STOP_DEFAULT = 10.0
 
+type CompletionKeepMode = 'head' | 'tail' | 'both'
+const COMPLETION_KEEP_OPTIONS: CompletionKeepMode[] = ['head', 'tail', 'both']
+const COMPLETION_KEEP_LABELS = [
+  'Head (preserve start of stream)',
+  'Tail (preserve end / final summary)',
+  'Both (head + tail with truncation marker)',
+]
+const COMPLETION_KEEP_CHARS_MIN = 0
+// Mirrors RESULT_FILE_MAX_BYTES on the backend (handlers/core.py _EDITABLE_CONFIG).
+const COMPLETION_KEEP_CHARS_MAX = 512000
+const COMPLETION_KEEP_CHARS_DEFAULT = 3000
+
 export function ChatPanel() {
   const qc = useQueryClient()
   const [chatCfg, setChatCfg] = useState<ChatConfig>(loadChatConfig)
@@ -79,7 +91,14 @@ export function ChatPanel() {
   })
 
   // ── KiroClaw config (server-side) ──
-  const mcQ = useQuery<{ session?: { autocompact_pct?: number }; agent?: { soft_stop_budget_secs?: number } }>({
+  const mcQ = useQuery<{
+    session?: { autocompact_pct?: number }
+    agent?: {
+      soft_stop_budget_secs?: number
+      completion_keep?: CompletionKeepMode
+      completion_keep_chars?: number
+    }
+  }>({
     queryKey: ['kiroclawConfig'],
     queryFn: () => api.kiroclawConfig(),
   })
@@ -104,6 +123,32 @@ export function ChatPanel() {
       // so the init effect will not clobber this on future query updates.
       setLocalBudget(String(mcCfg?.agent?.soft_stop_budget_secs ?? SOFT_STOP_DEFAULT))
     },
+  })
+
+  const [localKeepChars, setLocalKeepChars] = useState('')
+  const keepCharsInitRef = useRef(false)
+  useEffect(() => {
+    if (mcQ.data && !keepCharsInitRef.current) {
+      keepCharsInitRef.current = true
+      setLocalKeepChars(String(mcQ.data.agent?.completion_keep_chars ?? COMPLETION_KEEP_CHARS_DEFAULT))
+    }
+  }, [mcQ.data])
+
+  const keepCharsMut = useMutation({
+    mutationFn: (n: number) => api.patchConfig('agent.completion_keep_chars', n),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['kiroclawConfig'] }),
+    onError: () => {
+      setSaveError('Failed to save completion-keep characters')
+      setLocalKeepChars(
+        String(mcCfg?.agent?.completion_keep_chars ?? COMPLETION_KEEP_CHARS_DEFAULT)
+      )
+    },
+  })
+
+  const keepModeMut = useMutation({
+    mutationFn: (v: CompletionKeepMode) => api.patchConfig('agent.completion_keep', v),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['kiroclawConfig'] }),
+    onError: () => setSaveError('Failed to save completion-keep mode'),
   })
 
   // ── Voice config (server-side) ──
@@ -330,6 +375,52 @@ export function ChatPanel() {
                 .then(() => qc.invalidateQueries({ queryKey: ['kiroclawConfig'] }))
                 .catch(() => setSaveError('Failed to save auto-compact threshold'))
             }
+            disabled={!mcQ.isSuccess}
+          />
+        </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection title="Subagents">
+        <SettingsCard>
+          {mcQ.isError && (
+            <div className="text-[13px] text-danger mb-2">
+              Failed to load config.{' '}
+              <button className="underline cursor-pointer bg-transparent border-none text-danger" onClick={() => mcQ.refetch()}>Retry</button>
+            </div>
+          )}
+          <SettingsSelect
+            label="Completion Event Truncation"
+            description="Which part of a subagent's stream to keep when injecting its completion event into the parent session. Head preserves the start (default, matches legacy behavior). Tail preserves the final summary. Both keeps a slice from each end with a marker between them."
+            value={mcCfg?.agent?.completion_keep ?? 'head'}
+            options={COMPLETION_KEEP_OPTIONS}
+            optionLabels={COMPLETION_KEEP_LABELS}
+            onChange={v => keepModeMut.mutate(v as CompletionKeepMode)}
+            disabled={!mcQ.isSuccess}
+          />
+          <SettingsInput
+            label="Completion Event Characters"
+            aria-label="Completion event characters"
+            hint={`Maximum characters retained in the completion event after applying the truncation mode. 0 disables truncation entirely. Default ${COMPLETION_KEEP_CHARS_DEFAULT}.`}
+            type="number"
+            value={localKeepChars}
+            min={COMPLETION_KEEP_CHARS_MIN}
+            max={COMPLETION_KEEP_CHARS_MAX}
+            step={500}
+            onChange={setLocalKeepChars}
+            onBlur={() => {
+              const n = parseInt(localKeepChars, 10)
+              if (
+                isNaN(n) ||
+                n < COMPLETION_KEEP_CHARS_MIN ||
+                n > COMPLETION_KEEP_CHARS_MAX
+              ) {
+                setLocalKeepChars(
+                  String(mcCfg?.agent?.completion_keep_chars ?? COMPLETION_KEEP_CHARS_DEFAULT)
+                )
+                return
+              }
+              keepCharsMut.mutate(n)
+            }}
             disabled={!mcQ.isSuccess}
           />
         </SettingsCard>

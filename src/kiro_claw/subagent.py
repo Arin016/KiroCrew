@@ -613,6 +613,24 @@ class SubagentManager:
         except Exception:
             self._spawn_stagger_secs = 2.0
 
+    def update_completion_keep(self, mode: str, max_chars: int) -> None:
+        """Update the live completion-keep mode and char budget.
+
+        Called from ``api_kiroclaw_config_patch`` after the user changes
+        ``agent.completion_keep`` or ``agent.completion_keep_chars`` from
+        the Settings UI. The values are read once per subagent at
+        completion time (``apply_completion_keep`` call site), so swapping
+        them here takes effect for the next subagent to finish — including
+        ones already running. No torn-read possible under asyncio: both
+        reads happen in the same synchronous block.
+
+        ``mode`` is validated by ``_validated_completion_keep`` at config
+        load; this setter is intentionally permissive about ``max_chars``
+        so the loader / handler stays the validation choke-point.
+        """
+        self._completion_keep = mode
+        self._completion_keep_chars = max_chars
+
     @staticmethod
     async def _approve_and_log(
         client,
