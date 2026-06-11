@@ -547,7 +547,17 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [showHistorySuggestions])
-  const [browseMode, setBrowseMode] = useState(false)
+  // Browse mode is per-session (keyed by slot), not page-global: enabling it in
+  // one session must not bleed into another. ChatPage never remounts on slot
+  // switch, so a single boolean would leak across every session. Kept in-memory
+  // only (resets on reload), matching the prior non-persisted behavior. Mesh-2055.
+  const [browseModeBySlot, setBrowseModeBySlot] = useState<Record<string, boolean>>({})
+  const browseMode = activeSlot ? (browseModeBySlot[activeSlot] ?? false) : false
+  const toggleBrowseMode = () => {
+    const slot = activeSlotRef.current
+    if (!slot) return
+    setBrowseModeBySlot(prev => ({ ...prev, [slot]: !(prev[slot] ?? false) }))
+  }
   const pendingInput = useAppSelector(s => s.chat.pendingInput)
 
   const [chatConfig, setChatConfig] = useState<ChatConfig>(loadChatConfig)
@@ -2668,7 +2678,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               autoNudgeCycleCount={autoNudgeLoop?.cycle_count || 0}
               onAutoNudgeClick={(rect) => { setAutoNudgeBtnRect(rect); setAutoNudgeOpen(!autoNudgeOpen) }}
               browseMode={browseMode}
-              onBrowseToggle={() => setBrowseMode(m => !m)}
+              onBrowseToggle={toggleBrowseMode}
               memoryMode={currentSlot?.memory_mode ?? 'persistent'}
               cleanMode={currentSlot?.clean_mode}
               sentMessages={sentMessages}
