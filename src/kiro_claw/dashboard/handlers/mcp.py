@@ -15,6 +15,7 @@ from typing import Any
 from aiohttp import web
 
 from kiro_claw.dashboard.state import DashboardState
+from kiro_claw.mcp_utils import mcp_server_alias
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
 
@@ -109,19 +110,20 @@ def _sync_mcp_to_agent(name: str, enabled: bool, *, remove: bool = False) -> Non
         logger.warning("Cannot read agent config %s, skipping sync: %s", path, exc)
         return
 
+    alias = mcp_server_alias(name)
     if enabled and not remove:
         # Ensure server exists in kiroclaw.json mcpServers when enabled
         mcp_servers = cfg.setdefault("mcpServers", {})
-        tool_ref = f"@{name}"
+        tool_ref = f"@{alias}"
         changed = False
-        if name not in mcp_servers:
-            # Copy spec from global mcp.json
+        if alias not in mcp_servers:
+            # Copy spec from global mcp.json (looked up by original name)
             try:
                 gdata = json.loads(_GLOBAL_MCP_JSON.read_text(encoding="utf-8"))
                 spec = gdata.get("mcpServers", {}).get(name, {})
                 if isinstance(spec, dict) and spec:
                     entry = {k: v for k, v in spec.items() if k != "disabled"}
-                    mcp_servers[name] = entry
+                    mcp_servers[alias] = entry
                     changed = True
                 else:
                     return
@@ -144,9 +146,10 @@ def _sync_mcp_to_agent(name: str, enabled: bool, *, remove: bool = False) -> Non
         )
     # On disable/remove, clean up any @server-name refs the user may have added
     if not enabled or remove:
-        tool_ref = f"@{name}"
-        cfg["tools"] = [t for t in cfg.get("tools", []) if t != tool_ref]
-        cfg["allowedTools"] = [t for t in cfg.get("allowedTools", []) if t != tool_ref]
+        stale_refs = {f"@{alias}", f"@{name}"}
+        tool_ref = f"@{alias}"
+        cfg["tools"] = [t for t in cfg.get("tools", []) if t not in stale_refs]
+        cfg["allowedTools"] = [t for t in cfg.get("allowedTools", []) if t not in stale_refs]
         sel().log_api_access(
             caller="system",
             operation="mcp_tools_removed",
@@ -155,6 +158,7 @@ def _sync_mcp_to_agent(name: str, enabled: bool, *, remove: bool = False) -> Non
             resources=f"{tool_ref} removed from tools/allowedTools",
         )
     if remove:
+        cfg.get("mcpServers", {}).pop(alias, None)
         cfg.get("mcpServers", {}).pop(name, None)
     try:
         from kiro_claw.agent import (  # noqa: F811 circular: agent imports handlers
@@ -188,14 +192,15 @@ def _sync_mcp_to_agent_batch(names: list[str], enabled: bool) -> None:
         except (FileNotFoundError, json.JSONDecodeError):
             gdata = {}
         for name in names:
-            if name not in mcp_servers:
+            alias = mcp_server_alias(name)
+            if alias not in mcp_servers:
                 spec = gdata.get("mcpServers", {}).get(name, {})
                 if not isinstance(spec, dict) or not spec:
                     continue
-                mcp_servers[name] = {k: v for k, v in spec.items() if k != "disabled"}
+                mcp_servers[alias] = {k: v for k, v in spec.items() if k != "disabled"}
                 changed = True
             # Ensure @server-name in tools and allowedTools
-            tool_ref = f"@{name}"
+            tool_ref = f"@{alias}"
             for key in ("tools", "allowedTools"):
                 lst = cfg.setdefault(key, [])
                 if tool_ref not in lst:
@@ -207,10 +212,16 @@ def _sync_mcp_to_agent_batch(names: list[str], enabled: bool) -> None:
                 operation="mcp_tools_added",
                 outcome="ok",
                 source="dashboard",
-                resources=f"{', '.join(f'@{n}' for n in names)} added to tools/allowedTools",
+                resources=(
+                    f"{', '.join(f'@{mcp_server_alias(n)}' for n in names)} "
+                    "added to tools/allowedTools"
+                ),
             )
     else:
-        refs_to_remove = {f"@{name}" for name in names}
+        # Remove both the alias ref and any legacy slash ref the user may have.
+        refs_to_remove = {f"@{name}" for name in names} | {
+            f"@{mcp_server_alias(name)}" for name in names
+        }
         cfg["tools"] = [t for t in cfg.get("tools", []) if t not in refs_to_remove]
         cfg["allowedTools"] = [t for t in cfg.get("allowedTools", []) if t not in refs_to_remove]
         changed = True

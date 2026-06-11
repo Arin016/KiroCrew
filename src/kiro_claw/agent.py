@@ -41,6 +41,7 @@ from typing import Any
 from kiro_claw.aim_agents import installed_kiro_packages_missing_from_cc
 from kiro_claw.config import KiroClawConfig
 from kiro_claw.config import config_path as _mc_config_path
+from kiro_claw.mcp_utils import mcp_server_alias
 from kiro_claw.security import is_sensitive_path, redact
 from kiro_claw.sel import (  # circular import: sel imports config which imports agent
     SecurityEvent,
@@ -1320,6 +1321,43 @@ def _load_existing_config(path: Path) -> tuple[dict, bool]:
     return config, False
 
 
+def _normalize_mcp_server_keys(config: dict) -> None:
+    """Rewrite any slash-containing ``mcpServers`` key to its slash-free alias.
+
+    Mutates ``config`` in place: moves each affected server spec under its
+    alias key and rewrites (and de-duplicates) the matching ``@oldkey`` ->
+    ``@alias`` reference in ``tools``/``allowedTools``.  Migrates already-broken
+    existing configs.  Idempotent: slash-free keys are left untouched and a
+    byte-identical re-merged duplicate is overwritten in place (no churn).
+
+    Collision: if the alias is already held by a *different* spec, the server
+    is preserved under a numeric-suffixed alias (``-2``, ``-3``) -- never
+    dropped.  Managed servers (slash-free by construction) are skipped so their
+    dynamic-field refresh is never disturbed.
+    """
+    servers = config.get("mcpServers")
+    if not isinstance(servers, dict):
+        return
+    managed = set(_MANAGED_MCP_SERVERS)
+    for old_key in [k for k in servers if "/" in k and k not in managed]:
+        spec = servers.pop(old_key)
+        alias = mcp_server_alias(old_key)
+        if alias in servers and servers[alias] != spec:
+            n = 2
+            while f"{alias}-{n}" in servers and servers[f"{alias}-{n}"] != spec:
+                n += 1
+            alias = f"{alias}-{n}"
+        servers[alias] = spec
+        old_ref, new_ref = f"@{old_key}", f"@{alias}"
+        for key in ("tools", "allowedTools"):
+            lst = config.get(key)
+            if isinstance(lst, list):
+                config[key] = list(
+                    dict.fromkeys(new_ref if t == old_ref else t for t in lst)
+                )
+        logger.info("Normalized MCP server key %r -> %r (kiro-safe)", old_key, alias)
+
+
 def rebuild_agent_config(*, clean: bool = False) -> Path:
     """Rebuild and write the merged kiroclaw.json to ~/.kiro/agents/.
 
@@ -1424,6 +1462,11 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
             logger.warning("Dropping MCP server %r: command not found: %s", name, cmd)
     config["mcpServers"] = valid_servers
 
+    # Rewrite slash-containing server keys to kiro-safe aliases (also migrates
+    # already-broken configs); runs after merges so global-only servers and
+    # their stale @refs are normalized too. See mcp_server_alias / Mesh-1956.
+    _normalize_mcp_server_keys(config)
+
     # Sync shared (user-installed) servers to tools/allowedTools.
     # These are explicitly installed by the user via `aim mcp install` or
     # manual mcp.json edits — unlike managed servers, they should always
@@ -1433,7 +1476,8 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
     for name, spec in itertools.chain(cc_shared_mcp.items(), shared_mcp.items()):
         if not isinstance(spec, dict) or name in managed_names:
             continue
-        ref = f"@{name}"
+        alias = mcp_server_alias(name)
+        ref = f"@{alias}"
         if spec.get("disabled"):
             for key in ("tools", "allowedTools"):
                 lst = config.get(key)
@@ -1441,8 +1485,8 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
                     lst.remove(ref)
                     if ref not in _shared_removed:
                         _shared_removed.append(ref)
-        elif name in valid_servers:
-            valid_servers[name].pop("disabled", None)
+        elif alias in valid_servers:
+            valid_servers[alias].pop("disabled", None)
             for key in ("tools", "allowedTools"):
                 if ref not in config.get(key, []):
                     config.setdefault(key, []).append(ref)
