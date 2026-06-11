@@ -12,12 +12,31 @@
 #                so frontend sync is by CONTENT within the post-snapshot window, not a
 #                clean SHA range. This SHA records the upstream tip last triaged.
 
-beta f42ef2d9      # 2026-06-10 MeshClaw backend beta tip (batch-13). PORTED (MCP slash-key alias).
-frontend-beta 3838bcc47556c7597fd93a1cc20c08027e516160  # 2026-06-10 MeshClawWebsite beta tip (batch-13). PORTED (sidebar rename caret).
-mainline 49633d05  # 2026-06-10 MeshClaw mainline tip (upstream); fully contained in beta-braveheart, no mainline-only delta.
+beta 80c564f5      # 2026-06-11 MeshClaw backend beta tip (batch-14). SKIP-only advance (no ports).
+frontend-beta 9099180d2b6a080346eceedfd71320b3741c2830  # 2026-06-11 MeshClawWebsite beta tip (batch-14). SKIP-only advance (no ports).
+mainline 49633d05  # 2026-06-11 MeshClaw mainline tip (upstream); unchanged since batch-13, fully contained in beta-braveheart, no mainline-only delta.
 # NOTE: this 'mainline' SHA is the UPSTREAM MeshClaw mainline tip (for the mainline-only
 # candidate check), NOT the fork's mainline — batch-12 mistakenly recorded the fork SHA
 # (796e21c5) here, which broke the `$MAIN..origin/mainline` scan. Corrected in batch-13.
+
+# --- Batch-14 (cron dual-repo sync 2026-06-11) -------------------------------
+# Fresh branch sync/beta-2026-06-11 off origin/mainline (prior CR-281120970 merged, tip dc42d0d).
+# 4 candidates (3 backend + 1 frontend); 0 PORTED, 0 PARTIAL, 4 dropped. SKIP-only boundary
+# advance (no code change, no DMG rebuild — nothing ships).
+# SKIP_INTERNAL: 80c564f5 (team-manager standup-cron leak fix — apps/builtins/team_manager/
+#   ABSENT in fork; fork has only auto_research + file_explorer; all 3 files 100% confined,
+#   reconcile_schedule_crons has no fork analogue). Anti-miss: grep'd the shared-helper — confined.
+# SKIP: 7c25d7ef (v2.7 docs + AGENTS, 33 files — bulk upstream doc snapshot for absent
+#   subsystems mcp-gateway/writing-review/promptfarm/research-lab; fork keeps diverged specs
+#   per-change). Anti-miss on its bundled test/test_cli.py hunk: RAN the fork's 4
+#   TestDoctorOllamaDocker tests → 4 passed (the validate_enterprise patch is redundant here).
+# ALREADY_PRESENT: 78f8f60c (patch validate_enterprise in TestDoctorOllamaDocker, Mesh-2072 —
+#   fixes a fail-CLOSED Enterprise-Grid gate; the fork's validate_enterprise is DEFAULT-OPEN
+#   (slack/enterprise.py:90, fails open with no allowlist), so the fork tests are green by a
+#   more fundamental divergence. Porting the patch = pointless churn. Verified by running them.)
+# SKIP (frontend): 9099180 (frontend AGENTS.md v2.7 — diverged convention doc mixing present
+#   Monaco/themes with absent LCARS/bikini-bottom + Artifactory ArtifactSharePanel/RemoteArtifactCard;
+#   fork's website/AGENTS.md is its own de-Amazoned voice).
 
 # --- Batch-13 (cron dual-repo sync 2026-06-10) -------------------------------
 # Fresh branch sync/beta-2026-06-10d off origin/mainline (prior CR-281070110 merged).
