@@ -12,9 +12,31 @@
 #                so frontend sync is by CONTENT within the post-snapshot window, not a
 #                clean SHA range. This SHA records the upstream tip last triaged.
 
-beta 527459a0      # 2026-06-10 backend tip (batch-12). Tip is a SKIP (config-baseline regen for promptfarm/AIM) — boundary advances past resolved SKIPs.
-frontend-beta 76a7fa3d1234aaac085953c9e9692e0ec0d00ba2  # 2026-06-10 MeshClawWebsite beta tip (batch-12). PORTED (force-kill debounce).
-mainline 796e21c5  # 2026-06-10 fork mainline tip (CR-281050885 merged); no mainline-only delta past this
+beta f42ef2d9      # 2026-06-10 MeshClaw backend beta tip (batch-13). PORTED (MCP slash-key alias).
+frontend-beta 3838bcc47556c7597fd93a1cc20c08027e516160  # 2026-06-10 MeshClawWebsite beta tip (batch-13). PORTED (sidebar rename caret).
+mainline 49633d05  # 2026-06-10 MeshClaw mainline tip (upstream); fully contained in beta-braveheart, no mainline-only delta.
+# NOTE: this 'mainline' SHA is the UPSTREAM MeshClaw mainline tip (for the mainline-only
+# candidate check), NOT the fork's mainline — batch-12 mistakenly recorded the fork SHA
+# (796e21c5) here, which broke the `$MAIN..origin/mainline` scan. Corrected in batch-13.
+
+# --- Batch-13 (cron dual-repo sync 2026-06-10) -------------------------------
+# Fresh branch sync/beta-2026-06-10d off origin/mainline (prior CR-281070110 merged).
+# 9 candidates (4 backend + 5 frontend); 7 PORTED/PARTIAL, 2 SKIP.
+# PORTED: f42ef2d9 (MCP slash-key alias — new mcp_utils.mcp_server_alias; kiro tool
+# resolution, fixes the fork's npm:@playwright/mcp server), fac5fcbb (secretary
+# retention config-roundtrip — ANTI-MISS save: titled fix(secretary) but the fork
+# ships SecretaryConfig with these fields and load() dropped them, a real fork bug),
+# 3838bcc (sidebar rename caret), 50ea94e (browse toggle per-session, Mesh-2055),
+# b7d3039 (Ctrl+Z prompt undo/redo, Mesh-2029), fa3c5ed (Cmd/Ctrl+Click new tab),
+# 977aa9e (flatter chrome + IconButton primitives + tool-name chip; PARTIAL —
+# dropped the absent AimPackageManager.tsx hunk). 977aa9e+3838bcc committed together
+# (shared a ChatSidebar diff hunk; splitting risked corruption).
+# PARTIAL: 3a017786 (python-docx 1.x floor for py3.10 — applied to setup.cfg, NOT the
+# Brazil Config which the public build ignores).
+# SKIP: 39d22f8a (mcp_gateway hardening — dir ABSENT, 100% confined), 3a017786's
+# Brazil Config hunk (setuptools build).
+# 2fee03d/50ea94e-style tests that imported the absent secretarySlice were re-authored
+# fork-correct. CR-281NNNNNN. Both DMGs arch-verified (arm64 + x86_64).
 
 # --- Batch-12 (dual-repo sync 2026-06-10, after CR-281050885 merged) ---------
 # Fresh branch sync/beta-2026-06-10c off origin/mainline (prior CR merged, no
