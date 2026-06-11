@@ -11,7 +11,7 @@ import { switchSlot, createSlot, deleteSlot, fetchHistory, resumeFromHistory, de
 import { sseSlotTitle, updateSlotFolder, updateSlotPin, markSlotUnread, markSlotRead } from '../store/dashboardSlice'
 import { api, SEARCH_MIN_CHARS } from '../api/client'
 import { computeReorderedFolders } from '../utils/reorderFolders'
-import { SearchInput, Input, Btn } from '../components/ui'
+import { SearchInput, Input, Btn, IconButton, IconButtonGroup } from '../components/ui'
 import { useSessionPalette } from '../hooks/useSessionPalette'
 import { useImeGuard } from '../hooks/useImeGuard'
 import { useIsMobile } from '../hooks/useIsMobile'
@@ -830,7 +830,7 @@ function ChatSidebar({
         transition={{ layout: { type: 'spring', stiffness: 500, damping: 35 }, opacity: { duration: 0.2 }, x: { duration: 0.2 } }}>
         <div className={`session-row group relative flex items-start gap-2.5 px-4 py-2 rounded-md cursor-pointer text-sm transition-all select-none ${isActive ? 'session-active text-text-strong bg-accent-subtle' : 'text-muted hover:text-text hover:bg-bg-hover'} ${rowColor ? 'session-colored' : ''} ${rowColor && colorMode === 'gradient' ? 'session-gradient' : ''}`}
           style={boostStyle as React.CSSProperties}
-          draggable
+          draggable={renamingSlot !== s.key}
           onDragStart={e => { e.dataTransfer.setData('text/plain', s.key); e.dataTransfer.effectAllowed = 'move' }}
           onClick={() => { dispatch(switchSlot(s.key)); onSelectSlot?.(s.key) }}
           onContextMenu={e => { e.preventDefault(); setCtxMenu({ key: s.key, x: e.clientX, y: e.clientY }) }}>
@@ -852,9 +852,9 @@ function ChatSidebar({
                   </>}
               {(s.last_ts || s.created) && <span className="ml-auto text-[11px] text-muted font-normal shrink-0">{fmtRelativeTime(s.last_ts || s.created!)}</span>}
             </div>
-            <div className="text-[13px] leading-snug line-clamp-2 break-words" title={s.title && s.title !== s.key ? s.title : s.key}>
+            <div className="text-[13px] leading-snug line-clamp-2 break-words text-text" title={s.title && s.title !== s.key ? s.title : s.key}>
               {renamingSlot === s.key ? (
-                <Input className="w-full bg-transparent border border-accent rounded px-1 py-0 text-text-strong outline-none text-[13px]" autoFocus value={renameValue} onChange={e => setRenameValue(e.target.value)} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => { (document.activeElement as HTMLInputElement)?.blur() }, onEscape: () => { cancelRenameRef.current = true; setRenamingSlot(null) }, onBlur: () => { if (!cancelRenameRef.current && renameValue.trim()) { dispatch(sseSlotTitle({ key: s.key, title: renameValue.trim() })); api.renameSlot(s.key, renameValue.trim()).catch(() => { queryClient.invalidateQueries({ queryKey: ['chat-slots'] }) }) } cancelRenameRef.current = false; setRenamingSlot(null) } })} onMouseDown={e => e.stopPropagation()} />
+                <Input className="w-full bg-transparent border border-accent rounded px-1 py-0 text-text-strong outline-none text-[13px] select-text" autoFocus value={renameValue} onChange={e => setRenameValue(e.target.value)} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => { (document.activeElement as HTMLInputElement)?.blur() }, onEscape: () => { cancelRenameRef.current = true; setRenamingSlot(null) }, onBlur: () => { if (!cancelRenameRef.current && renameValue.trim()) { dispatch(sseSlotTitle({ key: s.key, title: renameValue.trim() })); api.renameSlot(s.key, renameValue.trim()).catch(() => { queryClient.invalidateQueries({ queryKey: ['chat-slots'] }) }) } cancelRenameRef.current = false; setRenamingSlot(null) } })} onMouseDown={e => e.stopPropagation()} />
               ) : (s.title && s.title !== s.key ? s.title : s.key)}
             </div>
             {s.running ? <div className="text-[12px] text-accent leading-snug truncate mt-0.5 flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse shrink-0" />{slotStatusDetail[s.key]?.text || 'Thinking…'}</div> : s.last_message && <div className="text-[12px] text-muted leading-snug truncate mt-0.5">{s.last_message}</div>}
@@ -879,11 +879,11 @@ function ChatSidebar({
               <button type="button" className="text-muted/50 active:text-danger p-1 cursor-pointer bg-transparent border-none" aria-label="Close session" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(s.key)) }}><X size={14} /></button>
             </div>
           ) : (
-            <div className={`absolute top-1/2 -translate-y-1/2 right-1.5 transition-all flex items-center gap-0.5 rounded-md p-1 bg-card border border-border shadow-sm ${ctxMenu?.key === s.key ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}`}>
-              <button type="button" className="text-muted cursor-pointer p-[4px] rounded hover:text-text hover:bg-bg-hover transition-all bg-transparent border-none" title="More" aria-label="More options" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); const rect = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect(); setCtxMenu({ key: s.key, x: rect.left, y: rect.bottom + 4 }) }}><MoreVertical size={12} /></button>
-              <button type="button" className="text-muted cursor-pointer p-[4px] rounded hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none" title="Duplicate" aria-label="Duplicate" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); forkMutation.mutate(s.key) }}><Copy size={12} /></button>
-              <button type="button" className="text-[12px] text-muted cursor-pointer p-[4px] rounded hover:text-danger hover:bg-danger-subtle transition-all bg-transparent border-none" title="Close" aria-label="Close session" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(s.key)) }}><X size={12} /></button>
-            </div>
+            <IconButtonGroup reveal className={`absolute top-1/2 -translate-y-1/2 right-1.5 ${ctxMenu?.key === s.key ? 'opacity-100' : ''}`}>
+              <IconButton title="More" aria-label="More options" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); const rect = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect(); setCtxMenu({ key: s.key, x: rect.left, y: rect.bottom + 4 }) }}><MoreVertical size={12} /></IconButton>
+              <IconButton variant="accent" title="Duplicate" aria-label="Duplicate" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); forkMutation.mutate(s.key) }}><Copy size={12} /></IconButton>
+              <IconButton variant="danger" title="Close" aria-label="Close session" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(s.key)) }}><X size={12} /></IconButton>
+            </IconButtonGroup>
           )}
         </div>
         {showDivider && <div className="mx-3 border-b border-border" />}
@@ -1086,35 +1086,34 @@ function ChatSidebar({
         )
       })()}
 
-      {/* Search + sort (reference layout) */}
-      <div className="px-3 pt-2 pb-1 flex items-center gap-1.5">
-        <div className="relative flex-1">
-          <SearchInput className="w-full" placeholder="Search sessions…" value={slotFilter} onChange={e => setSlotFilter(e.target.value)} />
+      {/* Search with inline sort/filter control */}
+      <div className="px-3 pt-2 pb-1">
+        <div className="relative">
+          <SearchInput className={`w-full ${slotFilter ? '[&>input]:pr-14' : '[&>input]:pr-9'}`} placeholder="Search sessions…" value={slotFilter} onChange={e => setSlotFilter(e.target.value)} />
           {slotFilter && (
-            <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text cursor-pointer bg-transparent border-none p-0 leading-none transition-colors" onClick={() => setSlotFilter('')} aria-label="Clear search"><X size={13} /></button>
+            <button type="button" className="absolute right-8 top-1/2 -translate-y-1/2 text-muted hover:text-text cursor-pointer bg-transparent border-none p-0 leading-none transition-colors" onClick={() => setSlotFilter('')} aria-label="Clear search"><X size={13} /></button>
           )}
-        </div>
-        <div className="relative shrink-0" data-filter-sort>
-          <button
-            type="button"
-            className="relative w-7 h-7 rounded-md border border-border bg-transparent text-muted flex items-center justify-center cursor-pointer transition-all hover:border-border-strong hover:text-text"
-            onClick={() => setFilterSortOpen(o => !o)}
-            title="Sort & filter sessions"
-            aria-label="Sort and filter sessions"
-            aria-haspopup="menu"
-            aria-expanded={filterSortOpen}
-          >
-            <ListFilter size={14} />
-            {unreadSlots.length > 0 && (
-              <span
-                aria-hidden="true"
-                className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-[3px] rounded-full bg-[var(--info)] text-white text-[10px] font-semibold leading-[14px] text-center pointer-events-none shadow-[0_0_4px_rgba(59,130,246,.5)]"
-              >
-                {unreadSlots.length > 99 ? '99+' : unreadSlots.length}
-              </span>
-            )}
-          </button>
-          {filterSortOpen && (
+          <div className="absolute right-1 inset-y-0 flex items-center" data-filter-sort>
+            <button
+              type="button"
+              className="relative w-6 h-6 rounded text-muted flex items-center justify-center cursor-pointer transition-colors hover:text-text hover:bg-bg-hover bg-transparent border-none"
+              onClick={() => setFilterSortOpen(o => !o)}
+              title="Sort & filter sessions"
+              aria-label="Sort and filter sessions"
+              aria-haspopup="menu"
+              aria-expanded={filterSortOpen}
+            >
+              <ListFilter size={14} />
+              {unreadSlots.length > 0 && (
+                <span
+                  aria-hidden="true"
+                  className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-[3px] rounded-full bg-[var(--info)] text-white text-[10px] font-semibold leading-[14px] text-center pointer-events-none shadow-[0_0_4px_rgba(59,130,246,.5)]"
+                >
+                  {unreadSlots.length > 99 ? '99+' : unreadSlots.length}
+                </span>
+              )}
+            </button>
+            {filterSortOpen && (
             <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] rounded-lg border border-border bg-bg-elevated shadow-lg py-1 animate-rise" role="menu">
               <div className="px-3 pt-1 pb-1 text-[11px] font-medium text-muted uppercase tracking-[.04em]">Filter</div>
               <button
@@ -1147,6 +1146,7 @@ function ChatSidebar({
               ))}
             </div>
           )}
+          </div>
         </div>
       </div>
       {showUnreadOnly && (

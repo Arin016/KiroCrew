@@ -1215,6 +1215,7 @@ function ChatInput({
                               <ToolDetails
                                   purpose={approvalPurpose}
                                   pillLabel={approvalLabel}
+                                  toolName={approvalLabelRaw}
                                   input={approvalToolInput}
                                   output=""
                                   auto={false}

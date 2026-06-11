@@ -104,7 +104,7 @@ export function LogViewer({ compact }: { compact?: boolean }) {
         <button className={`${sz.btn} rounded cursor-pointer border transition-all whitespace-nowrap ml-auto ${autoFollow ? 'bg-surface border-border-strong text-text' : 'bg-transparent border-border text-muted'}`}
           onClick={toggleTail}>{autoFollow ? 'Tail: on' : 'Tail: off'}</button>
       </div>
-      <div className={`flex-1 flex flex-col min-h-0 ${compact ? '' : 'card-glow border border-border bg-card rounded-lg p-5 animate-rise shadow-sm hover:border-border-strong hover:shadow-md transition-all'}`}>
+      <div className={`flex-1 flex flex-col min-h-0 ${compact ? '' : 'card-glow border border-border bg-card rounded-lg p-5 animate-rise shadow-sm transition-all'}`}>
         <Virtuoso ref={virtuosoRef} data={filtered} followOutput={autoFollow ? 'smooth' : false}
           style={{ flex: 1, minHeight: 0 }}
           itemContent={(_i, l) => (

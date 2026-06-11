@@ -161,7 +161,7 @@ export function SettingsSection({ title, children }: SettingsSectionProps) {
 
 export function SettingsCard({ children }: { children: React.ReactNode }) {
   return (
-    <div className="card-glow border border-border bg-card rounded-lg p-5 mb-4 animate-rise shadow-sm hover:border-border-strong hover:shadow-md transition-all">
+    <div className="card-glow border border-border bg-card rounded-lg p-5 mb-4 animate-rise shadow-sm transition-all">
       <div className="flex flex-col gap-1">
         {children}
       </div>

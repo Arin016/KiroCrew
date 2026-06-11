@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { Maximize2, Minimize2, ExternalLink, Download, Bookmark } from 'lucide-react'
+import { IconButton, IconButtonGroup } from './ui'
 import { useTheme } from '../hooks/useTheme'
 import { sanitizeCssValue } from '../lib/cssSanitize'
 import { THEME_VAR_NAMES, buildSrcdoc } from '../lib/widgetSrcdoc'
@@ -7,7 +8,6 @@ import { effectiveWidgetSlug } from '../lib/widgetSlug'
 import { api, ApiError } from '../api/client'
 
 const MIN_HEIGHT = 80
-const MAX_HEIGHT = 500
 // Height shrinks are deferred this long. A reload / Tailwind JIT reflow briefly
 // reports a smaller height before the content settles; applying it immediately
 // collapses-then-regrows the row, which accumulates into a growing gap at the
@@ -221,7 +221,7 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
     const handler = (e: MessageEvent) => {
       if (!iframeRef.current || e.source !== iframeRef.current.contentWindow) return
       if (e.data?.type === 'mc-widget-height' && typeof e.data.height === 'number') {
-        const h = Math.min(Math.max(e.data.height, MIN_HEIGHT), MAX_HEIGHT)
+        const h = Math.max(e.data.height, MIN_HEIGHT)
         // No-op when the clamped height is unchanged. An animated widget can
         // post the same height every frame; without this guard each report
         // re-ran applyHeight → persistHeightCache (synchronous localStorage
@@ -467,7 +467,7 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
   return (
     <div
       ref={containerRef}
-      className={`rounded-xl border border-border bg-card overflow-hidden transition-colors my-2 ${expanded ? 'fixed inset-4 z-50 shadow-2xl' : 'max-h-[540px]'}`}
+      className={`group my-2 transition-colors ${expanded ? 'fixed inset-4 z-50 rounded-xl border border-border bg-card overflow-hidden shadow-2xl' : ''}`}
     >
       {!visible ? (
         /* Skeleton — mirrors the visible layout (same header bar + a reserved
@@ -477,13 +477,13 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
            becoming visible, which showed as a scroll-up "jump" as each widget
            entered from the top. */
         <>
-          <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-bg-elevated">
+          <div className="flex items-center justify-between px-3 py-2">
             <span className="text-[13px] font-medium text-muted truncate">{title}</span>
           </div>
-          <div aria-hidden style={{ height: Math.min(height, MAX_HEIGHT) }} />
+          <div aria-hidden style={{ height }} />
         </>
       ) : (<>
-      <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-bg-elevated">
+      <div className={`flex items-center justify-between px-3 py-2 ${expanded ? 'border-b border-border bg-bg-elevated' : ''}`}>
         <span className="text-[13px] font-medium text-text truncate">
           {savedSlug ? (
             <a
@@ -496,11 +496,12 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
           )}
           {saveError && <span className="ml-2 text-[12px] text-danger" title={saveError}>save failed</span>}
         </span>
-        <div className="flex items-center gap-1">
-          <button
+        <IconButtonGroup reveal={!expanded}>
+          <IconButton
+            variant={savedSlug ? 'active' : 'default'}
             onClick={toggleArtifact}
             disabled={saving || !effectiveSlug}
-            className={`p-1 rounded transition-colors cursor-pointer bg-transparent border-none ${savedSlug ? 'text-accent' : 'text-muted hover:text-text'} ${saving ? 'opacity-50 cursor-wait' : ''} ${!effectiveSlug ? 'opacity-30 cursor-not-allowed' : ''}`}
+            className={saving ? 'cursor-wait' : ''}
             title={
               !effectiveSlug
                 ? 'Cannot save: widget has no slug or message context'
@@ -510,18 +511,18 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
             }
             aria-label={savedSlug ? `Remove artifact ${savedSlug} from library` : 'Save as artifact'}
           >
-            <Bookmark size={13} fill={savedSlug ? 'currentColor' : 'none'} />
-          </button>
-          <button onClick={downloadAsHtml} className="p-1 rounded text-muted hover:text-text transition-colors cursor-pointer bg-transparent border-none" title="Download as HTML" aria-label="Download as HTML">
-            <Download size={13} />
-          </button>
-          <button onClick={openInNewTab} className="p-1 rounded text-muted hover:text-text transition-colors cursor-pointer bg-transparent border-none" title="Open in new tab" aria-label="Open in new tab">
-            <ExternalLink size={13} />
-          </button>
-          <button onClick={() => setExpanded(!expanded)} className="p-1 rounded text-muted hover:text-text transition-colors cursor-pointer bg-transparent border-none" title={expanded ? 'Minimize' : 'Expand'} aria-label={expanded ? 'Minimize' : 'Expand'}>
-            {expanded ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
-          </button>
-        </div>
+            <Bookmark size={12} fill={savedSlug ? 'currentColor' : 'none'} />
+          </IconButton>
+          <IconButton onClick={downloadAsHtml} title="Download as HTML" aria-label="Download as HTML">
+            <Download size={12} />
+          </IconButton>
+          <IconButton onClick={openInNewTab} title="Open in new tab" aria-label="Open in new tab">
+            <ExternalLink size={12} />
+          </IconButton>
+          <IconButton onClick={() => setExpanded(!expanded)} title={expanded ? 'Minimize' : 'Expand'} aria-label={expanded ? 'Minimize' : 'Expand'}>
+            {expanded ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+          </IconButton>
+        </IconButtonGroup>
       </div>
 
       {blobUrl && <iframe
@@ -530,7 +531,7 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
         onLoad={() => setIframeLoaded(true)}
         sandbox="allow-scripts"
         className="w-full border-none bg-card transition-opacity duration-200 ease-out motion-reduce:transition-none"
-        style={{ height: expanded ? 'calc(100% - 36px)' : Math.min(height, MAX_HEIGHT), opacity: iframeLoaded ? 1 : 0 }}
+        style={{ height: expanded ? 'calc(100% - 36px)' : height, opacity: iframeLoaded ? 1 : 0 }}
         title={title}
       />}
 

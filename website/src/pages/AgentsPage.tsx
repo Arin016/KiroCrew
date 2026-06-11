@@ -176,7 +176,7 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
         </div>
         {/* Installed Agents — fixed left list, fixed right detail */}
         {installed.length > 0 && (
-          <div className="card-glow border border-border bg-card rounded-lg mb-4 animate-rise shadow-sm hover:border-border-strong hover:shadow-md transition-all overflow-hidden">
+          <div className="card-glow border border-border bg-card rounded-lg mb-4 animate-rise shadow-sm transition-all overflow-hidden">
             <div className="px-5 pt-5 pb-3"><h3 className="text-sm font-semibold text-text-strong flex items-center gap-1.5">Installed Agents <InfoTip text={`Agent templates grouped by package. Update and uninstall at package level. Individual agents can be deleted (removes config file).`} /></h3></div>
             <div className="flex" style={{ height: `${LAYOUT.AGENT_LIST_HEIGHT}px` }}>
               {/* Agent list — scrollable */}
@@ -271,7 +271,7 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
           </div>
         )}
         {/* Context Window Usage */}
-        <div className="card-glow border border-border bg-card rounded-lg p-5 mb-4 animate-rise shadow-sm hover:border-border-strong hover:shadow-md transition-all">
+        <div className="card-glow border border-border bg-card rounded-lg p-5 mb-4 animate-rise shadow-sm transition-all">
           <h3 className="text-sm font-semibold text-text-strong mb-3.5 flex items-center gap-1.5">Context Window Usage <InfoTip text={`Live context window utilization per active ${provider.labels.sessionProcess} session. Custom agents show their configured model. Compaction triggers at 90%.`} /></h3>
           {ctx.length === 0 ? <p className="text-muted italic text-sm">No active sessions</p> : (
             <div className="space-y-4">
@@ -321,7 +321,7 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
         </div>
         {/* Kiro Usage */}
         {usage && (
-          <div className="card-glow border border-border bg-card rounded-lg p-5 mb-4 animate-rise shadow-sm hover:border-border-strong hover:shadow-md transition-all">
+          <div className="card-glow border border-border bg-card rounded-lg p-5 mb-4 animate-rise shadow-sm transition-all">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-sm font-semibold text-text-strong flex items-center gap-1.5">{provider.displayName} Usage <InfoTip text={`${provider.displayName} consumption for the current billing period. Cached 10 min.`} /></h3>
               <div className="flex items-center gap-2">
@@ -358,7 +358,7 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
             })()}
           </div>
         )}
-        <div className="card-glow border border-border bg-card rounded-lg p-5 mb-4 animate-rise shadow-sm hover:border-border-strong hover:shadow-md transition-all">
+        <div className="card-glow border border-border bg-card rounded-lg p-5 mb-4 animate-rise shadow-sm transition-all">
           <h3 className="text-sm font-semibold text-text-strong mb-3.5 flex items-center gap-2">Subagents {agents.some(a => a.done) && <button className="px-2 py-0.5 rounded-md border border-border bg-transparent text-muted text-[13px] cursor-pointer hover:text-danger hover:border-danger transition-all" onClick={() => spawnClearMut.mutate()}>Clear completed</button>}</h3>
           <table className="w-full border-collapse table-striped"><thead><tr>{['ID','Task','Status',''].map(h => <th key={h} className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium">{h}</th>)}</tr></thead>
             <tbody>{agents.length === 0 ? <tr><td colSpan={4}><EmptyState icon={<Bot className="lucide-inline" />} title="No subagents" subtitle="Spawn tasks from chat or CLI" /></td></tr> : agents.map(a => (

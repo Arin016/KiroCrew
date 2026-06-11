@@ -6,7 +6,7 @@ import InfoTip from './InfoTip'
 
 export function Card({ children, className = '' }: { children: React.ReactNode; className?: string }) {
   return (
-    <div className={`card-glow border border-border bg-card rounded-lg p-5 mb-4 animate-rise shadow-sm hover:border-border-strong hover:shadow-md transition-all ${className}`}>
+    <div className={`card-glow border border-border bg-card rounded-lg p-5 mb-4 animate-rise shadow-sm transition-all ${className}`}>
       {children}
     </div>
   )
@@ -44,6 +44,51 @@ export function SendBtn({ children, onClick, disabled, style }: { children: Reac
     >
       {children}
     </button>
+  )
+}
+
+/* ── Icon button group ──
+ * The hover-revealed capsule of small square icon buttons used in chat session
+ * rows, the widget header, and other row/card affordances. `IconButtonGroup`
+ * is the bordered `bg-card` capsule; pass `reveal` to fade it in on the parent's
+ * :hover / focus-within (the parent element must carry the `group` class).
+ * `IconButton` is a single square icon button; `variant` sets the hover color. */
+const ICON_BUTTON_VARIANTS: Record<'default' | 'accent' | 'danger' | 'active', string> = {
+  default: 'text-muted hover:text-text hover:bg-bg-hover',
+  accent: 'text-muted hover:text-accent hover:bg-bg-hover',
+  danger: 'text-muted hover:text-danger hover:bg-danger-subtle',
+  active: 'text-accent hover:bg-bg-hover',
+}
+
+export const IconButton = React.forwardRef<
+  HTMLButtonElement,
+  Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'aria-label'> & { variant?: keyof typeof ICON_BUTTON_VARIANTS; 'aria-label': string }
+>(({ variant = 'default', className, children, ...rest }, ref) => (
+  <button
+    ref={ref}
+    type="button"
+    className={twMerge(
+      'p-[4px] rounded transition-all cursor-pointer bg-transparent border-none disabled:opacity-30 disabled:cursor-not-allowed',
+      ICON_BUTTON_VARIANTS[variant],
+      className,
+    )}
+    {...rest}
+  >
+    {children}
+  </button>
+))
+
+export function IconButtonGroup({ reveal, className, children }: { reveal?: boolean; className?: string; children: React.ReactNode }) {
+  return (
+    <div
+      className={twMerge(
+        'flex items-center gap-0.5 rounded-md p-1 bg-card border border-border shadow-sm transition-all',
+        reveal ? 'opacity-0 group-hover:opacity-100 focus-within:opacity-100' : '',
+        className,
+      )}
+    >
+      {children}
+    </div>
   )
 }
 
