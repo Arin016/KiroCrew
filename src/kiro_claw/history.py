@@ -1597,21 +1597,43 @@ class HistoryConsolidator:
             return None
 
         session_key = BACKGROUND_KEY
+        # Timing instrumentation (_bg stall investigation): measure both the
+        # wait to acquire the shared `_bg` session (queue contention behind
+        # other `_bg` consumers like chat_nav link-preview) and the LLM turn
+        # itself. No behavior change. Logged at DEBUG: silent in normal
+        # operation, surfaced only when log_level is raised to investigate a
+        # consolidation stall.
+        t_start = _time.monotonic()
         try:
             client, _is_new, _resumed = await self._sessions.get_or_create(
                 session_key, agent="kiroclaw-lite"
             )
+            t_acquired = _time.monotonic()
+            wait_s = t_acquired - t_start
             # Reject all tools: this is a text/JSON-only generation turn. kiro
             # scopes the kiroclaw-lite session to tools:[] via set_mode, but the
             # Claude Code backend skips set_mode and injects the full
             # kiroclaw-core/cron toolset — without REJECT_ALL a background
             # consolidation turn could fire side-effecting tools (send_message,
             # learn_add, spawn_run). REJECT_ALL keeps both providers tool-free.
-            return await stream_and_collect_json(
+            result = await stream_and_collect_json(
                 client, prompt, approval_policy=ToolApprovalPolicy.REJECT_ALL
             )
+            turn_s = _time.monotonic() - t_acquired
+            logger.debug(
+                "Consolidation LLM turn: wait=%.1fs turn=%.1fs total=%.1fs ok=%s",
+                wait_s,
+                turn_s,
+                _time.monotonic() - t_start,
+                result is not None,
+            )
+            return result
         except Exception:
-            logger.warning("LLM consolidation call failed", exc_info=True)
+            logger.warning(
+                "LLM consolidation call failed after %.1fs",
+                _time.monotonic() - t_start,
+                exc_info=True,
+            )
             return None
         finally:
             self._sessions.release(session_key)

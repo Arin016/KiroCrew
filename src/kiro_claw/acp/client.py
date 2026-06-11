@@ -28,8 +28,9 @@ import subprocess as subprocess_mod
 import sys
 import time
 from collections import deque
+from contextlib import aclosing
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncGenerator, AsyncIterator
 
 from kiro_claw.acp.types import (
     ACP_BACKEND_CLAUDE,
@@ -850,6 +851,28 @@ class AcpClient:
         self._stderr_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._last_activity: float = time.monotonic()
         self._turn_done: asyncio.Event = asyncio.Event()
+        # Serializes whole read turns on this client's single stdout StreamReader.
+        # An asyncio StreamReader permits exactly ONE waiting reader; the shared
+        # `_bg` session is streamed by ~8 callers and the per-session Semaphore(1)
+        # does not cover abnormal-exit overlap (a turn dying mid-readline leaves a
+        # parked read the next caller collides with -> "readuntil() called while
+        # another coroutine is already waiting"). Acquired at the top of
+        # _prompt_loop, released in its finally.
+        #
+        # Finalization caveat: a consumer that `return`s on "complete" without
+        # exhausting _prompt_loop leaves the async-gen SUSPENDED; CPython runs
+        # its finally via a *deferred* scheduled athrow (next loop tick), not at
+        # the consumer's return. So the lock releases promptly on a live loop but
+        # NOT synchronously. send_message_stream wraps the loop in `aclosing(...)`
+        # to force deterministic release on its hot path; the other consumers
+        # rely on the next-tick finalization.
+        #
+        # Coverage caveat: this lock only covers reads inside _prompt_loop.
+        # _read_message also has callers OUTSIDE the loop (_wait_for_response
+        # during init, wait_for_compaction). Those run in distinct lifecycle
+        # phases that do not overlap a streaming _bg turn, so they are not
+        # serialized here; if that ever changes, the readuntil race could recur.
+        self._turn_lock: asyncio.Lock = asyncio.Lock()
         self._stale_eligible: bool = False  # set by _dispatch_events after text chunks
         self._last_stop_reason: str = ""
         # Dynamic config from ACP session/new response and config_option_update notifications.
@@ -1895,7 +1918,7 @@ class AcpClient:
         self,
         req_id: int,
         timeout: float,
-    ) -> AsyncIterator[tuple[str, JsonRpcMessage]]:
+    ) -> AsyncGenerator[tuple[str, JsonRpcMessage], None]:
         """Core prompt read loop. Yields (action, msg) pairs.
 
         Always releases ``_turn_done`` on exit — including abnormal exits
@@ -1905,11 +1928,18 @@ class AcpClient:
         ``wait_turn_done`` waiter (the cooperative-stop ack) blocks for its
         full budget before escalating to a session-losing hard kill.
         """
-        deadline = time.monotonic() + timeout
-        consecutive_empty = 0
-        last_data_ts = time.monotonic()
-
+        # L1 turn-lock: serialize the whole read turn on this client's single
+        # stdout StreamReader so two _bg streaming turns can't both park on
+        # readline() and trip "readuntil() called while another coroutine is
+        # already waiting". Acquired here (every streaming consumer funnels
+        # through _prompt_loop), released in the finally — see the __init__
+        # comment for the finalization + coverage caveats.
+        await self._turn_lock.acquire()
         try:
+            deadline = time.monotonic() + timeout
+            consecutive_empty = 0
+            last_data_ts = time.monotonic()
+
             while time.monotonic() < deadline:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1943,6 +1973,7 @@ class AcpClient:
                 action = self._process_message(msg, req_id)
                 yield action, msg
         finally:
+            self._turn_lock.release()
             # Release any cooperative-stop waiter regardless of how the loop
             # ends. The callers set the precise stop reason on the clean
             # "complete" path before this runs (idempotent); on abnormal exit
@@ -1980,42 +2011,50 @@ class AcpClient:
             context_window_tokens=_prev_window,
         )
 
-        async for action, msg in self._prompt_loop(req_id, timeout):
-            if action == "complete":
-                reason = ""
-                result = msg.result or {}
-                if isinstance(result, dict):
-                    reason = result.get("stopReason", "") or ""
-                self._last_stop_reason = reason
-                self._turn_done.set()
-                return
-            if action == "error":
-                raise AcpError(_format_acp_error(msg.error))
-            if action == "permission":
-                await self._handle_permission(msg)
-            elif action == "server_request_unknown":
-                await self._reject_unknown_server_request(msg)
-            elif action == "update":
-                self._track_usage_update(msg)
-                chunk, is_thinking = self._extract_text_chunk(msg)
-                if chunk and not is_thinking:
-                    self.last_prompt_stats.text_chunks += 1
-                    yield chunk
-                    if _is_tool_interrupted_marker(chunk):
-                        self._emit_tool_interrupted_sel("send_message_stream")
-                        # send_message_stream yields only text chunks (str),
-                        # not AcpEvent objects. Tool-result events are a
-                        # different shape and cannot be yielded here; callers
-                        # of this API do not consume them. Unlike
-                        # _dispatch_events (which yields AcpEvent and must
-                        # drain tool results before EVENT_COMPLETE), we just
-                        # return — no further text will arrive from kiro-cli.
-                        return
-                self._track_tool_call(msg)
-            elif action == "metadata":
-                self._track_metadata(msg)
-            elif action == "compaction":
-                self._log_compaction_status(msg)
+        # aclosing(): _prompt_loop holds _turn_lock and releases it in its
+        # finally. Consumers below `return` on "complete" without exhausting the
+        # loop, which leaves the async-generator SUSPENDED — and CPython
+        # finalizes async-gens via a *deferred* scheduled athrow, not at the
+        # return point, so the lock would stay held past the turn (next _bg
+        # caller blocks = the freeze). aclosing() runs aclose() deterministically
+        # on block exit, firing the finally and releasing the lock immediately.
+        async with aclosing(self._prompt_loop(req_id, timeout)) as _loop:
+            async for action, msg in _loop:
+                if action == "complete":
+                    reason = ""
+                    result = msg.result or {}
+                    if isinstance(result, dict):
+                        reason = result.get("stopReason", "") or ""
+                    self._last_stop_reason = reason
+                    self._turn_done.set()
+                    return
+                if action == "error":
+                    raise AcpError(_format_acp_error(msg.error))
+                if action == "permission":
+                    await self._handle_permission(msg)
+                elif action == "server_request_unknown":
+                    await self._reject_unknown_server_request(msg)
+                elif action == "update":
+                    self._track_usage_update(msg)
+                    chunk, is_thinking = self._extract_text_chunk(msg)
+                    if chunk and not is_thinking:
+                        self.last_prompt_stats.text_chunks += 1
+                        yield chunk
+                        if _is_tool_interrupted_marker(chunk):
+                            self._emit_tool_interrupted_sel("send_message_stream")
+                            # send_message_stream yields only text chunks (str),
+                            # not AcpEvent objects. Tool-result events are a
+                            # different shape and cannot be yielded here; callers
+                            # of this API do not consume them. Unlike
+                            # _dispatch_events (which yields AcpEvent and must
+                            # drain tool results before EVENT_COMPLETE), we just
+                            # return — no further text will arrive from kiro-cli.
+                            return
+                    self._track_tool_call(msg)
+                elif action == "metadata":
+                    self._track_metadata(msg)
+                elif action == "compaction":
+                    self._log_compaction_status(msg)
 
         # Loop ended without "complete" — timeout or process death.
         self._last_stop_reason = ""

@@ -128,6 +128,31 @@ def _is_claude_backend(provider: Any) -> bool:
     return backend == "claude"
 
 
+def _provider_effectively_alive(provider: Any) -> bool:
+    """Whether a session's provider should be treated as live (NOT stale).
+
+    Uses the process-level check (is_process_alive), not is_alive() which has a
+    600s stale-activity threshold that falsely kills idle sessions. A CC
+    per_session provider whose process has exited is still effectively alive:
+    its session state is on disk and reconnects lazily on the next stream(), so
+    it must not be evicted as stale.
+
+    Used by the two post-acquire re-checks (the post-semaphore re-validate and
+    the won-race re-validate). The in-lock live fast path keeps its own inline
+    copy of this decision because it also evicts the stale entry and emits
+    path-specific logging; that copy must stay in sync with this helper.
+    """
+    alive = provider.is_process_alive() if hasattr(provider, "is_process_alive") else provider.is_alive()
+    if (
+        not alive
+        and ClaudeCodeProvider is not None
+        and isinstance(provider, ClaudeCodeProvider)
+        and provider.connection_mode == "per_session"
+    ):
+        alive = True
+    return alive
+
+
 def detect_provider_switch(session_map: "SessionMap", session_key: str, new_provider: str) -> bool:
     """Detect if the provider for a session differs from the stored one.
 
@@ -169,6 +194,13 @@ def detect_provider_switch(session_map: "SessionMap", session_key: str, new_prov
 
 
 _MAX_POOL = 10
+
+# Bound on the won-race stale-retry recursion in get_or_create. Each retry
+# requires the winning session to have been recycled/reaped in the narrow
+# window between our semaphore acquire and re-validate, so >1 is already
+# adversarial; the cap is a safety backstop against pathological churn, never
+# expected to be hit in practice.
+_WON_RACE_MAX_RETRIES = 8
 
 _SUBAGENT_PREFIX = "subagent:"
 _CHANNEL_PREFIX = "channel:"
@@ -846,6 +878,7 @@ class SessionManager:
         model: str | None = None,
         cwd: str | None = None,
         extra_env: dict[str, str] | None = None,
+        _won_race_retries: int = 0,
         **extra_factory_kwargs: Any,
     ) -> tuple[LLMProvider, bool, bool]:
         """Return ``(LLMProvider, is_new, resumed)`` for *key*, creating if needed.
@@ -882,6 +915,7 @@ class SessionManager:
 
         # Fast path: existing session — hold lock only briefly
         stale_provider = None
+        _claimed: "tuple[_Session, bool] | None" = None
         try:
             async with self._lock:
                 # Skip the live-session branch only when a *recycle-style*
@@ -950,13 +984,18 @@ class SessionManager:
                                 provider="claude_code",
                                 cwd=sess.provider.cwd,
                             )
-                        await sess.semaphore.acquire()
-                        return sess.provider, was_new, False
+                        # Claim this session, but DON'T acquire its semaphore
+                        # while holding self._lock. The semaphore can be held a
+                        # long time (a whole turn); a wedged turn (e.g. a dead
+                        # _bg ACP process) would otherwise pin self._lock and
+                        # freeze get_or_create for EVERY session. Acquire below,
+                        # after the lock is released, then re-validate.
+                        _claimed = (sess, was_new)
 
-                if not self._provider_factory:
-                    raise RuntimeError("No provider factory configured")
-
-                factory = self._provider_factory
+                if _claimed is None:
+                    if not self._provider_factory:
+                        raise RuntimeError("No provider factory configured")
+                    factory = self._provider_factory
         finally:
             # Kill orphaned child processes (MCP servers, kiro-cli-chat)
             # outside the lock — shutdown() may involve signals/waitpid.
@@ -965,6 +1004,51 @@ class SessionManager:
                     await stale_provider.shutdown()
                 except Exception:
                     logger.warning("Failed to shut down stale provider for %s", key, exc_info=True)
+
+        # Existing session claimed above: acquire its semaphore HERE, with
+        # self._lock released, so a long-held turn can't pin the global lock
+        # and freeze every other session's get_or_create. Re-validate after
+        # acquiring: another coroutine may have recycled/removed this session
+        # while we waited on the semaphore — if so, fall through to cold-start.
+        if _claimed is not None:
+            sess, was_new = _claimed
+            await sess.semaphore.acquire()
+            async with self._lock:
+                _current = self._sessions.get(key)
+                # _provider_effectively_alive treats a dead CC per_session
+                # process as alive (reconnects lazily), matching the in-lock
+                # live-path policy, so a process that dies during the semaphore
+                # wait isn't needlessly evicted.
+                _still_valid = _current is sess and _provider_effectively_alive(sess.provider)
+            if _still_valid:
+                return sess.provider, was_new, False
+            # Stale between claim and acquire — clean up and cold-start. If the
+            # entry is still ours but the provider died, remove it and shut the
+            # dead provider down (mirrors the live-path stale handling above);
+            # otherwise another coroutine already recycled it. Then set
+            # `factory` for the cold-start path, which the `if _claimed is None`
+            # block skipped when we claimed a then-live session.
+            #
+            # Ordering note: we release the semaphore BEFORE re-taking _lock to
+            # evict. That opens a brief window where another _bg caller can claim
+            # this same dead `sess` — but it converges safely: that racer runs
+            # this same re-validate, finds the provider dead, and cold-starts too.
+            # Holding the semaphore across the _lock acquire would re-introduce
+            # the very lock-ordering deadlock this whole block exists to avoid.
+            sess.semaphore.release()
+            _dead_provider = None
+            async with self._lock:
+                if self._sessions.get(key) is sess:
+                    del self._sessions[key]
+                    _dead_provider = sess.provider
+            if _dead_provider is not None:
+                try:
+                    await _dead_provider.shutdown()
+                except Exception:
+                    logger.warning("Failed to shut down stale provider for %s", key, exc_info=True)
+            if not self._provider_factory:
+                raise RuntimeError("No provider factory configured")
+            factory = self._provider_factory
 
         # Check session map for resume — only for long-lived sessions
         resume_sid: str | None = None
@@ -1113,6 +1197,8 @@ class SessionManager:
 
         # Everything after start() must be wrapped so that a CancelledError
         # between start() and session registration doesn't orphan the process.
+        _won_race_sess: "_Session | None" = None
+        _dup_provider: "LLMProvider | None" = None
         try:
             # Check if session was resumed
             resumed = False
@@ -1134,58 +1220,64 @@ class SessionManager:
                     and not _is_claude_backend(_existing.provider)
                 )
                 if _existing is not None and not _is_recycling:
-                    # Another task won the race — shut down our provider, use theirs.
-                    await provider.shutdown()
+                    # Another task won the race — use theirs and shut down our
+                    # duplicate provider below, after the lock is released
+                    # (shutdown() involves subprocess teardown; no need to hold
+                    # the global lock across it). Claim the winner here but DON'T
+                    # acquire its semaphore under self._lock: _existing's
+                    # semaphore may be held by a long-running turn, and blocking
+                    # on it here would pin the global lock and freeze every other
+                    # session (the same deadlock class fixed on the fast path).
                     sess = _existing
                     sess.last_used = time.monotonic()
                     if approval_policy:
                         sess.approval_policy = approval_policy
                     if agent:
                         sess.agent = agent
+                    _won_race_sess = sess
+                    _dup_provider = provider
+                else:
+                    sess = _Session(
+                        provider=provider,
+                        is_new=False,
+                        approval_policy=approval_policy,
+                        agent=agent or "",
+                    )
+                    if _provider_switched:
+                        sess.provider_switch_replay = True
+                    self._sessions[key] = sess
+                    logger.info(
+                        "New session: %s agent=%s resumed=%s provider_switch=%s (total=%d)",
+                        key,
+                        agent or "kiroclaw",
+                        resumed,
+                        _provider_switched,
+                        len(self._sessions),
+                    )
+
+                    # Save session mapping for long-lived sessions
+                    _cwd_str = provider.cwd
+                    if not is_stateless and isinstance(provider, AcpProvider):
+                        sid = provider.client._session_id
+                        _prov_label = "claude_code" if _is_claude_backend(provider) else "acp"
+                        if sid:
+                            self._session_map.set(key, sid, provider=_prov_label, cwd=_cwd_str)
+                    elif (
+                        not is_stateless
+                        and ClaudeCodeProvider is not None
+                        and isinstance(provider, ClaudeCodeProvider)
+                    ):
+                        sid = provider.session_id
+                        if sid:
+                            self._session_map.set(key, sid, provider="claude_code", cwd=_cwd_str)
+
+                    if self._cleanup_task is None or self._cleanup_task.done():
+                        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+
                     await sess.semaphore.acquire()
-                    return sess.provider, False, False
+                    Stats().inc_session_created()
 
-                sess = _Session(
-                    provider=provider,
-                    is_new=False,
-                    approval_policy=approval_policy,
-                    agent=agent or "",
-                )
-                if _provider_switched:
-                    sess.provider_switch_replay = True
-                self._sessions[key] = sess
-                logger.info(
-                    "New session: %s agent=%s resumed=%s provider_switch=%s (total=%d)",
-                    key,
-                    agent or "kiroclaw",
-                    resumed,
-                    _provider_switched,
-                    len(self._sessions),
-                )
-
-                # Save session mapping for long-lived sessions
-                _cwd_str = provider.cwd
-                if not is_stateless and isinstance(provider, AcpProvider):
-                    sid = provider.client._session_id
-                    _prov_label = "claude_code" if _is_claude_backend(provider) else "acp"
-                    if sid:
-                        self._session_map.set(key, sid, provider=_prov_label, cwd=_cwd_str)
-                elif (
-                    not is_stateless
-                    and ClaudeCodeProvider is not None
-                    and isinstance(provider, ClaudeCodeProvider)
-                ):
-                    sid = provider.session_id
-                    if sid:
-                        self._session_map.set(key, sid, provider="claude_code", cwd=_cwd_str)
-
-                if self._cleanup_task is None or self._cleanup_task.done():
-                    self._cleanup_task = asyncio.create_task(self._cleanup_loop())
-
-                await sess.semaphore.acquire()
-                Stats().inc_session_created()
-
-                result = (provider, True, resumed)
+                    result = (provider, True, resumed)
         except BaseException:
             # CancelledError or any other exception after provider.start()
             # succeeded — provider is running but never registered.  Kill it.
@@ -1196,6 +1288,53 @@ class SessionManager:
             # now either in self._sessions or dead, so drop the start-up guard.
             if _starting_pid is not None:
                 self._starting_pids.discard(_starting_pid)
+
+        # Lost the same-key race: shut down our duplicate provider (outside the
+        # lock — subprocess teardown), then acquire the winner's semaphore HERE,
+        # with self._lock released, so a long-held turn on the winning session
+        # can't pin the global lock and freeze every other session's
+        # get_or_create (the same deadlock class fixed on the fast path).
+        if _won_race_sess is not None:
+            if _dup_provider is not None:
+                try:
+                    await _dup_provider.shutdown()
+                except Exception:
+                    logger.warning("Failed to shut down duplicate provider for %s", key, exc_info=True)
+            await _won_race_sess.semaphore.acquire()
+            # Re-validate after acquiring, mirroring the fast path: the winning
+            # session may have been recycled/reaped while we waited on its
+            # semaphore. Check identity AND liveness (a CC per_session process
+            # that died is NOT stale — it reconnects lazily on next stream()).
+            # If no longer valid, release and retry from the top (cold-starts
+            # cleanly) rather than handing back a stale/dead provider.
+            async with self._lock:
+                _wsess = _won_race_sess
+                _still_valid = (
+                    self._sessions.get(key) is _wsess
+                    and _provider_effectively_alive(_wsess.provider)
+                )
+            if _still_valid:
+                return _won_race_sess.provider, False, False
+            _won_race_sess.semaphore.release()
+            # Stale winner: retry from the top (cold-starts cleanly). Bounded so
+            # a pathological recycle race can't recurse without limit.
+            if _won_race_retries >= _WON_RACE_MAX_RETRIES:
+                raise RuntimeError(
+                    f"get_or_create({key!r}) exceeded {_WON_RACE_MAX_RETRIES} "
+                    "won-race retries — session kept going stale between acquire "
+                    "and re-validate"
+                )
+            return await self.get_or_create(
+                key,
+                agent=agent,
+                channel_id=channel_id,
+                approval_policy=approval_policy,
+                model=model,
+                cwd=cwd,
+                extra_env=extra_env,
+                _won_race_retries=_won_race_retries + 1,
+                **extra_factory_kwargs,
+            )
 
         return result
 

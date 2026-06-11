@@ -1082,6 +1082,36 @@ async def start_dashboard(
         await runner.cleanup()
         raise
 
+    # Event-loop heartbeat: proves the asyncio loop is live (the off-loop /proc
+    # sampler can't — it runs in a subprocess). Sleeps 10s, then logs actual
+    # elapsed. If the loop wedges (e.g. a coroutine blocks it), this task can't
+    # be scheduled, so the log goes SILENT during the stall and the first tick
+    # after recovery reports a lag >> 10s — that gap IS the wedge, measured.
+    async def _loop_heartbeat() -> None:
+        interval = 10.0
+        while True:
+            t0 = time.monotonic()
+            await asyncio.sleep(interval)
+            lag = time.monotonic() - t0 - interval
+            if lag > 1.0:
+                logger.warning("event-loop heartbeat: lag %.1fs (loop was blocked)", lag)
+            else:
+                # Healthy ticks are DEBUG: at the default WARNING level the loop
+                # stays silent unless it actually wedges (the tripwire), and we
+                # don't emit ~8.6k INFO lines/day when DEBUG is enabled.
+                logger.debug("event-loop heartbeat ok (lag %.2fs)", lag)
+
+    def _heartbeat_done(task: "asyncio.Task") -> None:  # type: ignore[type-arg]
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("event-loop heartbeat task exited unexpectedly", exc_info=exc)
+
+    _hb = asyncio.create_task(_loop_heartbeat())
+    _hb.add_done_callback(_heartbeat_done)
+    state._loop_heartbeat = _hb  # prevent GC
+
     # Fire background MCP probe at startup (non-blocking)
     asyncio.create_task(handlers._bg_mcp_probe())
 

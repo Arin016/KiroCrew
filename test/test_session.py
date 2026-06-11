@@ -33,6 +33,23 @@ def _mock_provider_factory():
     return factory
 
 
+def _alive_provider_factory():
+    """Like _mock_provider_factory but with an explicit live process check, so
+    the fast-path session-reuse branch (which gates on is_process_alive) treats
+    the session as alive instead of relying on AsyncMock attribute truthiness."""
+
+    def factory(session_key=None, agent=None, channel_id=None, **kwargs):
+        m = AsyncMock()
+        m.start = AsyncMock()
+        m.shutdown = AsyncMock()
+        m.is_process_alive = lambda: True
+        m.is_alive = lambda: True
+        m.context_usage_pct = lambda: 0.0
+        return m
+
+    return factory
+
+
 class TestSessionManager:
     @pytest.mark.asyncio
     async def test_creates_session(self, cfg):
@@ -95,6 +112,137 @@ class TestSessionManager:
 
         assert mgr.count == 0
         provider.shutdown.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_held_session_does_not_block_other_sessions(self, cfg):
+        """A SAME-KEY second acquirer parked on session A's held semaphore must
+        NOT block get_or_create for a DIFFERENT session B. This is the actual
+        lock-ordering freeze: the fast path acquired the per-session semaphore
+        while holding the global self._lock, so a second caller for A — wedged
+        on A's semaphore — pinned self._lock and froze EVERY other session.
+
+        This test FAILS on the pre-fix code (B hangs); it only passes because
+        the fast path now claims under the lock and acquires the semaphore
+        after releasing it. The earlier version of this test parked the second
+        caller on a *different* key, so it never pinned the lock and passed even
+        on the buggy code — it did not guard the fix."""
+        mgr = SessionManager(cfg, provider_factory=_alive_provider_factory())
+
+        # Caller 1 holds A's semaphore (a turn in flight, not yet released).
+        await mgr.get_or_create("A")
+
+        # Caller 2 on the SAME key takes the fast path (A exists + alive) and
+        # blocks on A's held semaphore. On the buggy code it blocks while
+        # holding self._lock — the freeze.
+        a2 = asyncio.create_task(mgr.get_or_create("A"))
+        await asyncio.sleep(0.1)
+        assert not a2.done()  # correctly waiting on A's semaphore
+
+        # With self._lock pinned by a2 (buggy) this hangs; with the fix a2
+        # released the lock before blocking, so B cold-starts freely.
+        b = asyncio.create_task(mgr.get_or_create("B"))
+        provider_b, is_new_b, _ = await asyncio.wait_for(b, timeout=3.0)
+        assert provider_b is not None
+        assert is_new_b is True
+
+        a2.cancel()  # unwedge the parked same-key acquirer
+
+    @pytest.mark.asyncio
+    async def test_cold_start_race_loser_does_not_block_other_sessions(self, cfg):
+        """The cold-start variant of the lock-ordering freeze (Concern #1).
+
+        Two callers cold-start the SAME new key concurrently. The race loser
+        hits the 'another task won the race' branch and must NOT acquire the
+        winner's held semaphore while holding self._lock — doing so pins the
+        global lock and freezes every other session, exactly like the fast-path
+        bug but in a branch the original CR diff never touched.
+
+        FAILS on the pre-fix cold-start path (a different key hangs while the
+        loser is wedged under the lock)."""
+        start_gate = asyncio.Event()
+
+        def factory(session_key=None, agent=None, channel_id=None, **kwargs):
+            m = AsyncMock()
+
+            async def _start():
+                await start_gate.wait()  # park both cold-starts to widen the race
+
+            m.start = _start
+            m.shutdown = AsyncMock()
+            m.is_process_alive = lambda: True
+            m.is_alive = lambda: True
+            m.context_usage_pct = lambda: 0.0
+            return m
+
+        mgr = SessionManager(cfg, provider_factory=factory)
+
+        # Both pass the fast path (no existing session) and park in start().
+        c1 = asyncio.create_task(mgr.get_or_create("A"))
+        c2 = asyncio.create_task(mgr.get_or_create("A"))
+        await asyncio.sleep(0.1)
+        start_gate.set()  # release both; they serialize on the registration lock
+
+        # Exactly one wins, registers A, and returns holding A's semaphore. The
+        # loser reaches the won-race branch and parks on that held semaphore.
+        done, pending = await asyncio.wait({c1, c2}, timeout=3.0)
+        assert len(done) == 1  # winner returned; loser is wedged on the semaphore
+        assert len(pending) == 1
+
+        # While the loser is wedged, a DIFFERENT key must still cold-start. On
+        # the buggy cold-start path the loser holds self._lock — this hangs.
+        b = asyncio.create_task(mgr.get_or_create("B"))
+        provider_b, is_new_b, _ = await asyncio.wait_for(b, timeout=3.0)
+        assert provider_b is not None
+        assert is_new_b is True
+
+        for t in pending:
+            t.cancel()
+
+    @pytest.mark.asyncio
+    async def test_same_session_still_serializes(self, cfg):
+        """Sanity: the per-session semaphore still serializes the SAME key —
+        a second get_or_create on a held session blocks until release."""
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+        await mgr.get_or_create("A")  # holds A's semaphore
+
+        second = asyncio.create_task(mgr.get_or_create("A"))
+        await asyncio.sleep(0.2)
+        assert not second.done()  # blocked on A's semaphore, as intended
+        mgr.release("A")          # let the first holder's turn "finish"
+        provider, _, _ = await asyncio.wait_for(second, timeout=3.0)
+        assert provider is not None
+        mgr.release("A")
+
+    @pytest.mark.asyncio
+    async def test_stale_between_claim_and_acquire_cold_starts_and_reaps(self, cfg):
+        """Covers the stale-between-claim-and-acquire branch (the riskiest new
+        logic in Option A). Caller 1 holds A's semaphore; A's provider then dies.
+        Caller 2 claims A (still in the dict) under the lock, blocks on the
+        semaphore, and on acquire re-validates: provider dead -> must evict +
+        await shutdown() on the dead provider AND cold-start a fresh one."""
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+
+        p1, _is_new, _ = await mgr.get_or_create("A")  # caller 1 holds semaphore
+
+        # Caller 2 must claim A while it is STILL ALIVE (so it takes the claim +
+        # wait-on-semaphore path, not the in-lock dead-provider eviction), then
+        # find it dead only AFTER acquiring the semaphore. Park caller 2 on the
+        # semaphore first, THEN kill A's provider, THEN release.
+        second = asyncio.create_task(mgr.get_or_create("A"))
+        await asyncio.sleep(0.2)
+        assert not second.done()  # blocked on A's semaphore behind caller 1
+
+        # A's process dies between claim and acquire.
+        p1.is_process_alive = lambda: False
+        p1.is_alive = lambda: False
+
+        mgr.release("A")  # caller 1's turn ends; caller 2 acquires + re-validates
+        p2, is_new2, _ = await asyncio.wait_for(second, timeout=3.0)
+
+        assert p2 is not p1            # cold-started a fresh provider
+        assert is_new2 is True         # reported as new
+        p1.shutdown.assert_awaited()   # dead provider was reaped
+        mgr.release("A")
 
 
 class TestWarmPool:
