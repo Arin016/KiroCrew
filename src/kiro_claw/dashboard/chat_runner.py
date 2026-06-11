@@ -935,6 +935,14 @@ def _expand_prompt_mention(
     return expanded, "ok"
 
 
+def _should_suppress_requeue(slot) -> bool:
+    """Return True if a stop is active and re-queue should be suppressed."""
+    if slot._stop_state != "idle":
+        logger.info("Suppressing re-queue — stop in progress (state=%s)", slot._stop_state)
+        return True
+    return False
+
+
 async def _run_chat(
     state: DashboardState,
     slot: _ChatSlot,
@@ -2874,7 +2882,9 @@ async def _run_chat(
                 "msg msg-a",
             )
         slot._acp_pipe_death_retries += 1
-        if _prompt_depth == 0 and slot._acp_pipe_death_retries <= 3:
+        if _should_suppress_requeue(slot):
+            pass
+        elif _prompt_depth == 0 and slot._acp_pipe_death_retries <= 3:
             # Persisted card: reliably visible at turn-teardown (an ephemeral
             # chat_status is dropped by the frontend once the streaming turn ends).
             # slot.append already emits ONE chat_message (via _on_message /
@@ -2901,7 +2911,9 @@ async def _run_chat(
                 "msg msg-a",
             )
         slot._prompt_busy_retries += 1
-        if _prompt_depth == 0 and slot._prompt_busy_retries <= 3:
+        if _should_suppress_requeue(slot):
+            pass
+        elif _prompt_depth == 0 and slot._prompt_busy_retries <= 3:
             # Single emit: slot.append persists + broadcasts one chat_message
             # via _on_message (see the AcpProcessDied note above); no explicit
             # broadcast_ws or the UI shows a duplicate card.
@@ -2956,7 +2968,9 @@ async def _run_chat(
                 slot._prompt_busy_retries += 1
                 _exhausted = slot._prompt_busy_retries > 3
                 _status = "⟳ Session busy — retrying…"
-            if _exhausted:
+            if _should_suppress_requeue(slot):
+                pass
+            elif _exhausted:
                 logger.info("Retry budget exhausted for slot %s — surfacing 'Session stuck'", slot.key)
                 slot.append("error", "Session stuck — please start a new chat.", "msg msg-err")
             elif _prompt_depth == 0:

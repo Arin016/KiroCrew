@@ -7697,6 +7697,62 @@ class TestAcpProcessDiedRecovery:
         state.sessions.reset.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_stop_state_suppresses_requeue(self, tmp_path: Path) -> None:
+        """AcpProcessDied during active stop → no re-queue."""
+        from kiro_claw.acp.client import AcpProcessDied
+
+        state, slot, client, _run_chat = self._make_state_and_slot(tmp_path)
+        slot._stop_state = "killing"
+        self._make_stream_raise(client, AcpProcessDied("pipe broken"))
+
+        await _run_chat(state, slot, "test message")
+
+        assert not slot._queue, "message should not be re-queued during active stop"
+
+    @pytest.mark.asyncio
+    async def test_stop_state_suppresses_requeue_prompt_busy(self, tmp_path: Path) -> None:
+        """PromptBusyExhaustedError during active stop → no re-queue."""
+        from kiro_claw.dashboard.chat_runner import PromptBusyExhaustedError
+
+        state, slot, client, _run_chat = self._make_state_and_slot(tmp_path)
+        slot._stop_state = "soft_pending"
+        self._make_stream_raise(client, PromptBusyExhaustedError("busy"))
+
+        await _run_chat(state, slot, "test message")
+
+        assert not slot._queue, "message should not be re-queued during active stop"
+
+    @pytest.mark.asyncio
+    async def test_stop_state_suppresses_requeue_acp_error(self, tmp_path: Path) -> None:
+        """AcpError retry-eligible during active stop → no re-queue."""
+        from kiro_claw.acp.client import AcpError
+
+        state, slot, client, _run_chat = self._make_state_and_slot(tmp_path)
+        slot._stop_state = "killing"
+        self._make_stream_raise(client, AcpError("process exited"))
+
+        await _run_chat(state, slot, "test message")
+
+        assert not slot._queue, "message should not be re-queued during active stop"
+
+    @pytest.mark.asyncio
+    async def test_should_suppress_requeue_helper(self, tmp_path: Path) -> None:
+        """_should_suppress_requeue returns True for non-idle states."""
+        from kiro_claw.dashboard.chat_runner import _should_suppress_requeue
+
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("helper-test")
+
+        slot._stop_state = "idle"
+        assert _should_suppress_requeue(slot) is False
+
+        slot._stop_state = "soft_pending"
+        assert _should_suppress_requeue(slot) is True
+
+        slot._stop_state = "killing"
+        assert _should_suppress_requeue(slot) is True
+
+    @pytest.mark.asyncio
     async def test_cancelled_error_redacts_partial_text(self, tmp_path: Path) -> None:
         """CancelledError mid-stream → partial output redacted before display."""
         from kiro_claw.providers.base import EVENT_TEXT_CHUNK, LLMEvent
