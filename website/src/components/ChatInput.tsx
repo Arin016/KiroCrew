@@ -425,6 +425,17 @@ function ChatInput({
   const applyingUndoRef = useRef(false)
   const prevUndoAfkRef = useRef(autoFocusKey)
   const slotSettlingRef = useRef(false)
+  // True when the latest `value` change came from a real DOM edit (user typing,
+  // IME, execCommand) rather than a parent-driven prop change (slot draft
+  // restore). Lets the slot-settling logic tell a keystroke apart from the
+  // draft restore regardless of whether ChatPage restores sync or async.
+  const valueFromUserRef = useRef(false)
+  // Tracks the prior render's optimizing state so the recording effect can
+  // record a single undo boundary when an optimize completes.
+  const wasOptimizingRef = useRef(false)
+  // Hoisted here (assigned below, where `optimizing` is defined) so the
+  // recording effect above the optimizer block can read it.
+  const optimizingRef = useRef(false)
   const slashMenuOpenRef = useRef(false)
   slashMenuOpenRef.current = slashMenuOpen
   const filePickerOpenRef = useRef(false)
@@ -558,6 +569,9 @@ function ChatInput({
   // Record undo snapshots as the controlled value changes.
   useEffect(() => {
     const el = inputRef.current
+    // Consume the "this change came from a DOM edit" flag exactly once per run.
+    const fromUser = valueFromUserRef.current
+    valueFromUserRef.current = false
     const seed = () => {
       undoHistoryRef.current = [{
         value,
@@ -575,12 +589,13 @@ function ChatInput({
       prevUndoAfkRef.current = autoFocusKey
       return
     }
-    // Slot/session switch. ChatPage updates the draft (`value`) in a *separate*
-    // commit after `activeSlot` (`autoFocusKey`) changes, so on this pass
-    // `value` may still be the previous slot's text. Reseed now and mark the
-    // next value change as the settling draft so it reseeds the base rather
-    // than being recorded as an undoable transition from the prior slot's stale
-    // text — otherwise Ctrl+Z in the new slot would restore the old slot's draft.
+    // Slot/session switch. ChatPage restores a slot's draft via the
+    // `[activeSlot]` effect in ChatPage.tsx, which calls `setInput` in a
+    // *separate* commit after `activeSlot` (`autoFocusKey`) changes — so on this
+    // pass `value` may still be the previous slot's text. Reseed now and mark
+    // the next value change as "settling" so the draft restore reseeds the base
+    // rather than being recorded as an undoable transition from the prior slot's
+    // stale text — otherwise Ctrl+Z in the new slot would restore the old draft.
     if (autoFocusKey !== prevUndoAfkRef.current) {
       prevUndoAfkRef.current = autoFocusKey
       seed()
@@ -589,9 +604,22 @@ function ChatInput({
     }
     if (slotSettlingRef.current) {
       slotSettlingRef.current = false
-      if (undoHistoryRef.current[undoPointerRef.current]?.value !== value) seed()
-      return
+      // The first value change after a switch. A parent-driven prop change is
+      // the draft restore (reseed the base at it). A real DOM edit means the
+      // user typed before/without a separate restore commit — i.e. ChatPage
+      // restored synchronously, the base was already seeded at the switch — so
+      // fall through and record the keystroke as a normal edit instead of
+      // folding it into the base. Keeps undo correct for sync and async restore.
+      if (!fromUser) {
+        if (undoHistoryRef.current[undoPointerRef.current]?.value !== value) seed()
+        return
+      }
     }
+    // While the optimizer owns the textarea, skip per-keystroke recording. A
+    // single-shot optimize (one execCommand) lands after `optimizing` clears and
+    // records normally; a streaming optimize is captured as one boundary by the
+    // completion effect below. Either way one Ctrl+Z reverses a whole optimize.
+    if (optimizingRef.current) return
     const hist = undoHistoryRef.current
     const ptr = undoPointerRef.current
     const prev = hist[ptr]?.value
@@ -663,8 +691,30 @@ function ChatInput({
     },
   })
   const optimizing = optimizeMutation.isPending
-  const optimizingRef = useRef(false)
   optimizingRef.current = optimizing
+
+  // When an optimize completes, ensure its result is a single undo boundary.
+  // The recording effect skips writes while `optimizing` is true; a single-shot
+  // optimize lands after `optimizing` clears and is already recorded, but a
+  // streaming optimize would otherwise leave the final value unrecorded — so
+  // push one boundary here if the tip doesn't already hold it. Idempotent: if
+  // the recording effect already captured it, the value-equality guard no-ops.
+  useEffect(() => {
+    if (wasOptimizingRef.current && !optimizing) {
+      const v = valueRef.current
+      const hist = undoHistoryRef.current
+      const ptr = undoPointerRef.current
+      if (hist[ptr]?.value !== v) {
+        const el = inputRef.current
+        hist.splice(ptr + 1)
+        hist.push({ value: v, selStart: el?.selectionStart ?? v.length, selEnd: el?.selectionEnd ?? v.length })
+        if (hist.length > UNDO_MAX_HISTORY) hist.shift()
+        undoPointerRef.current = hist.length - 1
+        undoLastEditRef.current = Date.now()
+      }
+    }
+    wasOptimizingRef.current = optimizing
+  }, [optimizing])
   const { mutate: runOptimize } = optimizeMutation
 
   const optimizePrompt = useCallback(() => {
@@ -1336,6 +1386,7 @@ function ChatInput({
           onDragLeave={e => { onDragLeave?.(e); e.stopPropagation() }}
           onDrop={e => { e.preventDefault(); onDrop?.(e); e.stopPropagation() }}
           onChange={e => {
+            valueFromUserRef.current = true // real DOM edit, not a parent-driven draft restore
             const val = e.target.value; onChange(val); setSlashMenuOpen(val.startsWith('/'))
             // Detect @query at word boundary for file picker
             const m = val.match(/(^|[\s])@(\S*)$/)

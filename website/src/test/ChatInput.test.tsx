@@ -758,6 +758,43 @@ describe('ChatInput', () => {
         fetchSpy.mockRestore()
       }
     })
+    it('collapses a streaming optimize into a single undo boundary (Mesh-2064)', async () => {
+      // The recording effect skips writes while the optimizer owns the textarea,
+      // and the completion effect records one boundary when it finishes — so even
+      // if runOptimize ever wrote its result incrementally, a single Ctrl+Z
+      // reverses the whole optimize rather than peeling off streamed chunks.
+      let resolveFetch: ((value: Response) => void) | null = null
+      const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(() =>
+        new Promise<Response>(res => { resolveFetch = res }),
+      )
+      try {
+        const onChange = vi.fn()
+        const { rerender } = renderWithProviders(
+          <ChatInput {...defaultProps} value="fix bug" onChange={onChange} />,
+        )
+        fireEvent.click(screen.getByRole('button', { name: 'Optimize prompt' }))
+        await new Promise(r => setTimeout(r, 10)) // mutation starts → optimizing = true
+        // Two streamed chunks arrive as prop updates while optimizing. Each must
+        // be skipped by the recording effect (not recorded as its own boundary).
+        rerender(<ChatInput {...defaultProps} value="fix bug WITH" onChange={onChange} />)
+        rerender(<ChatInput {...defaultProps} value="fix bug WITH MORE DETAIL" onChange={onChange} />)
+        // Completing the optimize flips optimizing → false; the completion effect
+        // records the final value as a single boundary. (The mid-flight value
+        // diverged from the prompt, so onSuccess drops its own write — irrelevant
+        // here; we only need the optimizing transition.)
+        resolveFetch!(new Response(
+          JSON.stringify({ optimized: 'IGNORED', changed: true }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ))
+        await new Promise(r => setTimeout(r, 50))
+        fireEvent.keyDown(screen.getByLabelText('Message input'), { key: 'z', ctrlKey: true })
+        // One undo lands on the pre-optimize text, not an intermediate chunk —
+        // proving the streamed writes collapsed into a single boundary.
+        expect(onChange).toHaveBeenLastCalledWith('fix bug')
+      } finally {
+        fetchSpy.mockRestore()
+      }
+    })
   })
 
   describe('autoFocusKey', () => {
@@ -1095,6 +1132,33 @@ describe('ChatInput undo/redo (Mesh-2029)', () => {
     expect(ta.value).toBe('') // slot B's draft settled in the second commit
     undo(ta)
     expect(ta.value).toBe('') // MUST NOT restore slot A's draft
+  })
+
+  it('reseeds synchronously when the draft lands in the same commit as the switch', () => {
+    // Mesh-2064: if ChatPage ever restores the draft in the SAME commit as the
+    // slot switch (no lag), the first keystroke must not be folded into the undo
+    // base — Ctrl+Z must still reach the restored draft.
+    const drafts: Record<string, string> = { 'slot-a': 'alpha draft', 'slot-b': 'beta draft' }
+    function SyncSwitch() {
+      const [afk, setAfk] = React.useState('slot-a')
+      const [v, setV] = React.useState(drafts['slot-a'])
+      // Both activeSlot and the draft change in one commit (synchronous restore).
+      const go = () => { setAfk('slot-b'); setV(drafts['slot-b']) }
+      return (
+        <>
+          <button onClick={go}>switch</button>
+          <ChatInput {...defaultProps} value={v} onChange={setV} autoFocusKey={afk} />
+        </>
+      )
+    }
+    renderWithProviders(<SyncSwitch />)
+    const ta = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    expect(ta.value).toBe('alpha draft')
+    fireEvent.click(screen.getByText('switch'))
+    expect(ta.value).toBe('beta draft')
+    fireEvent.change(ta, { target: { value: 'beta draft!' } }) // user's first keystroke (real DOM edit)
+    undo(ta)
+    expect(ta.value).toBe('beta draft') // first edit is undoable back to the restored draft (no fold)
   })
 
   it('starts a new undo step after a pause longer than the coalesce window', () => {
