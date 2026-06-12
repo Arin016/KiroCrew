@@ -117,6 +117,72 @@ async def api_chat_slot_slack_link(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "thread_ts": thread_ts, "channel": target_channel})
 
 
+async def api_chat_slot_slack_unlink(request: web.Request) -> web.Response:
+    """POST /api/chat/slots/{slot}/slack-unlink — stop mirroring to Slack.
+
+    Symmetric counterpart to ``api_chat_slot_slack_link``. Clears the Slack
+    link so subsequent dashboard turns are no longer mirrored, while keeping
+    the session, its history, and the existing Slack thread intact. Idempotent:
+    unlinking a session with no link returns ``{ok, was_linked: false}``.
+
+    Auth posture is identical to slack-link, with no new auth surface: both are
+    reachable as mixed-internal via the ``/api/chat`` prefix in
+    ``mixed_internal_paths`` (server.py; token_auth.py prefix-matches sub-routes),
+    so on loopback they accept the internal secret and otherwise fall back to
+    normal dashboard-token + CSRF auth. No separate allowlist entry is needed —
+    and it must NOT be added to the strict ``internal_paths`` set, which would
+    wrongly restrict this browser action to loopback-only callers.
+    """
+    state: DashboardState = request.app["state"]
+    # Keys off _history_key_for(name), NOT slot.linked_session_key — the latter
+    # only diverges for cron/takeover slots, which are never Slack-linked.
+    name = request.match_info.get("name") or request.match_info.get("slot", "")
+    slot = state.get_slot(name) or state._slots.get(name)
+    if not slot:
+        return web.json_response({"error": "not found"}, status=404)
+
+    session_key = _history_key_for(name)
+    cleared = state.sessions.clear_slack_link(session_key)
+    # ⚠️ chat_runner.py copies the link onto the "dashboard:"-prefixed key when
+    # a turn runs, so unlink MUST clear BOTH the raw and "dashboard:"-prefixed
+    # keys or the next turn silently re-inherits the link and mirroring resumes.
+    if session_key.startswith("dashboard:"):
+        cleared = state.sessions.clear_slack_link(session_key[len("dashboard:"):]) or cleared
+    else:
+        # Defensive: _history_key_for always returns a dashboard:-prefixed key,
+        # so this branch is currently unreachable — kept to stay correct if the
+        # key scheme ever changes.
+        cleared = state.sessions.clear_slack_link(f"dashboard:{session_key}") or cleared
+
+    prev_channel = slot._slack_channel
+    prev_thread_ts = slot._slack_thread_ts
+    slot._slack_linked = False
+    slot._slack_channel = ""
+    slot._slack_thread_ts = ""
+
+    # Best-effort courtesy note so a Slack watcher knows why the thread went
+    # quiet. Same redaction path as the link endpoint; failure is non-fatal.
+    if cleared and state.slack_client and prev_channel and prev_thread_ts:
+        try:
+            await state.slack_client.post_message(
+                prev_channel,
+                "\U0001f50c _Unlinked from dashboard — replies here no longer sync._",
+                prev_thread_ts,
+            )
+        except Exception:
+            logger.debug("Failed to post unlink courtesy note to Slack", exc_info=True)
+
+    sel().log_api_access(
+        caller="dashboard",
+        operation="chat.slack_unlink",
+        outcome="success" if cleared else "noop",
+        source="dashboard",
+        resources=slot.key,
+    )
+    state.push_slots_update()
+    return web.json_response({"ok": True, "was_linked": cleared})
+
+
 async def api_slack_channels(request: web.Request) -> web.Response:
     """GET /api/slack/channels — list channels the bot can reply in.
 

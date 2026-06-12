@@ -96,6 +96,7 @@ from kiro_claw.dashboard.chat_runner import (  # noqa: F401
 from kiro_claw.dashboard.chat_slack import (  # noqa: F401
     api_chat_slot_handoff,
     api_chat_slot_slack_link,
+    api_chat_slot_slack_unlink,
     api_handoff_channels,
     api_slack_channels,
 )

@@ -14,6 +14,7 @@ def _make_slack_app(state):
     from kiro_claw.dashboard.chat_slack import (
         api_chat_slot_handoff,
         api_chat_slot_slack_link,
+        api_chat_slot_slack_unlink,
         api_handoff_channels,
         api_slack_channels,
     )
@@ -21,6 +22,7 @@ def _make_slack_app(state):
     app = web.Application()
     app["state"] = state
     app.router.add_post("/api/chat/slots/{slot}/slack-link", api_chat_slot_slack_link)
+    app.router.add_post("/api/chat/slots/{slot}/slack-unlink", api_chat_slot_slack_unlink)
     app.router.add_get("/api/slack/channels", api_slack_channels)
     app.router.add_post("/api/chat/slots/{slot}/handoff", api_chat_slot_handoff)
     app.router.add_get("/api/handoff-channels", api_handoff_channels)
@@ -106,6 +108,149 @@ class TestSlackLink:
         args = state.sessions.set_slack_link.call_args.args
         assert args[1] == "1700.42"
         assert args[2] == "C999"
+
+
+class TestSlackUnlink:
+    @pytest.mark.asyncio
+    async def test_slot_not_found(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        async with TestClient(TestServer(_make_slack_app(state))) as client:
+            resp = await client.post("/api/chat/slots/nope/slack-unlink")
+            assert resp.status == 404
+
+    @pytest.mark.asyncio
+    async def test_unlink_clears_both_key_variants(self, tmp_path, monkeypatch):
+        """The handler must clear BOTH the raw and the dashboard:-prefixed keys.
+        chat_runner copies the link onto the dashboard:-prefixed key at turn
+        start, so clearing only one leaves the next turn to re-inherit it."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        slot._slack_linked = True
+        slot._slack_channel = "C123"
+        slot._slack_thread_ts = "ts123"
+        state.slack_client = MagicMock()
+        state.slack_client.post_message = AsyncMock()
+        state.sessions.clear_slack_link = MagicMock(return_value=True)
+        state.push_slots_update = MagicMock()
+        async with TestClient(TestServer(_make_slack_app(state))) as client:
+            resp = await client.post("/api/chat/slots/s1/slack-unlink")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data == {"ok": True, "was_linked": True}
+        # Both key variants cleared: "dashboard:s1" (from _history_key_for) and "s1".
+        cleared_keys = {c.args[0] for c in state.sessions.clear_slack_link.call_args_list}
+        assert cleared_keys == {"dashboard:s1", "s1"}
+        # Slot link state reset so the badge flips off and "Send to Slack" returns.
+        assert slot._slack_linked is False
+        assert slot._slack_channel == ""
+        assert slot._slack_thread_ts == ""
+
+    @pytest.mark.asyncio
+    async def test_unlink_posts_courtesy_note(self, tmp_path, monkeypatch):
+        """On a real unlink, a best-effort note is posted to the old thread."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        slot._slack_linked = True
+        slot._slack_channel = "C123"
+        slot._slack_thread_ts = "ts123"
+        state.slack_client = MagicMock()
+        state.slack_client.post_message = AsyncMock()
+        state.sessions.clear_slack_link = MagicMock(return_value=True)
+        state.push_slots_update = MagicMock()
+        async with TestClient(TestServer(_make_slack_app(state))) as client:
+            resp = await client.post("/api/chat/slots/s1/slack-unlink")
+            assert resp.status == 200
+        state.slack_client.post_message.assert_awaited_once()
+        args = state.slack_client.post_message.await_args.args
+        assert args[0] == "C123"  # posted to the old channel
+        assert args[2] == "ts123"  # in the old thread
+
+    @pytest.mark.asyncio
+    async def test_unlink_idempotent_when_not_linked(self, tmp_path, monkeypatch):
+        """Unlinking an unlinked session is a no-op: was_linked False, no post."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.get_or_create_slot("s1")
+        state.slack_client = MagicMock()
+        state.slack_client.post_message = AsyncMock()
+        state.sessions.clear_slack_link = MagicMock(return_value=False)
+        state.push_slots_update = MagicMock()
+        async with TestClient(TestServer(_make_slack_app(state))) as client:
+            resp = await client.post("/api/chat/slots/s1/slack-unlink")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data == {"ok": True, "was_linked": False}
+        # No courtesy note when nothing was linked.
+        state.slack_client.post_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unlink_courtesy_note_failure_non_fatal(self, tmp_path, monkeypatch):
+        """A Slack post failure during the courtesy note must not fail the unlink."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        slot._slack_linked = True
+        slot._slack_channel = "C123"
+        slot._slack_thread_ts = "ts123"
+        state.slack_client = MagicMock()
+        state.slack_client.post_message = AsyncMock(side_effect=RuntimeError("slack down"))
+        state.sessions.clear_slack_link = MagicMock(return_value=True)
+        state.push_slots_update = MagicMock()
+        async with TestClient(TestServer(_make_slack_app(state))) as client:
+            resp = await client.post("/api/chat/slots/s1/slack-unlink")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["was_linked"] is True
+        assert slot._slack_linked is False
+
+
+class TestSlackLinkUnlinkRoundTrip:
+    @pytest.mark.asyncio
+    async def test_link_then_unlink_real_session_map(self, tmp_path, monkeypatch):
+        """End-to-end with a REAL SessionMap: link then unlink leaves
+        get_slack_link == (None, None) and drops the reverse index.
+
+        The slack endpoints only call the slack-link delegation methods
+        (get/set/clear_slack_link, get_session_for_thread), all of which
+        SessionMap implements directly — so a raw SessionMap stands in for
+        the SessionManager here.
+        """
+        from unittest.mock import patch
+
+        from kiro_claw.session_map import SessionMap
+
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        # Swap the mocked sessions for a real SessionMap backed by tmp_path.
+        with patch("kiro_claw.session_map.config_dir", return_value=tmp_path):
+            state.sessions = SessionMap()
+
+        slot = state.get_or_create_slot("s1")
+        slot.append("user", "hello")
+        slot.drain()
+        state.slack_client = MagicMock()
+        state.slack_client.open_dm = AsyncMock(return_value="C123")
+        state.slack_client.post_message = AsyncMock(return_value="ts123")
+        state.owner_id = "U123"
+        state.push_slots_update = MagicMock()
+
+        async with TestClient(TestServer(_make_slack_app(state))) as client:
+            link = await client.post("/api/chat/slots/s1/slack-link", json={})
+            assert link.status == 200
+            link_data = await link.json()
+            ts = link_data["thread_ts"]
+            assert state.sessions.get_session_for_thread(ts) == "dashboard:s1"
+
+            unlink = await client.post("/api/chat/slots/s1/slack-unlink")
+            assert unlink.status == 200
+            unlink_data = await unlink.json()
+            assert unlink_data["was_linked"] is True
+
+        assert state.sessions.get_slack_link("dashboard:s1") == (None, None)
+        assert state.sessions.get_session_for_thread(ts) is None
 
 
 class TestSlackChannels:

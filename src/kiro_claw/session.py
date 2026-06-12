@@ -1816,6 +1816,10 @@ class SessionManager:
         """Return (thread_ts, channel_id) for a session."""
         return self._session_map.get_slack_link(key)
 
+    def clear_slack_link(self, key: str) -> bool:
+        """Remove a session's Slack link (stop mirroring). Returns True if one was present."""
+        return self._session_map.clear_slack_link(key)
+
     def get_session_for_thread(self, thread_ts: str) -> str | None:
         """Return the session key linked to a Slack thread, or None."""
         return self._session_map.get_session_for_thread(thread_ts)

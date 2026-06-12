@@ -638,6 +638,7 @@ async def start_dashboard(
     app.router.add_post("/api/chat/slots/{slot}/handoff", chat.api_chat_slot_handoff)
     app.router.add_get("/api/handoff-channels", chat.api_handoff_channels)
     app.router.add_post("/api/chat/slots/{slot}/slack-link", chat.api_chat_slot_slack_link)
+    app.router.add_post("/api/chat/slots/{slot}/slack-unlink", chat.api_chat_slot_slack_unlink)
     app.router.add_get("/api/slack/channels", chat.api_slack_channels)
 
     # Task runner (MCP routes via _register_mcp_routes; dashboard-only routes below)
@@ -671,6 +672,7 @@ async def start_dashboard(
     app.router.add_post("/api/slack/pins", handlers.api_slack_pins)
     app.router.add_post("/api/slack/reactions", handlers.api_slack_reactions)
     app.router.add_post("/api/chat/slots/{name}/slack-link", chat.api_chat_slot_slack_link)
+    app.router.add_post("/api/chat/slots/{name}/slack-unlink", chat.api_chat_slot_slack_unlink)
     app.router.add_get("/api/slack/channels", chat.api_slack_channels)
     app.router.add_post("/api/outbox/notify", handlers.api_outbox_notify)
     app.router.add_get("/api/outbox", handlers.api_outbox_list)

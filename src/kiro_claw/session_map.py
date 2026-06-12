@@ -236,6 +236,28 @@ class SessionMap:
             return None, None
         return entry.get("slack_thread_ts"), entry.get("slack_channel_id")
 
+    def clear_slack_link(self, key: str) -> bool:
+        """Remove the Slack link from a session, keeping the session itself.
+
+        Clears only ``slack_thread_ts`` + ``slack_channel_id`` (preserves
+        ``sid`` and the entry) and evicts the ``_thread_to_session`` reverse
+        index so a later Slack reply in the old thread does not re-route to
+        this session and silently re-engage mirroring. Returns True iff a link
+        was present (only then is ``_save()`` called).
+        """
+        entry = self._data.get(key)
+        if not entry:
+            return False
+        old_ts = entry.get("slack_thread_ts")
+        had_link = bool(old_ts or entry.get("slack_channel_id"))
+        if old_ts and self._thread_to_session.get(old_ts) == key:
+            del self._thread_to_session[old_ts]
+        entry.pop("slack_thread_ts", None)
+        entry.pop("slack_channel_id", None)
+        if had_link:
+            self._save()
+        return had_link
+
     def get_session_for_thread(self, thread_ts: str) -> str | None:
         """Return the session key linked to a Slack thread_ts, or None."""
         return self._thread_to_session.get(thread_ts)
