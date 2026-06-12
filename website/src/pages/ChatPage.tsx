@@ -80,7 +80,7 @@ import { loadChatConfig, CONTENT_WIDTH, type ChatConfig } from './chat/ChatSetti
 import { useKnowledgeFetch, extractKnowledgeQuery, expandKnowledgeBlock } from './chat/useKnowledgeFetch'
 import { KnowledgePicker } from './chat/KnowledgePicker'
 import { useSessionPalette } from '../hooks/useSessionPalette'
-import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, Pen, MessageSquareShare, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Locate, ListTree, Link2, Hash, Undo2, Check } from 'lucide-react'
+import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, Pen, MessageSquareShare, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Locate, ListTree, Link2, Link2Off, Hash, Undo2, Check } from 'lucide-react'
 
 import InfoTip from '../components/InfoTip'
 import { FileCard } from '../components/FileCard'
@@ -108,7 +108,7 @@ import { rewindWithRollback } from '../lib/rewindCall'
 const IDLE_DEFAULT = { kind: 'idle', text: 'Ready', ts: 0 } as const
 
 /** Live session status badge — shows current phase with elapsed timer. */
-function ChatHeaderMenu({ activeSlot, currentSlot, slackChannels, onSlackLink, slotKey, colorIndex, agent, onReveal, mode }: {
+export function ChatHeaderMenu({ activeSlot, currentSlot, slackChannels, onSlackLink, slotKey, colorIndex, agent, onReveal, mode }: {
   activeSlot: string | null; currentSlot: any; slackChannels: { id: string; name: string }[] | null | undefined
   onSlackLink: (channelId?: string) => void; slotKey?: string; colorIndex?: number | null; agent?: string; onReveal?: () => void; mode?: string
 }) {
@@ -200,6 +200,9 @@ function ChatHeaderMenu({ activeSlot, currentSlot, slackChannels, onSlackLink, s
               <div className="mx-2 my-1 border-b border-border" />
               <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-ok cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={async () => { try { await api.slackLink(activeSlot) } catch {} setOpen(false) }}>
                 <MessageSquareShare size={13} /> Post reminder in Slack
+              </button>
+              <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-danger cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={async () => { try { await api.unlinkSlack(activeSlot); dispatch(updateSlot({ key: activeSlot, slack_linked: false, slack_channel: undefined, slack_thread_ts: undefined })) } catch (e) { console.warn('unlinkSlack failed; session stays linked', e) } setOpen(false) }}>
+                <Link2Off size={13} /> Unlink from Slack
               </button>
             </>
           )}
