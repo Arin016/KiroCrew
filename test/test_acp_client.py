@@ -654,6 +654,87 @@ class TestMiseWhich:
         assert _mise_which("claude-agent-acp") is None
 
 
+class TestAcpClientStaleTurn:
+    """Regression for the stale-turn false-positive on the thinking path.
+
+    The staleness check in ``_prompt_loop`` must fold in ``_last_activity``
+    (refreshed by the stderr drain when the agent streams ``thinking_tokens``)
+    and not rely solely on the stdout clock. Otherwise a turn that streams its
+    final text and then thinks silently on stdout — while still emitting
+    thinking events on stderr — is falsely declared stale, burning
+    ~_STALE_TURN_TIMEOUT seconds per turn and reaping long subagent runs.
+    """
+
+    def _client_with_silent_stdout(self, tmp_path):
+        client = AcpClient(work_dir=tmp_path)
+        # stdout is silent: _read_message returns None (timeout/no data).
+        client._read_message = AsyncMock(return_value=None)
+        # process stays alive so the consecutive-empty death path is not taken.
+        client._is_process_alive = MagicMock(return_value=True)
+        # caller streamed text earlier this turn, so staleness is eligible.
+        client._stale_eligible = True
+        return client
+
+    @pytest.mark.asyncio
+    async def test_recent_stderr_activity_prevents_stale_turn(
+        self, tmp_path, caplog
+    ):
+        """thinking_tokens on stderr (recent _last_activity) keeps the turn alive.
+
+        With a tiny stale timeout, a turn whose stdout is silent but whose
+        _last_activity keeps refreshing (as the stderr drain does during
+        thinking) must NOT be declared stale.
+        """
+        client = self._client_with_silent_stdout(tmp_path)
+
+        # Emulate the stderr drain refreshing _last_activity on every poll, so
+        # the turn is continuously "active" even though stdout yields nothing.
+        # Sleep well under the stale timeout each poll so liveness never lapses
+        # (mirrors thinking_tokens streaming faster than _STALE_TURN_TIMEOUT).
+        async def read_and_touch(*args, **kwargs):
+            await asyncio.sleep(0.05)
+            client._last_activity = time.monotonic()
+            return None
+
+        client._read_message = AsyncMock(side_effect=read_and_touch)
+
+        # The overall loop timeout (1.0s) must exceed _STALE_TURN_TIMEOUT (0.2s)
+        # so the staleness check gets multiple chances to fire during the loop —
+        # otherwise the loop exits on `remaining <= 0` before the check runs and
+        # the test would pass trivially, even without the fix. Each 0.05s poll
+        # refreshes _last_activity, staying well under the 0.2s stale window.
+        with patch("kiro_claw.acp.client._STALE_TURN_TIMEOUT", 0.2):
+            with caplog.at_level("WARNING", logger="kiro_claw.acp.client"):
+                actions = []
+                async for action, _msg in client._prompt_loop(
+                    req_id=1, timeout=1.0
+                ):
+                    actions.append(action)
+
+        assert actions == []  # stdout silent → nothing yielded
+        assert "Stale turn detected" not in caplog.text  # fix: not falsely stale
+
+    @pytest.mark.asyncio
+    async def test_genuine_silence_still_triggers_stale_turn(
+        self, tmp_path, caplog
+    ):
+        """Silence on BOTH stdout and stderr still trips the stale-turn guard."""
+        client = self._client_with_silent_stdout(tmp_path)
+        # _last_activity never refreshes → genuinely silent on both clocks.
+        client._last_activity = time.monotonic()
+
+        with patch("kiro_claw.acp.client._STALE_TURN_TIMEOUT", 0.05):
+            with caplog.at_level("WARNING", logger="kiro_claw.acp.client"):
+                actions = []
+                async for action, _msg in client._prompt_loop(
+                    req_id=7, timeout=5.0
+                ):
+                    actions.append(action)
+
+        assert actions == []  # returned via stale-turn early return
+        assert "Stale turn detected" in caplog.text  # real protection preserved
+
+
 class TestAcpClientReadMessage:
     @pytest.mark.asyncio
     async def test_read_valid_json(self, tmp_path):

@@ -1953,15 +1953,23 @@ class AcpClient:
                         raise AcpProcessDied(f"Process exited during prompt (exit code {rc})")
                     # Staleness check: if caller set _stale_eligible (text was
                     # streamed) and kiro-cli has gone silent, exit early.
+                    # Fold in _last_activity (refreshed by the stderr drain) so a
+                    # turn that is still streaming thinking_tokens on stderr —
+                    # between its final text chunk and its next tool call — is not
+                    # mistaken for silence. Using only the stdout clock
+                    # (last_data_ts) trips a false stale-turn on every multi-turn
+                    # reasoning step, burning ~_STALE_TURN_TIMEOUT s per turn and
+                    # reaping long subagent runs at the timeout.
+                    last_seen = max(last_data_ts, self._last_activity)
                     if (
                         self._stale_eligible
-                        and (time.monotonic() - last_data_ts) > _STALE_TURN_TIMEOUT
+                        and (time.monotonic() - last_seen) > _STALE_TURN_TIMEOUT
                     ):
                         logger.warning(
                             "Stale turn detected for req %d — no data for %.0fs after text was streamed. "
                             "Treating as complete.",
                             req_id,
-                            time.monotonic() - last_data_ts,
+                            time.monotonic() - last_seen,
                         )
                         return
                     continue
