@@ -204,6 +204,9 @@ class TestCompactCallbackWiring:
         assert added["cls"] == "msg msg-a"
         assert "92" in added["content"]
         assert "Auto-compacted" in added["content"]
+        # Tagged kind="compaction" so the proactive notice does not shadow the
+        # follow-up [OPTIONS:] backward scan (deriveFollowUpOptions).
+        assert added.get("meta", {}).get("kind") == "compaction"
 
     @pytest.mark.asyncio
     async def test_callback_rounds_pct_in_notice(self, state: DashboardState) -> None:

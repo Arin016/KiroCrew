@@ -2011,6 +2011,19 @@ class TestRunChatCompactDeferredWait:
         assistant_msgs = [m for m in slot.messages if m.get("role") == "assistant"]
         assert any("Conversation compacted" in m["content"] for m in assistant_msgs)
         assert not any("timed out" in m["content"] for m in assistant_msgs)
+        # The notice must be tagged kind="compaction" so it does not shadow the
+        # follow-up [OPTIONS:] buttons of the turn it follows (persisted meta +
+        # live broadcast). See chat_utils._append_compaction_notice.
+        compaction_msgs = [m for m in assistant_msgs if "Conversation compacted" in m["content"]]
+        assert compaction_msgs
+        assert all(m.get("meta", {}).get("kind") == "compaction" for m in compaction_msgs)
+        assistant_broadcasts = [
+            c
+            for c in state.broadcast_ws.call_args_list
+            if c.args and c.args[0] == "chat_message" and c.args[1].get("role") == "assistant"
+        ]
+        assert assistant_broadcasts
+        assert all(c.args[1].get("kind") == "compaction" for c in assistant_broadcasts)
         # Updated context% must be broadcast so the dashboard bar refreshes.
         ws_kinds = [c.args[0] for c in state.broadcast_ws.call_args_list]
         assert "context_usage" in ws_kinds
@@ -2041,6 +2054,10 @@ class TestRunChatCompactDeferredWait:
         client.wait_for_compaction.assert_awaited_once()
         assistant_msgs = [m for m in slot.messages if m.get("role") == "assistant"]
         assert any("summary text" in m["content"] for m in assistant_msgs)
+        # Notice tagged kind="compaction" on the kiro deferred-wait path too.
+        compaction_msgs = [m for m in assistant_msgs if "summary text" in m["content"]]
+        assert compaction_msgs
+        assert all(m.get("meta", {}).get("kind") == "compaction" for m in compaction_msgs)
 
 
 class TestTokenPersistenceBackfill:

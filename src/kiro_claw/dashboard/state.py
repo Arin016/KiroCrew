@@ -906,7 +906,17 @@ class DashboardState:
             template = _AUTO_COMPACT_NOTICE if success else _AUTO_COMPACT_FAILED_NOTICE
             message = template.format(pct=pct)
             try:
-                slot.append("assistant", message, "msg msg-a")
+                # Tag kind="compaction" so this proactive auto-compact notice
+                # (fired at session.autocompact_pct) is skipped by the dashboard's
+                # follow-up [OPTIONS:] backward scan — same invariant as
+                # chat_utils._append_compaction_notice. meta.kind covers history
+                # reload; slot.append carries the meta on the live broadcast too.
+                # (Routing through the chat_utils chokepoint would create a
+                # state<->chat_utils import cycle; the notice is a hardcoded
+                # template with no LLM content, so its redaction pass is moot.)
+                slot.append(
+                    "assistant", message, "msg msg-a", meta={"kind": "compaction"}
+                )
             except Exception:
                 logging.getLogger(__name__).exception(
                     "Failed to append compact notice to slot %s", slot_key

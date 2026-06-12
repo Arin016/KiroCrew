@@ -183,6 +183,44 @@ def _broadcast_auto_tool(state: DashboardState, slot: _ChatSlot, event: "LLMEven
     return title
 
 
+def _append_compaction_notice(
+    state: DashboardState, slot: _ChatSlot, msg_text: str
+) -> None:
+    """Append a compaction status notice as an assistant message and broadcast it.
+
+    The notice is tagged ``kind="compaction"`` so the dashboard can tell it apart
+    from a real assistant turn. Follow-up ``[OPTIONS:]`` buttons are derived by
+    scanning backward for the last assistant message; without this marker the
+    scan stops on this option-less notice and hides the buttons of the turn it
+    follows (see ChatPage ``deriveFollowUpOptions``). ``meta.kind`` survives a
+    history reload; the top-level ``kind`` covers the live websocket path.
+
+    This is the single chokepoint for emitting a compaction notice — every
+    compaction path (auto-compaction status events and the ``/compact`` slash
+    command, the kiro backend and the dormant claude seam alike) must route
+    through here so the tag is never accidentally dropped.
+
+    Defense-in-depth: callers already redact, but since this chokepoint posts to
+    an external surface (the dashboard websocket) the redaction is reapplied here
+    so a future caller passing unredacted LLM-derived text (e.g. a compaction
+    summary) can never leak a credential/exfil URL. Both passes are idempotent.
+    """
+    msg_text, _ = redact_credentials(msg_text)
+    msg_text, _ = redact_exfiltration_urls(msg_text)
+    meta = {"kind": "compaction"}
+    slot.append("assistant", msg_text, "msg msg-a", meta=meta)
+    state.broadcast_ws(
+        "chat_message",
+        {
+            "slot": slot.key,
+            "role": "assistant",
+            "content": msg_text,
+            "kind": "compaction",
+            "meta": meta,
+        },
+    )
+
+
 def _broadcast_compaction_result(
     state: DashboardState, slot: _ChatSlot, event: "LLMEvent"
 ) -> str | None:
@@ -200,11 +238,7 @@ def _broadcast_compaction_result(
         msg_text = f"❌ Compaction failed: {error}"
     else:
         return None
-    slot.append("assistant", msg_text, "msg msg-a")
-    state.broadcast_ws(
-        "chat_message",
-        {"slot": slot.key, "role": "assistant", "content": msg_text},
-    )
+    _append_compaction_notice(state, slot, msg_text)
     return msg_text
 
 

@@ -46,6 +46,7 @@ from kiro_claw.dashboard.chat_utils import (
     _BLOCKED_SLASH_COMMANDS,
     _MAX_TOOL_PURPOSE,
     _SLASH_COMMANDS,
+    _append_compaction_notice,
     _apply_incognito_prefix,
     _broadcast_auto_tool,
     _broadcast_compaction_result,
@@ -2652,11 +2653,7 @@ async def _run_chat(
             # before interpolation — matching the kiro-cli path below.
             if is_claude_backend(client):
                 msg = "✅ Conversation compacted."
-                slot.append("assistant", msg, "msg msg-a")
-                state.broadcast_ws(
-                    "chat_message",
-                    {"slot": slot.key, "role": "assistant", "content": msg},
-                )
+                _append_compaction_notice(state, slot, msg)
                 state.broadcast_ws("context_usage", _context_usage_payload(slot.key, client))
             else:
                 # Tell frontend to show compacting state and disable input
@@ -2681,11 +2678,7 @@ async def _run_chat(
                     msg = "❌ Compaction failed."
                 else:
                     msg = "⚠️ Compaction timed out."
-                slot.append("assistant", msg, "msg msg-a")
-                state.broadcast_ws(
-                    "chat_message",
-                    {"slot": slot.key, "role": "assistant", "content": msg},
-                )
+                _append_compaction_notice(state, slot, msg)
                 # Update context usage after compaction
                 state.broadcast_ws("context_usage", _context_usage_payload(slot.key, client))
 
