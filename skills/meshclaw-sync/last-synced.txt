@@ -12,12 +12,39 @@
 #                so frontend sync is by CONTENT within the post-snapshot window, not a
 #                clean SHA range. This SHA records the upstream tip last triaged.
 
-beta 202268a3      # 2026-06-11 MeshClaw backend beta tip (batch-15). PORTED (stop re-queue guard).
-frontend-beta d12eb8c39f815e478093c7bd2d39408ceafb74b8  # 2026-06-11 MeshClawWebsite beta tip (batch-15). PORTED (completion_keep Chat panel).
+beta ebee95e7      # 2026-06-11 MeshClaw backend beta tip (batch-16). SKIP at tip (gateway service installer, absent dir).
+frontend-beta 1ae3c8557c6893206e0a323c2cd8d65edca86db4  # 2026-06-11 MeshClawWebsite beta tip (batch-16). SKIP at tip (midway-ttl visibility hook, absent consumer).
 mainline 49633d05  # 2026-06-11 MeshClaw mainline tip (upstream); unchanged since batch-13, fully contained in beta-braveheart, no mainline-only delta.
 # NOTE: this 'mainline' SHA is the UPSTREAM MeshClaw mainline tip (for the mainline-only
 # candidate check), NOT the fork's mainline — batch-12 mistakenly recorded the fork SHA
 # (796e21c5) here, which broke the `$MAIN..origin/mainline` scan. Corrected in batch-13.
+
+# --- Batch-16 (cron dual-repo sync 2026-06-11) -------------------------------
+# Fresh branch sync/beta-2026-06-11c off origin/mainline (batch-15 CR-281319232 merged, tip 7824113).
+# 12 candidates (6 backend + 6 frontend); 9 PORTED, 3 SKIP. No mainline-only delta.
+# PORTED (backend): dd59c148 (ACP stale-turn: fold stderr _last_activity into the
+#   thinking-path staleness check via max(last_data_ts,_last_activity) — stops false
+#   stale-turn reaping long subagent runs), c38b72e8 (test isolation: autouse fixture
+#   stubs subagent.read_learned_cost so subagent-sizing tests use cfg fallback not the
+#   real ~/.kiroclaw store), 7a22e34d (tag compaction notices kind="compaction" via a
+#   shared _append_compaction_notice chokepoint so follow-up [OPTIONS:] survive; state.py
+#   auto-compact notice tagged inline to avoid an import cycle), bfcea59a (Unlink from
+#   Slack: SessionMap.clear_slack_link + slack-unlink endpoint, clears both raw and
+#   dashboard:-prefixed keys; 3 test files).
+# PORTED (frontend): ffa68cd (Unlink from Slack menu action — pairs bfcea59a),
+#   f1910f8 (deriveFollowUpOptions util skips kind=="compaction" — pairs 7a22e34d),
+#   599cff3 (prompt-undo reseed/optimize hardening, follow-up to batch-13 b7d3039 —
+#   valueFromUserRef discriminates DOM edit vs draft restore; completion-effect single
+#   undo boundary), 74e880b (in-progress session filter: showUnreadOnly bool -> activeFilters
+#   Set + SESSION_FILTERS table; ADAPTED — dropped upstream slot.app guard, fork Slot has
+#   no app field), b1b1211 (board-view "new chat in folder" + button + column-aware
+#   createChatInFolder; ADAPTED to the fork's diverged renderColumnFolder button cluster).
+# SKIP: ebee95e7 (macOS gateway SERVICE installer — scripts/darwin-gateway-service/ absent,
+#   Midway-gateway LaunchAgent + FDA Swift helper, 100% confined, NOT the fork's
+#   packaging/build-desktop.sh DMG flow), b9036ac4 (standup test mock — team_manager/standup
+#   absent), 1ae3c85 (useVisibilityInterval hook — generic, but its ONLY consumer is the
+#   absent midway-ttl topbar countdown; no other fork caller, so SKIP per anti-miss check (b)).
+# Both DMGs arch-verified (arm64 + x86_64). CR-281NNNNNN.
 
 # --- Batch-15 (cron dual-repo sync 2026-06-11) -------------------------------
 # Fresh branch sync/beta-2026-06-11b off origin/mainline (batch-14 CR-281228622 merged, tip 7b1530a).
