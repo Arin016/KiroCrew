@@ -756,14 +756,23 @@ function ChatSidebar({
   })
   const assignToFolder = useCallback((slotKey: string, folderId: string | null) => { assignFolderMutation.mutate({ slotKey, folderId }) }, [assignFolderMutation])
   const createChatInFolderMutation = useMutation({
-    mutationFn: (folderId: string) => {
+    mutationFn: ({ folderId }: { folderId: string; columnId?: string }) => {
       const agent = resolveFolderAgent(folders, folderId, defaultAgent)
       return dispatch(createSlot({ agent, mode })).unwrap()
     },
-    onSuccess: (slot: any, folderId: string) => { if (slot?.key) assignToFolder(slot.key, folderId) },
+    onSuccess: (slot: any, { folderId, columnId }: { folderId: string; columnId?: string }) => {
+      if (slot?.key) {
+        assignToFolder(slot.key, folderId)
+        // Board view: also drop the new session into the column it was created
+        // from, so a status-lane column shows it immediately instead of the
+        // untagged session vanishing from a tag-filtered column. Mirrors a
+        // drag-drop and is a harmless no-op for filter-only / non-status columns.
+        if (columnId) dropSlotMutation.mutate({ slot: slot.key, columnId })
+      }
+    },
     onError: (err: unknown) => console.error('Failed to create chat in folder:', err),
   })
-  const createChatInFolder = useCallback((folderId: string) => { createChatInFolderMutation.mutate(folderId) }, [createChatInFolderMutation])
+  const createChatInFolder = useCallback((folderId: string, columnId?: string) => { createChatInFolderMutation.mutate({ folderId, columnId }) }, [createChatInFolderMutation])
 
   // Session colors
   const { paletteColors, boost, colorMode } = useSessionPalette()
@@ -823,6 +832,9 @@ function ChatSidebar({
               <option value="">agent…</option>
               {installedAgents.map(a => <option key={a.name} value={a.name}>{a.name}</option>)}
             </select>
+            <button type="button" data-testid={`col-${columnId}-folder-${folder.id}-new-chat`} className="text-muted hover:text-accent bg-transparent border-none cursor-pointer p-[2px]" title="New chat in folder" aria-label={`New chat in folder ${folder.name}`} onClick={e => { e.stopPropagation(); createChatInFolder(folder.id, columnId) }} onMouseDown={e => { e.stopPropagation() }}>
+              <Plus size={11} />
+            </button>
             <button type="button" data-testid={`col-${columnId}-folder-${folder.id}-new-sub`} className="text-muted hover:text-accent bg-transparent border-none cursor-pointer p-[2px]" title="New subfolder" aria-label="New subfolder" onClick={e => { e.stopPropagation(); setCreatingIn(folder.id); setNewName('') }}>
               <FolderPlus size={10} />
             </button>
