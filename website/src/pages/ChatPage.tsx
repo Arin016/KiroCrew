@@ -62,7 +62,7 @@ import SearchHighlightContext, { MessageSearchScope } from '../hooks/SearchHighl
 import SearchBar from '../components/SearchBar'
 import QueueStack from '../components/QueueStack'
 import { useVoiceInput, voiceInputSupported } from '../hooks/useVoiceInput'
-import { ChatFooter, AssistantMessage, UserMessage, parseOptions } from './chat'
+import { ChatFooter, AssistantMessage, UserMessage } from './chat'
 import MarkdownRenderer from '../components/MarkdownRenderer'
 import TypewriterText from '../components/TypewriterText'
 import ActivityViewer from './chat/ActivityViewer'
@@ -75,6 +75,7 @@ import { DRAFT_SAVE_DEBOUNCE_MS, loadDrafts, saveDrafts as persistDrafts, setDra
 import { loadFileDrafts, saveFileDrafts as persistFileDrafts, setFileDraft } from '../utils/chatFileDrafts'
 import { loadPasteDrafts, savePasteDrafts as persistPasteDrafts, setPasteDraft } from '../utils/chatPasteDrafts'
 import { findPrevUserMsgDisplayIdx } from '../utils/findPrevUserMsgDisplayIdx'
+import { deriveFollowUpOptions } from '../utils/deriveFollowUpOptions'
 import OverlayDrawer from '../components/OverlayDrawer'
 import { loadChatConfig, CONTENT_WIDTH, type ChatConfig } from './chat/ChatSettings'
 import { useKnowledgeFetch, extractKnowledgeQuery, expandKnowledgeBlock } from './chat/useKnowledgeFetch'
@@ -1516,18 +1517,10 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const isStreaming = lastMsg?.role === 'streaming'
   // Follow-up options derived from the last assistant message in the current chat.
   // Swapping chats (activeSlot change) → messages change → memo recomputes fresh.
-  const { followUpOptions, followUpIsPlan } = useMemo(() => {
-    if (isStreaming) return { followUpOptions: [] as string[], followUpIsPlan: false }
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i]
-      if (m.role === 'user') return { followUpOptions: [] as string[], followUpIsPlan: false }
-      if (m.role === 'assistant' && m.content) {
-        const { options, isPlan } = parseOptions(m.content)
-        return { followUpOptions: options, followUpIsPlan: isPlan }
-      }
-    }
-    return { followUpOptions: [] as string[], followUpIsPlan: false }
-  }, [messages, isStreaming])
+  const { followUpOptions, followUpIsPlan } = useMemo(
+    () => deriveFollowUpOptions(messages, isStreaming),
+    [messages, isStreaming],
+  )
   // Visual-only highlight state; text in the input is the source of truth for
   // what gets sent. Cleared whenever the options list changes (new assistant
   // message) or the active chat switches — both signal a fresh turn.
