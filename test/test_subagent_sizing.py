@@ -17,6 +17,17 @@ import kiro_claw.subagent as subagent
 from kiro_claw.subagent import compute_max_subagents, resolve_max_subagents
 
 
+@pytest.fixture(autouse=True)
+def _no_learned_cost(monkeypatch):
+    """Isolate from the machine's learned-cost store (~/.kiroclaw/subagents/
+    cost_samples.jsonl). compute_max_subagents prefers read_learned_cost over
+    the cfg fallback, so on a dev box with a populated store these tests would
+    read the real mem_gb/cpu_cores instead of the per-case fallback costs and
+    assert against the wrong cap. These cases exercise the fallback path by
+    design, so force the learned lookup to miss."""
+    monkeypatch.setattr(subagent, "read_learned_cost", lambda *a, **k: None)
+
+
 def _cfg(
     *,
     max_subagents: int = 0,
