@@ -59,6 +59,7 @@ interface Slot {
   key: string
   title?: string
   running: boolean
+  unread?: boolean
   agent?: string
   workspace?: string
   created?: string
@@ -87,6 +88,27 @@ interface AgentInfo {
   name: string
   source: string
 }
+
+type SessionFilterKey = 'unread' | 'running'
+
+interface SessionFilterDef {
+  key: SessionFilterKey
+  storageKey: string
+  label: string
+  color: string
+  icon: (active: boolean) => React.ReactNode
+}
+
+const SESSION_FILTERS: SessionFilterDef[] = [
+  {
+    key: 'unread', storageKey: 'mc-session-unread-only', label: 'Unread', color: 'var(--info)',
+    icon: (active) => <Circle size={12} className={active ? 'text-[var(--info)]' : 'text-muted'} {...(active ? { strokeWidth: 0, fill: 'var(--info)' } : {})} />,
+  },
+  {
+    key: 'running', storageKey: 'mc-session-running-only', label: 'In progress', color: 'var(--warn)',
+    icon: (active) => <Zap size={12} className={active ? 'text-[var(--warn)]' : 'text-muted'} {...(active ? { fill: 'var(--warn)', stroke: 'none' } : {})} />,
+  },
+]
 
 /**
  * Debounced backend session-content search.  Returns `null` until the first
@@ -230,7 +252,30 @@ function ChatSidebar({
     const saved = localStorage.getItem(SORT_LS_KEY)
     return SORT_OPTIONS.some(o => o.value === saved) ? saved as SortKey : 'date-desc'
   })
-  const [showUnreadOnly, setShowUnreadOnly] = useState<boolean>(() => localStorage.getItem('mc-session-unread-only') === '1')
+  const [activeFilters, setActiveFilters] = useState<Set<SessionFilterKey>>(() => {
+    const initialFilters = new Set<SessionFilterKey>()
+    for (const filterDef of SESSION_FILTERS) { if (localStorage.getItem(filterDef.storageKey) === '1') initialFilters.add(filterDef.key) }
+    return initialFilters
+  })
+  const toggleFilter = useCallback((key: SessionFilterKey) => {
+    setActiveFilters(prev => {
+      const next = new Set(prev)
+      const filterDef = SESSION_FILTERS.find(sf => sf.key === key)!
+      if (next.has(key)) { next.delete(key); localStorage.setItem(filterDef.storageKey, '0') }
+      else { next.add(key); localStorage.setItem(filterDef.storageKey, '1') }
+      return next
+    })
+  }, [])
+  const disableFilter = useCallback((key: SessionFilterKey) => {
+    setActiveFilters(prev => {
+      if (!prev.has(key)) return prev
+      const next = new Set(prev)
+      next.delete(key)
+      const filterDef = SESSION_FILTERS.find(sf => sf.key === key)!
+      localStorage.setItem(filterDef.storageKey, '0')
+      return next
+    })
+  }, [])
   // Signal from the SSE/data-fetch layer indicating the initial slot list
   // has arrived. Used by the auto-drain effect to distinguish "data not yet
   // loaded" from "data loaded and genuinely empty".
@@ -238,12 +283,21 @@ function ChatSidebar({
   const slotStatusDetail = useAppSelector(s => s.chat.slotStatusDetail)
   // O(1) lookup set for the filter predicate (mirrors the `pinned` and
   // `slotSearchKeys` patterns elsewhere in this file).
-  const unreadSlotSet = useMemo(() => new Set(unreadSlots), [unreadSlots])
-  // Ref mirror of `showUnreadOnly` so the auto-drain effect can read the
+  const unreadSet = useMemo(() => new Set(unreadSlots), [unreadSlots])
+  const enrichedSlots = useMemo<Slot[]>(() =>
+    slots.map(s => ({ ...s, unread: unreadSet.has(s.key) })),
+    [slots, unreadSet]
+  )
+  const filterCounts = useMemo(() => {
+    const counts = {} as Record<SessionFilterKey, number>
+    for (const filterDef of SESSION_FILTERS) counts[filterDef.key] = enrichedSlots.filter(slot => slot[filterDef.key]).length
+    return counts
+  }, [enrichedSlots])
+  // Ref mirror of `activeFilters` so the auto-drain effect can read the
   // current toggle state without depending on it. Keeps the effect from
   // re-firing on its own setState output.
-  const showUnreadRef = useRef(showUnreadOnly)
-  showUnreadRef.current = showUnreadOnly
+  const activeFiltersRef = useRef(activeFilters)
+  activeFiltersRef.current = activeFilters
   // Auto-disable the unread filter when the inbox drains, so the user doesn't
   // end up staring at an empty list. Decision logic lives in the pure helper
   // `decideUnreadDrain` so it can be unit-tested in isolation — see
@@ -264,14 +318,11 @@ function ChatSidebar({
       prev: prevUnreadCount.current,
       current: unreadSlots.length,
       slotsLoaded,
-      showUnreadOnly: showUnreadRef.current,
+      showUnreadOnly: activeFiltersRef.current.has('unread'),
     })
-    if (action === 'disable') {
-      setShowUnreadOnly(false)
-      localStorage.setItem('mc-session-unread-only', '0')
-    }
+    if (action === 'disable') disableFilter('unread')
     prevUnreadCount.current = unreadSlots.length
-  }, [unreadSlots.length, slotsLoaded])
+  }, [unreadSlots.length, slotsLoaded, disableFilter])
   const [historyOpen, setHistoryOpen] = useState(false)
   // History pane height (persisted). Drag handle adjusts this while open.
   const HISTORY_HEIGHT_LS_KEY = 'mc-history-height'
@@ -582,24 +633,26 @@ function ChatSidebar({
     return m
   }, [slots, folders])
 
-  const filteredSlots = useMemo(() =>
-    slots
-      .filter(s => {
-        if (showUnreadOnly && !unreadSlotSet.has(s.key)) return false
+  const filteredSlots = useMemo(() => {
+    const activeFilterDefs = SESSION_FILTERS.filter(filterDef => activeFilters.has(filterDef.key))
+    return enrichedSlots
+      .filter(slot => {
+        if (activeFilterDefs.length > 0 && !activeFilterDefs.some(filterDef => slot[filterDef.key])) return false
         if (!slotFilter) return true
         if (slotFilter.trim().length >= SEARCH_MIN_CHARS) {
-          if (slotSearchKeys) return slotSearchKeys.has(s.key)
-          return ((s.title || '') + s.key + (s.agent || '')).toLowerCase().includes(slotFilter.toLowerCase())
+          if (slotSearchKeys) return slotSearchKeys.has(slot.key)
+          return ((slot.title || '') + slot.key + (slot.agent || '')).toLowerCase().includes(slotFilter.toLowerCase())
         }
-        return ((s.title || '') + s.key + (s.agent || '')).toLowerCase().includes(slotFilter.toLowerCase())
+        return ((slot.title || '') + slot.key + (slot.agent || '')).toLowerCase().includes(slotFilter.toLowerCase())
       })
       .sort((a, b) => {
         const pa = pinned.has(a.key) ? 0 : 1
         const pb = pinned.has(b.key) ? 0 : 1
         if (pa !== pb) return pa - pb
         return compareSlots(a, b, sortKey)
-      }),
-    [slots, slotFilter, slotSearchKeys, pinned, sortKey, showUnreadOnly, showUnreadOnly ? unreadSlotSet : null]
+      })
+  },
+    [enrichedSlots, slotFilter, slotSearchKeys, pinned, sortKey, activeFilters]
   )
 
   // Folder mutations
@@ -834,7 +887,7 @@ function ChatSidebar({
           onDragStart={e => { e.dataTransfer.setData('text/plain', s.key); e.dataTransfer.effectAllowed = 'move' }}
           onClick={() => { dispatch(switchSlot(s.key)); onSelectSlot?.(s.key) }}
           onContextMenu={e => { e.preventDefault(); setCtxMenu({ key: s.key, x: e.clientX, y: e.clientY }) }}>
-          {unreadSlots.includes(s.key) && (
+          {s.unread && (
             <span className="absolute right-1.5 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full pointer-events-none" style={{ background: 'var(--info)' }} />
           )}
           <div className="flex-1 min-w-0 overflow-hidden">
@@ -966,7 +1019,7 @@ function ChatSidebar({
       )
     }
     // Hide folders with no matching children when searching or filtering unreads
-    if ((slotFilter || showUnreadOnly) && childNodes.length === 0) return []
+    if ((slotFilter || activeFilters.size > 0) && childNodes.length === 0) return []
     // Wrap children in a bordered container so the folder's extent is visually
     // clear when multiple folders are open. Only wrap when there's content,
     // otherwise the FolderBody would render an empty 1px-tall strip with a line.
@@ -1104,32 +1157,35 @@ function ChatSidebar({
               aria-expanded={filterSortOpen}
             >
               <ListFilter size={14} />
-              {unreadSlots.length > 0 && (
+              {filterCounts['unread'] > 0 && (
                 <span
                   aria-hidden="true"
                   className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-[3px] rounded-full bg-[var(--info)] text-white text-[10px] font-semibold leading-[14px] text-center pointer-events-none shadow-[0_0_4px_rgba(59,130,246,.5)]"
                 >
-                  {unreadSlots.length > 99 ? '99+' : unreadSlots.length}
+                  {filterCounts['unread'] > 99 ? '99+' : filterCounts['unread']}
                 </span>
               )}
             </button>
             {filterSortOpen && (
             <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] rounded-lg border border-border bg-bg-elevated shadow-lg py-1 animate-rise" role="menu">
               <div className="px-3 pt-1 pb-1 text-[11px] font-medium text-muted uppercase tracking-[.04em]">Filter</div>
-              <button
-                role="menuitemcheckbox"
-                aria-checked={showUnreadOnly}
-                className="w-full px-3 py-1.5 text-left text-[13px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors"
-                onClick={() => {
-                  const nv = !showUnreadOnly
-                  setShowUnreadOnly(nv)
-                  localStorage.setItem('mc-session-unread-only', nv ? '1' : '0')
-                }}
-              >
-                <Circle size={12} className={showUnreadOnly ? 'text-[var(--info)]' : 'text-muted'} {...(showUnreadOnly ? { strokeWidth: 0, fill: 'var(--info)' } : {})} />
-                <span className="flex-1">Unread only{unreadSlots.length > 0 ? ` (${unreadSlots.length})` : ''}</span>
-                {showUnreadOnly && <Check size={14} className="text-accent" />}
-              </button>
+              {SESSION_FILTERS.map(filterDef => {
+                const active = activeFilters.has(filterDef.key)
+                const slotCount = filterCounts[filterDef.key] ?? 0
+                return (
+                  <button
+                    key={filterDef.key}
+                    role="menuitemcheckbox"
+                    aria-checked={active}
+                    className="w-full px-3 py-1.5 text-left text-[13px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors"
+                    onClick={() => toggleFilter(filterDef.key)}
+                  >
+                    {filterDef.icon(active)}
+                    <span className="flex-1">{filterDef.label}{slotCount > 0 ? ` (${slotCount})` : ''}</span>
+                    {active && <Check size={14} className="text-accent" />}
+                  </button>
+                )
+              })}
               <div className="my-1 border-t border-border" />
               <div className="px-3 pt-1 pb-1 text-[11px] font-medium text-muted uppercase tracking-[.04em]">Sort by</div>
               {SORT_OPTIONS.map(o => (
@@ -1149,18 +1205,25 @@ function ChatSidebar({
           </div>
         </div>
       </div>
-      {showUnreadOnly && (
+      {activeFilters.size > 0 && (
         <div className="px-3 pb-1 flex items-center gap-1.5 flex-wrap">
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full text-[11px] bg-[var(--info)]/10 text-[var(--info)] border border-[var(--info)]/30 cursor-pointer hover:bg-[var(--info)]/15 transition-colors"
-            onClick={() => { setShowUnreadOnly(false); localStorage.setItem('mc-session-unread-only', '0') }}
-            title="Clear unread filter"
-            aria-label="Clear unread filter"
-          >
-            Unread{unreadSlots.length > 0 ? ` (${unreadSlots.length})` : ''}
-            <X size={11} />
-          </button>
+          {SESSION_FILTERS.filter(filterDef => activeFilters.has(filterDef.key)).map(filterDef => {
+            const slotCount = filterCounts[filterDef.key] ?? 0
+            return (
+              <button
+                key={filterDef.key}
+                type="button"
+                className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full text-[11px] cursor-pointer transition-colors"
+                style={{ background: `color-mix(in srgb, ${filterDef.color} 10%, transparent)`, color: filterDef.color, borderWidth: 1, borderColor: `color-mix(in srgb, ${filterDef.color} 30%, transparent)` }}
+                onClick={() => toggleFilter(filterDef.key)}
+                title={`Clear ${filterDef.label.toLowerCase()} filter`}
+                aria-label={`Clear ${filterDef.label.toLowerCase()} filter`}
+              >
+                {filterDef.label}{slotCount > 0 ? ` (${slotCount})` : ''}
+                <X size={11} />
+              </button>
+            )
+          })}
         </div>
       )}
       <LayoutGroup id="chat-slots">
@@ -1573,8 +1636,8 @@ function ChatSidebar({
               <Link2 size={13} /> Copy link
             </button>
             <button role="menuitem" className="w-full px-3 py-1.5 text-left text-text hover:bg-bg-hover cursor-pointer flex items-center gap-2 bg-transparent border-none font-body"
-              onClick={() => { dispatch(unreadSlots.includes(ctxMenu.key) ? markSlotRead(ctxMenu.key) : markSlotUnread(ctxMenu.key)); setCtxMenu(null) }}>
-              <Circle size={13} /> {unreadSlots.includes(ctxMenu.key) ? 'Mark as read' : 'Mark as unread'}
+              onClick={() => { dispatch(unreadSet.has(ctxMenu.key) ? markSlotRead(ctxMenu.key) : markSlotUnread(ctxMenu.key)); setCtxMenu(null) }}>
+              <Circle size={13} /> {unreadSet.has(ctxMenu.key) ? 'Mark as read' : 'Mark as unread'}
             </button>
             <button role="menuitem" className="w-full px-3 py-1.5 text-left text-text hover:bg-bg-hover cursor-pointer flex items-center gap-2 bg-transparent border-none font-body"
               onClick={() => { togglePin(ctxMenu.key); setCtxMenu(null) }}>
