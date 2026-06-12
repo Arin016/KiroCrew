@@ -425,6 +425,20 @@ with a build and a CR:
    auto-sync cron job **is** that standing authorization; a manual invocation is
    not (ask first).
 
+## Workflow harness (`.claude/workflows/meshclaw-sync.js`)
+
+This skill is also operationalized as a multi-agent Workflow script at
+`.claude/workflows/meshclaw-sync.js`, invocable as
+`Workflow({name: "meshclaw-sync", args: {mode}})`. The script **defers to this
+SKILL** — every agent it spawns reads this file first and the skill wins on any
+conflict. It fans out one analyzer + one skeptic per candidate (the adversarial
+triage), then gates mutation behind `mode`: `triage` (default, read-only report)
+→ `port` (port + verify, no CR) → `full` (+ build DMGs + commit + CR). Paths
+come from `args` (`workspaceFork`/`upstreamBackend`/`upstreamFrontend`,
+defaulting to the locations above) so it runs on any checkout. The script
+parallelizes + enforces the pipeline shape; this skill remains the source of
+truth for every verdict, the de-Amazon rubric, and the surgical porting.
+
 ## Recurring auto-sync (cron)
 
 A durable cron job runs this whole skill every 6 hours (scan → triage+verify →
