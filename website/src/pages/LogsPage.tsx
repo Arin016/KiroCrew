@@ -22,6 +22,9 @@ export function LogViewer({ compact }: { compact?: boolean }) {
   const [search, setSearch] = useState('')
   const [matchesOnly, setMatchesOnly] = useState(false)
   const [autoFollow, setAutoFollow] = useState(true)
+  const [wrapLines, setWrapLines] = useState(true)
+  const [newestFirst, setNewestFirst] = useState(false)
+  const [atTop, setAtTop] = useState(true)
   const virtuosoRef = useRef<VirtuosoHandle>(null)
   const { subscribeLogs } = useContext(WsContext)
 
@@ -42,25 +45,41 @@ export function LogViewer({ compact }: { compact?: boolean }) {
     const levelIdx = LEVELS.indexOf(currentLevel as typeof LEVELS[number])
     const levelFiltered = lines.filter(l => LEVELS.indexOf(l.level as typeof LEVELS[number]) >= levelIdx)
     const q = search.toLowerCase()
-    if (!q) return { filtered: levelFiltered.map(l => ({ ...l, match: false })), matchCount: 0 }
+    // newestFirst reverses the display (latest at top); default is latest-last (tail).
+    if (!q) {
+      const base = levelFiltered.map(l => ({ ...l, match: false }))
+      return { filtered: newestFirst ? [...base].reverse() : base, matchCount: 0 }
+    }
     const result = levelFiltered.map(l => ({ ...l, match: l.msg.toLowerCase().includes(q) }))
     const matched = result.filter(l => l.match)
-    return { filtered: matchesOnly ? matched : result, matchCount: matched.length }
-  }, [lines, search, matchesOnly, currentLevel])
+    const display = matchesOnly ? matched : result
+    return { filtered: newestFirst ? [...display].reverse() : display, matchCount: matched.length }
+  }, [lines, search, matchesOnly, currentLevel, newestFirst])
 
+  // Re-align to the latest end when filters / tail / direction change.
   useEffect(() => {
     if (autoFollow && filtered.length > 0) {
-      virtuosoRef.current?.scrollToIndex({ index: filtered.length - 1, behavior: 'smooth' })
+      virtuosoRef.current?.scrollToIndex({ index: newestFirst ? 0 : filtered.length - 1, behavior: 'smooth' })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, matchesOnly, autoFollow])
+  }, [search, matchesOnly, autoFollow, newestFirst])
+
+  // Newest-first live-follow: followOutput only tracks the bottom, so pin to the
+  // top (index 0) as new lines prepend. Gated on atTop so streaming logs don't
+  // yank the user back up while they're scrolled down reading older entries —
+  // mirrors followOutput's auto-pause in latest-last mode.
+  useEffect(() => {
+    if (autoFollow && newestFirst && atTop && filtered.length > 0) {
+      virtuosoRef.current?.scrollToIndex({ index: 0 })
+    }
+  }, [filtered.length, autoFollow, newestFirst, atTop])
 
   const toggleTail = useCallback(() => {
     setAutoFollow(p => !p)
     if (!autoFollow && filtered.length > 0) {
-      virtuosoRef.current?.scrollToIndex({ index: filtered.length - 1, behavior: 'smooth' })
+      virtuosoRef.current?.scrollToIndex({ index: newestFirst ? 0 : filtered.length - 1, behavior: 'smooth' })
     }
-  }, [autoFollow, filtered.length])
+  }, [autoFollow, filtered.length, newestFirst])
 
   const highlight = (msg: string) => {
     const q = search.toLowerCase()
@@ -101,14 +120,19 @@ export function LogViewer({ compact }: { compact?: boolean }) {
             <span className={`${sz.label} text-muted whitespace-nowrap`}>{matchCount} matches</span>
           </>
         )}
-        <button className={`${sz.btn} rounded cursor-pointer border transition-all whitespace-nowrap ml-auto ${autoFollow ? 'bg-surface border-border-strong text-text' : 'bg-transparent border-border text-muted'}`}
+        <button className={`${sz.btn} rounded cursor-pointer border transition-all whitespace-nowrap ml-auto ${newestFirst ? 'bg-surface border-border-strong text-text' : 'bg-transparent border-border text-muted'}`}
+          onClick={() => setNewestFirst(p => !p)}>{newestFirst ? 'Latest: first' : 'Latest: last'}</button>
+        <button className={`${sz.btn} rounded cursor-pointer border transition-all whitespace-nowrap ${wrapLines ? 'bg-surface border-border-strong text-text' : 'bg-transparent border-border text-muted'}`}
+          onClick={() => setWrapLines(p => !p)}>{wrapLines ? 'Wrap: on' : 'Wrap: off'}</button>
+        <button className={`${sz.btn} rounded cursor-pointer border transition-all whitespace-nowrap ${autoFollow ? 'bg-surface border-border-strong text-text' : 'bg-transparent border-border text-muted'}`}
           onClick={toggleTail}>{autoFollow ? 'Tail: on' : 'Tail: off'}</button>
       </div>
-      <div className={`flex-1 flex flex-col min-h-0 ${compact ? '' : 'card-glow border border-border bg-card rounded-lg p-5 animate-rise shadow-sm transition-all'}`}>
-        <Virtuoso ref={virtuosoRef} data={filtered} followOutput={autoFollow ? 'smooth' : false}
+      <div className={`flex-1 flex flex-col min-h-0 ${compact ? 'border border-border rounded-lg overflow-hidden mb-2' : 'card-glow border border-border bg-card rounded-lg p-5 animate-rise shadow-sm transition-all'}`}>
+        <Virtuoso ref={virtuosoRef} data={filtered} followOutput={autoFollow && !newestFirst ? 'smooth' : false}
+          atTopStateChange={setAtTop}
           style={{ flex: 1, minHeight: 0 }}
           itemContent={(_i, l) => (
-            <div className={`font-mono ${sz.row} whitespace-pre-wrap break-all px-2.5 py-0.5 leading-[1.7] ${l.match ? 'border-l-2 border-accent bg-accent/10' : ''} ${levelColor(l.level)}`}>
+            <div className={`font-mono ${sz.row} ${wrapLines ? 'whitespace-pre-wrap break-all' : 'whitespace-pre'} px-2.5 py-0.5 leading-[1.7] ${l.match ? 'border-l-2 border-accent bg-accent/10' : ''} ${levelColor(l.level)}`}>
               {l.match ? highlight(l.msg) : l.msg}
             </div>
           )}
