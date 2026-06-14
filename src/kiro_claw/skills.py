@@ -22,6 +22,23 @@ logger = logging.getLogger(__name__)
 
 SKILLS_DIR_NAME = "skills"
 _MIN_TRIGGER_OVERLAP = 0.7
+
+# ── $skill inline trigger (Mesh-588) ──
+# A ``$skillname`` token anywhere in a user message explicitly loads that skill,
+# across all three sources (kiroclaw builtin, workspace, AIM extra paths).
+# Resolution is allowlist-only: the token must match the last path segment of an
+# already-enumerated skill key (per ARCC BSC1 input-validation guidance — no path
+# is ever constructed from the raw token, which structurally blocks traversal like
+# ``$../../etc/passwd``). The charset is deliberately lowercase-led so shell-style
+# tokens (``$PATH``, ``$5``) and prose ($variable mid-sentence in caps) don't match
+# real skill slugs.
+#   (?<![\w$])  — not preceded by a word char or another $ (avoids ``foo$bar``, ``$$x``)
+#   [a-z0-9]    — must start with a lowercase letter or digit
+#   [a-z0-9/_-]* — slug body: lowercase, digits, slash (nested keys), underscore, hyphen
+_DOLLAR_SKILL_PATTERN = re.compile(r"(?<![\w$])\$([a-z0-9][a-z0-9/_-]*)")
+# Cap how many distinct $skills one message may expand — bounds prompt growth and
+# matches the spirit of the per-message trigger cap.
+_MAX_DOLLAR_SKILLS = 5
 # Cache the discovered skill-file list for this long. get_triggered_skills runs
 # on EVERY message; without this it os.walk()s the skills dir + every extra
 # path per message. Skills change rarely (add/remove via setup or sync), so a
@@ -242,6 +259,16 @@ def skills_dir() -> Path:
     return config_dir() / SKILLS_DIR_NAME
 
 
+def aim_skills_dir() -> Path:
+    """Root of AIM-installed skills (``~/.aim/skills``).
+
+    Factored out (rather than inlined in ``SkillsLoader.__init__``) so tests can
+    monkeypatch it and stay hermetic — otherwise every loader construction would
+    pick up the developer's real AIM skills.
+    """
+    return Path.home() / ".aim" / "skills"
+
+
 class SkillsLoader:
     """Load skill markdown files from ~/.kiroclaw/skills/.
 
@@ -292,6 +319,20 @@ class SkillsLoader:
                 self._extra_paths.append(resolved)
             else:
                 logger.debug("Extra skill path does not exist: %s", p)
+        # Implicitly include the AIM skills root (~/.aim/skills) as a lowest-
+        # precedence source. The dashboard's /api/skills (and thus the $skill
+        # autocomplete picker) lists AIM-installed skills, so the $skill resolver
+        # MUST be able to resolve them too — otherwise the picker offers a token
+        # the backend can't load. We scan the dir directly (not the async `aim skills list`
+        # CLI) so this stays sync + cache-friendly; it's the same on-disk truth the CLI reports.
+        # Skipped if already covered by a configured extra_path, missing, or sensitive.
+        aim_skills_root = aim_skills_dir().resolve()
+        if (
+            aim_skills_root not in self._extra_paths
+            and aim_skills_root.is_dir()
+            and not is_sensitive_path(str(aim_skills_root))
+        ):
+            self._extra_paths.append(aim_skills_root)
 
     def _iter(self) -> list[tuple[str, Path]]:
         """Return all ``(name, skill_file)`` pairs, TTL-cached.
@@ -725,6 +766,79 @@ class SkillsLoader:
             parts.append("\n".join(summary_lines))
 
         return "[Skills:]\n" + "\n\n---\n\n".join(parts) + "\n[End of skills]\n\n"
+
+    def resolve_dollar_skills(self, text: str) -> list[tuple[str, str, str]]:
+        """Resolve ``$skillname`` tokens in *text* to loadable skills.
+
+        Scans *text* for ``$token`` occurrences (anywhere, multiple allowed) and
+        matches each token against the **last path segment** of every enumerated
+        skill key — so ``$oncall-handover`` resolves the skill whose key is
+        ``WorkforceEmploymentKnowledgeBase/oncall-handover``. Matching is
+        case-insensitive on the leaf.
+
+        Security (per ARCC BSC1 input validation): this is allowlist-only. The
+        token is *matched against* the vetted, already-enumerated skill set from
+        ``_iter()`` — no filesystem path is ever built from the raw token. A
+        token like ``$../../etc/passwd`` simply matches nothing. Content is loaded
+        through ``load_skill`` (which inherits ``_safe_name`` + ``validate_file_path``
+        + sensitive-path gating) and frontmatter is stripped before return.
+
+        Returns a list of ``(token, skill_name, stripped_body)`` tuples — one per
+        distinct resolved skill, in first-appearance order, deduped, and capped at
+        ``_MAX_DOLLAR_SKILLS``. Unknown tokens are silently skipped (left literal by
+        the caller). Returns an empty list if *text* has no resolvable tokens.
+        """
+        if not text or "$" not in text:
+            return []
+
+        # Build leaf → full-key map once from the enumerated (allowlisted) set.
+        # _iter() already applies local > workspace > AIM precedence and dedupes
+        # by full key, so the first full key seen for a given leaf wins.
+        leaf_to_name: dict[str, str] = {}
+        for name, _path in self._iter():
+            leaf = name.rsplit("/", 1)[-1].lower()
+            leaf_to_name.setdefault(leaf, name)
+
+        resolved: list[tuple[str, str, str]] = []
+        seen_names: set[str] = set()
+        for match in _DOLLAR_SKILL_PATTERN.finditer(text):
+            token = match.group(1)
+            # Match on the leaf segment of the token (supports ``$a/b`` typed by
+            # the user, though the common case is a bare leaf).
+            leaf = token.rsplit("/", 1)[-1].lower()
+            matched: str | None = leaf_to_name.get(leaf)
+            if matched is None or matched in seen_names:
+                continue
+            content = self.load_skill(matched)
+            if content is None:
+                continue
+            seen_names.add(matched)
+            resolved.append((token, matched, self.strip_frontmatter(content)))
+            if len(resolved) >= _MAX_DOLLAR_SKILLS:
+                break
+        return resolved
+
+    @staticmethod
+    def has_dollar_candidate(text: str) -> bool:
+        """True if *text* contains at least one ``$skill``-shaped token.
+
+        Distinguishes a genuine (if unresolved) skill-invocation attempt from
+        an incidental ``$`` (e.g. ``$5``, ``$42``, ``$PATH``, a bare ``$``). The
+        caller uses this to decide whether an empty ``resolve_dollar_skills``
+        result is worth a ``not_found`` audit event — keeps the regex the single
+        source of truth instead of duplicating it in chat_runner.
+
+        Note: the token charset is digit-led (so a skill like ``5whys`` works via
+        ``$5whys``), which means a purely numeric ``$5`` *matches the regex*. A
+        bare price is not a skill attempt, so we additionally require the matched
+        token to contain at least one letter before counting it as a candidate.
+        """
+        if not text or "$" not in text:
+            return False
+        return any(
+            any(c.isalpha() for c in m.group(1))
+            for m in _DOLLAR_SKILL_PATTERN.finditer(text)
+        )
 
     # ── Private ──
 

@@ -8117,3 +8117,143 @@ class TestEmptyResponseRetry:
 
         error_msgs = [m for m in slot.messages if m.get("role") == "error"]
         assert not any("Empty response" in m.get("content", "") for m in error_msgs)
+
+
+class TestExpandDollarSkills:
+    """Runner-side ``_expand_dollar_skills`` (Mesh-588): redaction, chip,
+    SEL audit, and empty/exception branches. The pure resolution logic is
+    covered separately by test_skills.TestResolveDollarSkills; here we
+    exercise the chat_runner wrapper that adds runner concerns."""
+
+    def _make_skill(self, skills_dir: Path, name: str, body: str) -> None:
+        d = skills_dir / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(body, encoding="utf-8")
+
+    def _state_with_skills(self, tmp_path, monkeypatch, *skills):
+        """A DashboardState whose _get_skills() returns a hermetic loader
+        pointed at *skills* (each a ``(name, body)`` pair)."""
+        from kiro_claw.skills import SkillsLoader
+
+        # Keep the implicit ~/.aim/skills root out of the hermetic loader.
+        monkeypatch.setattr(
+            "kiro_claw.skills.aim_skills_dir", lambda: tmp_path / "no_aim_absent"
+        )
+        skills_dir = tmp_path / "skills"
+        for name, body in skills:
+            self._make_skill(skills_dir, name, body)
+        loader = SkillsLoader(skills_path=skills_dir, install_builtins=False)
+
+        state = _make_state(tmp_path)
+        state.push_slots_update = MagicMock()
+        state.context_builder = None
+        state._standalone_skills = loader  # _get_skills returns this verbatim
+        return state
+
+    def test_no_dollar_short_circuits(self, tmp_path, monkeypatch):
+        from kiro_claw.dashboard.chat_runner import _expand_dollar_skills
+
+        state = self._state_with_skills(tmp_path, monkeypatch)
+        slot = _ChatSlot("s1")
+        out, n = _expand_dollar_skills("plain message", state, slot, "sess")
+        assert out == "plain message"
+        assert n == 0
+        state.push_slots_update.assert_not_called()
+
+    def test_resolves_appends_block_and_chip(self, tmp_path, monkeypatch):
+        from kiro_claw.dashboard.chat_runner import _expand_dollar_skills
+
+        state = self._state_with_skills(
+            tmp_path,
+            monkeypatch,
+            ("oncall-handover", "---\nname: oncall-handover\n---\n# Handover\nBODY-A"),
+        )
+        slot = _ChatSlot("s1")
+        out, n = _expand_dollar_skills("please $oncall-handover now", state, slot, "sess")
+        assert n == 1
+        # original message preserved, skill body appended as a [Skill: name] block
+        assert out.startswith("please $oncall-handover now")
+        assert "[Skill: oncall-handover]" in out
+        assert "BODY-A" in out
+        # a system chip is appended and the UI is poked
+        assert any(
+            "Loaded skill(s)" in m.get("content", "") and m.get("role") == "system"
+            for m in slot.messages
+        )
+        state.push_slots_update.assert_called_once()
+
+    def test_unresolved_token_no_chip(self, tmp_path, monkeypatch):
+        from kiro_claw.dashboard import chat_runner
+
+        state = self._state_with_skills(
+            tmp_path,
+            monkeypatch,
+            ("oncall-handover", "---\nname: oncall-handover\n---\nBODY"),
+        )
+        slot = _ChatSlot("s1")
+        sel_mock = MagicMock()
+        monkeypatch.setattr(chat_runner, "sel", lambda: sel_mock)
+
+        out, n = chat_runner._expand_dollar_skills("$does-not-exist hi", state, slot, "sess")
+        assert (out, n) == ("$does-not-exist hi", 0)
+        state.push_slots_update.assert_not_called()
+        # a real $skill-shaped token that didn't resolve IS audited as not_found
+        assert sel_mock.log_tool_invocation.called
+        _, kwargs = sel_mock.log_tool_invocation.call_args
+        assert kwargs.get("outcome") == "not_found"
+        assert kwargs.get("tool_name") == "skill_dollar_expansion"
+
+    def test_incidental_dollar_not_audited(self, tmp_path, monkeypatch):
+        from kiro_claw.dashboard import chat_runner
+
+        state = self._state_with_skills(
+            tmp_path,
+            monkeypatch,
+            ("oncall-handover", "---\nname: oncall-handover\n---\nBODY"),
+        )
+        slot = _ChatSlot("s1")
+        sel_mock = MagicMock()
+        monkeypatch.setattr(chat_runner, "sel", lambda: sel_mock)
+
+        # $5 / $PATH / bare $ are NOT skill-shaped → no not_found noise.
+        out, n = chat_runner._expand_dollar_skills("it costs $5 not $PATH", state, slot, "sess")
+        assert (out, n) == ("it costs $5 not $PATH", 0)
+        sel_mock.log_tool_invocation.assert_not_called()
+
+    def test_credentials_redacted_in_loaded_body(self, tmp_path, monkeypatch):
+        from kiro_claw.dashboard.chat_runner import _expand_dollar_skills
+
+        secret = "AKIAIOSFODNN7EXAMPLE"
+        state = self._state_with_skills(
+            tmp_path,
+            monkeypatch,
+            ("leaky", f"---\nname: leaky\n---\n# Leaky\naws_key={secret}"),
+        )
+        slot = _ChatSlot("s1")
+        out, n = _expand_dollar_skills("use $leaky", state, slot, "sess")
+        assert n == 1
+        # the raw credential must not survive into the expanded message
+        assert secret not in out
+
+    def test_resolution_exception_audited_and_swallowed(self, tmp_path, monkeypatch):
+        from kiro_claw.dashboard import chat_runner
+
+        state = self._state_with_skills(tmp_path, monkeypatch)
+        slot = _ChatSlot("s1")
+
+        boom = MagicMock()
+        boom.resolve_dollar_skills.side_effect = RuntimeError("kaboom")
+        # Force _get_skills(state) to return the exploding loader.
+        monkeypatch.setattr(chat_runner, "_get_skills", lambda _s: boom)
+
+        sel_mock = MagicMock()
+        monkeypatch.setattr(chat_runner, "sel", lambda: sel_mock)
+
+        out, n = chat_runner._expand_dollar_skills("try $whatever", state, slot, "sess")
+        # message returned unchanged, no crash
+        assert (out, n) == ("try $whatever", 0)
+        # the failure was audited via SEL with outcome="error"
+        assert sel_mock.log_tool_invocation.called
+        _, kwargs = sel_mock.log_tool_invocation.call_args
+        assert kwargs.get("outcome") == "error"
+        assert kwargs.get("tool_name") == "skill_dollar_expansion"

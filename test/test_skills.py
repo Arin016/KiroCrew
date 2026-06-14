@@ -9,14 +9,18 @@ from kiro_claw.skills import SkillsLoader
 
 
 @pytest.fixture(autouse=True)
-def _isolate_extra_paths(monkeypatch):
-    """SkillsLoader.__init__ reads global config for ``skills.extra_paths``;
-    isolate it so a developer's local ~/.kiroclaw extra_paths don't bleed into
-    these hermetic loader tests. Tests that need extra_paths pass ``config=``."""
+def _isolate_extra_paths(monkeypatch, tmp_path_factory):
+    """SkillsLoader.__init__ reads global config for ``skills.extra_paths`` and
+    the AIM skills root (``~/.aim/skills``); isolate both so a developer's local
+    ~/.kiroclaw extra_paths / installed AIM skills don't bleed into these
+    hermetic loader tests. Tests that need extra_paths pass ``config=``; tests
+    that need AIM resolution monkeypatch ``kiro_claw.skills.aim_skills_dir``."""
     monkeypatch.setattr(
         KiroClawConfig, "load",
         classmethod(lambda cls: KiroClawConfig(skills=SkillsConfig(extra_paths=[]))),
     )
+    _no_aim = tmp_path_factory.mktemp("no_aim") / "absent"
+    monkeypatch.setattr("kiro_claw.skills.aim_skills_dir", lambda: _no_aim)
 
 
 def _create_skill(skills_dir, name, content):
@@ -1016,3 +1020,178 @@ class TestTriggerPerformance:
 
         triggered = loader.get_triggered_skills("shorten url")
         assert len(triggered) == 2
+
+
+class TestResolveDollarSkills:
+    """$skillname inline trigger resolution (allowlist, all sources)."""
+
+    def _loader(self, tmp_path, **extra):
+        skills_dir = tmp_path / "skills"
+        _create_skill(
+            skills_dir,
+            "oncall-handover",
+            "---\nname: oncall-handover\ndescription: Handover\n---\n# Handover\nBody A.",
+        )
+        _create_skill(
+            skills_dir,
+            "nested/ticket-pull",
+            "---\nname: nested/ticket-pull\ndescription: Pull\n---\n# Pull\nBody B.",
+        )
+        return SkillsLoader(skills_path=skills_dir, install_builtins=False, **extra)
+
+    def test_basic_match_leaves_token_resolves_body(self, tmp_path):
+        loader = self._loader(tmp_path)
+        out = loader.resolve_dollar_skills("please $oncall-handover now")
+        assert len(out) == 1
+        token, name, body = out[0]
+        assert token == "oncall-handover"
+        assert name == "oncall-handover"
+        assert "Body A." in body
+        # frontmatter stripped
+        assert "description:" not in body
+
+    def test_nested_key_resolved_by_leaf(self, tmp_path):
+        loader = self._loader(tmp_path)
+        out = loader.resolve_dollar_skills("run $ticket-pull")
+        assert len(out) == 1
+        assert out[0][1] == "nested/ticket-pull"
+
+    def test_multiple_tokens_anywhere(self, tmp_path):
+        loader = self._loader(tmp_path)
+        out = loader.resolve_dollar_skills("start $oncall-handover then $ticket-pull")
+        names = [n for _t, n, _b in out]
+        assert names == ["oncall-handover", "nested/ticket-pull"]
+
+    def test_dedupe_repeated_token(self, tmp_path):
+        loader = self._loader(tmp_path)
+        out = loader.resolve_dollar_skills("$oncall-handover and again $oncall-handover")
+        assert len(out) == 1
+
+    def test_unknown_token_skipped(self, tmp_path):
+        loader = self._loader(tmp_path)
+        assert loader.resolve_dollar_skills("$does-not-exist hello") == []
+
+    def test_no_dollar_returns_empty(self, tmp_path):
+        loader = self._loader(tmp_path)
+        assert loader.resolve_dollar_skills("plain message no trigger") == []
+
+    def test_path_traversal_token_matches_nothing(self, tmp_path):
+        loader = self._loader(tmp_path)
+        # allowlist-only: no path is constructed from the token
+        assert loader.resolve_dollar_skills("$../../etc/passwd") == []
+
+    def test_uppercase_midtoken_truncates_match(self, tmp_path):
+        loader = self._loader(tmp_path)
+        # The $ charset is [a-z0-9/_-]: an uppercase letter ENDS the token. So
+        # "$oncall-Handover" tokenizes as "oncall-" (trailing hyphen, no skill),
+        # not "oncall-handover" — hence no match. (This is about charset
+        # boundaries, NOT case-insensitive matching; see
+        # test_leaf_match_is_case_insensitive for that.)
+        out = loader.resolve_dollar_skills("$oncall-Handover")
+        assert out == []
+
+    def test_leaf_match_is_case_insensitive(self, tmp_path):
+        # A skill whose leaf has uppercase letters is still matched by a
+        # lowercase $token, because the leaf→name map lowercases both sides.
+        skills_dir = tmp_path / "skills"
+        _create_skill(
+            skills_dir,
+            "MyHandover",
+            "---\nname: MyHandover\ndescription: d\n---\n# Body",
+        )
+        loader = SkillsLoader(skills_path=skills_dir, install_builtins=False)
+        out = loader.resolve_dollar_skills("$myhandover")
+        assert len(out) == 1
+        assert out[0][1].rsplit("/", 1)[-1].lower() == "myhandover"
+
+    def test_uppercase_env_like_token_ignored(self, tmp_path):
+        loader = self._loader(tmp_path)
+        # $PATH / $5 must not match skill slugs
+        assert loader.resolve_dollar_skills("echo $PATH and $5") == []
+
+    def test_cap_enforced(self, tmp_path, monkeypatch):
+        skills_dir = tmp_path / "skills"
+        for i in range(8):
+            _create_skill(
+                skills_dir,
+                f"skill{i}",
+                f"---\nname: skill{i}\ndescription: d{i}\n---\n# S{i}\nbody{i}",
+            )
+        loader = SkillsLoader(skills_path=skills_dir, install_builtins=False)
+        monkeypatch.setattr("kiro_claw.skills._MAX_DOLLAR_SKILLS", 5)
+        msg = " ".join(f"$skill{i}" for i in range(8))
+        out = loader.resolve_dollar_skills(msg)
+        assert len(out) == 5
+
+    def test_local_precedence_over_aim_extra_path(self, tmp_path):
+        # Same leaf in local skills dir and an AIM-style extra path → local wins.
+        local = tmp_path / "skills"
+        _create_skill(local, "oncall-handover", "---\nname: oncall-handover\n---\nLOCAL")
+        aim = tmp_path / "aim"
+        _create_skill(
+            aim, "WorkforceEmploymentKnowledgeBase/oncall-handover",
+            "---\nname: WFE/oncall-handover\n---\nAIM",
+        )
+        cfg = KiroClawConfig(skills=SkillsConfig(extra_paths=[str(aim)]))
+        loader = SkillsLoader(skills_path=local, install_builtins=False, config=cfg)
+        out = loader.resolve_dollar_skills("$oncall-handover")
+        assert len(out) == 1
+        assert "LOCAL" in out[0][2]
+
+    def test_aim_only_skill_resolves(self, tmp_path):
+        aim = tmp_path / "aim"
+        _create_skill(
+            aim, "WorkforceEmploymentKnowledgeBase/alarm-investigation",
+            "---\nname: WFE/alarm-investigation\n---\nAIM ALARM",
+        )
+        cfg = KiroClawConfig(skills=SkillsConfig(extra_paths=[str(aim)]))
+        loader = SkillsLoader(skills_path=tmp_path / "skills", install_builtins=False, config=cfg)
+        out = loader.resolve_dollar_skills("check $alarm-investigation")
+        assert len(out) == 1
+        assert out[0][1] == "WorkforceEmploymentKnowledgeBase/alarm-investigation"
+        assert "AIM ALARM" in out[0][2]
+
+    def test_implicit_aim_skills_root_resolves(self, tmp_path, monkeypatch):
+        # An AIM-installed skill under ~/.aim/skills/<pkg>/<leaf> must resolve via
+        # $leaf WITHOUT being in extra_paths — the loader implicitly includes the
+        # AIM root so the $skill resolver matches what the /api/skills picker
+        # offers (Mesh-588 frontend/backend parity).
+        aim_root = tmp_path / "aim_skills"
+        _create_skill(
+            aim_root, "HoangvpPrivatePackage/personal-kb-sync",
+            "---\nname: personal-kb-sync\ndescription: Sync\n---\n# Sync\nAIM KB BODY",
+        )
+        monkeypatch.setattr("kiro_claw.skills.aim_skills_dir", lambda: aim_root)
+        # No extra_paths configured — resolution must come from the implicit AIM root.
+        loader = SkillsLoader(skills_path=tmp_path / "skills", install_builtins=False)
+        out = loader.resolve_dollar_skills("run $personal-kb-sync")
+        assert len(out) == 1
+        assert out[0][1] == "HoangvpPrivatePackage/personal-kb-sync"
+        assert "AIM KB BODY" in out[0][2]
+
+    def test_local_skill_wins_over_aim_root_on_leaf_collision(self, tmp_path, monkeypatch):
+        # Local skills dir and the implicit AIM root both have a `grill` leaf →
+        # local wins (AIM root is appended last, _iter dedupes by first-seen).
+        aim_root = tmp_path / "aim_skills"
+        _create_skill(aim_root, "SomePkg/grill", "---\nname: grill\n---\nAIM GRILL")
+        monkeypatch.setattr("kiro_claw.skills.aim_skills_dir", lambda: aim_root)
+        local = tmp_path / "skills"
+        _create_skill(local, "grill", "---\nname: grill\n---\nLOCAL GRILL")
+        loader = SkillsLoader(skills_path=local, install_builtins=False)
+        out = loader.resolve_dollar_skills("$grill")
+        assert len(out) == 1
+        assert "LOCAL GRILL" in out[0][2]
+
+    def test_has_dollar_candidate(self, tmp_path):
+        loader = self._loader(tmp_path)
+        # real $skill-shaped tokens
+        assert loader.has_dollar_candidate("run $oncall-handover")
+        assert loader.has_dollar_candidate("$does-not-exist still counts")
+        assert loader.has_dollar_candidate("$a/b nested")
+        # incidental $ that the lowercase-led charset rejects
+        assert not loader.has_dollar_candidate("it costs $5")
+        assert not loader.has_dollar_candidate("price $42 today")
+        assert not loader.has_dollar_candidate("echo $PATH")
+        assert not loader.has_dollar_candidate("bare $ sign")
+        assert not loader.has_dollar_candidate("no dollar here")
+        assert not loader.has_dollar_candidate("")

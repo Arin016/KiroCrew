@@ -61,7 +61,12 @@ from kiro_claw.dashboard.chat_utils import (
     _remove_queued_by_id,
     _validate_tool_name,
 )
-from kiro_claw.dashboard.handlers import MAX_PROMPT_BYTES, _find_prompt, _list_aim_prompts
+from kiro_claw.dashboard.handlers import (
+    MAX_PROMPT_BYTES,
+    _find_prompt,
+    _get_skills,
+    _list_aim_prompts,
+)
 from kiro_claw.dashboard.handlers.usage import persist_token_record_async
 from kiro_claw.dashboard.state import (
     CRON_NOTIFY_PREFIX,
@@ -936,6 +941,78 @@ def _expand_prompt_mention(
     return expanded, "ok"
 
 
+def _expand_dollar_skills(
+    message: str,
+    state: DashboardState,
+    slot: _ChatSlot,
+    session_key: str,
+) -> tuple[str, int]:
+    """Expand ``$skillname`` tokens anywhere in *message* into appended skill bodies.
+
+    Leaves the literal ``$token`` in place (decision (a)) and appends a
+    ``[Skill: name]`` block per resolved skill after the user's message, so the
+    agent sees both the user's intent marker and the loaded procedure. Unknown
+    tokens are left untouched.
+
+    Resolution + security live in ``SkillsLoader.resolve_dollar_skills`` (allowlist
+    match, no path construction — per ARCC BSC1). This function adds the runner-side
+    concerns: redaction of the loaded content, a user-visible chip, and SEL audit.
+
+    Returns ``(expanded_message, count)`` where *count* is the number of skills
+    appended (0 if none resolved).
+    """
+    if "$" not in message:
+        return message, 0
+    skills = _get_skills(state)
+    try:
+        resolved = skills.resolve_dollar_skills(message)
+    except Exception:
+        logger.exception("dollar-skill resolution failed")
+        # Audit the failed resolution attempt — the security-controls guideline
+        # requires every tool invocation/permission decision to emit a SEL event,
+        # including failures (mirrors the prompt-expansion not_found/error path).
+        sel().log_tool_invocation(
+            session_key=session_key,
+            agent=slot.agent or "kiroclaw",
+            source="dashboard",
+            tool_name="skill_dollar_expansion",
+            tool_kind="prompt",
+            outcome="error",
+            metadata={"reason": "exception", "slot": slot.key},
+        )
+        return message, 0
+    if not resolved:
+        if skills.has_dollar_candidate(message):
+            sel().log_tool_invocation(
+                session_key=session_key,
+                agent=slot.agent or "kiroclaw",
+                source="dashboard",
+                tool_name="skill_dollar_expansion",
+                tool_kind="prompt",
+                outcome="not_found",
+                metadata={"slot": slot.key},
+            )
+        return message, 0
+
+    blocks: list[str] = []
+    names: list[str] = []
+    for _token, name, body in resolved:
+        body, _ = redact_credentials(body)
+        body, _ = redact_exfiltration_urls(body)
+        blocks.append(f"[Skill: {name}]\n\n{body}")
+        names.append(name)
+
+    expanded = message + "\n\n" + "\n\n---\n\n".join(blocks)
+
+    slot.append(
+        "system",
+        f"📎 Loaded skill(s) via `$`: **{', '.join(names)}**",
+        "msg msg-info",
+    )
+    state.push_slots_update()
+    return expanded, len(names)
+
+
 def _should_suppress_requeue(slot) -> bool:
     """Return True if a stop is active and re-queue should be suppressed."""
     if slot._stop_state != "idle":
@@ -1299,10 +1376,12 @@ async def _run_chat(
             pass
 
         # ── @prompt expansion: resolve @name to SOP/prompt content ──
+        prompt_expanded = False
         if message.startswith("@") and not is_slash and _prompt_depth < 1:
             original = message
             message, _status = _expand_prompt_mention(message, state, slot)
             if _status == "ok":
+                prompt_expanded = True
                 sel().log_tool_invocation(
                     session_key=session_key,
                     agent=slot.agent or "kiroclaw",
@@ -1339,6 +1418,27 @@ async def _run_chat(
                     tool_kind="prompt",
                     outcome="not_found",
                     metadata={"mention": original.split()[0], "slot": slot.key},
+                )
+
+        # ── $skill expansion: resolve $name tokens anywhere → append skill body ──
+        # Operates ONLY on the user's typed message, never on @prompt-substituted
+        # content: `prompt_expanded` is True when an @prompt body replaced `message`
+        # above (at the same _prompt_depth=0), so we skip $skill here to prevent a
+        # prompt author's embedded $tokens from silently loading extra skills into
+        # the context (expand-what-the-user-typed, principle of least surprise).
+        # Skipped for slash commands; _prompt_depth<1 blocks the recursive _run_chat
+        # path. Token is left literal; resolved bodies are appended.
+        if "$" in message and not is_slash and not prompt_expanded and _prompt_depth < 1:
+            message, _n_skills = _expand_dollar_skills(message, state, slot, session_key)
+            if _n_skills:
+                sel().log_tool_invocation(
+                    session_key=session_key,
+                    agent=slot.agent or "kiroclaw",
+                    source="dashboard",
+                    tool_name="skill_dollar_expansion",
+                    tool_kind="prompt",
+                    outcome="ok",
+                    metadata={"count": str(_n_skills), "slot": slot.key},
                 )
 
         if is_slash:
