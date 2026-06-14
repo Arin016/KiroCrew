@@ -8,8 +8,10 @@ import json
 import logging
 import math
 import os
+import platform
 import shlex
 import shutil
+import subprocess
 from pathlib import Path
 
 from aiohttp import web
@@ -20,12 +22,13 @@ from kiro_claw.agent import build_agent_config
 from kiro_claw.config.loader import (
     _VALID_STT_PROVIDERS,
     KiroClawConfig,
+    config_path,
 )
 from kiro_claw.context_management import RESULT_FILE_MAX_BYTES
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.dashboard.token_auth import MAX_SESSION_TTL_SECS, generate_token, parse_duration
 from kiro_claw.security import SUSPICIOUS_BASH_PATTERNS
-from kiro_claw.transcribe import ensure_ffmpeg_in_path
+from kiro_claw.transcribe import ensure_ffmpeg_in_path, is_available
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +111,50 @@ _STT_MODEL_SIZES: dict[str, str] = {
     "turbo": "~1.6 GB",
 }
 
+# Curated MLX model repos surfaced in the STT picker and accepted on PUT.
+# Maps Hugging Face repo -> approximate on-disk download size.
+_STT_MLX_MODELS: dict[str, str] = {
+    "mlx-community/whisper-large-v3-turbo": "~809 MB",
+}
+
+
+def _is_apple_silicon() -> bool:
+    """True if running on Apple Silicon hardware.
+
+    ``platform.machine()`` reports ``x86_64`` when the interpreter runs under
+    Rosetta 2 — which KiroClaw's bundled Python does — so it cannot be used to
+    detect the host CPU. The ``hw.optional.arm64`` sysctl reports the true
+    hardware capability regardless of translation.
+    """
+    if platform.system() != "Darwin":
+        return False
+    if platform.machine() == "arm64":
+        return True
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "hw.optional.arm64"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        return out.stdout.strip() == "1"
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _stt_providers() -> list[str]:
+    """STT provider values offered to the UI.
+
+    ``mlx`` (Whisper on Apple's MLX framework) only runs on Apple Silicon, so
+    it is omitted entirely on every other platform rather than being shown as
+    an unusable option. This is the single source of truth for which providers
+    are advertised (GET) and accepted (PUT).
+    """
+    providers = list(_VALID_STT_PROVIDERS)
+    if not _is_apple_silicon() and "mlx" in providers:
+        providers.remove("mlx")
+    return providers
+
 
 # Common BCP-47 language codes surfaced in the Chat Settings STT picker.
 # The handler accepts any string value on PUT — this list only drives the UI
@@ -132,8 +179,6 @@ _stt_install_status: dict[str, str] = {"step": "idle", "detail": "", "error": ""
 
 async def api_stt_config(request: web.Request) -> web.Response:
     """GET/PUT /api/config/stt — speech-to-text settings."""
-    from kiro_claw.config.loader import KiroClawConfig, config_path  # noqa: F811
-
     cfg = KiroClawConfig.load()
     if request.method == "PUT":
         try:
@@ -148,10 +193,12 @@ async def api_stt_config(request: web.Request) -> web.Response:
         stt = data.setdefault("stt", {})
         if "enabled" in body:
             stt["enabled"] = bool(body["enabled"])
-        if "provider" in body and body["provider"] in _VALID_STT_PROVIDERS:
+        if "provider" in body and body["provider"] in _stt_providers():
             stt["provider"] = body["provider"]
         if "model" in body and body["model"] in _STT_MODEL_SIZES:
             stt["model"] = body["model"]
+        if "mlx_model" in body and isinstance(body["mlx_model"], str) and body["mlx_model"] in _STT_MLX_MODELS:
+            stt["mlx_model"] = body["mlx_model"]
         if "transcribe_region" in body and isinstance(body["transcribe_region"], str):
             stt["transcribe_region"] = body["transcribe_region"]
         if "transcribe_profile" in body and isinstance(body["transcribe_profile"], str):
@@ -164,46 +211,65 @@ async def api_stt_config(request: web.Request) -> web.Response:
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         cfg = KiroClawConfig.load()
 
-    from kiro_claw.transcribe import is_available as _stt_available  # noqa: F811
-
     provider = cfg.stt.provider
-    available = _stt_available(cfg.stt)
+    available = is_available(cfg.stt)
     return web.json_response(
         {
             "enabled": cfg.stt.enabled,
             "provider": provider,
             "model": cfg.stt.model,
+            "mlx_model": cfg.stt.mlx_model,
             "available": available,
             "streaming": cfg.stt.streaming,
             "transcribe_region": cfg.stt.transcribe_region,
             "transcribe_profile": cfg.stt.transcribe_profile,
             "language_code": cfg.stt.language_code,
             "models": _STT_MODEL_SIZES,
+            "mlx_models": _STT_MLX_MODELS,
+            "providers": _stt_providers(),
             "language_codes": list(_STT_LANGUAGE_CODES),
             "install_step": _stt_install_status["step"],
             "install_detail": _stt_install_status["detail"],
             "install_error": _stt_install_status["error"],
-            "prereqs": _stt_prereq_commands(),
+            "prereqs": _stt_prereq_commands(provider),
         }
     )
 
 
-def _stt_prereq_commands() -> list[str]:
-    """Return shell commands the user must run manually (need sudo/GUI)."""
-    import platform  # noqa: F811
+def _stt_prereq_commands(provider: str = "whisper") -> list[str]:
+    """Return shell commands the user must run manually (need sudo/GUI).
 
+    The ``mlx`` provider has its own lightweight prerequisite (``pipx install
+    mlx-whisper``) and only needs ffmpeg beyond that — it does not require the
+    system-python/whisper toolchain.
+    """
     ensure_ffmpeg_in_path()
 
     system = platform.system()
     cmds: list[str] = []
     has_ffmpeg = shutil.which("ffmpeg") is not None
+
+    if provider == "mlx":
+        # mlx is only advertised on Apple Silicon (see _stt_providers); on any
+        # other platform there are no prerequisites to surface.
+        if not _is_apple_silicon():
+            return []
+        # The Install button (see _build_stt_install_script) installs ffmpeg,
+        # pipx, and mlx-whisper itself. The only thing it cannot bootstrap
+        # non-interactively is Homebrew, so that is the sole manual prereq —
+        # listing the others here would duplicate the button.
+        if not shutil.which("brew"):
+            return [
+                '/bin/bash -c "$(curl -fsSL'
+                ' https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+            ]
+        return []
+
     has_python = _find_suitable_python() is not None
 
     if system == "Darwin":
-        import subprocess as _sp  # noqa: F811
-
         try:
-            _sp.run(["/usr/bin/xcrun", "--show-sdk-path"], capture_output=True, timeout=5)
+            subprocess.run(["/usr/bin/xcrun", "--show-sdk-path"], capture_output=True, timeout=5)
         except Exception:
             cmds.append("sudo xcodebuild -license accept")
         if not shutil.which("brew"):
@@ -258,23 +324,21 @@ def _is_al2023() -> bool:
 
 def _find_suitable_python() -> str | None:
     """Find a non-free-threaded python3 >= 3.10 with pip."""
-    import subprocess as _sp  # noqa: F811
-
     for name in ("python3.12", "python3.11", "python3", "python3.13", "python3.10"):
         p = shutil.which(name)
         if not p:
             continue
         try:
-            ver = _sp.check_output(
+            ver = subprocess.check_output(
                 [p, "-c", "import sys; print(sys.version)"], timeout=5, text=True
             )
             if "free-threading" in ver:
                 continue
-            _sp.check_output(
+            subprocess.check_output(
                 [p, "-m", "pip", "--version"],
                 timeout=5,
                 text=True,
-                stderr=_sp.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             return p
         except Exception:
@@ -285,15 +349,29 @@ def _find_suitable_python() -> str | None:
 async def api_stt_install(request: web.Request) -> web.Response:
     """POST /api/stt/install — install openai-whisper + ffmpeg."""
     global _stt_install_status
+    caller = request.get("user", "dashboard")
     if _stt_install_status["step"] not in ("idle", "done", "error"):
+        _sel().log_api_access(
+            caller=caller,
+            operation="stt.install",
+            outcome="denied",
+            error=f"install already in progress: {_stt_install_status['step']}",
+        )
         return web.json_response(
             {"error": f"Install already in progress: {_stt_install_status['step']}"}, status=409
         )
 
     _stt_install_status = {"step": "starting", "detail": "", "error": ""}
 
-    # Native install via shell script
-    script = _build_stt_install_script()
+    # Native install via shell script, tailored to the configured provider.
+    provider = KiroClawConfig.load().stt.provider
+    _sel().log_api_access(
+        caller=caller,
+        operation="stt.install",
+        outcome="started",
+        resources=f"provider={provider}",
+    )
+    script = _build_stt_install_script(provider)
     try:
         proc = await asyncio.create_subprocess_exec(
             "bash",
@@ -320,6 +398,8 @@ async def api_stt_install(request: web.Request) -> web.Response:
                 _stt_install_status = {"step": "installing_ffmpeg", "detail": line, "error": ""}
             elif "Installing openai-whisper" in line:
                 _stt_install_status = {"step": "installing_whisper", "detail": line, "error": ""}
+            elif "Installing mlx-whisper" in line:
+                _stt_install_status = {"step": "installing_mlx", "detail": line, "error": ""}
             elif "No suitable python3" in line:
                 _stt_install_status = {"step": "installing_python", "detail": line, "error": ""}
             elif "Using:" in line:
@@ -333,9 +413,22 @@ async def api_stt_install(request: web.Request) -> web.Response:
         output = "\n".join(lines[-20:])
         if proc.returncode != 0:
             _stt_install_status = {"step": "error", "detail": "", "error": output[-500:]}
+            _sel().log_api_access(
+                caller=caller,
+                operation="stt.install",
+                outcome="failed",
+                resources=f"provider={provider}",
+                error=output[-500:],
+            )
             return web.json_response({"ok": False, "error": output[-500:]}, status=500)
 
         _stt_install_status = {"step": "done", "detail": "Whisper ready", "error": ""}
+        _sel().log_api_access(
+            caller=caller,
+            operation="stt.install",
+            outcome="success",
+            resources=f"provider={provider}",
+        )
         return web.json_response(
             {
                 "ok": True,
@@ -350,14 +443,54 @@ async def api_stt_install(request: web.Request) -> web.Response:
         except OSError:
             pass
         _stt_install_status = {"step": "error", "detail": "", "error": "Install timed out (10min)"}
+        _sel().log_api_access(
+            caller=caller,
+            operation="stt.install",
+            outcome="failed",
+            resources=f"provider={provider}",
+            error="install timed out",
+        )
         return web.json_response({"ok": False, "error": "Install timed out"}, status=500)
     except FileNotFoundError:
         _stt_install_status = {"step": "error", "detail": "", "error": "bash not found"}
+        _sel().log_api_access(
+            caller=caller,
+            operation="stt.install",
+            outcome="failed",
+            resources=f"provider={provider}",
+            error="bash not found",
+        )
         return web.json_response({"ok": False, "error": "bash not found"}, status=500)
 
 
-def _build_stt_install_script() -> str:
-    """Shell script that installs whisper + ffmpeg on macOS and Linux."""
+def _build_stt_install_script(provider: str = "whisper") -> str:
+    """Shell script that installs the runtime for the selected STT provider.
+
+    - ``mlx``: installs mlx-whisper via pipx (Apple Silicon only) plus ffmpeg.
+    - ``whisper`` (default): installs openai-whisper + ffmpeg via brew or pip.
+    """
+    if provider == "mlx":
+        return r"""
+[ -d "$HOME/ffmpeg" ] && export PATH="$HOME/ffmpeg:$PATH"
+
+if ! command -v brew >/dev/null 2>&1; then
+    echo "ERROR: Homebrew required. Install from https://brew.sh/"
+    exit 1
+fi
+
+echo "Installing ffmpeg via brew..."
+brew install ffmpeg 2>&1 || true
+
+if ! command -v pipx >/dev/null 2>&1; then
+    echo "Installing pipx via brew..."
+    brew install pipx 2>&1 || { echo "ERROR: pipx install failed"; exit 1; }
+fi
+
+echo "Installing mlx-whisper via pipx..."
+pipx install --force mlx-whisper 2>&1 || { echo "ERROR: pipx install mlx-whisper failed"; exit 1; }
+
+echo "Done. mlx_whisper=$(command -v mlx_whisper 2>/dev/null || echo 'check PATH') ffmpeg=$(command -v ffmpeg 2>/dev/null || echo 'MISSING')"
+"""
     return r"""
 # Pick up ffmpeg from ~/ffmpeg if installed there
 [ -d "$HOME/ffmpeg" ] && export PATH="$HOME/ffmpeg:$PATH"

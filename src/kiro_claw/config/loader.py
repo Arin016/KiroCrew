@@ -1129,7 +1129,7 @@ class ChannelConfig:
         )
 
 
-_VALID_STT_PROVIDERS = ("whisper", "transcribe")
+_VALID_STT_PROVIDERS = ("whisper", "mlx", "transcribe")
 _VALID_CHANNEL_PREFIXES = ("C", "D", "G")
 
 
@@ -1265,6 +1265,13 @@ class SttConfig:
     model: str = field(
         default="turbo",
         metadata=_meta("Model", "Whisper model size.", enum=["turbo"]),
+    )
+    mlx_model: str = field(
+        default="mlx-community/whisper-large-v3-turbo",
+        metadata=_meta(
+            "MLX Model",
+            "Hugging Face repo for the mlx_whisper model (mlx provider only).",
+        ),
     )
     device: str = field(
         default="cpu",
@@ -1963,6 +1970,7 @@ class KiroClawConfig:
                 # Default changed from "base" to "turbo" — turbo is faster and
                 # recommended for most users (809M vs 74M, but much better latency).
                 model=stt_data.get("model", "turbo"),
+                mlx_model=stt_data.get("mlx_model", "mlx-community/whisper-large-v3-turbo"),
                 device=stt_data.get("device", "cpu"),
                 timeout_secs=stt_data.get("timeout_secs", 300),
                 transcribe_region=stt_data.get("transcribe_region", "us-east-1"),

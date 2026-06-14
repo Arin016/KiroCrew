@@ -71,6 +71,26 @@ device.
 5. Click **📦 Install Whisper** in the Speech-to-Text card — this installs
    the `openai-whisper` Python package and downloads the selected model.
 
+### MLX provider (Apple Silicon GPU)
+
+On Apple Silicon (M-series) Macs, the `mlx` provider runs Whisper on the Metal
+GPU via Apple's [MLX](https://github.com/ml-explore/mlx) framework — typically
+~5× faster than the CPU-based `whisper` provider. The `mlx` provider is
+selectable on every platform but only *available* on arm64 macOS; elsewhere the
+status badge stays "not installed".
+
+1. In the Speech-to-Text card, set **Provider** to `mlx`.
+2. Click **📦 Install** — this runs `pipx install mlx-whisper` plus `ffmpeg`
+   (the provider-aware install button installs the right runtime for whichever
+   provider is selected).
+3. The MLX model (`mlx_model`, default `mlx-community/whisper-large-v3-turbo`)
+   downloads from Hugging Face on first transcription and is cached under
+   `~/.cache/huggingface/hub/`.
+
+`mlx-whisper` is installed out-of-band via `pipx` rather than as a package
+dependency because the `mlx` wheel is arm64-only; KiroClaw invokes the
+`mlx_whisper` CLI as a subprocess, exactly like the `whisper` provider.
+
 ## Voice Output (Text-to-Speech)
 
 KiroClaw can speak responses aloud using AWS Polly. Two modes are available:

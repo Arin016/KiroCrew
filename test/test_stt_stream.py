@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
@@ -673,3 +674,92 @@ class TestDefensiveGuards:
         assert "stt_stream_start" in ops and "stt_stream_end" in ops, (
             f"both start and end audit events required; got {ops}"
         )
+
+
+class TestSttProviderGating:
+    """`mlx` is only offered on Apple Silicon, and the check must see through
+    Rosetta 2 (KiroClaw's bundled Python reports ``x86_64`` even on arm64)."""
+
+    def test_is_apple_silicon_false_off_darwin(self, monkeypatch):
+        from kiro_claw.dashboard.handlers import core
+
+        monkeypatch.setattr("platform.system", lambda: "Linux")
+        monkeypatch.setattr("platform.machine", lambda: "x86_64")
+        assert core._is_apple_silicon() is False
+
+    def test_is_apple_silicon_true_native_arm64(self, monkeypatch):
+        from kiro_claw.dashboard.handlers import core
+
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        monkeypatch.setattr("platform.machine", lambda: "arm64")
+        assert core._is_apple_silicon() is True
+
+    def test_is_apple_silicon_true_under_rosetta(self, monkeypatch):
+        """Darwin + ``x86_64`` interpreter, but ``hw.optional.arm64`` == 1."""
+        from kiro_claw.dashboard.handlers import core
+
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        monkeypatch.setattr("platform.machine", lambda: "x86_64")
+
+        def fake_run(*_a, **_kw):
+            return SimpleNamespace(stdout="1\n")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+        assert core._is_apple_silicon() is True
+
+    def test_is_apple_silicon_false_on_intel_mac(self, monkeypatch):
+        """Darwin + ``x86_64``; sysctl key absent/0 on a true Intel Mac."""
+        from kiro_claw.dashboard.handlers import core
+
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        monkeypatch.setattr("platform.machine", lambda: "x86_64")
+
+        def fake_run(*_a, **_kw):
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+        assert core._is_apple_silicon() is False
+
+    def test_providers_include_mlx_on_apple_silicon(self, monkeypatch):
+        from kiro_claw.dashboard.handlers import core
+
+        monkeypatch.setattr(core, "_is_apple_silicon", lambda: True)
+        assert core._stt_providers() == ["whisper", "mlx", "transcribe"]
+
+    def test_providers_exclude_mlx_off_apple_silicon(self, monkeypatch):
+        from kiro_claw.dashboard.handlers import core
+
+        monkeypatch.setattr(core, "_is_apple_silicon", lambda: False)
+        providers = core._stt_providers()
+        assert "mlx" not in providers
+        assert providers == ["whisper", "transcribe"]
+
+    def test_mlx_prereqs_empty_when_brew_present(self, monkeypatch):
+        """The Install button installs ffmpeg/pipx/mlx-whisper, so when brew is
+        present there are no manual prereqs to surface (no duplication)."""
+        from kiro_claw.dashboard.handlers import core
+
+        monkeypatch.setattr(core, "_is_apple_silicon", lambda: True)
+        monkeypatch.setattr(core, "ensure_ffmpeg_in_path", lambda: None)
+        monkeypatch.setattr("shutil.which", lambda _name: "/opt/homebrew/bin/brew")
+        assert core._stt_prereq_commands("mlx") == []
+
+    def test_mlx_prereqs_only_homebrew_when_brew_absent(self, monkeypatch):
+        """Homebrew is the one thing the Install button can't bootstrap."""
+        from kiro_claw.dashboard.handlers import core
+
+        monkeypatch.setattr(core, "_is_apple_silicon", lambda: True)
+        monkeypatch.setattr(core, "ensure_ffmpeg_in_path", lambda: None)
+        monkeypatch.setattr("shutil.which", lambda _name: None)
+        cmds = core._stt_prereq_commands("mlx")
+        assert len(cmds) == 1
+        assert "brew" in cmds[0] and "install.sh" in cmds[0]
+        # Must NOT duplicate what the Install button already does.
+        assert not any("pipx install mlx-whisper" in c for c in cmds)
+
+    def test_mlx_prereqs_empty_off_apple_silicon(self, monkeypatch):
+        from kiro_claw.dashboard.handlers import core
+
+        monkeypatch.setattr(core, "_is_apple_silicon", lambda: False)
+        monkeypatch.setattr(core, "ensure_ffmpeg_in_path", lambda: None)
+        assert core._stt_prereq_commands("mlx") == []

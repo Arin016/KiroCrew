@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -98,6 +99,36 @@ def _find_whisper(configured_path: str = "") -> str | None:
     return None
 
 
+_MLX_WHISPER_SEARCH_PATHS = [
+    os.path.expanduser("~/.local/bin/mlx_whisper"),
+    "/opt/homebrew/bin/mlx_whisper",
+    "/usr/local/bin/mlx_whisper",
+]
+
+
+def _find_mlx_whisper() -> str | None:
+    """Return the mlx_whisper binary path or None if not found.
+
+    mlx_whisper is the Apple-Silicon (Metal GPU) Whisper runtime. It is
+    installed out-of-band (e.g. ``pipx install mlx-whisper``) rather than as
+    a package dependency, because the ``mlx`` wheel only exists for arm64 and
+    would break builds/installs on every other architecture. We therefore
+    locate and invoke the CLI as a subprocess, mirroring ``_find_whisper``.
+    """
+    found = shutil.which("mlx_whisper")
+    if found:
+        return found
+    py3_bin = _python3_bin_dir()
+    if py3_bin:
+        p = os.path.join(py3_bin, "mlx_whisper")
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    for p in _MLX_WHISPER_SEARCH_PATHS:
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
 def is_available(stt_config=None) -> bool:  # type: ignore[no-untyped-def]
     """Check if STT is enabled in config and a provider is usable."""
     if stt_config is None:
@@ -120,6 +151,9 @@ def is_available(stt_config=None) -> bool:  # type: ignore[no-untyped-def]
         if not shutil.which("ffmpeg"):
             logger.warning("ffmpeg not found; .webm transcription will be unavailable")
         return True
+    if provider == "mlx":
+        ensure_ffmpeg_in_path()
+        return _find_mlx_whisper() is not None
     ensure_ffmpeg_in_path()
     return _find_whisper(stt_config.whisper_path) is not None
 
@@ -144,6 +178,9 @@ async def transcribe_audio(audio_path: str, stt_config=None) -> str | None:  # t
     provider = stt_config.provider
     if provider == "transcribe":
         result = await _transcribe_aws(audio_path, stt_config)
+    elif provider == "mlx":
+        ensure_ffmpeg_in_path()
+        result = await _transcribe_mlx(audio_path, stt_config)
     else:
         ensure_ffmpeg_in_path()
         result = await _transcribe_native(audio_path, stt_config)
@@ -321,23 +358,107 @@ def _collect_whisper_output(
     return txt_files[0].read_text().strip() or None
 
 
+async def _run_whisper_cli(
+    binary: str,
+    build_args,  # Callable[[str], list[str]]: out_dir -> CLI args (excluding binary)
+    timeout_secs: int,
+    label: str,
+) -> str | None:  # type: ignore[no-untyped-def]
+    """Run a Whisper-style CLI in an isolated subprocess and read its transcript.
+
+    Shared by ``_transcribe_native`` (openai-whisper) and ``_transcribe_mlx``
+    (mlx_whisper). Both CLIs are installed out-of-band and run under their own
+    Python interpreter, so we strip ``PYTHONPATH``/``PYTHONHOME`` to stop
+    KiroClaw's bundled packages (numpy, torch) from leaking into their runtime.
+    Each writes a ``.txt`` transcript into a temp ``out_dir`` we own and clean
+    up. ``build_args`` lets callers express their differing flags (the two CLIs
+    use hyphenated vs underscored option names).
+    """
+    out_dir = tempfile.mkdtemp()
+    proc = None
+    try:
+        clean_env = os.environ.copy()
+        clean_env.pop("PYTHONPATH", None)
+        clean_env.pop("PYTHONHOME", None)
+        proc = await asyncio.create_subprocess_exec(
+            binary,
+            *build_args(out_dir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=clean_env,
+        )
+        _stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout_secs
+        )
+        return _collect_whisper_output(proc.returncode, stderr, out_dir, label=label)
+    except asyncio.TimeoutError:
+        if proc is not None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            await proc.wait()
+        logger.error("%s transcription timed out after %ds", label, timeout_secs)
+        return None
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+
+# Defense in depth: ``mlx_model`` is read from config.json. The dashboard PUT
+# API validates it against an allowlist, but a hand- or tool-edited config could
+# inject an arbitrary value that is then passed to the mlx_whisper subprocess.
+# Constrain it to a HuggingFace ``owner/repo`` id (single slash, no path
+# traversal — the owner segment forbids dots) before use.
+_MLX_MODEL_RE = re.compile(r"^[A-Za-z0-9_-]+/[A-Za-z0-9._-]+$")
+
+
+async def _transcribe_mlx(audio_path: str, stt_config) -> str | None:  # type: ignore[no-untyped-def]
+    """Transcribe using the mlx_whisper CLI (Apple Silicon, Metal GPU).
+
+    mlx_whisper is installed out-of-band (the ``mlx`` wheel is arm64-only). Note
+    the hyphenated flags (``--output-dir``/``--output-format``), which differ
+    from the underscore flags used by the openai-whisper CLI.
+    """
+    mlx_bin = _find_mlx_whisper()
+    if not mlx_bin:
+        logger.error("mlx_whisper not found — install: pipx install mlx-whisper")
+        return None
+
+    model = stt_config.mlx_model
+    if not _MLX_MODEL_RE.match(model or ""):
+        logger.error(
+            "Refusing to run mlx_whisper: invalid mlx_model %r "
+            "(expected a HuggingFace 'owner/repo' id)",
+            model,
+        )
+        return None
+
+    return await _run_whisper_cli(
+        mlx_bin,
+        lambda out_dir: [
+            audio_path,
+            "--model",
+            model,
+            "--output-dir",
+            out_dir,
+            "--output-format",
+            "txt",
+        ],
+        stt_config.timeout_secs,
+        label="mlx_whisper",
+    )
+
+
 async def _transcribe_native(audio_path: str, stt_config) -> str | None:  # type: ignore[no-untyped-def]
-    """Transcribe using native whisper binary."""
+    """Transcribe using the native openai-whisper binary."""
     whisper_bin = _find_whisper(stt_config.whisper_path)
     if not whisper_bin:
         logger.error("whisper not found — install: pip install openai-whisper")
         return None
 
-    out_dir = tempfile.mkdtemp()
-    try:
-        # Build a clean environment for the whisper subprocess to prevent
-        # KiroClaw's bundled Python packages (numpy, torch) from leaking
-        # into whisper's own Python runtime via PYTHONPATH/PYTHONHOME.
-        clean_env = os.environ.copy()
-        clean_env.pop("PYTHONPATH", None)
-        clean_env.pop("PYTHONHOME", None)
-        proc = await asyncio.create_subprocess_exec(
-            whisper_bin,
+    return await _run_whisper_cli(
+        whisper_bin,
+        lambda out_dir: [
             audio_path,
             "--model",
             stt_config.model,
@@ -349,21 +470,7 @@ async def _transcribe_native(audio_path: str, stt_config) -> str | None:  # type
             "txt",
             "--fp16",
             "False",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=clean_env,
-        )
-        _stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=stt_config.timeout_secs
-        )
-        return _collect_whisper_output(proc.returncode, stderr, out_dir)
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        await proc.wait()
-        logger.error("Transcription timed out after %ds", stt_config.timeout_secs)
-        return None
-    finally:
-        shutil.rmtree(out_dir, ignore_errors=True)
+        ],
+        stt_config.timeout_secs,
+        label="whisper",
+    )

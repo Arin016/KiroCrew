@@ -10,6 +10,7 @@ import pytest
 
 from kiro_claw.config.loader import SttConfig
 from kiro_claw.transcribe import (
+    _find_mlx_whisper,
     _find_whisper,
     _ProfileCredentialResolver,
     is_available,
@@ -63,10 +64,36 @@ class TestFindWhisper:
 
 
 # ---------------------------------------------------------------------------
-# is_available
+# _find_mlx_whisper
 # ---------------------------------------------------------------------------
 
 
+class TestFindMlxWhisper:
+    def test_found_on_path(self):
+        with patch("kiro_claw.transcribe.shutil.which", return_value="/usr/local/bin/mlx_whisper"):
+            assert _find_mlx_whisper() == "/usr/local/bin/mlx_whisper"
+
+    def test_not_found(self, monkeypatch):
+        with patch("kiro_claw.transcribe.shutil.which", return_value=None):
+            monkeypatch.setattr("kiro_claw.transcribe._python3_bin_dir", lambda: "")
+            monkeypatch.setattr("kiro_claw.transcribe._MLX_WHISPER_SEARCH_PATHS", ["/nonexistent"])
+            assert _find_mlx_whisper() is None
+
+    def test_found_in_search_paths(self, tmp_path, monkeypatch):
+        binary = tmp_path / "mlx_whisper"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        with patch("kiro_claw.transcribe.shutil.which", return_value=None):
+            monkeypatch.setattr("kiro_claw.transcribe._python3_bin_dir", lambda: "")
+            monkeypatch.setattr(
+                "kiro_claw.transcribe._MLX_WHISPER_SEARCH_PATHS", [str(binary)]
+            )
+            assert _find_mlx_whisper() == str(binary)
+
+
+# ---------------------------------------------------------------------------
+# is_available
+# ---------------------------------------------------------------------------
 class TestIsAvailable:
     def test_disabled(self):
         cfg = SttConfig(enabled=False)
@@ -88,6 +115,16 @@ class TestIsAvailable:
         mock_cfg.stt = SttConfig(enabled=False)
         with patch("kiro_claw.config.loader.KiroClawConfig.load", return_value=mock_cfg):
             assert is_available(None) is False
+
+    def test_mlx_available_when_binary_found(self):
+        cfg = SttConfig(enabled=True, provider="mlx")
+        with patch("kiro_claw.transcribe._find_mlx_whisper", return_value="/usr/bin/mlx_whisper"):
+            assert is_available(cfg) is True
+
+    def test_mlx_unavailable_when_binary_missing(self):
+        cfg = SttConfig(enabled=True, provider="mlx")
+        with patch("kiro_claw.transcribe._find_mlx_whisper", return_value=None):
+            assert is_available(cfg) is False
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +234,95 @@ class TestTranscribeAudio:
         mock_cfg.stt = SttConfig(enabled=False)
         with patch("kiro_claw.config.loader.KiroClawConfig.load", return_value=mock_cfg):
             result = await transcribe_audio("/tmp/test.webm", None)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_mlx_no_binary_returns_none(self, tmp_path):
+        audio = tmp_path / "test.webm"
+        audio.write_text("fake audio")
+        cfg = SttConfig(enabled=True, provider="mlx")
+        with patch("kiro_claw.transcribe._find_mlx_whisper", return_value=None):
+            result = await transcribe_audio(str(audio), cfg)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_mlx_invalid_model_rejected_before_subprocess(self, tmp_path):
+        """A malformed mlx_model (e.g. from a hand-edited config) must be
+        rejected before it is ever passed to the subprocess."""
+        audio = tmp_path / "test.webm"
+        audio.write_text("fake audio")
+        cfg = SttConfig(
+            enabled=True, provider="mlx", mlx_model="; rm -rf ~", timeout_secs=10
+        )
+        with patch("kiro_claw.transcribe._find_mlx_whisper", return_value="/usr/bin/mlx_whisper"):
+            with patch("kiro_claw.transcribe.asyncio.create_subprocess_exec") as spawn:
+                result = await transcribe_audio(str(audio), cfg)
+        assert result is None
+        spawn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mlx_successful_transcription(self, tmp_path):
+        audio = tmp_path / "test.webm"
+        audio.write_text("fake audio")
+        cfg = SttConfig(
+            enabled=True, provider="mlx", mlx_model="mlx-community/whisper-large-v3-turbo",
+            timeout_secs=10,
+        )
+
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+        captured: dict = {}
+
+        async def fake_exec(*args, **kwargs):
+            captured["args"] = args
+            out_dir = args[args.index("--output-dir") + 1]
+            Path(out_dir).joinpath("test.txt").write_text("Hola mundo")
+            return mock_proc
+
+        with patch("kiro_claw.transcribe._find_mlx_whisper", return_value="/usr/bin/mlx_whisper"):
+            with patch(
+                "kiro_claw.transcribe.asyncio.create_subprocess_exec", side_effect=fake_exec
+            ):
+                result = await transcribe_audio(str(audio), cfg)
+        assert result == "Hola mundo"
+        # The configured HF repo must be passed via --model.
+        assert "mlx-community/whisper-large-v3-turbo" in captured["args"]
+
+    @pytest.mark.asyncio
+    async def test_mlx_failure_returns_none(self, tmp_path):
+        audio = tmp_path / "test.webm"
+        audio.write_text("fake audio")
+        cfg = SttConfig(enabled=True, provider="mlx", timeout_secs=10)
+
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 1
+        mock_proc.communicate = AsyncMock(return_value=(b"", b"boom"))
+
+        with patch("kiro_claw.transcribe._find_mlx_whisper", return_value="/usr/bin/mlx_whisper"):
+            with patch(
+                "kiro_claw.transcribe.asyncio.create_subprocess_exec", return_value=mock_proc
+            ):
+                result = await transcribe_audio(str(audio), cfg)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_mlx_timeout_returns_none(self, tmp_path):
+        audio = tmp_path / "test.webm"
+        audio.write_text("fake audio")
+        cfg = SttConfig(enabled=True, provider="mlx", timeout_secs=1)
+
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
+
+        with patch("kiro_claw.transcribe._find_mlx_whisper", return_value="/usr/bin/mlx_whisper"):
+            with patch(
+                "kiro_claw.transcribe.asyncio.create_subprocess_exec", return_value=mock_proc
+            ):
+                with patch(
+                    "kiro_claw.transcribe.asyncio.wait_for", side_effect=asyncio.TimeoutError
+                ):
+                    result = await transcribe_audio(str(audio), cfg)
         assert result is None
 
 
@@ -363,6 +489,7 @@ class TestSttConfig:
         assert cfg.enabled is True
         assert cfg.whisper_path == ""
         assert cfg.model == "turbo"
+        assert cfg.mlx_model == "mlx-community/whisper-large-v3-turbo"
         assert cfg.device == "cpu"
         assert cfg.timeout_secs == 300
 
