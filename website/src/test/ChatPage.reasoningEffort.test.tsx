@@ -100,55 +100,86 @@ function renderDropdown(props: Partial<Parameters<typeof ReasoningEffortDropdown
 }
 
 describe('ReasoningEffortDropdown', () => {
-  beforeEach(() => { mockApi.effortLevels.mockClear() })
+  beforeEach(() => { mockApi.effortLevels.mockClear(); mockApi.chatSlotReasoningEffort.mockClear() })
 
-  it('renders all 6 levels incl xhigh from the ACP-reported list', async () => {
+  it('renders a slider over the concrete levels with the current value', async () => {
     renderDropdown()
-    // Levels are fetched async via useQuery — wait for xhigh to appear.
-    await vi.waitFor(() => expect(screen.getByTitle(/Set reasoning effort to xhigh/)).toBeInTheDocument())
-    expect(screen.getByTitle(/Use the model default effort/)).toBeInTheDocument()
-    expect(screen.getByTitle(/Set reasoning effort to low/)).toBeInTheDocument()
-    expect(screen.getByTitle(/Set reasoning effort to medium/)).toBeInTheDocument()
-    expect(screen.getByTitle('Set reasoning effort to high')).toBeInTheDocument()
-    expect(screen.getByTitle(/Set reasoning effort to max/)).toBeInTheDocument()
+    const slider = await screen.findByRole('slider', { name: 'Reasoning effort' })
+    // 5 concrete levels (low..max) -> index range 0..4, current 'high' = index 2.
+    await vi.waitFor(() => expect(slider.getAttribute('aria-valuemax')).toBe('4'))
+    expect(slider.getAttribute('aria-valuemin')).toBe('0')
+    expect(slider.getAttribute('aria-valuenow')).toBe('2')
+    expect(slider.getAttribute('aria-valuetext')).toBe('High')
   })
 
-  it('calls API and onClose on selection', async () => {
-    const onClose = vi.fn()
-    renderDropdown({ onClose })
-    fireEvent.click(screen.getByTitle(/Set reasoning effort to low/))
-    expect(onClose).toHaveBeenCalled()
-    await vi.waitFor(() => expect(mockApi.chatSlotReasoningEffort).toHaveBeenCalledWith('s1', 'low'))
+  it('persists the level for the slot when stepped up', async () => {
+    renderDropdown()
+    const slider = await screen.findByRole('slider', { name: 'Reasoning effort' })
+    await vi.waitFor(() => expect(slider.getAttribute('aria-valuemax')).toBe('4'))
+    // high (index 2) -> ArrowRight -> xhigh (index 3)
+    fireEvent.keyDown(slider, { key: 'ArrowRight' })
+    await vi.waitFor(() => expect(mockApi.chatSlotReasoningEffort).toHaveBeenCalledWith('s1', 'xhigh'))
   })
 
-  it('marks active level with check icon', () => {
+  it('reflects the active level as the slider value', async () => {
     renderDropdown({ currentEffort: 'max' })
-    const maxBtn = screen.getByTitle(/Set reasoning effort to max/)
-    expect(maxBtn.querySelector('.lucide-check')).toBeInTheDocument()
-    const lowBtn = screen.getByTitle(/Set reasoning effort to low/)
-    expect(lowBtn.querySelector('.lucide-check')).not.toBeInTheDocument()
+    const slider = await screen.findByRole('slider', { name: 'Reasoning effort' })
+    await vi.waitFor(() => expect(slider.getAttribute('aria-valuetext')).toBe('Max'))
   })
 
-  it('deduplicates default when API returns "default" string', async () => {
-    mockApi.effortLevels.mockResolvedValueOnce(['default', 'high', 'low', 'max', 'medium', 'xhigh'])
-    renderDropdown()
-    await vi.waitFor(() => expect(screen.getByTitle(/Set reasoning effort to xhigh/)).toBeInTheDocument())
-    const defaults = screen.getAllByTitle(/default/i)
-    expect(defaults).toHaveLength(1)
+  it('renders one tick mark per level boundary', async () => {
+    const { container } = renderDropdown()
+    await screen.findByRole('slider', { name: 'Reasoning effort' })
+    // 5 concrete levels -> 4 segments -> 5 tick marks
+    await vi.waitFor(() => expect(container.querySelectorAll('[aria-hidden] > span').length).toBe(5))
   })
 
   it('always shows the current effort even when absent from the reported list', async () => {
     // Slot is on 'xhigh' but this model only reports low/medium/high.
     mockApi.effortLevels.mockResolvedValueOnce(['low', 'medium', 'high'])
     renderDropdown({ currentEffort: 'xhigh' })
-    // The active level is still rendered and check-marked (reselectable).
-    const xhighBtn = await screen.findByTitle(/Set reasoning effort to xhigh/)
-    expect(xhighBtn).toBeInTheDocument()
-    expect(xhighBtn.querySelector('.lucide-check')).toBeInTheDocument()
+    const slider = await screen.findByRole('slider', { name: 'Reasoning effort' })
+    // concrete = [low, medium, high, xhigh] -> xhigh is the last index (3).
+    await vi.waitFor(() => expect(slider.getAttribute('aria-valuetext')).toBe('Extra High'))
+    expect(slider.getAttribute('aria-valuenow')).toBe('3')
   })
 
   it('fetches effort levels scoped to the slot', async () => {
     renderDropdown({ slot: 'slot-xyz' })
     await vi.waitFor(() => expect(mockApi.effortLevels).toHaveBeenCalledWith('slot-xyz'))
+  })
+
+  it('drops the "default" string from the concrete level set', async () => {
+    mockApi.effortLevels.mockResolvedValueOnce(['default', 'high', 'low', 'max', 'medium', 'xhigh'])
+    renderDropdown()
+    const slider = await screen.findByRole('slider', { name: 'Reasoning effort' })
+    // 5 concrete levels -> max index 4 (no stray 'default'/'' notch).
+    await vi.waitFor(() => expect(slider.getAttribute('aria-valuemax')).toBe('4'))
+  })
+
+  it('"Use model default" toggle reflects the empty effort and disables the slider', async () => {
+    renderDropdown({ currentEffort: '' })
+    const toggle = await screen.findByRole('switch', { name: 'Use model default' })
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    const slider = screen.getByRole('slider', { name: 'Reasoning effort' })
+    expect(slider.getAttribute('aria-disabled')).toBe('true')
+  })
+
+  it('toggling default on persists the empty sentinel; off persists a concrete level', async () => {
+    // Start explicit ('high') -> toggle on -> persists ''.
+    renderDropdown({ currentEffort: 'high' })
+    const toggle = await screen.findByRole('switch', { name: 'Use model default' })
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    fireEvent.click(toggle)
+    await vi.waitFor(() => expect(mockApi.chatSlotReasoningEffort).toHaveBeenCalledWith('s1', ''))
+  })
+
+  it('toggling default off persists the slider level (not empty)', async () => {
+    renderDropdown({ currentEffort: '' })
+    const toggle = await screen.findByRole('switch', { name: 'Use model default' })
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    fireEvent.click(toggle)
+    // default idx for an unset slot is 'high' (index 2 of low..max).
+    await vi.waitFor(() => expect(mockApi.chatSlotReasoningEffort).toHaveBeenCalledWith('s1', 'high'))
   })
 })

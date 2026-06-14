@@ -8,8 +8,8 @@
  * on when switching to session B. The fix keys browse mode by slot, so each
  * session keeps its own toggle and new sessions default to off.
  *
- * The Globe button (rendered by ChatInput) encodes its state in aria-label /
- * aria-pressed, which is what this test observes.
+ * Browse mode is a per-session Toggle (role="switch", aria-checked) inside the
+ * ChatInput "+" drop-up menu ("Browser use"), which is what this test observes.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
@@ -102,9 +102,12 @@ async function renderChat(activeSlot: string) {
   return store
 }
 
-/** The Globe button's aria-label flips with state; query it either way. */
-const globeBtn = () => screen.getByLabelText(/Browse mode (on|off)/i)
-const isOn = () => globeBtn().getAttribute('aria-pressed') === 'true'
+/** Browse mode lives in the ChatInput "+" drop-up as a Toggle ("Browser use").
+ *  Open the menu once per test; it stays open across slot switches (ChatInput
+ *  doesn't remount), so the switch keeps reflecting the active slot's state. */
+const openMenu = () => fireEvent.click(screen.getByTitle('Add files & options'))
+const browseToggle = () => screen.getByRole('switch', { name: 'Browser use' })
+const isOn = () => browseToggle().getAttribute('aria-checked') === 'true'
 
 async function switchSlot(store: ReturnType<typeof makeStore>, slot: string) {
   await act(async () => { store.dispatch({ type: 'chat/setActiveSlot', payload: slot }) })
@@ -119,30 +122,33 @@ beforeEach(() => {
 describe('ChatPage — per-session Browse toggle (Mesh-2055)', { timeout: 15_000 }, () => {
   it('defaults to off and toggles on for the active session', async () => {
     await renderChat('slot-a')
+    await act(async () => { openMenu() })
     expect(isOn()).toBe(false)
-    await act(async () => { fireEvent.click(globeBtn()) })
+    await act(async () => { fireEvent.click(browseToggle()) })
     expect(isOn()).toBe(true)
   })
 
   it('does not bleed an enabled toggle into another session', async () => {
     const store = await renderChat('slot-a')
+    await act(async () => { openMenu() })
     // Enable browse in slot-a.
-    await act(async () => { fireEvent.click(globeBtn()) })
+    await act(async () => { fireEvent.click(browseToggle()) })
     expect(isOn()).toBe(true)
-    // Switch to slot-b — it must be independent (off).
+    // Switch to slot-b — it must be independent (off). Menu stays open.
     await switchSlot(store, 'slot-b')
     expect(isOn()).toBe(false)
   })
 
   it('preserves each session\'s toggle when switching back', async () => {
     const store = await renderChat('slot-a')
+    await act(async () => { openMenu() })
     // slot-a ON.
-    await act(async () => { fireEvent.click(globeBtn()) })
+    await act(async () => { fireEvent.click(browseToggle()) })
     expect(isOn()).toBe(true)
     // slot-b stays OFF, then turn it ON independently.
     await switchSlot(store, 'slot-b')
     expect(isOn()).toBe(false)
-    await act(async () => { fireEvent.click(globeBtn()) })
+    await act(async () => { fireEvent.click(browseToggle()) })
     expect(isOn()).toBe(true)
     // Back to slot-a — still ON (its own state preserved).
     await switchSlot(store, 'slot-a')

@@ -10,39 +10,46 @@ vi.mock('../api/client', () => ({ api: new Proxy({}, { get: () => vi.fn() }) }))
 
 import ChatInput from '../components/ChatInput'
 
-const base = { value: '', onChange: vi.fn(), onSend: vi.fn() }
-const snipBtn = () => screen.queryByRole('button', { name: /snip/i })
+// Screenshot now lives inside the "+" drop-up menu ("Add files & options"),
+// which renders only when onUploadFiles is provided (ChatPage always passes both).
+const base = { value: '', onChange: vi.fn(), onSend: vi.fn(), onUploadFiles: vi.fn() }
+const openPlusMenu = () => fireEvent.click(screen.getByTitle('Add files & options'))
+const snipItem = () => screen.queryByRole('button', { name: /screenshot/i })
 
 beforeEach(() => {
   h.supported = true
   h.mobile = false
 })
 
-describe('ChatInput screen snip button', () => {
-  it('shows the button and fires onScreenshot when screen capture is supported', () => {
+describe('ChatInput screenshot action (in + menu)', () => {
+  it('shows Screenshot in the + menu and fires onScreenshot when screen capture is supported', () => {
     const onScreenshot = vi.fn()
     renderWithProviders(<ChatInput {...base} onScreenshot={onScreenshot} isMac={false} />)
-    const btn = snipBtn()
+    openPlusMenu()
+    const btn = snipItem()
     expect(btn).toBeInTheDocument()
     fireEvent.click(btn!)
     expect(onScreenshot).toHaveBeenCalledTimes(1)
   })
 
-  it('shows the button as a native macOS fallback when capture is unsupported', () => {
+  it('shows Screenshot as a native macOS fallback when capture is unsupported', () => {
     h.supported = false
     renderWithProviders(<ChatInput {...base} onScreenshot={vi.fn()} isMac={true} />)
-    expect(snipBtn()).toBeInTheDocument()
+    openPlusMenu()
+    expect(snipItem()).toBeInTheDocument()
   })
 
-  it('hides the button when capture is unsupported and not macOS', () => {
+  it('hides Screenshot when capture is unsupported and not macOS', () => {
     h.supported = false
     renderWithProviders(<ChatInput {...base} onScreenshot={vi.fn()} isMac={false} />)
-    expect(snipBtn()).toBeNull()
+    openPlusMenu()
+    expect(snipItem()).toBeNull()
   })
 
-  it('hides the button on mobile even when capture is supported', () => {
+  it('hides Screenshot on mobile even when capture is supported', () => {
     h.mobile = true
     renderWithProviders(<ChatInput {...base} onScreenshot={vi.fn()} isMac={true} />)
-    expect(snipBtn()).toBeNull()
+    openPlusMenu()
+    expect(snipItem()).toBeNull()
   })
 })

@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, memo } from 'react'
-import { ArrowUpFromLine, ArrowUp, Loader2, Plus, Crop, Bot, Mic, Square, ShieldCheck, BookOpen, Handshake, Rocket, X, ClipboardList, CheckCircle, Ban, Sparkles, Goal, Target, Lock, Globe, FolderOpen } from 'lucide-react'
+import { ArrowUpFromLine, ArrowUp, Loader2, Plus, Crop, Bot, Mic, Square, ShieldCheck, BookOpen, Handshake, Rocket, X, ClipboardList, CheckCircle, Ban, Sparkles, Goal, Target, Lock, Globe, FolderOpen, FileText } from 'lucide-react'
+import { Toggle } from './ui'
+import { createPortal } from 'react-dom'
 import { useMutation } from '@tanstack/react-query'
 import { useBranding } from '../hooks/useBranding'
 import { useAppSelector, useAppDispatch } from '../store'
@@ -34,6 +36,11 @@ import {
 } from '../utils/pasteTokens'
 import type { SendMode } from '../pages/chat/ChatSettings'
 import type { RootState } from '../store'
+
+// Upload picker accept hints. Client-side ONLY (UX) — the server validates type
+// (magic bytes), size, and runs malware scanning per ARCC SAX-04.
+const IMAGE_ACCEPT = 'image/png,image/jpeg,image/gif,image/webp,image/bmp,image/svg+xml'
+const FILE_ACCEPT = IMAGE_ACCEPT + ',.txt,.md,.json,.yaml,.yml,.xml,.csv,.log,.py,.js,.ts,.tsx,.jsx,.html,.css,.sh,.bash,.rb,.go,.rs,.java,.c,.cpp,.h,.hpp,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.rtf,.zip,.tar,.gz'
 
 const APPROVAL_DISPLAY: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
   normal: { label: 'Normal', icon: <ShieldCheck size={13} />, color: '' },
@@ -384,6 +391,36 @@ function ChatInput({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const wrapperRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // "+" drop-up menu (upload file / image + browse toggle).
+  const [plusOpen, setPlusOpen] = useState(false)
+  const plusWrapRef = useRef<HTMLDivElement>(null)
+  const plusBtnRef = useRef<HTMLButtonElement>(null)
+  const plusMenuRef = useRef<HTMLDivElement>(null)
+  const [plusRect, setPlusRect] = useState<DOMRect | null>(null)
+  useEffect(() => {
+    if (!plusOpen) return
+    // Menu is portaled to <body> (escapes the input's overflow-hidden), so the
+    // outside-click guard must also exclude the portaled menu, not just the button.
+    const h = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (!plusWrapRef.current?.contains(t) && !plusMenuRef.current?.contains(t)) setPlusOpen(false)
+    }
+    document.addEventListener('mousedown', h)
+    return () => document.removeEventListener('mousedown', h)
+  }, [plusOpen])
+  const togglePlus = () => {
+    if (!plusOpen && plusBtnRef.current) setPlusRect(plusBtnRef.current.getBoundingClientRect())
+    setPlusOpen(o => !o)
+  }
+  // Client-side `accept` is a UX hint only (ARCC SAX-04: server enforces type via
+  // magic bytes, size, and malware scanning — never trust the extension/MIME here).
+  const openPicker = (imageOnly: boolean) => {
+    const el = fileInputRef.current
+    if (!el) return
+    el.accept = imageOnly ? IMAGE_ACCEPT : FILE_ACCEPT
+    el.click()
+    setPlusOpen(false)
+  }
   const { botName } = useBranding()
   const isMobile = useIsMobile()
   const ime = useImeGuard()
@@ -1327,7 +1364,7 @@ function ChatInput({
         </div>
       )}
 
-      <input ref={fileInputRef} type="file" multiple accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,image/svg+xml,.txt,.md,.json,.yaml,.yml,.xml,.csv,.log,.py,.js,.ts,.tsx,.jsx,.html,.css,.sh,.bash,.rb,.go,.rs,.java,.c,.cpp,.h,.hpp,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.rtf,.zip,.tar,.gz" className="hidden" onChange={handleFileInputChange} />
+      <input ref={fileInputRef} type="file" multiple accept={FILE_ACCEPT} className="hidden" onChange={handleFileInputChange} />
 
       <SlashCommandMenu input={value} anchorRef={inputRef as React.RefObject<HTMLElement>} open={slashMenuOpen} onSelect={cmd => { onChange(cmd); setSlashMenuOpen(false) }} onClose={() => setSlashMenuOpen(false)} />
 
@@ -1408,14 +1445,58 @@ function ChatInput({
         <div className="flex items-center justify-between px-2.5 pb-2 pt-0.5">
           <div className="flex items-center gap-0.5 min-w-0">
             {onUploadFiles && (
-              <button className="w-8 h-8 rounded-lg text-muted hover:text-text hover:bg-bg-hover flex items-center justify-center cursor-pointer transition-all disabled:opacity-30 bg-transparent border-none shrink-0" onClick={() => fileInputRef.current?.click()} disabled={uploading} title="Attach file">
-                {uploading ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} />}
-              </button>
-            )}
-            {(isScreenSnipSupported() || isMac) && !isMobile && onScreenshot && (
-              <button aria-label="Screen snip" className="w-8 h-8 rounded-lg text-muted hover:text-text hover:bg-bg-hover flex items-center justify-center cursor-pointer transition-all disabled:opacity-30 bg-transparent border-none shrink-0" onClick={onScreenshot} disabled={uploading} title="Screen snip">
-                <Crop size={16} />
-              </button>
+              <div className="relative shrink-0" ref={plusWrapRef}>
+                <button
+                  ref={plusBtnRef}
+                  className={`w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer transition-all disabled:opacity-30 bg-transparent border-none ${plusOpen ? 'text-text bg-bg-hover' : 'text-muted hover:text-text hover:bg-bg-hover'}`}
+                  onClick={togglePlus}
+                  disabled={uploading}
+                  aria-haspopup="menu"
+                  aria-expanded={plusOpen}
+                  aria-label="Add files & options"
+                  title="Add files & options"
+                >
+                  {uploading ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} className={`transition-transform ${plusOpen ? 'rotate-45' : ''}`} />}
+                </button>
+                {plusOpen && plusRect && createPortal(
+                  <div
+                    ref={plusMenuRef}
+                    className="fixed w-[260px] rounded-xl bg-bg-elevated border border-border shadow-xl p-2 animate-slide-up z-[60]"
+                    style={{ left: Math.max(8, Math.min(plusRect.left, window.innerWidth - 260 - 8)), bottom: window.innerHeight - plusRect.top + 8 }}
+                  >
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => openPicker(false)}
+                        className="flex-1 flex flex-col items-center gap-1.5 px-2 py-3 rounded-lg border border-border bg-transparent hover:bg-bg-hover hover:border-border-strong transition-all cursor-pointer"
+                      >
+                        <FileText size={18} className="text-muted" />
+                        <span className="text-[12px] font-medium text-text">Upload file</span>
+                      </button>
+                      {(isScreenSnipSupported() || isMac) && !isMobile && onScreenshot && (
+                        <button
+                          type="button"
+                          onClick={() => { setPlusOpen(false); onScreenshot() }}
+                          className="flex-1 flex flex-col items-center gap-1.5 px-2 py-3 rounded-lg border border-border bg-transparent hover:bg-bg-hover hover:border-border-strong transition-all cursor-pointer"
+                        >
+                          <Crop size={18} className="text-muted" />
+                          <span className="text-[12px] font-medium text-text">Screenshot</span>
+                        </button>
+                      )}
+                    </div>
+                    {onBrowseToggle && (
+                      <div className="flex items-start justify-between gap-2 mt-2 pt-2.5 border-t border-border">
+                        <div className="min-w-0">
+                          <div className="text-[12px] font-medium text-text flex items-center gap-1.5"><Globe size={13} className="text-muted shrink-0" />Browser use</div>
+                          <div className="text-[11px] text-muted mt-0.5 leading-snug">Let the agent open a real browser to load web pages and read what's on them.</div>
+                        </div>
+                        <div className="pt-0.5"><Toggle checked={browseMode} onChange={() => onBrowseToggle()} label="Browser use" /></div>
+                      </div>
+                    )}
+                  </div>,
+                  document.body
+                )}
+              </div>
             )}
             <div className="flex items-center gap-0.5 min-w-0 overflow-x-auto flex-1">
               {onAgentClick && agentName && (
@@ -1427,23 +1508,6 @@ function ChatInput({
                 >
                   <Bot size={14} className="shrink-0" />
                   {!isMobile && agentName}
-                </button>
-              )}
-              {onModelClick && modelName && (
-                <button
-                  className="h-7 px-2 rounded-lg text-[12px] font-mono text-muted hover:text-text hover:bg-bg-hover flex items-center gap-1.5 transition-all bg-transparent border-none shrink-0 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted cursor-pointer"
-                  onClick={e => onModelClick(e.currentTarget.getBoundingClientRect())}
-                  disabled={isRunning}
-                  title={isRunning ? 'Stop the current response to switch models' : onReasoningEffortClick ? `Model: ${modelName} · Reasoning: ${effortLabel(reasoningEffort || '')}` : `Model: ${modelName}`}
-                  aria-label={`Model: ${modelName}${onReasoningEffortClick ? ` · Reasoning: ${effortLabel(reasoningEffort || '')}` : ''}`}
-                >
-                  {contextPct !== undefined && <ContextRing pct={contextPct} usedTokens={contextUsedTokens} windowTokens={contextWindowTokens} />}
-                  {!isMobile && modelName}
-                  {onReasoningEffortClick && !isMobile && (
-                    <span className="text-muted/70">
-                      {effortLabel(reasoningEffort || '')}
-                    </span>
-                  )}
                 </button>
               )}
               {onProjectClick && (() => {
@@ -1496,19 +1560,21 @@ function ChatInput({
             })()}
           </div>
           <div className="flex items-center gap-1 shrink-0">
-            {onBrowseToggle && (
+            {onModelClick && modelName && (
               <button
-                className={`w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer transition-all border-none ${
-                  browseMode
-                    ? 'bg-accent/15 text-accent hover:bg-accent/25'
-                    : 'bg-transparent text-muted hover:text-text hover:bg-bg-hover'
-                }`}
-                onClick={onBrowseToggle}
-                aria-label={browseMode ? 'Browse mode on — click to disable' : 'Browse mode off — click to enable'}
-                aria-pressed={browseMode}
-                title="Browse mode — agent will use the built-in browser to visit URLs"
+                className="h-7 px-2 rounded-lg text-[12px] font-mono text-muted hover:text-text hover:bg-bg-hover flex items-center gap-1.5 transition-all bg-transparent border-none shrink-0 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted cursor-pointer"
+                onClick={e => onModelClick(e.currentTarget.getBoundingClientRect())}
+                disabled={isRunning}
+                title={isRunning ? 'Stop the current response to switch models' : onReasoningEffortClick ? `Model: ${modelName} · Reasoning: ${effortLabel(reasoningEffort || '')}` : `Model: ${modelName}`}
+                aria-label={`Model: ${modelName}${onReasoningEffortClick ? ` · Reasoning: ${effortLabel(reasoningEffort || '')}` : ''}`}
               >
-                <Globe size={16} />
+                {contextPct !== undefined && <ContextRing pct={contextPct} usedTokens={contextUsedTokens} windowTokens={contextWindowTokens} />}
+                {!isMobile && modelName}
+                {onReasoningEffortClick && !isMobile && (
+                  <span className="text-muted/70">
+                    {effortLabel(reasoningEffort || '')}
+                  </span>
+                )}
               </button>
             )}
             {onVoiceToggle && (

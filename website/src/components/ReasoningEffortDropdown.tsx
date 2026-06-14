@@ -1,30 +1,40 @@
 import { useQuery } from '@tanstack/react-query'
-import { Check } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
 import { effortLabel } from './ChatInput'
 import { EFFORT_LEVELS } from '../lib/effort'
 import { api } from '../api/client'
+import { Slider, Toggle } from './ui'
+import InfoTip from './InfoTip'
+
+const EFFORT_HELP =
+  'Reasoning effort sets how long the model thinks before answering. Higher means ' +
+  'more time reasoning through hard problems (slower, better answers); lower is faster. ' +
+  '"Model default" applies no override — the model picks its own effort (Opus/Sonnet only).'
 
 // Cold-start fallback before /api/effort-levels resolves (or on fetch failure).
-// Sourced from the shared effort vocabulary (incl. 'xhigh') so the dropdown
-// never silently drops a level beta offered statically.
-const FALLBACK_LEVELS: string[] = [...EFFORT_LEVELS]
+// Concrete levels only — "default" is a separate toggle, not a slider notch.
+const FALLBACK_LEVELS: string[] = EFFORT_LEVELS.filter(Boolean)
 
 function normalizeLevels(data: string[]): string[] {
-  return ['', ...data.filter(l => l !== '' && l !== 'default')]
+  return data.filter(l => l !== '' && l !== 'default')
 }
 
 interface Props {
   slot: string
   currentEffort: string
+  /** Kept for call-site compatibility; the slider stays open while adjusting
+   *  and the popover dismisses on outside-click, so this is no longer invoked. */
   onClose: () => void
   embedded?: boolean
 }
 
-export default function ReasoningEffortDropdown({ slot, currentEffort, onClose, embedded }: Props) {
-  // Keyed by slot: each slot's levels come from its own live ACP model, so the
-  // cache must not bleed across slots. staleTime 0 + refetchOnMount means every
-  // time the popover (re)mounts we fetch the slot's current levels, so a model
-  // switch is reflected immediately rather than served stale from cache.
+/** Reasoning-effort picker: a stepped macOS-style slider over the model's
+ *  ordered effort levels (Default → low → … → max). Each notch is a level;
+ *  the value snaps to the grid and persists to the slot. Reads the slot's
+ *  live levels from /api/effort-levels (keyed by slot so a model switch is
+ *  reflected on remount). */
+export default function ReasoningEffortDropdown({ slot, currentEffort, embedded }: Props) {
   const { data: levels = FALLBACK_LEVELS } = useQuery({
     queryKey: ['effort-levels', slot],
     queryFn: () => api.effortLevels(slot).then(data =>
@@ -36,33 +46,94 @@ export default function ReasoningEffortDropdown({ slot, currentEffort, onClose, 
     refetchOnMount: 'always',
   })
 
-  // The slot's persisted effort may be a level absent from the fetched/fallback
-  // list (e.g. a value valid for persistence but not in this model's reported
-  // set, or before the fetch resolves). Always include it so the active level
-  // is shown with a check and remains reselectable.
-  const shownLevels = levels.includes(currentEffort)
-    ? levels
-    : [...levels, currentEffort]
+  // "Default" is a mode (let the model pick its own effort), not a level — it's a
+  // toggle. The slider covers only the concrete levels (low→max).
+  const propDefault = currentEffort === ''
+  // Include the slot's current concrete level if the model didn't report it.
+  // The "" default sentinel is never a notch (guarded by the truthy check).
+  const concrete = currentEffort && !levels.includes(currentEffort) ? [...levels, currentEffort] : levels
+  const maxIdx = Math.max(0, concrete.length - 1)
+  const currentIdx = concrete.indexOf(currentEffort)
+
+  // Optimistic default state so the toggle flips instantly; the persisted value
+  // catches up after the debounced write + slot refresh.
+  const [isDefault, setIsDefault] = useState(propDefault)
+  useEffect(() => { setIsDefault(propDefault) }, [propDefault])
+
+  // idx = the concrete level the slider points at. Persists while Default is on
+  // so toggling Default off restores the user's last explicit pick.
+  const [idx, setIdx] = useState(() => currentIdx >= 0 ? currentIdx : Math.min(2, maxIdx))
+  useEffect(() => { if (currentIdx >= 0) setIdx(currentIdx) }, [currentIdx])
+
+  const commitTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingLevel = useRef<string | null>(null)
+  useEffect(() => () => {
+    if (commitTimer.current) {
+      clearTimeout(commitTimer.current)
+      // Flush a pending write so closing the dropdown within the 150ms debounce
+      // window doesn't silently drop the user's last effort change.
+      if (pendingLevel.current !== null) {
+        api.chatSlotReasoningEffort(slot, pendingLevel.current).catch(() => {})
+      }
+    }
+  }, [slot])
+
+  // Persist debounced so a drag across several notches doesn't spam the backend.
+  const commit = (level: string) => {
+    pendingLevel.current = level
+    if (commitTimer.current) clearTimeout(commitTimer.current)
+    commitTimer.current = setTimeout(async () => {
+      pendingLevel.current = null
+      try { await api.chatSlotReasoningEffort(slot, level) }
+      catch (err) { console.warn('Failed to set reasoning effort', err) }
+    }, 150)
+  }
+
+  const handleSlide = (next: number) => { setIsDefault(false); setIdx(next); commit(concrete[next] ?? '') }
+  const handleToggleDefault = (useDefault: boolean) => { setIsDefault(useDefault); commit(useDefault ? '' : (concrete[idx] ?? '')) }
+
+  const currentLabel = isDefault ? 'Default' : effortLabel(concrete[idx] ?? '')
+  const atMax = !isDefault && idx >= maxIdx
 
   return (
-    <div className={embedded ? '' : 'rounded-lg bg-bg-elevated border border-border py-1 w-[200px]'}>
-      {shownLevels.map(level => {
-        const active = currentEffort === level
-        return (
-          <button
-            key={level || 'default'}
-            title={level ? `Set reasoning effort to ${level}` : 'Use the model default effort (Opus/Sonnet only)'}
-            onClick={async () => {
-              onClose()
-              try { await api.chatSlotReasoningEffort(slot, level) } catch (err) { console.warn('Failed to set reasoning effort', err) }
-            }}
-            className={`flex items-center gap-2 w-full px-3 py-2 text-[13px] font-medium cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover ${active ? 'text-accent' : 'text-text'}`}
-          >
-            <span>{effortLabel(level || '')}</span>
-            {active && <Check size={13} className="ml-auto text-accent" />}
-          </button>
-        )
-      })}
+    <div className={embedded ? 'px-3 py-2.5' : 'rounded-lg bg-bg-elevated border border-border px-4 py-3.5 w-[240px]'}>
+      <div className="flex items-center gap-1.5 mb-3">
+        <span className="text-[14px] font-medium text-muted uppercase tracking-[.04em] leading-none">Effort</span>
+        <span className="relative inline-flex items-center overflow-hidden leading-none" style={{ height: '1.5em' }}>
+          <AnimatePresence mode="popLayout" initial={false}>
+            <motion.span
+              key={currentLabel}
+              initial={{ y: '100%' }}
+              animate={{ y: 0 }}
+              exit={{ y: '-100%' }}
+              transition={{ type: 'spring', stiffness: 500, damping: 34 }}
+              className={`inline-flex items-center h-full text-[14px] font-semibold whitespace-nowrap leading-none transition-colors ${atMax ? 'text-accent' : 'text-text'}`}
+            >
+              {currentLabel}
+            </motion.span>
+          </AnimatePresence>
+        </span>
+        <span className="ml-auto flex"><InfoTip text={EFFORT_HELP} placement="top" /></span>
+      </div>
+      <Slider
+        aria-label="Reasoning effort"
+        min={0}
+        max={maxIdx}
+        step={1}
+        value={idx}
+        onChange={handleSlide}
+        disabled={isDefault}
+        emphasizeMax={!isDefault}
+        formatValue={v => effortLabel(concrete[v] ?? '')}
+      />
+      <div className={`relative mt-1 h-[14px] text-[10px] text-muted select-none transition-opacity ${isDefault ? 'opacity-40' : ''}`}>
+        <span className="absolute left-0">Faster</span>
+        <span className="absolute right-0">Smarter</span>
+      </div>
+      <div className="flex items-center justify-between gap-2 mt-3.5">
+        <span className="text-[12px] text-text">Use model default</span>
+        <Toggle checked={isDefault} onChange={handleToggleDefault} label="Use model default" />
+      </div>
     </div>
   )
 }

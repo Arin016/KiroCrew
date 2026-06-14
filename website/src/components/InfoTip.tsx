@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 
 /** Tiny ? button that shows a tooltip on click. Portal-rendered to escape overflow clipping. */
-export default function InfoTip({ text }: { text: string }) {
+export default function InfoTip({ text, placement = 'auto' }: { text: string; placement?: 'auto' | 'top' }) {
   const [open, setOpen] = useState(false)
   const btnRef = useRef<HTMLButtonElement>(null)
   const tipRef = useRef<HTMLDivElement>(null)
@@ -22,6 +22,13 @@ export default function InfoTip({ text }: { text: string }) {
     if (!btnRef.current) return { top: 0, left: 0 }
     const r = btnRef.current.getBoundingClientRect()
     const tipW = 300, tipH = 120
+    if (placement === 'top') {
+      // Centered above the button, bottom-anchored so height doesn't matter.
+      let left = r.left + r.width / 2 - tipW / 2
+      left = Math.max(8, Math.min(left, window.innerWidth - tipW - 8))
+      if (r.top > tipH + 12) return { bottom: window.innerHeight - r.top + 6, left }
+      return { top: r.bottom + 6, left } // not enough room above → fall below
+    }
     let top = r.top
     let left = r.right + 6
     if (left + tipW > window.innerWidth) left = r.left - tipW - 6

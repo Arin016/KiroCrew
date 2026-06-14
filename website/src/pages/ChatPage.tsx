@@ -50,7 +50,7 @@ import { useFilteredDropdown } from '../hooks/useFilteredDropdown'
 import { useAgents } from '../hooks/useAgents'
 import AgentDropdownList from '../components/AgentDropdownList'
 import ProjectPicker from '../components/ProjectPicker'
-import ModelDropdownList from '../components/ModelDropdownList'
+import ModelEffortDropdown from '../components/ModelEffortDropdown'
 
 import ChatInput from '../components/ChatInput'
 import { modelSupportsEffort } from '../lib/effort'
@@ -1748,7 +1748,8 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     const val = modelName === 'auto' ? '' : modelName
     if (!activeSlot) { setPendingModel(val); return }
     await api.chatSlotModel(activeSlot, val)
-    setModelDropdown(false)
+    // Keep the dropdown open after selecting — the user may switch models again
+    // or drill into the reasoning-effort panel. Dismiss is via outside-click/Escape.
   }, [activeSlot])
   const setProject = useCallback(async (path: string) => {
     if (!activeSlot) { setPendingProject(path); return }
@@ -2755,30 +2756,21 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               document.body
             )}
             {/* Model dropdown portal — triggered from input bar */}
-            {modelDropdown && modelBtnRect && createPortal((() => {
-              const hasEffort = !!(activeSlot && provider.capabilities.reasoningEffort && modelSupportsEffort(currentSlot?.model || resolvedModel))
-              const popWidth = hasEffort ? 460 : 348
-              return (
-              <div ref={modelDropdownRef} className="fixed z-[9999] bg-bg-elevated border border-border rounded-xl shadow-xl flex flex-row p-1 gap-1 animate-slide-up" style={(() => { const left = Math.max(8, Math.min(modelBtnRect.left, window.innerWidth - popWidth)); return { bottom: window.innerHeight - modelBtnRect.top + 4, left } })()}>
-                <div className="flex flex-col gap-0.5 flex-1 min-w-[252px]">
-                  <div className="px-1.5 pt-1.5 pb-1">
-                    <Input ref={modelInputRef} type="text" placeholder="Type to filter…" value={modelFilter} onChange={e => setModelFilter(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') setModelDropdown(false); if (e.key === 'Enter' && filteredModels.length === 1) { switchModel(filteredModels[0].name); setModelDropdown(false) } }} className="w-full px-2 py-1 text-[13px] font-mono" />
-                  </div>
-                  <div className="overflow-y-auto max-h-[280px]">
-                    <ModelDropdownList models={filteredModels} activeModel={currentSlot?.model || resolvedModel || 'auto'} onSelect={name => { switchModel(name); setModelDropdown(false) }} />
-                  </div>
-                </div>
-                {hasEffort && activeSlot && (
-                  <div className="flex flex-col gap-0.5 border-l border-border pl-1 w-[180px] shrink-0">
-                    <div className="px-3 pt-2.5 pb-1 text-[11px] font-medium text-muted uppercase tracking-[.04em]">Reasoning effort</div>
-                    <div className="overflow-y-auto max-h-[280px]">
-                      <ReasoningEffortDropdown slot={activeSlot} currentEffort={currentSlot?.reasoning_effort || ''} onClose={() => setModelDropdown(false)} embedded />
-                    </div>
-                  </div>
-                )}
-              </div>
-              )
-            })(),
+            {modelDropdown && modelBtnRect && createPortal(
+              <ModelEffortDropdown
+                anchorRect={modelBtnRect}
+                dropdownRef={modelDropdownRef}
+                inputRef={modelInputRef}
+                models={filteredModels}
+                activeModel={currentSlot?.model || resolvedModel || 'auto'}
+                onSelectModel={name => switchModel(name)}
+                filter={modelFilter}
+                setFilter={setModelFilter}
+                onClose={() => setModelDropdown(false)}
+                hasEffort={!!(activeSlot && provider.capabilities.reasoningEffort && modelSupportsEffort(currentSlot?.model || resolvedModel))}
+                slot={activeSlot}
+                currentEffort={currentSlot?.reasoning_effort || ''}
+              />,
               document.body
             )}
             {/* Project picker — triggered from input bar */}

@@ -172,32 +172,33 @@ describe('ChatInput', () => {
   describe('file action buttons', () => {
     it('does not show attach/screenshot buttons by default', () => {
       renderWithProviders(<ChatInput {...defaultProps} />)
-      expect(screen.queryByTitle('Attach file')).not.toBeInTheDocument()
-      expect(screen.queryByTitle(/Screen snip/)).not.toBeInTheDocument()
+      expect(screen.queryByTitle('Add files & options')).not.toBeInTheDocument()
+      expect(screen.queryByText('Screenshot')).not.toBeInTheDocument()
     })
 
     it('shows attach button with onUploadFiles', () => {
       renderWithProviders(<ChatInput {...defaultProps} onUploadFiles={vi.fn()} />)
-      expect(screen.getByTitle('Attach file')).toBeInTheDocument()
+      expect(screen.getByTitle('Add files & options')).toBeInTheDocument()
     })
 
-    it('shows screen snip button on macOS with onScreenshot', () => {
-      renderWithProviders(<ChatInput {...defaultProps} isMac onScreenshot={vi.fn()} />)
-      expect(screen.getByTitle(/Screen snip/)).toBeInTheDocument()
+    it('shows Screenshot in the + menu on macOS with onScreenshot', () => {
+      renderWithProviders(<ChatInput {...defaultProps} isMac onUploadFiles={vi.fn()} onScreenshot={vi.fn()} />)
+      fireEvent.click(screen.getByTitle('Add files & options'))
+      expect(screen.getByText('Screenshot')).toBeInTheDocument()
     })
 
-    it('clicking attach button triggers hidden file input click', () => {
+    it('opening the menu and clicking "Upload file" triggers the hidden file input click', () => {
       const clickSpy = vi.spyOn(HTMLInputElement.prototype, 'click')
       renderWithProviders(<ChatInput {...defaultProps} onUploadFiles={vi.fn()} />)
-      fireEvent.click(screen.getByTitle('Attach file'))
+      fireEvent.click(screen.getByTitle('Add files & options'))
+      fireEvent.click(screen.getByText('Upload file'))
       expect(clickSpy).toHaveBeenCalled()
       clickSpy.mockRestore()
     })
 
-    it('disables file buttons when uploading', () => {
+    it('disables the + menu button when uploading', () => {
       renderWithProviders(<ChatInput {...defaultProps} isMac onUploadFiles={vi.fn()} onScreenshot={vi.fn()} uploading />)
-      expect(screen.getByTitle('Attach file')).toBeDisabled()
-      expect(screen.getByTitle(/Screen snip/)).toBeDisabled()
+      expect(screen.getByTitle('Add files & options')).toBeDisabled()
     })
   })
 
@@ -674,7 +675,7 @@ describe('ChatInput', () => {
     let originalExec: typeof document.execCommand | undefined
     beforeEach(() => {
       originalExec = (document as any).execCommand // eslint-disable-line @typescript-eslint/no-explicit-any
-      ;(document as any).execCommand = () => true // eslint-disable-line @typescript-eslint/no-explicit-any
+        ; (document as any).execCommand = () => true // eslint-disable-line @typescript-eslint/no-explicit-any
     })
     afterEach(() => {
       if (originalExec === undefined) delete (document as any).execCommand // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -737,7 +738,7 @@ describe('ChatInput', () => {
       const execSpy = vi.spyOn(document, 'execCommand').mockReturnValue(true)
       // Suppress the console.warn the onError path emits so the test output
       // stays clean.
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => { })
       try {
         const onChange = vi.fn()
         const { rerender } = renderWithProviders(
@@ -758,6 +759,7 @@ describe('ChatInput', () => {
         fetchSpy.mockRestore()
       }
     })
+
     it('collapses a streaming optimize into a single undo boundary (Mesh-2064)', async () => {
       // The recording effect skips writes while the optimizer owns the textarea,
       // and the completion effect records one boundary when it finishes — so even
