@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { screen } from '@testing-library/react'
+import { screen, fireEvent } from '@testing-library/react'
 import { renderWithProviders } from './helpers'
 import WelcomeView from '../components/WelcomeView'
 
@@ -33,5 +33,28 @@ describe('WelcomeView', () => {
   it('shows revert toggle in incognito mode', () => {
     renderWithProviders(<WelcomeView {...defaultProps} onSwitchMode={vi.fn()} memoryMode="incognito" />)
     expect(screen.getByText('Switch back to default mode')).toBeInTheDocument()
+  })
+
+  describe('suggestion pills', () => {
+    // Falls back to FALLBACK_SUGGESTIONS when api.suggestions is unmocked.
+    const FALLBACK_PILL = 'Check my pipeline status'
+
+    it('pill is type=button and prevents mousedown default so the textarea keeps focus', () => {
+      renderWithProviders(<WelcomeView {...defaultProps} />)
+      const pill = screen.getByRole('button', { name: FALLBACK_PILL })
+      expect(pill).toHaveAttribute('type', 'button')
+      // fireEvent returns false when the (cancelable) event had preventDefault
+      // called — i.e. focus stays in the textarea instead of moving to the pill,
+      // so a follow-up Enter sends instead of re-activating this button.
+      const notCancelled = fireEvent.mouseDown(pill)
+      expect(notCancelled).toBe(false)
+    })
+
+    it('clicking a pill sets the input to the suggestion text', () => {
+      const setInput = vi.fn()
+      renderWithProviders(<WelcomeView setInput={setInput} />)
+      fireEvent.click(screen.getByRole('button', { name: FALLBACK_PILL }))
+      expect(setInput).toHaveBeenCalledWith(FALLBACK_PILL)
+    })
   })
 })

@@ -50,7 +50,11 @@ function SuggestedPills({ setInput }: { setInput: (v: string) => void }) {
   return (
     <div className="flex gap-x-2 gap-y-1 flex-wrap justify-center max-w-[760px] mx-auto w-full items-center">
       {pills.map(s => (
-        <button key={s} className="shrink-0 px-3 py-1.5 rounded-lg text-[13px] cursor-pointer transition-all relative border border-border text-muted hover:text-text bg-bg-elevated" onClick={() => setInput(s)}>
+        // type=button + onMouseDown preventDefault stop the pill from taking
+        // keyboard focus on click. Without this the focused pill is re-activated
+        // by a follow-up Enter (re-firing setInput) instead of submitting via the
+        // textarea, so the prompt appears to clear instead of send.
+        <button key={s} type="button" onMouseDown={e => e.preventDefault()} className="shrink-0 px-3 py-1.5 rounded-lg text-[13px] cursor-pointer transition-all relative border border-border text-muted hover:text-text bg-bg-elevated" onClick={() => setInput(s)}>
           {s}
         </button>
       ))}

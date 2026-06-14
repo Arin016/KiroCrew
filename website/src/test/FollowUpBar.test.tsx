@@ -187,4 +187,35 @@ describe('FollowUpBar', () => {
       expect(onSelect).toHaveBeenCalledTimes(1)
     })
   })
+
+  // ─── Focus management: clicking a chip must NOT steal keyboard focus ──────
+  // Regression for the active-chat "Enter clears the prompt" bug: when a chip
+  // takes focus on click, a follow-up Enter re-activates the (now picked) chip
+  // and runs its toggle-off branch, deleting the composed input. type=button +
+  // onMouseDown preventDefault keep focus in the textarea so Enter sends. The
+  // toggle still works via mouse re-click and via deliberate keyboard (tab)
+  // activation — we only suppress the mouse-click focus steal.
+  describe('focus management (does not steal focus on click)', () => {
+    it('legacy chip (no onSend) is type=button and prevents mousedown default', () => {
+      render(<FollowUpBar options={['Alpha']} picked={new Set()} onSelect={() => {}} />)
+      const chip = screen.getByRole('button', { name: 'Alpha' })
+      expect(chip).toHaveAttribute('type', 'button')
+      // fireEvent returns false when the cancelable event had preventDefault called.
+      expect(fireEvent.mouseDown(chip)).toBe(false)
+    })
+
+    it('debounced chip (with onSend) is type=button and prevents mousedown default', () => {
+      render(<FollowUpBar options={['Beta']} picked={new Set()} onSelect={() => {}} onSend={() => {}} />)
+      const chip = screen.getByRole('button', { name: 'Beta' })
+      expect(chip).toHaveAttribute('type', 'button')
+      expect(fireEvent.mouseDown(chip)).toBe(false)
+    })
+
+    it('picked chip prevents mousedown default (so Enter in textarea sends, not toggles off)', () => {
+      render(<FollowUpBar options={['Gamma']} picked={new Set(['Gamma'])} onSelect={() => {}} onSend={() => {}} />)
+      const chip = screen.getByRole('button', { name: 'Gamma' })
+      expect(chip).toHaveAttribute('type', 'button')
+      expect(fireEvent.mouseDown(chip)).toBe(false)
+    })
+  })
 })

@@ -59,6 +59,8 @@ function Chip({ option, isPicked, picked, quickSend, onSelect, onSend, className
   if (!useDebouncedClick) {
     return (
       <button
+        type="button"
+        onMouseDown={(e) => e.preventDefault()}
         onClick={(e) => onSelect(option, e)}
         className={className}
         title={title}
@@ -91,6 +93,12 @@ function Chip({ option, isPicked, picked, quickSend, onSelect, onSend, className
 
   return (
     <button
+      type="button"
+      // Keep keyboard focus in the textarea on click. Without this the chip
+      // takes focus, and a follow-up Enter re-activates this (now picked) chip,
+      // running the toggle-off branch that deletes the composed input ("the
+      // prompt clears"). Deliberate keyboard (tab) activation still toggles.
+      onMouseDown={(e) => e.preventDefault()}
       onClick={handleClick}
       onDoubleClick={handleDoubleClick}
       className={className}
