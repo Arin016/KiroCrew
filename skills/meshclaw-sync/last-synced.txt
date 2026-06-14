@@ -12,12 +12,51 @@
 #                so frontend sync is by CONTENT within the post-snapshot window, not a
 #                clean SHA range. This SHA records the upstream tip last triaged.
 
-beta ebee95e7      # 2026-06-11 MeshClaw backend beta tip (batch-16). SKIP at tip (gateway service installer, absent dir).
-frontend-beta 1ae3c8557c6893206e0a323c2cd8d65edca86db4  # 2026-06-11 MeshClawWebsite beta tip (batch-16). SKIP at tip (midway-ttl visibility hook, absent consumer).
-mainline 49633d05  # 2026-06-11 MeshClaw mainline tip (upstream); unchanged since batch-13, fully contained in beta-braveheart, no mainline-only delta.
+beta 570a9ccf      # 2026-06-14 MeshClaw backend beta tip (batch-18). KEEP at tip (perf(acp) MCP-init drain cap, ported).
+frontend-beta ecc6e5a5c753ae0d271c0ac6c1ced6dd8977ac58  # 2026-06-14 MeshClawWebsite beta tip (batch-18, mid-batch fold-in). KEEP at tip (in-input trigger menu, ported).
+mainline ebd78ac4  # 2026-06-14 MeshClaw mainline tip (upstream). Mainline-only delta vs beta = ebd78ac4 (byte-identical dual-landing of beta 14ae0f50, already ported as a keeper) — no NEW mainline-only candidate.
 # NOTE: this 'mainline' SHA is the UPSTREAM MeshClaw mainline tip (for the mainline-only
 # candidate check), NOT the fork's mainline — batch-12 mistakenly recorded the fork SHA
 # (796e21c5) here, which broke the `$MAIN..origin/mainline` scan. Corrected in batch-13.
+
+# --- Batch-18 (manual dual-repo sync 2026-06-14, ultracode comprehensive) ----
+# Fresh branch sync/beta-2026-06-14 off origin/mainline (3fc5d1d = batch-16 boundary).
+# Batch-17 (sync/beta-2026-06-12, 15 commits, CR-281529650) was ABANDONED by the user
+# (CR draft lost / discarded) and NOT merged — so this batch re-spanned the batch-16
+# boundary, re-porting batch-17's verified fixes from scratch plus all newer commits.
+# 56 candidates triaged (35 backend + 21 frontend) via a 113-agent analyzer+skeptic
+# Workflow. 45 commits: 42 keepers + 2 mid-batch frontend fold-ins + 1 baseline regen.
+# Tally: 30 KEEP, 11 PARTIAL, 2 DEFER, 13 SKIP_INTERNAL. No NEW mainline-only delta
+# (ebd78ac4 is a byte-identical dual-landing of 14ae0f50, ported).
+#
+# HEADLINE "KiroClaw styles" (user ask): 7661050 Kiro ghost BOOT-REVEAL splash (draws the
+# KIROCLAW wordmark in Kiro-purple + vendored anime.js v3.2.2) — ported KEEPING the fork's
+# current header logo/avatar/favicon untouched (splash + persistent logo coexist). Plus
+# fd88c429 Knight Rider theme persona, b674cd5 WCAG-AA contrast, 8b07305 disintegrate effect.
+#
+# 3 cross-candidate OVERRIDES of the per-commit triage (the analyzers couldn't see each
+# other): 96c39b8 (MLX STT UI) DEFER->KEEP — its backend pair 7b66e2e3 is a keeper this
+# batch (ported backend-first); d2325079 (unfreeze session switch) DEFER->KEEP — its prereq
+# 24c317d (retrace Back/Forward) is a keeper this batch; cd6730f (artifacts masonry) PARTIAL->
+# DEFER — +572-line rewrite on a hard-diverged 253-line page + new @virtuoso.dev/masonry dep,
+# zero fix/security value (matches batch-17's human-review deferral).
+#
+# DEFER (2, noted in CR for human review): cd6730f (artifacts masonry, frontend),
+#   96c39b8's masonry sibling N/A. (96c39b8 itself was RESCUED to KEEP — see overrides.)
+# SKIP_INTERNAL (13): 2b95f6ac + fc06e9ab (AIM auto_update — absent), 6d07a290 + 45821ff
+#   (writing-review — absent), 24745b38 (oncall-radar App Store entry — app-registry.json is
+#   [] by design), 231cb2dc (code-approvers — Brazil infra), a6a7c2db (AppSenseAIUsage
+#   telemetry — RUM stub), 24f23968 (Knight Rider *world* — parody theme like LCARS, absent
+#   substrate), 7c9c140f + 92a1d3bb + 94196d1a + fedf6e4d (changelog/version bumps to 3.x —
+#   fork is 0.1.0), 6181474a (SharePoint/Loop redaction carve-out — Amazon-corp M365 hosts
+#   only, e62422ae precedent; flagged for human review).
+# MID-BATCH FOLD-IN (cron rule): 2 frontend commits landed during the ~2h port (ecc6e5a
+#   in-input trigger menu + friendly-placeholder hint — follow-up to the $skill picker;
+#   fab2c55 root ErrorBoundary crash-guard) — folded onto the same branch, both clean KEEPs.
+# Verify: backend 1538 pass / 24 skip + flake8 clean; frontend tsc -b clean + 2596 vitest;
+# de-Amazon audit clean (0 live couplings; 8 inert comment hits + 4 acp Bedrock-path literals).
+# Boundaries advanced: beta ebee95e7->570a9ccf, frontend-beta 1ae3c85->ecc6e5a, mainline
+# 49633d05->ebd78ac4. CR-281NNNNNN.
 
 # --- Batch-16 (cron dual-repo sync 2026-06-11) -------------------------------
 # Fresh branch sync/beta-2026-06-11c off origin/mainline (batch-15 CR-281319232 merged, tip 7824113).
