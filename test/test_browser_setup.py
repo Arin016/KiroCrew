@@ -150,6 +150,14 @@ class TestGeneratePlaywrightConfig:
         config_path = generate_playwright_config()
         assert config_path.exists()
 
+    def test_does_not_write_remote_debugging_port(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        # B-minus dropped the CDP debug port — the live mirror now rides the
+        # proxy's existing screenshot path, so no remote-debugging port is opened.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        config = json.loads(generate_playwright_config().read_text())
+        args = config["browser"]["launchOptions"]["args"]
+        assert not any("remote-debugging-port" in a for a in args)
+
     def test_config_has_correct_structure(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         config_path = generate_playwright_config()

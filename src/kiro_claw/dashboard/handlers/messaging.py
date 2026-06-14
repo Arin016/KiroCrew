@@ -14,6 +14,7 @@ from typing import Any
 from aiohttp import web
 
 from kiro_claw.browser.auth import ensure as browser_auth_ensure
+from kiro_claw.browser.screencast import build_frame_payload
 from kiro_claw.browser.setup import (
     get_extension_token,
     has_playwright_extension,
@@ -23,6 +24,7 @@ from kiro_claw.browser.setup import (
 from kiro_claw.constants import CHAT_TURN_TIMEOUT
 from kiro_claw.dashboard.chat_persistence import _rehydrate_slot_from_history
 from kiro_claw.dashboard.chat_utils import _remove_queued_by_id
+from kiro_claw.dashboard.origin import is_loopback
 from kiro_claw.dashboard.state import (
     CRON_NOTIFY_END,
     CRON_NOTIFY_PREFIX,
@@ -1035,6 +1037,58 @@ async def api_browser_event(request: web.Request) -> web.Response:
     _sel().log_tool_invocation(
         session_key="dashboard",
         tool_name="browser_event",
+        outcome="completed",
+        downstream_service="browser",
+    )
+    return web.json_response({"ok": True})
+
+
+async def api_browser_frame(request: web.Request) -> web.Response:
+    """POST /api/browser/frame — receive a browse screenshot and rebroadcast it.
+
+    The Playwright MCP proxy POSTs each screenshot it already captured (loopback
+    only) as ``{"data": "<base64>", "format": "jpeg", ...}``; we normalize it and
+    broadcast a ``browser_frame`` WS event for the BrowserLiveView panel. No CDP
+    debug port is involved — this rides the proxy's existing capture path.
+
+    Loopback-gated: the proxy runs on the same host, and frames carry a live view
+    of the (Midway-authenticated) browse session, so off-host posts are refused.
+    """
+    if not is_loopback(request.remote or ""):
+        _sel().log_tool_invocation(
+            session_key="dashboard",
+            tool_name="browser_frame",
+            outcome="denied",
+            downstream_service="browser",
+            resources="non-loopback",
+        )
+        return web.json_response({"error": "loopback only"}, status=403)
+    state: DashboardState = request.app["state"]
+    try:
+        body = await request.json()
+    except Exception:
+        _sel().log_tool_invocation(
+            session_key="dashboard",
+            tool_name="browser_frame",
+            outcome="invalid_input",
+            downstream_service="browser",
+            resources="invalid-json",
+        )
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    payload = build_frame_payload(body if isinstance(body, dict) else {})
+    if payload is None:
+        _sel().log_tool_invocation(
+            session_key="dashboard",
+            tool_name="browser_frame",
+            outcome="invalid_input",
+            downstream_service="browser",
+            resources="no-frame-data",
+        )
+        return web.json_response({"error": "no frame data"}, status=400)
+    state.broadcast_ws("browser_frame", payload)
+    _sel().log_tool_invocation(
+        session_key="dashboard",
+        tool_name="browser_frame",
         outcome="completed",
         downstream_service="browser",
     )

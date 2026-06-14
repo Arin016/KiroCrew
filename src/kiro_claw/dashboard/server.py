@@ -192,6 +192,7 @@ def _register_mcp_routes(app: web.Application) -> None:
     app.router.add_post("/api/delete-message", handlers.api_delete_message)
     app.router.add_post("/api/browser-event", handlers.api_browser_event)
     app.router.add_post("/api/browser-auth-retry", handlers.api_browser_auth_retry)
+    app.router.add_post("/api/browser/frame", handlers.api_browser_frame)
     app.router.add_get("/api/browser/config", handlers.api_browser_config_get)
     app.router.add_put("/api/browser/config", handlers.api_browser_config_save)
     app.router.add_post("/api/session-keepalive", handlers.api_session_keepalive)
@@ -1026,6 +1027,7 @@ async def start_dashboard(
                     "/api/send-message",
                     "/api/delete-message",
                     "/api/browser-event",
+                    "/api/browser/frame",
                     "/api/session-keepalive",
                     "/api/session-tool-policy",
                     "/api/hooks/agent",

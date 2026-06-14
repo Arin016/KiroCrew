@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from typing import Any
 
 try:
@@ -74,16 +75,14 @@ def _compress_to_outline(text: str) -> str:
 _SCREENSHOT_DIR = os.path.join(os.environ.get("TMPDIR", "/tmp"), "kiroclaw-screenshots")
 
 
-def _save_screenshot(data: str, media_type: str) -> str:
-    """Save base64 image to file, compress with PIL if available, return path."""
-    os.makedirs(_SCREENSHOT_DIR, mode=0o700, exist_ok=True)
-    ext = "jpeg" if "jpeg" in media_type or "jpg" in media_type else "png"
-    ts = int(time.time() * 1000)
-    filename = f"screenshot-{ts}.{ext}"
-    filepath = os.path.join(_SCREENSHOT_DIR, filename)
+def _encode_frame(data: str, media_type: str) -> tuple[bytes, str]:
+    """Decode a base64 image; downscale + JPEG-encode if PIL is available.
 
+    Returns ``(bytes, ext)``. Shared by the on-disk save and the live-frame POST
+    so the (relatively expensive) decode/resize/encode runs once per screenshot.
+    """
     img_bytes = base64.b64decode(data)
-
+    ext = "jpeg" if ("jpeg" in media_type or "jpg" in media_type) else "png"
     if _HAS_PIL:
         try:
             img = Image.open(io.BytesIO(img_bytes))
@@ -91,18 +90,128 @@ def _save_screenshot(data: str, media_type: str) -> str:
             if img.width > max_width:
                 ratio = max_width / img.width
                 resample = getattr(Image, "LANCZOS", getattr(Image, "ANTIALIAS", None))
-                resized = img.resize((max_width, int(img.height * ratio)), resample)
-            else:
-                resized = img
+                img = img.resize((max_width, int(img.height * ratio)), resample)
             buf = io.BytesIO()
-            resized.save(buf, format="JPEG", quality=70)
-            img_bytes = buf.getvalue()
-            filepath = filepath.rsplit(".", 1)[0] + ".jpeg"
+            img.save(buf, format="JPEG", quality=70)
+            return buf.getvalue(), "jpeg"
+        except Exception:
+            pass
+    return img_bytes, ext
+
+
+_SCREENSHOT_KEEP = 200
+
+
+def _prune_screenshot_dir() -> None:
+    """Keep at most ``_SCREENSHOT_KEEP`` newest screenshots; best-effort.
+
+    The dir grows one file per agent screenshot and was previously never pruned
+    (a latent unbounded-disk leak). Ring-trim the oldest on each save.
+    """
+    try:
+        entries = [
+            os.path.join(_SCREENSHOT_DIR, f) for f in os.listdir(_SCREENSHOT_DIR)
+        ]
+        if len(entries) <= _SCREENSHOT_KEEP:
+            return
+        entries.sort(key=lambda p: os.path.getmtime(p))
+        for stale in entries[: len(entries) - _SCREENSHOT_KEEP]:
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _write_screenshot(img_bytes: bytes, ext: str) -> str:
+    """Write pre-encoded image bytes to the screenshot dir; prune; return path."""
+    os.makedirs(_SCREENSHOT_DIR, mode=0o700, exist_ok=True)
+    ts = int(time.time() * 1000)
+    filepath = os.path.join(_SCREENSHOT_DIR, f"screenshot-{ts}.{ext}")
+    with open(filepath, "wb") as f:
+        f.write(img_bytes)
+    _prune_screenshot_dir()
+    return filepath
+
+
+def _gateway_frame_url() -> str:
+    """Loopback gateway endpoint that rebroadcasts a browse frame to the dashboard."""
+    port = os.environ.get("KIROCLAW_PORT", "8765")
+    return f"http://127.0.0.1:{port}/api/browser/frame"
+
+
+def _internal_secret() -> str:
+    """Read the per-session IPC secret the gateway requires on internal paths.
+
+    Same source as ``mcp_core._internal_secret`` (``$KIROCLAW_HOME/.local_secret``,
+    default ``~/.kiroclaw``). Read directly to avoid importing the gateway into
+    this stdio proxy. Returns "" if unreadable — the POST then fails the gate and
+    is silently dropped (frames are best-effort).
+    """
+    home = os.environ.get("KIROCLAW_HOME", os.path.expanduser("~/.kiroclaw"))
+    try:
+        with open(os.path.join(home, ".local_secret"), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+# Extension mode attaches to the user's own (visible) Chrome rather than launching
+# a headless browser, so the live mirror is redundant — they already see the real
+# window. setup.py passes ``--extension`` to this proxy in that mode, so we read it
+# from our own argv and suppress the frame POST (the screenshot is still saved to
+# disk for the agent's Read tool; only the dashboard mirror is skipped).
+_EXTENSION_MODE = "--extension" in sys.argv
+
+
+def _post_frame_to_gateway(img_bytes: bytes, fmt: str) -> None:
+    """Best-effort POST of a browse frame to the gateway for the live dashboard mirror.
+
+    Runs on a daemon thread so it never blocks the JSON-RPC relay (a synchronous
+    POST in the relay loop would add latency to the agent's own screenshot call).
+    Swallows every error: frames are non-critical, and the gateway may be down,
+    on a different port, or unreachable — the agent's screenshot must not depend
+    on the mirror succeeding. The ``/api/browser/frame`` ingress is a loopback +
+    internal-secret path, so we send the same ``X-Internal-Secret`` header the
+    other MCP-side callers use.
+
+    No-op in extension mode: the user is watching their own Chrome, so mirroring a
+    sparse, downscaled copy to the dashboard adds load with no benefit.
+    """
+    if _EXTENSION_MODE:
+        return
+
+    def _send() -> None:
+        try:
+            b64 = base64.b64encode(img_bytes).decode("ascii")
+            body = json.dumps({"data": b64, "format": fmt}).encode("utf-8")
+            headers = {"Content-Type": "application/json"}
+            secret = _internal_secret()
+            if secret:
+                headers["X-Internal-Secret"] = secret
+            req = urllib.request.Request(
+                _gateway_frame_url(),
+                data=body,
+                headers=headers,
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=2).close()
         except Exception:
             pass
 
-    with open(filepath, "wb") as f:
-        f.write(img_bytes)
+    threading.Thread(target=_send, daemon=True).start()
+
+
+def _save_screenshot(data: str, media_type: str) -> str:
+    """Encode, persist, and mirror a screenshot. Returns the on-disk path.
+
+    Encodes once, writes the file (for the agent's Read tool), and fires a
+    best-effort live-frame POST to the gateway (for the dashboard mirror).
+    """
+    img_bytes, ext = _encode_frame(data, media_type)
+    filepath = _write_screenshot(img_bytes, ext)
+    _post_frame_to_gateway(img_bytes, ext)
     return filepath
 
 

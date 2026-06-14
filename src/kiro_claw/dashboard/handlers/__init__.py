@@ -213,6 +213,7 @@ from kiro_claw.dashboard.handlers.messaging import (  # noqa: E402, F401
     api_browser_config_get,
     api_browser_config_save,
     api_browser_event,
+    api_browser_frame,
     api_delete_message,
     api_notification_ack,
     api_notification_delete,
