@@ -16,7 +16,7 @@ from typing import Any
 
 from aiohttp import web
 
-from kiro_claw import model_registry
+from kiro_claw import agent_state, model_registry
 from kiro_claw.aim_agents import (
     install_cc_plugin,
     installed_kiro_packages_missing_from_cc,
@@ -916,12 +916,14 @@ async def api_agent_detail(request: web.Request) -> web.Response:
                     ):
                         return web.json_response({"error": "cannot delete kiroclaw"}, status=400)
                     f.unlink()
+                    agent_state.prune(data.get("name") or name)
                     state: DashboardState = request.app["state"]
                     state.push_refresh("agents")
                     return web.json_response({"ok": True})
                 if request.method == "PATCH" and patch_body is not None:
                     async with _get_config_lock():
                         data = json.loads(f.read_text(encoding="utf-8"))
+                        agent_name = data.get("name") or name
                         if "model" in patch_body:
                             # Stored verbatim (canonical key); translated to a
                             # provider id at the config.loader factory boundary.
@@ -930,10 +932,14 @@ async def api_agent_detail(request: web.Request) -> web.Response:
                                 data.pop("model", None)
                                 # Cleared/auto: resume tracking the shipped
                                 # default (re-synced by _refresh_dynamic_fields).
-                                data["model_managed"] = True
+                                agent_state.set_model_managed(agent_name, True)
                             else:
                                 # Explicit pick: freeze it against default bumps.
-                                data["model_managed"] = False
+                                agent_state.set_model_managed(agent_name, False)
+                        # Never persist KiroClaw bookkeeping into the kiro spec —
+                        # kiro-cli rejects unknown fields and drops the agent.
+                        data.pop("model_managed", None)
+                        data.pop("cc_model", None)
                         f.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
                     state = request.app["state"]
                     state.push_refresh("agents")

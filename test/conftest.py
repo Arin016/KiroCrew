@@ -86,6 +86,21 @@ def _isolate_kiroclaw_home(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_agent_state_sidecar(tmp_path_factory, monkeypatch):
+    """Pin the agent_state sidecar to a tmp dir for the whole suite.
+
+    ``kiro_claw.agent_state`` stores per-agent bookkeeping (model_managed,
+    cc_model) in ``~/.kiroclaw/agent_model_state.json`` via ``config_dir()``.
+    Tests that exercise the install / refresh / migration / PATCH paths would
+    otherwise read and write the operator's real sidecar. Redirect
+    ``config_dir`` — referenced as a module attribute at call time — to a fresh
+    tmp dir so every test starts from empty state.
+    """
+    sidecar_root = tmp_path_factory.mktemp("agent-state-isolation")
+    monkeypatch.setattr("kiro_claw.agent_state.config_dir", lambda: sidecar_root)
+
+
+@pytest.fixture(autouse=True)
 def _ensure_event_loop():
     """Ensure an event loop exists for asyncio.Semaphore default_factory (Python 3.9)."""
     try:

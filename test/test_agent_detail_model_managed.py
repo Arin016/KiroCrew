@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from aiohttp import web
 
+from kiro_claw import agent_state
 from kiro_claw.dashboard.handlers.agents import api_agent_detail
 
 
@@ -40,7 +41,9 @@ async def test_patch_explicit_model_freezes(tmp_path):
     assert resp.status == 200
     data = json.loads(cfg.read_text())
     assert data["model"] == "claude-new"
-    assert data["model_managed"] is False
+    # Spec stays schema-clean; managed-state goes to the sidecar.
+    assert "model_managed" not in data
+    assert agent_state.get_model_managed("kiroclaw") is False
 
 
 @pytest.mark.asyncio
@@ -57,4 +60,5 @@ async def test_patch_clear_model_resumes_tracking(tmp_path):
     assert resp.status == 200
     data = json.loads(cfg.read_text())
     assert "model" not in data
-    assert data["model_managed"] is True
+    assert "model_managed" not in data
+    assert agent_state.get_model_managed("kiroclaw") is True

@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from kiro_claw import agent_state
 from kiro_claw.aim_agents import installed_kiro_packages_missing_from_cc
 from kiro_claw.config import KiroClawConfig
 from kiro_claw.config import config_path as _mc_config_path
@@ -83,6 +84,10 @@ def _atomic_json_write(path: Path, data: dict) -> None:
 
 KIRO_AGENTS_DIR = Path.home() / ".kiro" / "agents"
 AGENT_FILENAME = "kiroclaw.json"
+_MAIN_AGENT_NAME = "kiroclaw"
+# Cheap Claude Code model for KiroClaw's background agents (lite / heartbeat).
+# Stored in the agent_state sidecar, never in the kiro spec (deny_unknown_fields).
+_BACKGROUND_CC_MODEL = "claude-sonnet-4.6"
 _KIRO_MCP_JSON = Path.home() / ".kiro" / "settings" / "mcp.json"
 _CC_MCP_JSON = Path.home() / ".claude.json"
 
@@ -1186,12 +1191,11 @@ def build_agent_config() -> dict:
             entry["autoApprove"] = list(spec["autoApprove"])
         mcp[name] = entry
 
-    # The shipped default `model` came from defaults.json above. Mark it as
-    # managed so _refresh_dynamic_fields keeps tracking the shipped default on
-    # every install; a later defaults.json bump then propagates automatically.
-    # An explicit user pick (PATCH) clears this marker to freeze the choice.
-    config["model_managed"] = True
-
+    # Default-model tracking ("managed" vs frozen) is recorded in the
+    # agent_state sidecar by the install path (rebuild_agent_config), never as
+    # a kiro-spec key — kiro-cli rejects unknown fields and would drop the whole
+    # spec. build_agent_config stays pure (no disk writes) so its many
+    # read-only callers don't mutate managed-state as a side effect.
     return config
 
 
@@ -1267,11 +1271,26 @@ def _refresh_dynamic_fields(config: dict) -> None:
     if cur_model in _model_migration:
         config["model"] = _model_migration[cur_model]
 
+    # Self-heal: lift any stray KiroClaw bookkeeping keys into the sidecar and
+    # strip them from the spec so kiro-cli (deny_unknown_fields) accepts it.
+    # This is the steady-state safety net that cleans specs polluted by older
+    # builds on the next refresh; the one-time migrate_agent_specs() at startup
+    # handles the rest of ~/.kiro/agents/.
+    name = config.get("name") or _MAIN_AGENT_NAME
+    if "model_managed" in config:
+        if agent_state.get_model_managed(name) is None:
+            agent_state.set_model_managed(name, bool(config["model_managed"]))
+        del config["model_managed"]
+    if "cc_model" in config:
+        if agent_state.get_cc_model(name) is None and config["cc_model"]:
+            agent_state.set_cc_model(name, str(config["cc_model"]))
+        del config["cc_model"]
+
     # Default-model tracking: when the model is managed (not an explicit user
     # pick), re-sync it from the shipped defaults.json so a default bump
-    # propagates to existing installs. Legacy configs predating this marker
-    # have no `model_managed` key and are left untouched (grandfathered).
-    if config.get("model_managed"):
+    # propagates to existing installs. Agents with no sidecar entry are
+    # grandfathered and left untouched (never force-changed).
+    if agent_state.get_model_managed(name):
         shipped_model = (_load_json(_shipped_defaults()) or {}).get("model")
         if shipped_model:
             config["model"] = shipped_model
@@ -1358,6 +1377,48 @@ def _normalize_mcp_server_keys(config: dict) -> None:
         logger.info("Normalized MCP server key %r -> %r (kiro-safe)", old_key, alias)
 
 
+def migrate_agent_specs() -> int:
+    """Strip KiroClaw bookkeeping keys from kiro agent specs into the sidecar.
+
+    kiro-cli validates ``~/.kiro/agents/*.json`` with ``deny_unknown_fields``
+    and rejects the entire spec on any unknown field (``model_managed`` /
+    ``cc_model``), then silently falls back to the default agent. This lifts
+    those values into ``agent_state`` and removes them from each spec so every
+    agent loads. Idempotent and cheap (a handful of small JSON files); safe to
+    run on every gateway start. Returns the number of spec files cleaned.
+    """
+    if not KIRO_AGENTS_DIR.is_dir():
+        return 0
+    cleaned = 0
+    for spec_path in sorted(KIRO_AGENTS_DIR.glob("*.json")):
+        try:
+            data = json.loads(spec_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if "model_managed" not in data and "cc_model" not in data:
+            continue
+        name = data.get("name") or spec_path.stem
+        if "model_managed" in data:
+            # Don't clobber an authoritative sidecar value with a stale spec one.
+            if agent_state.get_model_managed(name) is None:
+                agent_state.set_model_managed(name, bool(data["model_managed"]))
+            del data["model_managed"]
+        if "cc_model" in data:
+            if agent_state.get_cc_model(name) is None and data["cc_model"]:
+                agent_state.set_cc_model(name, str(data["cc_model"]))
+            del data["cc_model"]
+        try:
+            _atomic_json_write(spec_path, data)
+            cleaned += 1
+        except OSError as exc:
+            logger.warning("Could not rewrite cleaned agent spec %s: %s", spec_path, exc)
+    if cleaned:
+        logger.info("Cleaned %d kiro agent spec(s) of KiroClaw bookkeeping keys", cleaned)
+    return cleaned
+
+
 def rebuild_agent_config(*, clean: bool = False) -> Path:
     """Rebuild and write the merged kiroclaw.json to ~/.kiro/agents/.
 
@@ -1386,6 +1447,10 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
     KIRO_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
     path = KIRO_AGENTS_DIR / AGENT_FILENAME
 
+    # One-time (idempotent) self-heal: strip KiroClaw bookkeeping keys from
+    # every kiro agent spec into the sidecar so kiro-cli accepts them all.
+    migrate_agent_specs()
+
     # Managed MCP sync happens after config is fully built (see below).
 
     if not clean and path.exists():
@@ -1395,6 +1460,13 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
     else:
         config = build_agent_config()
         fresh_install = True
+
+    # Seed default-model tracking for a fresh/clean build. A clean regen always
+    # resumes tracking the shipped default; a first-time install seeds tracking
+    # only when the sidecar has no prior (possibly frozen) choice to preserve.
+    main_name = config.get("name") or _MAIN_AGENT_NAME
+    if fresh_install and (clean or agent_state.get_model_managed(main_name) is None):
+        agent_state.set_model_managed(main_name, True)
 
     # Merge shared MCP servers from ~/.claude.json (Claude Code user-level
     # config) FIRST so CC globals take precedence over Kiro globals when
@@ -1628,17 +1700,17 @@ def _install_lite_agent_fallback() -> None:
     lite_config = {
         "name": "kiroclaw-lite",
         "model": "claude-opus-4.6",
-        # Cheap model for the claude_code (CC) provider. kiro-cli resolves the
-        # lite model from `model` via --agent; the CC backend can't, so the
-        # provider factory reads this `cc_model` for the lite agent. Sonnet is
-        # plenty for background title/compaction/heartbeat work and far cheaper
-        # than the global Opus 4.8 default.
-        "cc_model": "claude-sonnet-4.6",
         "tools": [],
         "mcpServers": {},
         "prompt": "",
     }
     _atomic_json_write(lite_path, lite_config)
+    # Cheap model for the claude_code (CC) provider. kiro-cli resolves the lite
+    # model from `model` via --agent; the CC backend can't, so the provider
+    # factory reads this cc_model for the lite agent. Sonnet is plenty for
+    # background title/compaction/heartbeat work and far cheaper than the global
+    # Opus 4.8 default. Stored in the sidecar (kiro spec stays schema-clean).
+    agent_state.set_cc_model("kiroclaw-lite", _BACKGROUND_CC_MODEL)
 
 
 _KNOWLEDGE_AGENT_FILENAME = "kiroclaw-knowledge.json"
@@ -1870,7 +1942,6 @@ def _install_heartbeat_agent() -> None:
             "gateway-side against HEARTBEAT_SAFE_TOOLS."
         ),
         "model": "claude-sonnet-4.6",
-        "cc_model": "claude-sonnet-4.6",
         "includeMcpJson": False,
         "prompt": _HEARTBEAT_SYSTEM_PROMPT,
         "mcpServers": mcp,
@@ -1881,6 +1952,8 @@ def _install_heartbeat_agent() -> None:
     }
 
     _atomic_json_write(path, config)
+    # CC model for the heartbeat agent lives in the sidecar, not the kiro spec.
+    agent_state.set_cc_model("kiroclaw-heartbeat", _BACKGROUND_CC_MODEL)
     logger.info("Installed heartbeat agent config: %s", path)
 
 

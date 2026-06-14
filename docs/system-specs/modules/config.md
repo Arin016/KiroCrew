@@ -1,6 +1,6 @@
 # Config Module
 
-Last Updated: 2026-04-24 (snapshot_dir)
+Last Updated: 2026-06-12 (agent_model_state.json sidecar: model_managed/cc_model moved out of kiro agent specs so kiro-cli deny_unknown_fields no longer drops KiroClaw agents)
 
 ## Overview
 
@@ -108,6 +108,47 @@ Returns `~/.kiroclaw/`. Overridden by `KIROCLAW_HOME` env var (refuses system di
 
 ### `config_path() -> Path`
 Returns `~/.kiroclaw/config.json` (or `$KIROCLAW_HOME/config.json` if overridden).
+
+### Agent Bookkeeping Sidecar (`agent_model_state.json`)
+
+KiroClaw tracks two pieces of per-agent state that are **not** part of the
+kiro-cli agent schema: `model_managed` (whether an agent's `model` tracks the
+shipped default or is a frozen user pick) and `cc_model` (a per-agent Claude
+Code model). kiro-cli validates `~/.kiro/agents/*.json` with serde
+`deny_unknown_fields` and rejects the *entire* spec on any unknown key, then
+silently falls back to the default agent (`--agent <name>` resolves to default
+with only a stderr "no agent with name X found" line). To keep every spec
+schema-valid, this state lives in a KiroClaw-owned sidecar
+`~/.kiroclaw/agent_model_state.json` (honoring `KIROCLAW_HOME`), keyed by agent
+name:
+
+```json
+{
+  "kiroclaw":           {"model_managed": true},
+  "kiroclaw-heartbeat": {"cc_model": "claude-sonnet-4.6"}
+}
+```
+
+- Read/written via `kiro_claw/agent_state.py` (atomic, lock-guarded near-leaf
+  module: stdlib + `config.paths` + `atomic_write` only).
+- `build_agent_config()` is pure (writes no spec key); `rebuild_agent_config()`
+  seeds managed-state on a fresh/clean install (never clobbering a frozen pick).
+- `_refresh_dynamic_fields()` sources managed-state from the sidecar and strips
+  any stray `model_managed`/`cc_model` from the spec (steady-state self-heal).
+- `migrate_agent_specs()` runs at startup (top of `rebuild_agent_config`): lifts
+  the keys out of every `~/.kiro/agents/*.json` into the sidecar and removes
+  them (idempotent), fixing installs polluted by older builds.
+- The dashboard model PATCH writes the sidecar, never the spec; agent DELETE
+  prunes the sidecar entry.
+
+Note: KiroClaw is KiroACP (kiro-cli) only — the deleted `claude_code` provider
+was the sole reader of spec `cc_model`, so `cc_model` is now dead config. The
+lite/heartbeat installers still write it to the sidecar (harmless bookkeeping)
+purely to keep the kiro spec schema-clean; nothing in the fork resolves it.
+
+**Invariant:** `~/.kiro/agents/*.json` must contain only kiro-cli schema keys at
+all times — after install, refresh, and any dashboard edit — or kiro-cli drops
+the agent and silently falls back to default.
 
 ## Schema
 

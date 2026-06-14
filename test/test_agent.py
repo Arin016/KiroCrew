@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 import pytest
 
-from kiro_claw.agent import install_agent
+from kiro_claw import agent_state
+from kiro_claw.agent import install_agent, migrate_agent_specs
 
 
 def _bundled_defaults(tmp_path: Path) -> Path:
@@ -105,18 +106,22 @@ class TestInstallAgent:
         assert "WriteFile" in config["tools"]
 
     def test_fresh_install_marks_model_managed(self, tmp_path: Path):
-        """Fresh install tracks the shipped default via model_managed=True."""
+        """Fresh install tracks the shipped default via the sidecar (not the spec)."""
         cfg_dir = _bundled_defaults(tmp_path)
         path = _run_install(tmp_path, cfg_dir)
         config = json.loads(path.read_text())
         assert config["model"] == "claude-default"
-        assert config["model_managed"] is True
+        # kiro spec must stay schema-clean; managed-state lives in the sidecar.
+        assert "model_managed" not in config
+        assert agent_state.get_model_managed("kiroclaw") is True
 
     def test_managed_config_tracks_defaults_bump(self, tmp_path: Path):
-        """A managed config re-syncs model from defaults.json on a bump."""
+        """A managed (sidecar) config re-syncs model from defaults.json on a bump."""
         cfg_dir = _bundled_defaults(tmp_path)
         kiro_dir = tmp_path / "kiro_agents"
         kiro_dir.mkdir(exist_ok=True)
+        # Pre-migration polluted spec: model_managed lives in the spec. The
+        # install migration lifts it into the sidecar and strips it.
         existing = {
             "model": "claude-old-default",
             "model_managed": True,
@@ -129,7 +134,8 @@ class TestInstallAgent:
         path = _run_install(tmp_path, cfg_dir)
         config = json.loads(path.read_text())
         assert config["model"] == "claude-default"
-        assert config["model_managed"] is True
+        assert "model_managed" not in config
+        assert agent_state.get_model_managed("kiroclaw") is True
 
     def test_legacy_config_without_marker_frozen(self, tmp_path: Path):
         """A legacy config (no marker) is grandfathered: model untouched."""
@@ -148,9 +154,10 @@ class TestInstallAgent:
         config = json.loads(path.read_text())
         assert config["model"] == "claude-legacy-4.6"
         assert "model_managed" not in config
+        assert agent_state.get_model_managed("kiroclaw") is None
 
     def test_explicitly_frozen_config_not_tracked(self, tmp_path: Path):
-        """model_managed=False (explicit pick) is never re-synced to default."""
+        """A frozen pick (model_managed=False) is never re-synced to default."""
         cfg_dir = _bundled_defaults(tmp_path)
         kiro_dir = tmp_path / "kiro_agents"
         kiro_dir.mkdir(exist_ok=True)
@@ -166,7 +173,8 @@ class TestInstallAgent:
         path = _run_install(tmp_path, cfg_dir)
         config = json.loads(path.read_text())
         assert config["model"] == "claude-user-pinned"
-        assert config["model_managed"] is False
+        assert "model_managed" not in config
+        assert agent_state.get_model_managed("kiroclaw") is False
 
     def test_existing_config_refreshes_security_fields(self, tmp_path: Path):
         """deniedCommands and hooks are always overwritten from bundled."""
@@ -3116,3 +3124,50 @@ class TestRefreshDynamicFieldsStripsStaleUrl:
         _refresh_dynamic_fields(config)
         # A genuine remote server is not a managed one — its url must survive.
         assert config["mcpServers"]["deepwiki"]["url"] == "https://mcp.deepwiki.com/mcp"
+
+
+class TestMigrateAgentSpecs:
+    """migrate_agent_specs lifts KiroClaw bookkeeping keys into the sidecar."""
+
+    def test_strips_and_lifts_keys(self, tmp_path: Path):
+        kiro = tmp_path / "kiro_agents"
+        kiro.mkdir()
+        (kiro / "a.json").write_text(
+            json.dumps({"name": "alpha", "model": "m", "model_managed": False})
+        )
+        (kiro / "b.json").write_text(
+            json.dumps({"name": "beta", "cc_model": "claude-sonnet-4.6"})
+        )
+        (kiro / "c.json").write_text(json.dumps({"name": "gamma", "model": "m"}))
+        with patch("kiro_claw.agent.KIRO_AGENTS_DIR", kiro):
+            cleaned = migrate_agent_specs()
+        assert cleaned == 2
+        assert "model_managed" not in json.loads((kiro / "a.json").read_text())
+        assert "cc_model" not in json.loads((kiro / "b.json").read_text())
+        assert agent_state.get_model_managed("alpha") is False
+        assert agent_state.get_cc_model("beta") == "claude-sonnet-4.6"
+
+    def test_idempotent(self, tmp_path: Path):
+        kiro = tmp_path / "kiro_agents"
+        kiro.mkdir()
+        (kiro / "a.json").write_text(json.dumps({"name": "alpha", "model_managed": True}))
+        with patch("kiro_claw.agent.KIRO_AGENTS_DIR", kiro):
+            assert migrate_agent_specs() == 1
+            assert migrate_agent_specs() == 0
+
+    def test_does_not_clobber_authoritative_sidecar(self, tmp_path: Path):
+        agent_state.set_model_managed("alpha", False)
+        kiro = tmp_path / "kiro_agents"
+        kiro.mkdir()
+        (kiro / "a.json").write_text(json.dumps({"name": "alpha", "model_managed": True}))
+        with patch("kiro_claw.agent.KIRO_AGENTS_DIR", kiro):
+            migrate_agent_specs()
+        assert agent_state.get_model_managed("alpha") is False
+
+    def test_installed_spec_is_schema_clean(self, tmp_path: Path):
+        """After install the written spec carries no KiroClaw bookkeeping keys."""
+        cfg_dir = _bundled_defaults(tmp_path)
+        path = _run_install(tmp_path, cfg_dir)
+        config = json.loads(path.read_text())
+        assert "model_managed" not in config
+        assert "cc_model" not in config
