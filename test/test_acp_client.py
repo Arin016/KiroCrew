@@ -13,6 +13,8 @@ import pytest
 
 from kiro_claw.acp.client import (
     _CLAUDE_ACP_PKG_ENTRY,
+    _DRAIN_DURATION,
+    _DRAIN_IDLE_EXIT,
     AcpClient,
     AcpError,
     AcpProcessDied,
@@ -5490,6 +5492,18 @@ class TestAcpClientDrainEarlyExit:
     """_drain_notifications exits early once MCP servers go quiet, bounded by
     the hard cap. Guards the TTFT optimization (idle early-exit) against
     regressing into either a full-cap wait or a premature exit while active."""
+
+    def test_idle_exit_constant_below_duration_constant(self):
+        # The idle early-exit only short-circuits the drain if it can fire
+        # before the hard cap. If a future edit bumps _DRAIN_IDLE_EXIT to or
+        # above _DRAIN_DURATION, the cap always fires first, the idle path
+        # becomes dead code, and cold-start TTFT silently regresses to the full
+        # cap. The default-bound drain tests pass explicit duration/idle_exit
+        # args, so only this assertion guards the module constants themselves.
+        assert _DRAIN_IDLE_EXIT < _DRAIN_DURATION, (
+            "_DRAIN_IDLE_EXIT must stay strictly below _DRAIN_DURATION "
+            "to keep the idle early-exit reachable"
+        )
 
     @pytest.mark.asyncio
     async def test_drain_exits_early_when_quiet(self, tmp_path):

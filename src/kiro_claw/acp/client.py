@@ -468,13 +468,15 @@ _INIT_TIMEOUT = 240.0  # 4 min — MCP servers can be slow to initialize
 # but usually never sends a JSON-RPC response — MCP servers load
 # asynchronously.  Any late responses land in _buffer and are harmlessly
 # skipped by _process_message() during the next prompt read loop.
-_DRAIN_DURATION = 10.0  # hard cap on draining MCP server init notifications
+_DRAIN_DURATION = 1.0  # hard cap on draining MCP server init notifications
 # Idle early-exit: once no init notification has arrived for this long, MCP
 # servers have gone quiet and we stop draining instead of always waiting the full
 # _DRAIN_DURATION. The cap still bounds genuinely slow servers; the idle window
-# only short-circuits the common fast case (~3s observed), cutting time-to-first
-# -token on new sessions without risking a missed banner from an active server.
-_DRAIN_IDLE_EXIT = 1.5
+# short-circuits the common fast case (servers quiet well under the cap), cutting
+# time-to-first-token on new sessions without risking a missed banner from an
+# active server. Must stay strictly below _DRAIN_DURATION, otherwise the hard cap
+# fires first and the idle path becomes dead code.
+_DRAIN_IDLE_EXIT = 0.5
 _DEFAULT_PROMPT_TIMEOUT = 7200.0  # 2 hours — allow very long tool execution
 _READ_TIMEOUT = 20.0
 # After streaming content, if no new data arrives for this many seconds,
