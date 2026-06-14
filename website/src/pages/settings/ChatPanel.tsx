@@ -20,6 +20,7 @@ type SttConfig = {
   transcribe_profile: string
   language_code: string
   models: Record<string, string>
+  providers?: string[]
   language_codes: string[]
 }
 
@@ -32,8 +33,16 @@ const VOICE_OPTIONS_FALLBACK = [
 
 const ENGINE_OPTIONS = ['generative', 'neural', 'long-form', 'standard']
 const SPEED_OPTIONS = ['80%', '90%', '95%', '100%', '110%', '120%', '130%', '150%']
-const STT_PROVIDER_OPTIONS = ['whisper', 'transcribe']
-const STT_PROVIDER_LABELS = ['Whisper (local)', 'Transcribe (AWS)']
+// Human-readable provider names. The actual option list comes from the
+// backend's platform-aware `providers` field (mlx is only offered on Apple
+// Silicon). STT_PROVIDER_FALLBACK is used only until that response arrives —
+// it deliberately omits mlx since the client can't know the platform.
+const PROVIDER_LABELS: Record<string, string> = {
+  whisper: 'Whisper (local)',
+  mlx: 'Whisper MLX (local — Apple Silicon only)',
+  transcribe: 'Transcribe (AWS)',
+}
+const STT_PROVIDER_FALLBACK = ['whisper', 'transcribe']
 // Fallback when the server hasn't responded yet. The authoritative list comes
 // from the `/api/config/stt` GET response's `language_codes` field.
 const STT_LANGUAGE_FALLBACK = ['en-US']
@@ -268,6 +277,7 @@ export function ChatPanel() {
   const sttDisabled = !sttQ.isSuccess
   const languageOptions = sttCfg.language_codes?.length ? sttCfg.language_codes : STT_LANGUAGE_FALLBACK
   const isTranscribe = sttCfg.provider === 'transcribe'
+  const providerOptions = sttCfg.providers?.length ? sttCfg.providers : STT_PROVIDER_FALLBACK
 
   // Switching to transcribe enables streaming by default (one-click off if not wanted).
   const handleProviderChange = (v: string) => {
@@ -441,7 +451,7 @@ export function ChatPanel() {
         <SettingsCard>
           {sttQ.isError && <div className="text-[13px] text-danger mb-2">Failed to load STT config. <button className="underline cursor-pointer bg-transparent border-none text-danger" onClick={() => sttQ.refetch()}>Retry</button></div>}
           <SettingsToggle label="Enabled" description="Transcribe voice memos into the input box when you click the mic" checked={sttCfg.enabled} onChange={v => setStt({ enabled: v })} disabled={sttDisabled} />
-          <SettingsSelect label="Provider" description="Whisper runs locally; Transcribe calls AWS" value={sttCfg.provider} options={STT_PROVIDER_OPTIONS} optionLabels={STT_PROVIDER_LABELS} onChange={handleProviderChange} disabled={sttDisabled} />
+          <SettingsSelect label="Provider" description="Whisper runs locally; Transcribe calls AWS" value={sttCfg.provider} options={providerOptions} optionLabels={providerOptions.map(p => PROVIDER_LABELS[p] || p)} onChange={handleProviderChange} disabled={sttDisabled} />
           <SettingsToggle label="Streaming" description="Stream live partial transcripts into the input box as you speak (Transcribe only)" checked={sttCfg.streaming} onChange={v => setStt({ streaming: v })} disabled={sttDisabled || !isTranscribe} />
           <SettingsSelect label="Language" description="BCP-47 language code for speech recognition" value={sttCfg.language_code} options={languageOptions} onChange={v => setStt({ language_code: v })} disabled={sttDisabled} />
           {isTranscribe && (

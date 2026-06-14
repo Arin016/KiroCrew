@@ -372,6 +372,7 @@ export const api = {
     enabled?: boolean
     provider?: string
     model?: string
+    mlx_model?: string
     streaming?: boolean
     transcribe_region?: string
     transcribe_profile?: string

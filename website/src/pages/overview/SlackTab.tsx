@@ -7,9 +7,12 @@ import InfoTip from '../../components/InfoTip'
 interface SttStatus {
   enabled: boolean
   model: string
+  mlx_model?: string
   available: boolean
   docker_mode: boolean
   models: Record<string, string>
+  mlx_models?: Record<string, string>
+  providers?: string[]
   provider?: string
   streaming?: boolean
   install_step: string
@@ -26,9 +29,17 @@ const STEP_LABELS: Record<string, string> = {
   installing_python: 'Installing Python…',
   installing_ffmpeg: 'Installing ffmpeg…',
   installing_whisper: 'Installing whisper (~1.6 GB)…',
+  installing_mlx: 'Installing mlx-whisper…',
   pulling: 'Pulling Docker image…',
   done: 'Done!',
   error: 'Failed',
+}
+
+// Human-readable provider names. Keep in sync with ChatPanel's STT_PROVIDER_LABELS.
+const PROVIDER_LABELS: Record<string, string> = {
+  whisper: 'Whisper (local)',
+  mlx: 'Whisper MLX (local — Apple Silicon only)',
+  transcribe: 'Transcribe (AWS)',
 }
 
 export default function SlackTab() {
@@ -73,6 +84,20 @@ export default function SlackTab() {
   const setModel = async (model: string) => {
     setSaving(true)
     try { setStt(await api.saveSttConfig({ model })) }
+    catch (e: any) { setErr(e.message) }
+    setSaving(false)
+  }
+
+  const setProvider = async (provider: string) => {
+    setSaving(true)
+    try { setStt(await api.saveSttConfig({ provider })) }
+    catch (e: any) { setErr(e.message) }
+    setSaving(false)
+  }
+
+  const setMlxModel = async (mlx_model: string) => {
+    setSaving(true)
+    try { setStt(await api.saveSttConfig({ mlx_model })) }
     catch (e: any) { setErr(e.message) }
     setSaving(false)
   }
@@ -131,14 +156,40 @@ export default function SlackTab() {
         </div>
 
         <div className="flex justify-between items-center gap-3 py-2 border-b border-border text-sm">
-          <span className="text-muted">Model</span>
-          <select value={stt.model} onChange={e => setModel(e.target.value)} disabled={saving}
+          <span className="text-muted">Provider</span>
+          <select value={stt.provider || 'whisper'} onChange={e => setProvider(e.target.value)} disabled={saving} aria-label="STT provider"
             className="bg-bg-elevated border border-border rounded-md px-3 py-1.5 text-text text-[13px] font-body outline-none cursor-pointer transition-colors focus-ring">
-            {Object.entries(stt.models).map(([name, size]) => (
-              <option key={name} value={name}>{name} ({size})</option>
+            {(stt.providers || ['whisper', 'transcribe']).map(p => (
+              <option key={p} value={p}>{PROVIDER_LABELS[p] || p}</option>
             ))}
           </select>
         </div>
+
+        {(stt.provider || 'whisper') === 'whisper' && (
+          <div className="flex justify-between items-center gap-3 py-2 border-b border-border text-sm">
+            <span className="text-muted">Model</span>
+            <select value={stt.model} onChange={e => setModel(e.target.value)} disabled={saving} aria-label="Whisper model"
+              className="bg-bg-elevated border border-border rounded-md px-3 py-1.5 text-text text-[13px] font-body outline-none cursor-pointer transition-colors focus-ring">
+              {Object.entries(stt.models).map(([name, size]) => (
+                <option key={name} value={name}>{name} ({size})</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {stt.provider === 'mlx' && (
+          <div className="flex justify-between items-center gap-3 py-2 border-b border-border text-sm">
+            <span className="text-muted">
+              MLX Model <InfoTip text="Whisper model running on Apple MLX (Metal GPU). Downloads on first use." />
+            </span>
+            <select value={stt.mlx_model || ''} onChange={e => setMlxModel(e.target.value)} disabled={saving} aria-label="MLX model"
+              className="bg-bg-elevated border border-border rounded-md px-3 py-1.5 text-text text-[13px] font-body outline-none cursor-pointer transition-colors focus-ring">
+              {Object.entries(stt.mlx_models || {}).map(([name, size]) => (
+                <option key={name} value={name}>{name.replace('mlx-community/', '')} ({size})</option>
+              ))}
+            </select>
+          </div>
+        )}
 
         <div className="flex justify-between items-center gap-3 py-2 border-b border-border text-sm">
           <span className="text-muted">Runtime</span>
@@ -184,12 +235,18 @@ export default function SlackTab() {
           ) : (
             <>
               <Btn onClick={install}>
-                {stt.docker_mode ? <><Package className="lucide-inline" /> Pull Docker Image</> : <><Package className="lucide-inline" /> Install Whisper</>}
+                {stt.docker_mode
+                  ? <><Package className="lucide-inline" /> Pull Docker Image</>
+                  : stt.provider === 'mlx'
+                    ? <><Package className="lucide-inline" /> Install MLX Whisper</>
+                    : <><Package className="lucide-inline" /> Install Whisper</>}
               </Btn>
               <p className="text-muted text-[13px] mt-2">
                 {stt.docker_mode
                   ? 'Pulls python:3.11-slim for Docker-based transcription (AL2).'
-                  : 'Installs openai-whisper + ffmpeg. Uses system python3 (≥ 3.10).'}
+                  : stt.provider === 'mlx'
+                    ? 'Installs mlx-whisper via pipx + ffmpeg. Apple Silicon (arm64) only.'
+                    : 'Installs openai-whisper + ffmpeg. Uses system python3 (≥ 3.10).'}
               </p>
             </>
           )}
