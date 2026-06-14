@@ -36,6 +36,25 @@ def _safe_url_for_prompt(url: str) -> str:
     return f"{p.scheme}://{p.netloc}{p.path}"
 
 
+def _normalize_link(raw: object) -> dict[str, str]:
+    """Coerce a raw link entry to ``{"url": str, "context": str}``.
+
+    The nav panel posts arbitrary client JSON; a non-dict entry or a
+    non-string ``url``/``context`` previously raised (TypeError/AttributeError)
+    inside prompt construction and surfaced as a 500. Normalizing at this
+    boundary keeps downstream logic string-only, and is index-aligned with the
+    input so the positional ``summaries`` response still lines up per link.
+    """
+    if not isinstance(raw, dict):
+        return {"url": "", "context": ""}
+    url = raw.get("url", "")
+    ctx = raw.get("context", "")
+    return {
+        "url": url if isinstance(url, str) else "",
+        "context": ctx if isinstance(ctx, str) else "",
+    }
+
+
 def _build_link_summary_prompt(links: list[dict]) -> str:
     """Build prompt for batch link summary generation."""
     items: list[str] = []
@@ -91,20 +110,40 @@ async def api_chat_nav_resolve_links(request: web.Request) -> web.Response:
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
+    if not isinstance(body, dict):
+        # A valid-but-non-dict JSON body (array/scalar/string) would raise on
+        # body.get() below; reject it as malformed rather than 500.
+        return web.json_response({"error": "invalid request body"}, status=400)
 
     links = body.get("links", [])
     if not isinstance(links, list) or not links:
         return web.json_response({"error": "links array required"}, status=400)
-    # Cap at 20 links per request
-    links = links[:20]
+    # Cap at 20 links per request, then normalize each entry to a string
+    # url/context at this boundary — a non-dict entry or non-string field would
+    # otherwise raise during prompt construction and surface as a spurious 500.
+    links = [_normalize_link(x) for x in links[:20]]
 
     try:
         summaries = await _resolve_link_summaries(state, links)
-    except Exception:
-        logger.warning("Link summary resolution failed", exc_info=True)
-        return web.json_response({"error": "resolution failed"}, status=500)
+    except Exception as exc:
+        # Cosmetic link-label enrichment must never emit a 5xx: a resolver
+        # failure (e.g. an LLM/provider error on the shared background session)
+        # is a non-event — the frontend falls back to the raw-URL chip. Fail
+        # soft to 200 with empty summaries, but keep the failure diagnosable
+        # via the warning log and a SEL audit event (so fail-soft doesn't hide
+        # a rising real-error rate).
+        logger.warning("Link summary resolution failed: %s", type(exc).__name__, exc_info=True)
+        try:
+            sel().log_tool_invocation(
+                session_key=BACKGROUND_KEY, tool_name="llm_link_summary",
+                source="chat_nav", outcome="error", error=type(exc).__name__,
+            )
+        except Exception:
+            # Best-effort audit: a SEL emit failure must not defeat fail-soft.
+            logger.warning("Failed to emit SEL event for link summary failure", exc_info=True)
+        summaries = []
 
-    # Pad if LLM returned fewer lines than expected
+    # Pad if the resolver returned fewer lines than expected (or failed soft).
     while len(summaries) < len(links):
         summaries.append("")
 

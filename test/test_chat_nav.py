@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from kiro_claw.dashboard.chat_nav import _build_link_summary_prompt, _resolve_link_summaries
+from kiro_claw.dashboard.chat_nav import (
+    _build_link_summary_prompt,
+    _normalize_link,
+    _resolve_link_summaries,
+)
 
 
 class TestBuildLinkSummaryPrompt:
@@ -189,3 +193,158 @@ class TestApiEndpoint:
             resp = await client.post("/api/chat/nav/resolve-links", json={"links": links})
             assert resp.status == 200
             assert len(received) == 20
+
+
+class TestNormalizeLink:
+    def test_valid_passthrough(self):
+        assert _normalize_link({"url": "https://x.com", "context": "ctx"}) == {
+            "url": "https://x.com",
+            "context": "ctx",
+        }
+
+    def test_missing_fields_default_to_empty(self):
+        assert _normalize_link({}) == {"url": "", "context": ""}
+
+    def test_non_string_url_coerced_to_empty(self):
+        # 123[:500] used to raise TypeError -> 500
+        assert _normalize_link({"url": 123, "context": "ctx"}) == {"url": "", "context": "ctx"}
+
+    def test_non_string_context_coerced_to_empty(self):
+        # "".strip() on a list used to raise AttributeError -> 500
+        assert _normalize_link({"url": "https://x.com", "context": ["a"]}) == {
+            "url": "https://x.com",
+            "context": "",
+        }
+
+    def test_null_url_coerced_to_empty(self):
+        assert _normalize_link({"url": None}) == {"url": "", "context": ""}
+
+    def test_non_dict_entry_coerced_to_empty(self):
+        # link.get(...) on a str/None used to raise AttributeError -> 500
+        assert _normalize_link("https://x.com") == {"url": "", "context": ""}
+        assert _normalize_link(None) == {"url": "", "context": ""}
+
+
+class TestApiEndpointResilience:
+    """Regression: malformed link shapes must fail soft (200), never 500."""
+
+    @pytest.mark.asyncio
+    async def test_malformed_links_do_not_500(self, monkeypatch):
+        from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_claw.dashboard import chat_nav
+        from kiro_claw.dashboard.chat_nav import api_chat_nav_resolve_links
+
+        async def mock_resolve(state, links):
+            # Exercise the REAL prompt builder to prove normalized links never
+            # raise during prompt construction (the original 500 root cause).
+            _build_link_summary_prompt(links)
+            return [""] * len(links)
+
+        monkeypatch.setattr(chat_nav, "_resolve_link_summaries", mock_resolve)
+
+        app = web.Application()
+        app["state"] = object()
+        app.router.add_post("/api/chat/nav/resolve-links", api_chat_nav_resolve_links)
+        async with TestClient(TestServer(app)) as client:
+            # Every shape that previously produced a 500.
+            links = [
+                {"url": 123, "context": "x"},
+                {"url": "https://ok.com", "context": 99},
+                {"url": None},
+                "https://not-a-dict.com",
+                None,
+                {},
+            ]
+            resp = await client.post("/api/chat/nav/resolve-links", json={"links": links})
+            assert resp.status == 200
+            data = await resp.json()
+            # Index-aligned: one summary per input link.
+            assert len(data["summaries"]) == len(links)
+
+    @pytest.mark.asyncio
+    async def test_non_dict_body_returns_400(self):
+        from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_claw.dashboard.chat_nav import api_chat_nav_resolve_links
+
+        app = web.Application()
+        app["state"] = object()
+        app.router.add_post("/api/chat/nav/resolve-links", api_chat_nav_resolve_links)
+        async with TestClient(TestServer(app)) as client:
+            # A valid-but-non-dict JSON body would raise on body.get() -> 500.
+            for payload in ([1, 2, 3], "x", 42):
+                resp = await client.post("/api/chat/nav/resolve-links", json=payload)
+                assert resp.status == 400, f"body={payload!r} should be 400"
+
+    @pytest.mark.asyncio
+    async def test_resolver_error_fails_soft_with_audit_event(self, monkeypatch):
+        from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_claw.dashboard import chat_nav
+        from kiro_claw.dashboard.chat_nav import api_chat_nav_resolve_links
+
+        async def mock_resolve(state, links):
+            raise RuntimeError("provider boom")
+
+        monkeypatch.setattr(chat_nav, "_resolve_link_summaries", mock_resolve)
+
+        # Capture the diagnostic SEL event instead of writing the real audit log.
+        events: list[dict] = []
+
+        class FakeSel:
+            def log_tool_invocation(self, **kwargs):
+                events.append(kwargs)
+
+        monkeypatch.setattr(chat_nav, "sel", lambda: FakeSel())
+
+        app = web.Application()
+        app["state"] = object()
+        app.router.add_post("/api/chat/nav/resolve-links", api_chat_nav_resolve_links)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/chat/nav/resolve-links",
+                json={"links": [{"url": "https://a.com"}, {"url": "https://b.com"}]},
+            )
+            # Cosmetic feature must never 5xx on resolver failure.
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["summaries"] == ["", ""]
+        # Failure stayed diagnosable after fail-soft hid the 5xx.
+        assert len(events) == 1
+        assert events[0]["outcome"] == "error"
+        assert events[0]["error"] == "RuntimeError"
+
+    @pytest.mark.asyncio
+    async def test_fail_soft_survives_sel_emit_error(self, monkeypatch):
+        from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_claw.dashboard import chat_nav
+        from kiro_claw.dashboard.chat_nav import api_chat_nav_resolve_links
+
+        async def mock_resolve(state, links):
+            raise RuntimeError("provider boom")
+
+        monkeypatch.setattr(chat_nav, "_resolve_link_summaries", mock_resolve)
+
+        # The audit emit itself raises -- it must not defeat fail-soft.
+        class ExplodingSel:
+            def log_tool_invocation(self, **kwargs):
+                raise OSError("sel sink down")
+
+        monkeypatch.setattr(chat_nav, "sel", lambda: ExplodingSel())
+
+        app = web.Application()
+        app["state"] = object()
+        app.router.add_post("/api/chat/nav/resolve-links", api_chat_nav_resolve_links)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/chat/nav/resolve-links", json={"links": [{"url": "https://a.com"}]}
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["summaries"] == [""]
