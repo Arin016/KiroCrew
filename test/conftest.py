@@ -9,6 +9,7 @@ import shutil
 import pytest
 from hypothesis import HealthCheck, settings
 
+from kiro_claw import sel as _sel
 from kiro_claw.safety_override import reset_singleton as _reset_safety_override
 from kiro_claw.slack.client import SlackClientOps
 from kiro_claw.slack.handler import _PHASE_EMOJIS, _build_phase_emojis
@@ -95,6 +96,28 @@ def _clean_emojis():
     yield
     _PHASE_EMOJIS.clear()
     _PHASE_EMOJIS.update(original)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_sel_default_dir(tmp_path_factory):
+    """Redirect the Security Event Log default dir to a session-local tmp dir.
+
+    SEL's default singleton writes to the real ``~/.kiroclaw/security_events.jsonl``
+    (``_DEFAULT_DIR = Path.home()/".kiroclaw"``, non-atomic append). Tests that
+    emit events via the default ``sel()`` would otherwise pollute that real file
+    and, under ``pytest -n auto``, share it across worker processes. Redirect the
+    module-level default to a per-session tmp dir. Session-scoped so we don't
+    churn SEL's background writer thread per test; tests that manage their own
+    ``SecurityEventLog`` (test_sel.py resets ``_instance`` + passes ``base_dir``)
+    are unaffected.
+    """
+    orig_dir = _sel._DEFAULT_DIR
+    orig_inst = _sel.SecurityEventLog._instance
+    _sel._DEFAULT_DIR = tmp_path_factory.mktemp("sel")
+    _sel.SecurityEventLog._instance = None
+    yield
+    _sel._DEFAULT_DIR = orig_dir
+    _sel.SecurityEventLog._instance = orig_inst
 
 
 class MockSlackClient(SlackClientOps):

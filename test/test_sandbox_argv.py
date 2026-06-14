@@ -25,6 +25,11 @@ from kiro_claw.sandbox import (
     wrap_argv,
 )
 
+# Several tests spawn real child interpreters (subprocess.run([sys.executable, ...]));
+# pin the module to a dedicated xdist worker so concurrent cold-starts under -n auto
+# don't starve each other / blow the 30s timeout. Requires --dist loadgroup.
+pytestmark = pytest.mark.xdist_group(name="subprocess_spawn")
+
 
 @pytest.fixture(autouse=True)
 def clean_backend():

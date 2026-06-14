@@ -11,7 +11,14 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 from kiro_claw.config.schema import SCHEMA_REGISTRY
+
+# Each test spawns a real child interpreter (subprocess.run([sys.executable, ...]));
+# pin the module to a dedicated xdist worker so concurrent cold-starts under -n auto
+# don't starve each other / blow the 30s timeout. Requires --dist loadgroup.
+pytestmark = pytest.mark.xdist_group(name="subprocess_spawn")
 
 # ---------------------------------------------------------------------------
 # Helpers

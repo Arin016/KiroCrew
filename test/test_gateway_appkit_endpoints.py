@@ -685,11 +685,12 @@ class TestReverseProxy:
         backend_app.router.add_route("*", "/{path:.*}", echo_handler)
         runner = web.AppRunner(backend_app)
         await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 18765)
+        site = web.TCPSite(runner, "127.0.0.1", 0)
         await site.start()
+        port = runner.addresses[0][1]
 
         import kiro_claw.apps.routes as rmod
-        monkeypatch.setattr(rmod, "_resolve_app_backend_url", lambda name: "http://127.0.0.1:18765")
+        monkeypatch.setattr(rmod, "_resolve_app_backend_url", lambda name: f"http://127.0.0.1:{port}")
 
         try:
             async with self._make_client() as client:
@@ -732,11 +733,12 @@ class TestReverseProxy:
         backend_app.router.add_route("*", "/{path:.*}", echo_handler)
         runner = web.AppRunner(backend_app)
         await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 18766)
+        site = web.TCPSite(runner, "127.0.0.1", 0)
         await site.start()
+        port = runner.addresses[0][1]
 
         import kiro_claw.apps.routes as rmod
-        monkeypatch.setattr(rmod, "_resolve_app_backend_url", lambda name: "http://127.0.0.1:18766")
+        monkeypatch.setattr(rmod, "_resolve_app_backend_url", lambda name: f"http://127.0.0.1:{port}")
 
         try:
             async with self._make_client() as client:

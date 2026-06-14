@@ -16,6 +16,11 @@ import pytest
 
 from kiro_claw import seed as seed_mod
 
+# A test here spawns a real `python -m kiro_claw gateway --help` child interpreter;
+# pin the module to a dedicated xdist worker so concurrent cold-starts under -n auto
+# don't starve each other / blow the 30s timeout. Requires --dist loadgroup.
+pytestmark = pytest.mark.xdist_group(name="subprocess_spawn")
+
 
 def test_seed_empty_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``kiroclaw seed --fixture empty`` writes fixture.yaml into $KIROCLAW_HOME."""

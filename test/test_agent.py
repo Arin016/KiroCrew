@@ -2078,7 +2078,16 @@ class TestKiroHooksAutoimport:
             result = _autoimport_kiro_hooks(missing)
 
         assert result == {}
-        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        # Scope to the kiro_claw.agent logger: under `pytest -n auto`, a leaked
+        # asyncio task exception from an unrelated test (e.g. "Task exception was
+        # never retrieved" on the root `asyncio` logger) can land in caplog during
+        # this window and falsely trip a bare records scan. We only care that THIS
+        # code path emits no WARNING+.
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.WARNING and r.name == "kiro_claw.agent"
+        ]
         assert warnings == []
 
     def test_kiro_hooks_autoimport_invalid_matcher_skips_script(
