@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -1644,14 +1645,26 @@ class GatewayOrchestrator:
                 # Compute the count this alert represents (including itself) so
                 # the re-alert message can call out persistence.
                 new_count = job.consecutive_failures + 1 if is_dup else 1
+                # Include the machine hostname so multi-gateway setups (e.g. a
+                # laptop + a cloud desktop both running KiroClaw) can tell which
+                # machine's session failed. This is framework-level: the ❌ DM
+                # can fire before any prompt logic runs (e.g. a session-startup
+                # credential failure), so the machine name must come from here,
+                # not from inside the cron prompt.
+                host = socket.gethostname().split(".")[0]
                 if is_dup:
                     fail_msg = (
-                        f"⏰ *Cron: {job.name}* ❌ _Job still failing"
+                        f"⏰ *Cron: {job.name}* ❌ _Job still failing on {host}"
                         f" ({new_count} consecutive identical failures)"
                         f" — check logs._"
                     )
                 else:
-                    fail_msg = f"⏰ *Cron: {job.name}* ❌ _Job failed — check logs._"
+                    fail_msg = f"⏰ *Cron: {job.name}* ❌ _Job failed on {host} — check logs._"
+                # Never trust interpolated content (job.name is user-controlled):
+                # scrub exfiltration URLs + credentials before it reaches Slack,
+                # mirroring the dashboard alert_title redaction above.
+                fail_msg, _ = redact_exfiltration_urls(fail_msg)
+                fail_msg, _ = redact_credentials(fail_msg)
                 slack_failed = False  # track real delivery exceptions only
                 if self.slack:
 
@@ -1662,8 +1675,7 @@ class GatewayOrchestrator:
                                 job.created_by or self._owner_id, job.name
                             )
                         if channel:
-                            fail_msg, _ = redact_exfiltration_urls(fail_msg)
-                            fail_msg, _ = redact_credentials(fail_msg)
+                            # fail_msg already redacted at construction above.
                             await self.slack.post_message(channel, fail_msg)
                         else:
                             logger.warning("Cron '%s': no channel resolved for error notification", job.name)

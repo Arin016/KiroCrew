@@ -8,6 +8,7 @@ the dedup state.
 from __future__ import annotations
 
 import asyncio
+import socket
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from kiro_claw.cron import CronJob, CronSchedule
@@ -304,6 +305,10 @@ class TestCronFailureDedup:
         _run_callback_raising(gw, job, RuntimeError("boom"))
         # First failure always posts to Slack
         assert gw.slack.post_message.await_count == 1
+        # The framework-level failure DM names the machine hostname so
+        # multi-gateway setups can tell which machine's session failed.
+        host = socket.gethostname().split(".")[0]
+        assert f"on {host}" in gw.slack.post_message.await_args.args[1]
         # State advanced only after successful delivery
         assert job.last_failure_hash != ""
         assert job.consecutive_failures == 1
@@ -357,6 +362,7 @@ class TestCronFailureDedup:
         realert_call = gw.slack.post_message.await_args_list[-1]
         assert "still failing" in realert_call.args[1]
         assert "3 consecutive" in realert_call.args[1]
+        assert f"on {socket.gethostname().split('.')[0]}" in realert_call.args[1]
 
     def test_recovery_clears_failure_state(self) -> None:
         gw = _make_gateway()
