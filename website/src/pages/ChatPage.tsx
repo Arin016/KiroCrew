@@ -709,6 +709,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
 
   const [prefillHint, setPrefillHint] = useState(false)
   const autoSendRef = useRef<string | null>(null)
+  const [autoSendTick, setAutoSendTick] = useState(0)
   const newSessionRef = useRef(false)
   // True while the challenge-redirect token effect is creating/linking its
   // session. Blocks the auto-select effect from switching to a different slot
@@ -826,6 +827,8 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       }
       setInput(prompt)
       setPrefillHint(true)
+      autoSendRef.current = prompt
+      setAutoSendTick(t => t + 1)
      } finally {
       // Release the auto-select guard once the session is created/linked (or
       // failed), so normal slot selection resumes.
@@ -1691,7 +1694,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   }, [panel.slot, activeSlot, dispatch, send])
 
   // Auto-send when navigated with ?autoSend=1 or ?token= with prompt
-  useEffect(() => { if (connected && autoSendRef.current) { const txt = autoSendRef.current; autoSendRef.current = null; send(txt) } }, [send, connected]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (connected && autoSendRef.current) { const txt = autoSendRef.current; autoSendRef.current = null; send(txt) } }, [send, connected, autoSendTick]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Widget interactivity: when a mcwidget iframe fires an action, auto-submit as user message
   useEffect(() => {
