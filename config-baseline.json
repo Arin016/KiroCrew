@@ -1112,6 +1112,7 @@
         "provider": "whisper",
         "whisper_path": "",
         "model": "turbo",
+        "mlx_model": "mlx-community/whisper-large-v3-turbo",
         "device": "cpu",
         "timeout_secs": 300,
         "transcribe_region": "us-east-1",
@@ -1147,6 +1148,7 @@
       "hasChildren": false,
       "enumValues": [
         "whisper",
+        "mlx",
         "transcribe"
       ],
       "defaultValue": "whisper"
@@ -1180,6 +1182,20 @@
         "turbo"
       ],
       "defaultValue": "turbo"
+    },
+    {
+      "path": "stt.mlx_model",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "MLX Model",
+      "help": "Hugging Face repo for the mlx_whisper model (mlx provider only).",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": "mlx-community/whisper-large-v3-turbo"
     },
     {
       "path": "stt.device",
