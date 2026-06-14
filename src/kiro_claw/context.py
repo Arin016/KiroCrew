@@ -565,6 +565,10 @@ class ContextBuilder:
             ws_path = workspace_dir_for(key)
             store = MemoryStore(workspace=ws_path)
             store.init()
+            # Share the global VectorMemoryStore so all agents get semantic/episodic reads
+            default = _memory_stores.get("default")
+            if default is not None and default.vector_store is not None:
+                store.vector_store = default.vector_store
             _memory_stores[key] = store
         return _memory_stores[key]
 

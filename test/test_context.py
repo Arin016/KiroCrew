@@ -283,6 +283,53 @@ class TestContextBuilder:
         assert len(history_block) <= _HISTORY_BUDGET_CHARS + 1000  # some overhead for labels
 
 
+class TestGetMemoryForVectorStore:
+    """Tests for symmetric vector_store attachment across memory stores."""
+
+    def test_nondefault_store_shares_vector_store(self, tmp_path, monkeypatch):
+        """Non-default stores get the same vector_store as the default store."""
+        import kiro_claw.context as ctx_mod
+
+        original = ctx_mod._memory_stores.copy()
+        ctx_mod._memory_stores.clear()
+        monkeypatch.setattr(
+            ctx_mod, "workspace_dir_for", lambda key: tmp_path / key
+        )
+        try:
+            default_store = MemoryStore(workspace=tmp_path / "default")
+            default_store.init()
+            mock_vs = object()  # sentinel
+            default_store.vector_store = mock_vs
+            ctx_mod._memory_stores["default"] = default_store
+
+            result = ContextBuilder.get_memory_for("custom-agent")
+
+            assert result.vector_store is mock_vs
+            assert result is not default_store
+            assert result._workspace != default_store._workspace
+        finally:
+            ctx_mod._memory_stores.clear()
+            ctx_mod._memory_stores.update(original)
+
+    def test_nondefault_store_without_default_has_no_vector_store(
+        self, tmp_path, monkeypatch
+    ):
+        """If no default store exists yet, non-default store gets no vector_store."""
+        import kiro_claw.context as ctx_mod
+
+        original = ctx_mod._memory_stores.copy()
+        ctx_mod._memory_stores.clear()
+        monkeypatch.setattr(
+            ctx_mod, "workspace_dir_for", lambda key: tmp_path / key
+        )
+        try:
+            result = ContextBuilder.get_memory_for("orphan")
+            assert result.vector_store is None
+        finally:
+            ctx_mod._memory_stores.clear()
+            ctx_mod._memory_stores.update(original)
+
+
 class TestCompressAssistantMessage:
     """Tests for _compress_assistant_message code block and JSON handling."""
 
