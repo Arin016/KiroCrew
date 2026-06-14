@@ -12,7 +12,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 
 from kiro_claw.dashboard.server import _register_dist_static_routes
 
@@ -71,3 +73,41 @@ def test_optional_subdirs_registered_only_when_present(tmp_path) -> None:
 
     prefixes = _registered_prefixes(app)
     assert {"/assets", "/sprites", "/fonts", "/vendor"} <= prefixes
+
+
+# ---------------------------------------------------------------------------
+# Content-Type verification for font files served via /fonts static route
+# ---------------------------------------------------------------------------
+
+_FONT_CONTENT_TYPE_CASES = [
+    ("test.woff", "font/woff"),
+    ("test.woff2", "font/woff2"),
+    ("test.ttf", "font/ttf"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filename,expected_ct", _FONT_CONTENT_TYPE_CASES)
+async def test_font_files_served_with_correct_content_type(
+    tmp_path: Path,
+    filename: str,
+    expected_ct: str,
+) -> None:
+    """Font files under /fonts must return their proper MIME Content-Type.
+
+    aiohttp's bare MimeTypes instance lacks font extensions and would fall
+    back to ``application/octet-stream`` without explicit registration.
+    The import-time registration in ``server.py`` fixes this for all static
+    routes — verify it works end-to-end through the aiohttp test client.
+    """
+    dist = _make_dist(tmp_path, "assets", "fonts")
+    # Create a dummy font file with some arbitrary bytes.
+    (dist / "fonts" / filename).write_bytes(b"\x00wOFF" * 4)
+
+    app = web.Application()
+    _register_dist_static_routes(app, dist)
+
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get(f"/fonts/{filename}")
+        assert resp.status == 200
+        assert resp.content_type == expected_ct

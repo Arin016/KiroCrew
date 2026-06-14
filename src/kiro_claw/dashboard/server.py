@@ -73,6 +73,18 @@ if TYPE_CHECKING:
         TaskRunner,
     )
 
+# aiohttp's static file handler uses its own ``mimetypes.MimeTypes()`` instance
+# (``aiohttp.web_fileresponse.CONTENT_TYPES``) which does NOT load the system
+# mime.types database.  Font extensions are missing from the built-in Python
+# fallback, so aiohttp returns ``application/octet-stream`` for .woff/.woff2/.ttf.
+# Register the correct font MIME types into that singleton at import time so ALL
+# static routes (including ``/fonts``) serve proper Content-Type headers.
+from aiohttp.web_fileresponse import CONTENT_TYPES as _AIOHTTP_CONTENT_TYPES
+
+_AIOHTTP_CONTENT_TYPES.add_type("font/woff", ".woff")
+_AIOHTTP_CONTENT_TYPES.add_type("font/woff2", ".woff2")
+_AIOHTTP_CONTENT_TYPES.add_type("font/ttf", ".ttf")
+
 logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
