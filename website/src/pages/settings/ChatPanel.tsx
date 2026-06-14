@@ -289,7 +289,6 @@ export function ChatPanel() {
 
       <SettingsSection title="Sidebar">
         <SettingsCard>
-          <SettingsToggle label="Enable Hiding Sessions Sidebar" description="Click the chat icon in the navigation bar to toggle visibility" checked={chatCfg.sidebarCanHide} onChange={v => setChat('sidebarCanHide', v)} />
           <SettingsToggle label="Navigation Panel" description="Show the link navigation panel when opening a session" checked={chatCfg.navPanelOpen} onChange={v => setChat('navPanelOpen', v)} />
         </SettingsCard>
       </SettingsSection>

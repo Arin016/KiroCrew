@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, memo, useMemo, useCallback, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import { LayoutGroup, AnimatePresence, motion } from 'framer-motion'
-import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, Folder, ChevronRight, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns3, GripVertical, Zap, Check, Link2, Copy, ListFilter } from 'lucide-react'
+import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, Folder, ChevronRight, ChevronDown, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns3, GripVertical, Zap, Check, Link2, Copy, ListFilter } from 'lucide-react'
 import { DndContext, closestCenter, pointerWithin, KeyboardSensor, PointerSensor, useSensor, useSensors, useDraggable, useDroppable, DragOverlay, type DragEndEvent, type DragStartEvent, type CollisionDetection } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy, useSortable, sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -239,6 +239,11 @@ interface ChatSidebarProps {
    *  When provided, this fires AFTER the switchSlot dispatch so consumers
    *  can react to user-driven selection (e.g. to navigate the URL). */
   onSelectSlot?: (key: string) => void
+  /** When true, the sidebar is externally collapsible — a persistent toggle
+   *  button lives in the chat container at the top-left, so the header
+   *  reserves left space for it. Omitted in embed/sessions mode where the
+   *  sidebar is the whole view. */
+  collapsible?: boolean
 }
 
 type SortKey = 'date-desc' | 'date-asc' | 'name-asc' | 'name-desc'
@@ -267,7 +272,7 @@ const SIDEBAR_LS_KEY = 'mc-sidebar-width'
 
 function ChatSidebar({
   slots, activeSlot, unreadSlots, history, historyHasMore,
-  defaultAgent, installedAgents, mode, onWidthChange, onDragChange, onSelectSlot,
+  defaultAgent, installedAgents, mode, onWidthChange, onDragChange, onSelectSlot, collapsible,
 }: ChatSidebarProps) {
   const dispatch = useAppDispatch()
   const queryClient = useQueryClient()
@@ -404,6 +409,14 @@ function ChatSidebar({
   }, [historyHeight])
   const [cleanupOpen, setCleanupOpen] = useState(false)
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false)
+  // Split create-button: main segment = New chat; caret opens a menu with
+  // New folder + New chat in folder (flat folder flyout). Menu is portaled to
+  // <body> so the right-edge folder flyout escapes the sidebar's overflow clip.
+  const [createMenuOpen, setCreateMenuOpen] = useState(false)
+  const [createSubmenuOpen, setCreateSubmenuOpen] = useState(false)
+  const [createRect, setCreateRect] = useState<DOMRect | null>(null)
+  const createBtnRef = useRef<HTMLButtonElement>(null)
+  const createMenuRef = useRef<HTMLDivElement>(null)
   const [filterSortOpen, setFilterSortOpen] = useState(false)
   const [cleanupDays, setCleanupDays] = useState(3)
   const [cleanupExpanded, setCleanupExpanded] = useState(false)
@@ -565,6 +578,20 @@ function ChatSidebar({
     const id2 = setTimeout(() => document.addEventListener('mousedown', handler), 0)
     return () => { clearTimeout(id2); document.removeEventListener('mousedown', handler) }
   }, [headerMenuOpen])
+
+  // Close the split create-menu on outside click. The menu is portaled to
+  // <body>, so the guard must check both the trigger wrapper and the portal.
+  useEffect(() => {
+    if (!createMenuOpen) return
+    const handler = (e: MouseEvent) => {
+      const t = e.target as Node | null
+      if (createBtnRef.current?.closest('[data-create-menu]')?.contains(t as Node)) return
+      if (createMenuRef.current?.contains(t as Node)) return
+      setCreateMenuOpen(false); setCreateSubmenuOpen(false)
+    }
+    const cid = setTimeout(() => document.addEventListener('mousedown', handler), 0)
+    return () => { clearTimeout(cid); document.removeEventListener('mousedown', handler) }
+  }, [createMenuOpen])
 
   // Close filter/sort popover on outside click
   useEffect(() => {
@@ -1133,6 +1160,12 @@ function ChatSidebar({
   const rootFolderIds = useMemo(() => rootFolders.map(f => f.id), [rootFolders])
   const ungroupedSlots = filteredSlots.filter(s => !slotFolders[s.key])
 
+  // Narrow-sidebar header responsiveness: below ~256px the full "New chat"
+  // label no longer fits next to the label + kebab, so collapse the create
+  // button to icon-only; below ~200px also drop the "Sessions" label.
+  const compactHeader = sidebarWidth < 256
+  const tinyHeader = sidebarWidth < 200
+
   return (
     <div className="sidebar-inner bg-bg-elevated border border-border rounded-xl flex flex-col shrink-0 relative h-full" style={{ width: sidebarWidth }}>
       {/* Drag handle */}
@@ -1144,9 +1177,11 @@ function ChatSidebar({
       </div>
 
       {/* Header */}
-      <div className="flex justify-between items-center px-3 h-12 mt-1">
-        <span className="text-[13px] font-medium text-muted uppercase tracking-[.04em]">Sessions</span>
-        <div className="flex items-center gap-1.5">
+      <div className="flex justify-between items-center px-2 h-12">
+        <div className={`flex items-center gap-1.5 min-w-0 flex-1 ${collapsible && !isMobile ? 'pl-8' : ''}`}>
+          {!tinyHeader && <span className="text-[13px] font-medium text-muted uppercase tracking-[.04em] truncate">Sessions</span>}
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
           <div className="relative" data-header-menu>
             <button className="w-7 h-7 rounded-md border border-border bg-transparent text-muted cursor-pointer flex items-center justify-center hover:border-border-strong hover:text-text transition-all" onClick={() => setHeaderMenuOpen(!headerMenuOpen)} title="More options" aria-label="More options" aria-haspopup="menu" aria-expanded={headerMenuOpen}><MoreVertical size={14} /></button>
             {headerMenuOpen && (
@@ -1162,8 +1197,57 @@ function ChatSidebar({
               </div>
             )}
           </div>
-          <button className="w-7 h-7 rounded-md border border-border bg-transparent text-muted cursor-pointer flex items-center justify-center hover:border-border-strong hover:text-text transition-all" onClick={() => { setCreatingIn('__root__'); setNewName('') }} title="New folder" aria-label="New folder"><FolderPlus size={14} /></button>
-          <button className="w-7 h-7 rounded-md bg-accent text-accent-fg border-none cursor-pointer flex items-center justify-center hover:bg-accent-hover hover:shadow-[0_0_16px_var(--accent-glow)] hover:rotate-90 hover:scale-110 active:scale-95 transition-all" onClick={() => dispatch(createSlot({ agent: defaultAgent || undefined, mode })).then(() => requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus()))} title="New chat" aria-label="New chat session"><Plus size={16} /></button>
+          {/* Split create-button: main segment = one-click New chat; caret
+           *  opens a menu grouping New folder + New chat in folder (flat
+           *  folder flyout). Replaces the old standalone New-folder + New-chat
+           *  header buttons. Menu is portaled to <body> so the right-side
+           *  folder flyout escapes the sidebar's overflow clip. */}
+          <div className="relative flex items-center rounded-md bg-accent text-accent-fg overflow-hidden shrink-0" data-create-menu>
+            <button
+              className={`flex items-center h-7 cursor-pointer bg-transparent border-none text-accent-fg hover:bg-accent-hover active:scale-95 transition-all ${compactHeader ? 'justify-center w-7' : 'gap-1.5 pl-2 pr-2.5 text-[12px] font-semibold'}`}
+              onClick={() => { setCreateMenuOpen(false); setCreateSubmenuOpen(false); dispatch(createSlot({ agent: defaultAgent || undefined, mode })).then(() => requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus())) }}
+              title="New chat" aria-label="New chat session"><Plus size={15} />{!compactHeader && <span className="whitespace-nowrap">New chat</span>}</button>
+            <span className="w-px h-4 bg-accent-fg opacity-30" aria-hidden="true" />
+            <button ref={createBtnRef}
+              className="flex items-center justify-center w-6 h-7 cursor-pointer bg-transparent border-none text-accent-fg hover:bg-black/10 active:scale-95 transition-all"
+              onClick={() => { if (!createMenuOpen && createBtnRef.current) setCreateRect(createBtnRef.current.getBoundingClientRect()); setCreateMenuOpen(o => !o); setCreateSubmenuOpen(false) }}
+              title="Create…" aria-label="More create options" aria-haspopup="menu" aria-expanded={createMenuOpen}><ChevronDown size={13} /></button>
+            {createMenuOpen && createRect && createPortal(
+              <div ref={createMenuRef} data-create-menu role="menu"
+                className="fixed z-[60] min-w-[200px] rounded-lg border border-border bg-bg-elevated shadow-lg py-1 animate-rise"
+                style={{ top: createRect.bottom + 6, right: Math.max(8, window.innerWidth - createRect.right) }}>
+                <button role="menuitem"
+                  className="w-full px-3 py-1.5 text-left text-[13px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors"
+                  onMouseEnter={() => setCreateSubmenuOpen(false)}
+                  onClick={() => { setCreateMenuOpen(false); setCreateSubmenuOpen(false); setCreatingIn('__root__'); setNewName('') }}>
+                  <FolderPlus size={14} className="text-muted" /> New folder
+                </button>
+                {folders.length > 0 && (
+                  <div className="relative" onMouseEnter={() => setCreateSubmenuOpen(true)}>
+                    <button role="menuitem" aria-haspopup="menu" aria-expanded={createSubmenuOpen}
+                      className="w-full px-3 py-1.5 text-left text-[13px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors"
+                      onClick={() => setCreateSubmenuOpen(o => !o)}>
+                      <Folder size={14} className="text-muted" /> New chat in folder
+                      <ChevronRight size={13} className="ml-auto text-muted" />
+                    </button>
+                    {createSubmenuOpen && (
+                      <div role="menu"
+                        className="absolute left-full top-0 ml-1 min-w-[170px] max-w-[220px] max-h-[280px] overflow-y-auto rounded-lg border border-border bg-bg-elevated shadow-lg py-1">
+                        {folders.map(f => (
+                          <button key={f.id} role="menuitem" title={f.name}
+                            className="w-full px-3 py-1.5 text-left text-[12.5px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors"
+                            onClick={() => { setCreateMenuOpen(false); setCreateSubmenuOpen(false); createChatInFolder(f.id); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus()) }}>
+                            <Folder size={13} className="text-accent shrink-0" /> <span className="truncate">{f.name}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>,
+              document.body
+            )}
+          </div>
         </div>
       </div>
 
@@ -1222,7 +1306,7 @@ function ChatSidebar({
       })()}
 
       {/* Search with inline sort/filter control */}
-      <div className="px-3 pt-2 pb-1">
+      <div className="px-2 pt-2 pb-1">
         <div className="relative">
           <SearchInput className={`w-full ${slotFilter ? '[&>input]:pr-14' : '[&>input]:pr-9'}`} placeholder="Search sessions…" value={slotFilter} onChange={e => setSlotFilter(e.target.value)} />
           {slotFilter && (

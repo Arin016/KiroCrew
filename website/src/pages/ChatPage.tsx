@@ -81,7 +81,7 @@ import { loadChatConfig, CONTENT_WIDTH, type ChatConfig } from './chat/ChatSetti
 import { useKnowledgeFetch, extractKnowledgeQuery, expandKnowledgeBlock } from './chat/useKnowledgeFetch'
 import { KnowledgePicker } from './chat/KnowledgePicker'
 import { useSessionPalette } from '../hooks/useSessionPalette'
-import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, Pen, MessageSquareShare, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Locate, ListTree, Link2, Link2Off, Hash, Undo2, Check } from 'lucide-react'
+import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, PanelLeftOpen, PanelLeftClose, Pen, MessageSquareShare, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Locate, ListTree, Link2, Link2Off, Hash, Undo2, Check } from 'lucide-react'
 
 import InfoTip from '../components/InfoTip'
 import { FileCard } from '../components/FileCard'
@@ -1769,7 +1769,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   })
   useEffect(() => { setResolvedModel(_slotResolvedModel || '') }, [_slotResolvedModel])
   const [navPanelOpen, setNavPanelOpen] = useState(() => loadChatConfig().navPanelOpen)
-  const [sidebarPinned, setSidebarPinned] = useState(() => localStorage.getItem('mc-sidebar-pinned') === 'true')
+  const [sidebarPinned, setSidebarPinned] = useState(() => localStorage.getItem('mc-sidebar-pinned') !== 'false')
   const isMobile = useIsMobile()
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const v = parseInt(localStorage.getItem('mc-sidebar-width') || '', 10)
@@ -1860,7 +1860,9 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const composingRef = useRef(false)
   useEffect(() => {
     const togglePin = () => {
-      if (!chatConfig.sidebarCanHide || filteredSlotsRef.current.length === 0) return
+      // Always-available collapse. Only guard is no-sessions (the sidebar is
+      // force-open then anyway, so there is nothing to collapse).
+      if (filteredSlotsRef.current.length === 0) return
       setSidebarPinned(p => {
         const next = !p
         localStorage.setItem('mc-sidebar-pinned', String(next))
@@ -1869,7 +1871,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     }
     window.addEventListener('toggle-pin-chat-sidebar', togglePin)
     return () => window.removeEventListener('toggle-pin-chat-sidebar', togglePin)
-  }, [chatConfig.sidebarCanHide])
+  }, [])
 
   const lastRole = messages[messages.length - 1]?.role ?? ''
   // Precompute: index of last finalized assistant message (tools after this are "trailing")
@@ -2199,17 +2201,29 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   useEffect(() => { if (!isMobile) setMobileSessions(false) }, [isMobile])
   // Swipe from left edge to open sidebar, swipe left on backdrop to close
   const chatContainerRef = useRef<HTMLDivElement>(null)
+  // Measured container height — used to size the sidebar border-box morph
+  // (the panel rect it grows from / shrinks into the expand button).
+  const [containerH, setContainerH] = useState(0)
+  useEffect(() => {
+    const el = chatContainerRef.current
+    if (!el) return
+    const measure = () => setContainerH(el.clientHeight)
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
   const openSidebar = useCallback(() => setMobileSessions(true), [])
   const closeSidebar = useCallback(() => setMobileSessions(false), [])
   useSwipeEdge(chatContainerRef, { enabled: isMobile && !mobileSessions, edge: 'left', edgeZone: 0.35, onSwipe: openSidebar })
   useSwipeEdge(chatContainerRef, { enabled: isMobile && mobileSessions, edge: 'right', threshold: 50, edgeZone: 9999, onSwipe: closeSidebar })
-  const sidebarOpen = isMobile ? mobileSessions : (!chatConfig.sidebarCanHide || sidebarPinned || filteredSlots.length === 0)
+  const sidebarOpen = isMobile ? mobileSessions : (sidebarPinned || filteredSlots.length === 0)
   useEffect(() => {
-    if (chatConfig.sidebarCanHide && filteredSlots.length === 0 && !sidebarPinned) {
+    if (filteredSlots.length === 0 && !sidebarPinned) {
       setSidebarPinned(true)
       localStorage.setItem('mc-sidebar-pinned', 'true')
     }
-  }, [chatConfig.sidebarCanHide, filteredSlots.length]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [filteredSlots.length, sidebarPinned])
 
   return (
     <div ref={chatContainerRef} className="flex flex-1 min-h-0 h-full overflow-hidden relative">
@@ -2226,6 +2240,46 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
           />
         )}
       </AnimatePresence>
+      {/* Sidebar collapse/expand control. Two stacked pieces, both in the
+          stable container (not inside the morphing panel):
+          1. Morph border-box: a crisp bordered box (no content, so border &
+             radius stay sharp) that grows from the button's rect to the
+             panel's rect on open and shrinks back on collapse — the panel's
+             border becoming the button's box.
+          2. Icon button: fixed at the button's spot, flips icon + action.
+          Desktop, non-embed, with sessions only. */}
+      {!isMobile && embedMode !== 'chat' && embedMode !== 'sessions' && filteredSlots.length > 0 && (() => {
+        const RADIUS = 12 // same as the panel's rounded-xl — constant through the morph
+        const PANEL = { top: 8, left: 0, width: sidebarWidth, height: Math.max(0, containerH - 16), borderRadius: RADIUS, opacity: 1 }
+        const BTN = { top: 15, left: 8, width: 34, height: 34, borderRadius: RADIUS, opacity: 1 }
+        const MORPH = { duration: 0.32, ease: [0.32, 0.72, 0, 1] as const }
+        return (
+          <>
+            <AnimatePresence initial={false}>
+              {!sidebarOpen && (
+                <motion.div
+                  key="sidebar-morph-box"
+                  aria-hidden="true"
+                  className="absolute z-[60] bg-bg-elevated border border-border shadow-md pointer-events-none"
+                  initial={PANEL}
+                  animate={BTN}
+                  exit={{ ...PANEL, opacity: 0 }}
+                  transition={MORPH}
+                />
+              )}
+            </AnimatePresence>
+            <button
+              type="button"
+              onClick={() => window.dispatchEvent(new CustomEvent('toggle-pin-chat-sidebar'))}
+              className="absolute top-[15px] left-2 z-[61] w-[34px] h-[34px] rounded-xl flex items-center justify-center cursor-pointer text-muted hover:text-text transition-colors bg-transparent border-none"
+              title={sidebarOpen ? 'Hide sessions' : 'Show sessions'}
+              aria-label={sidebarOpen ? 'Hide sessions sidebar' : 'Show sessions sidebar'}
+            >
+              {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
+            </button>
+          </>
+        )
+      })()}
       {embedMode === 'chat' ? null : embedMode === 'sessions' ? (
         <div className="flex-1 min-w-0 h-full overflow-hidden [&_.sidebar-inner]:!w-full [&_.sidebar-inner]:!border-0 [&_.sidebar-inner]:!rounded-none [&_.sidebar-inner]:!shrink [&_.sidebar-inner]:!bg-bg [&_.sidebar-resize-handle]:!hidden">
           <ChatSidebar
@@ -2243,7 +2297,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
           />
         </div>
       ) : (
-      <OverlayDrawer open={sidebarOpen} width={sidebarWidth} dragging={sidebarDragging} className={isMobile ? 'mobile-sessions-overlay fixed top-[52px] bottom-0 left-0 z-50 bg-bg-elevated !py-0 rounded-r-xl shadow-lg max-w-[calc(100vw-2.5rem)] [&>*]:!rounded-none [&>*]:!border-0 [&>*]:!m-0' : ''}>
+      <OverlayDrawer open={sidebarOpen} width={sidebarWidth} dragging={sidebarDragging} morph={!isMobile} className={isMobile ? 'mobile-sessions-overlay fixed top-[52px] bottom-0 left-0 z-50 bg-bg-elevated !py-0 rounded-r-xl shadow-lg max-w-[calc(100vw-2.5rem)] [&>*]:!rounded-none [&>*]:!border-0 [&>*]:!m-0' : ''}>
         <ChatSidebar
           slots={filteredSlots}
           activeSlot={activeSlot}
@@ -2255,6 +2309,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
           mode={mode}
           onWidthChange={setSidebarWidth}
           onDragChange={setSidebarDragging}
+          collapsible={!isMobile}
         />
       </OverlayDrawer>
       )}
@@ -2312,7 +2367,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                 in index.css) so the overlay never paints over the scroller's scrollbar
                 track — otherwise the thumb is hidden/un-grabbable when scrolled to top. */}
             <div className="absolute top-0 left-0 right-1.5 z-10 pointer-events-none" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-              <div className="px-5 pt-3 pb-2 flex items-center gap-2 bg-bg pointer-events-none">
+              <div className={`pr-5 pt-3 pb-2 flex items-center gap-2 bg-bg pointer-events-none ${!sidebarOpen && !isMobile ? 'pl-14' : 'pl-5'}`}>
                 {embedMode !== 'chat' && isMobile && (
                   <button className="p-1 rounded-md text-muted hover:text-text cursor-pointer bg-transparent border-none pointer-events-auto" onClick={() => setMobileSessions(p => !p)} aria-label="Toggle sessions">
                     {mode === 'orchestrator' ? <MessageSquareDot size={16} /> : <MessageSquare size={16} />}

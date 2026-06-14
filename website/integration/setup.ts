@@ -93,6 +93,22 @@ if (typeof window !== 'undefined' && !(window as unknown as { IntersectionObserv
   ;(globalThis as unknown as { IntersectionObserver: unknown }).IntersectionObserver = StubIntersectionObserver
 }
 
+// jsdom polyfill: ResizeObserver. Used by ChatPage (the sidebar collapse
+// border-box morph measures the container height) and other layout-aware
+// components. jsdom has no layout, so a no-op stub is sufficient — observers
+// simply never fire.
+if (typeof (globalThis as unknown as { ResizeObserver?: unknown }).ResizeObserver === 'undefined') {
+  class StubResizeObserver {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  }
+  ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = StubResizeObserver
+  if (typeof window !== 'undefined') {
+    ;(window as unknown as { ResizeObserver: unknown }).ResizeObserver = StubResizeObserver
+  }
+}
+
 // jsdom polyfill: EventSource. jsdom doesn't implement the SSE Web API; the
 // useFileWatch / useLogSSE / useSSE hooks open an EventSource. Provide a
 // minimal no-op stub so any component that opens a stream doesn't crash under

@@ -59,9 +59,11 @@ describe('ChatSidebar Folder Grouping', () => {
     expect(screen.queryByText('UNGROUPED')).not.toBeInTheDocument()
   })
 
-  it('shows new folder button', async () => {
+  it('shows new folder action in the create menu', async () => {
+    const user = userEvent.setup()
     renderWithProviders(<ChatSidebar {...defaultProps} />)
-    await waitFor(() => expect(screen.getByTitle('New folder')).toBeInTheDocument())
+    await user.click(await screen.findByLabelText('More create options'))
+    await waitFor(() => expect(screen.getByText('New folder')).toBeInTheDocument())
   })
 
   it('creates a folder via inline input and API', async () => {
@@ -78,7 +80,8 @@ describe('ChatSidebar Folder Grouping', () => {
     )
     renderWithProviders(<ChatSidebar {...defaultProps} />)
 
-    await user.click(screen.getByTitle('New folder'))
+    await user.click(await screen.findByLabelText('More create options'))
+    await user.click(await screen.findByText('New folder'))
     const input = await screen.findByPlaceholderText('Folder name…')
     await user.type(input, 'Oncall Work')
     fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', keyCode: 13 })
@@ -90,7 +93,8 @@ describe('ChatSidebar Folder Grouping', () => {
     const user = userEvent.setup()
     renderWithProviders(<ChatSidebar {...defaultProps} />)
 
-    await user.click(screen.getByTitle('New folder'))
+    await user.click(await screen.findByLabelText('More create options'))
+    await user.click(await screen.findByText('New folder'))
     expect(screen.getByPlaceholderText('Folder name…')).toBeInTheDocument()
     await user.keyboard('{Escape}')
 
@@ -109,7 +113,8 @@ describe('ChatSidebar Folder Grouping', () => {
     )
     renderWithProviders(<ChatSidebar {...defaultProps} />)
 
-    await user.click(screen.getByTitle('New folder'))
+    await user.click(await screen.findByLabelText('More create options'))
+    await user.click(await screen.findByText('New folder'))
     const input = screen.getByPlaceholderText('Folder name…') as HTMLInputElement
     fireEvent.compositionStart(input)
     fireEvent.change(input, { target: { value: '测试' } })
