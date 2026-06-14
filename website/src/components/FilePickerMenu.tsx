@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { FileText, Eye } from 'lucide-react'
 import { api } from '../api/client'
+import { useListKeyboardNav } from '../hooks/useListKeyboardNav'
 
 interface FileResult {
   path: string
@@ -42,10 +43,8 @@ function makeRelative(path: string, root: string): string {
 
 export default function FilePickerMenu({ query, anchorRef, open, onSelect, onClose, onFileOpen, project }: Props) {
   const [results, setResults] = useState<FileResult[]>([])
-  const [selected, setSelected] = useState(0)
   const [loading, setLoading] = useState(false)
   const rootRef = useRef('')
-  const selectedRef = useRef(0)
   const resultsRef = useRef<FileResult[]>([])
   const onFileOpenRef = useRef(onFileOpen)
   onFileOpenRef.current = onFileOpen
@@ -55,53 +54,35 @@ export default function FilePickerMenu({ query, anchorRef, open, onSelect, onClo
     const controller = new AbortController()
     const timer = setTimeout(() => {
       api.fileSearch(query, project, controller.signal)
-        .then(d => { setResults(d.results || []); resultsRef.current = d.results || []; rootRef.current = d.root || ''; setSelected(0); selectedRef.current = 0 })
+        .then(d => { setResults(d.results || []); resultsRef.current = d.results || []; rootRef.current = d.root || ''; setSelected(0) })
         .catch(() => { if (!controller.signal.aborted) { setResults([]); resultsRef.current = [] } })
         .finally(() => { if (!controller.signal.aborted) setLoading(false) })
     }, 200)
     return () => { clearTimeout(timer); controller.abort() }
   }, [query, open, project])
 
-  const selectItem = useCallback((idx: number) => {
+  const choose = useCallback((idx: number) => {
     const r = resultsRef.current
-    const i = idx >= r.length ? 0 : idx
-    const f = r[i]
+    const f = r[idx >= r.length ? 0 : idx]
     if (f) onSelect({ path: f.path, relativePath: makeRelative(f.path, rootRef.current) })
   }, [onSelect])
 
-  const onKey = useCallback((e: KeyboardEvent) => {
-    if (!open) return
-    const r = resultsRef.current
-    if (r.length === 0) {
-      if (e.key === 'Escape' || e.key === 'Enter' || e.key === 'Tab') {
-        e.preventDefault(); e.stopPropagation(); onClose()
-      }
-      return
-    }
-    if (e.key === 'ArrowDown') {
-      e.preventDefault(); e.stopPropagation()
-      setSelected(i => { const next = (i + 1) % r.length; selectedRef.current = next; return next })
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault(); e.stopPropagation()
-      setSelected(i => { const next = (i - 1 + r.length) % r.length; selectedRef.current = next; return next })
-    } else if (e.key === 'Enter' || e.key === 'Tab') {
-      e.preventDefault(); e.stopPropagation()
-      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && onFileOpenRef.current) {
-        const f = r[selectedRef.current]
-        if (f) { onFileOpenRef.current(f.path); onClose() }
-      } else {
-        selectItem(selectedRef.current)
-      }
-    } else if (e.key === 'Escape') {
-      e.preventDefault(); e.stopPropagation(); onClose()
-    }
-  }, [open, onClose, selectItem])
+  // Cmd/Ctrl+Enter opens the file in the viewer instead of inserting it.
+  // Returns true to signal the hook to skip the default choose.
+  const altEnter = useCallback((idx: number): boolean => {
+    const f = resultsRef.current[idx]
+    if (f && onFileOpenRef.current) { onFileOpenRef.current(f.path); onClose(); return true }
+    return false
+  }, [onClose])
 
-  useEffect(() => {
-    if (!open) return
-    document.addEventListener('keydown', onKey, true)
-    return () => document.removeEventListener('keydown', onKey, true)
-  }, [open, onKey])
+  // Shared Arrow/Enter/Tab/Escape + scroll-into-view (see useListKeyboardNav).
+  const { selected, setSelected, itemRefs } = useListKeyboardNav({
+    open,
+    count: results.length,
+    onChoose: choose,
+    onClose,
+    onAltEnter: altEnter,
+  })
 
   if (!open || !anchorRef.current) return null
 
@@ -128,9 +109,10 @@ export default function FilePickerMenu({ query, anchorRef, open, onSelect, onClo
           aria-selected={i === selected}
           tabIndex={-1}
           key={f.path}
+          ref={el => { itemRefs.current[i] = el }}
           className={`w-full text-left px-3 py-2 flex items-center gap-3 cursor-pointer transition-colors ${i === selected ? 'bg-accent-subtle text-text' : 'text-muted hover:bg-bg-hover hover:text-text'}`}
           title={f.path}
-          onMouseEnter={() => { setSelected(i); selectedRef.current = i }}
+          onMouseEnter={() => setSelected(i)}
           onMouseDown={e => { e.preventDefault(); onSelect({ path: f.path, relativePath: makeRelative(f.path, rootRef.current) }) }}
         >
           <FileText size={14} className="shrink-0 lucide-inline" />

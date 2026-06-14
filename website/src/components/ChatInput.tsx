@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useLayoutEffect, useCallback, memo } from 
 import { ArrowUpFromLine, ArrowUp, Loader2, Plus, Crop, Bot, Mic, Square, ShieldCheck, BookOpen, Handshake, Rocket, X, ClipboardList, CheckCircle, Ban, Sparkles, Goal, Target, Lock, Globe, FolderOpen, FileText } from 'lucide-react'
 import { Toggle } from './ui'
 import { createPortal } from 'react-dom'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useBranding } from '../hooks/useBranding'
 import { useAppSelector, useAppDispatch } from '../store'
 import { resolveByApprovalId, openActivityToTool } from '../store/chatSlice'
@@ -62,6 +62,7 @@ export {
 import { effortLabel } from '../lib/effort'
 import SlashCommandMenu from './SlashCommandMenu'
 import FilePickerMenu from './FilePickerMenu'
+import SkillPickerMenu from './SkillPickerMenu'
 
 const INPUT_MIN_H = 44
 const INPUT_DEFAULT_MAX_H = 140
@@ -428,6 +429,20 @@ function ChatInput({
   const [slashMenuOpen, setSlashMenuOpen] = useState(false)
   const [filePickerOpen, setFilePickerOpen] = useState(false)
   const [fileQuery, setFileQuery] = useState('')
+  const [skillPickerOpen, setSkillPickerOpen] = useState(false)
+  const [skillQuery, setSkillQuery] = useState('')
+  // Warm the shared ['skills'] cache when the input gains focus so the first
+  // `$` trigger renders the picker instantly (the fetch is the only latency).
+  // prefetchQuery is a no-op if the cache is already fresh (staleTime), so it's
+  // cheap to call on every focus. Shares the key with SkillPickerMenu + SkillsTab.
+  const queryClient = useQueryClient()
+  const prefetchSkills = useCallback(() => {
+    queryClient.prefetchQuery({
+      queryKey: ['skills'],
+      queryFn: () => api.skills(),
+      staleTime: 5 * 60 * 1000,
+    })
+  }, [queryClient])
   const chatMessages = useAppSelector(s => s.chat.messages)
   const [manualHeight, setManualHeight] = useState<number | null>(() => {
     const saved = localStorage.getItem(INPUT_HEIGHT_LS_KEY)
@@ -477,6 +492,8 @@ function ChatInput({
   slashMenuOpenRef.current = slashMenuOpen
   const filePickerOpenRef = useRef(false)
   filePickerOpenRef.current = filePickerOpen
+  const skillPickerOpenRef = useRef(false)
+  skillPickerOpenRef.current = skillPickerOpen
 
   // Auto-focus textarea when the active session changes (autoFocusKey).
   // Track the previous key in a ref so the effect only acts on real key
@@ -988,10 +1005,10 @@ function ChatInput({
     }
     // Prompt history: ↑/↓ cycles through prior user messages.
     // Ignore when IME composing, no history, modifier keys, or when
-    // slash-command / file-picker menus are open (they own ↑/↓).
+    // slash-command / file-picker / skill-picker menus are open (they own ↑/↓).
     if (
       !sentMessages?.length ||
-      slashMenuOpenRef.current || filePickerOpenRef.current ||
+      slashMenuOpenRef.current || filePickerOpenRef.current || skillPickerOpenRef.current ||
       ime.isComposing(e) ||
       e.metaKey || e.ctrlKey || e.altKey || e.shiftKey
     ) return
@@ -1386,6 +1403,20 @@ function ChatInput({
         />
       )}
 
+      <SkillPickerMenu
+        query={skillQuery}
+        anchorRef={inputRef as React.RefObject<HTMLElement>}
+        open={skillPickerOpen}
+        onSelect={({ leaf }) => {
+          // Replace the trailing $query with $leaf (token left literal — backend
+          // appends the skill body and the user still sees their $token marker).
+          const newVal = value.replace(/(^|[\s])\$[a-z0-9/_-]*$/, (_, prefix) => `${prefix}$${leaf} `)
+          onChange(newVal)
+          setSkillPickerOpen(false); setSkillQuery('')
+        }}
+        onClose={() => { setSkillPickerOpen(false); setSkillQuery('') }}
+      />
+
       {/* Unified input container — drag-to-resize targets this div.
        *  Wrapped in AnimatePresence so the swap between "bar above input"
        *  and "bar replaces input" feels like a single continuous morph
@@ -1429,6 +1460,13 @@ function ChatInput({
             const m = val.match(/(^|[\s])@(\S*)$/)
             if (m && onFileSelect) { setFilePickerOpen(true); setFileQuery(m[2]) }
             else { setFilePickerOpen(false); setFileQuery('') }
+            // Detect $query at word boundary for skill picker.
+            // Charset mirrors the backend $skill token: lowercase-led slug, so
+            // shell-style $PATH / $5 won't trigger the menu. Mutually exclusive
+            // with the @ file picker (a token starts with one sigil or the other).
+            const sm = val.match(/(^|[\s])\$([a-z0-9][a-z0-9/_-]*)?$/)
+            if (sm && !m) { setSkillPickerOpen(true); setSkillQuery(sm[2] || '') }
+            else { setSkillPickerOpen(false); setSkillQuery('') }
           }}
           onKeyDown={handleKeyDown}
           {...ime.composition}
@@ -1436,6 +1474,7 @@ function ChatInput({
           onCopy={handleCopy}
           onCut={handleCut}
           onClick={handleTextareaClick}
+          onFocus={prefetchSkills}
           onMouseUp={handleSelectSnap}
           onSelect={handleSelectSnap}
           onInput={handleInput}
