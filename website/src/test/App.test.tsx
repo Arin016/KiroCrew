@@ -293,6 +293,20 @@ describe('TopbarMetrics widget', () => {
     localStorage.removeItem('mc-topbar-metrics')
   })
 
+  it('renders "CPU —" instead of crashing when cpu_pct is undefined', async () => {
+    const { api } = await import('../api/client')
+    const sysMock = vi.mocked(api.system)
+    // Backend omits cpu_pct (partial/stale frame or older gateway) -> cpuPct is undefined.
+    sysMock.mockResolvedValueOnce({ mem_used_gb: 4.0, mem_total_gb: 16.0, disk_total_gb: 100.0, disk_free_gb: 60.0 } as never)
+    localStorage.setItem('mc-topbar-metrics', '1')
+    renderWithProviders(<App />, { route: '/chat' })
+    expect(await screen.findByText(/CPU —/)).toBeInTheDocument()
+    // mem/disk still render normally from the same frame.
+    expect(screen.getByText(/MEM 25%/)).toBeInTheDocument()
+    sysMock.mockResolvedValue({ mem_used_gb: 4.0, mem_total_gb: 16.0, cpu_pct: 25.0, disk_total_gb: 100.0, disk_free_gb: 60.0 } as never)
+    localStorage.removeItem('mc-topbar-metrics')
+  })
+
   it('renders "metrics unavailable" pill when api.system rejects', async () => {
     const { api } = await import('../api/client')
     const sysMock = vi.mocked(api.system)

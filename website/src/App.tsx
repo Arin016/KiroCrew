@@ -861,9 +861,10 @@ export default function App() {
             const dskPct = m.diskTotal > 0 ? dskUsed / m.diskTotal : 0
             const memValid = m.memTotal > 0
             const dskValid = m.diskTotal > 0
+            const cpuValid = typeof m.cpuPct === 'number' && Number.isFinite(m.cpuPct)
             const staleTitle = sysMetricsStale ? ' (stale: fetch failing)' : ''
             return (<button className={`top-bar-pill bg-card flex items-center gap-2 text-[11px] font-mono cursor-pointer ${sysMetricsStale ? 'opacity-60 ring-1 ring-danger' : ''}`} title={sysMetricsStale ? 'Metrics are stale, latest fetch failed' : 'Click to hide'} onClick={() => { setMetricsOpen(false); localStorage.setItem('mc-topbar-metrics', '0') }}>
-              <span className={metricColor(m.cpuPct / 100)} title={`CPU: ${m.cpuPct.toFixed(0)}%${staleTitle}`}>CPU {m.cpuPct.toFixed(0)}%</span>
+              <span className={cpuValid ? metricColor(m.cpuPct / 100) : 'text-muted'} title={cpuValid ? `CPU: ${m.cpuPct.toFixed(0)}%${staleTitle}` : 'CPU: unavailable'}>CPU {cpuValid ? `${m.cpuPct.toFixed(0)}%` : '—'}</span>
               <span className={memValid ? metricColor(memPct) : 'text-muted'} title={memValid ? `Memory: ${m.memUsed.toFixed(1)}/${m.memTotal.toFixed(1)} GB${staleTitle}` : 'Memory: unavailable'}>MEM {memValid ? `${(memPct * 100).toFixed(0)}%` : '—'}</span>
               <span className={dskValid ? metricColor(dskPct) : 'text-muted'} title={dskValid ? `Disk: ${dskUsed.toFixed(0)}/${m.diskTotal.toFixed(0)} GB${staleTitle}` : 'Disk: unavailable'}>DSK {dskValid ? `${(dskPct * 100).toFixed(0)}%` : '—'}</span>
             </button>)
