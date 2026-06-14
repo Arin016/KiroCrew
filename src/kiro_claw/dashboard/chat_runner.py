@@ -975,6 +975,7 @@ async def _run_chat(
                 tool_name=tool_name,
                 tool_input=tool_input,
                 tool_response=tool_response,
+                parent_session_key=session_key,
             )
             for r in results:
                 if r.exit_code == 0 and r.stdout:

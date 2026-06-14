@@ -102,3 +102,41 @@ class TestAgentSpawnHookInjection:
 
         assert captured_message is not None
         assert "Enable caveman mode" not in captured_message
+
+
+class TestHookSessionKeyForwarding:
+    """The chat path must forward its session key to fired hooks so downstream
+    hook scripts can attribute each turn to the correct session identity."""
+
+    @pytest.mark.asyncio
+    async def test_session_key_passed_to_fire(self, tmp_path, monkeypatch):
+        from kiro_claw.dashboard.chat import _run_chat
+        from kiro_claw.providers.base import LLMEvent
+
+        monkeypatch.setattr("kiro_claw.dashboard.chat.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_claw.dashboard.chat.sel", lambda: MagicMock())
+
+        state = _make_state(tmp_path)
+        # Mock the hook store so we can inspect the kwargs passed to fire().
+        hook_store = MagicMock()
+        hook_store.fire = AsyncMock(return_value=[])
+        state._hook_store = hook_store
+
+        fake_client = AsyncMock()
+
+        async def _stream(msg):
+            yield LLMEvent(kind="text_chunk", text="ok")
+            yield LLMEvent(kind="complete")
+
+        fake_client.stream = _stream
+        fake_client.stream_command = _stream
+        fake_client.context_usage_pct = MagicMock(return_value=0.0)
+        state.sessions.get_or_create = AsyncMock(return_value=(fake_client, False, False))
+
+        slot = state.get_or_create_slot("s1")
+        await _run_chat(state, slot, "hello")
+
+        # _history_key_for("s1") == "dashboard:s1" — every fired hook must carry it.
+        assert hook_store.fire.await_count > 0
+        for call in hook_store.fire.await_args_list:
+            assert call.kwargs.get("parent_session_key") == "dashboard:s1"
