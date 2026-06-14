@@ -111,15 +111,19 @@ beforeEach(() => localStorage.clear())
 afterEach(() => vi.clearAllMocks())
 
 describe('Mesh-1908: session row drag is disabled during inline rename', () => {
+  // The legacy lane uses dnd-kit drag; the logical drag-enabled state is
+  // surfaced via data-draggable (dnd-kit's `disabled` prop is otherwise not
+  // reflected as a DOM attribute). Drag must be off during rename so the input
+  // gets native click-to-place-caret.
   it('row is draggable before rename', () => {
     const { container } = renderSidebar()
-    expect(rowFor(container).getAttribute('draggable')).toBe('true')
+    expect(rowFor(container).getAttribute('data-draggable')).toBe('true')
   })
 
   it('row becomes non-draggable once the rename input is open', () => {
     const { container } = renderSidebar()
     const row = rowFor(container)
-    expect(row.getAttribute('draggable')).toBe('true')
+    expect(row.getAttribute('data-draggable')).toBe('true')
 
     fireEvent.contextMenu(row)
     const menu = container.querySelector('[role="menu"]') as HTMLElement
@@ -128,7 +132,7 @@ describe('Mesh-1908: session row drag is disabled during inline rename', () => {
 
     // Same row node, now rendering the input; drag must be off so the browser
     // gives the input native click-to-place-caret.
-    expect(rowFor(container).getAttribute('draggable')).toBe('false')
+    expect(rowFor(container).getAttribute('data-draggable')).toBe('false')
     // select-text overrides the row's inherited select-none so click-drag
     // selection works in the field — the other half of the fix.
     const input = within(rowFor(container)).getByRole('textbox')

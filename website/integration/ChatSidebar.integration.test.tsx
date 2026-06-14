@@ -246,9 +246,12 @@ describe('ChatSidebar Folder Grouping', () => {
   it('sessions are draggable', async () => {
     renderWithProviders(<ChatSidebar {...defaultProps} />)
     await waitFor(() => expect(screen.getByText('Pipeline debug')).toBeInTheDocument())
-    const sessionEl = screen.getByText('Pipeline debug').closest('[draggable]')
+    // Legacy-lane rows use dnd-kit drag (not native HTML5); drag-enabled state
+    // is surfaced via data-draggable since dnd-kit's disabled prop is not a DOM
+    // attribute.
+    const sessionEl = screen.getByText('Pipeline debug').closest('[data-draggable]')
     expect(sessionEl).toBeTruthy()
-    expect(sessionEl?.getAttribute('draggable')).toBe('true')
+    expect(sessionEl?.getAttribute('data-draggable')).toBe('true')
   })
 
   it('derives slot folders from slot.folder_id prop', async () => {
@@ -585,14 +588,15 @@ describe('ChatSidebar Folder Reorder', () => {
     expect(document.querySelector('[data-folder-sortable="f-2"]')).toBeInTheDocument()
   })
 
-  it('renders grip handle with correct accessibility attributes', async () => {
+  it('folder header is the whole-row drag handle (no grip)', async () => {
     renderWithProviders(<ChatSidebar {...defaultProps} />)
     await waitFor(() => expect(screen.getByText('Alpha')).toBeInTheDocument())
-    // dnd-kit places role="button" and tabIndex on the handle via attributes
-    const handles = document.querySelectorAll('[data-folder-sortable] [role="button"]')
+    // The grip handle was removed; the whole folder header row is now the
+    // drag handle (pointer listeners forwarded onto the header, cursor-grab).
+    const handles = document.querySelectorAll('[data-folder-sortable] .cursor-grab')
     expect(handles.length).toBeGreaterThanOrEqual(3)
-    // Verify aria-label is set
-    expect(handles[0].getAttribute('aria-label')).toContain('Reorder')
+    // The legacy "Reorder" grip handle no longer exists.
+    expect(document.querySelector('[data-folder-sortable] [aria-label^="Reorder"]')).toBeNull()
   })
 
   // Reorder logic is unit-tested in src/test/reorderFolders.test.ts

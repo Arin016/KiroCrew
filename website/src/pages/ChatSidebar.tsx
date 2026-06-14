@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, memo, useMemo, useCallback, Fragment } fro
 import { createPortal } from 'react-dom'
 import { LayoutGroup, AnimatePresence, motion } from 'framer-motion'
 import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, Folder, ChevronRight, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns3, GripVertical, Zap, Check, Link2, Copy, ListFilter } from 'lucide-react'
-import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
+import { DndContext, closestCenter, pointerWithin, KeyboardSensor, PointerSensor, useSensor, useSensors, useDraggable, useDroppable, DragOverlay, type DragEndEvent, type DragStartEvent, type CollisionDetection } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy, useSortable, sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -41,16 +41,62 @@ function fmtRelativeTime(ts: string | number | undefined): string {
 }
 
 /** Sortable wrapper for a folder block — enables drag-to-reorder */
-function SortableFolderBlock({ folder, renderFolderBlock }: { folder: ChatFolder; renderFolderBlock: (f: ChatFolder, depth: number, visited?: Set<string>, dragHandleProps?: React.HTMLAttributes<HTMLElement>, dragHandleRef?: (el: HTMLElement | null) => void) => React.ReactNode[] }) {
-  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id: folder.id })
+/**
+ * Folder reordering and session-to-folder assignment share one DndContext but
+ * want different collision behavior:
+ *  - Dragging a folder: restrict collisions to folder sortable containers so
+ *    verticalListSortingStrategy animates cleanly and `over.id` is a folder id.
+ *  - Dragging a session: prefer the innermost droppable under the pointer
+ *    (folder/root drop target), falling back to closestCenter.
+ */
+const sidebarCollision: CollisionDetection = (args) => {
+  const activeType = (args.active?.data?.current as { type?: string } | undefined)?.type
+  if (activeType === 'folder') {
+    const folderContainers = args.droppableContainers.filter(
+      c => (c.data?.current as { type?: string } | undefined)?.type === 'folder'
+    )
+    return closestCenter({ ...args, droppableContainers: folderContainers })
+  }
+  const within = pointerWithin(args)
+  return within.length ? within : closestCenter(args)
+}
+
+/** Render-prop wrapper exposing a dnd-kit draggable to inline JSX without
+ *  defining a component per row (which would remount on every render). */
+function DndDraggable({ id, data, disabled, children }: {
+  id: string
+  data: Record<string, unknown>
+  disabled?: boolean
+  children: (p: { setNodeRef: (el: HTMLElement | null) => void; listeners: ReturnType<typeof useDraggable>['listeners']; attributes: ReturnType<typeof useDraggable>['attributes']; isDragging: boolean }) => React.ReactNode
+}) {
+  const { setNodeRef, listeners, attributes, isDragging } = useDraggable({ id, data, disabled })
+  return <>{children({ setNodeRef, listeners, attributes, isDragging })}</>
+}
+
+/** Render-prop wrapper exposing a dnd-kit droppable to inline JSX. */
+function DndDroppable({ id, data, children }: {
+  id: string
+  data: Record<string, unknown>
+  children: (p: { setNodeRef: (el: HTMLElement | null) => void; isOver: boolean }) => React.ReactNode
+}) {
+  const { setNodeRef, isOver } = useDroppable({ id, data })
+  return <>{children({ setNodeRef, isOver })}</>
+}
+
+function SortableFolderBlock({ folder, renderFolderBlock }: { folder: ChatFolder; renderFolderBlock: (f: ChatFolder, depth: number, visited?: Set<string>, dragHandleProps?: React.HTMLAttributes<HTMLElement>, forceCollapsed?: boolean) => React.ReactNode[] }) {
+  const { listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: folder.id, data: { type: 'folder' } })
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1, position: 'relative' as const }
-  // The drag handle lives INSIDE the folder header (see renderFolderHeader) so
-  // hovering it reuses the header's own :hover state — no separate highlight.
-  // setActivatorNodeRef marks that handle as the drag activator so dnd-kit's
-  // keyboard sensor can start a reorder from it (custom handle != sortable node).
+  // The whole folder header is the drag handle (pointer + touch): dragging the
+  // row reorders the folder — no grip, consistent with session-card drag. Only
+  // pointer listeners are forwarded (not attributes) so the header keeps
+  // its inner collapse/action buttons valid. The PointerSensor activation
+  // distance lets clicks through. setNodeRef stays on the block for sortable
+  // positioning. While dragging, the body is force-collapsed so the source
+  // shrinks to a single row — the drop-target gap (and the DragOverlay ghost)
+  // stay compact.
   return (
     <div ref={setNodeRef} style={style} className="relative" data-folder-sortable={folder.id}>
-      {renderFolderBlock(folder, 0, undefined, { ...attributes, ...listeners } as React.HTMLAttributes<HTMLElement>, setActivatorNodeRef)}
+      {renderFolderBlock(folder, 0, undefined, listeners as unknown as React.HTMLAttributes<HTMLElement>, isDragging)}
     </div>
   )
 }
@@ -396,9 +442,6 @@ function ChatSidebar({
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
   const cancelledRef = useRef(false)
-  // Per-folder drag-enter counter: nested enter/leave pairs balance out so
-  // the highlight only clears when the drag truly leaves the outermost wrapper.
-  const folderDragCount = useRef<Record<string, number>>({})
 
   // Resize logic
   const sidebarDragging = useRef(false)
@@ -699,13 +742,14 @@ function ChatSidebar({
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   )
-  const handleFolderDragEnd = useCallback((event: DragEndEvent) => {
-    const { active, over } = event
-    if (!over || active.id === over.id) return
+  // Tracks the item currently being dragged, for the DragOverlay preview.
+  const [activeDrag, setActiveDrag] = useState<{ type: string; id: string } | null>(null)
+  const reorderFolders = useCallback((activeId: string, overId: string) => {
+    if (activeId === overId) return
     // Read latest from cache to avoid stale-closure ordering on rapid successive drags
     const current = queryClient.getQueryData<ChatFolder[]>(['chat-folders']) ?? []
     const rootOnly = current.filter(f => !f.parent_id)
-    const changes = computeReorderedFolders(rootOnly, active.id as string, over.id as string)
+    const changes = computeReorderedFolders(rootOnly, activeId, overId)
     if (!changes.length) return
     // Optimistic update
     queryClient.setQueryData<ChatFolder[]>(['chat-folders'], old =>
@@ -755,6 +799,37 @@ function ChatSidebar({
     onError: (_err, _vars, ctx) => { if (ctx) dispatch(updateSlotFolder({ key: ctx.slotKey, folderId: ctx.prevFolderId })) },
   })
   const assignToFolder = useCallback((slotKey: string, folderId: string | null) => { assignFolderMutation.mutate({ slotKey, folderId }) }, [assignFolderMutation])
+  // Unified dnd-kit handlers for the legacy single-lane layout. One DndContext
+  // owns both folder reordering (sortable) and session drag-to-assign
+  // (draggable rows + droppable folder/root targets); the active item's
+  // data.type routes the drop.
+  const handleSidebarDragStart = useCallback((e: DragStartEvent) => {
+    const d = e.active.data.current as { type?: string; key?: string } | undefined
+    if (d?.type === 'session' && d.key) setActiveDrag({ type: 'session', id: d.key })
+    else if (d?.type === 'folder') setActiveDrag({ type: 'folder', id: e.active.id as string })
+  }, [])
+  const handleSidebarDragEnd = useCallback((event: DragEndEvent) => {
+    setActiveDrag(null)
+    const { active, over } = event
+    if (!over) return
+    const a = active.data.current as { type?: string; key?: string } | undefined
+    const o = over.data.current as { type?: string; folderId?: string | null } | undefined
+    if (a?.type === 'folder') {
+      // over may be a sortable folder (over.id = folder id) or a folder-drop
+      // droppable (use its folderId) — resolve to a folder id either way.
+      const overId = o?.type === 'folder-drop' && o.folderId ? o.folderId : (over.id as string)
+      reorderFolders(active.id as string, overId)
+      return
+    }
+    if (a?.type === 'session' && a.key) {
+      // Drop targets, innermost-first via pointerWithin:
+      //  folder-drop  → assign to that folder (folderId may be null for root lane)
+      //  folder       → sortable folder container (whole block) → assign to its id
+      if (o?.type === 'folder-drop') assignToFolder(a.key, o.folderId ?? null)
+      else if (o?.type === 'folder') assignToFolder(a.key, over.id as string)
+    }
+  }, [reorderFolders, assignToFolder])
+  const handleSidebarDragCancel = useCallback(() => setActiveDrag(null), [])
   const createChatInFolderMutation = useMutation({
     mutationFn: ({ folderId }: { folderId: string; columnId?: string }) => {
       const agent = resolveFolderAgent(folders, folderId, defaultAgent)
@@ -893,10 +968,14 @@ function ChatSidebar({
         initial={{ opacity: 0, x: -12 }}
         animate={{ opacity: 1, x: 0 }}
         transition={{ layout: { type: 'spring', stiffness: 500, damping: 35 }, opacity: { duration: 0.2 }, x: { duration: 0.2 } }}>
-        <div className={`session-row group relative flex items-start gap-2.5 px-4 py-2 rounded-md cursor-pointer text-sm transition-all select-none ${isActive ? 'session-active text-text-strong bg-accent-subtle' : 'text-muted hover:text-text hover:bg-bg-hover'} ${rowColor ? 'session-colored' : ''} ${rowColor && colorMode === 'gradient' ? 'session-gradient' : ''}`}
+        <DndDraggable id={`session:${s.key}`} data={{ type: 'session', key: s.key }} disabled={scope !== 'list' || renamingSlot === s.key}>
+          {({ setNodeRef, listeners, isDragging }) => (
+        <div ref={scope === 'list' ? setNodeRef : undefined} {...(scope === 'list' ? listeners : {})}
+          data-draggable={(renamingSlot !== s.key).toString()}
+          className={`session-row group relative flex items-start gap-2.5 px-4 py-2 rounded-md cursor-pointer text-sm transition-all select-none ${isActive ? 'session-active text-text-strong bg-accent-subtle' : 'text-muted hover:text-text hover:bg-bg-hover'} ${rowColor ? 'session-colored' : ''} ${rowColor && colorMode === 'gradient' ? 'session-gradient' : ''} ${isDragging ? 'opacity-40' : ''}`}
           style={boostStyle as React.CSSProperties}
-          draggable={renamingSlot !== s.key}
-          onDragStart={e => { e.dataTransfer.setData('text/plain', s.key); e.dataTransfer.effectAllowed = 'move' }}
+          draggable={scope !== 'list' && renamingSlot !== s.key}
+          onDragStart={scope !== 'list' ? (e => { e.dataTransfer.setData('text/plain', s.key); e.dataTransfer.effectAllowed = 'move' }) : undefined}
           onClick={() => { dispatch(switchSlot(s.key)); onSelectSlot?.(s.key) }}
           onContextMenu={e => { e.preventDefault(); setCtxMenu({ key: s.key, x: e.clientX, y: e.clientY }) }}>
           {s.unread && (
@@ -951,36 +1030,28 @@ function ChatSidebar({
             </IconButtonGroup>
           )}
         </div>
+          )}
+        </DndDraggable>
         {showDivider && <div className="mx-3 border-b border-border" />}
       </motion.div>
     )
   }
 
   // ── Folder row: matches session-row width (full width minus drawer padding) ──
-  const renderFolderHeader = (folder: ChatFolder, dragHandleProps?: React.HTMLAttributes<HTMLElement>, dragHandleRef?: (el: HTMLElement | null) => void) => {
+  const renderFolderHeader = (folder: ChatFolder, dragHandleProps?: React.HTMLAttributes<HTMLElement>) => {
     const childFolders = folders.filter(f => f.parent_id === folder.id)
     const childSlots = filteredSlots.filter(s => slotFolders[s.key] === folder.id)
     const count = childSlots.length + childFolders.length
+    // The whole header is the drag-to-reorder handle (pointer listeners forwarded
+    // via dragHandleProps). The PointerSensor activation distance keeps the
+    // collapse toggle + action buttons clickable; drag is off while renaming.
+    const draggable = !!dragHandleProps && editingId !== folder.id
     return (
       <div key={`folder-header-${folder.id}`}
-        className={`group relative flex items-center gap-2 pr-2 py-2 rounded-md cursor-pointer text-sm text-muted hover:text-text hover:bg-bg-hover transition-all`}
+        {...(draggable ? dragHandleProps : {})}
+        className={`group relative flex items-center gap-2 pr-2 py-2 rounded-md cursor-pointer text-sm text-muted hover:text-text hover:bg-bg-hover transition-all ${draggable ? 'cursor-grab active:cursor-grabbing' : ''}`}
         style={{ paddingLeft: '8px' }}
         onClick={() => toggleCollapse(folder.id)}>
-        {/* Drag-to-reorder handle. Rendered as a header child (not a wrapper
-         *  sibling) so hovering it triggers the header's own :hover — the whole
-         *  folder row highlights, no separate handle background needed. Sits in
-         *  the empty gutter left of the chevron, so it adds no layout shift. */}
-        {dragHandleProps && editingId !== folder.id && (
-          <div
-            ref={dragHandleRef}
-            className="absolute -left-2 inset-y-0 w-4 flex items-center justify-center cursor-grab opacity-0 group-hover:opacity-100 transition-opacity z-10"
-            aria-label={`Reorder ${folder.name}`}
-            onClick={e => e.stopPropagation()}
-            {...dragHandleProps}
-          >
-            <GripVertical size={14} className="text-muted" />
-          </div>
-        )}
         <span data-testid={`folder-collapse-${folder.id}`} className="shrink-0 text-muted transition-transform duration-150" style={{ transform: folder.collapsed ? 'rotate(0deg)' : 'rotate(90deg)' }}>
           <ChevronRight size={14} />
         </span>
@@ -1010,7 +1081,7 @@ function ChatSidebar({
     )
   }
 
-  const renderFolderBlock = (folder: ChatFolder, depth: number, visited = new Set<string>(), dragHandleProps?: React.HTMLAttributes<HTMLElement>, dragHandleRef?: (el: HTMLElement | null) => void): React.ReactNode[] => {
+  const renderFolderBlock = (folder: ChatFolder, depth: number, visited = new Set<string>(), dragHandleProps?: React.HTMLAttributes<HTMLElement>, forceCollapsed = false): React.ReactNode[] => {
     if (depth > 10 || visited.has(folder.id)) return []
     visited.add(folder.id)
     const childFolders = folders.filter(f => f.parent_id === folder.id)
@@ -1047,15 +1118,14 @@ function ChatSidebar({
     // folders fire enter/leave pairs that balance to zero when the drag
     // moves into a subfolder, so the parent highlight clears correctly.
     return [
-      <div key={`folder-drop-${folder.id}`}
-        className="rounded-md transition-all mb-0.5"
-        onDragEnter={e => { e.preventDefault(); e.stopPropagation(); folderDragCount.current[folder.id] = (folderDragCount.current[folder.id] || 0) + 1; if (folderDragCount.current[folder.id] === 1) e.currentTarget.classList.add('ring-1', 'ring-accent') }}
-        onDragOver={e => { e.preventDefault(); e.stopPropagation() }}
-        onDragLeave={e => { e.stopPropagation(); folderDragCount.current[folder.id] = (folderDragCount.current[folder.id] || 0) - 1; if (folderDragCount.current[folder.id] <= 0) { folderDragCount.current[folder.id] = 0; e.currentTarget.classList.remove('ring-1', 'ring-accent') } }}
-        onDrop={e => { e.preventDefault(); e.stopPropagation(); folderDragCount.current[folder.id] = 0; e.currentTarget.classList.remove('ring-1', 'ring-accent'); const k = e.dataTransfer.getData('text/plain'); if (k) assignToFolder(k, folder.id) }}>
-        {renderFolderHeader(folder, dragHandleProps, dragHandleRef)}
-        <FolderBody key={`folder-body-${folder.id}`} open={!folder.collapsed}>{wrapped}</FolderBody>
-      </div>,
+      <DndDroppable key={`folder-drop-${folder.id}`} id={`folder-drop:${folder.id}`} data={{ type: 'folder-drop', folderId: folder.id }}>
+        {({ setNodeRef, isOver }) => (
+          <div ref={setNodeRef} className={`rounded-md transition-all mb-0.5${isOver ? ' ring-1 ring-accent' : ''}`}>
+            {renderFolderHeader(folder, dragHandleProps)}
+            <FolderBody key={`folder-body-${folder.id}`} open={!folder.collapsed && !forceCollapsed}>{wrapped}</FolderBody>
+          </div>
+        )}
+      </DndDroppable>,
     ]
   }
 
@@ -1241,26 +1311,44 @@ function ChatSidebar({
       <LayoutGroup id="chat-slots">
         {orderedColumns.length === 0 ? (
           // Legacy single-lane layout (identical to pre-columns behavior)
-          <motion.div layoutScroll className="flex-1 min-h-0 overflow-y-auto p-2 flex flex-col"
-            onDragOver={e => e.preventDefault()}
-            onDrop={e => { e.preventDefault(); const k = e.dataTransfer.getData('text/plain'); if (k) assignToFolder(k, null) }}>
-            {/* Root folders — drag to reorder */}
-            <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleFolderDragEnd}>
-              <SortableContext items={rootFolderIds} strategy={verticalListSortingStrategy}>
-                {rootFolders.map(f => <SortableFolderBlock key={f.id} folder={f} renderFolderBlock={renderFolderBlock} />)}
-              </SortableContext>
+          <motion.div layoutScroll className="flex-1 min-h-0 overflow-y-auto p-2 flex flex-col">
+            {/* One DndContext owns folder reorder (sortable) + session drag-to-
+             *  assign (draggable rows + droppable folder/root targets). */}
+            <DndContext sensors={dndSensors} collisionDetection={sidebarCollision} onDragStart={handleSidebarDragStart} onDragEnd={handleSidebarDragEnd} onDragCancel={handleSidebarDragCancel}>
+              {/* Root lane is the fallback drop target: dropping a session on
+               *  empty space (not over a folder) ungroups it (folderId: null). */}
+              <DndDroppable id="root-lane" data={{ type: 'folder-drop', folderId: null }}>
+                {({ setNodeRef }) => (
+                  <div ref={setNodeRef} className="flex flex-col flex-1 min-h-0">
+                    <SortableContext items={rootFolderIds} strategy={verticalListSortingStrategy}>
+                      {rootFolders.map(f => <SortableFolderBlock key={f.id} folder={f} renderFolderBlock={renderFolderBlock} />)}
+                    </SortableContext>
+                    {creatingIn === '__root__' && (
+                      <div className="px-2 py-1">
+                        <Input className="w-full py-1 text-[13px]" autoFocus placeholder="Folder name…" value={newName} onChange={e => setNewName(e.target.value)} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => createFolder(newName), onEscape: () => { cancelledRef.current = true; setCreatingIn(null); setNewName('') }, onBlur: () => { if (cancelledRef.current) { cancelledRef.current = false; return } if (newName.trim()) createFolder(newName); else setCreatingIn(null) } })} />
+                      </div>
+                    )}
+                    {ungroupedSlots.map((s, i) => {
+                      const nextIsActive = i < ungroupedSlots.length - 1 && activeSlot === ungroupedSlots[i + 1].key
+                      const isActive = activeSlot === s.key
+                      const showDivider = i < ungroupedSlots.length - 1 && !isActive && !nextIsActive
+                      return renderSessionRow(s, 0, showDivider)
+                    })}
+                  </div>
+                )}
+              </DndDroppable>
+              <DragOverlay dropAnimation={null}>
+                {activeDrag ? (() => {
+                  if (activeDrag.type === 'folder') {
+                    const f = folders.find(x => x.id === activeDrag.id)
+                    return <div className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-[13px] text-text shadow-lg max-w-[240px] truncate pointer-events-none flex items-center gap-2"><Folder size={14} className="text-muted shrink-0" />{f?.name ?? 'Folder'}</div>
+                  }
+                  const ds = slots.find(x => x.key === activeDrag.id)
+                  const label = ds?.title && ds.title !== ds.key ? ds.title : (ds?.key ?? activeDrag.id)
+                  return <div className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-[13px] text-text shadow-lg max-w-[240px] truncate pointer-events-none">{label}</div>
+                })() : null}
+              </DragOverlay>
             </DndContext>
-            {creatingIn === '__root__' && (
-              <div className="px-2 py-1">
-                <Input className="w-full py-1 text-[13px]" autoFocus placeholder="Folder name…" value={newName} onChange={e => setNewName(e.target.value)} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => createFolder(newName), onEscape: () => { cancelledRef.current = true; setCreatingIn(null); setNewName('') }, onBlur: () => { if (cancelledRef.current) { cancelledRef.current = false; return } if (newName.trim()) createFolder(newName); else setCreatingIn(null) } })} />
-              </div>
-            )}
-            {ungroupedSlots.map((s, i) => {
-              const nextIsActive = i < ungroupedSlots.length - 1 && activeSlot === ungroupedSlots[i + 1].key
-              const isActive = activeSlot === s.key
-              const showDivider = i < ungroupedSlots.length - 1 && !isActive && !nextIsActive
-              return renderSessionRow(s, 0, showDivider)
-            })}
           </motion.div>
         ) : (
           // Trello-style horizontal column strip
