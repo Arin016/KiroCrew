@@ -9,8 +9,9 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Provider } from 'react-redux'
-import { MemoryRouter, Routes, Route, useLocation, useSearchParams } from 'react-router-dom'
+import { MemoryRouter, Routes, Route, useLocation, useSearchParams, useNavigate } from 'react-router-dom'
 import { createTestStore } from './helpers'
+import { switchSlot } from '../store/chatSlice'
 import { ThemeProvider } from '../hooks/useTheme'
 import type { ChatSlot } from '../types'
 
@@ -77,6 +78,16 @@ function UrlCapture() {
   const loc = useLocation()
   const [sp] = useSearchParams()
   currentUrl = loc.pathname + (sp.toString() ? '?' + sp.toString() : '')
+  return null
+}
+
+/** Exposes the router's navigate() so tests can drive a real Back/Forward POP. */
+let navBack: () => void = () => {}
+let navForward: () => void = () => {}
+function NavController() {
+  const n = useNavigate()
+  navBack = () => n(-1)
+  navForward = () => n(1)
   return null
 }
 
@@ -262,6 +273,76 @@ describe('ChatPage ?sid= URL parameter', () => {
         // /chat/ = 6 chars, slug should be <= 80
         expect(path.length).toBeLessThanOrEqual(6 + 80)
       })
+    })
+  })
+
+  // Regression: browser Back/Forward (history POP) must retrace sessions across
+  // MULTIPLE steps. The bug (pre-fix): on a POP, the activeSlot→?sid sync effect
+  // ran with a STALE activeSlot and pushed a spurious entry, so a second goBack
+  // jumped to the wrong session and goForward stuck. A NavController exposes the
+  // router's navigate(); navigate(-1/+1) is a real POP (useNavigationType()==='POP').
+  describe('browser Back/Forward (history POP) retrace', () => {
+    function renderForPop(initialSlots: ChatSlot[]) {
+      const store = createTestStore({
+        dashboard: {
+          status: { platform: 'darwin' }, connected: false, slots: initialSlots, approvalMode: 'normal',
+          channelTrusted: false, refreshTrigger: 0, unreadSlots: [], updateProgress: null,
+          subagentRunning: {}, subagentDetails: {}, subagentText: {},
+          sessionDefaultColor: null, sessionColorsMode: 'tint', sessionColorsPalette: 'horizon', sessionColorsIntensity: 'clear',
+        } as any,
+        chat: {
+          activeSlot: null, messages: [], slotRunning: false, slotStopping: false, slotState: 'idle',
+          slotStatusDetail: {}, slotHasMore: false, slotOldestIndex: 0, loadingOlder: false,
+          lastChunkSeq: undefined, history: [], historyHasMore: false, historyOffset: 0,
+          pendingInput: null, slotContextPct: {}, voicePlaying: false, voiceAudio: null,
+          subagents: {}, toolLog: [], activityOpen: false, activityTab: 'tools', slotActivity: {}, slotHistory: [],
+          slotMessages: {}, slotLoading: false,
+        } as any,
+      })
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      render(
+        <QueryClientProvider client={qc}>
+          <Provider store={store}>
+            <ThemeProvider>
+              <MemoryRouter initialEntries={['/chat']}>
+                <Routes>
+                  <Route path="/chat/:slug?" element={<ChatPage />} />
+                </Routes>
+                <UrlCapture />
+                <NavController />
+              </MemoryRouter>
+            </ThemeProvider>
+          </Provider>
+        </QueryClientProvider>,
+      )
+      return { store }
+    }
+
+    it('retraces the correct session across two Back steps then Forward', async () => {
+      const navSlots = [slot('chat-1-100', 'Alpha'), slot('chat-2-200', 'Beta'), slot('chat-3-300', 'Gamma')]
+      const { store } = renderForPop(navSlots)
+
+      // First slot auto-activates (no ?sid, no localStorage) → history entry A.
+      await waitFor(() => expect(store.getState().chat.activeSlot).toBe('chat-1-100'))
+      await waitFor(() => expect(currentUrl).toContain('sid=chat-1-100'))
+
+      // Switch A→B→C: each genuine switch PUSHES a ?sid history entry.
+      await act(async () => { await store.dispatch(switchSlot('chat-2-200')) })
+      await waitFor(() => expect(currentUrl).toContain('sid=chat-2-200'))
+      await act(async () => { await store.dispatch(switchSlot('chat-3-300')) })
+      await waitFor(() => expect(currentUrl).toContain('sid=chat-3-300'))
+
+      // Back once: C → B.
+      await act(async () => { navBack() })
+      await waitFor(() => expect(store.getState().chat.activeSlot).toBe('chat-2-200'))
+
+      // Back again: B → A. Pre-fix this landed on chat-3-300 (spurious push).
+      await act(async () => { navBack() })
+      await waitFor(() => expect(store.getState().chat.activeSlot).toBe('chat-1-100'))
+
+      // Forward: A → B. Pre-fix the forward stack was corrupted and stuck.
+      await act(async () => { navForward() })
+      await waitFor(() => expect(store.getState().chat.activeSlot).toBe('chat-2-200'))
     })
   })
 })

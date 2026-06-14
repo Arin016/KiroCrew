@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import { createPortal } from 'react-dom'
-import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
+import { useLocation, useNavigate, useNavigationType, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { useSwipeEdge } from '../hooks/useSwipeEdge'
@@ -412,6 +412,7 @@ function renderFileSegment(content: string, meta: Record<string, unknown> | unde
 export default function ChatPage({ mode, embedded, embedMode }: { mode?: string; embedded?: boolean; embedMode?: 'chat' | 'sessions' } = {}) {
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
+  const navigationType = useNavigationType()
   const queryClient = useQueryClient()
   const provider = useProvider()
   const { botName, avatar } = useBranding()
@@ -1407,20 +1408,22 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   // current activeSlot instead of switching to the slot the URL is asking
   // for.
   //
-  // GATED to embed mode only: in the main UI, URL changes are always
-  // derived from activeSlot (our own writes), so reacting to them here
-  // creates a feedback loop with the activeSlot→URL sync effect — they
-  // race on the same render and ping-pong activeSlot back to its prior
-  // value.
+  // Embed mode: react to ANY ?sid change (the host app drives the URL).
+  // Main dashboard: react ONLY to a genuine Back/Forward (navigationType POP).
+  // Our own activeSlot→URL writes are PUSH/REPLACE, so they never re-enter here
+  // — that is what avoids the activeSlot↔URL ping-pong the old embed-only gate
+  // guarded against. A session switch pushes a ?sid history entry (sync effect
+  // below), so native browser/Electron Back/Forward (and Alt+←/→) retrace the
+  // sessions you've visited.
   useEffect(() => {
-    if (!embedMode) return
+    if (!embedMode && navigationType !== 'POP') return
     const urlSid = searchParams.get('sid') || searchParams.get('slot')
     if (!urlSid || urlSid === activeSlot) return
     if (filteredSlots.some(s => s.key === urlSid)) {
       pendingSidRef.current = true
       dispatch(switchSlot(urlSid))
     }
-  }, [searchParams, filteredSlots, activeSlot, dispatch, embedMode])
+  }, [searchParams, filteredSlots, activeSlot, dispatch, embedMode, navigationType])
   // Timeout: if slot never appears after 5s, show error
   useEffect(() => {
     const urlSlot = initialSidRef.current
@@ -1450,6 +1453,17 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     // the user back into chat view.
     if (embedMode === 'sessions') return
     const sp = searchParamsRef.current
+    // Back/Forward (POP) activation in flight: the browser already set the URL to
+    // the target session and activeSlot is catching up via the switchSlot the
+    // ?sid→activeSlot effect above just dispatched. Writing the URL here would run
+    // with a STALE activeSlot (the slot we're leaving) and push a spurious history
+    // entry for it — corrupting multi-step Back/Forward. Bail until activeSlot
+    // matches the URL, then fall through for replace-only slug normalization (a POP
+    // must never produce a push).
+    if (pendingSidRef.current) {
+      if (!activeSlot || activeSlot !== sp.get('sid')) return
+      pendingSidRef.current = false
+    }
     if (!activeSlot) {
       if (sp.has('sid') && !initialSidRef.current && !pendingSidRef.current) {
         navigate(basePath, { replace: true })
@@ -1469,7 +1483,11 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     next.delete('autoSend')
     next.delete('newSession')
     next.delete('msg')
-    navigate(`${basePath}${slug ? '/' + slug : ''}?${next}`, { replace: true })
+    // Push a new history entry on a real session switch (already viewing a
+    // different session) so native Back/Forward retraces sessions; replace for
+    // the initial activation (no prior sid) and same-session path normalization.
+    const isSessionSwitch = !!current && current !== activeSlot
+    navigate(`${basePath}${slug ? '/' + slug : ''}?${next}`, { replace: !isSessionSwitch })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSlot, filteredSlots, navigate, basePath, location.pathname, embedded])
   // Re-fetch slot messages on mount (handles nav away + back).
