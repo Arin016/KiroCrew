@@ -4350,6 +4350,178 @@ class TestPromptLoopReleasesTurnDone:
         assert result == ""
 
 
+class TestToolStallWatchdog:
+    """A tool dispatched that never returns must abort the turn via the
+    _TOOL_STALL_TIMEOUT watchdog, not hang to the full prompt timeout."""
+
+    @pytest.mark.asyncio
+    async def test_dispatched_tool_with_no_data_exits(self, tmp_path, monkeypatch):
+        from kiro_claw.acp import client as acp_client
+
+        # Shrink the windows so the watchdog trips quickly under test.
+        monkeypatch.setattr(acp_client, "_TOOL_STALL_TIMEOUT", 0.2)
+        monkeypatch.setattr(acp_client, "_READ_TIMEOUT", 0.02)
+
+        client = AcpClient(work_dir=tmp_path)
+        client._turn_done.clear()
+        # Simulate "a tool was dispatched this turn".
+        client._tool_dispatched = True
+        client._stale_eligible = False  # the stale check must NOT be what saves us
+        # Process is alive but silent: _read_message always returns None.
+        client._read_message = AsyncMock(return_value=None)
+        client._is_process_alive = lambda: True
+
+        actions = []
+        # Generous outer timeout; the watchdog must end the loop well before it.
+        t0 = time.monotonic()
+        async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
+            actions.append(action)
+        elapsed = time.monotonic() - t0
+
+        # Loop returned (did not hang) and emitted no spurious actions.
+        assert actions == []
+        assert client._turn_done.is_set()
+        # Prove it was the watchdog (stall window 0.2s) that ended the loop,
+        # not the outer 30s deadline — guards against the watchdog branch being
+        # removed and the test still passing on the outer timeout.
+        assert elapsed < 5.0, f"loop ran too long ({elapsed:.2f}s) — watchdog may not have fired"
+
+    @pytest.mark.asyncio
+    async def test_no_dispatch_does_not_trip_watchdog(self, tmp_path, monkeypatch):
+        # Without a dispatched tool, the stall watchdog must NOT fire; the loop
+        # simply runs to its own deadline (proving the guard is gated on the flag).
+        from kiro_claw.acp import client as acp_client
+
+        monkeypatch.setattr(acp_client, "_TOOL_STALL_TIMEOUT", 0.2)
+        monkeypatch.setattr(acp_client, "_READ_TIMEOUT", 0.02)
+
+        client = AcpClient(work_dir=tmp_path)
+        client._turn_done.clear()
+        client._tool_dispatched = False
+        client._stale_eligible = False
+        client._read_message = AsyncMock(return_value=None)
+        client._is_process_alive = lambda: True
+
+        actions = []
+        # Short outer timeout: the loop should exhaust it (no early watchdog exit).
+        t0 = time.monotonic()
+        async for action, _ in client._prompt_loop(req_id=1, timeout=0.5):
+            actions.append(action)
+        elapsed = time.monotonic() - t0
+
+        assert actions == []
+        assert client._turn_done.is_set()
+        # The guard is gated on _tool_dispatched, so with the flag clear the
+        # watchdog (0.2s stall window) must NOT fire — the loop runs to its own
+        # 0.5s deadline. If the `self._tool_dispatched and ...` guard were
+        # removed, the loop would exit ~0.2s early and this assertion would fail.
+        assert elapsed >= 0.4, f"loop exited too early ({elapsed:.2f}s) — watchdog gate may be broken"
+
+    @pytest.mark.asyncio
+    async def test_progress_frame_then_stall_still_trips(self, tmp_path, monkeypatch):
+        # Regression: a dispatched tool that emits ONE inbound frame and then
+        # goes silent must still trip the watchdog.  _prompt_loop must not clear
+        # _tool_dispatched on inbound frames — only an actual tool result or
+        # turn completion (handled in _dispatch_events) clears it.  The
+        # last_data_ts reset alone prevents false positives for tools that keep
+        # streaming.
+        from kiro_claw.acp import client as acp_client
+        from kiro_claw.acp.types import JsonRpcMessage
+
+        monkeypatch.setattr(acp_client, "_TOOL_STALL_TIMEOUT", 0.2)
+        monkeypatch.setattr(acp_client, "_READ_TIMEOUT", 0.02)
+
+        client = AcpClient(work_dir=tmp_path)
+        client._turn_done.clear()
+        client._tool_dispatched = True  # a tool was dispatched this turn
+        client._stale_eligible = False
+
+        # One progress frame, then silence forever.
+        frames = [JsonRpcMessage(method="session/update", params={})]
+
+        async def fake_read(*_args, **_kwargs):
+            return frames.pop(0) if frames else None
+
+        client._read_message = fake_read  # type: ignore[assignment]
+        client._is_process_alive = lambda: True
+
+        actions = []
+        # The single frame is yielded as an action; then the watchdog must end
+        # the loop well before this generous outer timeout.
+        async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
+            actions.append(action)
+
+        # The flag was NOT cleared by the inbound frame (that's _dispatch_events'
+        # job), so the watchdog still fired and the loop returned.
+        assert client._tool_dispatched is True
+        assert client._turn_done.is_set()
+
+    @pytest.mark.asyncio
+    async def test_complete_clears_tool_dispatched(self, monkeypatch):
+        # Covers the EVENT_COMPLETE clear path in _dispatch_events: a turn that
+        # ends while a tool is still marked dispatched must disarm the flag so a
+        # stale True can't leak into the next turn's watchdog.
+        from kiro_claw.acp.types import JsonRpcMessage
+
+        client = AcpClient()
+        # No tool results to flush on the complete path.
+        monkeypatch.setattr(client, "_read_new_tool_results_sync", lambda: [])
+        complete_msg = JsonRpcMessage(id=1, result={"stopReason": "end_turn"})
+
+        async def fake_prompt_loop(req_id, timeout):
+            yield "complete", complete_msg
+
+        client._prompt_loop = fake_prompt_loop  # type: ignore[assignment]
+        client._tool_dispatched = True  # a tool was in flight when the turn ended
+
+        async for _ in client._dispatch_events(req_id=1, timeout=5.0):
+            pass
+
+        assert client._tool_dispatched is False
+
+    @pytest.mark.asyncio
+    async def test_tool_result_clears_tool_dispatched(self, monkeypatch):
+        # Covers the tool_call_update clear path in _dispatch_events: when the
+        # dispatched tool produces a result, the watchdog is disarmed.
+        from kiro_claw.acp.types import (
+            EVENT_TOOL_CALL_UPDATE,
+            METHOD_SESSION_UPDATE,
+            AcpEvent,
+            JsonRpcMessage,
+        )
+
+        client = AcpClient()
+        monkeypatch.setattr(client, "_read_new_tool_results_sync", lambda: [])
+        # An update frame that carries a tool result (no text chunk, no new
+        # tool_call) — drive only the tool_call_update branch.
+        monkeypatch.setattr(client, "_extract_text_chunk", lambda msg: ("", False))
+        monkeypatch.setattr(client, "_extract_tool_event", lambda msg: None)
+        monkeypatch.setattr(
+            client, "_extract_tool_call_update",
+            lambda msg: AcpEvent(kind=EVENT_TOOL_CALL_UPDATE, tool_call_id="t1"),
+        )
+        monkeypatch.setattr(client, "_extract_tool_call_refinement", lambda msg: None)
+        update_msg = JsonRpcMessage(method=METHOD_SESSION_UPDATE, params={})
+        complete_msg = JsonRpcMessage(id=1, result={})
+
+        async def fake_prompt_loop(req_id, timeout):
+            yield "update", update_msg
+            yield "complete", complete_msg
+
+        client._prompt_loop = fake_prompt_loop  # type: ignore[assignment]
+        client._tool_dispatched = True
+
+        saw_result = False
+        async for event in client._dispatch_events(req_id=1, timeout=5.0):
+            if event.kind == EVENT_TOOL_CALL_UPDATE:
+                # Cleared the instant the result is dispatched, before complete.
+                assert client._tool_dispatched is False
+                saw_result = True
+
+        assert saw_result
+        assert client._tool_dispatched is False
+
+
 class TestSendMessageStreamBranches:
     """Tests for send_message_stream covering metadata and compaction branches."""
 

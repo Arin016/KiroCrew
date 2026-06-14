@@ -481,6 +481,16 @@ _READ_TIMEOUT = 20.0
 # treat the turn as done.  Handles kiro-cli silently finishing without
 # sending the JSON-RPC `result` response.
 _STALE_TURN_TIMEOUT = 90.0
+# After a tool is DISPATCHED, if no data of ANY kind (tool result, progress
+# update, permission request, completion) arrives for this many seconds, treat
+# the turn as a dead stall and exit.  Unlike _STALE_TURN_TIMEOUT this does NOT
+# require _stale_eligible (which is cleared the moment a tool_call is yielded),
+# so it catches the "tool dispatched but never resolves" hang that otherwise
+# runs to the caller's full prompt timeout — e.g. a cron job dispatching a tool
+# that silently never returns, burning the whole job timeout.  Long real tools
+# keep resetting the timer via tool_call_update progress frames and tool
+# results, so this only trips on a genuine stall.
+_TOOL_STALL_TIMEOUT = 600.0
 _CANCEL_GRACE_SECS = 10.0  # grace window for cooperative cancel ack
 # Absolute safety cap for _wait_for_response's activity-based deadline. The
 # per-call deadline resets on every received frame (so a long session/load
@@ -874,6 +884,12 @@ class AcpClient:
         # serialized here; if that ever changes, the readuntil race could recur.
         self._turn_lock: asyncio.Lock = asyncio.Lock()
         self._stale_eligible: bool = False  # set by _dispatch_events after text chunks
+        # Set when a tool_call is yielded, cleared when the tool resolves
+        # (tool_call_update result) or the turn starts/completes.  NOT cleared
+        # on arbitrary inbound frames — that would disarm the watchdog after a
+        # single progress frame.  Gates the _TOOL_STALL_TIMEOUT watchdog so a
+        # dispatched-but-never-resolved tool can't hang the whole turn.
+        self._tool_dispatched: bool = False
         self._last_stop_reason: str = ""
         # Dynamic config from ACP session/new response and config_option_update notifications.
         # Only the effort configOptions are consumed (model lists come from
@@ -1972,10 +1988,33 @@ class AcpClient:
                             time.monotonic() - last_seen,
                         )
                         return
+                    # Tool-stall watchdog: a tool was dispatched but NOTHING has
+                    # come back (no result, no progress, no permission) for the
+                    # stall window.  This is the silent-hang case where
+                    # _stale_eligible is False (cleared on tool_call) so the
+                    # check above never fires.  Treat as a dead turn and exit so
+                    # the caller raises/escalates instead of waiting out the full
+                    # prompt timeout (or, for crons, the job timeout).
+                    if self._tool_dispatched and (time.monotonic() - last_data_ts) > _TOOL_STALL_TIMEOUT:
+                        logger.warning(
+                            "Tool stall detected for req %d — tool dispatched but no data for %.0fs. "
+                            "Treating turn as dead.",
+                            req_id, time.monotonic() - last_data_ts,
+                        )
+                        return
                     continue
 
                 consecutive_empty = 0
                 last_data_ts = time.monotonic()
+                # NB: do NOT clear _tool_dispatched here.  The last_data_ts reset
+                # above already prevents false positives for tools that stream
+                # progress frames (each frame restarts the _TOOL_STALL_TIMEOUT
+                # countdown).  Clearing the flag on every inbound frame would
+                # disarm the watchdog after a single progress frame, so a tool
+                # that emits one frame then silently stalls would hang anyway —
+                # exactly the bug this watchdog targets.  The flag is cleared
+                # only when a tool actually resolves or the turn completes
+                # (see _dispatch_events).
                 self.last_prompt_stats.event_count += 1
 
                 action = self._process_message(msg, req_id)
@@ -2102,6 +2141,7 @@ class AcpClient:
         # a prior turn cannot leak into this one (memory + correctness).
         self._permission_options.clear()
         self._stale_eligible = False
+        self._tool_dispatched = False
         got_complete = False
         saw_agent_switch = False
 
@@ -2141,6 +2181,8 @@ class AcpClient:
                 # Flush any remaining tool results before completing
                 for tr_event in await asyncio.to_thread(self._read_new_tool_results_sync):
                     yield tr_event
+                # Turn is over — disarm the stall watchdog.
+                self._tool_dispatched = False
                 self._last_stop_reason = reason
                 self._turn_done.set()
                 yield AcpEvent(kind=EVENT_COMPLETE, stop_reason=reason)
@@ -2177,6 +2219,10 @@ class AcpClient:
                 tool_event = self._extract_tool_event(msg)
                 if tool_event:
                     self._stale_eligible = False
+                    # Arm the tool-stall watchdog: if no further data arrives
+                    # within _TOOL_STALL_TIMEOUT, _prompt_loop treats the turn
+                    # as dead instead of hanging to the full prompt timeout.
+                    self._tool_dispatched = True
                     # Check for results from previous tool before yielding new tool_call
                     for tr_event in await asyncio.to_thread(self._read_new_tool_results_sync):
                         yield tr_event
@@ -2189,6 +2235,11 @@ class AcpClient:
                 # (content blocks vs rawOutput) details.
                 tool_result_event = self._extract_tool_call_update(msg)
                 if tool_result_event:
+                    # The dispatched tool produced a result — disarm the stall
+                    # watchdog.  (Cleared here, not on every inbound frame, so a
+                    # tool that streams progress then silently stalls is still
+                    # caught.)
+                    self._tool_dispatched = False
                     yield tool_result_event
                 # claude-agent-acp emits a separate `tool_call_update` carrying
                 # the refined title / kind / rawInput once `chunk.input` finishes
