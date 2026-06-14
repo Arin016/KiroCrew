@@ -465,6 +465,11 @@ Examples:
         help="Only install the agent config, skip credential prompts",
     )
     setup_parser.add_argument(
+        "--electron-only",
+        action="store_true",
+        help="Only install the KiroClaw desktop app (macOS), skip other setup",
+    )
+    setup_parser.add_argument(
         "--clean",
         action="store_true",
         help="Fresh install — don't merge MCP servers/tools from existing config",
@@ -1120,6 +1125,7 @@ Examples:
     elif args.command == "setup":
         _setup(
             agent_only=getattr(args, "agent_only", False),
+            electron_only=getattr(args, "electron_only", False),
             clean=getattr(args, "clean", False),
         )
     elif args.command == "doctor":

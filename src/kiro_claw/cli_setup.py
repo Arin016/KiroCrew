@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import shutil
 import socket
+import subprocess
 import sys
 from importlib.resources import files as _pkg_files
 from pathlib import Path
@@ -165,10 +167,97 @@ def _ensure_prerequisites() -> bool:
     return True
 
 
-def _setup(agent_only: bool = False, clean: bool = False) -> None:
+def _find_electron_dir() -> Path | None:
+    """Locate the in-repo electron app sources (website/electron).
+
+    The pip-installed package does NOT ship the desktop-app sources, so this
+    only resolves from a source checkout: first via KIROCLAW_PROJECT_DIR, then
+    by walking up from this module's location and the cwd.
+    """
+    candidates = []
+    proj = os.environ.get("KIROCLAW_PROJECT_DIR")
+    if proj:
+        candidates.append(Path(proj))
+    for base in (Path(__file__).resolve(), Path.cwd()):
+        for parent in [base] + list(base.parents):
+            candidates.append(parent)
+    seen = set()
+    for root in candidates:
+        if root in seen:
+            continue
+        seen.add(root)
+        electron_dir = root / "website" / "electron"
+        if electron_dir.is_dir():
+            return electron_dir
+    return None
+
+
+def _setup_electron() -> None:
+    """Build and install the KiroClaw desktop app (macOS only)."""
+    if platform.system() != "Darwin":
+        print("  ⚠️  KiroClaw desktop app is only available on macOS.")
+        return
+
+    if not shutil.which("node"):
+        print("  ❌ Node.js not found — required to build the desktop app.")
+        print("     Install Node.js and re-run: kiroclaw setup --electron-only")
+        return
+
+    electron_dir = _find_electron_dir()
+    if electron_dir is None:
+        print("  ❌ Desktop app sources not found.")
+        print("     The desktop app is built from a source checkout — clone the "
+              "repo and run `make desktop` (or run setup from the checkout).")
+        return
+
+    print("  🔨 Building KiroClaw desktop app…")
+    npm_install = subprocess.run(
+        ["npm", "install", "--no-audit", "--no-fund", "--loglevel=error"],
+        cwd=str(electron_dir),
+        capture_output=True, text=True, timeout=120,
+    )
+    if npm_install.returncode != 0:
+        print(f"  ❌ npm install failed: {npm_install.stderr.strip()[:200]}")
+        return
+
+    build = subprocess.run(
+        ["npx", "electron-builder", "--mac", "--dir"],
+        cwd=str(electron_dir),
+        capture_output=True, text=True, timeout=300,
+    )
+    if build.returncode != 0:
+        print(f"  ❌ Electron build failed: {build.stderr.strip()[:200]}")
+        return
+
+    arch = "mac-arm64" if platform.machine() == "arm64" else "mac"
+    app_src = electron_dir / "dist" / arch / "KiroClaw.app"
+    if not app_src.is_dir():
+        for candidate in ("mac-arm64", "mac", "mac-x64"):
+            app_src = electron_dir / "dist" / candidate / "KiroClaw.app"
+            if app_src.is_dir():
+                break
+    if not app_src.is_dir():
+        print("  ❌ Build succeeded but KiroClaw.app not found in dist/")
+        return
+
+    app_dest = Path.home() / "Applications" / "KiroClaw.app"
+    app_dest.parent.mkdir(parents=True, exist_ok=True)
+    if app_dest.is_dir():
+        shutil.rmtree(app_dest)
+    shutil.copytree(str(app_src), str(app_dest))
+    print("  ✅ KiroClaw.app installed to ~/Applications")
+    print("     Launch via Spotlight (⌘+Space → KiroClaw) or Finder → ~/Applications")
+
+
+def _setup(agent_only: bool = False, electron_only: bool = False, clean: bool = False) -> None:
     """Install agent config and optionally configure credentials."""
     from kiro_claw.agent import install_agent  # circular import: agent imports cli
     from kiro_claw.cli import _project_dir_file  # circular import: cli -> cli_setup -> cli
+
+    if electron_only:
+        print("── Desktop App ──\n")
+        _setup_electron()
+        return
 
     print("KiroClaw Setup 🐾\n")
     print(f"  {DATA_WARNING.replace(chr(10), chr(10) + '  ')}\n")
@@ -273,6 +362,15 @@ def _setup(agent_only: bool = False, clean: bool = False) -> None:
         print("  Browser proxy registered in mcp.json")
     except Exception:
         pass  # Non-fatal: browser still works without pre-loaded cookies
+
+    # 6. Desktop app (macOS only)
+    if platform.system() == "Darwin":
+        print("── Desktop App ──\n")
+        answer = input("  Install KiroClaw desktop app to ~/Applications? [Y/n]: ").strip().lower()
+        if answer in ("", "y", "yes"):
+            _setup_electron()
+        else:
+            print("  ⏭  Skipped. Install later: kiroclaw setup --electron-only\n")
 
     print("\n🐾 Done! Try: kiroclaw doctor && kiroclaw gateway")
 
