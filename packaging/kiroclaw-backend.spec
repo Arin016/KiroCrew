@@ -65,6 +65,7 @@ for rel in [
     "config/persona-lumon.md",
     "config/persona-lcars.md",
     "config/persona-bikini-bottom.md",
+    "config/persona-knight-rider.md",
     "config/prompt-orchestrator.md",
     "apps/app-registry.json",
 ]:

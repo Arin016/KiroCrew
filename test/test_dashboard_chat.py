@@ -7097,6 +7097,49 @@ class TestBikiniPersonaInjection:
                 chat_utils._cached_persona(bad)
 
 
+class TestKnightRiderPersonaInjection:
+    """Tests for _maybe_inject_persona helper function (knight-rider / KITT)."""
+
+    def setup_method(self):
+        from kiro_claw.dashboard import chat
+        if hasattr(chat, "_cached_persona"):
+            chat._cached_persona.cache_clear()
+
+    def test_persona_appended_when_knight_rider(self, tmp_path):
+        from kiro_claw.dashboard.chat import _maybe_inject_persona
+
+        fake_persona = "Use a Knight Rider in-car AI persona."
+        with patch("kiro_claw.dashboard.chat_utils._cached_persona", return_value=fake_persona):
+            result = _maybe_inject_persona("hello", "knight-rider", True)
+
+        assert "[KITT PERSONA]" in result
+        assert fake_persona in result
+
+    def test_persona_not_appended_on_followup(self):
+        from kiro_claw.dashboard.chat import _maybe_inject_persona
+
+        result = _maybe_inject_persona("hello", "knight-rider", False)
+        assert result == "hello"
+
+    def test_persona_survives_cache_error(self):
+        from kiro_claw.dashboard.chat import _maybe_inject_persona
+
+        with patch("kiro_claw.dashboard.chat_utils._cached_persona", side_effect=ImportError("boom")):
+            result = _maybe_inject_persona("hello", "knight-rider", True)
+        assert result == "hello"
+
+    def test_knight_rider_registered_in_theme_personas(self):
+        """Guards the registry mapping so the slug + tag stay in sync with the
+        frontend (themeBranding.tsx) and the persona file shipped via
+        config/persona-*.md (setup.cfg)."""
+        from kiro_claw.dashboard.chat_utils import _THEME_PERSONAS
+
+        assert "knight-rider" in _THEME_PERSONAS
+        tag, filename = _THEME_PERSONAS["knight-rider"]
+        assert tag == "KITT PERSONA"
+        assert filename == "persona-knight-rider.md"
+
+
 class TestStopReasonCancelled:
     """Phase 4: handler response to stopReason='cancelled'."""
 

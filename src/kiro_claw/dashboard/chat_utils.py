@@ -314,6 +314,7 @@ _THEME_PERSONAS: dict[str, tuple[str, str]] = {
     "lumon": ("LUMON PERSONA", "persona-lumon.md"),
     "lcars": ("LCARS PERSONA", "persona-lcars.md"),
     "bikini-bottom": ("KAREN PERSONA", "persona-bikini-bottom.md"),
+    "knight-rider": ("KITT PERSONA", "persona-knight-rider.md"),
 }
 
 
