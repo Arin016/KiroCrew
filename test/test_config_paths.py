@@ -76,11 +76,31 @@ class TestDefaultWorkspaceBase:
     ) -> None:
         monkeypatch.setattr(sys, "platform", "darwin")
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-        # Force the /Volumes/workplace probe to report absent so the fallback
-        # path is exercised regardless of the host's real filesystem (this dev
-        # box is itself rooted at /Volumes/workplace; CI is not).
-        monkeypatch.setattr(Path, "is_dir", lambda self: False)
+        # Hermetic: simulate /Volumes/workplace being ABSENT regardless of the
+        # host. On a real macOS dev box /Volumes/workplace often exists, which
+        # would otherwise make this assert the wrong branch. Patch is_dir to
+        # report False only for that path; everything else behaves normally.
+        _real_is_dir = Path.is_dir
+        monkeypatch.setattr(
+            Path,
+            "is_dir",
+            lambda self: False if str(self) == "/Volumes/workplace" else _real_is_dir(self),
+        )
         assert paths._default_workspace_base() == tmp_path / "workplace"
+
+    def test_macos_uses_volumes_when_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        # Hermetic: simulate /Volumes/workplace being PRESENT regardless of host.
+        _real_is_dir = Path.is_dir
+        monkeypatch.setattr(
+            Path,
+            "is_dir",
+            lambda self: True if str(self) == "/Volumes/workplace" else _real_is_dir(self),
+        )
+        assert paths._default_workspace_base() == Path("/Volumes/workplace")
 
 
 class TestSafeDirName:

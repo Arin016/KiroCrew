@@ -570,8 +570,17 @@ def _make_app(registry=None, cfg=None, user="testuser"):
     return app
 
 
+@pytest.mark.xdist_group("pty_integration")
 class TestTerminalWsIntegration:
-    """Integration tests that exercise the full WebSocket PTY lifecycle."""
+    """Integration tests that exercise the full WebSocket PTY lifecycle.
+
+    Pinned to one xdist worker (requires ``--dist loadgroup``): each test forks
+    a real PTY shell and waits on multi-second drain budgets for interactive
+    output. Under ``-n auto`` these competed with the gateway integration
+    subprocess storm for CPU and the forked shell could go unscheduled past the
+    10s readiness budget ("shell never produced any PTY output"). Sharing one
+    group serializes the heavy PTY tests, matching the gateway-test pattern.
+    """
 
     @pytest.mark.asyncio
     async def test_ws_spawn_and_disconnect(self, monkeypatch, tmp_path):
@@ -796,21 +805,25 @@ class TestTerminalWsIntegration:
 
         async with TestClient(TestServer(app)) as client:
             async with client.ws_connect("/api/ws/terminal/sigint-sess") as ws:
-                # Drain until the shell prints its prompt.  Bash defaults to
-                # ``$ ``/``# `` for the user/root primary prompt; either is a
-                # signal that the PTY has spawned and reached interactive idle.
-                pre_prompt = await _drain_until(
+                # Readiness gate: drive it off INPUT ECHO, not an unsolicited
+                # prompt. A login shell on a minimal build host (no MOTD, empty
+                # PS1, non-interactive-looking PTY) may emit nothing until it
+                # receives input, so waiting for a spontaneous ``$ ``/``# ``
+                # prompt is brittle and fired "shell never produced any PTY
+                # output" on the fleet. Instead send a probe and wait for the
+                # PTY line discipline to echo it back — the same proven pattern
+                # as test_ws_binary_io. This confirms the shell is interactive
+                # and consuming stdin without depending on prompt rendering.
+                await ws.send_bytes(b"echo __PTY_READY__\n")
+                ready = await _drain_until(
                     ws,
-                    lambda b: b"$ " in b or b"# " in b,
-                    budget_secs=10,
+                    lambda b: b"__PTY_READY__" in b,
+                    budget_secs=15,
                 )
-                # Intentionally loose: under xdist load the shell init
-                # output may not include the prompt sentinel within the
-                # budget, but a non-empty drain still indicates the PTY is
-                # alive. The real readiness gate is the `sleep 30` echo
-                # check below — if the shell isn't actually interactive,
-                # that assertion fails fast and unambiguously.
-                assert pre_prompt, "shell never produced any PTY output"
+                assert b"__PTY_READY__" in ready, (
+                    "shell never echoed the readiness probe — PTY input/echo "
+                    "path is not live"
+                )
 
                 # Run sleep in foreground; drain until we see the command
                 # echoed back (so we know the shell is processing it, not
