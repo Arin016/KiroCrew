@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hashlib
 import json
 import logging
 import mimetypes
@@ -14,6 +15,7 @@ import sys
 import time
 import urllib.parse
 import uuid
+import zipfile
 from pathlib import Path
 
 from aiohttp import web
@@ -807,6 +809,38 @@ async def api_upload_file(request: web.Request) -> web.Response:
             except Exception:
                 dest.unlink(missing_ok=True)
                 raise
+            # Diagnostic logging for binary uploads. Compares the bytes
+            # we received in memory against the bytes that landed on
+            # disk after _write_file_restricted, so a future report of
+            # "uploaded .docx is corrupted" can be pinned to the
+            # upload pipeline vs post-upload tampering. Logged for
+            # extensions that are binary archives (docx/xlsx/pptx/odt/
+            # zip/pdf etc.) where any byte mismatch breaks the file;
+            # text uploads aren't worth the I/O.
+            if ext in _ALLOWED_DOC_EXT or ext in _ALLOWED_IMAGE_EXT:
+                try:
+                    sent_sha = hashlib.sha256(bytes(data)).hexdigest()
+                    on_disk = dest.read_bytes()
+                    disk_sha = hashlib.sha256(on_disk).hexdigest()
+                    head_hex = on_disk[:4].hex() if on_disk else ""
+                    is_zip_ext = ext in {".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".zip"}
+                    is_zip = zipfile.is_zipfile(str(dest)) if is_zip_ext else None
+                    logger.info(
+                        "upload.file diagnostic: name=%s ext=%s sent_size=%d disk_size=%d "
+                        "sent_sha256=%s disk_sha256=%s match=%s magic=%s is_zipfile=%s",
+                        safe_name,
+                        ext,
+                        len(data),
+                        len(on_disk),
+                        sent_sha,
+                        disk_sha,
+                        sent_sha == disk_sha,
+                        head_hex,
+                        is_zip,
+                    )
+                except Exception:
+                    # Diagnostic failure must never break the upload.
+                    logger.exception("upload.file diagnostic failed for %s", safe_name)
             paths.append(str(dest))
     except Exception:
         _cleanup()
