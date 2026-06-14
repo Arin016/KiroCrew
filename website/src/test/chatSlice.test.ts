@@ -8,6 +8,8 @@ import reducer, {
   removeThinking,
   setSlotRunning,
   setSlotStopping,
+  startLocalTurn,
+  syncSlotRunningFromServer,
   setSlotState,
   setSlotStatusDetail,
   clearMessages,
@@ -98,6 +100,91 @@ describe('chatSlice reducers', () => {
     expect(state.slotStopping).toBe(true)
     state = reducer(state, setSlotState('tool_running'))
     expect(state.slotState).toBe('tool_running')
+  })
+
+  describe('local turn / server running reconciliation (session resurrection)', () => {
+    const active = (slot: string) => reducer(initial, setActiveSlot(slot))
+
+    it('startLocalTurn sets running and pendingTurnSlot for the active slot', () => {
+      let state = active('chat-1')
+      state = reducer(state, startLocalTurn('chat-1'))
+      expect(state.slotRunning).toBe(true)
+      expect(state.pendingTurnSlot).toBe('chat-1')
+    })
+
+    it('startLocalTurn for a non-active (targeted) slot does not spin the active footer', () => {
+      let state = active('chat-1')
+      state = reducer(state, startLocalTurn('chat-2'))
+      expect(state.slotRunning).toBe(false)
+      expect(state.pendingTurnSlot).toBe('chat-2')
+    })
+
+    it('a stale slots snapshot (running=false) does NOT clobber an optimistic local turn', () => {
+      // Regression: after send() the server may broadcast a slots list that
+      // predates the send (running=false). It must not hide the thinking footer.
+      let state = active('chat-1')
+      state = reducer(state, startLocalTurn('chat-1'))
+      state = reducer(state, syncSlotRunningFromServer({ slot: 'chat-1', running: false, stopping: false }))
+      expect(state.slotRunning).toBe(true)
+      expect(state.pendingTurnSlot).toBe('chat-1')
+    })
+
+    it('a stale snapshot cannot leak stopping=true onto a pending turn', () => {
+      // While the guard blocks running=false it must also ignore stopping, else
+      // a leftover stopping=true from a prior turn falsely shows "stopping".
+      let state = active('chat-1')
+      state = reducer(state, startLocalTurn('chat-1'))
+      state = reducer(state, syncSlotRunningFromServer({ slot: 'chat-1', running: false, stopping: true }))
+      expect(state.slotRunning).toBe(true)
+      expect(state.slotStopping).toBe(false)
+      expect(state.pendingTurnSlot).toBe('chat-1')
+    })
+
+    it('server confirming running=true clears the pending guard', () => {
+      let state = active('chat-1')
+      state = reducer(state, startLocalTurn('chat-1'))
+      state = reducer(state, syncSlotRunningFromServer({ slot: 'chat-1', running: true, stopping: false }))
+      expect(state.slotRunning).toBe(true)
+      expect(state.pendingTurnSlot).toBeNull()
+      // Once confirmed, a later running=false (genuine turn end) is honoured.
+      state = reducer(state, syncSlotRunningFromServer({ slot: 'chat-1', running: false, stopping: false }))
+      expect(state.slotRunning).toBe(false)
+    })
+
+    it('_done authoritatively ends the turn and clears the pending guard', () => {
+      let state = active('chat-1')
+      state = reducer(state, startLocalTurn('chat-1'))
+      state = reducer(state, sseChatMessage({ slot: 'chat-1', role: '_done', content: '' }))
+      expect(state.slotRunning).toBe(false)
+      expect(state.pendingTurnSlot).toBeNull()
+      // A trailing stale slots snapshot after _done is now honoured (no clobber risk).
+      state = reducer(state, syncSlotRunningFromServer({ slot: 'chat-1', running: false, stopping: false }))
+      expect(state.slotRunning).toBe(false)
+    })
+
+    it('setSlotRunning(false) clears the pending guard (send failure path)', () => {
+      let state = active('chat-1')
+      state = reducer(state, startLocalTurn('chat-1'))
+      state = reducer(state, setSlotRunning(false))
+      expect(state.slotRunning).toBe(false)
+      expect(state.pendingTurnSlot).toBeNull()
+    })
+
+    it('switching active slot clears a stale pending guard', () => {
+      let state = active('chat-1')
+      state = reducer(state, startLocalTurn('chat-1'))
+      state = reducer(state, setActiveSlot('chat-2'))
+      expect(state.pendingTurnSlot).toBeNull()
+    })
+
+    it('syncSlotRunningFromServer ignores updates for non-active slots', () => {
+      let state = active('chat-1')
+      state = reducer(state, startLocalTurn('chat-1'))
+      const before = state.slotRunning
+      state = reducer(state, syncSlotRunningFromServer({ slot: 'chat-2', running: false, stopping: true }))
+      expect(state.slotRunning).toBe(before)
+      expect(state.slotStopping).toBe(false)
+    })
   })
 
   it('setSlotStatusDetail updates kind, text, and ts', () => {

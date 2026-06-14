@@ -8,7 +8,7 @@ import { useAppSelector, useAppDispatch, store } from '../store'
 import {
   switchSlot, createSlot, deleteSlot, fetchHistory,
   appendMessage, resumeFromHistory, forkSlot,
-  setSlotRunning, setSlotStopping, setPendingInput, resolveByApprovalId, clearPendingPermissions, cancelQueuedMessage,
+  setSlotRunning, startLocalTurn, syncSlotRunningFromServer, setPendingInput, resolveByApprovalId, clearPendingPermissions, cancelQueuedMessage,
   setVoiceAudio,
   toggleActivity, openActivityToTab,
   setActiveSlot, truncateAfterIndex, replaceMessages,
@@ -1566,13 +1566,13 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     prevRunningRef.current = slotRunning
   }, [slotRunning, scrollBottom])
 
-  // Sync slotRunning from WS slot updates.
+  // Reconcile the active slot's running state from WS slot updates. The reducer
+  // guards against a stale snapshot overwriting an unconfirmed local turn.
   useEffect(() => {
     if (!activeSlot) return
     const s = slots.find(s => s.key === activeSlot)
     if (!s) return
-    dispatch(setSlotRunning(s.running))
-    dispatch(setSlotStopping(s.stopping ?? false))
+    dispatch(syncSlotRunningFromServer({ slot: s.key, running: s.running, stopping: s.stopping ?? false }))
   }, [slots, activeSlot, dispatch])
 
   const handleResumeSession = useCallback(async (key: string, title: string) => {
@@ -1659,7 +1659,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     sendingRef.current = false
     isAtBottomRef.current = true
     setTimeout(() => scrollBottom(), SCROLL_AFTER_RENDER_MS)
-    dispatch(setSlotRunning(true))
+    if (slot) dispatch(startLocalTurn(slot))
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 10_000)
     try {

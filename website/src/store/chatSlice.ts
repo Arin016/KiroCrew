@@ -67,6 +67,10 @@ interface ChatState {
   slotHistory: string[]
   stopPressedAt: Record<string, number | null>
   pendingQuestion: { slot: string; questions: Array<{ question: string; header?: string; options: Array<{ label: string; description?: string }>; multiSelect?: boolean }> } | null
+  // Slot with a locally-started turn awaiting server confirmation. While set,
+  // the slots-sync ignores a server running=false for it (the snapshot may
+  // predate the send). Cleared on server confirmation or turn end.
+  pendingTurnSlot: string | null
 }
 
 const initialState: ChatState = {
@@ -102,6 +106,7 @@ const initialState: ChatState = {
   slotHistory: [],
   pendingQuestion: null,
   stopPressedAt: {},
+  pendingTurnSlot: null,
 }
 
 function pushHistory(history: string[], key: string): string[] {
@@ -286,8 +291,8 @@ const chatSlice = createSlice({
   name: 'chat',
   initialState,
   reducers: {
-    setActiveSlot(state, action: PayloadAction<string | null>) { state.activeSlot = action.payload; state.slotState = 'idle' },
-    clearSlotState(state) { state.messages = []; state.toolLog = []; state.subagents = {}; state.activityTab = 'files'; state.slotRunning = false; state.slotStopping = false; state.slotState = 'idle'; state.slotHasMore = false; state.slotOldestIndex = 0; state.loadingOlder = false; state.lastChunkSeq = undefined; state._wsChunkedDuringFetch = false; state.slotStatusDetail = {}; state.voicePlaying = false; state.voiceAudio = null; state.pendingQuestion = null },
+    setActiveSlot(state, action: PayloadAction<string | null>) { state.activeSlot = action.payload; state.slotState = 'idle'; state.pendingTurnSlot = null },
+    clearSlotState(state) { state.messages = []; state.toolLog = []; state.subagents = {}; state.activityTab = 'files'; state.slotRunning = false; state.slotStopping = false; state.slotState = 'idle'; state.slotHasMore = false; state.slotOldestIndex = 0; state.loadingOlder = false; state.lastChunkSeq = undefined; state._wsChunkedDuringFetch = false; state.slotStatusDetail = {}; state.voicePlaying = false; state.voiceAudio = null; state.pendingQuestion = null; state.pendingTurnSlot = null },
     setPendingInput(state, action: PayloadAction<string | null>) { state.pendingInput = action.payload },
     setQuestionCard(state, action: PayloadAction<ChatState['pendingQuestion']>) { state.pendingQuestion = action.payload },
     clearQuestionCard(state) { state.pendingQuestion = null },
@@ -340,7 +345,36 @@ const chatSlice = createSlice({
         if (e.type === 'tool' && e.output == null && !e.rejected) e.rejected = true
       }
     },
-    setSlotRunning(state, action: PayloadAction<boolean>) { state.slotRunning = action.payload },
+    setSlotRunning(state, action: PayloadAction<boolean>) {
+      state.slotRunning = action.payload
+      if (!action.payload) state.pendingTurnSlot = null
+    },
+    /** Optimistically start a turn for `slot` after a local send. Marks it
+     *  pending so the slots-sync won't clobber running=true before the server
+     *  catches up. Only the active slot drives the visible footer. */
+    startLocalTurn(state, action: PayloadAction<string>) {
+      const slot = action.payload
+      state.pendingTurnSlot = slot
+      if (slot === state.activeSlot) state.slotRunning = true
+    },
+    /** Reconcile the active slot's running state from a WS slots broadcast.
+     *  running=true is always trusted (also catches Slack/cron-initiated turns);
+     *  running=false is ignored while a local turn is pending confirmation, since
+     *  the snapshot may predate the send. Turn end is owned by _done/refreshSlot. */
+    syncSlotRunningFromServer(state, action: PayloadAction<{ slot: string; running: boolean; stopping: boolean }>) {
+      const { slot, running, stopping } = action.payload
+      if (slot !== state.activeSlot) return
+      if (running) {
+        state.slotRunning = true
+        state.slotStopping = stopping
+        state.pendingTurnSlot = null
+      } else if (state.pendingTurnSlot !== slot) {
+        state.slotRunning = false
+        state.slotStopping = stopping
+      }
+      // Pending turn: ignore both fields so a leftover stopping=true from a
+      // prior turn can't falsely show a "stopping" state on the new turn.
+    },
     setSlotStopping(state, action: PayloadAction<boolean>) { state.slotStopping = action.payload },
     setStopPressedAt(state, action: PayloadAction<{ slotId: string; ts: number }>) { state.stopPressedAt[action.payload.slotId] = action.payload.ts },
     setSlotState(state, action: PayloadAction<SlotState>) { state.slotState = action.payload },
@@ -664,6 +698,7 @@ const chatSlice = createSlice({
         state.slotRunning = false
         state.slotStopping = false
         state.slotState = 'idle'
+        state.pendingTurnSlot = null
         return
       }
       // Compacting — block input, show footer indicator (no visible message)
@@ -846,6 +881,7 @@ const chatSlice = createSlice({
         }
         state.slotRunning = running
         state.slotStopping = action.payload.stopping ?? false
+        state.pendingTurnSlot = null
         state.slotHasMore = hasMore
         state.slotOldestIndex = hasMore ? total - messages.length : 0
         // Hydrate queued messages from backend queue field
@@ -900,6 +936,7 @@ const chatSlice = createSlice({
           : mergedWithPastes
         state.slotRunning = running
         state.slotStopping = action.payload.stopping ?? false
+        state.pendingTurnSlot = null
         state.slotHasMore = hasMore
         state.slotOldestIndex = hasMore ? total - messages.length : 0
       })
@@ -949,6 +986,7 @@ const chatSlice = createSlice({
           state.activeSlot = action.payload.key
           state.messages = mergePreservedPastes(state.messages, action.payload.messages)
           state.slotState = 'idle'
+          state.pendingTurnSlot = null
           state.slotHasMore = action.payload.hasMore
           state.slotOldestIndex = action.payload.hasMore ? action.payload.total - action.payload.messages.length : 0
         }
@@ -979,7 +1017,7 @@ const chatSlice = createSlice({
 
 export const {
   setActiveSlot, clearSlotState, setPendingInput, setQuestionCard, clearQuestionCard, appendMessage, updateStreamingMessage, finalizeAssistant,
-  removeThinking, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage,
+  removeThinking, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, startLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage,
   sseContextUsage, setVoicePlaying, setVoiceAudio,
   toggleActivity, openActivityToTab, openActivityToTool, clearFocusToolCallId, sseSubagentPending, markSubagentApproving, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentDone,
   sseSubagentSnapshot, sseToolActivity, sseToolResult, sseActivityEvent,
