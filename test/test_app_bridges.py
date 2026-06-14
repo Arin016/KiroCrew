@@ -356,6 +356,97 @@ class TestMCPRegistration:
         data = json.loads(mcp_path.read_text())
         assert "test-app:my-mcp" in data["mcpServers"]
 
+    def test_http_mcp_url_port_rewritten_to_live_backend_port(self, tmp_path, app_env, monkeypatch):
+        # An app with backend.port:"auto" gets a free port at spawn time (9100, else
+        # 9101, …). The manifest's mcpServers url carries an illustrative fixed port.
+        # Registration MUST rewrite it to the live allocated port, else agents call the
+        # wrong port and every app tool call silently fails.
+        import kiro_claw.apps.backend as backend_mod
+        import kiro_claw.apps.bridges as bmod
+        mcp_path = tmp_path / "mcp.json"
+        monkeypatch.setattr(bmod, "_MCP_JSON_PATH", mcp_path)
+        # Pretend the backend actually came up on 9101 (not the manifest's 9100).
+        monkeypatch.setattr(backend_mod, "get_app_backend_port", lambda _n: 9101)
+
+        src = _make_app_source(tmp_path, mcpServers={
+            "my-mcp": {"url": "http://localhost:9100/mcp"},
+        })
+        install_app(src)
+        manifest = AppManifest.from_json_file(
+            app_env["home"] / "apps" / "test-app" / APP_MANIFEST_FILENAME
+        )
+        _register_mcp_servers("test-app", manifest)
+        data = json.loads(mcp_path.read_text())
+        # Port rewritten 9100 -> 9101; scheme/host/path preserved.
+        assert data["mcpServers"]["test-app:my-mcp"]["url"] == "http://localhost:9101/mcp"
+
+    def test_http_mcp_url_kept_when_backend_not_yet_up(self, tmp_path, app_env, monkeypatch):
+        # If the backend isn't running yet (port unknown), keep the manifest default —
+        # the enable flow re-registers once the backend is up.
+        import kiro_claw.apps.backend as backend_mod
+        import kiro_claw.apps.bridges as bmod
+        mcp_path = tmp_path / "mcp.json"
+        monkeypatch.setattr(bmod, "_MCP_JSON_PATH", mcp_path)
+        monkeypatch.setattr(backend_mod, "get_app_backend_port", lambda _n: None)
+
+        src = _make_app_source(tmp_path, mcpServers={
+            "my-mcp": {"url": "http://localhost:9100/mcp"},
+        })
+        install_app(src)
+        manifest = AppManifest.from_json_file(
+            app_env["home"] / "apps" / "test-app" / APP_MANIFEST_FILENAME
+        )
+        _register_mcp_servers("test-app", manifest)
+        data = json.loads(mcp_path.read_text())
+        assert data["mcpServers"]["test-app:my-mcp"]["url"] == "http://localhost:9100/mcp"
+
+    def test_reregister_app_mcp_servers_overwrites_with_live_port(self, tmp_path, app_env, monkeypatch):
+        # reregister_app_mcp_servers (called after the backend starts) overwrites the
+        # earlier manifest-default entry with the live-port url.
+        import kiro_claw.apps.backend as backend_mod
+        import kiro_claw.apps.bridges as bmod
+        from kiro_claw.apps.bridges import reregister_app_mcp_servers
+        mcp_path = tmp_path / "mcp.json"
+        monkeypatch.setattr(bmod, "_MCP_JSON_PATH", mcp_path)
+
+        src = _make_app_source(tmp_path, mcpServers={
+            "my-mcp": {"url": "http://localhost:9100/mcp"},
+        })
+        install_app(src)
+        # First registration BEFORE the backend is up: port stays 9100.
+        monkeypatch.setattr(backend_mod, "get_app_backend_port", lambda _n: None)
+        manifest = AppManifest.from_json_file(
+            app_env["home"] / "apps" / "test-app" / APP_MANIFEST_FILENAME
+        )
+        _register_mcp_servers("test-app", manifest)
+        assert json.loads(mcp_path.read_text())["mcpServers"]["test-app:my-mcp"]["url"] \
+            == "http://localhost:9100/mcp"
+        # Backend now up on 9101 → re-register rewrites it.
+        monkeypatch.setattr(backend_mod, "get_app_backend_port", lambda _n: 9101)
+        reregister_app_mcp_servers("test-app")
+        assert json.loads(mcp_path.read_text())["mcpServers"]["test-app:my-mcp"]["url"] \
+            == "http://localhost:9101/mcp"
+
+    def test_explicit_live_port_rewrites_even_when_backend_unhealthy(self, tmp_path, app_env, monkeypatch):
+        # The boot/enable path passes the just-allocated port explicitly because the
+        # backend isn't marked *healthy* yet (get_app_backend_port would return None at
+        # that instant). An explicit live_port must still rewrite the url — this is the
+        # exact bug that left the registered url at :9100 while the backend was on :9101.
+        import kiro_claw.apps.backend as backend_mod
+        import kiro_claw.apps.bridges as bmod
+        from kiro_claw.apps.bridges import reregister_app_mcp_servers
+        mcp_path = tmp_path / "mcp.json"
+        monkeypatch.setattr(bmod, "_MCP_JSON_PATH", mcp_path)
+        # Health-gated lookup returns None (backend up but not yet confirmed healthy).
+        monkeypatch.setattr(backend_mod, "get_app_backend_port", lambda _n: None)
+
+        src = _make_app_source(tmp_path, mcpServers={"my-mcp": {"url": "http://localhost:9100/mcp"}})
+        install_app(src)
+        # Explicit live_port=9101 (from the spawn result) must win over the None lookup.
+        reregister_app_mcp_servers("test-app", live_port=9101)
+        data = json.loads(mcp_path.read_text())
+        assert data["mcpServers"]["test-app:my-mcp"]["url"] == "http://localhost:9101/mcp"
+
     def test_deregister_mcp_servers(self, tmp_path, app_env, monkeypatch):
         import kiro_claw.apps.bridges as bmod
         mcp_path = tmp_path / "mcp.json"

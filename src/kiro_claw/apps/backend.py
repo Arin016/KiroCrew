@@ -72,6 +72,10 @@ class AppProcess:
     started_at: float = 0.0
     log_path: str = ""
     adopted_pids: list[int] = field(default_factory=list)
+    # True only for the transient placeholder a single-flighting spawn inserts while it
+    # allocates a port + launches the process; replaced by the real record on success or
+    # popped on failure. Concurrent start_app_backend calls see it and skip duplicate spawn.
+    starting: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -160,13 +164,88 @@ def start_app_backend(app_name: str) -> AppProcess | None:
     if not manifest or not manifest.backend.entryPoint:
         return None
 
+    await_inflight = False
     with _lock:
         if app_name in _processes:
             existing = _processes[app_name]
+            # Already running (spawned proc alive, OR an adopted external instance) — reuse.
             if existing.proc and existing.proc.poll() is None:
                 logger.info("App %s backend already running (pid %d)", app_name, existing.pid)
                 return existing
+            if existing.proc is None and existing.adopted_pids:
+                logger.info("App %s backend already adopted (pids %s)", app_name, existing.adopted_pids)
+                return existing
+            # A concurrent start_app_backend is mid-spawn for this app (placeholder with
+            # ``starting=True``). Without this guard two callers (gateway boot-reconcile
+            # + an enable event) both passed the check, both allocated the SAME port
+            # (the bind-test in _find_free_port closes its probe socket → TOCTOU), both
+            # spawned, and the loser crash-looped on EADDRINUSE forever. Defer the wait
+            # to OUTSIDE this lock (the await re-acquires _lock — calling it here would
+            # self-deadlock the non-reentrant lock), then return the in-flight result.
+            if getattr(existing, "starting", False):
+                await_inflight = True
+        if not await_inflight:
+            # Reserve a STARTING placeholder so a concurrent call sees this spawn in flight.
+            _processes[app_name] = AppProcess(app_name=app_name, starting=True, started_at=time.time())
+    if await_inflight:
+        logger.info("App %s backend is already starting — awaiting the in-flight spawn", app_name)
+        return _await_inflight_spawn(app_name)
 
+    # From here the spawn is single-flighted for this app. The body returns the real
+    # AppProcess on success, or None on any failure / no-op path; in EITHER the None
+    # case or an exception we must clear the STARTING placeholder so a later retry isn't
+    # permanently blocked (and a success path replaces it with the real record).
+    try:
+        result = _start_app_backend_body(app_name, manifest)
+    except Exception:
+        with _lock:
+            cur = _processes.get(app_name)
+            if cur is not None and getattr(cur, "starting", False):
+                _processes.pop(app_name, None)
+        raise
+    if result is None:
+        with _lock:
+            cur = _processes.get(app_name)
+            if cur is not None and getattr(cur, "starting", False):
+                _processes.pop(app_name, None)
+    return result
+
+
+def _await_inflight_spawn(app_name: str, timeout: float = 20.0) -> AppProcess | None:
+    """Block until the concurrently-running spawn for ``app_name`` resolves — i.e. the
+    STARTING placeholder is replaced by a real AppProcess (success) or cleared (failure).
+    Returns the resolved process or None. Prevents a second caller from returning the
+    bare port-0 placeholder (which would proxy to nothing)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with _lock:
+            cur = _processes.get(app_name)
+            if cur is None:
+                return None  # the in-flight spawn failed and cleared the placeholder
+            if not getattr(cur, "starting", False):
+                return cur  # resolved to a real process
+        time.sleep(0.1)
+    # Timed out waiting. If the spawn resolved to a real process right at the deadline,
+    # return it. Otherwise the placeholder is still STARTING (a spawn body that hung
+    # without raising — its owner's None/exception cleanup never fired) — clear it here
+    # so a later retry can attempt a fresh spawn instead of re-entering this 20s wait
+    # forever (the app would otherwise be wedged in 'starting' until a gateway restart).
+    # If the body does eventually finish it will find the entry gone and its own cleanup
+    # is a guarded no-op; the starting= guard ensures we never drop a started real proc.
+    with _lock:
+        cur = _processes.get(app_name)
+        if cur is not None and not getattr(cur, "starting", False):
+            return cur  # resolved to a real process at the deadline
+        if cur is not None and getattr(cur, "starting", False):
+            _processes.pop(app_name, None)
+            logger.warning("App %s backend spawn timed out — cleared stale placeholder", app_name)
+        return None
+
+
+def _start_app_backend_body(app_name: str, manifest) -> AppProcess | None:
+    """The spawn body, single-flighted by the STARTING placeholder set in
+    :func:`start_app_backend`. Returns the real AppProcess on success or None on any
+    failure; the caller clears the placeholder on None/exception."""
     root = app_dir(app_name)
     entry_point = manifest.backend.entryPoint
     # Module-style entry point (e.g. "kiro_claw.apps.builtins.<name>"):
@@ -381,7 +460,12 @@ def start_app_backend(app_name: str) -> AppProcess | None:
         not backend_type and _is_asgi_entry(entry)
     ):
         venv_python = str(root / ".venv" / "bin" / "python3")
-        python_bin = venv_python if (root / ".venv" / "bin" / "python3").is_file() else "python3"
+        # Fall back to the gateway's own interpreter (sys.executable) rather than a bare
+        # "python3": a bare name relies on PATH, which isn't guaranteed (e.g. the Brazil
+        # build farm ships only a versioned interpreter, so execvp("python3") raises
+        # FileNotFoundError and the backend dies immediately). Matches the module-style
+        # branch above.
+        python_bin = venv_python if (root / ".venv" / "bin" / "python3").is_file() else sys.executable
         # Derive the module path for uvicorn (e.g. backend.app:app)
         rel = entry.relative_to(root)
         parts = list(rel.parts)
@@ -402,7 +486,9 @@ def start_app_backend(app_name: str) -> AppProcess | None:
     # --- Plain Python backend (default) ---
     else:
         venv_python = str(root / ".venv" / "bin" / "python3")
-        python_bin = venv_python if (root / ".venv" / "bin" / "python3").is_file() else "python3"
+        # See the ASGI branch: prefer the venv python, else the gateway's own interpreter
+        # (sys.executable) — a bare "python3" relies on PATH and isn't always present.
+        python_bin = venv_python if (root / ".venv" / "bin" / "python3").is_file() else sys.executable
         cmd = [python_bin, entry_str]
         cwd = str(root)
 
@@ -437,6 +523,36 @@ def start_app_backend(app_name: str) -> AppProcess | None:
             raise
     except OSError as exc:
         logger.error("Failed to start app %s backend: %s", app_name, exc)
+        return None
+
+    # Verify the child SURVIVED its initial bind. A port collision (e.g. another
+    # process grabbed the assigned port between our free-port probe and the child's
+    # bind) makes the backend exit almost immediately with EADDRINUSE. Without this
+    # check we'd return a 'started' record for a dead pid, the caller would proxy to a
+    # dead port (502), and repeated enable/health calls would respawn onto the SAME
+    # doomed port forever (the observed crash-loop). Poll over a short grace window
+    # (the sandbox launcher adds startup latency, so a single 0.4s check can miss a
+    # crash); if it exits, surface the real reason from its log and fail (caller clears
+    # the placeholder; a fresh spawn then re-runs free-port selection).
+    for _ in range(8):  # ~1.6s total
+        time.sleep(0.2)
+        if proc.poll() is not None:
+            break
+    if proc.poll() is not None:
+        tail = ""
+        try:
+            with open(log_path, "r") as _lf:
+                tail = "".join(_lf.readlines()[-8:]).strip()[-600:]
+        except Exception:  # noqa: BLE001
+            pass
+        log_fh.close()
+        collided = "address already in use" in tail.lower() or "errno 98" in tail.lower()
+        logger.error(
+            "App %s backend exited immediately (rc=%s) on port %d%s — %s",
+            app_name, proc.returncode, port,
+            " [PORT COLLISION]" if collided else "",
+            tail or "(no output)",
+        )
         return None
 
     ap = AppProcess(
@@ -706,4 +822,16 @@ def start_enabled_app_backends() -> list[str]:
         if ap:
             started.append(name)
             logger.info("Auto-started backend for app %s on port %d", name, ap.port)
+            # Re-register the app's MCP servers now that the backend is up on its real
+            # allocated port — an HTTP MCP url with backend.port:"auto" was registered at
+            # install/enable time with the manifest's illustrative port, which is wrong if
+            # the backend landed elsewhere (e.g. 9101 when 9100 was taken). Without this,
+            # agents call the stale port and every app tool call silently fails on reboot.
+            try:
+                # circular import: bridges imports backend.get_app_backend_port; deferring
+                # this import to call time breaks the backend ↔ bridges module cycle.
+                from kiro_claw.apps.bridges import reregister_app_mcp_servers
+                reregister_app_mcp_servers(name, live_port=ap.port)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("MCP re-registration after auto-start failed for %s: %s", name, exc)
     return started

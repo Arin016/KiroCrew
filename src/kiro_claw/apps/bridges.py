@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import urlparse, urlunparse
 
 from kiro_claw.apps.cron_sdk import CronSDK
 from kiro_claw.apps.manager import app_dir, get_app, get_app_manifest
@@ -439,10 +440,52 @@ def _read_mcp_json() -> dict[str, Any]:
         return _read_mcp_json_unlocked()
 
 
-def _register_mcp_servers(app_name: str, manifest: AppManifest) -> list[str]:
+def _resolve_live_mcp_url(app_name: str, url: str, live_port: int | None = None) -> str:
+    """Rewrite a manifest HTTP MCP url's port to the backend's ACTUALLY-allocated port.
+
+    Gateway-managed backends declare ``backend.port:"auto"`` and get a free port at
+    spawn time (``backend.py:_find_free_port`` — 9100 if free, else 9101, …). The
+    manifest's ``mcpServers.<name>.url`` carries an illustrative fixed port (e.g.
+    ``http://localhost:9100/mcp``). Registering that verbatim is a latent bug: whenever
+    the backend lands on a different port, the registered MCP server points at the wrong
+    one and every agent tool call to the app silently fails. Here we substitute the live
+    port (preserving scheme/host/path) so the registration always matches the running
+    backend. Non-HTTP transports and apps with no resolvable port are passed through
+    unchanged.
+
+    ``live_port`` may be passed explicitly by a caller that knows the just-allocated
+    port (the boot/enable path, where the backend isn't marked *healthy* yet so the
+    tracked-port lookup would still return None). When omitted we fall back to the
+    health-gated ``get_app_backend_port``.
+    """
+    if not url or not url.startswith("http"):
+        return url
+    try:
+        if live_port is None:
+            # circular import: backend.py imports from bridges (reregister_app_mcp_servers
+            # in its boot path), so bridges can't import backend at module load — defer it.
+            from kiro_claw.apps.backend import get_app_backend_port
+            live_port = get_app_backend_port(app_name)
+        if not live_port:
+            return url  # backend not running yet — keep the manifest default
+        p = urlparse(url)
+        if p.port == live_port:
+            return url  # already correct
+        host = p.hostname or "127.0.0.1"
+        netloc = f"{host}:{live_port}"
+        return urlunparse((p.scheme, netloc, p.path, p.params, p.query, p.fragment))
+    except Exception:  # noqa: BLE001 — registration must never crash on URL rewrite
+        return url
+
+
+def _register_mcp_servers(app_name: str, manifest: AppManifest, live_port: int | None = None) -> list[str]:
     """Register app-provided MCP servers into global mcp.json.
 
-    Uses ``{app_name}:{server_name}`` namespace to avoid collisions.
+    Uses ``{app_name}:{server_name}`` namespace to avoid collisions. HTTP MCP urls have
+    their port rewritten to the backend's live allocated port (see
+    :func:`_resolve_live_mcp_url`) so a ``backend.port:"auto"`` app whose backend landed
+    on a non-default port is still reachable by agents. ``live_port`` lets the boot/enable
+    path pass the just-allocated port directly (health not yet confirmed).
     """
     if not manifest.mcpServers:
         return []
@@ -452,11 +495,28 @@ def _register_mcp_servers(app_name: str, manifest: AppManifest) -> list[str]:
         servers = mcp_data.setdefault("mcpServers", {})
         for server_name, server_config in manifest.mcpServers.items():
             namespaced = f"{app_name}:{server_name}"
-            servers[namespaced] = server_config
+            cfg = dict(server_config) if isinstance(server_config, dict) else server_config
+            if isinstance(cfg, dict) and cfg.get("url"):
+                cfg["url"] = _resolve_live_mcp_url(app_name, cfg["url"], live_port=live_port)
+            servers[namespaced] = cfg
             registered.append(namespaced)
         _write_mcp_json_unlocked(mcp_data)
     logger.info("Registered %d MCP server(s) for app %s", len(registered), app_name)
     return registered
+
+
+def reregister_app_mcp_servers(app_name: str, live_port: int | None = None) -> list[str]:
+    """Re-register an app's MCP servers AFTER its backend has started, so an HTTP MCP
+    url with ``backend.port:"auto"`` is rewritten to the live allocated port. Called
+    from the enable + boot paths once the backend is up (the first register_app ran
+    before the port was known). ``live_port`` should be the just-allocated port from the
+    spawn result — at boot the backend isn't marked *healthy* yet, so the health-gated
+    tracked-port lookup would return None and the rewrite would be skipped. Safe to call
+    repeatedly — it overwrites the namespaced entries. No-op for apps with no MCP servers."""
+    manifest = get_app_manifest(app_name)
+    if not manifest or not manifest.mcpServers:
+        return []
+    return _register_mcp_servers(app_name, manifest, live_port=live_port)
 
 
 def _deregister_mcp_servers(app_name: str) -> int:

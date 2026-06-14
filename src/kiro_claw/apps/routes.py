@@ -31,6 +31,7 @@ from kiro_claw.apps.bridges import (
     deregister_app,
     deregister_app_crons_from_service,
     register_app,
+    reregister_app_mcp_servers,
 )
 from kiro_claw.apps.builtins import BUILTIN_NAMES
 from kiro_claw.apps.dependencies import resolve_dependencies as _resolve_deps
@@ -607,6 +608,16 @@ async def handle_enable_app(request: web.Request) -> web.Response:
     if resources == "gateway":
         reg = register_app(name)
         backend = start_app_backend(name)
+        # The first register_app ran BEFORE the backend was up, so an HTTP MCP server
+        # with backend.port:"auto" was registered with the manifest's illustrative port
+        # (the live port wasn't known yet). Now that the backend is running on its real
+        # allocated port, re-register the MCP servers so the url matches — otherwise
+        # agents call the wrong port and every app tool call silently fails.
+        if backend is not None:
+            try:
+                reregister_app_mcp_servers(name, live_port=getattr(backend, "port", None))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("MCP re-registration after backend start failed for %s: %s", name, exc)
         resp["registration"] = reg.to_dict()
         if backend:
             resp["backend"] = backend.to_dict()
