@@ -29,6 +29,32 @@ _HAS_GIT = shutil.which("git") is not None
 requires_git = pytest.mark.skipif(not _HAS_GIT, reason="git not available")
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Pre-import ``tracemalloc`` so pytest's unraisable hook can't crash on it.
+
+    pytest's ``_pytest/unraisableexception`` plugin replaces ``sys.unraisablehook``
+    and, when a leaked object (an un-awaited coroutine, an orphaned
+    ``SessionManager._cleanup_loop`` task, etc.) is garbage-collected, calls
+    ``tracemalloc_message()`` which runs ``import tracemalloc`` *from inside the
+    GC callback*. If ``tracemalloc`` has not been imported yet, that first import
+    lands in a partially-initialized state (a CPython circular-import artifact
+    observed on 3.12) and raises ``AttributeError: partially initialized module
+    'tracemalloc' has no attribute 'get_object_traceback'``. pytest then re-raises
+    it as ``RuntimeError: Failed to process unraisable exception`` and reports it
+    as an ERROR at the *next* test's setup — turning a benign "object was never
+    awaited" warning into a hard build failure that lands on an innocent test.
+
+    Importing the module eagerly here (once per xdist worker, before any test
+    runs or any GC fires) makes the hook's ``import tracemalloc`` a no-op
+    ``sys.modules`` hit against a fully-built module, so leaks degrade back to
+    warnings instead of failing the suite. Touch ``get_object_traceback`` to
+    force full initialization and to keep the import from reading as unused.
+    """
+    import tracemalloc
+
+    assert hasattr(tracemalloc, "get_object_traceback")
+
+
 @pytest.fixture(autouse=True)
 def _reset_safety_override_between_tests():
     """Reset the SafetyOverride singleton between tests to prevent state leaking."""
