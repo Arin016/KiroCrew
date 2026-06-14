@@ -1,7 +1,7 @@
 /**
  * InstancesPanel — Settings → Instances. Set up and manage remote KiroClaw
  * instances reachable over SSH tunnels (add / edit / connect / disconnect /
- * diagnose / restart). This panel is the *control plane* only — it does not
+ * diagnose). This panel is the *control plane* only — it does not
  * embed remote dashboards. Once an instance is connected here, switch into it
  * from the tab strip in the top header (see InstanceTabBar / Stage 3).
  *
@@ -20,7 +20,6 @@ import {
   Trash2,
   RefreshCw,
   Stethoscope,
-  RotateCw,
   AlertTriangle,
   X,
   Power,
@@ -155,7 +154,6 @@ function InstanceRow({
   onDisconnect,
   onRemove,
   onDiagnose,
-  onRestart,
 }: {
   inst: InstanceView
   busy: string
@@ -163,7 +161,6 @@ function InstanceRow({
   onDisconnect: (id: string) => void
   onRemove: (id: string) => void
   onDiagnose: (id: string) => void
-  onRestart: (id: string) => void
 }) {
   const connected = inst.status.state === 'connected'
   const ttl = inst.status.token_ttl_remaining
@@ -185,9 +182,6 @@ function InstanceRow({
       <div className="flex items-center gap-2 shrink-0">
         <Btn onClick={() => onDiagnose(inst.id)} disabled={!!busy} aria-label={`Diagnose ${inst.name}`}>
           <Stethoscope className="lucide-inline" /> {busy === `diagnose:${inst.id}` ? '…' : 'Diagnose'}
-        </Btn>
-        <Btn onClick={() => onRestart(inst.id)} disabled={!!busy} aria-label={`Restart ${inst.name} gateway`}>
-          <RotateCw className="lucide-inline" /> {busy === `restart:${inst.id}` ? '…' : 'Restart'}
         </Btn>
         {connected ? (
           <Btn onClick={() => onDisconnect(inst.id)} disabled={!!busy}>
@@ -289,12 +283,6 @@ export function InstancesPanel() {
     onError: (e, id) => setActionErr(`Diagnose of ${id} failed: ${errMsg(e, 'unknown error')}`),
     onSettled: () => reload(),
   })
-  const restartMutation = useMutation({
-    mutationFn: (id: string) => api.restartInstance(id),
-    onMutate: clearNotices,
-    onError: (e, id) => setActionErr(`Restart of ${id} failed: ${errMsg(e, 'unknown error')}`),
-    onSettled: () => reload(),
-  })
   // Toggle the instances.enabled config flag from the UI (no CLI). The change
   // only takes effect after a gateway restart (manager + CSP init at startup),
   // so we flag restartPending and the panel surfaces a "restart required" hint.
@@ -316,15 +304,12 @@ export function InstancesPanel() {
         ? `remove:${removeMutation.variables}`
         : diagnoseMutation.isPending
           ? `diagnose:${diagnoseMutation.variables}`
-          : restartMutation.isPending
-            ? `restart:${restartMutation.variables}`
-            : ''
+          : ''
 
   const onConnect = useCallback((id: string) => connectMutation.mutate(id), [connectMutation])
   const onDisconnect = useCallback((id: string) => disconnectMutation.mutate(id), [disconnectMutation])
   const onRemove = useCallback((id: string) => removeMutation.mutate(id), [removeMutation])
   const onDiagnose = useCallback((id: string) => diagnoseMutation.mutate(id), [diagnoseMutation])
-  const onRestart = useCallback((id: string) => restartMutation.mutate(id), [restartMutation])
 
   if (disabled) {
     return (
@@ -451,7 +436,6 @@ export function InstancesPanel() {
                     onDisconnect={onDisconnect}
                     onRemove={onRemove}
                     onDiagnose={onDiagnose}
-                    onRestart={onRestart}
                   />
                 ))}
               </div>
