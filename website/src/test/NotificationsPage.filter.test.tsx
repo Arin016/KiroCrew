@@ -74,7 +74,7 @@ describe('NotificationsPage multi-select filter', () => {
     ]))
     renderWithProviders(<NotificationsPage />, { store })
 
-    const subagentBtn = screen.getByRole('button', { name: /Subagent/ })
+    const subagentBtn = screen.getByRole('button', { name: /^Subagent$/ })
     fireEvent.click(subagentBtn)
 
     expect(subagentBtn.getAttribute('aria-pressed')).toBe('false')
@@ -126,7 +126,7 @@ describe('NotificationsPage multi-select filter', () => {
     ]))
     const { unmount } = renderWithProviders(<NotificationsPage />, { store: store1 })
 
-    fireEvent.click(screen.getByRole('button', { name: /Subagent/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Subagent$/ }))
 
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]')
     expect(saved).not.toContain('subagent')
@@ -173,7 +173,7 @@ describe('NotificationsPage multi-select filter', () => {
     ]))
     renderWithProviders(<NotificationsPage />, { store })
 
-    fireEvent.click(screen.getByRole('button', { name: /Subagent/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Subagent$/ }))
 
     expect(screen.getByText('Cron Result')).toBeInTheDocument()
     // Strict filter active — unknown kinds drop out

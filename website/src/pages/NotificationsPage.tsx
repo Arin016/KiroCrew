@@ -13,6 +13,8 @@ import InfoTip from '../components/InfoTip'
 import MarkdownRenderer from '../components/MarkdownRenderer'
 import { CronAckBar } from './chat'
 import { api } from '../api/client'
+import { disintegrate } from '../lib/disintegrate'
+import Clickable from '../components/Clickable'
 import type { Notification } from '../types'
 
 type Kind = 'cron' | 'hook' | 'heartbeat' | 'agent' | 'approval' | 'subagent' | 'taskrunner'
@@ -324,20 +326,29 @@ export default function NotificationsPage() {
                         const km = KIND_META[n.kind] || DEFAULT_META
                         const active = selectedTs === n.ts
                         return (
-                          <div key={n.ts}
-                            className={`group flex items-center gap-2 px-2.5 py-2 rounded-md mb-1 cursor-pointer transition-all border-l-[3px] ${km.borderColor} ${active ? 'bg-accent-subtle border border-accent' : 'border border-transparent hover:bg-bg-hover hover:border-border'} ${n.acked && !active ? 'opacity-50' : ''}`}
-                            onClick={() => handleSelect(n)}
+                          <div key={n.ts} data-notif-row
+                            className={`group flex items-center gap-2 px-2.5 py-2 rounded-md mb-1 transition-all border-l-[3px] ${km.borderColor} ${active ? 'bg-accent-subtle border border-accent' : 'border border-transparent hover:bg-bg-hover hover:border-border'} ${n.acked && !active ? 'opacity-50' : ''}`}
                           >
-                            <span className="text-[13px] shrink-0">{km.icon}</span>
-                            <div className="flex-1 min-w-0">
-                              <div className="text-[13px] font-medium text-text-strong truncate leading-tight">{n.title}</div>
-                              <div className="text-[12px] text-muted truncate mt-0.5">{stripMd(n.body || '').slice(0, 80)}</div>
-                            </div>
-                            <div className="flex flex-col items-end gap-0.5 shrink-0">
-                              <span className="text-[11px] text-muted font-mono">{fmtTime(n.ts)}</span>
-                              {!n.acked && <span className="w-1.5 h-1.5 rounded-full bg-accent animate-dot-breathe" />}
-                            </div>
-                            <span className="opacity-0 group-hover:opacity-40 text-[11px] cursor-pointer hover:!opacity-100 hover:text-danger transition-opacity shrink-0" onClick={e => { e.stopPropagation(); dispatch(deleteNotification(n.ts)); if (selectedTs === n.ts) setSelectedTs(null) }}><X className="lucide-inline" /></span>
+                            <Clickable
+                              onClick={() => handleSelect(n)}
+                              aria-label={`Open notification: ${n.title}`}
+                              className="flex items-center gap-2 flex-1 min-w-0 text-left cursor-pointer"
+                            >
+                              <span className="text-[13px] shrink-0">{km.icon}</span>
+                              <div className="flex-1 min-w-0">
+                                <div className="text-[13px] font-medium text-text-strong truncate leading-tight">{n.title}</div>
+                                <div className="text-[12px] text-muted truncate mt-0.5">{stripMd(n.body || '').slice(0, 80)}</div>
+                              </div>
+                              <div className="flex flex-col items-end gap-0.5 shrink-0">
+                                <span className="text-[11px] text-muted font-mono">{fmtTime(n.ts)}</span>
+                                {!n.acked && <span className="w-1.5 h-1.5 rounded-full bg-accent animate-dot-breathe" />}
+                              </div>
+                            </Clickable>
+                            <Clickable
+                              aria-label="Dismiss notification"
+                              className="opacity-0 group-hover:opacity-40 text-[11px] cursor-pointer hover:!opacity-100 hover:text-danger transition-opacity shrink-0"
+                              onClick={async e => { e?.stopPropagation(); const row = (e?.currentTarget as HTMLElement | undefined)?.closest('[data-notif-row]') as HTMLElement | null; await disintegrate(row); dispatch(deleteNotification(n.ts)); if (selectedTs === n.ts) setSelectedTs(null) }}
+                            ><X className="lucide-inline" /></Clickable>
                           </div>
                         )
                       })}
