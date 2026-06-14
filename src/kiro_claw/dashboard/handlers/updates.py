@@ -196,16 +196,37 @@ async def api_update_auto(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "auto_update": enabled})
 
 
-async def api_changelog(request: web.Request) -> web.Response:
-    """GET /api/changelog — read full CHANGELOG.md from project."""
+def _changelog_path() -> Path | None:
+    """Locate CHANGELOG.md across install layouts.
+
+    1. ``KIROCLAW_PROJECT_DIR/CHANGELOG.md`` — dev / git installs.
+    2. Bundled ``kiro_claw/CHANGELOG.md`` — pip-wheel installs where
+       no source tree is present (copied into the package at build time by
+       ``setup.py``'s ``BuildWithFrontend._copy_changelog``).
+
+    Returns the first existing path, or ``None`` if neither is found.
+    """
     proj = os.environ.get("KIROCLAW_PROJECT_DIR", "")
-    if not proj:
-        return web.json_response({"content": ""})
-    path = Path(proj) / "CHANGELOG.md"
-    try:
-        content = path.read_text(encoding="utf-8")
-    except Exception:
-        content = ""
+    if proj:
+        p = Path(proj) / "CHANGELOG.md"
+        if p.is_file():
+            return p
+    # updates.py lives at kiro_claw/dashboard/handlers/ — parents[2] == kiro_claw/
+    bundled = Path(__file__).resolve().parents[2] / "CHANGELOG.md"
+    if bundled.is_file():
+        return bundled
+    return None
+
+
+async def api_changelog(request: web.Request) -> web.Response:
+    """GET /api/changelog — read full CHANGELOG.md from project or bundle."""
+    path = _changelog_path()
+    content = ""
+    if path is not None:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except Exception:
+            content = ""
     return web.json_response({"content": content})
 
 

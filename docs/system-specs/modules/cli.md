@@ -11,8 +11,8 @@ The CLI module (`kiro_claw/cli.py`) provides the `kiroclaw` command using stdlib
 At startup, `main()` auto-detects the project root and sets `KIROCLAW_PROJECT_DIR`:
 
 1. If `KIROCLAW_PROJECT_DIR` env var is already set, use it
-2. Walk up from CWD looking for a directory with both `agents/` and `skills/`
-3. Read saved path from `~/.kiroclaw/project_dir` (written by `kiroclaw setup`)
+2. Walk up from CWD looking for a directory with both `skills/` and `src/kiro_claw/` (`_PROJECT_MARKERS`). The project-level `agents/` dir was removed when agent config was consolidated into `src/kiro_claw/config/` (commit bbbc1f6e), so the marker no longer references it — a stale `agents/` requirement left detection (and the dashboard changelog) silently broken.
+3. Read saved path from `~/.kiroclaw/project_dir` (written by `kiroclaw setup`); the saved path is re-validated against the same markers
 
 This allows `kiroclaw` to find project-level agent config and skills from any directory.
 

@@ -64,13 +64,20 @@ class TestLifecycleHookOrdering:
 
     @settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(names=_app_names())
-    def test_startup_order_is_lexicographic(self, names: list[str], tmp_path: Path) -> None:
+    def test_startup_order_is_lexicographic(
+        self, names: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Startup hooks are invoked in lexicographic order by app name."""
         import uuid
         from unittest.mock import patch
 
         work_dir = tmp_path / uuid.uuid4().hex
         work_dir.mkdir()
+        # dispatch_startup → _build_context → app_dir(name)/"data".mkdir() resolves
+        # against config_dir() == ~/.kiroclaw unless KIROCLAW_HOME is isolated. Each
+        # generated name would otherwise leak a real apps/<name>/data/ dir (one per
+        # hypothesis example → thousands over a dev's test history). Pin it to tmp.
+        monkeypatch.setenv("KIROCLAW_HOME", str(work_dir))
 
         apps = [_make_app_info(n, on_startup="backend.hooks:on_startup") for n in names]
         dispatcher = LifecycleDispatcher()

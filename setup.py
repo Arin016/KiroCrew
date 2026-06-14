@@ -95,6 +95,22 @@ class BuildWithFrontend(build_py):
                 "             cd website && npm install && npm run build\n"
                 "         then copy website/dist into src/kiro_claw/static/dist."
             )
+        self._copy_changelog(base)
+
+    def _copy_changelog(self, base: str) -> None:
+        """Bundle the repo-root CHANGELOG.md into the package.
+
+        Pip-wheel installs ship no source tree, so the dashboard's
+        ``/api/changelog`` endpoint (handlers/updates.py:_changelog_path) falls
+        back to a bundled ``kiro_claw/CHANGELOG.md``. Copy it in here rather than
+        via package_data because it lives at the repo root, outside the
+        ``src/kiro_claw`` package tree that setuptools globs.
+        """
+        src_changelog = os.path.join(base, "CHANGELOG.md")
+        if os.path.isfile(src_changelog):
+            pkg_dir = os.path.join(self.build_lib, "kiro_claw")
+            if os.path.isdir(pkg_dir):
+                shutil.copy2(src_changelog, os.path.join(pkg_dir, "CHANGELOG.md"))
 
 
 setup(

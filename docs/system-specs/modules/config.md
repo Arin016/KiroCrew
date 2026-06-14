@@ -34,7 +34,7 @@ The parent directory is created on first call if it doesn't exist.
 `KIROCLAW_PROJECT_DIR` env var controls where agent config and skills are loaded from:
 
 1. Env var `KIROCLAW_PROJECT_DIR` (if set and valid)
-2. CWD walk-up — CLI walks up from CWD looking for `agents/` + `skills/`
+2. CWD walk-up — CLI walks up from CWD looking for `skills/` + `src/kiro_claw/` (the `agents/` dir was removed in commit bbbc1f6e when agent config moved into `src/kiro_claw/config/`)
 3. Saved path in `~/.kiroclaw/project_dir` (written by `kiroclaw setup`)
 4. Bundled fallback — `config/defaults.json` and `builtin_skills/` inside the package
 

@@ -127,7 +127,14 @@ class TestChannelConfig:
 
 
 class TestConfigDir:
-    def test_config_dir_is_home_based(self):
+    def test_config_dir_is_home_based(self, monkeypatch, tmp_path):
+        # The autouse _isolate_kiroclaw_home fixture (conftest.py) pins
+        # KIROCLAW_HOME to a tmp dir for every test; this one specifically
+        # exercises the UNSET-env default, so clear it and pin Path.home to a
+        # tmp dir to keep the assertion hermetic (mirrors
+        # test_config_paths.py::test_default_is_home_dotkiroclaw).
+        monkeypatch.delenv("KIROCLAW_HOME", raising=False)
+        monkeypatch.setattr("pathlib.Path.home", classmethod(lambda cls: tmp_path))
         d = config_dir()
         assert d.name == ".kiroclaw"
 

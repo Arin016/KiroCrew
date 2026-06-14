@@ -247,6 +247,21 @@ async def handle_get_manifest(request: web.Request) -> web.Response:
     return web.json_response(manifest.to_dict())
 
 
+async def _start_backend_after_install(name: str) -> None:
+    """Spawn an app's backend after a fresh install/register, if it has one.
+
+    ``start_app_backend`` is a no-op for apps that declare no backend and is
+    idempotent for already-running ones, so this is safe to call unconditionally.
+    It blocks on a health-check poll, so run it off the event loop. Failures are
+    logged but never abort the install — the backend also gets a retry on the
+    next gateway boot via ``start_enabled_app_backends``.
+    """
+    try:
+        await asyncio.to_thread(start_app_backend, name)
+    except Exception:
+        logger.warning("Backend auto-start after install failed for app %s", name, exc_info=True)
+
+
 async def handle_install_app(request: web.Request) -> web.Response:
     """POST /api/apps/install — install an app from a local path."""
     try:
@@ -278,6 +293,9 @@ async def handle_install_app(request: web.Request) -> web.Response:
 
     # Auto-register resources
     reg = register_app(result.name)
+    # Spawn the backend now so the app is reachable without a gateway reboot
+    # (see _start_backend_after_install). No-op for backend-less apps.
+    await _start_backend_after_install(result.name)
     sel().log_api_access(caller="dashboard", operation="app_install", outcome="completed", resources=result.name)
     return web.json_response({
         **result.to_dict(),
@@ -899,6 +917,12 @@ async def handle_registry_install(request: web.Request) -> web.Response:
 
     # Auto-register resources
     reg = register_app(result["name"])
+    # Spawn the backend now so apps with a server are reachable immediately —
+    # without this the backend only starts on the next gateway reboot (via
+    # start_enabled_app_backends), leaving the app's UI with "no reachable
+    # backend" until then. No-op for apps that declare no backend. Run in a
+    # thread because start_app_backend blocks on a health-check poll.
+    await _start_backend_after_install(result["name"])
     result["registration"] = reg.to_dict()
     sel().log_api_access(caller="dashboard", operation="app_registry_install", outcome="completed", resources=name)
     return web.json_response(result, status=201)
@@ -1019,6 +1043,9 @@ async def handle_registry_install_stream(request: web.Request) -> web.StreamResp
 
     # Auto-register resources (same as non-streaming endpoint)
     reg = register_app(result["name"])
+    # Spawn the backend immediately (see handle_registry_install) so the app is
+    # reachable without a gateway reboot. No-op for backend-less apps.
+    await _start_backend_after_install(result["name"])
     result["registration"] = reg.to_dict()
     sel().log_api_access(caller="dashboard", operation="app_registry_install_stream", outcome="completed", resources=name)
     await _send_sse("done", json.dumps(result))

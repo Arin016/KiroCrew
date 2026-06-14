@@ -64,6 +64,28 @@ def _reset_safety_override_between_tests():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_kiroclaw_home(tmp_path_factory, monkeypatch):
+    """Pin ``KIROCLAW_HOME`` to a per-test tmp dir as a safety net.
+
+    ``config_dir()`` reads ``KIROCLAW_HOME`` on every call and falls back to the
+    operator's real ``~/.kiroclaw`` when it is unset. Any test that reaches a
+    code path resolving ``apps_dir()`` / ``config_dir()`` (e.g. a lifecycle
+    dispatch that calls ``app_dir(name)/"data".mkdir()``) without setting
+    ``KIROCLAW_HOME`` itself would otherwise create real dirs/files under the
+    developer's home — and under Hypothesis that means one orphan per generated
+    example, accumulating into thousands of stray ``~/.kiroclaw/apps/<name>/``
+    dirs over a dev's test history.
+
+    This runs before the test body, so a test that sets its own
+    ``KIROCLAW_HOME`` via ``monkeypatch.setenv`` still wins (its value is applied
+    later and reverted independently). The guard only changes behavior for tests
+    that did NOT isolate the home themselves — exactly the leak we want to close.
+    """
+    home = tmp_path_factory.mktemp("kiroclaw-home")
+    monkeypatch.setenv("KIROCLAW_HOME", str(home))
+
+
+@pytest.fixture(autouse=True)
 def _ensure_event_loop():
     """Ensure an event loop exists for asyncio.Semaphore default_factory (Python 3.9)."""
     try:

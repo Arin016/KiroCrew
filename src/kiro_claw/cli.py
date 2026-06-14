@@ -61,7 +61,13 @@ BANNER = r"""
   🐾 Your personal AI agent
 """
 
-_PROJECT_MARKERS = ("agents", "skills")
+# Markers that uniquely identify the KiroClaw repo root for project-dir
+# auto-detection. The project-level ``agents/`` dir was removed when agent
+# config was consolidated into ``src/kiro_claw/config/`` (commit bbbc1f6e), so
+# ``skills/`` + ``src/kiro_claw/`` is now the stable signature: ``skills/`` is
+# editable-at-root and ``src/kiro_claw/`` pins this to the KiroClaw package repo
+# (not just any directory that happens to contain a ``skills/`` folder).
+_PROJECT_MARKERS = ("skills", "src/kiro_claw")
 
 
 def _project_dir_file() -> Path:

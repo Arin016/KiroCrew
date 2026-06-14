@@ -2246,8 +2246,8 @@ class TestConfigDirOverride:
         """_detect_project_dir reads saved path from config_dir()/project_dir."""
         proj = tmp_path / "my_project"
         proj.mkdir()
-        (proj / "agents").mkdir()
         (proj / "skills").mkdir()
+        (proj / "src" / "kiro_claw").mkdir(parents=True)
 
         config_home = tmp_path / "custom_config"
         config_home.mkdir()
@@ -2259,6 +2259,26 @@ class TestConfigDirOverride:
         from kiro_claw.cli import _detect_project_dir
 
         assert _detect_project_dir() == str(proj)
+
+    def test_detect_project_dir_no_agents_dir(self, tmp_path, monkeypatch):
+        """Detection works without a project-level agents/ dir (removed in bbbc1f6e).
+
+        Regression guard: agent config was consolidated into src/kiro_claw/config/
+        and the root agents/ dir deleted, which silently broke detection (and the
+        dashboard changelog) while the marker still required agents/ + skills/.
+        """
+        proj = tmp_path / "KiroClaw"
+        (proj / "skills").mkdir(parents=True)
+        (proj / "src" / "kiro_claw").mkdir(parents=True)
+        assert not (proj / "agents").exists()
+
+        monkeypatch.setattr("kiro_claw.cli.config_dir", lambda: tmp_path / "cfg")
+        (tmp_path / "cfg").mkdir()
+        monkeypatch.chdir(proj)
+
+        from kiro_claw.cli import _detect_project_dir
+
+        assert _detect_project_dir() == str(proj.resolve())
 
     def test_logout_reads_secret_from_config_dir(self, tmp_path, monkeypatch):
         """_logout reads .local_secret from config_dir(), not ~/.kiroclaw."""
