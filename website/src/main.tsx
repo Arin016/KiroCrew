@@ -10,6 +10,7 @@ import { ThemeProvider } from './hooks/useTheme'
 import { UIModeProvider } from './hooks/useUIMode'
 import { initRum } from './rum'
 import App from './App'
+import ErrorBoundary from './components/ErrorBoundary'
 import 'katex/dist/katex.min.css'
 import 'monaco-editor/esm/vs/base/browser/ui/codicons/codicon/codicon.css'
 import './index.css'
@@ -33,19 +34,21 @@ const queryClient = new QueryClient({
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <Provider store={store}>
-        <ThemeProvider>
-          <UIModeProvider>
-            <BrowserRouter>
-              <Routes>
-                <Route path="/worlds-popout" element={<BrandingProvider><ProviderProvider><Suspense fallback={null}><WorldsPopout /></Suspense></ProviderProvider></BrandingProvider>} />
-                <Route path="*" element={<BrandingProvider><ProviderProvider><App /></ProviderProvider></BrandingProvider>} />
-              </Routes>
-            </BrowserRouter>
-          </UIModeProvider>
-        </ThemeProvider>
-      </Provider>
-    </QueryClientProvider>
+    <ErrorBoundary root scope="app-shell">
+      <QueryClientProvider client={queryClient}>
+        <Provider store={store}>
+          <ThemeProvider>
+            <UIModeProvider>
+              <BrowserRouter>
+                <Routes>
+                  <Route path="/worlds-popout" element={<BrandingProvider><ProviderProvider><Suspense fallback={null}><WorldsPopout /></Suspense></ProviderProvider></BrandingProvider>} />
+                  <Route path="*" element={<BrandingProvider><ProviderProvider><App /></ProviderProvider></BrandingProvider>} />
+                </Routes>
+              </BrowserRouter>
+            </UIModeProvider>
+          </ThemeProvider>
+        </Provider>
+      </QueryClientProvider>
+    </ErrorBoundary>
   </StrictMode>,
 )
