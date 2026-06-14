@@ -69,7 +69,29 @@ def _healthy_agent_file(path: Path) -> None:
     )
 
 
+def _pin_default_config(monkeypatch) -> None:
+    """Make ``_doctor()``'s config read hermetic for doctor tests.
+
+    ``_doctor()`` calls the real ``KiroClawConfig.load()`` / ``load_credentials()``,
+    which read the shared ``~/.kiroclaw`` config at runtime. ``KiroClawConfig.save()``
+    writes that same shared path non-atomically, so under ``pytest -n auto`` a
+    concurrent worker's config write races these reads: a polluted/foreign config
+    flips a check and ``_doctor()`` exits 1. xdist worker interleaving differs per
+    interpreter, so the flake surfaced only on python3.10. Pin both to a pristine
+    default (Slack-less, STT disabled) so doctor runs are deterministic and isolated.
+    """
+    from kiro_claw.config.loader import KiroClawConfig
+
+    monkeypatch.setattr(KiroClawConfig, "load", classmethod(lambda cls: cls()))
+    monkeypatch.setattr(KiroClawConfig, "load_credentials", lambda self: {})
+
+
 class TestDoctor:
+    @pytest.fixture(autouse=True)
+    def _hermetic_config(self, monkeypatch):
+        """Pin config to a pristine default (see ``_pin_default_config``)."""
+        _pin_default_config(monkeypatch)
+
     def test_doctor_with_kiro(self, tmp_path):
         agent_file = tmp_path / "kiroclaw.json"
         # A minimally healthy agent config so doctor walks the whole MCP
@@ -83,7 +105,6 @@ class TestDoctor:
             patch("urllib.request.urlopen", side_effect=urllib.error.URLError("no gateway")),
             patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
-            patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True),
             patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
         ):
             _doctor()
@@ -120,6 +141,63 @@ class TestDoctor:
                 pass
         out = capsys.readouterr().out
         assert "ssh -NL" in out
+
+    def test_doctor_slack_workspace_allowed_ok(self, tmp_path, capsys):
+        """Slack configured + the bot token in the configured workspace
+        allowlist -> doctor reports the workspace OK. validate_enterprise is
+        mocked True so no live slack_sdk auth.test fires (its own logic is
+        covered by test_enterprise.py); this covers the doctor-side success
+        branch."""
+        agent_file = tmp_path / "kiroclaw.json"
+        _healthy_agent_file(agent_file)
+        mock_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
+        slack_creds = {
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "KIROCLAW_OWNER_ID": "U123",
+        }
+        with (
+            patch("kiro_claw.cli_doctor.shutil.which", side_effect=lambda b: f"/usr/local/bin/{b}"),
+            patch("kiro_claw.cli_doctor.KIRO_AGENTS_DIR", tmp_path),
+            patch("kiro_claw.cli_doctor.subprocess.run", return_value=mock_run),
+            patch("urllib.request.urlopen", side_effect=urllib.error.URLError("no gateway")),
+            patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
+            patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
+            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
+            patch("kiro_claw.cli_doctor.KiroClawConfig.load_credentials", return_value=slack_creds),
+            patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True) as mock_ve,
+        ):
+            _doctor()
+        out = capsys.readouterr().out
+        assert "✅ configured" in out
+        assert "  workspace:   ✅ allowed" in out
+        mock_ve.assert_called_once()
+
+    def test_doctor_slack_workspace_not_allowed_flags_issue(self, tmp_path, capsys):
+        """Slack configured but the bot token NOT in the configured workspace
+        allowlist is a blocking issue: doctor prints the warning and exits 1.
+        validate_enterprise is mocked False so no live auth.test fires; covers
+        the doctor-side failure branch + the resulting sys.exit(1)."""
+        agent_file = tmp_path / "kiroclaw.json"
+        _healthy_agent_file(agent_file)
+        mock_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
+        slack_creds = {"SLACK_APP_TOKEN": "xapp-test", "SLACK_BOT_TOKEN": "xoxb-test"}
+        with (
+            patch("kiro_claw.cli_doctor.shutil.which", side_effect=lambda b: f"/usr/local/bin/{b}"),
+            patch("kiro_claw.cli_doctor.KIRO_AGENTS_DIR", tmp_path),
+            patch("kiro_claw.cli_doctor.subprocess.run", return_value=mock_run),
+            patch("urllib.request.urlopen", side_effect=urllib.error.URLError("no gateway")),
+            patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
+            patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
+            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
+            patch("kiro_claw.cli_doctor.KiroClawConfig.load_credentials", return_value=slack_creds),
+            patch("kiro_claw.cli_doctor.validate_enterprise", return_value=False),
+        ):
+            with pytest.raises(SystemExit) as exc:
+                _doctor()
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "❌ not in configured workspace allowlist" in out
 
 
 class TestSetupWorkspaceDir:
@@ -1678,6 +1756,11 @@ class TestEnsurePrerequisites:
 class TestDoctorStaleProjectDir:
     """Tests for doctor stale project_dir detection."""
 
+    @pytest.fixture(autouse=True)
+    def _hermetic_config(self, monkeypatch):
+        """Pin config to a pristine default (see ``_pin_default_config``)."""
+        _pin_default_config(monkeypatch)
+
     def test_doctor_detects_stale_project_dir(self, tmp_path, capsys):
         proj_file = tmp_path / "project_dir"
         proj_file.write_text("/nonexistent/deleted\n")
@@ -2486,6 +2569,11 @@ class TestSeedDispatch:
 
 class TestDoctorOllamaDocker:
     """Tests for doctor detecting Ollama via Docker container."""
+
+    @pytest.fixture(autouse=True)
+    def _hermetic_config(self, monkeypatch):
+        """Pin config to a pristine default (see ``_pin_default_config``)."""
+        _pin_default_config(monkeypatch)
 
     def test_doctor_detects_ollama_docker(self, tmp_path, capsys):
         """When native ollama is missing but Docker container exists, report as installed."""
