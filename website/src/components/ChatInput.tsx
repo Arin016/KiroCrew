@@ -425,12 +425,32 @@ function ChatInput({
   const { botName } = useBranding()
   const isMobile = useIsMobile()
   const ime = useImeGuard()
-  const resolvedPlaceholder = placeholder || `Message ${botName}…`
+  const resolvedPlaceholder = placeholder || `Message ${botName}…  (/command · @file · $skill)`
   const [slashMenuOpen, setSlashMenuOpen] = useState(false)
   const [filePickerOpen, setFilePickerOpen] = useState(false)
   const [fileQuery, setFileQuery] = useState('')
   const [skillPickerOpen, setSkillPickerOpen] = useState(false)
   const [skillQuery, setSkillQuery] = useState('')
+  // Open an in-input trigger picker from the + menu (mirrors typing the sigil):
+  //  '/' slash commands (whole-input), '@' file mention, '$' skill. Inserts the
+  //  sigil at a word boundary, opens the matching picker, then refocuses the box.
+  const openTrigger = (sigil: '/' | '@' | '$') => {
+    setPlusOpen(false)
+    if (sigil === '/') {
+      onChange('/')
+      setSlashMenuOpen(true); setFilePickerOpen(false); setSkillPickerOpen(false)
+    } else {
+      const sep = value === '' || /\s$/.test(value) ? '' : ' '
+      onChange(value + sep + sigil)
+      setSlashMenuOpen(false)
+      if (sigil === '@') { setFilePickerOpen(true); setFileQuery(''); setSkillPickerOpen(false) }
+      else { setSkillPickerOpen(true); setSkillQuery(''); setFilePickerOpen(false) }
+    }
+    requestAnimationFrame(() => {
+      const el = inputRef.current
+      if (el) { el.focus(); const n = el.value.length; el.setSelectionRange(n, n) }
+    })
+  }
   // Warm the shared ['skills'] cache when the input gains focus so the first
   // `$` trigger renders the picker instantly (the fetch is the only latency).
   // prefetchQuery is a no-op if the cache is already fresh (staleTime), so it's
@@ -1522,6 +1542,48 @@ function ChatInput({
                           <span className="text-[12px] font-medium text-text">Screenshot</span>
                         </button>
                       )}
+                    </div>
+                    {/* In-input trigger shortcuts: clicking inserts the sigil
+                     *  and opens the matching picker (same as typing /, @, $). */}
+                    <div className="mt-2 pt-2 border-t border-border flex flex-col gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => openTrigger('/')}
+                        title="Slash commands"
+                        className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg bg-transparent hover:bg-bg-hover transition-colors cursor-pointer text-left"
+                      >
+                        <span className="w-4 text-center text-[14px] font-mono leading-none text-muted shrink-0">/</span>
+                        <div className="min-w-0">
+                          <div className="text-[12px] font-medium text-text">Command</div>
+                          <div className="text-[11px] text-muted leading-snug">Quick actions like clearing the chat or checking usage</div>
+                        </div>
+                      </button>
+                      {onFileSelect && (
+                        <button
+                          type="button"
+                          onClick={() => openTrigger('@')}
+                          title="Reference a file"
+                          className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg bg-transparent hover:bg-bg-hover transition-colors cursor-pointer text-left"
+                        >
+                          <span className="w-4 text-center text-[14px] font-mono leading-none text-muted shrink-0">@</span>
+                          <div className="min-w-0">
+                            <div className="text-[12px] font-medium text-text">File</div>
+                            <div className="text-[11px] text-muted leading-snug">Let the agent read one of your files</div>
+                          </div>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => openTrigger('$')}
+                        title="Use a skill"
+                        className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg bg-transparent hover:bg-bg-hover transition-colors cursor-pointer text-left"
+                      >
+                        <span className="w-4 text-center text-[14px] font-mono leading-none text-muted shrink-0">$</span>
+                        <div className="min-w-0">
+                          <div className="text-[12px] font-medium text-text">Skill</div>
+                          <div className="text-[11px] text-muted leading-snug">Apply a ready-made set of instructions</div>
+                        </div>
+                      </button>
                     </div>
                     {onBrowseToggle && (
                       <div className="flex items-start justify-between gap-2 mt-2 pt-2.5 border-t border-border">
