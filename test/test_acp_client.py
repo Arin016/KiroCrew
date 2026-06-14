@@ -3656,6 +3656,37 @@ class TestBuildPermissionEvent:
         assert event.title == "shell"
         assert len(event.options) == 2
 
+    def test_tool_kind_carried_from_toolcall(self):
+        # The ACP toolCall carries kind="execute" for Bash; carrying it onto the
+        # event lets downstream validation apply the execute-tool exemptions
+        # (e.g. the display-name length cap). Regression for the empty-kind bug
+        # where long bash commands aborted as "User refused permission".
+        client = AcpClient()
+        from kiro_claw.acp.types import JsonRpcMessage
+
+        msg = JsonRpcMessage(
+            id=43,
+            method="session/requestPermission",
+            params={
+                "toolCall": {"title": "ls", "kind": "execute", "toolCallId": "tc-k"},
+                "options": [{"id": "allow_once", "label": "Allow"}],
+            },
+        )
+        event = client._build_permission_event(msg)
+        assert event.tool_kind == "execute"
+
+    def test_tool_kind_defaults_empty_when_absent(self):
+        client = AcpClient()
+        from kiro_claw.acp.types import JsonRpcMessage
+
+        msg = JsonRpcMessage(
+            id=44,
+            method="session/requestPermission",
+            params={"toolCall": {"title": "ls"}, "options": []},
+        )
+        event = client._build_permission_event(msg)
+        assert event.tool_kind == ""
+
     def test_default_options_when_empty(self):
         client = AcpClient()
         from kiro_claw.acp.types import JsonRpcMessage

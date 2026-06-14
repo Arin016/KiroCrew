@@ -3002,6 +3002,11 @@ class AcpClient:
         params = msg.params or {}
         tool_call = params.get("toolCall", {})
         title = tool_call.get("title", "unknown")
+        # The ACP toolCall carries a `kind` ("execute" for Bash, "read"/"edit"/
+        # …). Carry it onto the event so downstream validation can apply the
+        # execute-tool exemptions — notably the display-name length gate, which
+        # is meaningless for a full shell command string. Missing/empty stays "".
+        tool_kind = tool_call.get("kind", "")
         # ACP spec uses optionId/name + kind ("allow_once"|"allow_always"|
         # "reject_once"|"reject_always"); kiro-cli historically uses id/label
         # with id values "allow_once"/"allow_always". Accept both shapes and
@@ -3074,6 +3079,7 @@ class AcpClient:
             kind=EVENT_PERMISSION_REQUEST,
             request_id=request_id,
             title=title,
+            tool_kind=tool_kind,
             options=options,
             tool_input=tool_input,
             tool_call_id=tool_call_id,
