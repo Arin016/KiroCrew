@@ -477,6 +477,12 @@ export function useWebSocket() {
             queryClient.invalidateQueries({ queryKey: ['cron-history'] })
             queryClient.invalidateQueries({ queryKey: ['cron-history-all'] })
             break
+          case 'browser_frame':
+            // Live mirror frame (a screenshot the agent took, forwarded by the
+            // MCP proxy). Routed via a window event so BrowserLiveView can render
+            // without a Redux slice.
+            window.dispatchEvent(new CustomEvent('kiroclaw-browser-frame', { detail: data }))
+            break
         }
       } catch { /* ignore malformed */ }
     }

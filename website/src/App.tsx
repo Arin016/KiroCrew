@@ -44,6 +44,7 @@ import EmbedTabStrip from './components/EmbedTabStrip'
 import DeveloperPage from './pages/DeveloperPage'
 import SchedulePage from './pages/SchedulePage'
 import CliPanel from './components/CliPanel'
+import BrowserLiveView from './components/BrowserLiveView'
 import { toggleCliPanel } from './store/terminalSlice'
 import { setTerminalEnabledFlag } from './utils/terminalRegistry'
 import AppsPage from './pages/AppsPage'
@@ -1171,6 +1172,7 @@ export default function App() {
         </main>
         <AnimatePresence>
           {terminalEnabled && terminalOpen && <CliPanel />}
+          <BrowserLiveView />
         </AnimatePresence>
       </div>
     </div>{/* /Local dashboard grid */}
