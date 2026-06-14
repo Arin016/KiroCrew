@@ -17,7 +17,7 @@ export const meta = {
 // match the documented checkout locations in skills/meshclaw-sync/SKILL.md.
 // ---------------------------------------------------------------------------
 const cfg = {
-  fork: (args && args.workspaceFork) || '/Volumes/workplace/KiroClawExternal/src/KiroClawExternal',
+  fork: (args && args.workspaceFork) || '/Volumes/workplace/KiroClaw/src/KiroClaw',
   backend: (args && args.upstreamBackend) || '/Volumes/workplace/MeshClaw/src/MeshClaw',
   frontend: (args && args.upstreamFrontend) || '/Volumes/workplace/MeshClaw/src/MeshClawWebsite',
   // mode: 'triage' (read-only, default) | 'port' (port + verify, no build/CR) | 'full' (port + verify + build + commit + CR)

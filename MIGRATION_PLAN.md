@@ -1,7 +1,7 @@
-# KiroClaw → KiroClawExternal — Global De-Amazoning Execution Map
+# KiroClaw — Global De-Amazoning Execution Map
 
 **Role:** Integration lead. The per-subsystem PLANS array arrived **empty**, so this map was
-derived directly from the codebase at `/Volumes/workplace/KiroClawExternal/src/KiroClawExternal`
+derived directly from the codebase at `/Volumes/workplace/KiroClaw/src/KiroClaw`
 (commit `cbe157b`). It is the single authoritative edit plan for the de-Amazoning fork.
 
 **Goal (fixed):** Fork KiroClaw into a PUBLIC, GitHub-distributable, pip+npm-installable app with

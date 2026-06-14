@@ -27,7 +27,7 @@ The fork bundles **two** upstream packages into one repo, so a full sync tracks
   backend ships only a server-rendered `static/dashboard.html`; the fork's SPA's
   real upstream is **MeshClawWebsite**, a separate package — sync it too or the
   dashboard silently drifts behind.
-- **Fork (this repo):** `/Volumes/workplace/KiroClawExternal/src/KiroClawExternal`
+- **Fork (this repo):** `/Volumes/workplace/KiroClaw/src/KiroClaw`
   (package `kiro_claw` + `website/`).
 
 ## Step 1 — Find the candidate commits
@@ -43,7 +43,7 @@ The fork shares the backend's content lineage, so a plain SHA range works:
 ```bash
 cd /Volumes/workplace/MeshClaw/src/MeshClaw
 git fetch -q
-STATE=/Volumes/workplace/KiroClawExternal/src/KiroClawExternal/skills/meshclaw-sync/last-synced.txt
+STATE=/Volumes/workplace/KiroClaw/src/KiroClaw/skills/meshclaw-sync/last-synced.txt
 BETA=$(grep '^beta ' "$STATE" | awk '{print $2}')
 MAIN=$(grep '^mainline ' "$STATE" | awk '{print $2}')
 git log --no-merges --oneline "$BETA"..origin/beta-braveheart      # new beta commits
@@ -420,7 +420,7 @@ with a build and a CR:
    with the builder-mcp `CRAddComment` tool, `publish=true`). Provenance across
    the history-less boundary lives entirely in this description + comment.
 
-   Origin = `ssh://git.amazon.com:2222/pkg/KiroClawExternal`. Per the global git
+   Origin = `ssh://git.amazon.com:2222/pkg/KiroClaw`. Per the global git
    rule, `commit`/`push`/CR need explicit user authorization — the recurring
    auto-sync cron job **is** that standing authorization; a manual invocation is
    not (ask first).

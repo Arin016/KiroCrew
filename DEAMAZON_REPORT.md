@@ -1,8 +1,8 @@
-# De-Amazoning Report — KiroClawExternal (KiroClaw → public OSS fork)
+# De-Amazoning Report — KiroClaw (public OSS fork)
 
-_Final state. Date: 2026-06-02. KiroClawExternal is the public, GitHub-distributable,
-pip+npm-installable fork of the internal KiroClaw. The original KiroClaw package was left
-untouched; all work happened in `KiroClawExternal/`._
+_Final state. Date: 2026-06-02. KiroClaw is the public, GitHub-distributable,
+pip+npm-installable OSS fork that strips all Amazon-internal couplings. The
+de-Amazoned fork now lives in this `KiroClaw` package._
 
 ## Final Health
 
