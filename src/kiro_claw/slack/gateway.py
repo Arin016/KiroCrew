@@ -2289,7 +2289,7 @@ class GatewayOrchestrator:
                 """
                 for attempt in range(3):
                     try:
-                        return await stream_and_collect(client, msg)
+                        return await stream_and_collect(client, msg, retry_transient=False)
                     except PromptBusyExhaustedError:
                         # Provider is dead after exhausting prompt-busy retries.
                         # Reset session + notify, same as TimeoutError path.

@@ -229,3 +229,165 @@ class TestStreamAndCollectPromptBusy:
 
         assert result == "hello"
         provider.cancel.assert_not_awaited()
+
+
+# ── Transient backend (5xx / throttle / stream-reset) retry tests ──
+
+
+class TestTransientErrorClassifier:
+    """_is_transient_acp_error: retry server-side hiccups, fail fast on auth."""
+
+    def test_internal_server_error_is_transient(self) -> None:
+        from kiro_claw.llm_helpers import _is_transient_acp_error
+
+        assert _is_transient_acp_error(
+            "Prompt error: {'message': 'Internal error: API Error: Internal server error'}"
+        )
+
+    def test_throttle_and_unavailable_are_transient(self) -> None:
+        from kiro_claw.llm_helpers import _is_transient_acp_error
+
+        assert _is_transient_acp_error("Bedrock is throttling requests")
+        assert _is_transient_acp_error("ServiceUnavailableException")
+        assert _is_transient_acp_error("Model 'x' is unavailable on Bedrock right now")
+        assert _is_transient_acp_error("connection reset by peer")
+
+    def test_auth_and_validation_are_not_transient(self) -> None:
+        from kiro_claw.llm_helpers import _is_transient_acp_error
+
+        # These must fail fast — a retry cannot fix them.
+        assert not _is_transient_acp_error("Bedrock authentication failed. Run 'ada credentials update'")
+        assert not _is_transient_acp_error("AccessDeniedException")
+        assert not _is_transient_acp_error("ExpiredTokenException")
+        assert not _is_transient_acp_error("ValidationException: bad input")
+        assert not _is_transient_acp_error("Prompt error: some unknown thing")
+
+
+class TestStreamAndCollectTransient:
+    _TRANSIENT = "Prompt error: {'message': 'Internal error: API Error: Internal server error'}"
+    _AUTH = "Bedrock authentication failed. Run 'ada credentials update'"
+
+    @pytest.mark.asyncio
+    async def test_retries_transient_then_succeeds(self) -> None:
+        """Two transient failures, then success — recovered, no shutdown."""
+        call_count = 0
+
+        async def _stream(msg):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                raise AcpError(self._TRANSIENT)
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="ok-result")
+            yield LLMEvent(kind=EVENT_COMPLETE)
+
+        provider = AsyncMock()
+        provider.cancel = AsyncMock()
+        provider.shutdown = AsyncMock()
+        provider.stream = _stream
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await stream_and_collect(provider, "test")
+
+        assert result == "ok-result"
+        assert call_count == 3
+        # Transient retries do NOT cancel (no in-flight turn) and never shutdown.
+        provider.cancel.assert_not_awaited()
+        provider.shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_transient_exhausts_budget_then_raises(self) -> None:
+        """Persistent transient failure raises AFTER exhausting the retry budget.
+
+        Asserts the call count so this proves the retry loop actually ran
+        (initial attempt + _TRANSIENT_RETRIES); without it, a skipped retry
+        path would still pass on the first raise.
+        """
+        from kiro_claw.llm_helpers import _TRANSIENT_RETRIES
+
+        call_count = 0
+
+        async def _stream(msg):
+            nonlocal call_count
+            call_count += 1
+            raise AcpError(self._TRANSIENT)
+            yield  # pragma: no cover
+
+        provider = AsyncMock()
+        provider.cancel = AsyncMock()
+        provider.shutdown = AsyncMock()
+        provider.stream = _stream
+
+        with patch("asyncio.sleep", new_callable=AsyncMock), pytest.raises(AcpError):
+            await stream_and_collect(provider, "test")
+
+        assert call_count == _TRANSIENT_RETRIES + 1
+        provider.cancel.assert_not_awaited()
+        provider.shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_auth_error_fails_fast_no_retry(self) -> None:
+        """Auth failure is NOT transient — raises on the first call, no retry."""
+        call_count = 0
+
+        async def _stream(msg):
+            nonlocal call_count
+            call_count += 1
+            raise AcpError(self._AUTH)
+            yield  # pragma: no cover
+
+        provider = AsyncMock()
+        provider.cancel = AsyncMock()
+        provider.shutdown = AsyncMock()
+        provider.stream = _stream
+
+        with patch("asyncio.sleep", new_callable=AsyncMock), pytest.raises(AcpError):
+            await stream_and_collect(provider, "test")
+
+        assert call_count == 1  # no retry
+        provider.cancel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_partial_response_not_retried(self) -> None:
+        """A transient error AFTER tokens have streamed must NOT be retried —
+        re-running would duplicate the already-emitted output (Mesh-1157)."""
+        call_count = 0
+
+        async def _stream(msg):
+            nonlocal call_count
+            call_count += 1
+            # Emit a token first, THEN fail transiently mid-stream.
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="partial ")
+            raise AcpError(self._TRANSIENT)
+
+        provider = AsyncMock()
+        provider.cancel = AsyncMock()
+        provider.shutdown = AsyncMock()
+        provider.stream = _stream
+
+        with patch("asyncio.sleep", new_callable=AsyncMock), pytest.raises(AcpError):
+            await stream_and_collect(provider, "test")
+
+        # No retry once a partial response was emitted — exactly one attempt.
+        assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_transient_false_disables_retry(self) -> None:
+        """retry_transient=False makes a transient error fail fast (for callers
+        that own an outer retry loop and must not be double-retried)."""
+        call_count = 0
+
+        async def _stream(msg):
+            nonlocal call_count
+            call_count += 1
+            raise AcpError(self._TRANSIENT)
+            yield  # pragma: no cover
+
+        provider = AsyncMock()
+        provider.cancel = AsyncMock()
+        provider.shutdown = AsyncMock()
+        provider.stream = _stream
+
+        with patch("asyncio.sleep", new_callable=AsyncMock), pytest.raises(AcpError):
+            await stream_and_collect(provider, "test", retry_transient=False)
+
+        assert call_count == 1  # opt-out → no inner retry

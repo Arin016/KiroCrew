@@ -9,10 +9,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import random
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from kiro_claw.acp.client import AcpError
 from kiro_claw.hooks import fire_tool_hooks, get_global_hook_store
 from kiro_claw.providers.base import (
     EVENT_COMPLETE,
@@ -26,6 +29,53 @@ from kiro_claw.sel import sel as _sel
 
 _PROMPT_BUSY_RETRIES = 2
 _PROMPT_BUSY_DELAY = 1.5  # seconds between retries
+
+# Transient backend (Bedrock 5xx / throttle / stream-reset) retry budget. These
+# are server-side hiccups where the credential is VALID — retry helps, re-auth
+# does not. Kept separate from the prompt-busy budget above.
+_TRANSIENT_RETRIES = 3
+_TRANSIENT_DELAY = 2.0  # base seconds; exponential backoff + jitter
+
+# Per-process RNG for retry jitter, seeded from the PID at import. Seeding makes
+# the jitter deterministic *within* a process (so tests that patch asyncio.sleep
+# stay reproducible) while spreading uniformly *across* processes/machines — so a
+# fleet-wide transient (e.g. several gateways hitting the same backend 5xx at the
+# same minute) doesn't retry in lockstep and re-thunder the recovering backend.
+_JITTER_RNG = random.Random(os.getpid())
+
+# Substrings (lowercased) that mark a RETRYABLE transient backend failure.
+# Matched against the formatted AcpError message (see acp.client._format_acp_error).
+# Auth/validation markers are deliberately ABSENT so those fail fast — a retry
+# cannot fix an expired token or a bad request, and silently retrying them would
+# only delay the correct "re-auth"/"fix the request" signal to the operator.
+_TRANSIENT_MARKERS = (
+    "internal server error",
+    "internal error: api error",
+    "serviceunavailable",
+    "service unavailable",
+    "throttl",                 # ThrottlingException + "Bedrock is throttling"
+    "toomanyrequests",
+    "servicequotaexceeded",
+    "modelstreamerror",
+    "connection reset",
+    "connectionreset",
+    "is unavailable on bedrock",  # capacity/region rollout (formatted message)
+)
+
+
+def _is_transient_acp_error(msg: str) -> bool:
+    """True iff an AcpError message looks like a retryable transient backend
+    failure. Auth failures are explicitly excluded (they need re-auth, not retry)."""
+    low = msg.lower()
+    if (
+        "authentication failed" in low
+        or "accessdenied" in low
+        or "expiredtoken" in low
+        or "unrecognizedclient" in low
+        or "invalidsignature" in low
+    ):
+        return False
+    return any(m in low for m in _TRANSIENT_MARKERS)
 
 
 class PromptBusyExhaustedError(Exception):
@@ -65,6 +115,7 @@ async def stream_and_collect(
     hooks: HookManager | None = None,
     on_chunk: Callable[[str], None] | None = None,
     on_tool_approval: Callable[[LLMEvent], Awaitable[bool]] | None = None,
+    retry_transient: bool = True,
 ) -> str:
     """Stream a message through an LLM provider and collect the full response.
 
@@ -78,13 +129,17 @@ async def stream_and_collect(
         hooks: HookManager for HOOK_BASED approval policy.
         on_chunk: Optional callback invoked with each text chunk (for progress).
         on_tool_approval: Optional async callback for interactive approval.
+        retry_transient: When True (default), transient backend errors are
+            retried in-place with bounded backoff. Set False from callers that
+            already own an outer transient-retry loop, so the inner arm doesn't
+            compound their attempts (retry-layer amplification).
 
     Returns:
         The complete response text.
     """
-    from kiro_claw.acp.client import AcpError
-
-    for attempt in range(_PROMPT_BUSY_RETRIES + 1):
+    transient_attempts = 0
+    attempt = 0
+    while True:
         result_text = ""
         try:
             async for event in provider.stream(message):
@@ -114,8 +169,12 @@ async def stream_and_collect(
                     break
             return result_text
         except AcpError as exc:
-            if "already in progress" not in str(exc) or attempt >= _PROMPT_BUSY_RETRIES:
-                if "already in progress" in str(exc):
+            msg = str(exc)
+            busy = "already in progress" in msg
+
+            # ── Case 1: prompt-busy (provider mid-turn) — cancel + retry. ──
+            if busy:
+                if attempt >= _PROMPT_BUSY_RETRIES:
                     # Provider is permanently stuck — kill it so the next
                     # get_or_create cold-starts a fresh process.
                     logger.warning(
@@ -125,20 +184,51 @@ async def stream_and_collect(
                         await provider.shutdown()
                     except Exception:
                         logger.debug("Provider shutdown after busy retries failed", exc_info=True)
-                    raise PromptBusyExhaustedError(str(exc)) from exc
-                raise
-            logger.warning(
-                "Prompt busy (attempt %d/%d), cancelling and retrying: %s",
-                attempt + 1,
-                _PROMPT_BUSY_RETRIES,
-                exc,
-            )
-            try:
-                await provider.cancel()
-            except Exception:
-                logger.debug("Cancel before retry failed", exc_info=True)
-            await asyncio.sleep(_PROMPT_BUSY_DELAY * (2**attempt))
-    return ""  # unreachable, satisfies type checker
+                    raise PromptBusyExhaustedError(msg) from exc
+                logger.warning(
+                    "Prompt busy (attempt %d/%d), cancelling and retrying: %s",
+                    attempt + 1, _PROMPT_BUSY_RETRIES, exc,
+                )
+                try:
+                    await provider.cancel()
+                except Exception:
+                    logger.debug("Cancel before retry failed", exc_info=True)
+                await asyncio.sleep(_PROMPT_BUSY_DELAY * (2**attempt))
+                attempt += 1
+                continue
+
+            # ── Case 2: transient backend (Bedrock 5xx / throttle / stream) ──
+            # Credential is valid; the server hiccupped. Retry with exponential
+            # backoff + jitter. Distinct budget from prompt-busy.
+            #
+            # Guards:
+            #   - retry_transient: callers that own an outer transient loop pass
+            #     False so the inner arm doesn't compound their attempts.
+            #   - `not result_text`: only retry if NO tokens have streamed yet.
+            #     A partial response must not be retried — the re-run would
+            #     duplicate the already-emitted output (Mesh-1157).
+            if (
+                retry_transient
+                and not result_text
+                and _is_transient_acp_error(msg)
+                and transient_attempts < _TRANSIENT_RETRIES
+            ):
+                transient_attempts += 1
+                # Exponential backoff with per-process jitter (see _JITTER_RNG):
+                # deterministic within a process for tests, uniform across the
+                # fleet so co-located peers don't retry in lockstep.
+                base = _TRANSIENT_DELAY * (2 ** (transient_attempts - 1))
+                jitter = _JITTER_RNG.random() * 0.25 * base
+                delay = base + jitter
+                logger.warning(
+                    "Transient backend error (attempt %d/%d), retrying in %.1fs: %s",
+                    transient_attempts, _TRANSIENT_RETRIES, delay, exc,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            # ── Case 3: fatal (auth, validation, exhausted retries) — propagate. ──
+            raise
 
 
 async def stream_and_collect_json(
