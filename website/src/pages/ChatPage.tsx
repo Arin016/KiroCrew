@@ -1374,7 +1374,17 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const initialSidRef = useRef(searchParams.get('sid') || searchParams.get('slot'))
   const initialMsgRef = useRef(searchParams.get('msg'))
   const initialNewRef = useRef(searchParams.get('new') === '1')
+  // Deep-link mount activation in progress — stops the sync effect from stripping
+  // ?sid before activation lands. Cleared once activeSlot is truthy.
   const pendingSidRef = useRef(!!initialSidRef.current)
+  // Back/Forward (POP) in flight — set ONLY by the POP effect. Kept separate from
+  // pendingSidRef so a deep-link load doesn't trip the POP bail and freeze the
+  // first sidebar switch. (Mesh chat-switch bug.)
+  const popInFlightRef = useRef(false)
+  // react-router reports the initial render as navigationType 'POP'. That first
+  // run is the deep-link load (owned by initialSidRef), not a real Back/Forward —
+  // skip it so the POP effect doesn't wrongly arm popInFlightRef on mount.
+  const popReadyRef = useRef(false)
   const [sidError, setSidError] = useState('')
   const [highlightTs, setHighlightTs] = useState<string | null>(null)
   // Embed ?new=1: create a new chat slot and navigate to it
@@ -1416,11 +1426,21 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   // below), so native browser/Electron Back/Forward (and Alt+←/→) retrace the
   // sessions you've visited.
   useEffect(() => {
-    if (!embedMode && navigationType !== 'POP') return
+    // Embed: host app drives the URL — react to any ?sid change.
+    // Main dashboard: honor only a genuine Back/Forward POP. react-router reports
+    // the initial render as 'POP' and stays 'POP' until our own switch navigates
+    // (PUSH/REPLACE); a real Back/Forward is a POP that follows one of those. So
+    // arm on the first non-POP nav and only honor POP once armed — this ignores
+    // the mount POP (deep-link load, owned by initialSidRef) so it can't wrongly
+    // arm popInFlightRef and freeze the next switch.
+    if (!embedMode) {
+      if (navigationType !== 'POP') { popReadyRef.current = true; return }
+      if (!popReadyRef.current) return
+    }
     const urlSid = searchParams.get('sid') || searchParams.get('slot')
     if (!urlSid || urlSid === activeSlot) return
     if (filteredSlots.some(s => s.key === urlSid)) {
-      pendingSidRef.current = true
+      popInFlightRef.current = true
       dispatch(switchSlot(urlSid))
     }
   }, [searchParams, filteredSlots, activeSlot, dispatch, embedMode, navigationType])
@@ -1432,6 +1452,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       if (initialSidRef.current) {
         initialSidRef.current = null
         pendingSidRef.current = false
+        popInFlightRef.current = false
         setSidError(`Session "${urlSlot}" not found`)
       }
     }, 5000)
@@ -1460,9 +1481,9 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     // entry for it — corrupting multi-step Back/Forward. Bail until activeSlot
     // matches the URL, then fall through for replace-only slug normalization (a POP
     // must never produce a push).
-    if (pendingSidRef.current) {
+    if (popInFlightRef.current) {
       if (!activeSlot || activeSlot !== sp.get('sid')) return
-      pendingSidRef.current = false
+      popInFlightRef.current = false
     }
     if (!activeSlot) {
       if (sp.has('sid') && !initialSidRef.current && !pendingSidRef.current) {

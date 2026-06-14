@@ -194,6 +194,27 @@ describe('ChatPage ?sid= URL parameter', () => {
     })
   })
 
+  // Regression: loading on a chat URL (?sid= present) must not freeze switching.
+  // Pre-fix, pendingSidRef was overloaded for both deep-link activation AND POP-in-
+  // flight; the deep-link load tripped the POP bail so the first switch never
+  // updated the URL until a reload. Loading at /chat (no ?sid) hid the bug.
+  describe('switch after deep-link load (Mesh chat-switch bug)', () => {
+    it('updates URL when switching sessions after loading with ?sid= present', async () => {
+      const { store } = renderChatPage({ route: '/chat/fix-login-bug?sid=chat-2-200', slots })
+      await waitFor(() => expect(store.getState().chat.activeSlot).toBe('chat-2-200'))
+      await waitFor(() => expect(currentUrl).toContain('sid=chat-2-200'))
+
+      await act(async () => { await store.dispatch(switchSlot('chat-1-100')) })
+
+      // URL must follow the switch — pre-fix it stayed on chat-2-200.
+      await waitFor(() => {
+        expect(currentUrl).toContain('sid=chat-1-100')
+        expect(currentUrl).toContain('/chat/debug-video-playback')
+      })
+      expect(currentUrl).not.toContain('sid=chat-2-200')
+    })
+  })
+
   describe('URL wins over localStorage', () => {
     it('activates URL session even when localStorage has different value', async () => {
       localStorage.setItem('mc-active-slot-chat', 'chat-1-100')
