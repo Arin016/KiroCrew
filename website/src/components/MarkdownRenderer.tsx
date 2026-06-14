@@ -362,25 +362,39 @@ export function fixCodeFences(s: string): string {
 
 const MCWIDGET_STRIP_RE = /<mcwidget[\s\S]*?<\/mcwidget>|<mcwidget[\s\S]*$/g
 
+// Anthropic tool-use protocol markup occasionally leaks into the visible
+// text stream (model emits a literal `<tool_use>...</tool_use>` block alongside
+// the real ACP tool call). The wrapper element is unknown to the markdown
+// renderer, so the JSON body — including its escaped `\n` literals — collapses
+// into a single unbroken paragraph, fragmenting the surrounding markdown.
+// Mirror MCWIDGET_STRIP_RE: catch complete tag pairs and unclosed openers
+// (mid-stream).
+const TOOL_USE_STRIP_RE = /<tool_use[\s\S]*?<\/tool_use>|<tool_use[\s\S]*$/g
+
 /**
- * Strip stray `<mcwidget>` tags that leak through to a markdown block during
- * streaming transitions, while preserving any tag mentions that appear inside
- * inline-code spans (e.g. when the agent is documenting widget syntax).
+ * Strip stray protocol tags (`<mcwidget>`, `<tool_use>`) that leak through to
+ * a markdown block during streaming transitions, while preserving any tag
+ * mentions that appear inside inline-code spans (e.g. when the agent is
+ * documenting the syntax).
  *
  * Builds a per-line inline-code mask, runs the strip regex against the masked
  * text to find ranges, then splices those ranges out of the original content.
  * Mask preserves offsets so match indices are valid against the original.
+ *
+ * `openMarker` is a fast-path substring check to skip work when the tag is
+ * not present at all. `stripRe` is the actual matcher; it must be a global
+ * regex with sticky-safe semantics (advance lastIndex on zero-length match).
  */
-function stripStrayWidgetTags(content: string): string {
-  if (!content.includes('<mcwidget')) return content
+function stripStrayTags(content: string, openMarker: string, stripRe: RegExp): string {
+  if (!content.includes(openMarker)) return content
   const masked = content.split('\n').map(l => maskInlineCode(l)).join('\n')
-  if (!masked.includes('<mcwidget')) return content
+  if (!masked.includes(openMarker)) return content
   const ranges: Array<[number, number]> = []
-  MCWIDGET_STRIP_RE.lastIndex = 0
+  stripRe.lastIndex = 0
   let m: RegExpExecArray | null
-  while ((m = MCWIDGET_STRIP_RE.exec(masked)) !== null) {
+  while ((m = stripRe.exec(masked)) !== null) {
     ranges.push([m.index, m.index + m[0].length])
-    if (m[0].length === 0) MCWIDGET_STRIP_RE.lastIndex++
+    if (m[0].length === 0) stripRe.lastIndex++
   }
   if (ranges.length === 0) return content
   let out = ''
@@ -393,10 +407,14 @@ function stripStrayWidgetTags(content: string): string {
   return out
 }
 
+const stripStrayWidgetTags = (content: string) => stripStrayTags(content, '<mcwidget', MCWIDGET_STRIP_RE)
+const stripStrayToolUseTags = (content: string) => stripStrayTags(content, '<tool_use', TOOL_USE_STRIP_RE)
+
 const MarkdownBlock = memo(function MarkdownBlock({ content, sourcePos, startLine, glow }: { content: string; sourcePos?: boolean; startLine?: number; glow?: boolean }) {
-  // Strip any <mcwidget> tags that leak through during streaming transitions,
-  // but preserve tag mentions inside inline-code spans.
-  const clean = stripStrayWidgetTags(content)
+  // Strip any <mcwidget> or <tool_use> tags that leak through during
+  // streaming transitions or when the agent emits protocol markup as text.
+  // Both passes preserve mentions inside inline-code spans.
+  const clean = stripStrayToolUseTags(stripStrayWidgetTags(content))
   if (!clean.trim()) return null
   const baseRehype = sourcePos ? REHYPE_PLUGINS_WITH_SOURCEPOS : REHYPE_PLUGINS
   // Append the glow plugin (last, so it runs on the final tree) only for the

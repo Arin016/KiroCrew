@@ -288,3 +288,81 @@ describe('MarkdownRenderer mcwidget strip is inline-code-aware', () => {
     expect(text).toContain('Navigate to /artifacts')
   })
 })
+
+describe('MarkdownRenderer strips leaked <tool_use> protocol markup', () => {
+  it('strips a complete <tool_use>...</tool_use> block and renders surrounding markdown', () => {
+    // Repro from chat where the agent leaked the full Anthropic tool_use
+    // wrapper as text. Pre-fix: the unknown <tool_use> element trapped the
+    // JSON body (including escaped \n literals) into a single paragraph,
+    // dropping all the headers and rating callouts. Post-fix: the wrapper
+    // and its body are gone, the surrounding prose renders normally.
+    const content = [
+      "I'll generate the review.",
+      '',
+      '<tool_use> {"tool_calls": [{"tool_name": "write_file", "parameters": {"file_path": "/tmp/x.md", "content": "### Heading\\n\\n**Rating:** Mixed"}}]} </tool_use>',
+      '',
+      'Review saved.',
+    ].join('\n')
+    const { container } = render(<MarkdownRenderer content={content} />)
+    const text = container.textContent || ''
+    expect(text).toContain("I'll generate the review.")
+    expect(text).toContain('Review saved.')
+    // Tag itself and its JSON body must NOT leak through
+    expect(text).not.toContain('tool_calls')
+    expect(text).not.toContain('write_file')
+    expect(text).not.toContain('<tool_use>')
+    expect(container.querySelector('tool_use')).toBeNull()
+  })
+
+  it('strips an unclosed <tool_use> opener (mid-stream)', () => {
+    // During streaming the closing tag may not have arrived yet. The strip
+    // regex falls through to the `<tool_use[\s\S]*$` alternative and removes
+    // everything from the opener to end of block.
+    const content = 'Working on it…\n\n<tool_use> {"tool_calls": [{"tool_name": "write_'
+    const { container } = render(<MarkdownRenderer content={content} />)
+    const text = container.textContent || ''
+    expect(text).toContain('Working on it')
+    expect(text).not.toContain('tool_calls')
+    expect(text).not.toContain('write_')
+  })
+
+  it('strips multiple <tool_use> blocks in the same message', () => {
+    const content = [
+      'First action:',
+      '<tool_use>{"a": 1}</tool_use>',
+      'Second action:',
+      '<tool_use>{"b": 2}</tool_use>',
+      'Done.',
+    ].join('\n')
+    const { container } = render(<MarkdownRenderer content={content} />)
+    const text = container.textContent || ''
+    expect(text).toContain('First action:')
+    expect(text).toContain('Second action:')
+    expect(text).toContain('Done.')
+    expect(text).not.toContain('"a"')
+    expect(text).not.toContain('"b"')
+  })
+
+  it('preserves <tool_use> mentions inside inline-code spans', () => {
+    // Author documenting the protocol in prose: e.g. `<tool_use>` should
+    // remain visible. The strip pass uses the same maskInlineCode helper as
+    // the widget strip, so backtick-wrapped tag mentions are not removed.
+    const content = 'When the agent emits a literal `<tool_use>` tag, the dashboard now strips it.'
+    const { container } = render(<MarkdownRenderer content={content} />)
+    const text = container.textContent || ''
+    expect(text).toContain('<tool_use>')
+    expect(text).toContain('the dashboard now strips it.')
+  })
+
+  it('does NOT strip <tool_use> mentions inside fenced code blocks', () => {
+    // When the agent is documenting the protocol in a code block, the tags
+    // are real content — the fence makes the markdown renderer treat them
+    // as literal text and the strip pass operates on markdown blocks only,
+    // not extracted code blocks. Regression guard for documentation messages.
+    const content = '```\n<tool_use>{"x": 1}</tool_use>\n```'
+    const { container } = render(<MarkdownRenderer content={content} />)
+    const text = container.textContent || ''
+    expect(text).toContain('<tool_use>')
+    expect(text).toContain('"x"')
+  })
+})
