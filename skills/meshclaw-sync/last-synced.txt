@@ -1,6 +1,10 @@
 # Last-synced upstream tips (one SHA per tracked branch/repo).
 # Updated at the END of every sync run (Step 1/7). The meshclaw-sync skill bounds
 # the candidate set by these SHAs — see skills/meshclaw-sync/SKILL.md Step 1.
+#
+# This file records the sync BOUNDARY (what has been triaged). For the per-commit
+# record of what was deliberately NOT ported and why — including the open
+# human-decision (DEFER/flagged) items — see skills/meshclaw-sync/left-out.md.
 # Format: "<branch-or-repo> <sha>  # <date> <note>"
 #
 # TWO upstream repos are tracked (the fork bundles both into one package):
@@ -56,7 +60,7 @@ mainline ebd78ac4  # 2026-06-14 MeshClaw mainline tip (upstream). Mainline-only 
 # Verify: backend 1538 pass / 24 skip + flake8 clean; frontend tsc -b clean + 2596 vitest;
 # de-Amazon audit clean (0 live couplings; 8 inert comment hits + 4 acp Bedrock-path literals).
 # Boundaries advanced: beta ebee95e7->570a9ccf, frontend-beta 1ae3c85->ecc6e5a, mainline
-# 49633d05->ebd78ac4. CR-281NNNNNN.
+# 49633d05->ebd78ac4. CR-281902310.
 
 # --- Batch-16 (cron dual-repo sync 2026-06-11) -------------------------------
 # Fresh branch sync/beta-2026-06-11c off origin/mainline (batch-15 CR-281319232 merged, tip 7824113).
@@ -83,7 +87,7 @@ mainline ebd78ac4  # 2026-06-14 MeshClaw mainline tip (upstream). Mainline-only 
 #   packaging/build-desktop.sh DMG flow), b9036ac4 (standup test mock — team_manager/standup
 #   absent), 1ae3c85 (useVisibilityInterval hook — generic, but its ONLY consumer is the
 #   absent midway-ttl topbar countdown; no other fork caller, so SKIP per anti-miss check (b)).
-# Both DMGs arch-verified (arm64 + x86_64). CR-281NNNNNN.
+# Both DMGs arch-verified (arm64 + x86_64). CR-281392951.
 
 # --- Batch-15 (cron dual-repo sync 2026-06-11) -------------------------------
 # Fresh branch sync/beta-2026-06-11b off origin/mainline (batch-14 CR-281228622 merged, tip 7b1530a).
@@ -107,7 +111,7 @@ mainline ebd78ac4  # 2026-06-14 MeshClaw mainline tip (upstream). Mainline-only 
 # api_meshclaw_config_patch->api_kiroclaw_config_patch, meshclawConfig->kiroclawConfig,
 # /api/config/meshclaw->/api/config/kiroclaw, MESHCLAW_SESSION_KEY env already KIROCLAW_).
 # Verify: backend 939 tests + flake8 clean; frontend tsc -b clean + 2521 vitest (+4);
-# de-Amazon audit clean (only the inert ClaudeCodeProvider seam in session.py). CR-281NNNNNN.
+# de-Amazon audit clean (only the inert ClaudeCodeProvider seam in session.py). CR-281319232.
 # GOTCHA: chat_runner re-exports PromptBusyExhaustedError (from llm_helpers) so the upstream
 # test import path works verbatim. test_acp_turn_lock.py regenerated-from-post-image.
 
@@ -147,7 +151,7 @@ mainline ebd78ac4  # 2026-06-14 MeshClaw mainline tip (upstream). Mainline-only 
 # SKIP: 39d22f8a (mcp_gateway hardening — dir ABSENT, 100% confined), 3a017786's
 # Brazil Config hunk (setuptools build).
 # 2fee03d/50ea94e-style tests that imported the absent secretarySlice were re-authored
-# fork-correct. CR-281NNNNNN. Both DMGs arch-verified (arm64 + x86_64).
+# fork-correct. CR-281120970. Both DMGs arch-verified (arm64 + x86_64).
 
 # --- Batch-12 (dual-repo sync 2026-06-10, after CR-281050885 merged) ---------
 # Fresh branch sync/beta-2026-06-10c off origin/mainline (prior CR merged, no
