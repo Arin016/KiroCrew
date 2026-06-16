@@ -131,6 +131,45 @@ See `website/package.json` for the complete, version-pinned list.
 | (documented fallback) | `nomic-embed-text` | dim 768; `ollama pull nomic-embed-text` |
 | `memory.embedding_url` | `http://localhost:11434` | Local Ollama server |
 
+## License Summary
+
+All dependencies use permissive open-source licenses compatible with Apache-2.0.
+
+### Backend (Python)
+
+| Package | License |
+|---|---|
+| `aiohttp` | Apache-2.0 |
+| `slack-sdk` | BSD-3-Clause |
+| `websockets` | BSD-3-Clause |
+| `croniter` | MIT |
+| `cron-descriptor` | MIT |
+| `numpy` | BSD-3-Clause |
+| `snowballstemmer` | BSD-3-Clause |
+| `pysqlite3-binary` | Zlib |
+| `python-docx` | MIT |
+| `requests` | Apache-2.0 |
+| `PyYAML` | MIT |
+| `boto3` (optional) | Apache-2.0 |
+| `amazon-transcribe` (optional) | Apache-2.0 |
+
+### Frontend (npm) — 299 production packages
+
+| License | Count |
+|---|---|
+| MIT | 240 |
+| ISC | 36 |
+| BSD-3-Clause | 7 |
+| Apache-2.0 | 6 |
+| Apache-2.0 OR MIT | 4 |
+| MPL-2.0 OR Apache-2.0 | 2 (Apache-2.0 chosen) |
+| BSD-2-Clause | 1 |
+| Unlicense | 1 |
+| 0BSD | 1 |
+| UNKNOWN | 1 (khroma — see note below) |
+
+For dual-licensed packages, we choose the permissive option (Apache-2.0 or MIT).
+
 ## Platform Notes
 
 - **macOS**: Fully supported.
