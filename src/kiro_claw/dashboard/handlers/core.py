@@ -638,6 +638,13 @@ async def api_security_stats(_request: web.Request) -> web.Response:
 
 
 # ── KiroClaw Config API ──
+# Absolute ceiling for agent.subagent_auto_max. Because subagent_auto_max is the
+# security cap that bounds max_subagents, it needs its own hard upper bound so a
+# caller cannot raise it arbitrarily (e.g. {"subagent_auto_max": 9999}) to bypass
+# the concurrency limit.
+SUBAGENT_AUTO_MAX_CEILING = 64
+
+
 async def api_kiroclaw_config(request: web.Request) -> web.Response:
     """GET/PUT /api/config/kiroclaw — read or update KiroClaw config."""
     from kiro_claw.config.loader import config_path  # noqa: F811
@@ -687,17 +694,45 @@ async def api_kiroclaw_config(request: web.Request) -> web.Response:
                     return _deny(f"{key} must be an integer between 1 and {upper}")
                 agent[key] = val
                 applied.append(key)
-        # max_subagents: 0 = auto-size; otherwise 1..hard_cap. The hard cap is the
-        # security ceiling and MUST come from the *persisted* config only — never
-        # from the same (untrusted) request being validated, or a caller could send
-        # {"subagent_auto_max": 9999, "max_subagents": 9999} to bypass it. (This
-        # endpoint does not persist subagent_auto_max, so the request value has no
-        # legitimate use as a bound anyway.)
+        # Capture the hard cap from the *persisted* config BEFORE applying any
+        # subagent_auto_max from this request. max_subagents is bounded by this
+        # persisted value only: a same-request raise of subagent_auto_max must NOT
+        # widen the bound (deny-by-default — prevents
+        # {subagent_auto_max: 9999, max_subagents: 9999} bypass). A higher ceiling
+        # only takes effect for max_subagents on a *subsequent* request.
+        persisted_hard_cap = agent.get("subagent_auto_max", 16)
+        if (
+            not isinstance(persisted_hard_cap, int)
+            or isinstance(persisted_hard_cap, bool)
+            or persisted_hard_cap < 1
+        ):
+            persisted_hard_cap = 16
+        # Clamp to the absolute ceiling even when read from persisted config: a
+        # corrupt or hand-edited config (e.g. {"subagent_auto_max": 9999}) must not
+        # be trusted to widen the concurrency bound (deny-by-default).
+        persisted_hard_cap = min(persisted_hard_cap, SUBAGENT_AUTO_MAX_CEILING)
+        # subagent_auto_max is now persistable (so the dashboard can raise/lower the
+        # auto-size ceiling), but carries its own absolute upper bound
+        # (SUBAGENT_AUTO_MAX_CEILING) so it can never be set arbitrarily high.
+        if "subagent_auto_max" in agent_settings:
+            val = agent_settings["subagent_auto_max"]
+            if (
+                isinstance(val, bool)
+                or not isinstance(val, int)
+                or val < 1
+                or val > SUBAGENT_AUTO_MAX_CEILING
+            ):
+                return _deny(
+                    "subagent_auto_max must be an integer between 1 and "
+                    f"{SUBAGENT_AUTO_MAX_CEILING}"
+                )
+            agent["subagent_auto_max"] = val
+            applied.append("subagent_auto_max")
+        # max_subagents: 0 = auto-size; otherwise 1..persisted_hard_cap. The bound
+        # is the persisted ceiling captured above, never this request's value.
         if "max_subagents" in agent_settings:
             val = agent_settings["max_subagents"]
-            hard_cap = agent.get("subagent_auto_max", 16)
-            if not isinstance(hard_cap, int) or isinstance(hard_cap, bool) or hard_cap < 1:
-                hard_cap = 16
+            hard_cap = persisted_hard_cap
             if isinstance(val, bool) or not isinstance(val, int) or val < 0 or val > hard_cap:
                 return _deny(
                     f"max_subagents must be an integer between 0 (auto) and {hard_cap}"

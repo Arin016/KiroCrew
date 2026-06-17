@@ -264,6 +264,54 @@ class TestApiKiroclawConfig:
             assert resp.status == 400
 
     @pytest.mark.asyncio
+    async def test_put_persists_subagent_auto_max(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.config.loader.config_path", lambda: tmp_path / "config.json")
+        monkeypatch.setattr("kiro_claw.dashboard.handlers.sel", lambda: MagicMock())
+        (tmp_path / "config.json").write_text('{"agent": {"max_subagents": 0}}')
+        async with TestClient(TestServer(self._make_app(tmp_path))) as c:
+            resp = await c.put("/api/config/kiroclaw", json={"agent": {"subagent_auto_max": 32}})
+            assert resp.status == 200
+            import json
+
+            saved = json.loads((tmp_path / "config.json").read_text())
+            assert saved["agent"]["subagent_auto_max"] == 32
+
+    @pytest.mark.asyncio
+    async def test_put_rejects_subagent_auto_max_above_ceiling(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.config.loader.config_path", lambda: tmp_path / "config.json")
+        monkeypatch.setattr("kiro_claw.dashboard.handlers.sel", lambda: MagicMock())
+        (tmp_path / "config.json").write_text('{"agent": {}}')
+        async with TestClient(TestServer(self._make_app(tmp_path))) as c:
+            resp = await c.put("/api/config/kiroclaw", json={"agent": {"subagent_auto_max": 9999}})
+            assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_put_auto_max_cannot_bypass_max_subagents_limit(self, tmp_path, monkeypatch):
+        # Raising subagent_auto_max in the same request must NOT let max_subagents
+        # exceed the absolute ceiling (64): a 9999 auto_max is rejected first, so
+        # the persisted cap stays at the default 16 and max_subagents=9999 fails.
+        monkeypatch.setattr("kiro_claw.config.loader.config_path", lambda: tmp_path / "config.json")
+        monkeypatch.setattr("kiro_claw.dashboard.handlers.sel", lambda: MagicMock())
+        (tmp_path / "config.json").write_text('{"agent": {}}')
+        async with TestClient(TestServer(self._make_app(tmp_path))) as c:
+            resp = await c.put(
+                "/api/config/kiroclaw",
+                json={"agent": {"subagent_auto_max": 9999, "max_subagents": 9999}},
+            )
+            assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_put_corrupt_persisted_auto_max_clamped_to_ceiling(self, tmp_path, monkeypatch):
+        # A hand-edited/corrupt config with subagent_auto_max above the ceiling must
+        # NOT be trusted to widen the bound: max_subagents is still capped at 64.
+        monkeypatch.setattr("kiro_claw.config.loader.config_path", lambda: tmp_path / "config.json")
+        monkeypatch.setattr("kiro_claw.dashboard.handlers.sel", lambda: MagicMock())
+        (tmp_path / "config.json").write_text('{"agent": {"subagent_auto_max": 9999}}')
+        async with TestClient(TestServer(self._make_app(tmp_path))) as c:
+            resp = await c.put("/api/config/kiroclaw", json={"agent": {"max_subagents": 9999}})
+            assert resp.status == 400
+
+    @pytest.mark.asyncio
     async def test_put_rejects_non_dict_agent(self, tmp_path, monkeypatch):
         monkeypatch.setattr("kiro_claw.dashboard.handlers.sel", lambda: MagicMock())
         async with TestClient(TestServer(self._make_app(tmp_path))) as c:
