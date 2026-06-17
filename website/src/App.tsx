@@ -508,10 +508,16 @@ export default function App() {
             const page = a.manifest.ui.pages[0]
             const isBuiltin = a.origin === 'builtin'
             const isOrphaned = !!a.orphaned
-            // Orphaned apps route to migration page; builtin apps use native route; installed apps use /apps/{name}
+            // A builtin that ships a dynamic UI bundle (manifest.ui.entry) has no
+            // native compiled surface — route it through AppHost like an installed
+            // app. Native builtins (no ui.entry) use their registered surface route.
+            const hasDynamicUI = !!a.manifest?.ui?.entry
+            const dynamicApp = !isBuiltin || hasDynamicUI
+            // Orphaned apps route to migration page; native builtins use their
+            // surface route; dynamic-UI builtins + installed apps use /apps/{name}.
             const path = isOrphaned
               ? `/apps/migrate/${a.name}`
-              : isBuiltin ? page.route : `/apps/${a.name}`
+              : dynamicApp ? `/apps/${a.name}` : page.route
             const iconName = page.icon || ''
             const baseIcon = isBuiltin && BUILTIN_ICONS[iconName]
               ? BUILTIN_ICONS[iconName]
@@ -524,7 +530,7 @@ export default function App() {
               : baseIcon
             return [{
               path,
-              id: isBuiltin ? a.name : `app-${a.name}`,
+              id: dynamicApp ? `app-${a.name}` : a.name,
               label: page.label || a.displayName || a.name,
               group: 'Apps',
               icon,
