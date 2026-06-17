@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import sys
+from datetime import datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
@@ -909,3 +912,233 @@ class TestCosineSimilarityDimensionMismatch:
         assert HybridRetriever._cosine_similarity([1.0], []) == 0.0
         # [] vs [] are equal-length but zero-norm -> 0.0 (zero-norm guard).
         assert HybridRetriever._cosine_similarity([], []) == 0.0
+# ---------------------------------------------------------------------------
+# Embedding rebuild background job
+# ---------------------------------------------------------------------------
+
+
+class _FakeEmbedder:
+    """Embedder stub: returns a fixed vector and records which items it embedded."""
+
+    model = "fake-embed"
+
+    def __init__(self):
+        self.embedded_titles: list[str] = []
+
+    def is_available(self) -> bool:
+        return True
+
+    def embed_for_item(self, title, summary, content=None):
+        self.embedded_titles.append(title)
+        return [0.1, 0.2, 0.3, 0.4]
+
+
+@pytest.mark.asyncio
+class TestRebuildEmbeddingsJob:
+    async def _run(self, store, embedder, n_items):
+        from kiro_claw.dashboard.handlers.knowledge import _rebuild_embeddings_job
+
+        # Seed active items, each with a stale (single-element) embedding so we can
+        # prove the rebuild overwrites in place rather than only filling NULLs.
+        from kiro_claw.knowledge.embedder import floats_to_bytes
+        for i in range(n_items):
+            store.add_item(f"Item {i:03d}", f"body {i}", "document",
+                           embedding=floats_to_bytes([9.9]))
+        job_id = "rebuildjob01"
+        now = "2026-06-16T00:00:00"
+        store.db.execute(
+            "INSERT INTO ingestion_jobs (id, source_id, status, created_at, updated_at) "
+            "VALUES (?, NULL, 'processing', ?, ?)", (job_id, now, now))
+        store.db.commit()
+        await _rebuild_embeddings_job(None, store, embedder, job_id)
+        return job_id
+
+    async def test_rebuild_reembeds_all_items_across_batches(self, store):
+        # More than one _REBUILD_BATCH_SIZE page to exercise the id-cursor loop.
+        from kiro_claw.knowledge.embedder import embed_signature, floats_to_bytes
+        from kiro_claw.knowledge.ingestion import _REBUILD_BATCH_SIZE
+        n = _REBUILD_BATCH_SIZE + 5
+        embedder = _FakeEmbedder()
+        job_id = await self._run(store, embedder, n)
+
+        # Every active item was embedded exactly once (cursor: no skips, no repeats).
+        assert len(embedder.embedded_titles) == n
+        assert len(set(embedder.embedded_titles)) == n
+
+        job = store.db.execute(
+            "SELECT * FROM ingestion_jobs WHERE id = ?", (job_id,)).fetchone()
+        assert job["status"] == "completed"
+        assert job["items_total"] == n
+        assert job["items_processed"] == n
+
+        # Stale [9.9] vectors were overwritten in place with the new embedding, and
+        # every item is stamped with the current signature + an embedded_at timestamp.
+        row = store.db.execute(
+            "SELECT embedding, embedding_sig, embedded_at FROM items "
+            "WHERE status = 'active' LIMIT 1").fetchone()
+        assert row["embedding"] == floats_to_bytes([0.1, 0.2, 0.3, 0.4])
+        assert row["embedding_sig"] == embed_signature(embedder.model)
+        assert row["embedded_at"]
+
+    async def test_rebuild_is_idempotent_skips_current_sig(self, store):
+        # First rebuild stamps every item with the current sig.
+        embedder = _FakeEmbedder()
+        await self._run(store, embedder, 3)
+        assert len(embedder.embedded_titles) == 3
+
+        # A second rebuild on an unchanged setup finds nothing stale -> no-op.
+        from kiro_claw.knowledge.ingestion import rebuild_embeddings
+        second = _FakeEmbedder()
+        processed = await rebuild_embeddings(store, second)
+        assert processed == 0
+        assert second.embedded_titles == []
+
+    async def test_rebuild_partial_retry_resumes_only_stale(self, store):
+        # One item already carries the current sig; the rest are stale (NULL sig).
+        from kiro_claw.knowledge.embedder import embed_signature, floats_to_bytes
+        from kiro_claw.knowledge.ingestion import rebuild_embeddings
+        embedder = _FakeEmbedder()
+        sig = embed_signature(embedder.model)
+        done = store.add_item("done", "body", "document",
+                              embedding=floats_to_bytes([0.1, 0.2, 0.3, 0.4]))
+        store.db.execute("UPDATE items SET embedding_sig = ? WHERE id = ?", (sig, done))
+        for i in range(2):
+            store.add_item(f"stale {i}", "body", "document")
+        store.db.commit()
+
+        processed = await rebuild_embeddings(store, embedder)
+        # Only the two stale items re-embed; the already-current one is skipped.
+        assert processed == 2
+        assert sorted(embedder.embedded_titles) == ["stale 0", "stale 1"]
+
+    async def test_rebuild_force_reembeds_current_sig(self, store):
+        # All items already current; force=True ignores the sig and re-embeds all.
+        embedder = _FakeEmbedder()
+        await self._run(store, embedder, 3)
+
+        from kiro_claw.knowledge.ingestion import rebuild_embeddings
+        forced = _FakeEmbedder()
+        processed = await rebuild_embeddings(store, forced, force=True)
+        assert processed == 3
+        assert len(forced.embedded_titles) == 3
+
+    async def test_rebuild_marks_job_failed_on_error(self, store):
+        class _BoomEmbedder(_FakeEmbedder):
+            def embed_for_item(self, title, summary, content=None):
+                raise RuntimeError("ollama down mid-rebuild")
+
+        job_id = await self._run(store, _BoomEmbedder(), 3)
+        job = store.db.execute(
+            "SELECT * FROM ingestion_jobs WHERE id = ?", (job_id,)).fetchone()
+        assert job["status"] == "failed"
+        assert "ollama down" in (job["error"] or "")
+
+
+@pytest.mark.asyncio
+class TestWatcherSelfHeal:
+    def _watcher(self, store, embedder):
+        from kiro_claw.knowledge.watcher import KnowledgeWatcher
+
+        class _Pipe:
+            pass
+        pipe = _Pipe()
+        pipe.embedder = embedder
+        return KnowledgeWatcher(store, pipe)
+
+    async def test_stale_items_trigger_rebuild_job(self, store):
+        # Items with NULL sig are stale -> watcher fires a tracked rebuild job.
+        from kiro_claw.knowledge.embedder import embed_signature
+        embedder = _FakeEmbedder()
+        for i in range(3):
+            store.add_item(f"Item {i}", "body", "document")
+        watcher = self._watcher(store, embedder)
+
+        await watcher._maybe_reembed_stale()
+        assert watcher._reembed_task is not None
+        await watcher._reembed_task
+
+        job = store.db.execute(
+            "SELECT * FROM ingestion_jobs WHERE source_id IS NULL "
+            "ORDER BY created_at DESC LIMIT 1").fetchone()
+        assert job["status"] == "completed"
+        assert job["items_processed"] == 3
+        assert len(embedder.embedded_titles) == 3
+        sig = embed_signature(embedder.model)
+        stale = store.db.execute(
+            "SELECT COUNT(*) AS c FROM items WHERE embedding_sig IS NULL OR embedding_sig != ?",
+            (sig,)).fetchone()["c"]
+        assert stale == 0
+
+    async def test_no_stale_items_is_noop(self, store):
+        # Everything already current -> no job created.
+        from kiro_claw.knowledge.embedder import embed_signature, floats_to_bytes
+        embedder = _FakeEmbedder()
+        sig = embed_signature(embedder.model)
+        item_id = store.add_item("current", "body", "document",
+                                 embedding=floats_to_bytes([0.1, 0.2, 0.3, 0.4]))
+        store.db.execute("UPDATE items SET embedding_sig = ? WHERE id = ?", (sig, item_id))
+        store.db.commit()
+        watcher = self._watcher(store, embedder)
+
+        await watcher._maybe_reembed_stale()
+        assert watcher._reembed_task is None
+        assert embedder.embedded_titles == []
+
+    async def test_single_flight_skips_when_job_processing(self, store):
+        # A dashboard rebuild already in flight (fresh updated_at) -> watcher does
+        # not stack a second.
+        embedder = _FakeEmbedder()
+        store.add_item("stale", "body", "document")
+        now = datetime.now().isoformat()
+        store.db.execute(
+            "INSERT INTO ingestion_jobs (id, source_id, status, created_at, updated_at) "
+            "VALUES ('inflight0001', NULL, 'processing', ?, ?)", (now, now))
+        store.db.commit()
+        watcher = self._watcher(store, embedder)
+
+        await watcher._maybe_reembed_stale()
+        assert watcher._reembed_task is None
+        assert embedder.embedded_titles == []
+
+    async def test_stale_processing_row_does_not_block(self, store):
+        # A 'processing' row whose updated_at is older than the staleness window is
+        # from a crash that bypassed cleanup -> the guard ignores it and the watcher
+        # starts a fresh rebuild rather than being permanently blocked.
+        from kiro_claw.knowledge.ingestion import _REBUILD_STALE_AFTER
+        embedder = _FakeEmbedder()
+        store.add_item("stale", "body", "document")
+        old = (datetime.now() - _REBUILD_STALE_AFTER - timedelta(minutes=1)).isoformat()
+        store.db.execute(
+            "INSERT INTO ingestion_jobs (id, source_id, status, created_at, updated_at) "
+            "VALUES ('dead00000001', NULL, 'processing', ?, ?)", (old, old))
+        store.db.commit()
+        watcher = self._watcher(store, embedder)
+
+        await watcher._maybe_reembed_stale()
+        assert watcher._reembed_task is not None
+        await watcher._reembed_task
+        assert embedder.embedded_titles == ["stale"]
+
+    async def test_cancelled_job_row_is_finalized_not_left_processing(self, store):
+        # If the rebuild task is cancelled (e.g. app shutdown), the job row must be
+        # finalized to 'cancelled' and the CancelledError re-raised -- otherwise the
+        # row stays 'processing' and permanently blocks the single-flight guard.
+        embedder = _FakeEmbedder()
+        store.add_item("item", "body", "document")
+        watcher = self._watcher(store, embedder)
+        now = datetime.now().isoformat()
+        store.db.execute(
+            "INSERT INTO ingestion_jobs (id, source_id, status, created_at, updated_at) "
+            "VALUES ('cancel000001', NULL, 'processing', ?, ?)", (now, now))
+        store.db.commit()
+
+        async def _boom(*a, **k):
+            raise asyncio.CancelledError()
+
+        with patch("kiro_claw.knowledge.watcher.rebuild_embeddings", _boom):
+            with pytest.raises(asyncio.CancelledError):
+                await watcher._run_reembed_job(embedder, "cancel000001")
+
+        row = store.db.execute(
+            "SELECT status FROM ingestion_jobs WHERE id = 'cancel000001'").fetchone()
+        assert row["status"] == "cancelled"

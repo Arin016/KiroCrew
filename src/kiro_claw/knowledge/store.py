@@ -214,6 +214,13 @@ class KnowledgeStore:
         if "namespace" not in cols:
             self.db.execute("ALTER TABLE items ADD COLUMN namespace TEXT DEFAULT 'default'")
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_items_namespace ON items(namespace)")
+        # Embedding provenance: which embed setup produced the stored vector, and when.
+        # NULL on existing rows -> treated as stale, re-embedded on the next sig-gated
+        # rebuild (manual or watcher self-heal).
+        if "embedding_sig" not in cols:
+            self.db.execute("ALTER TABLE items ADD COLUMN embedding_sig TEXT")
+        if "embedded_at" not in cols:
+            self.db.execute("ALTER TABLE items ADD COLUMN embedded_at TEXT")
         src_cols = {r[1] for r in self.db.execute("PRAGMA table_info(sources)").fetchall()}
         if "sync_status" not in src_cols:
             self.db.execute("ALTER TABLE sources ADD COLUMN sync_status TEXT DEFAULT 'pending'")

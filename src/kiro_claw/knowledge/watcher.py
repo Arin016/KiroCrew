@@ -5,12 +5,16 @@ import hashlib
 import json
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 from kiro_claw.security import is_sensitive_path
+from kiro_claw.sel import sel
 
+from .embedder import embed_signature
 from .folder_watcher import FolderWatcher
-from .ingestion import IngestionPipeline
+from .ingestion import _REBUILD_STALE_AFTER, IngestionPipeline, rebuild_embeddings
 from .store import KnowledgeStore
 
 logger = logging.getLogger(__name__)
@@ -28,6 +32,7 @@ class KnowledgeWatcher:
         self.interval = interval
         self._stop_event = asyncio.Event()
         self._folder_watcher = FolderWatcher(store, pipeline)
+        self._reembed_task: asyncio.Task | None = None
 
     async def start(self):
         logger.info("Source watcher started: interval=%ds", self.interval)
@@ -111,6 +116,84 @@ class KnowledgeWatcher:
                     self.store.update_source(row["id"], properties=json.dumps(props))
             except Exception:
                 logger.exception("Error checking source %s", row.get("uri", row["id"]))
+
+        # After file-level reconciliation, self-heal vectors left stale by an
+        # embedding-setup change (model/budget) -- the file gates above never fire
+        # for unchanged files, so this is the only path that catches a sig change.
+        await self._maybe_reembed_stale()
+
+    async def _maybe_reembed_stale(self) -> None:
+        """Trigger a background sig-gated rebuild when items have a stale embedding sig.
+
+        Single-flight: skips if a rebuild job is already processing or our own
+        prior re-embed task is still running. The rebuild runs as a detached task
+        (not awaited) so file-change detection isn't blocked for its duration; it
+        shares the dashboard's ingestion_jobs progress row so the UI sees it too.
+        """
+        embedder = getattr(self.pipeline, "embedder", None)
+        if not embedder or not embedder.is_available():
+            return
+        if self._reembed_task and not self._reembed_task.done():
+            return
+        sig = embed_signature(embedder.model)
+        stale = self.store.db.execute(
+            "SELECT COUNT(*) AS c FROM items "
+            "WHERE status = 'active' AND (embedding_sig IS NULL OR embedding_sig != ?)",
+            (sig,)).fetchone()["c"]
+        if not stale:
+            return
+        # Don't stack on a dashboard-triggered rebuild already in flight. A row
+        # stale past the window is from a crash that bypassed cleanup; ignore it.
+        fresh = (datetime.now() - _REBUILD_STALE_AFTER).isoformat()
+        active = self.store.db.execute(
+            "SELECT id FROM ingestion_jobs WHERE source_id IS NULL AND status = 'processing' "
+            "AND updated_at > ? ORDER BY created_at DESC LIMIT 1",
+            (fresh,)
+        ).fetchone()
+        if active:
+            return
+        job_id = uuid4().hex[:12]
+        now = datetime.now().isoformat()
+        self.store.db.execute(
+            "INSERT INTO ingestion_jobs (id, source_id, status, created_at, updated_at) "
+            "VALUES (?, NULL, 'processing', ?, ?)",
+            (job_id, now, now))
+        self.store.db.commit()
+        logger.info("Watcher self-heal: %d items with stale embedding sig, rebuild job %s",
+                    stale, job_id)
+        self._reembed_task = asyncio.create_task(self._run_reembed_job(embedder, job_id))
+
+    async def _run_reembed_job(self, embedder, job_id: str) -> None:
+        try:
+            processed = await rebuild_embeddings(self.store, embedder, job_id=job_id)
+            self.store.db.execute(
+                "UPDATE ingestion_jobs SET status = 'completed', items_processed = ?, "
+                "updated_at = ? WHERE id = ?",
+                (processed, datetime.now().isoformat(), job_id))
+            self.store.db.commit()
+            sel().log_tool_invocation(
+                session_key="watcher", agent="knowledge-watcher",
+                tool_name="knowledge.batch_embed", outcome="completed",
+                resources=str({"count": processed, "rebuild": True, "source": "self_heal"}))
+        except BaseException as exc:
+            # CancelledError is a BaseException in 3.8+; finalize the row so the
+            # single-flight guard can't be permanently blocked, then re-raise it.
+            is_cancel = isinstance(exc, asyncio.CancelledError)
+            status = "cancelled" if is_cancel else "failed"
+            if is_cancel:
+                logger.debug("Watcher self-heal rebuild %s cancelled", job_id)
+            else:
+                logger.exception("Watcher self-heal rebuild %s failed", job_id)
+            self.store.db.execute(
+                "UPDATE ingestion_jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+                (status, str(exc), datetime.now().isoformat(), job_id))
+            self.store.db.commit()
+            sel().log_tool_invocation(
+                session_key="watcher", agent="knowledge-watcher",
+                tool_name="knowledge.batch_embed", outcome=status,
+                resources=str({"rebuild": True, "source": "self_heal"}), error=str(exc))
+            if is_cancel:
+                raise
 
     @staticmethod
     def _parse_props(raw) -> dict:

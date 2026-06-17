@@ -73,17 +73,64 @@ class TestOllamaEmbedder:
         # Title and summary remain present and ordered first (highest signal).
         assert captured["text"].startswith("Short Title Brief summary")
 
-    def test_embed_for_item_truncates_long_content(self, monkeypatch):
-        """Content is bounded so a huge chunk can't blow the embed request."""
+    def test_embed_for_item_embeds_full_target_size_chunk(self, monkeypatch):
+        """A full target-size chunk must embed untruncated (Mesh-2205 Phase 0).
+
+        The old _EMBED_CONTENT_BUDGET=2000 clipped ~88% of normal chunks (a chunk is
+        ~CHUNK_TOKEN_SIZE+CHUNK_OVERLAP tokens). The bound is now derived above the
+        chunker's max output, so a realistic largest chunk embeds whole — RED on the
+        old 2000-char cap.
+        """
+        from kiro_claw.knowledge.chunker import CHUNK_OVERLAP, CHUNK_TOKEN_SIZE
+
+        emb = OllamaEmbedder()
+        captured = {}
+        monkeypatch.setattr(emb, "embed", lambda text: captured.setdefault("text", text))
+        # ~6 chars/token over the full chunk budget — at the high end of observed
+        # corpus chunks (max ~6227 chars) and well past the old 2000-char cap.
+        big_chunk = "word " * int((CHUNK_TOKEN_SIZE + CHUNK_OVERLAP) * 6 / 5)
+        tail = "UNIQUE_TAIL_TOKEN_zzz"
+        content = big_chunk + tail
+        emb.embed_for_item("T", "S", content)
+        assert tail in captured["text"], "chunk tail was clipped from the vector"
+
+    def test_embed_for_item_bounds_pathological_blob(self, monkeypatch):
+        """A blob far past the safety bound is truncated AND logged (never silent)."""
         from kiro_claw.knowledge.embedder import _EMBED_CONTENT_BUDGET
 
         emb = OllamaEmbedder()
         captured = {}
         monkeypatch.setattr(emb, "embed", lambda text: captured.setdefault("text", text))
         big = "x" * (_EMBED_CONTENT_BUDGET * 3)
-        emb.embed_for_item("T", "S", big)
+        with self._capture_warnings() as warned:
+            emb.embed_for_item("T", "S", big)
         # title + summary + at most the budget of content (plus 2 join spaces).
         assert len(captured["text"]) <= len("T") + len("S") + _EMBED_CONTENT_BUDGET + 2
+        assert warned, "truncation must be logged, not silent"
+
+    @staticmethod
+    def _capture_warnings():
+        import contextlib
+        import logging
+
+        from kiro_claw.knowledge import embedder
+
+        @contextlib.contextmanager
+        def _cap():
+            records = []
+            handler = logging.Handler()
+            handler.setLevel(logging.WARNING)
+            handler.emit = records.append  # type: ignore[method-assign]
+            embedder.logger.addHandler(handler)
+            prev = embedder.logger.level
+            embedder.logger.setLevel(logging.WARNING)
+            try:
+                yield records
+            finally:
+                embedder.logger.removeHandler(handler)
+                embedder.logger.setLevel(prev)
+
+        return _cap()
 
     def test_embed_for_item_content_optional(self, monkeypatch):
         """Back-compat: omitting content still embeds title + summary only."""

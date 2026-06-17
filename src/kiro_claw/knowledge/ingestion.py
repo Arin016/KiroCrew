@@ -7,14 +7,14 @@ import hashlib
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 
 from .chunker import CHUNK_OVERLAP, CHUNK_TOKEN_SIZE, HeadingAwareChunker
-from .embedder import floats_to_bytes
+from .embedder import embed_signature, floats_to_bytes
 from .extractor import EntityExtractor
 from .readers import FileReader
 from .store import KnowledgeStore
@@ -366,8 +366,9 @@ class IngestionPipeline:
         )
         if vec:
             self.store.db.execute(
-                "UPDATE items SET embedding = ? WHERE id = ?",
-                (floats_to_bytes(vec), item_id))
+                "UPDATE items SET embedding = ?, embedding_sig = ?, embedded_at = ? WHERE id = ?",
+                (floats_to_bytes(vec), embed_signature(self.embedder.model),
+                 datetime.now().isoformat(), item_id))
             self.store.db.commit()
 
     async def generate_source_summary(self, source_id: str) -> None:
@@ -404,3 +405,76 @@ class IngestionPipeline:
                 self.store.db.commit()
         except Exception:
             logger.debug("Source summary generation failed for %s", source_id, exc_info=True)
+
+
+_REBUILD_BATCH_SIZE = 50
+
+# A rebuild commits progress (refreshing updated_at) at least every batch. A job
+# row stuck in 'processing' past this window is from a crash that bypassed cleanup,
+# so the single-flight guard treats it as dead and lets a new rebuild start.
+_REBUILD_STALE_AFTER = timedelta(minutes=10)
+
+
+async def rebuild_embeddings(store, embedder, *, job_id: str | None = None,
+                             force: bool = False) -> int:
+    """Re-embed active items in place, stamping the current embedding signature.
+
+    Sig-gated by default: only items whose stored ``embedding_sig`` differs from the
+    current setup (or is NULL) are re-embedded, which makes the operation idempotent
+    — a partial-failure retry skips already-done items, and a re-run on an unchanged
+    setup is a no-op. ``force=True`` re-embeds every active item regardless of sig
+    (escape hatch for suspected vector corruption).
+
+    Vectors are overwritten one item at a time so search stays queryable throughout.
+    When ``job_id`` is given, progress is written to that ``ingestion_jobs`` row; the
+    same function powers the dashboard trigger and the watcher self-heal. Returns the
+    number of items re-embedded.
+
+    ponytail: serial single-item embed (Ollama is the CPU floor and fans out
+    internally); batch size is only the commit/progress cadence, not a throttle.
+    """
+    loop = asyncio.get_running_loop()
+    sig = embed_signature(embedder.model)
+    processed = 0
+    if force:
+        where = "status = 'active' AND id > ?"
+        params_tail: tuple = ()
+    else:
+        where = "status = 'active' AND (embedding_sig IS NULL OR embedding_sig != ?) AND id > ?"
+        params_tail = (sig,)
+
+    if job_id is not None:
+        total = store.db.execute(
+            f"SELECT COUNT(*) AS c FROM items WHERE {where.replace(' AND id > ?', '')}",  # noqa: S608
+            params_tail).fetchone()["c"]
+        store.db.execute(
+            "UPDATE ingestion_jobs SET items_total = ?, updated_at = ? WHERE id = ?",
+            (total, datetime.now().isoformat(), job_id))
+        store.db.commit()
+
+    last_id = ""
+    while True:
+        rows = store.db.execute(
+            f"SELECT id, title, summary, content FROM items WHERE {where} "  # noqa: S608
+            "ORDER BY id LIMIT ?",
+            (*params_tail, last_id, _REBUILD_BATCH_SIZE)).fetchall()
+        if not rows:
+            break
+        for row in rows:
+            vec = await loop.run_in_executor(
+                None, embedder.embed_for_item, row["title"], row["summary"], row["content"]
+            )
+            if vec:
+                store.db.execute(
+                    "UPDATE items SET embedding = ?, embedding_sig = ?, embedded_at = ? "
+                    "WHERE id = ?",
+                    (floats_to_bytes(vec), sig, datetime.now().isoformat(), row["id"]))
+            last_id = row["id"]
+            processed += 1
+        if job_id is not None:
+            store.db.execute(
+                "UPDATE ingestion_jobs SET items_processed = ?, updated_at = ? WHERE id = ?",
+                (processed, datetime.now().isoformat(), job_id))
+        store.db.commit()
+
+    return processed

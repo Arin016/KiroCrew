@@ -5,12 +5,15 @@ is not running or the model isn't available — no errors, no degraded UX.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import struct
 import time
 import urllib.error
 import urllib.request
+
+from kiro_claw.knowledge.chunker import CHUNK_OVERLAP, CHUNK_TOKEN_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +24,17 @@ DEFAULT_MODEL = "qwen3-embedding:0.6b"
 DEFAULT_BASE_URL = "http://localhost:11434"
 TIMEOUT = 10  # seconds
 NEGATIVE_CACHE_TTL = 300  # seconds before re-checking failed availability
-# Max chunk-content chars folded into an item embedding. Chunks are ~400 tokens
-# (~1600 chars) by the heading-aware chunker, so this covers a full chunk with
-# headroom while bounding the embed request well within the model's context.
-_EMBED_CONTENT_BUDGET = 2000
+# Safety bound (chars) on chunk content folded into an item embedding. This is a
+# backstop for a pathological un-chunked blob (e.g. a separator-less minified file or
+# base64 string that the chunker's whitespace-based splitter cannot break), NOT a limit
+# on normal chunks. The HeadingAwareChunker already bounds every chunk to
+# ~CHUNK_TOKEN_SIZE + CHUNK_OVERLAP tokens; we size this above that maximum (using a
+# deliberately generous 10 chars/token — real text runs ~4-6, dense code/paths/URLs
+# higher) so a normally-chunked passage is always embedded whole. Configured embed
+# models have ample context (snowflake-arctic-embed2 8192 tok, qwen3-embedding ~32K),
+# so this only ever fires for inputs that bypassed normal chunk bounding — and when it
+# does, the truncation is logged rather than silent.
+_EMBED_CONTENT_BUDGET = (CHUNK_TOKEN_SIZE + CHUNK_OVERLAP) * 10
 
 
 class OllamaEmbedder:
@@ -81,15 +91,24 @@ class OllamaEmbedder:
         """Embed title + summary + chunk content for knowledge items.
 
         Content is included so vector search matches on body text, not just the
-        title/summary. It is appended last and truncated to ``_EMBED_CONTENT_BUDGET``
-        chars to bound the embedding request (the model has a fixed context window;
-        title and summary carry the highest-signal terms and must not be crowded out).
+        title/summary, and is appended after them. A normally-chunked passage is
+        embedded whole; ``_EMBED_CONTENT_BUDGET`` is only a backstop for a pathological
+        un-chunked blob, and truncation is logged (never silent) when it fires so the
+        dropped-tail recall gap is observable rather than hidden.
         """
         parts = [title]
         if summary:
             parts.append(summary)
         if content:
-            parts.append(content[:_EMBED_CONTENT_BUDGET])
+            if len(content) > _EMBED_CONTENT_BUDGET:
+                logger.warning(
+                    "Embedding content truncated %d -> %d chars for item %r; chunk "
+                    "exceeds the safety bound (likely un-chunked/separator-less input). "
+                    "Tail is excluded from the vector.",
+                    len(content), _EMBED_CONTENT_BUDGET, title,
+                )
+                content = content[:_EMBED_CONTENT_BUDGET]
+            parts.append(content)
         return self.embed(" ".join(parts))
 
 
@@ -102,6 +121,23 @@ def bytes_to_floats(data: bytes) -> list[float]:
     """Deserialize binary BLOB back to float list."""
     n = len(data) // 4
     return list(struct.unpack(f"{n}f", data))
+
+
+def embed_signature(model: str) -> str:
+    """Signature over the embedding inputs a re-embed can actually change.
+
+    Captures the model name and the content budget — change either and a stored
+    vector becomes stale, and re-embedding the same item content fixes it. Items
+    whose stored ``embedding_sig`` differs from the current one are re-embedded by
+    the sig-gated rebuild (manual trigger and watcher self-heal both use it).
+
+    ponytail: does NOT cover edits to ``embed_for_item``'s assembly logic (field
+    set / join separator) — a value hash can't see code. Ceiling: such a change
+    needs a manual ``force`` rebuild. Upgrade path: add an ast-normalized source
+    hash here if that logic starts churning.
+    """
+    raw = f"{model}|{_EMBED_CONTENT_BUDGET}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 def create_embedder_from_config(config: dict) -> OllamaEmbedder | None:

@@ -8,7 +8,9 @@ import json
 import logging
 import re
 import tempfile
+from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 from aiohttp import web
 
@@ -16,10 +18,19 @@ from kiro_claw.knowledge.agent_fetch import fetch_url_content
 from kiro_claw.knowledge.chunker import HeadingAwareChunker
 from kiro_claw.knowledge.connectors.base import BaseConnector
 from kiro_claw.knowledge.connectors.local_folder import LocalFolderConnector
-from kiro_claw.knowledge.embedder import create_embedder_from_config, floats_to_bytes
+from kiro_claw.knowledge.embedder import (
+    create_embedder_from_config,
+    embed_signature,
+    floats_to_bytes,
+)
 from kiro_claw.knowledge.extractor import EntityExtractor
 from kiro_claw.knowledge.folder_watcher import SOURCE_TYPE_SKIP_DIRS
-from kiro_claw.knowledge.ingestion import IngestionPipeline, _redact
+from kiro_claw.knowledge.ingestion import (
+    _REBUILD_STALE_AFTER,
+    IngestionPipeline,
+    _redact,
+    rebuild_embeddings,
+)
 from kiro_claw.knowledge.llm_pool import LLMPool
 from kiro_claw.knowledge.readers import FileReader
 from kiro_claw.knowledge.retrieval import HybridRetriever
@@ -996,8 +1007,49 @@ async def get_embedding_status(request: web.Request) -> web.Response:
     })
 
 
+async def _rebuild_embeddings_job(app: web.Application, store, embedder, job_id: str,
+                                  force: bool = False) -> None:
+    """Background wrapper: run the sig-gated rebuild and finalize the job row.
+
+    The re-embed loop itself lives in ``knowledge.ingestion.rebuild_embeddings`` so
+    the watcher self-heal path shares one implementation. Vectors are overwritten
+    one item at a time, so existing vectors stay queryable throughout -- search
+    degrades gracefully during the rebuild instead of going dark.
+    """
+    try:
+        processed = await rebuild_embeddings(store, embedder, job_id=job_id, force=force)
+        store.db.execute(
+            "UPDATE ingestion_jobs SET status = 'completed', items_processed = ?, updated_at = ? "
+            "WHERE id = ?",
+            (processed, datetime.now().isoformat(), job_id))
+        store.db.commit()
+        _sel_log("batch_embed", count=processed, rebuild=True, force=force)
+    except BaseException as exc:
+        # CancelledError is a BaseException in 3.8+; finalize the row so a shutdown
+        # cancellation can't leave it 'processing' and block the single-flight guard.
+        is_cancel = isinstance(exc, asyncio.CancelledError)
+        status = "cancelled" if is_cancel else "failed"
+        if is_cancel:
+            logger.debug("Embedding rebuild job %s cancelled", job_id)
+        else:
+            logger.exception("Embedding rebuild job %s failed", job_id)
+        store.db.execute(
+            "UPDATE ingestion_jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+            (status, str(exc), datetime.now().isoformat(), job_id))
+        store.db.commit()
+        _sel_log("batch_embed", rebuild=True, force=force, outcome=status)
+        if is_cancel:
+            raise
+
+
 async def batch_embed_items(request: web.Request) -> web.Response:
-    """POST /api/knowledge/embedding/generate -- embed all unembedded items (or re-embed all)."""
+    """POST /api/knowledge/embedding/generate -- embed unembedded items, or re-embed all.
+
+    ``{"rebuild": true}`` re-embeds every active item; because that can span the
+    whole corpus it runs as a background job and returns a ``job_id`` to poll via
+    ``GET /api/knowledge/jobs/{id}``. The default (fill-NULL) path stays synchronous
+    since it only touches items missing an embedding at cold start.
+    """
     store = _store(request)
     embedder = request.app.get("knowledge_embedder")
     if not embedder:
@@ -1007,18 +1059,41 @@ async def batch_embed_items(request: web.Request) -> web.Response:
 
     body = await request.json() if request.can_read_body else {}
     rebuild = body.get("rebuild", False)
+    force = body.get("force", False)
 
     if rebuild:
-        rows = store.db.execute(
-            "SELECT id, title, summary, content FROM items WHERE status = 'active' LIMIT 200"
-        ).fetchall()
-    else:
-        rows = store.db.execute(
-            "SELECT id, title, summary, content FROM items "
-            "WHERE status = 'active' AND embedding IS NULL LIMIT 200"
-        ).fetchall()
+        # Single-flight: don't stack a rebuild on top of one already running. A row
+        # whose updated_at is older than the staleness window is from a crash that
+        # bypassed cleanup and is ignored so it can't permanently block rebuilds.
+        fresh = (datetime.now() - _REBUILD_STALE_AFTER).isoformat()
+        active = store.db.execute(
+            "SELECT id FROM ingestion_jobs WHERE source_id IS NULL AND status = 'processing' "
+            "AND updated_at > ? ORDER BY created_at DESC LIMIT 1",
+            (fresh,)
+        ).fetchone()
+        if active:
+            return web.json_response({"job_id": active["id"], "status": "processing"})
+        job_id = uuid4().hex[:12]
+        now = datetime.now().isoformat()
+        store.db.execute(
+            "INSERT INTO ingestion_jobs (id, source_id, status, created_at, updated_at) "
+            "VALUES (?, NULL, 'processing', ?, ?)",
+            (job_id, now, now))
+        store.db.commit()
+        task = asyncio.create_task(
+            _rebuild_embeddings_job(request.app, store, embedder, job_id, force=force))
+        app_tasks = request.app.setdefault("_bg_tasks", set())
+        app_tasks.add(task)
+        task.add_done_callback(app_tasks.discard)
+        return web.json_response({"job_id": job_id, "status": "processing"})
+
+    rows = store.db.execute(
+        "SELECT id, title, summary, content FROM items "
+        "WHERE status = 'active' AND embedding IS NULL LIMIT 200"
+    ).fetchall()
 
     loop = asyncio.get_running_loop()
+    sig = embed_signature(embedder.model)
     embedded = 0
     for row in rows:
         vec = await loop.run_in_executor(
@@ -1026,8 +1101,8 @@ async def batch_embed_items(request: web.Request) -> web.Response:
         )
         if vec:
             store.db.execute(
-                "UPDATE items SET embedding = ? WHERE id = ?",
-                (floats_to_bytes(vec), row["id"]))
+                "UPDATE items SET embedding = ?, embedding_sig = ?, embedded_at = ? WHERE id = ?",
+                (floats_to_bytes(vec), sig, datetime.now().isoformat(), row["id"]))
             embedded += 1
             if embedded % 50 == 0:
                 store.db.commit()
@@ -1036,7 +1111,7 @@ async def batch_embed_items(request: web.Request) -> web.Response:
     remaining = store.db.execute(
         "SELECT COUNT(*) as c FROM items WHERE status = 'active' AND embedding IS NULL"
     ).fetchone()["c"]
-    _sel_log("batch_embed", count=embedded, rebuild=rebuild)
+    _sel_log("batch_embed", count=embedded, rebuild=False)
     return web.json_response({"embedded": embedded, "total": len(rows), "remaining": remaining})
 
 
