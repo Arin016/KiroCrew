@@ -35,12 +35,13 @@ describe('useTouchedFiles', () => {
     expect(result.current.files).toHaveLength(1)
   })
 
-  it('does not bump lastWrite on re-touch with source=history', () => {
+  it('promotes tool→history on re-touch with source=history', () => {
     const { result } = renderHook(() => useTouchedFiles('test-session'))
     act(() => result.current.addFile('/tmp/a.ts', 'tool'))
     const first = result.current.files[0].lastWrite
     act(() => result.current.addFile('/tmp/a.ts', 'history'))
-    expect(result.current.files[0].lastWrite).toBe(first)
+    expect(result.current.files[0].source).toBe('history')
+    expect(result.current.files).toHaveLength(1)
   })
 
   it('does not duplicate files on re-add', () => {

@@ -23,13 +23,12 @@ describe('useTouchedFiles', () => {
     expect(result.current.files[0].ts).toBeGreaterThan(0)
   })
 
-  it('addFile is idempotent — adding same path twice keeps single entry', () => {
+  it('addFile promotes tool→history when re-added with source=history', () => {
     const { result } = renderHook(() => useTouchedFiles('s1'))
     act(() => result.current.addFile('/foo.ts', 'tool'))
     act(() => result.current.addFile('/foo.ts', 'history'))
     expect(result.current.files).toHaveLength(1)
-    // First-add wins; source not overwritten.
-    expect(result.current.files[0].source).toBe('tool')
+    expect(result.current.files[0].source).toBe('history')
   })
 
   it('addFile defaults source to history when omitted', () => {
@@ -135,5 +134,23 @@ describe('useTouchedFiles', () => {
     localStorage.setItem(KEY + 's-bad', '{not-json')
     const { result } = renderHook(() => useTouchedFiles('s-bad'))
     expect(result.current.files).toEqual([])
+  })
+
+  it('addFile does NOT demote history→tool on re-add', () => {
+    const { result } = renderHook(() => useTouchedFiles('s1'))
+    act(() => result.current.addFile('/foo.ts', 'history'))
+    act(() => result.current.addFile('/foo.ts', 'tool'))
+    expect(result.current.files).toHaveLength(1)
+    // tool re-touch updates lastWrite but does NOT change source
+    expect(result.current.files[0].source).toBe('history')
+  })
+
+  it('addFile with source=tool bumps lastWrite on existing tool entry', () => {
+    const { result } = renderHook(() => useTouchedFiles('s1'))
+    act(() => result.current.addFile('/foo.ts', 'tool'))
+    const first = result.current.files[0].lastWrite!
+    act(() => result.current.addFile('/foo.ts', 'tool'))
+    expect(result.current.files[0].lastWrite).toBeGreaterThanOrEqual(first)
+    expect(result.current.files).toHaveLength(1)
   })
 })

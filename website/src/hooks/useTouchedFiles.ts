@@ -68,10 +68,17 @@ export function useTouchedFiles(sessionKey: string | undefined) {
     setFiles(prev => {
       const existing = prev.find(f => f.path === path)
       if (existing) {
-        if (source !== 'tool') return prev
-        const next = prev.map(f => f.path === path ? { ...f, lastWrite: Date.now() } : f)
-        persist(next)
-        return next
+        if (source === 'history' && existing.source === 'tool') {
+          const next = prev.map(f => f.path === path ? { ...f, source: 'history' as const } : f)
+          persist(next)
+          return next
+        }
+        if (source === 'tool') {
+          const next = prev.map(f => f.path === path ? { ...f, lastWrite: Date.now() } : f)
+          persist(next)
+          return next
+        }
+        return prev
       }
       const next = [...prev, { path, ts: Date.now(), lastWrite: source === 'tool' ? Date.now() : undefined, source }]
       persist(next)
