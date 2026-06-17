@@ -2781,6 +2781,10 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               onDragLeave={e => { if (e.currentTarget === e.target) setDragOver(false) }}
               voiceRecording={voice.recording}
               voiceTranscribing={voice.transcribing}
+              voiceError={voice.error}
+              voiceLevel={voice.level}
+              voiceDeviceLabel={voice.deviceLabel}
+              onClearVoiceError={voice.clearError}
               onVoiceToggle={voiceInputSupported ? toggleVoice : undefined}
               agentName={currentSlot?.agent || 'default'}
               agentSource={installedAgents.find(a => a.name === (currentSlot?.agent || 'default'))?.source}

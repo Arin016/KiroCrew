@@ -789,6 +789,34 @@ app.whenReady().then(async () => {
     { useSystemPicker: true },
   );
 
+  // Grant microphone access for the chat input's voice / speech-to-text
+  // feature. Without an explicit permission handler, Electron's default
+  // permission *check* can report `media` as denied for the renderer's
+  // navigator.mediaDevices.getUserMedia(), so the mic button silently no-ops
+  // in the packaged app even though it works in a plain browser (Chromium
+  // prompts there). Scope the grant to the `media` permission type only
+  // (what getUserMedia needs for the mic) and deny every other permission
+  // type (geolocation, clipboard, notifications, MIDI, …) per least
+  // privilege. Screen capture uses its own setDisplayMediaRequestHandler and
+  // is unaffected. On macOS we also proactively trigger the OS microphone
+  // (TCC) permission prompt.
+  const isAppOrigin = (wc) => {
+    try { return new URL(wc?.getURL?.() || "").hostname === "localhost"; } catch { return false; }
+  };
+  session.defaultSession.setPermissionRequestHandler((wc, permission, callback, details) => {
+    const isAudioOnly = details?.mediaTypes?.includes("audio") && !details?.mediaTypes?.includes("video");
+    callback(permission === "media" && isAppOrigin(wc) && isAudioOnly);
+  });
+  session.defaultSession.setPermissionCheckHandler((wc, permission, _origin, details) => {
+    if (permission === "media") return isAppOrigin(wc) && details?.mediaType === "audio";
+    return false;
+  });
+  if (process.platform === "darwin") {
+    systemPreferences.askForMediaAccess("microphone").catch(() => {
+      /* best effort — older macOS or TCC denied */
+    });
+  }
+
   createTray();
   const win = createWindow();
 

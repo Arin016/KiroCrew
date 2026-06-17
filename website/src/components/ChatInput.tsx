@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, memo } from 'react'
 import { ArrowUpFromLine, ArrowUp, Loader2, Plus, Crop, Bot, Mic, Square, ShieldCheck, BookOpen, Handshake, Rocket, X, ClipboardList, CheckCircle, Ban, Sparkles, Goal, Target, Lock, Globe, FolderOpen, FileText } from 'lucide-react'
 import { Toggle } from './ui'
+import VoiceStatusBar from './VoiceStatusBar'
 import { createPortal } from 'react-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useBranding } from '../hooks/useBranding'
@@ -172,6 +173,11 @@ interface ChatInputProps {
   voiceRecording?: boolean
   voiceTranscribing?: boolean
   onVoiceToggle?: () => void
+  /** Mic error (null = none), live input level [0,1], active device label, and error-dismiss. */
+  voiceError?: string | null
+  voiceLevel?: number
+  voiceDeviceLabel?: string
+  onClearVoiceError?: () => void
   /** Chat-level controls in input bar */
   agentName?: string
   agentSource?: string
@@ -287,6 +293,10 @@ function ChatInput({
   voiceRecording = false,
   voiceTranscribing = false,
   onVoiceToggle,
+  voiceError = null,
+  voiceLevel = 0,
+  voiceDeviceLabel = '',
+  onClearVoiceError,
   agentName,
   agentSource,
   modelName,
@@ -1515,6 +1525,8 @@ function ChatInput({
       >
         <FilePreviewStrip files={pendingFiles} onRemove={onRemoveFile} />
 
+        <VoiceStatusBar recording={voiceRecording} level={voiceLevel} deviceLabel={voiceDeviceLabel} error={voiceError} onDismissError={onClearVoiceError} />
+
         {optimizing && <span className="absolute inset-0 flex items-start px-4 pt-3 text-sm text-white font-medium pointer-events-none z-10 bg-black/60 rounded-2xl"><Sparkles size={14} className="inline mr-1 text-yellow-400" /> Optimizing prompt…</span>}
         <div className={`relative ${manualHeight !== null ? 'flex-1 min-h-0 flex flex-col' : ''}`}>
         <PasteHighlightLayer ref={mirrorRef} value={value} blocks={pasteBlocks} />
@@ -1523,7 +1535,7 @@ function ChatInput({
           aria-label="Message input"
           className={`relative w-full bg-transparent border-none ${INPUT_TYPO} text-text outline-none min-h-[44px] max-h-[calc(var(--mc-vh,100vh)*0.5)] placeholder:text-muted resize-none ${manualHeight !== null ? 'flex-1' : ''} ${disabled ? 'opacity-40 pointer-events-none' : ''} ${optimizing ? 'opacity-30' : ''}`}
           style={manualHeight !== null ? { height: '100%' } : undefined}
-          placeholder={disabled ? 'Stopping…' : voiceRecording ? '🎙️ Recording… click mic to stop' : voiceTranscribing ? '⏳ Transcribing, please wait…' : resolvedPlaceholder}
+          placeholder={disabled ? 'Stopping…' : voiceRecording ? 'Recording… click mic to stop' : voiceTranscribing ? 'Transcribing, please wait…' : resolvedPlaceholder}
           readOnly={optimizing}
           rows={1}
           value={value}
@@ -1698,10 +1710,11 @@ function ChatInput({
             {onVoiceToggle && (
               <button
                 className={`w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer transition-all border-none ${
-                  voiceRecording ? 'bg-danger/20 text-danger animate-pulse' : voiceTranscribing ? 'bg-accent/20 text-accent' : 'text-muted hover:text-text hover:bg-bg-hover bg-transparent'
+                  voiceRecording ? 'bg-danger-subtle text-danger animate-pulse' : voiceTranscribing ? 'bg-accent-subtle text-accent' : 'text-muted hover:text-text hover:bg-bg-hover bg-transparent'
                 } disabled:opacity-30`}
                 onClick={onVoiceToggle}
                 disabled={disabled || voiceTranscribing || optimizing}
+                aria-label={voiceRecording ? 'Stop recording' : voiceTranscribing ? 'Transcribing…' : 'Voice input'}
                 title={voiceRecording ? 'Stop recording' : voiceTranscribing ? 'Transcribing…' : 'Voice input'}
               >
                 {voiceTranscribing ? <Loader2 size={18} className="animate-spin" /> : <Mic size={18} />}

@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, X, Hourglass, Package } from 'lucide-react'
 import { SettingsCard, SettingsToggle, SettingsSelect, SettingsInput } from '../../components/settings'
 import { Badge, Btn, FormSkeleton } from '../../components/ui'
 import { api } from '../../api/client'
+import { listMicrophones, getPreferredMicId, setPreferredMicId, micAudioConstraints } from '../../hooks/mic'
 
 interface SttConfig {
   enabled: boolean
@@ -70,6 +71,30 @@ export default function SttSettings() {
   const [err, setErr] = useState('')
   const [localProfile, setLocalProfile] = useState('')
   const [localRegion, setLocalRegion] = useState('')
+
+  // Microphone input-device picker (browser-local; persisted in localStorage,
+  // applied via getUserMedia constraints). Device labels are blank until the
+  // page has been granted mic access at least once.
+  const [mics, setMics] = useState<MediaDeviceInfo[]>([])
+  const [micId, setMicId] = useState(getPreferredMicId())
+  const refreshMics = useCallback(async () => { setMics(await listMicrophones()) }, [])
+  useEffect(() => {
+    refreshMics()
+    const md = navigator.mediaDevices
+    md?.addEventListener?.('devicechange', refreshMics)
+    return () => md?.removeEventListener?.('devicechange', refreshMics)
+  }, [refreshMics])
+  const micsNeedGrant = mics.length > 0 && mics.every(d => !d.label)
+  const grantMicAccess = async () => {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia(micAudioConstraints())
+      s.getTracks().forEach(t => t.stop())
+      refreshMics()
+    } catch {
+      /* permission denied — device names stay hidden */
+    }
+  }
+  const changeMic = (id: string) => { setMicId(id); setPreferredMicId(id) }
 
   const sttQ = useQuery<SttConfig>({
     queryKey: ['sttConfig'],
@@ -148,6 +173,25 @@ export default function SttSettings() {
         <InfoRow label="Status">
           {stt.available ? <Badge variant="ok">ready</Badge> : <Badge variant="warn">not installed</Badge>}
         </InfoRow>
+
+        <SettingsSelect
+          label="Microphone"
+          description="Input device used to capture your voice"
+          value={micId}
+          options={['', ...mics.map(d => d.deviceId)]}
+          optionLabels={['System default', ...mics.map((d, i) => d.label || `Microphone ${i + 1}`)]}
+          onChange={changeMic}
+          disabled={saving}
+        />
+        {micsNeedGrant && (
+          <button
+            type="button"
+            onClick={grantMicAccess}
+            className="-mt-1 mb-1 text-[12px] text-accent hover:underline cursor-pointer bg-transparent border-none p-0 self-start"
+          >
+            Allow microphone access to show device names
+          </button>
+        )}
 
         <SettingsSelect label="Provider" description="Whisper and MLX run locally; Transcribe calls AWS" value={provider} options={providerOptions} optionLabels={providerOptions.map(p => PROVIDER_LABELS[p] || p)} onChange={handleProvider} disabled={saving} />
 

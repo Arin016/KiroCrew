@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { micAudioConstraints, humanizeMicError, createLevelMeter } from './mic'
 
 /**
  * Streaming STT over `/api/ws/stt`.
@@ -23,13 +24,18 @@ interface Opts {
   onPartial: (text: string) => void
   onFinal: (text: string) => void
   onError?: (msg: string) => void
+  /** Live input level in [0,1] for the recording meter. */
+  onLevel?: (v: number) => void
+  /** Active capture device label (e.g. "MacBook Pro Microphone"). */
+  onDevice?: (label: string) => void
 }
 
-export function useStreamingStt ({ onPartial, onFinal, onError }: Opts) {
+export function useStreamingStt ({ onPartial, onFinal, onError, onLevel, onDevice }: Opts) {
   const [recording, setRecording] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const ctxRef = useRef<AudioContext | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
+  const levelStopRef = useRef<(() => void) | null>(null)
   const finalsRef = useRef<string[]>([])
   // Keep callback refs fresh so the long-lived WS handlers (`ws.onmessage`
   // / `ws.onclose`) always invoke the latest caller-supplied callbacks,
@@ -37,17 +43,25 @@ export function useStreamingStt ({ onPartial, onFinal, onError }: Opts) {
   const onPartialRef = useRef(onPartial)
   const onFinalRef = useRef(onFinal)
   const onErrorRef = useRef(onError)
+  const onLevelRef = useRef(onLevel)
+  const onDeviceRef = useRef(onDevice)
   onPartialRef.current = onPartial
   onFinalRef.current = onFinal
   onErrorRef.current = onError
+  onLevelRef.current = onLevel
+  onDeviceRef.current = onDevice
 
   const cleanup = useCallback(() => {
+    try { levelStopRef.current?.() } catch { /* ignore */ }
+    levelStopRef.current = null
     try { wsRef.current?.close() } catch { /* ignore */ }
     wsRef.current = null
     try { streamRef.current?.getTracks().forEach(t => t.stop()) } catch { /* ignore */ }
     streamRef.current = null
     try { ctxRef.current?.close() } catch { /* ignore */ }
     ctxRef.current = null
+    onLevelRef.current?.(0)
+    onDeviceRef.current?.('')
     setRecording(false)
   }, [])
 
@@ -58,12 +72,14 @@ export function useStreamingStt ({ onPartial, onFinal, onError }: Opts) {
     finalsRef.current = []
     let stream: MediaStream
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    } catch {
-      onErrorRef.current?.('microphone access denied')
+      stream = await navigator.mediaDevices.getUserMedia(micAudioConstraints())
+    } catch (e) {
+      onErrorRef.current?.(humanizeMicError(e))
       return
     }
     streamRef.current = stream
+    onDeviceRef.current?.(stream.getAudioTracks()[0]?.label || '')
+    levelStopRef.current = createLevelMeter(stream, v => onLevelRef.current?.(v))
 
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${proto}//${window.location.host}/api/ws/stt`)
