@@ -19,6 +19,7 @@ import { useIsMobile } from '../hooks/useIsMobile'
 import { isScreenSnipSupported } from '../hooks/useScreenSnip'
 import { useImeGuard } from '../hooks/useImeGuard'
 import ContextRing from './ContextRing'
+import PasteHighlightLayer, { INPUT_TYPO } from './PasteHighlightLayer'
 import FollowUpBar from './FollowUpBar'
 import { dispatchLightbox } from './MarkdownRenderer'
 import { IMG_EXT } from '../utils/fileTokens'
@@ -391,6 +392,9 @@ function ChatInput({
 
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const wrapperRef = useRef<HTMLDivElement>(null)
+  // Backdrop mirror that paints chip backgrounds behind paste tokens; its scroll
+  // is kept in lockstep with the textarea (see syncMirrorScroll on the textarea).
+  const mirrorRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   // "+" drop-up menu (upload file / image + browse toggle).
   const [plusOpen, setPlusOpen] = useState(false)
@@ -625,6 +629,16 @@ function ChatInput({
   // Auto-resize textarea to fit content
   useEffect(() => {
     if (inputRef.current && !dragging.current) applyHeight(inputRef.current, manualHeight, prefillHint)
+  }, [value, prefillHint, manualHeight])
+
+  // Keep the paste-highlight mirror's scroll aligned with the textarea after
+  // value/height changes (applyHeight mutates scrollTop programmatically, which
+  // doesn't fire the textarea's onScroll). rAF lets layout settle first.
+  useEffect(() => {
+    const id = requestAnimationFrame(() => {
+      if (mirrorRef.current && inputRef.current) mirrorRef.current.scrollTop = inputRef.current.scrollTop
+    })
+    return () => cancelAnimationFrame(id)
   }, [value, prefillHint, manualHeight])
 
   // Reset manual height when input is cleared (new message sent)
@@ -1461,10 +1475,12 @@ function ChatInput({
         <FilePreviewStrip files={pendingFiles} onRemove={onRemoveFile} />
 
         {optimizing && <span className="absolute inset-0 flex items-start px-4 pt-3 text-sm text-white font-medium pointer-events-none z-10 bg-black/60 rounded-2xl"><Sparkles size={14} className="inline mr-1 text-yellow-400" /> Optimizing prompt…</span>}
+        <div className={`relative ${manualHeight !== null ? 'flex-1 min-h-0 flex flex-col' : ''}`}>
+        <PasteHighlightLayer ref={mirrorRef} value={value} blocks={pasteBlocks} />
         <textarea
           ref={inputRef}
           aria-label="Message input"
-          className={`w-full bg-transparent border-none px-4 pt-3 pb-1 text-text text-sm font-body outline-none min-h-[44px] max-h-[calc(var(--mc-vh,100vh)*0.5)] leading-normal placeholder:text-muted resize-none ${manualHeight !== null ? 'flex-1' : ''} ${disabled ? 'opacity-40 pointer-events-none' : ''} ${optimizing ? 'opacity-30' : ''}`}
+          className={`relative w-full bg-transparent border-none ${INPUT_TYPO} text-text outline-none min-h-[44px] max-h-[calc(var(--mc-vh,100vh)*0.5)] placeholder:text-muted resize-none ${manualHeight !== null ? 'flex-1' : ''} ${disabled ? 'opacity-40 pointer-events-none' : ''} ${optimizing ? 'opacity-30' : ''}`}
           style={manualHeight !== null ? { height: '100%' } : undefined}
           placeholder={disabled ? 'Stopping…' : voiceRecording ? '🎙️ Recording… click mic to stop' : voiceTranscribing ? '⏳ Transcribing, please wait…' : resolvedPlaceholder}
           readOnly={optimizing}
@@ -1498,7 +1514,9 @@ function ChatInput({
           onMouseUp={handleSelectSnap}
           onSelect={handleSelectSnap}
           onInput={handleInput}
+          onScroll={e => { if (mirrorRef.current) mirrorRef.current.scrollTop = e.currentTarget.scrollTop }}
         />
+        </div>
 
         {/* Bottom icon row */}
         <div className="flex items-center justify-between px-2.5 pb-2 pt-0.5">
