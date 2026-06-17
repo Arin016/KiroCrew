@@ -1,0 +1,87 @@
+import { ClipboardList, Anchor, Heart, Bot, Lock, GitBranch, Bell, Clock } from 'lucide-react'
+import type { ReactNode } from 'react'
+
+/**
+ * Shared notification metadata + helpers. Extracted verbatim from the former
+ * inline NotificationsPage so the full page and the topbar bell popover render
+ * notifications through the exact same code (one source of truth for kinds,
+ * filters, formatting, and date grouping).
+ */
+
+export type Kind = 'cron' | 'hook' | 'heartbeat' | 'agent' | 'approval' | 'subagent' | 'taskrunner'
+export type Category = 'all' | Kind
+
+export const KIND_KEYS: Kind[] = ['cron', 'hook', 'heartbeat', 'agent', 'approval', 'subagent', 'taskrunner']
+
+export const CATEGORIES: { key: Category; label: string; icon: ReactNode }[] = [
+  { key: 'all', label: 'All', icon: <ClipboardList className="lucide-inline" /> },
+  { key: 'cron', label: 'Cron', icon: <Clock className="lucide-inline" /> },
+  { key: 'hook', label: 'Hooks', icon: <Anchor className="lucide-inline" /> },
+  { key: 'heartbeat', label: 'Heartbeat', icon: <Heart className="lucide-inline" /> },
+  { key: 'agent', label: 'Agent', icon: <Bot className="lucide-inline" /> },
+  { key: 'approval', label: 'Approval', icon: <Lock className="lucide-inline" /> },
+  { key: 'subagent', label: 'Subagent', icon: <GitBranch className="lucide-inline" /> },
+  { key: 'taskrunner', label: 'Tasks', icon: <ClipboardList className="lucide-inline" /> },
+]
+
+export const KINDS_STORAGE_KEY = 'mc:notif:activeKinds'
+
+export function loadActiveKinds(): Set<Kind> {
+  try {
+    const raw = localStorage.getItem(KINDS_STORAGE_KEY)
+    if (raw) {
+      const arr = JSON.parse(raw)
+      if (Array.isArray(arr)) {
+        const valid = arr.filter((k: unknown): k is Kind => typeof k === 'string' && (KIND_KEYS as string[]).includes(k))
+        return new Set(valid)
+      }
+    }
+  } catch { /* fall through to default */ }
+  return new Set(KIND_KEYS)
+}
+
+export function parseTs(ts: string): Date {
+  let d = new Date(ts)
+  if (isNaN(d.getTime())) {
+    const epoch = parseFloat(ts)
+    if (!isNaN(epoch)) d = new Date(epoch * 1000)
+  }
+  if (isNaN(d.getTime()) || d.getTime() < Date.UTC(2020, 0, 1)) return new Date(NaN)
+  return d
+}
+
+export function dateGroup(d: Date): string {
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const yesterday = new Date(today.getTime() - 86400000)
+  const weekAgo = new Date(today.getTime() - 6 * 86400000)
+  if (d >= today) return 'Today'
+  if (d >= yesterday) return 'Yesterday'
+  if (d >= weekAgo) return 'This Week'
+  return d.toLocaleDateString([], { year: 'numeric', month: 'short' })
+}
+
+export const KIND_META: Record<string, { icon: ReactNode; color: string; label: string; borderColor: string }> = {
+  cron:       { icon: <Clock className="lucide-inline" />, color: 'bg-accent/15 text-accent',  label: 'Cron Job',   borderColor: 'border-l-accent' },
+  hook:       { icon: <Anchor className="lucide-inline" />, color: 'bg-info/15 text-info',      label: 'Webhook',    borderColor: 'border-l-info' },
+  heartbeat:  { icon: <Heart className="lucide-inline" />, color: 'bg-ok/15 text-ok',          label: 'Heartbeat',  borderColor: 'border-l-ok' },
+  agent:      { icon: <Bot className="lucide-inline" />, color: 'bg-info/15 text-info',      label: 'Agent',      borderColor: 'border-l-info' },
+  approval:   { icon: <Lock className="lucide-inline" />, color: 'bg-warn/15 text-warn',      label: 'Approval',   borderColor: 'border-l-warn' },
+  subagent:   { icon: <GitBranch className="lucide-inline" />, color: 'bg-accent/15 text-accent',  label: 'Subagent',   borderColor: 'border-l-accent' },
+  taskrunner: { icon: <ClipboardList className="lucide-inline" />, color: 'bg-accent/15 text-accent',  label: 'Task Runner', borderColor: 'border-l-accent' },
+}
+export const DEFAULT_META = { icon: <Bell className="lucide-inline" />, color: 'bg-muted/15 text-muted', label: 'Notification', borderColor: 'border-l-muted' }
+
+export function fmtTime(ts: string): string {
+  const d = parseTs(ts)
+  return isNaN(d.getTime()) ? 'Unknown date' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+export function fmtFull(ts: string): string {
+  const d = parseTs(ts)
+  return isNaN(d.getTime()) ? 'Unknown date' : d.toLocaleString()
+}
+
+export function stripMd(text: string): string {
+  return text.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/[*_~`#>]+/g, '').replace(/\n+/g, ' ').trim()
+}

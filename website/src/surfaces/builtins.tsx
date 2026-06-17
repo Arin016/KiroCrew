@@ -41,6 +41,10 @@ registerBuiltinSurface({
   // Non-slot: count comes from the notifications panel.
   unreadSelector: selectUnacknowledgedNotificationCount,
   badgeLabel: 'notifications',
+  // Surfaced as the topbar bell (App.tsx NotificationsBellButton), not a rail
+  // item. Route + badge + tab-title attention count stay wired via the
+  // selectors above; only the left-rail entry is suppressed.
+  hiddenFromNav: true,
 })
 
 registerBuiltinSurface({

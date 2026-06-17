@@ -9,7 +9,7 @@ import { fetchSlots, sseStatus, setUpdateProgress, setEnabledAppIds, changeAppro
 import './surfaces/builtins'
 import { getBuiltinSurfaces, getBuiltinSurface, selectSurfaceBadgeCount, selectAllSurfacesAttention } from './surfaces/registry'
 import { createSlot, appendMessage, setSlotRunning } from './store/chatSlice'
-import { fetchNotifications } from './store/notificationsSlice'
+import { fetchNotifications, ackNotification } from './store/notificationsSlice'
 import { useWebSocket } from './hooks/useWebSocket'
 import { useTheme } from './hooks/useTheme'
 import { useBranding } from './hooks/useBranding'
@@ -17,16 +17,18 @@ import { useRumPageView } from './hooks/useRumPageView'
 import { useIsMobile } from './hooks/useIsMobile'
 import { useNativeNotification } from './hooks/useNativeNotification'
 import { useNotificationSound } from './hooks/useNotificationSound'
-import { recordSessionStart } from './rum'
+import { recordSessionStart, recordEvent } from './rum'
 import { ZoomProvider } from './hooks/ZoomProvider'
 import { api } from './api/client'
-import { Rocket, Menu, Users, BookOpen, BookOpenText, MessageSquareDot, Settings, Code, RefreshCw, Palette, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, Sparkles, X, Inbox, Gamepad2, KanbanSquare, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain, FolderTree, ChevronUp, MoreHorizontal } from 'lucide-react'
+import { Rocket, Menu, Bell, Users, BookOpen, BookOpenText, MessageSquareDot, Settings, Code, RefreshCw, Palette, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, Sparkles, X, Inbox, Gamepad2, KanbanSquare, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain, FolderTree, ChevronUp, MoreHorizontal } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ChatPage from './pages/ChatPage'
 import OrchestratedChatPage from './pages/OrchestratedChatPage'
 import ErrorBoundary from './components/ErrorBoundary'
 import MarkdownRenderer, { Lightbox } from './components/MarkdownRenderer'
 import NotificationsPage from './pages/NotificationsPage'
+import NotificationDetailPanel from './components/notifications/NotificationDetailPanel'
+import NotificationFeed from './components/notifications/NotificationFeed'
 import KiroClawAgentsPage from './pages/KiroClawAgentsPage'
 import ProjectsPage from './pages/ProjectsPage'
 import LogsPage from './pages/LogsPage'
@@ -402,6 +404,144 @@ function NavToggle({ collapsed, expanded, hiddenCount, onClick }: {
 
 function TasksRedirect() { const { search } = useLocation(); return <Navigate to={'/projects' + search} replace /> }
 function ChatRedirect() { const { search } = useLocation(); return <Navigate to={'/chat' + search} replace /> }
+
+/**
+ * Topbar Notifications bell. Replaces the former left-rail Notifications item
+ * (the surface is now `hiddenFromNav`). Click opens an Activity Feed popover
+ * (portaled to <body> to escape the topbar's backdrop-filter containing
+ * block); clicking an item slides out a detail panel. The full page is
+ * preserved at /notifications via the popover's "Open inbox" link.
+ */
+function NotificationsBellButton() {
+  const navigate = useNavigate()
+  const location = useLocation()
+  const dispatch = useAppDispatch()
+  const items = useAppSelector(s => s.notifications.items)
+  const isMobile = useIsMobile()
+  const [open, setOpen] = useState(false)
+  const [selectedTs, setSelectedTs] = useState<string | null>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
+  const unacked = items.filter(n => !n.acked)
+  const selected = selectedTs ? items.find(n => n.ts === selectedTs) || null : null
+
+  // Close popover when navigating (e.g. detail panel's "Go to Chat" buttons)
+  const lastPathRef = useRef(location.pathname)
+  useEffect(() => {
+    if (location.pathname !== lastPathRef.current) {
+      lastPathRef.current = location.pathname
+      if (open) { setOpen(false); setSelectedTs(null) }
+    }
+  }, [location.pathname, open])
+
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null
+      if (!target) return
+      const inButton = containerRef.current?.contains(target) ?? false
+      const inPopover = popoverRef.current?.contains(target) ?? false
+      if (!inButton && !inPopover) {
+        setOpen(false); setSelectedTs(null)
+      }
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (selectedTs) setSelectedTs(null)
+        else setOpen(false)
+      }
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('pointerdown', onPointerDown); document.removeEventListener('keydown', onKey) }
+  }, [open, selectedTs])
+
+  // Auto-mark-read when opening a notification's detail
+  useEffect(() => {
+    if (selected && !selected.acked) dispatch(ackNotification(selected.ts))
+  }, [selected, dispatch])
+
+  return (
+    <div ref={containerRef} className="relative">
+      <button
+        className={`top-bar-pill bg-card relative !gap-0 ${open ? 'text-accent' : ''}`}
+        onClick={() => {
+          setOpen(o => {
+            if (!o) recordEvent('notifications_open', { source: 'topbar' })
+            return !o
+          })
+          setSelectedTs(null)
+        }}
+        title={unacked.length > 0 ? `${unacked.length} notification${unacked.length === 1 ? '' : 's'}` : 'Notifications'}
+        aria-label="Notifications"
+        aria-expanded={open}
+      >
+        <Bell size={13} />
+        <span className="w-0 overflow-hidden">{'\u200B'}</span>
+        {unacked.length > 0 && (
+          <span className="absolute -top-1 -right-1 min-w-[16px] h-[16px] px-1 rounded-full bg-accent text-accent-fg text-[10px] font-bold flex items-center justify-center shadow-[0_0_8px_var(--accent-glow)] animate-dot-breathe" aria-hidden="true">
+            {unacked.length > 99 ? '99+' : unacked.length}
+          </span>
+        )}
+      </button>
+      {open && createPortal(
+        <div
+          ref={popoverRef}
+          className="fixed z-[60] pointer-events-none"
+          style={isMobile ? { top: 60, bottom: 12, left: 8, right: 8 } : { top: 60, bottom: 12, right: 8, left: 12 }}
+        >
+          <ErrorBoundary
+            scope="notifications-bell"
+            fallback={
+              <div className={`absolute top-0 right-0 pointer-events-auto ${isMobile ? 'left-0' : 'w-[400px]'} glass-surface glass-static rounded-xl shadow-xl flex flex-col items-center justify-center gap-2 p-6 text-center`} style={{ maxHeight: 240 }}>
+                <AlertTriangle size={20} className="text-warn" />
+                <div className="text-[13px] font-semibold text-text-strong">Notifications failed to load</div>
+                <button className="text-[12px] text-accent hover:text-accent-hover bg-transparent border-none cursor-pointer" onClick={() => { setOpen(false); navigate('/notifications') }}>Open the full inbox</button>
+              </div>
+            }
+          >
+          {/* Feed — anchored right, fixed width on desktop, full-width on mobile */}
+          <div
+            className={`absolute top-0 bottom-0 right-0 pointer-events-auto ${isMobile ? 'left-0' : 'w-[400px]'} glass-surface glass-static rounded-xl shadow-xl flex flex-col overflow-hidden`}
+          >
+            <div className="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
+              <span className="text-[13px] font-semibold text-text-strong">Activity Feed</span>
+            </div>
+            <div className="flex-1 min-h-0 px-3 py-2">
+              <NotificationFeed
+                selectedTs={selectedTs}
+                onSelect={n => setSelectedTs(n.ts)}
+              />
+            </div>
+            <div className="px-3 py-2 border-t border-border shrink-0">
+              <button
+                className="w-full text-[13px] text-accent hover:text-accent-hover bg-transparent border-none cursor-pointer text-center py-1"
+                onClick={() => { setOpen(false); navigate('/notifications') }}
+              >
+                Open inbox
+              </button>
+            </div>
+          </div>
+          {/* Detail panel — overlays feed on mobile, sits beside it on desktop.
+              Rendered plainly (no AnimatePresence): an exit animation here races
+              the portal teardown when the popover closes and throws removeChild. */}
+          {selected && (
+            <div
+              className={`absolute top-0 bottom-0 pointer-events-auto ${isMobile ? 'left-0 right-0' : 'left-0 right-[408px]'} bg-card border border-border rounded-xl shadow-xl overflow-hidden`}
+            >
+              <NotificationDetailPanel
+                n={selected}
+                onClose={() => setSelectedTs(null)}
+              />
+            </div>
+          )}
+          </ErrorBoundary>
+        </div>,
+        document.body
+      )}
+    </div>
+  )
+}
 
 export default function App() {
   const location = useLocation()
@@ -859,6 +999,7 @@ export default function App() {
           {!isMobile && <button className="top-bar-pill bg-transparent text-[12px]" onClick={requestFeature}>Request a Feature</button>}
           <span className={`w-1.5 h-1.5 rounded-full shrink-0 transition-colors duration-300 ${connected ? 'bg-ok shadow-[0_0_8px_rgba(34,197,94,.4)]' : 'bg-danger'}`} />
           {!connected && <span className="text-[11px] text-danger font-medium">Offline</span>}
+          <NotificationsBellButton />
           {!isMobile && (() => {
             if (!metricsOpen) return <button className="top-bar-pill bg-card text-muted hover:text-text !gap-0" onClick={() => { setMetricsOpen(true); localStorage.setItem('mc-topbar-metrics', '1') }} title="System metrics" aria-label="System metrics"><Activity size={13} /><span className="w-0 overflow-hidden">{'\u200B'}</span></button>
             const m = sysMetrics; if (!m) return sysMetricsError ? (<button className="top-bar-pill bg-card text-danger flex items-center gap-1 text-[11px] cursor-pointer" title="Click to hide" onClick={() => { setMetricsOpen(false); localStorage.setItem('mc-topbar-metrics', '0') }}><Activity size={11} /> metrics unavailable</button>) : null

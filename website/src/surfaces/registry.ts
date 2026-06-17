@@ -92,6 +92,16 @@ export interface Surface {
    * manifest UI page but need a Redux-backed badge.
    */
   appOnly?: boolean
+  /**
+   * Hide this surface from the left nav rail while keeping its route, badge
+   * selector, and attention-count contribution intact. Unlike `appOnly`
+   * (which gates the attention sum on `enabledAppIds` membership), a
+   * `hiddenFromNav` surface still contributes to `selectAllSurfacesAttention`
+   * (browser-tab count) and `selectSurfaceBadgeCount` — only its rail item is
+   * suppressed because it's surfaced elsewhere (the topbar Notifications
+   * bell). The route stays registered in `App.tsx`'s `<Routes>`.
+   */
+  hiddenFromNav?: boolean
 }
 
 const _builtins: Surface[] = []
@@ -132,7 +142,7 @@ export function registerBuiltinSurface(s: Surface): void {
  * which iterate `_builtins` directly.
  */
 export function getBuiltinSurfaces(): readonly Surface[] {
-  return _builtins.filter(s => !s.appOnly)
+  return _builtins.filter(s => !s.appOnly && !s.hiddenFromNav)
 }
 
 /** Look up a built-in surface by navId. Returns `undefined` for app-only ids. */
