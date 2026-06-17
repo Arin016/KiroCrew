@@ -350,6 +350,20 @@ class TestHandleMessage:
         )
         assert "auth expired" in all_text or "error" in all_text.lower()
 
+    @pytest.mark.asyncio
+    async def test_session_create_failure_does_not_raise_unbound_client(self):
+        class _FailingSessions(FakeSessionManager):
+            async def get_or_create(self, key, agent=None, channel_id=None):
+                raise ConnectionResetError("Connection lost")
+
+        slack = MockSlackClient()
+        await handle_message(slack, _FailingSessions(), "C1", "hi", None, "msg1", "U1")
+        all_text = " ".join(
+            a[1].get("text", "") for a in slack.actions
+            if a[0] in ("post", "stop_stream", "update")
+        )
+        assert "went wrong" in all_text.lower() or "🔧" in all_text
+
 
 class TestHookIntegration:
     @pytest.mark.asyncio

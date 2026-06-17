@@ -2506,6 +2506,7 @@ async def handle_message(
         )
         session_key = linked_session_key
 
+    client: LLMProvider | None = None
     try:
         task.start()
         _agent = _thread_agents.get(session_key) or channel_agent or _get_default_agent() or None
