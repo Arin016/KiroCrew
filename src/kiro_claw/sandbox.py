@@ -655,6 +655,6 @@ def wrap_argv(argv: list[str], mode: str = "auto") -> tuple[list[str], str | Non
 
     if backend == "none":
         if not getattr(wrap_argv, "_warned", False):
-            logger.warning("No OS-level sandbox available — app-level checks only")
+            logger.info("No OS-level sandbox available — using app-level checks only")
             wrap_argv._warned = True  # type: ignore[attr-defined]
     return argv, None

@@ -357,3 +357,19 @@ class TestResolveRealKiroBin:
         with patch("subprocess.run", return_value=MagicMock(stdout=b"")):
             result = _resolve_real_kiro_bin("/usr/local/bin/kiro-cli")
         assert result == "/usr/local/bin/kiro-cli"
+
+
+class TestSandboxNoWarningWhenExpected:
+    """Mesh-2054: no WARNING for expected no-sandbox states."""
+
+    @patch("kiro_claw.sandbox.detect_backend", return_value="none")
+    def test_no_sandbox_logs_info_not_warning(self, mock_detect, caplog):
+        import logging
+        if hasattr(wrap_argv, "_warned"):
+            del wrap_argv._warned  # type: ignore[attr-defined]
+        with caplog.at_level(logging.DEBUG, logger="kiro_claw.sandbox"):
+            wrap_argv(["kiro-cli", "acp"], mode="auto")
+        warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
+        info_msgs = [r for r in caplog.records if r.levelno == logging.INFO and "sandbox" in r.message.lower()]
+        assert not warning_msgs, f"Expected no WARNING but got: {warning_msgs}"
+        assert info_msgs, "Expected INFO about no OS-level sandbox"
