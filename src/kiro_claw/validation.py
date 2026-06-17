@@ -657,6 +657,29 @@ LOCAL_KNOWLEDGE_SEARCH_SCHEMA = ToolSchema(
     ],
 )
 
+# ISO calendar date (YYYY-MM-DD) for the chat-history date filters.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+SEARCH_CHAT_HISTORY_SCHEMA = ToolSchema(
+    tool_name="search_chat_history",
+    fields=[
+        FieldSpec("query", str, required=True, max_len=500),
+        FieldSpec("limit", int, required=False, min_val=1, max_val=50, default=10),
+        FieldSpec("before", str, required=False, max_len=10, pattern=_ISO_DATE_RE),
+        FieldSpec("after", str, required=False, max_len=10, pattern=_ISO_DATE_RE),
+        FieldSpec("all_workspaces", bool, required=False, default=False),
+    ],
+)
+
+GET_CHAT_SESSION_SCHEMA = ToolSchema(
+    tool_name="get_chat_session",
+    fields=[
+        FieldSpec("session_key", str, required=True, max_len=MAX_SHORT_STRING),
+        FieldSpec("max_messages", int, required=False, min_val=1, max_val=200, default=50),
+        FieldSpec("all_workspaces", bool, required=False, default=False),
+    ],
+)
+
 # ── Schema Registry ──
 
 MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
@@ -674,6 +697,8 @@ MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
     "file_send": FILE_SEND_SCHEMA,
     "autonudge_stop": AUTONUDGE_STOP_SCHEMA,
     "local_knowledge_search": LOCAL_KNOWLEDGE_SEARCH_SCHEMA,
+    "search_chat_history": SEARCH_CHAT_HISTORY_SCHEMA,
+    "get_chat_session": GET_CHAT_SESSION_SCHEMA,
     "taskkeeper_complete": TASKKEEPER_COMPLETE_SCHEMA,
     "artifact_save": ARTIFACT_SAVE_SCHEMA,
     "artifact_get": ARTIFACT_GET_SCHEMA,

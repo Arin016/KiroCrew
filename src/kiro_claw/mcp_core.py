@@ -34,6 +34,7 @@ try:
     import fcntl  # POSIX-only; not available on Windows.
 except ImportError:  # pragma: no cover — guard for non-POSIX systems.
     fcntl = None  # type: ignore[assignment]
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlparse
@@ -41,6 +42,7 @@ from urllib.parse import urlencode, urlparse
 from kiro_claw.aim_agents import list_agents
 from kiro_claw.config.loader import KiroClawConfig, config_dir, outbox_dir
 from kiro_claw.dashboard.origin import parse_dashboard_url
+from kiro_claw.history import ConversationLog
 from kiro_claw.hooks import FileTooLargeError, safe_read_file_bytes
 from kiro_claw.knowledge.embedder import create_embedder_from_config
 from kiro_claw.knowledge.retrieval import HybridRetriever
@@ -64,11 +66,13 @@ from kiro_claw.validation import (
     ARTIFACT_VERSIONS_SCHEMA,
     AUTONUDGE_STOP_SCHEMA,
     CHANNEL_ID_RE,
+    GET_CHAT_SESSION_SCHEMA,
     LOCAL_KNOWLEDGE_SEARCH_SCHEMA,
     MAX_MEDIUM_STRING,
     MAX_SHORT_STRING,
     MCP_CORE_SCHEMAS,
     REGISTER_HOOK_SCHEMA,
+    SEARCH_CHAT_HISTORY_SCHEMA,
     SPAWN_RUN_SCHEMA,
     SPAWN_SUB_AGENTS_SCHEMA,
     TASK_RUN_SCHEMA,
@@ -788,6 +792,81 @@ def _list_tools() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "search_chat_history",
+            "description": (
+                "Search your own past conversation transcripts (chat history) by "
+                "keyword and get back ranked, snippet-level hits. Use this to "
+                "recover context that is NOT in your injected memory — e.g. 'what "
+                "did we decide about X three weeks ago', 'the error message from "
+                "that debugging session', a name/number/path mentioned earlier. "
+                "Search like a human: try a query, read the snippets, then re-search "
+                "with different keywords if the first hit isn't right. Returns "
+                "metadata + a short snippet per session (NOT full transcripts) — "
+                "call get_chat_session with a returned session_key to read the full "
+                "thread once a hit looks promising. Scoped to your current workspace "
+                "by default. This is a READ — it never modifies memory or history."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Keyword(s) to search for in past conversations.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results to return (default 10, max 50).",
+                        "default": 10,
+                    },
+                    "before": {
+                        "type": "string",
+                        "description": "Optional ISO date (YYYY-MM-DD); only sessions modified before this day.",
+                    },
+                    "after": {
+                        "type": "string",
+                        "description": "Optional ISO date (YYYY-MM-DD); only sessions modified on/after this day.",
+                    },
+                    "all_workspaces": {
+                        "type": "boolean",
+                        "description": "Search across all workspaces instead of just the current one (default false).",
+                        "default": False,
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+        {
+            "name": "get_chat_session",
+            "description": (
+                "Read the full message transcript of one past conversation, "
+                "identified by a session_key returned from search_chat_history. "
+                "Returns the messages as role/content pairs, tail-capped at "
+                "max_messages. Use after search_chat_history when a snippet hit "
+                "looks like the thread you need. Refuses incognito/temporary "
+                "sessions. This is a READ — it never modifies memory or history."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_key": {
+                        "type": "string",
+                        "description": "The session_key from a search_chat_history result.",
+                    },
+                    "max_messages": {
+                        "type": "integer",
+                        "description": "Max (most recent) messages to return (default 50, max 200).",
+                        "default": 50,
+                    },
+                    "all_workspaces": {
+                        "type": "boolean",
+                        "description": "Allow reading a session from a different workspace than the caller's (default false — deny cross-workspace).",
+                        "default": False,
+                    },
+                },
+                "required": ["session_key"],
+            },
+        },
+        {
             "name": "browse_outline",
             "description": (
                 "Compress a browser snapshot into a compact outline with element refs. "
@@ -1089,6 +1168,73 @@ def _call_tool(name: str, raw_args: dict[str, Any]) -> str:
         session_key="mcp_core",
         downstream_service="kiroclaw-core",
     )
+
+
+# ── Chat-history search helpers (Phase 1: search_chat_history / get_chat_session) ──
+
+_HISTORY_INCOGNITO_MODES = frozenset({"incognito", "temporary"})
+_SNIPPET_RADIUS = 120  # chars of context kept on each side of a match
+_SNIPPET_MAX_LEN = 320  # hard cap on a returned snippet
+
+
+def _history_is_incognito(meta: dict) -> bool:
+    """True if a session's memory_mode marks it private (never searchable)."""
+    return str(meta.get("memory_mode", "")).lower() in _HISTORY_INCOGNITO_MODES
+
+
+def _redact_history_output(text: str) -> str:
+    """Apply the standard dual redaction to any chat-history tool output.
+
+    Used on EVERY return path (including early-return error strings that echo an
+    LLM-supplied session_key) so nothing reaches the dashboard unredacted.
+    """
+    text, _ = redact_exfiltration_urls(text)
+    text, _ = redact_credentials(text)
+    return text
+
+
+def _parse_iso_date_epoch(date_str: str) -> float | None:
+    """Parse a YYYY-MM-DD string to a UTC midnight epoch. None on bad input."""
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _extract_history_snippet(messages: list[dict], needle: str) -> str:
+    """Return a bounded snippet around the first message matching *needle*.
+
+    The matched substring is delimited with ``<<<...>>>``. Returns "" when no
+    message content contains the needle (e.g. it only matched the title).
+    """
+    # Defense-in-depth: an empty/whitespace needle makes str.find return 0 on
+    # every message and would wrap meaningless text in <<<>>>. The query is
+    # already validated non-empty upstream, but guard here too since this helper
+    # is independently callable.
+    if not needle.strip():
+        return ""
+    needle_cf = needle.casefold()
+    for m in messages:
+        content = m.get("content")
+        if not isinstance(content, str) or not content:
+            continue
+        idx = content.casefold().find(needle_cf)
+        if idx < 0:
+            continue
+        start = max(0, idx - _SNIPPET_RADIUS)
+        end = min(len(content), idx + len(needle) + _SNIPPET_RADIUS)
+        seg = content[start:end]
+        rel = seg.casefold().find(needle_cf)
+        if rel >= 0:
+            seg = seg[:rel] + "<<<" + seg[rel : rel + len(needle)] + ">>>" + seg[rel + len(needle) :]
+        seg = ("…" if start > 0 else "") + seg + ("…" if end < len(content) else "")
+        result = seg[:_SNIPPET_MAX_LEN]
+        # If the hard cap sliced through the match delimiters (possible with a
+        # long query), re-close so the consumer never sees a dangling "<<<".
+        if "<<<" in result and ">>>" not in result:
+            result = result[: _SNIPPET_MAX_LEN - 3] + ">>>"
+        return result
+    return ""
 
 
 def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
@@ -2090,6 +2236,164 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             + (f" (reason: {reason})" if reason else "")
             + ". No further nudges will fire."
         )
+
+    if name == "search_chat_history":
+        args = validate_tool_args(args, SEARCH_CHAT_HISTORY_SCHEMA)
+        query = args["query"]
+        limit = args.get("limit", 10)
+        all_workspaces = args.get("all_workspaces", False)
+        after_epoch = _parse_iso_date_epoch(args["after"]) if args.get("after") else None
+        before_epoch = _parse_iso_date_epoch(args["before"]) if args.get("before") else None
+
+        cl = ConversationLog()
+        session_key = _resolve_session_key()
+
+        # Default scoping: confine results to the caller's workspace. Sessions
+        # with no workspace recorded (legacy, or an unresolved caller) are
+        # bucketed as "default" on BOTH sides of the comparison, so an
+        # unresolvable caller scopes to the default bucket rather than
+        # fail-open-ing to every workspace's history. all_workspaces opts out.
+        current_ws: str | None = None
+        if not all_workspaces:
+            current_ws = (cl.get_metadata(session_key).get("workspace") if session_key else None) or "default"
+
+        # Over-fetch from the ranked backend so post-filtering (incognito,
+        # workspace, date) can drop rows without starving the limit. (Named
+        # `ranked`, not `raw`: `raw` is bound as bytes|None elsewhere in this
+        # function and mypy unifies a function's locals.)
+        ranked: list[dict] = cl.search_sessions(query, limit=limit * 3)
+
+        results: list[dict] = []
+        for meta in ranked:
+            key = meta.get("key", "")
+            if not key:
+                continue
+            # Authoritative metadata (list meta omits workspace and may carry a
+            # default memory_mode) — one bounded read per candidate.
+            full_meta = cl.get_metadata(key)
+            if _history_is_incognito(full_meta) or _history_is_incognito(meta):
+                continue  # EB-5: incognito/temporary never surface
+            if current_ws is not None and (full_meta.get("workspace") or "default") != current_ws:
+                continue  # EB-cc3: workspace scoping (fail-closed via "default" bucket)
+            modified = meta.get("modified", 0) or 0
+            if after_epoch is not None and modified < after_epoch:
+                continue
+            if before_epoch is not None and modified >= before_epoch:
+                continue
+
+            snippet = _extract_history_snippet(cl.read_messages(key), query)
+            results.append(
+                {
+                    "session_key": key,
+                    "title": meta.get("title") or key,
+                    "date": meta.get("created") or "",
+                    "snippet": snippet,
+                }
+            )
+            if len(results) >= limit:
+                break
+
+        if not results:
+            sel().log_tool_invocation(
+                session_key=session_key, source="mcp",
+                tool_name="search_chat_history", outcome="no_results",
+                metadata={"query_len": len(query)},
+            )
+            return "No matching conversations found. Try different keywords."
+
+        lines = [
+            "\U0001f50e Chat history matches "
+            "(snippets only — use get_chat_session to read a full thread):"
+        ]
+        for r in results:
+            lines.append("\n---")
+            lines.append(f"**{r['title']}**  ·  `{r['session_key']}`")
+            if r["date"]:
+                lines.append(f"_{r['date']}_")
+            if r["snippet"]:
+                lines.append(f"\n{r['snippet']}")
+
+        output = "\n".join(lines)
+        # EB-6: redact secrets/exfil URLs from snippets before returning.
+        output = _redact_history_output(output)
+        sel().log_tool_invocation(
+            session_key=session_key, source="mcp",
+            tool_name="search_chat_history", outcome="success",
+            metadata={"query_len": len(query), "result_count": len(results)},
+        )
+        return output
+
+    if name == "get_chat_session":
+        args = validate_tool_args(args, GET_CHAT_SESSION_SCHEMA)
+        key = args["session_key"]
+        max_messages = args.get("max_messages", 50)
+        all_workspaces = args.get("all_workspaces", False)
+
+        # Defense-in-depth on a path-bearing identifier: ConversationLog._safe_key
+        # already neutralizes separators, but reject traversal markers outright
+        # here so a crafted key can never probe outside the sessions dir. (A
+        # strict allowlist regex is avoided: real keys legitimately contain ':'
+        # and '.', e.g. Slack thread_ts and "dashboard:chat-…".)
+        if "/" in key or "\\" in key or ".." in key:
+            sel().log_tool_invocation(
+                session_key=_resolve_session_key(), source="mcp",
+                tool_name="get_chat_session", outcome="rejected_bad_key",
+            )
+            return "Invalid session_key."
+
+        cl = ConversationLog()
+        if not cl.has_log(key):
+            sel().log_tool_invocation(
+                session_key=_resolve_session_key(), source="mcp",
+                tool_name="get_chat_session", outcome="not_found",
+            )
+            return _redact_history_output(f"No conversation found for session_key `{key}`.")
+
+        meta = cl.get_metadata(key)
+        if _history_is_incognito(meta):
+            # EB-7b: no bypass of incognito exclusion via direct fetch.
+            sel().log_tool_invocation(
+                session_key=_resolve_session_key(), source="mcp",
+                tool_name="get_chat_session", outcome="refused_incognito",
+            )
+            return "That conversation is private (incognito/temporary) and cannot be read."
+
+        # Deny-by-default workspace isolation: mirror search_chat_history's
+        # fail-closed scoping so a caller can't bypass it by fetching a session
+        # from another workspace directly. Unset workspaces bucket as "default".
+        if not all_workspaces:
+            caller_key = _resolve_session_key()
+            caller_ws = (cl.get_metadata(caller_key).get("workspace") if caller_key else None) or "default"
+            target_ws = meta.get("workspace") or "default"
+            if caller_ws != target_ws:
+                sel().log_tool_invocation(
+                    session_key=caller_key, source="mcp",
+                    tool_name="get_chat_session", outcome="denied_cross_workspace",
+                )
+                return "Access denied: that conversation belongs to a different workspace."
+
+        messages = cl.recent(key, max_messages=max_messages, roles={"user", "assistant"})
+        if not messages:
+            sel().log_tool_invocation(
+                session_key=_resolve_session_key(), source="mcp",
+                tool_name="get_chat_session", outcome="empty",
+            )
+            return _redact_history_output(f"Conversation `{key}` has no readable messages.")
+
+        title = meta.get("title") or key
+        lines = [f"\U0001f4dc Conversation: **{title}**  ·  `{key}`", ""]
+        for m in messages:
+            role = str(m.get("role", "?")).title()
+            lines.append(f"**{role}:** {m.get('content', '')}")
+            lines.append("")
+
+        output = _redact_history_output("\n".join(lines))
+        sel().log_tool_invocation(
+            session_key=_resolve_session_key(), source="mcp",
+            tool_name="get_chat_session", outcome="success",
+            metadata={"message_count": len(messages)},
+        )
+        return output
 
     if name == "local_knowledge_search":
         args = validate_tool_args(args, LOCAL_KNOWLEDGE_SEARCH_SCHEMA)
