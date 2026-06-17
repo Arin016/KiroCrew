@@ -27,7 +27,12 @@
     "introspect",
     "session",
     "report",
-    "@kiroclaw-cron",
+    "@kiroclaw-cron/cron_list",
+    "@kiroclaw-cron/cron_pause",
+    "@kiroclaw-cron/cron_resume",
+    "@kiroclaw-cron/cron_trigger",
+    "@kiroclaw-cron/cron_remove",
+    "@kiroclaw-cron/cron_remove_all",
     "@kiroclaw-core"
   ],
   "resources": [

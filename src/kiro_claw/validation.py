@@ -503,6 +503,16 @@ CRON_ADD_SCHEMA = ToolSchema(
         FieldSpec("timezone", str, max_len=50, pattern=re.compile(r"^[A-Za-z0-9_/+-]+$")),
         FieldSpec("persistent_session", bool),
         FieldSpec("strict_schedule", bool),
+        # SECURITY NOTE: the patterns below are input-SHAPE checks, NOT security
+        # sanitizers. The "command" regex only rejects control bytes and the
+        # "script" regex only enforces a path:func shape — neither makes the
+        # value safe to execute. The enforced security boundary for the
+        # model-supplied cron command/script lives elsewhere (finding P454794507):
+        #   1. storage-time deny-list  -> mcp_cron._vet_shell_command / _vet_script_file
+        #   2. exec-time OS sandbox     -> cron_script.run_command_sandboxed (mode="cc")
+        #                                  + _clean_cron_env() env scrubbing
+        # Do not treat these regexes as the guard, and do not relax them assuming
+        # downstream code re-validates the value as safe.
         FieldSpec("script", str, max_len=200, pattern=re.compile(r"^[a-zA-Z0-9_.~/-]+:[a-zA-Z_][a-zA-Z0-9_]*$")),
         FieldSpec("command", str, max_len=5000, pattern=re.compile(r"^[^\x00-\x1f\x7f]*$")),
         FieldSpec("timeout", int, min_val=0, max_val=3600),

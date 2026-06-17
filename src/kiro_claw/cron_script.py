@@ -33,9 +33,23 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kiro_claw.config.loader import read_local_secret
-from kiro_claw.sandbox import wrap_argv
+from kiro_claw.sandbox import _AGENT_DENIED_ENV_KEYS, wrap_argv
 from kiro_claw.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
+
+# Env vars stripped from EVERY cron subprocess (command and script), regardless
+# of OS sandbox mode. The OS sandbox can fall back to backend "none" (e.g.
+# macOS >= 26, see sandbox._probe_sandbox_exec), so env scrubbing is the only
+# guaranteed control on those hosts. _AGENT_DENIED_ENV_KEYS = Slack tokens +
+# KIROCLAW_OWNER_ID; KIROCLAW_INTERNAL_SECRET is handed to scripts via a 0600
+# temp file instead of the env. (Finding P454794507, defense-in-depth item 4.)
+_CRON_ENV_DENY: frozenset[str] = frozenset({"KIROCLAW_INTERNAL_SECRET", *_AGENT_DENIED_ENV_KEYS})
+
+
+def _clean_cron_env() -> dict[str, str]:
+    """Return os.environ minus the cron env-deny set (secrets never inherited)."""
+    return {k: v for k, v in os.environ.items() if k not in _CRON_ENV_DENY}
+
 
 if TYPE_CHECKING:
     from kiro_claw.cron import CronJob
@@ -394,8 +408,9 @@ def run_script_sandboxed(
         argv = [sys.executable, launcher_path]
         sandboxed_argv, sandbox_cleanup = wrap_argv(argv, mode="standard")
 
-        # Build clean env without KIROCLAW_INTERNAL_SECRET
-        clean_env = {k: v for k, v in os.environ.items() if k != "KIROCLAW_INTERNAL_SECRET"}
+        # Build clean env: secrets (Slack tokens, owner id, internal secret)
+        # are never inherited; the internal secret is passed via the 0600 file.
+        clean_env = _clean_cron_env()
         clean_env["_KIROCLAW_SECRET_FILE"] = secret_path
 
         proc = subprocess.run(
@@ -436,8 +451,20 @@ def run_command_sandboxed(command: str, timeout: int = 300) -> dict:
     Returns: {"status": "ok"|"error", "output": "...", "exit_code": N}
     """
     argv = ["sh", "-c", command]
-    sandboxed_argv, sandbox_cleanup = wrap_argv(argv, mode="standard")
-    clean_env = {k: v for k, v in os.environ.items() if k != "KIROCLAW_INTERNAL_SECRET"}
+    # mode="cc" (not "standard"): the command string is fully model-supplied via
+    # cron_add and executes outside the kiro-cli ACP permission/hook flow, so this
+    # is a low-trust exec path. "cc" hides the credential dirs/files (.aws, .kube,
+    # .netrc, .git-credentials, .npmrc, .pypirc, .kiroclaw/.env) and scrubs the
+    # agent-denied env keys, while deliberately leaving ~/.ssh reachable so a
+    # legitimate command cron can still do git/scp/rsync over SSH. "strict" would
+    # additionally hide ~/.ssh but break those workflows; the residual .ssh
+    # exposure is covered by the storage-time deny-list (mcp_cron._vet_shell_command,
+    # which blocks any .ssh reference) — the primary control. This sandbox is
+    # defense-in-depth and is bypassed when the OS backend falls back to "none"
+    # (e.g. macOS >= 26 — see _clean_cron_env). (Finding P454794507, remediation
+    # item 2.)
+    sandboxed_argv, sandbox_cleanup = wrap_argv(argv, mode="cc")
+    clean_env = _clean_cron_env()
     try:
         proc = subprocess.run(
             sandboxed_argv,

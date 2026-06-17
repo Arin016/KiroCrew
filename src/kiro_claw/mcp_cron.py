@@ -19,6 +19,7 @@ import os
 import re
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 from zoneinfo import available_timezones
 
@@ -28,7 +29,17 @@ from kiro_claw.cron_script import resolve_script_path
 from kiro_claw.cron_trigger import trigger_cron_job
 from kiro_claw.mcp_core import _resolve_session_key
 from kiro_claw.mcp_shared import call_tool_with_logging, run_mcp_stdio_loop
-from kiro_claw.security import redact_credentials, redact_exfiltration_urls
+from kiro_claw.sandbox import _AGENT_DENIED_ENV_KEYS
+from kiro_claw.security import (
+    _SENSITIVE_HOME_DIRS,
+    is_denied,
+    is_sensitive_bash_command,
+    is_sensitive_path,
+    redact_credentials,
+    redact_exfiltration_urls,
+    scan_exfiltration_urls,
+)
+from kiro_claw.sel import sel
 from kiro_claw.validation import MCP_CRON_SCHEMAS, ValidationError, validate_tool_args
 
 logger = logging.getLogger(__name__)
@@ -51,6 +62,176 @@ _UNIT_SECS = {
     "hour": 3600,
     "hours": 3600,
 }
+
+
+# Credential dirs/files a cron shell command must never reference directly. The
+# sandbox (cron_script.run_command_sandboxed, mode="cc") is the only
+# sanctioned access path. We reuse security._SENSITIVE_HOME_DIRS (the canonical
+# list, kept DRY so it can't drift) and match the token ANYWHERE in the command
+# — not only after a known read command like the shared is_sensitive_bash_command
+# regex does — because tools such as ``curl -d @~/.aws/credentials`` or
+# ``wget --post-file=$HOME/.ssh/id_rsa`` read files via flags with no recognizable
+# read-command prefix, evading that regex (verified: the canonical exfil payload
+# from finding P454794507 slipped through the three stock guards).
+_CRON_CRED_PATH_RE = re.compile(
+    r"(?:^|[\s'\"=@/~`]|\$\{?HOME\}?)"
+    r"(?:" + "|".join(re.escape(d) for d in _SENSITIVE_HOME_DIRS) + r")"
+    r"(?:/|\s|['\"]|$)",
+    re.IGNORECASE,
+)
+# Protected secret env vars a cron command must not read by name. Union of the
+# sandbox-scrubbed agent keys (Slack tokens, owner id) and well-known cloud /
+# source-control credential env vars. Fix 4 strips _AGENT_DENIED_ENV_KEYS from
+# the cron subprocess env, but AWS_*/token vars may still be present (or arrive
+# via a future regression), so denying a by-name reference at storage time is a
+# cheap, precise backstop that mirrors the existing execute_bash deniedCommands
+# AWS patterns in config/defaults.json.
+_CRON_SECRET_ENV_NAMES = list(_AGENT_DENIED_ENV_KEYS) + [
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SESSION_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITLAB_TOKEN",
+]
+_CRON_SECRET_ENV_RE = re.compile(
+    r"\$\{?(?:" + "|".join(re.escape(k) for k in _CRON_SECRET_ENV_NAMES) + r")\}?",
+    re.IGNORECASE,
+)
+# Bare-name form for scanning SCRIPT bodies: a Python/Ruby cron script reads
+# secrets by env-var NAME (e.g. os.environ["AWS_SECRET_ACCESS_KEY"]), not via
+# the shell ``$NAME`` syntax, so we also match the names on word boundaries.
+_CRON_SECRET_NAME_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(k) for k in _CRON_SECRET_ENV_NAMES) + r")\b",
+)
+# Cap how much of a cron script we read for the security review (256 KiB is far
+# larger than any legitimate cron script; bounds memory on a hostile huge file).
+_MAX_SCRIPT_SCAN_BYTES = 256 * 1024
+
+
+def _vet_shell_command(command: str) -> str | None:
+    """Apply the bash-tool security guards to a model-supplied cron shell command.
+
+    The ``command`` field of ``cron_add`` is a free-form shell string that is
+    later executed by the gateway via ``sh -c`` (see ``cron_script.run_command_sandboxed``),
+    entirely outside the kiro-cli ACP permission/hook flow. The host hook layer
+    only ever sees the tool name ``"cron_add"``, never the embedded command, so
+    the deny-list/sensitive-path checks that normally gate a ``bash`` tool call
+    never run on this path. We therefore replicate them here, at storage time,
+    so a prompt-injected ``cron_add`` cannot schedule credential exfiltration or
+    arbitrary destructive shell. Mirrors the same guards used for the bash tool
+    in ``security.py`` (``is_denied`` / ``is_sensitive_bash_command`` /
+    ``scan_exfiltration_urls``), plus a cron-surface-specific deny of any
+    credential-path or protected-secret-env reference (the stock guards miss
+    flag-based file reads like ``curl -d @FILE`` and body-exfil, which is the
+    exact gap in finding P454794507).
+
+    Returns an ``"Error: ..."`` string to surface to the caller, or ``None`` if
+    the command is clean. The returned message is redacted so it never echoes
+    captured credentials back to the model.
+    """
+    if not command:
+        return None
+    reason = is_denied(command) or is_sensitive_bash_command(command)
+    if reason:
+        safe_reason = redact_exfiltration_urls(redact_credentials(reason)[0])[0]
+        return f"Error: cron command blocked by security policy: {safe_reason}"
+    if _CRON_CRED_PATH_RE.search(command):
+        return (
+            "Error: cron command blocked: references a credential path "
+            "(e.g. .aws/.ssh/.netrc). Cron commands may not read credential "
+            "files directly."
+        )
+    if _CRON_SECRET_ENV_RE.search(command):
+        return "Error: cron command blocked: references a protected secret environment variable"
+    exfil = scan_exfiltration_urls(command)
+    if exfil:
+        safe = redact_exfiltration_urls(redact_credentials("; ".join(exfil))[0])[0]
+        return f"Error: cron command blocked: possible credential exfiltration ({safe})"
+    return None
+
+
+def _vet_script_contents(text: str) -> str | None:
+    """Scan a cron SCRIPT body for credential-exfiltration patterns.
+
+    A ``cron_add`` ``script`` job points at a file under ``~/.kiroclaw/crons/``
+    that the agent itself can write (via its file-write tool) and then register.
+    ``resolve_script_path`` validates only the *path*, so without this the body
+    is never inspected. The script runs under ``mode="standard"`` (user scripts
+    may legitimately use creds), which does NOT hide ``~/.aws`` — so a body that
+    reads ``~/.aws/credentials`` or ``os.environ["AWS_SECRET_ACCESS_KEY"]`` and
+    POSTs it out would succeed. We reuse the same credential-path / secret-env /
+    exfil detectors as the command path (plus a bare-name env match for
+    ``os.environ[...]`` style access). We deliberately do NOT run ``is_denied``
+    over a script body: it encodes shell tool-name semantics (e.g. ``*git*push*``)
+    that false-positive on ordinary Python source, and destructive-op risk is
+    covered by the now-required ``cron_add`` approval prompt (Fix 3). Credential
+    exfiltration — which a human rubber-stamping the prompt would not catch — is
+    the threat this gate closes. (Finding P454794507, defense-in-depth item 5.)
+    """
+    if _CRON_CRED_PATH_RE.search(text):
+        return (
+            "Error: cron script blocked: references a credential path "
+            "(e.g. .aws/.ssh/.netrc). Cron scripts may not read credential files."
+        )
+    if _CRON_SECRET_ENV_RE.search(text) or _CRON_SECRET_NAME_RE.search(text):
+        return "Error: cron script blocked: references a protected secret environment variable"
+    reason = is_sensitive_bash_command(text)
+    if reason:
+        safe_reason = redact_exfiltration_urls(redact_credentials(reason)[0])[0]
+        return f"Error: cron script blocked by security policy: {safe_reason}"
+    exfil = scan_exfiltration_urls(text)
+    if exfil:
+        safe = redact_exfiltration_urls(redact_credentials("; ".join(exfil))[0])[0]
+        return f"Error: cron script blocked: possible credential exfiltration ({safe})"
+    return None
+
+
+def _vet_script_file(file_path: str) -> str | None:
+    """Read a resolved cron script file and run :func:`_vet_script_contents`.
+
+    ``file_path`` is expected to come from ``resolve_script_path`` (under
+    ``~/.kiroclaw/crons/``), but this function does NOT trust that — it
+    independently resolves the real path and rejects it via ``is_sensitive_path``
+    before opening, so a symlink under the crons dir pointing at a credential
+    file (e.g. ``crons/evil.py -> ~/.aws/credentials``) cannot be read here. Read
+    is capped at ``_MAX_SCRIPT_SCAN_BYTES``. Storage-time check only (TOCTOU note:
+    the file could change before execution — the exec-time sandbox is the runtime
+    control; this gate stops the obvious register-a-malicious-script case).
+    """
+    try:
+        resolved = Path(file_path).resolve()
+    except (OSError, ValueError) as e:
+        return f"Error: cannot resolve cron script path for security review: {e}"
+    if is_sensitive_path(str(resolved)):
+        return "Error: cron script path blocked by security policy (resolves to a sensitive credential path)"
+    try:
+        with open(resolved, encoding="utf-8", errors="replace") as f:
+            contents = f.read(_MAX_SCRIPT_SCAN_BYTES)
+    except OSError as e:
+        return f"Error: cannot read cron script for security review: {e}"
+    return _vet_script_contents(contents)
+
+
+def _log_cron_denial(tool_name: str, error: str) -> None:
+    """Emit a SEL audit event when a cron command/script is blocked at storage time.
+
+    The blocked command/script never reaches the kiro-cli ACP permission/hook
+    flow (which normally produces the tool-invocation audit trail), so the denial
+    must be recorded here to preserve the audit trail (Finding P454794507).
+    ``error`` is the already-redacted "Error: ..." message from the _vet_* guards.
+    """
+    try:
+        sel().log_tool_invocation(
+            session_key=_resolve_session_key() or "mcp_cron",
+            source="mcp",
+            tool_name=tool_name,
+            tool_kind="authz",
+            outcome="denied",
+            error=error,
+        )
+    except Exception:
+        logger.debug("SEL logging failed for cron denial", exc_info=True)
 
 
 def _parse_time_string(s: str) -> float | str:
@@ -567,11 +748,20 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         msg = args.get("message", "")
         script = args.get("script", "")
         command = args.get("command", "")
+        if command:
+            err = _vet_shell_command(command)
+            if err:
+                _log_cron_denial("cron_add", err)
+                return err
         if script:
             try:
-                resolve_script_path(script)
+                script_path, _ = resolve_script_path(script)
             except (ValueError, FileNotFoundError, PermissionError) as e:
                 return f"Error: {e}"
+            err = _vet_script_file(script_path)
+            if err:
+                _log_cron_denial("cron_add", err)
+                return err
         every = args.get("every")
         cron_expr = args.get("cron_expr")
         at_ts = args.get("at")
