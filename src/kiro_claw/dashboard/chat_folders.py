@@ -22,6 +22,52 @@ logger = logging.getLogger(__name__)
 _folder_icon_lock = asyncio.Lock()
 
 
+def _is_single_emoji(s: str) -> bool:
+    """True if `s` is exactly one emoji grapheme (no letters/digits/text).
+
+    Accepts simple emoji, variation-selector / skin-tone modified emoji, ZWJ
+    sequences (families, professions), and two-codepoint flag pairs. Rejects
+    empty strings, plain text, and multiple emoji.
+    """
+    if not s or len(s) > 16:
+        return False
+    modifiers = {0xFE0F, 0x200D}  # variation selector-16, zero-width joiner
+
+    def _emoji_char(c: str) -> bool:
+        o = ord(c)
+        return (
+            unicodedata.category(c).startswith("So")  # symbol, other
+            or o > 0x1F000                            # supplementary emoji planes
+            or o in modifiers
+            or 0x1F3FB <= o <= 0x1F3FF                 # skin-tone modifiers
+            or 0x1F1E6 <= o <= 0x1F1FF                 # regional indicators (flags)
+        )
+
+    if not all(_emoji_char(c) for c in s):
+        return False
+    # Count grapheme clusters; must be exactly one.
+    cps = [ord(c) for c in s]
+    n = len(cps)
+    clusters = 0
+    i = 0
+    while i < n:
+        if 0x1F1E6 <= cps[i] <= 0x1F1FF:  # flag = pair of regional indicators
+            clusters += 1
+            i += 2 if (i + 1 < n and 0x1F1E6 <= cps[i + 1] <= 0x1F1FF) else 1
+        else:
+            clusters += 1  # base emoji, then absorb modifiers / ZWJ-joined emoji
+            i += 1
+            while i < n and (cps[i] == 0xFE0F or 0x1F3FB <= cps[i] <= 0x1F3FF):
+                i += 1
+            while i < n and cps[i] == 0x200D:  # ZWJ joins the following emoji
+                i += 2 if i + 1 < n else 1
+                while i < n and (cps[i] == 0xFE0F or 0x1F3FB <= cps[i] <= 0x1F3FF):
+                    i += 1
+        if clusters > 1:
+            return False
+    return clusters == 1
+
+
 async def _generate_folder_icon(state: DashboardState, folder: dict) -> None:
     """Background task: ask LLM for a single emoji for the folder name.
 
@@ -60,13 +106,8 @@ async def _generate_folder_icon(state: DashboardState, folder: dict) -> None:
     icon = text.strip()
     icon, _ = redact_exfiltration_urls(icon)
     icon, _ = redact_credentials(icon)
-    # Validate: must be a single emoji (1-2 code points, symbol category or high-plane emoji)
-    if icon and len(icon) <= 3 and all(
-        unicodedata.category(c).startswith("So")
-        or ord(c) > 0x1F000
-        or c in "\uFE0F\u200D"
-        for c in icon
-    ):
+    # Validate: must be exactly one emoji (guard against stray LLM text).
+    if _is_single_emoji(icon):
         if any(f["id"] == folder["id"] for f in state._folders):
             folder["icon"] = icon
             state.save_folders()
@@ -164,6 +205,28 @@ async def api_chat_folder_update(request: web.Request) -> web.Response:
         if err:
             return web.json_response({"error": err}, status=400)
         folder["project_dir"] = pd
+    if "icon" in body and body.get("regenerate_icon"):
+        # Mutually exclusive: a manual icon would be saved and returned, then the
+        # background regeneration would silently overwrite it. Reject the
+        # ambiguous request so the conflict is explicit to the caller.
+        return web.json_response(
+            {"error": "Cannot set icon and regenerate_icon in the same request"},
+            status=400,
+        )
+    if "icon" in body:
+        # User-chosen emoji. None or empty string clears to the default;
+        # otherwise it must be exactly one emoji (no text / multiple emoji).
+        raw_icon = body["icon"]
+        icon_val = str(raw_icon).strip() if raw_icon is not None else ""
+        if icon_val and not _is_single_emoji(icon_val):
+            return web.json_response({"error": "icon must be a single emoji"}, status=400)
+        folder["icon"] = icon_val[:16]
+    if body.get("regenerate_icon"):
+        # "Reset to auto" — re-run the LLM emoji generator in the background.
+        # _generate_folder_icon saves + pushes a slots update on success.
+        task = asyncio.create_task(_generate_folder_icon(state, folder))
+        state._background_tasks.add(task)
+        task.add_done_callback(state._background_tasks.discard)
     state.save_folders()
     state.push_slots_update()
     sel().log_api_access(
