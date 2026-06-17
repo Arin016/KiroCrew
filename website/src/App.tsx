@@ -20,7 +20,7 @@ import { useNotificationSound } from './hooks/useNotificationSound'
 import { recordSessionStart, recordEvent } from './rum'
 import { ZoomProvider } from './hooks/ZoomProvider'
 import { api } from './api/client'
-import { Rocket, Menu, Bell, Users, BookOpen, BookOpenText, MessageSquareDot, Settings, Code, RefreshCw, Palette, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, Sparkles, X, Inbox, Gamepad2, KanbanSquare, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain, FolderTree, ChevronUp, MoreHorizontal } from 'lucide-react'
+import { Rocket, Menu, Bell, Users, BookOpen, BookOpenText, MessageSquareDot, Settings, Code, RefreshCw, Palette, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, Sparkles, X, Inbox, Gamepad2, KanbanSquare, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain, FolderTree, ChevronUp, MoreHorizontal, Coins } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ChatPage from './pages/ChatPage'
 import OrchestratedChatPage from './pages/OrchestratedChatPage'
@@ -61,6 +61,7 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts'
 import { useProvider } from './providers/context'
 import { useAgents } from './hooks/useAgents'
 import ShortcutsModal from './components/ShortcutsModal'
+import Modal from './components/Modal'
 
 type LogSubscribeFn = (cb: ((data: { level: string; msg: string }) => void) | null) => void
 export const WsContext = createContext<{ subscribeLogs: LogSubscribeFn; subscribeSubagents: (s: boolean) => void }>({ subscribeLogs: () => {}, subscribeSubagents: () => {} })
@@ -707,6 +708,7 @@ export default function App() {
 
   const [updating, setUpdating] = useState(false)
   const [showUpdateModal, setShowUpdateModal] = useState(false)
+  const [kiroUsageOpen, setKiroUsageOpen] = useState(false)
   const [changes, setChanges] = useState('')
   const [checking, setChecking] = useState(false)
   const [showChangelog, setShowChangelog] = useState(false)
@@ -821,6 +823,33 @@ export default function App() {
     return () => { clearTimeout(t); document.removeEventListener('click', onClick); document.removeEventListener('keydown', onKey) }
   }, [settingsOpen])
 
+  // Kiro CLI monthly credit usage. /api/sessions/usage TRIGGERS the background
+  // `kiro-cli /usage` fetch AND returns the cached result, so the pill is
+  // self-sufficient on any page. Month-to-date = credits_covered (in-plan) +
+  // credits_used (the OVERAGE field, not total consumption), matching the % bar
+  // `kiro-cli /usage` prints. Returns null until the background cache warms.
+  const { data: kiroUsage } = useQuery({
+    queryKey: ['kiro-usage'],
+    queryFn: () => api.sessionsUsage().then(d => {
+      const u = d?.usage || {}
+      // Kiro credit plan (internal) — the only usage this pill surfaces.
+      // Number.isFinite guards against a stray NaN ever rendering as "NaN / NaN".
+      if (Number.isFinite(u.credits_plan)) {
+        const covered = Number.isFinite(u.credits_covered) ? u.credits_covered : 0
+        const overage = Number.isFinite(u.credits_used) ? u.credits_used : 0
+        return { used: Math.round(covered + overage), limit: Math.round(u.credits_plan), resets: u.resets, plan: u.plan, overage, costUsd: u.cost_usd, overageRate: u.overage_rate }
+      }
+      // Non-Kiro provider (kiro-cli absent) -> hide. Empty cache (Kiro warming) -> spinner.
+      if (u.available === false) return 'none' as const
+      return null
+    }),
+    refetchInterval: 30_000,
+  })
+  // Auto-close the details modal if usage resolves to unavailable — the pill
+  // hides in that case, so a modal opened during loading would otherwise be stuck.
+  useEffect(() => {
+    if (kiroUsage === 'none') setKiroUsageOpen(false)
+  }, [kiroUsage])
   const [metricsOpen, setMetricsOpen] = useState(() => localStorage.getItem('mc-topbar-metrics') === '1')
   const { data: sysMetrics, isError: sysMetricsError, dataUpdatedAt: sysMetricsUpdatedAt } = useQuery({ queryKey: ['system-metrics'], queryFn: () => api.system().then(d => ({ memUsed: d.mem_used_gb, memTotal: d.mem_total_gb, cpuPct: d.cpu_pct, diskTotal: d.disk_total_gb, diskFree: d.disk_free_gb })), refetchInterval: metricsOpen ? 30_000 : false, enabled: metricsOpen })
   // Tick every 10s while widget is open so `sysMetricsStale` re-evaluates even when the query stops refetching (backgrounded tab, network drop).
@@ -1015,6 +1044,39 @@ export default function App() {
               <span className={memValid ? metricColor(memPct) : 'text-muted'} title={memValid ? `Memory: ${m.memUsed.toFixed(1)}/${m.memTotal.toFixed(1)} GB${staleTitle}` : 'Memory: unavailable'}>MEM {memValid ? `${(memPct * 100).toFixed(0)}%` : '—'}</span>
               <span className={dskValid ? metricColor(dskPct) : 'text-muted'} title={dskValid ? `Disk: ${dskUsed.toFixed(0)}/${m.diskTotal.toFixed(0)} GB${staleTitle}` : 'Disk: unavailable'}>DSK {dskValid ? `${(dskPct * 100).toFixed(0)}%` : '—'}</span>
             </button>)
+          })()}
+          {/* Usage pill. Kiro credit plan when present (internal); otherwise a
+              provider-agnostic month-to-date $ spend from KiroClaw's own token
+              log, shown against a user budget if one is set. Spinner while the
+              cache warms; hidden when there's nothing to show. */}
+          {kiroUsage === 'none' ? null : !kiroUsage ? (
+            <button
+              className="top-bar-pill bg-card text-muted"
+              onClick={() => setKiroUsageOpen(true)}
+              title="Kiro credit usage — checking…"
+              aria-label="Kiro credit usage — checking"
+            >
+              <Coins size={13} /> {!isMobile && <Loader2 size={12} className="animate-spin" />}
+            </button>
+          ) : (() => {
+            const pct = kiroUsage.limit > 0 ? (kiroUsage.used / kiroUsage.limit) * 100 : 0
+            const usedStr = kiroUsage.used >= 1000 ? `${(kiroUsage.used / 1000).toFixed(1)}K` : `${kiroUsage.used}`
+            const limitStr = kiroUsage.limit >= 1000 ? `${(kiroUsage.limit / 1000).toFixed(0)}K` : `${kiroUsage.limit}`
+            const title = `Kiro credits: ${kiroUsage.used.toLocaleString()} / ${kiroUsage.limit.toLocaleString()} (${pct.toFixed(0)}%) — click for details`
+            return (
+              <button
+                className="top-bar-pill bg-card"
+                onClick={() => setKiroUsageOpen(true)}
+                title={title}
+                aria-label={title}
+              >
+                <Coins size={13} /> {!isMobile && (
+                  <span className="font-mono text-[13px]">
+                    {usedStr}<span className="text-muted">/{limitStr}</span>
+                  </span>
+                )}
+              </button>
+            )
           })()}
           {terminalEnabled && <button
             className={`top-bar-pill bg-card ${terminalOpen ? 'text-accent' : ''}`}
@@ -1349,6 +1411,45 @@ export default function App() {
     )}
     </WsContext.Provider>
     {shortcutsOpen && <ShortcutsModal onClose={() => setShortcutsOpen(false)} />}
+    <Modal open={kiroUsageOpen} onClose={() => setKiroUsageOpen(false)} title={<span className="flex items-center gap-2"><Coins size={16} /> Kiro Credits</span>} maxWidth={460}>
+      {!kiroUsage || kiroUsage === 'none' ? (
+        <div className="flex items-center gap-2 text-sm text-muted py-4">
+          <Loader2 size={14} className="animate-spin shrink-0" />
+          <span>Checking usage — running <code className="font-mono">kiro-cli /usage</code>…</span>
+        </div>
+      ) : (() => {
+        const pct = kiroUsage.limit > 0 ? (kiroUsage.used / kiroUsage.limit) * 100 : 0
+        const barColor = 'var(--accent)'
+        const Row = ({ label, value }: { label: string; value: React.ReactNode }) => (
+          <div className="flex justify-between items-baseline py-1.5 border-b" style={{ borderColor: 'var(--border)' }}>
+            <span className="text-[12px] text-muted">{label}</span>
+            <span className="text-[13px] font-medium text-text">{value}</span>
+          </div>
+        )
+        return (
+          <div className="flex flex-col gap-3">
+            <div className="flex items-baseline gap-2">
+              <span className="text-2xl font-bold text-text">{kiroUsage.used.toLocaleString()}</span>
+              <span className="text-sm text-muted">/ {kiroUsage.limit.toLocaleString()} credits</span>
+              <span className="ml-auto text-[12px] font-medium px-2 py-0.5 rounded-md" style={{ background: barColor, color: '#fff' }}>{pct.toFixed(0)}%</span>
+            </div>
+            <div className="w-full h-2 rounded-full overflow-hidden" style={{ background: 'var(--border)' }}>
+              <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(pct, 100)}%`, background: barColor }} />
+            </div>
+            <div className="mt-1">
+              {kiroUsage.plan && <Row label="Plan" value={kiroUsage.plan} />}
+              {kiroUsage.resets && <Row label="Resets" value={kiroUsage.resets} />}
+              <Row label="Overage used" value={`${kiroUsage.overage.toLocaleString()} credits`} />
+              {kiroUsage.overageRate && <Row label="Overage rate" value={`$${kiroUsage.overageRate} / credit`} />}
+              {kiroUsage.costUsd != null && <Row label="Est. overage cost" value={`$${kiroUsage.costUsd.toFixed(2)} USD`} />}
+            </div>
+            <p className="text-[11px] text-muted leading-relaxed mt-1">
+              Monthly Kiro credit usage from <code className="font-mono">kiro-cli /usage</code> — across chat, agents, MCP, and subagents.
+            </p>
+          </div>
+        )
+      })()}
+    </Modal>
     <Lightbox />
     </ZoomProvider>
   )
