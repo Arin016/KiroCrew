@@ -133,9 +133,9 @@ const MD_COMPONENTS: Record<string, React.ComponentType<any>> = {
   h4({ children, ...rest }: any) { const id = slugify(children); return <h4 {...sp(rest)} id={id} className="text-sm font-semibold mt-2 mb-1 text-text-strong">{children}</h4> },
   h5({ children, ...rest }: any) { const id = slugify(children); return <h5 {...sp(rest)} id={id} className="text-sm font-medium mt-2 mb-1 text-text-strong">{children}</h5> },
   h6({ children, ...rest }: any) { const id = slugify(children); return <h6 {...sp(rest)} id={id} className="text-[13px] font-medium mt-2 mb-1 text-muted">{children}</h6> },
-  ul({ children, ...rest }: any) { return <ul {...sp(rest)} className="list-disc pl-8 my-2 space-y-1 marker:text-muted">{children}</ul> },
-  ol({ children, ...rest }: any) { return <ol {...sp(rest)} className="list-decimal pl-8 my-2 space-y-1 marker:text-muted">{children}</ol> },
-  li({ children, ...rest }: any) { return <li {...sp(rest)} className="text-sm leading-relaxed">{children}</li> },
+  ul({ children, className, ...rest }: any) { const isTasks = className?.includes('contains-task-list'); return <ul {...sp(rest)} className={isTasks ? 'list-none pl-4 my-2 space-y-1' : 'list-disc pl-8 my-2 space-y-1 marker:text-muted'}>{children}</ul> },
+  ol({ children, className, ...rest }: any) { const isTasks = className?.includes('contains-task-list'); return <ol {...sp(rest)} className={isTasks ? 'list-none pl-4 my-2 space-y-1' : 'list-decimal pl-8 my-2 space-y-1 marker:text-muted'}>{children}</ol> },
+  li({ children, className, ...rest }: any) { const isTask = className?.includes('task-list-item'); return <li {...sp(rest)} className={isTask ? 'text-sm leading-relaxed flex items-start gap-1.5' : 'text-sm leading-relaxed'}>{children}</li> },
   p({ children, ...rest }: any) { return <p {...sp(rest)} className="my-1.5 leading-relaxed">{children}</p> },
   strong({ children, ...rest }: any) { return <strong {...sp(rest)} className="font-semibold text-text-strong">{children}</strong> },
   em({ children, ...rest }: any) { return <em {...sp(rest)} className="italic">{children}</em> },
@@ -203,8 +203,13 @@ function rehypeSanitize() {
       if (node.type === 'element') {
         // Remove dangerous elements entirely
         if (DANGEROUS_TAGS.has(node.tagName)) {
-          parent.children.splice(index, 1)
-          return index  // re-check this index (shifted)
+          // Allow GFM task-list checkboxes (safe: disabled, no handlers)
+          if (node.tagName === 'input' && node.properties?.type === 'checkbox') {
+            node.properties = { type: 'checkbox', checked: !!node.properties.checked, disabled: true }
+          } else {
+            parent.children.splice(index, 1)
+            return index  // re-check this index (shifted)
+          }
         }
         // Strip event handler attributes, dangerous protocol URLs, and srcdoc
         if (node.properties) {

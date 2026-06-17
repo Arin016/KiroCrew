@@ -122,6 +122,35 @@ describe('MarkdownRenderer XSS sanitization', () => {
   })
 })
 
+describe('MarkdownRenderer GFM task-list checkboxes (Mesh-2052)', () => {
+  it('renders - [ ] and - [x] as checkbox inputs', () => {
+    const { container } = render(
+      <MarkdownRenderer content={'- [ ] unchecked\n- [x] checked'} />
+    )
+    const checkboxes = container.querySelectorAll('input[type="checkbox"]')
+    expect(checkboxes).toHaveLength(2)
+    expect((checkboxes[0] as HTMLInputElement).checked).toBe(false)
+    expect((checkboxes[1] as HTMLInputElement).checked).toBe(true)
+    expect((checkboxes[0] as HTMLInputElement).disabled).toBe(true)
+  })
+
+  it('still strips non-checkbox input elements (XSS safety)', () => {
+    const { container } = render(
+      <MarkdownRenderer content={'<input type="text" value="xss">'} />
+    )
+    expect(container.querySelector('input[type="text"]')).toBeNull()
+  })
+
+  it('renders task-list ul without bullet disc', () => {
+    const { container } = render(
+      <MarkdownRenderer content={'- [ ] foo\n- [x] bar'} />
+    )
+    const ul = container.querySelector('ul')
+    expect(ul!.className).toContain('list-none')
+    expect(ul!.className).not.toContain('list-disc')
+  })
+})
+
 describe('MarkdownRenderer PATH_RE colon support', () => {
   it('renders path with colon in filename as clickable', () => {
     const { container } = render(
