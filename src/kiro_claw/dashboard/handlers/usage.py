@@ -562,7 +562,10 @@ async def api_kiro_usage(request: web.Request) -> web.Response:
         # Get billing from existing usage cache
         billing: dict = {}
         usage = get_usage_cache()
-        if usage:
+        # Only surface billing when a real credit plan parsed. The cache can hold
+        # an {"available": False} sentinel (kiro-cli absent / unparseable output)
+        # which is truthy but carries no billing fields — treat it as no billing.
+        if usage.get("credits_plan") is not None:
             billing = {
                 "credits_used": usage.get("credits_used"),
                 "credits_plan": usage.get("credits_plan"),

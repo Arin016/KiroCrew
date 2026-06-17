@@ -335,6 +335,24 @@ class TestApiKiroUsage:
                 # Cache should NOT be set
                 assert usage_mod._CACHE == {}
 
+    @pytest.mark.asyncio
+    async def test_unavailable_sentinel_yields_empty_billing(self, tmp_path):
+        # The {"available": False} sentinel is truthy but carries no plan — billing
+        # must stay {} rather than a dict of all-None fields.
+        d = tmp_path / "cli"
+        d.mkdir()
+        f = d / "s.jsonl"
+        _write_session(f, [{"kind": "Prompt"}])
+        with patch.object(usage_mod, "_SESSIONS_DIR", d), \
+             patch.object(usage_mod, "validate_file_path", return_value=str(f)), \
+             patch.object(usage_mod, "get_usage_cache", return_value={"available": False}):
+            app = web.Application()
+            app.router.add_get("/api/usage/kiro", api_kiro_usage)
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.get("/api/usage/kiro")
+                data = await resp.json()
+                assert data["billing"] == {}
+
 
 # ── _parse_token_history ─────────────────────────────────────────────────
 

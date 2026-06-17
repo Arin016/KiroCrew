@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,6 +16,7 @@ if TYPE_CHECKING:
 
 from aiohttp import web
 
+from kiro_claw.acp.client import _resolve_kiro_bin
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.history import SEARCH_MIN_CHARS
 from kiro_claw.mcp_discovery import (
@@ -21,6 +24,8 @@ from kiro_claw.mcp_discovery import (
     register_servers_for_cc,
     sync_to_agent_config,
 )
+from kiro_claw.sandbox import wrap_argv
+from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.validation import sanitize_string
 
 logger = logging.getLogger(__name__)
@@ -74,10 +79,16 @@ _USAGE_REFRESH_SECS = 600  # background refresh every 10 min
 _usage_fetching = False
 
 
+def _safe_float(text: str) -> float | None:
+    """Parse a float, returning None on malformed input instead of raising."""
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 def _parse_usage(raw: str) -> dict[str, object]:
     """Parse structured fields from kiro-cli /usage output."""
-    import re  # noqa: F811
-
     clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", raw)
     result: dict[str, object] = {"raw": ""}
 
@@ -91,32 +102,58 @@ def _parse_usage(raw: str) -> dict[str, object]:
             usage_lines.append(line)
     result["raw"] = "\n".join(usage_lines).strip()
 
-    # Parse fields
+    # Parse fields. First-wins on each field so a duplicate header or echoed
+    # line later in the (untrusted) output can't overwrite a real value, and
+    # malformed numbers skip the field via _safe_float rather than aborting.
     for line in usage_lines:
-        if "resets on" in line:
+        if "resets on" in line and "resets" not in result:
             m = re.search(r"resets on (\S+)", line)
             if m:
                 result["resets"] = m.group(1)
             if "|" in line:
                 result["plan"] = line.rsplit("|", 1)[-1].strip()
-        if "Credits used" in line:
+        if "Credits used" in line and "credits_used" not in result:
             m = re.search(r"Credits used:\s*([\d.]+)", line)
             if m:
-                result["credits_used"] = float(m.group(1))
-        if "Est. cost" in line:
+                v = _safe_float(m.group(1))
+                if v is not None:
+                    result["credits_used"] = v
+        if "Est. cost" in line and "cost_usd" not in result:
             m = re.search(r"\$([\d.]+)", line)
             if m:
-                result["cost_usd"] = float(m.group(1))
-        if "covered in plan" in line:
+                v = _safe_float(m.group(1))
+                if v is not None:
+                    result["cost_usd"] = v
+        if "covered in plan" in line and "credits_plan" not in result:
             m = re.search(r"\(([\d.]+)\s+of\s+([\d.]+)", line)
             if m:
-                result["credits_covered"] = float(m.group(1))
-                result["credits_plan"] = float(m.group(2))
-        if "billed at" in line:
+                covered = _safe_float(m.group(1))
+                plan = _safe_float(m.group(2))
+                if covered is not None and plan is not None:
+                    result["credits_covered"] = covered
+                    result["credits_plan"] = plan
+        if "billed at" in line and "overage_rate" not in result:
             m = re.search(r"\$([\d.]+)\s+per", line)
             if m:
                 result["overage_rate"] = m.group(1)
     return result
+
+
+def _redact_strings(value: object) -> object:
+    """Recursively redact credentials / exfil URLs from every string leaf.
+
+    Walks dicts and lists so nested values cannot bypass redaction, used on
+    untrusted kiro-cli output before it is cached and served to the dashboard.
+    """
+    if isinstance(value, str):
+        value, _ = redact_exfiltration_urls(value)
+        value, _ = redact_credentials(value)
+        return value
+    if isinstance(value, dict):
+        return {k: _redact_strings(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_strings(v) for v in value]
+    return value
 
 
 async def _fetch_usage_bg() -> None:
@@ -125,40 +162,71 @@ async def _fetch_usage_bg() -> None:
     if _usage_fetching:
         return
     _usage_fetching = True
+    proc = None
+    sandbox_cleanup = None
     try:
-        from kiro_claw.acp.client import _resolve_kiro_bin  # noqa: F811
-
         kiro_bin = _resolve_kiro_bin()
         if not kiro_bin:
+            # kiro-cli absent (non-Kiro provider): cache an unavailable marker so
+            # the dashboard hides the credit pill instead of polling forever.
+            _usage_cache = {"available": False}
+            _usage_cache_ts = time.time()
             return
+        # Route through the OS-level sandbox, consistent with how the main agent
+        # kiro-cli process is spawned (AcpClient._spawn -> wrap_argv).
+        argv, sandbox_cleanup = wrap_argv(
+            [kiro_bin, "chat", "--no-interactive", "--agent", "kiroclaw-lite", "/usage"],
+            mode="standard",
+        )
         proc = await asyncio.create_subprocess_exec(
-            kiro_bin,
-            "chat",
-            "--no-interactive",
-            "--agent",
-            "kiroclaw-lite",
-            "/usage",
+            *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
         raw = (out or err or b"").decode(errors="replace")
         parsed = _parse_usage(raw)
-        if parsed.get("raw"):
+        if parsed.get("credits_plan") is not None:
+            # kiro-cli output is untrusted: redact credentials / exfil URLs from
+            # every string leaf before the dict is cached and served.
+            parsed = {k: _redact_strings(v) for k, v in parsed.items()}
             _usage_cache = parsed
             _usage_cache_ts = time.time()
             logger.info("Kiro usage refreshed: %s credits used", parsed.get("credits_used", "?"))
+        else:
+            # No parseable credit plan (a Kiro build whose /usage output this
+            # parser doesn't recognize): hide the pill instead of spinning.
+            _usage_cache = {"available": False}
+            _usage_cache_ts = time.time()
     except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        await proc.communicate()
+        # Always advance the cache so the pill never spins forever on a hang.
         logger.debug("Background usage fetch timed out")
+        _usage_cache = {"available": False}
+        _usage_cache_ts = time.time()
     except Exception:
         logger.debug("Background usage fetch failed", exc_info=True)
+        _usage_cache = {"available": False}
+        _usage_cache_ts = time.time()
     finally:
+        # Always reap the subprocess on any exit path (timeout, error, or task
+        # cancellation, which is a BaseException the excepts above don't catch)
+        # so a leaked kiro-cli process can't hold the agent lock or keep burning
+        # credit quota. kill() is non-blocking; the OS reaps the zombie.
         _usage_fetching = False
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+                # Await termination so the asyncio transport + pipe FDs close
+                # (otherwise they leak, and this runs on a timer). Bounded by
+                # wait_for so a wedged process can't reintroduce an unbounded hang.
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except Exception:
+                pass
+        if sandbox_cleanup:
+            try:
+                os.remove(sandbox_cleanup)
+            except OSError:
+                pass
 
 
 async def api_sessions_usage(request: web.Request) -> web.Response:
