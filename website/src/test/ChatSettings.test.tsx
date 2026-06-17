@@ -26,15 +26,6 @@ describe('loadChatConfig', () => {
     expect(loadChatConfig().confirmCloseSession).toBe(false)
   })
 
-  it('defaults navPanelOpen to false', () => {
-    expect(loadChatConfig().navPanelOpen).toBe(false)
-  })
-
-  it('respects stored navPanelOpen=true', () => {
-    localStorage.setItem('mc-chat-config', JSON.stringify({ navPanelOpen: true }))
-    expect(loadChatConfig().navPanelOpen).toBe(true)
-  })
-
   it('respects stored confirmCloseSession=true', () => {
     localStorage.setItem('mc-chat-config', JSON.stringify({ confirmCloseSession: true }))
     expect(loadChatConfig().confirmCloseSession).toBe(true)

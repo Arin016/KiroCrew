@@ -66,7 +66,6 @@ import { ChatFooter, AssistantMessage, UserMessage } from './chat'
 import MarkdownRenderer from '../components/MarkdownRenderer'
 import TypewriterText from '../components/TypewriterText'
 import ActivityViewer from './chat/ActivityViewer'
-import ChatNavPanel from './chat/ChatNavPanel'
 import { useChatNavigation } from '../hooks/useChatNavigation'
 import SubagentProgressBar from './chat/SubagentProgressBar'
 import ChatSidebar, { SIDEBAR_MIN, SIDEBAR_MAX } from './ChatSidebar'
@@ -81,7 +80,7 @@ import { loadChatConfig, CONTENT_WIDTH, type ChatConfig } from './chat/ChatSetti
 import { useKnowledgeFetch, extractKnowledgeQuery, expandKnowledgeBlock } from './chat/useKnowledgeFetch'
 import { KnowledgePicker } from './chat/KnowledgePicker'
 import { useSessionPalette } from '../hooks/useSessionPalette'
-import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, PanelLeftOpen, PanelLeftClose, Pen, MessageSquareShare, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Locate, ListTree, Link2, Link2Off, Hash, Undo2, Check } from 'lucide-react'
+import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, PanelLeftOpen, PanelLeftClose, Pen, MessageSquareShare, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Locate, Link2, Link2Off, Hash, Undo2, Check } from 'lucide-react'
 
 import InfoTip from '../components/InfoTip'
 import { FileCard } from '../components/FileCard'
@@ -1812,7 +1811,6 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     enabled: !!_slotTemplateName,
   })
   useEffect(() => { setResolvedModel(_slotResolvedModel || '') }, [_slotResolvedModel])
-  const [navPanelOpen, setNavPanelOpen] = useState(() => loadChatConfig().navPanelOpen)
   const [sidebarPinned, setSidebarPinned] = useState(() => localStorage.getItem('mc-sidebar-pinned') !== 'false')
   const isMobile = useIsMobile()
   const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -2403,9 +2401,6 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
           <SearchHighlightContext.Provider value={searchCtxValue}>
           <div className="relative flex flex-col flex-1 min-h-0">
             {search.isOpen && <SearchBar term={search.term} setTerm={search.setTerm} matches={search.matches} currentIdx={search.currentIdx} next={search.next} prev={search.prev} close={search.close} caseSensitive={search.caseSensitive} toggleCaseSensitive={search.toggleCaseSensitive} />}
-            <AnimatePresence>
-              {navPanelOpen && <ChatNavPanel links={chatNav.links} sections={chatNav.sections} onScrollToSection={scrollToNavSection} onClose={() => setNavPanelOpen(false)} searchOpen={search.isOpen} resolving={chatNav.resolving} />}
-            </AnimatePresence>
             {/* Claude-style title row — absolute overlay, solid top fading to transparent.
                 Inset on the right by the 6px scrollbar width (see ::-webkit-scrollbar
                 in index.css) so the overlay never paints over the scroller's scrollbar
@@ -2446,10 +2441,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               )}
                 </div>
               {mode === 'orchestrator' && <span className="pointer-events-auto"><InfoTip text="Autopilot plans before executing. Each stage needs your approval (or select 'Go All' to run autonomously). Sub-agents are delegated automatically. Plan lessons persist across sessions." /></span>}
-              <Clickable className="ml-auto opacity-40 hover:opacity-100 transition-opacity cursor-pointer pointer-events-auto" onClick={() => setNavPanelOpen(p => !p)} title="Chat navigation" aria-label="Toggle chat navigation">
-                <ListTree size={14} />
-              </Clickable>
-              {embedMode !== 'chat' && !activityOpen && <Clickable className="opacity-40 hover:opacity-100 transition-opacity cursor-pointer pointer-events-auto" onClick={toggleAct} aria-label="Toggle activity panel">
+              {embedMode !== 'chat' && !activityOpen && <Clickable className="ml-auto opacity-40 hover:opacity-100 transition-opacity cursor-pointer pointer-events-auto" onClick={toggleAct} aria-label="Toggle activity panel">
                 <SessionStatus />
               </Clickable>}
               </div>
@@ -2986,7 +2978,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
         )}
         {activityOpen && !panel.isOpen && !diffPanel.isOpen && (
           <DetailPanel key="activity-panel" title="Activity" onClose={toggleAct} initialWidth={420} storageKey="mc-activity-width">
-            <ActivityViewer subagents={subagents} toolLog={toolLog} open={true} onToggle={toggleAct} slot={activeSlot || ''} files={touchedFiles.files} onFileOpen={handleFileOpen} onFileRemove={touchedFiles.removeFile} onFilesClear={touchedFiles.clearBySource} projectDir={currentSlot?.project || undefined} />
+            <ActivityViewer subagents={subagents} toolLog={toolLog} open={true} onToggle={toggleAct} slot={activeSlot || ''} files={touchedFiles.files} onFileOpen={handleFileOpen} onFileRemove={touchedFiles.removeFile} onFilesClear={touchedFiles.clearBySource} projectDir={currentSlot?.project || undefined} navLinks={chatNav.links} navSections={chatNav.sections} onScrollToNavSection={scrollToNavSection} navResolving={chatNav.resolving} />
           </DetailPanel>
         )}
       </AnimatePresence>

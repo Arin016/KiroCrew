@@ -27,21 +27,6 @@ function wrap(ui: React.ReactElement) {
   return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>)
 }
 
-describe('ChatPanel settings – navPanelOpen toggle', () => {
-  beforeEach(() => { localStorage.removeItem('mc-chat-config') })
-
-  it('renders and toggles Navigation Panel setting', () => {
-    wrap(<ChatPanel />)
-    const label = screen.getByText('Navigation Panel')
-    expect(label).toBeInTheDocument()
-    // Click the toggle to exercise the onChange callback
-    fireEvent.click(label)
-    // After click, navPanelOpen should be saved as true
-    const stored = JSON.parse(localStorage.getItem('mc-chat-config') || '{}')
-    expect(stored.navPanelOpen).toBe(true)
-  })
-})
-
 describe('ChatPanel settings – Subagents section', () => {
   beforeEach(() => {
     patchConfigMock.mockClear()

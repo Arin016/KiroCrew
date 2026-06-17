@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 
 // jsdom polyfill: SegmentedControl uses ResizeObserver
 if (typeof globalThis.ResizeObserver === 'undefined') {
@@ -9,6 +9,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Provider } from 'react-redux'
 import { configureStore } from '@reduxjs/toolkit'
 import chatReducer from '../store/chatSlice'
+import { openActivityToTab } from '../store/chatSlice'
 import dashboardReducer from '../store/dashboardSlice'
 import notificationsReducer from '../store/notificationsSlice'
 
@@ -54,5 +55,34 @@ describe('ActivityViewer', () => {
     expect(screen.getByText('Browse files')).toBeInTheDocument()
     // Browser is collapsed — no Loading indicator
     expect(screen.queryByText('Loading…')).not.toBeInTheDocument()
+  })
+
+  it('Navigation tab renders links + outline and scrolls a section on click', () => {
+    const onScroll = vi.fn()
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const store = configureStore({
+      reducer: { chat: chatReducer, dashboard: dashboardReducer, notifications: notificationsReducer },
+    })
+    // Seed the active tab to 'nav' so the component renders the Navigation
+    // body directly — SegmentedControl falls back to compact mode under jsdom
+    // (zero width), so clicking the inactive segment label is unreliable.
+    store.dispatch(openActivityToTab('nav'))
+    render(
+      <Provider store={store}>
+        <QueryClientProvider client={qc}>
+          <ActivityViewer
+            {...baseProps}
+            navLinks={[{ url: 'https://code.amazon.com/reviews/CR-1', type: 'cr', label: 'CR-1', msgIdx: 0 }]}
+            navSections={[{ label: 'First question', msgIdx: 0, displayIdx: 3 }]}
+            onScrollToNavSection={onScroll}
+          />
+        </QueryClientProvider>
+      </Provider>,
+    )
+    expect(screen.getByText('CR-1')).toBeInTheDocument()
+    const section = screen.getByText('First question')
+    expect(section).toBeInTheDocument()
+    fireEvent.click(section)
+    expect(onScroll).toHaveBeenCalledWith(3)
   })
 })

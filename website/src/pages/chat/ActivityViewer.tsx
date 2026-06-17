@@ -1,16 +1,19 @@
 import { useEffect, useRef, useState, useCallback, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Bot, ScrollText, FileText, X, Lock, CheckCircle, AlertCircle, Loader as LoaderIcon, Ban, Handshake, Wrench, FolderOpen, ChevronLeft, ChevronRight, MessageSquare } from 'lucide-react'
+import { Bot, ScrollText, FileText, X, Lock, CheckCircle, AlertCircle, Loader as LoaderIcon, Ban, Handshake, Wrench, FolderOpen, ChevronLeft, ChevronRight, MessageSquare, ListTree } from 'lucide-react'
 import { api } from '../../api/client'
 import { LogViewer } from '../LogsPage'
 import TrustDropdown from '../../components/TrustDropdown'
 import type { SubagentActivity, ToolActivity } from '../../types'
 import type { TouchedFile } from '../../hooks/useTouchedFiles'
+import type { ExtractedLink } from '../../utils/extractChatLinks'
+import type { ChatSection } from '../../hooks/useChatNavigation'
 import { useAppSelector, useAppDispatch } from '../../store'
 import { markSubagentApproving, openActivityToTab } from '../../store/chatSlice'
 import SegmentedControl from '../../components/SegmentedControl'
 import { colorForExt, fileIcon } from '../../utils/fileIcons'
 import SideChat from './SideChat'
+import ChatNavContent from './ChatNavPanel'
 
 const STATUS = {
   pending: <Lock size={12} className="text-muted" />,
@@ -372,10 +375,11 @@ function FileBrowser({ onFileOpen, initialPath = '' }: { onFileOpen?: (path: str
   )
 }
 
-export default function ActivityViewer({ subagents, toolLog, open, onToggle, slot, files, onFileOpen, onFileRemove, onFilesClear, projectDir }: {
+export default function ActivityViewer({ subagents, toolLog, open, onToggle, slot, files, onFileOpen, onFileRemove, onFilesClear, projectDir, navLinks, navSections, onScrollToNavSection, navResolving }: {
   subagents: Record<string, SubagentActivity>; toolLog: ToolActivity[]; open: boolean; onToggle: () => void; slot: string
   files?: TouchedFile[]; onFileOpen?: (path: string) => void; onFileRemove?: (path: string) => void; onFilesClear?: (source: 'history' | 'tool') => void
   projectDir?: string
+  navLinks?: ExtractedLink[]; navSections?: ChatSection[]; onScrollToNavSection?: (displayIdx: number) => void; navResolving?: boolean
 }) {
   const dispatch = useAppDispatch()
   const [, setSelected] = useState(0)
@@ -384,7 +388,7 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
   const [browserOpen, setBrowserOpen] = useState(!!projectDir)
   const [browserHeight, setBrowserHeight] = useState(320)
   const [browserDragging, setBrowserDragging] = useState(false)
-  const [tab, setTab] = useState<'subagents' | 'logs' | 'files' | 'side'>(reduxTab)
+  const [tab, setTab] = useState<'subagents' | 'logs' | 'files' | 'side' | 'nav'>(reduxTab)
   const explicitTab = useRef(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const ids = Object.keys(subagents)
@@ -418,6 +422,7 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
 
   const TABS: { key: typeof tab; label: string; icon: ReactNode; count?: number }[] = [
     { key: 'files', label: 'Files', icon: <FileText size={13} />, count: files?.length || 0 },
+    { key: 'nav', label: 'Navigation', icon: <ListTree size={13} /> },
     { key: 'subagents', label: 'Subagents', icon: <Bot size={13} />, count: ids.length + visibleLog.filter(isSpawnApproval).length },
     { key: 'logs', label: 'Logs', icon: <ScrollText size={13} /> },
     { key: 'side', label: 'Side', icon: <MessageSquare size={13} /> },
@@ -455,6 +460,16 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
 
       {/* Logs tab */}
       {tab === 'logs' && <LogViewer compact />}
+
+      {/* Navigation tab */}
+      {tab === 'nav' && (
+        <ChatNavContent
+          links={navLinks ?? []}
+          sections={navSections ?? []}
+          onScrollToSection={onScrollToNavSection ?? (() => {})}
+          resolving={navResolving}
+        />
+      )}
 
       {/* Files tab */}
       {tab === 'files' && (() => {

@@ -25,7 +25,6 @@ export interface ChatConfig {
   confirmCloseSession: boolean
   simplifiedToolNames: boolean
   tagColumnsEnabled: boolean
-  navPanelOpen: boolean
   fileChipStyle: FileChipStyle
   followUpLayout: FollowUpLayout
 }
@@ -34,7 +33,7 @@ export type FileChipStyle = 'expanded' | 'minimal'
 export type FollowUpLayout = 'multiline' | 'scroll'
 
 const LS_KEY = 'mc-chat-config'
-const DEFAULTS: ChatConfig = { historyExpanded: true, notifLimit: 50, showTimestamps: true, sendOnEnter: 'enter', collapseAllSteps: true, confirmCloseSession: false, simplifiedToolNames: true, contentWidth: 'compact', tagColumnsEnabled: true, navPanelOpen: false, fileChipStyle: 'expanded', followUpLayout: 'scroll' }
+const DEFAULTS: ChatConfig = { historyExpanded: true, notifLimit: 50, showTimestamps: true, sendOnEnter: 'enter', collapseAllSteps: true, confirmCloseSession: false, simplifiedToolNames: true, contentWidth: 'compact', tagColumnsEnabled: true, fileChipStyle: 'expanded', followUpLayout: 'scroll' }
 
 const VALID_FILE_CHIP_STYLES: ReadonlySet<FileChipStyle> = new Set(['expanded', 'minimal'])
 const VALID_FOLLOW_UP_LAYOUTS: ReadonlySet<FollowUpLayout> = new Set(['multiline', 'scroll'])

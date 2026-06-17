@@ -297,12 +297,6 @@ export function ChatPanel() {
         </div>
       )}
 
-      <SettingsSection title="Sidebar">
-        <SettingsCard>
-          <SettingsToggle label="Navigation Panel" description="Show the link navigation panel when opening a session" checked={chatCfg.navPanelOpen} onChange={v => setChat('navPanelOpen', v)} />
-        </SettingsCard>
-      </SettingsSection>
-
       <SettingsSection title="Behavior">
         <SettingsCard>
           <SettingsSelect
