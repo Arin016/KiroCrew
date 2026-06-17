@@ -114,6 +114,7 @@ from kiro_claw.security import (
     redact_exfiltration_urls,
 )
 from kiro_claw.sel import sel
+from kiro_claw.slack.handler import post_linked_approval, resolve_linked_approval
 from kiro_claw.stats import Stats
 from kiro_claw.validation import ValidationError, validate_ask_user_question
 
@@ -2445,12 +2446,78 @@ async def _run_chat(
                 # slot dict reflects pending_approval=true and Board cards
                 # move into the Blocked lane without a browser refresh.
                 state.push_slots_update()
+                # Mirror the prompt to the linked Slack thread so a user driving
+                # this session from Slack can actually answer it. Without this,
+                # the prompt only renders in the dashboard and a Slack-only user
+                # never sees it — the turn then parks here until the 2h timeout,
+                # holding the slot lock and silently dropping inbound messages.
+                # The Slack click resolves THIS future (via state.resolve_approval);
+                # we remain the sole caller of approve_tool/reject_tool below.
+                _slack_approval_ts: str | None = None
+                if slot._slack_linked and slot._slack_channel and slot._slack_thread_ts and state.slack_client:
+                    try:
+                        _slack_approval_ts = await post_linked_approval(
+                            state.slack_client,
+                            slot._slack_channel,
+                            slot._slack_thread_ts,
+                            event.request_id,
+                            session_key,
+                            event.title,
+                            event.tool_input or "",
+                        )
+                        if _slack_approval_ts is None:
+                            # Delivery failed — do not silently park for 2h.
+                            # Resolve the future now (reject) and tell the user
+                            # the prompt could not be delivered, so they retry
+                            # rather than wait. The dashboard still rendered the
+                            # prompt, so a dashboard user could also answer; but
+                            # resolving keeps a Slack-only user from being stuck.
+                            logger.warning(
+                                "Linked approval delivery to Slack failed; auto-rejecting tool %r",
+                                event.title,
+                            )
+                            slot.append(
+                                "assistant",
+                                "\u26a0\ufe0f A tool approval was required but I couldn't post it to "
+                                "this Slack thread, so I auto-declined it. Please retry, or "
+                                "approve from the dashboard.",
+                                "msg msg-a",
+                            )
+                            state.push_slots_update()
+                            if not fut.done():
+                                fut.set_result("rejected")
+                    except Exception:
+                        # Any failure before the future is resolved (ImportError,
+                        # post_linked_approval raising, slot.append/push raising in
+                        # the delivery-failure branch) would otherwise fall through
+                        # to the 2h wait_for with an unresolved future — the exact
+                        # wedge this fix prevents. Auto-reject so the turn unblocks,
+                        # mirroring the _slack_approval_ts is None branch.
+                        logger.warning(
+                            "Error mirroring approval prompt to Slack", exc_info=True
+                        )
+                        if not fut.done():
+                            fut.set_result("rejected")
                 try:
                     outcome = await asyncio.wait_for(fut, timeout=7200.0)
                 except asyncio.TimeoutError:
                     outcome = "rejected"
                 finally:
                     slot._approval_futures.pop(str(event.request_id), None)
+                    # Clean up the Slack prompt: remove the registry entry and
+                    # delete the buttons message now the decision is in.
+                    if _slack_approval_ts is not None:
+                        try:
+                            resolve_linked_approval(slot._slack_channel, _slack_approval_ts)
+                            if state.slack_client:
+                                await state.slack_client.delete_message(
+                                    slot._slack_channel, _slack_approval_ts
+                                )
+                        except Exception:
+                            logger.debug(
+                                "Failed to clean up linked Slack approval message",
+                                exc_info=True,
+                            )
                 if outcome == "approved_trust_reads":
                     slot._trust_reads = True
                     outcome = "approved"

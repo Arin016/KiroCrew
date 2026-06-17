@@ -935,6 +935,34 @@ class _PendingApproval:
         self.future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
 
+class _LinkedApproval:
+    """A tool-approval prompt posted to Slack on behalf of a *linked dashboard
+    slot*.
+
+    Unlike :class:`_PendingApproval`, this entry does NOT own the ACP backend
+    answer. For a Slack-linked dashboard session the consumer that actually
+    calls ``approve_tool`` / ``reject_tool`` is the dashboard's ``_run_chat``
+    loop, which is parked on the slot's approval *future*. A Slack button click
+    here must therefore ONLY resolve that future (via
+    ``state.resolve_approval``); the dashboard loop then answers the backend
+    exactly once. Calling ``approve_tool`` from here too would answer the
+    JSON-RPC request twice.
+    """
+
+    __slots__ = ("request_id", "session_key")
+
+    def __init__(self, request_id: str | int, session_key: str) -> None:
+        self.request_id = request_id
+        self.session_key = session_key
+
+
+# Linked-slot approvals: keyed by f"{channel}:{approval_msg_ts}", parallel to
+# _pending_approvals. Kept separate so the click handler can tell a Slack-native
+# approval (answer the backend) from a dashboard-linked one (resolve the slot
+# future only).
+_linked_approvals: dict[str, _LinkedApproval] = {}
+
+
 _OUTCOME_APPROVED = "approved"
 _OUTCOME_REJECTED = "rejected"
 
@@ -3372,6 +3400,79 @@ async def _reject_orphaned_tool(provider: LLMProvider, request_id: "str | int") 
         logger.warning("Failed to reject orphaned tool %s", request_id, exc_info=True)
 
 
+class _LinkedApprovalEvent:
+    """Minimal event shim for :func:`_build_approval_blocks`.
+
+    The dashboard's permission event (``AcpEvent``) and the Slack-native
+    ``LLMEvent`` have different shapes, so adapt the few fields the block
+    builder reads: ``request_id``, ``title``, ``tool_input``, ``tool_purpose``.
+    """
+
+    __slots__ = ("request_id", "title", "tool_input", "tool_purpose")
+
+    def __init__(self, request_id: str | int, title: str, tool_input: str = "") -> None:
+        self.request_id = request_id
+        self.title = title
+        self.tool_input = tool_input
+        self.tool_purpose = ""
+
+
+async def post_linked_approval(
+    slack: SlackClientOps,
+    channel: str,
+    thread_ts: str,
+    request_id: str | int,
+    session_key: str,
+    title: str,
+    tool_input: str = "",
+) -> str | None:
+    """Mirror a dashboard tool-approval prompt into a linked Slack thread.
+
+    Posts Approve / Reject buttons threaded under ``thread_ts`` and registers a
+    :class:`_LinkedApproval` keyed by ``channel:ts`` so a button click resolves
+    the dashboard slot's approval future (see :func:`handle_interaction`).
+
+    Returns the Slack message ts on success, or ``None`` if the post failed.
+    The caller (dashboard ``_run_chat``) treats ``None`` as "delivery failed"
+    and surfaces it rather than silently parking on an unanswerable prompt.
+
+    Trust is intentionally omitted (``is_dm=False``): trust for a linked slot is
+    a dashboard-side mode, not wired through this path. Approve / Reject are
+    sufficient to guarantee the prompt is answerable from Slack.
+    """
+    # title / tool_input are LLM-generated (the tool-use request). Slack is an
+    # external surface, so scrub them the same way every other outbound LLM
+    # string is scrubbed before posting — the dashboard path already redacts
+    # these via perm_meta, but this Slack mirror must do its own redaction.
+    title, _ = redact_exfiltration_urls(title)
+    title, _ = redact_credentials(title)
+    tool_input, _ = redact_exfiltration_urls(tool_input)
+    tool_input, _ = redact_credentials(tool_input)
+    event = _LinkedApprovalEvent(request_id, title, tool_input)
+    # _build_approval_blocks is typed for AcpEvent but only reads the four
+    # attributes the shim provides (request_id/title/tool_input/tool_purpose).
+    blocks = _build_approval_blocks(event, is_dm=False)  # type: ignore[arg-type]
+    try:
+        approval_ts = await slack.post_blocks(
+            channel, blocks, "Manual approval required", thread_ts
+        )
+    except Exception:
+        logger.warning(
+            "Failed to post linked approval prompt to Slack (session=%s req=%s)",
+            session_key,
+            request_id,
+            exc_info=True,
+        )
+        return None
+    _linked_approvals[f"{channel}:{approval_ts}"] = _LinkedApproval(request_id, session_key)
+    return approval_ts
+
+
+def resolve_linked_approval(channel: str, approval_ts: str) -> None:
+    """Drop a linked-approval registry entry (after the dashboard resolved it)."""
+    _linked_approvals.pop(f"{channel}:{approval_ts}", None)
+
+
 async def _request_approval(
     slack: SlackClientOps,
     provider: LLMProvider,
@@ -3454,6 +3555,42 @@ async def handle_interaction(
         return None
 
     key = f"{channel}:{msg_ts}"
+
+    # Linked-dashboard-slot approval: the dashboard's _run_chat owns the ACP
+    # answer (it is parked on the slot's approval future). Resolve ONLY that
+    # future here via state.resolve_approval — do NOT call approve_tool/reject
+    # (that would answer the JSON-RPC request twice). Trust is not offered on
+    # this path, so treat anything that isn't an explicit reject as approve.
+    linked_entry = _linked_approvals.get(key)
+    if linked_entry is not None:
+        approved = action_id != _ACTION_REJECT
+        resolved = False
+        if _dashboard_state is not None and hasattr(_dashboard_state, "resolve_approval"):
+            try:
+                resolved = bool(
+                    _dashboard_state.resolve_approval(str(linked_entry.request_id), approved)  # type: ignore[attr-defined]
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to resolve linked approval (req=%s)",
+                    linked_entry.request_id,
+                    exc_info=True,
+                )
+        _linked_approvals.pop(key, None)
+        sel().log_api_access(
+            caller=user_id,
+            operation="slack.interactive.approval_linked",
+            outcome="allowed" if approved else "denied",
+            source="slack",
+            resources=linked_entry.session_key,
+            error="" if resolved else "future_not_found",
+        )
+        if approved:
+            Stats().inc_tool_approval()
+        else:
+            Stats().inc_tool_denial()
+        return _ACTION_APPROVE if approved else _ACTION_REJECT
+
     pending = _pending_approvals.get(key)
     if not pending:
         # Approval already resolved (approved/rejected/timed out).
