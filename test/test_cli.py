@@ -1741,11 +1741,11 @@ class TestEnsurePrerequisites:
             assert _ensure_prerequisites() is True
 
     def test_returns_true_when_optional_kiro_absent(self):
-        """kiro-cli is an OPTIONAL backend now — its absence must not block setup.
+        """kiro-cli's absence must not block setup.
 
-        The public default backend is claude-agent-acp, so there is no Amazon
-        login prerequisite. _ensure_prerequisites only prints guidance and
-        always returns True so setup proceeds.
+        _ensure_prerequisites only prints guidance for missing tooling (it does
+        no installs and imposes no login prerequisite) and always returns True so
+        setup proceeds even when the kiro-cli backend is not yet on PATH.
         """
         from kiro_claw.cli_setup import _ensure_prerequisites
 

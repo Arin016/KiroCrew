@@ -186,12 +186,12 @@ def _is_safe_oauth_url(url: str) -> bool:
 def _resolve_kiro_bin() -> str | None:
     """Find the kiro-cli binary, or None when it is not installed.
 
-    kiro-cli is an OPTIONAL backend — the default is ``claude-agent-acp``.
-    Honours an explicit ``KIROCLAW_KIRO_BIN`` override first (only when it points
-    at an existing executable; ignored otherwise), then resolves from PATH
-    (augmented with the usual local bin dirs so a non-login gateway still finds a
-    user install) and returns ``None`` rather than raising when it is absent, so
-    a vanilla machine without kiro-cli simply falls back to the default backend.
+    kiro-cli is the agent backend for the public build. Honours an explicit
+    ``KIROCLAW_KIRO_BIN`` override first (only when it points at an existing
+    executable; ignored otherwise), then resolves from PATH (augmented with the
+    usual local bin dirs so a non-login gateway still finds a user install) and
+    returns ``None`` rather than raising when it is absent, so the caller can
+    surface a clear "install kiro-cli" error instead of crashing.
     """
     env_bin = os.environ.get("KIROCLAW_KIRO_BIN")
     if env_bin and Path(env_bin).is_file() and os.access(env_bin, os.X_OK):

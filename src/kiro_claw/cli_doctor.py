@@ -32,8 +32,10 @@ from kiro_claw.transcribe import _find_whisper, ensure_ffmpeg_in_path
 
 _MIN_NODE_VERSION = 16
 
-# Default agent backend is the public claude-agent-acp; kiro-cli stays an
-# OPTIONAL backend. Resolve it via PATH only and report gracefully when absent.
+# KiroClaw's agent backend is kiro-cli (the sole public ACP backend). The
+# claude-agent-acp binary below is only the dormant protocol seam an internal
+# companion re-registers (see acp/client.py) — report it, when present, as that
+# optional seam rather than as a user-facing backend.
 _CLAUDE_ACP_BIN = "claude-agent-acp"
 
 
@@ -213,18 +215,12 @@ def _doctor() -> None:
 
     # ── Dependencies ──
     print("Dependencies")
-    # Default backend is the public claude-agent-acp (npm). kiro-cli is an
-    # OPTIONAL backend — report gracefully when either is absent.
-    claude_acp = shutil.which(_CLAUDE_ACP_BIN)
-    if claude_acp:
-        print(f"  claude-acp:  ✅ {claude_acp}")
-    else:
-        print("  claude-acp:  ⏭  not found (default backend)")
-        print("               Install: npm i -g @agentclientprotocol/claude-agent-acp")
-
+    # kiro-cli is THE agent backend for the public build. claude-agent-acp is
+    # only the dormant protocol seam (re-registered by an internal companion),
+    # so report it as optional and report kiro-cli as the backend.
     kiro = shutil.which(KIRO_CLI_BIN)
     if kiro:
-        print(f"  kiro-cli:    ✅ {kiro} (optional backend)")
+        print(f"  kiro-cli:    ✅ {kiro}")
         # Check login status — best-effort, never a hard failure
         try:
             r = subprocess.run(
@@ -236,11 +232,16 @@ def _doctor() -> None:
             if r.returncode == 0:
                 print("  kiro login:  ✅")
             else:
-                print("  kiro login:  ⏹ not logged in (optional: kiro-cli login)")
+                print("  kiro login:  ⏹ not logged in (run: kiro-cli login)")
         except Exception:
             print("  kiro login:  ⚠️  could not check")
     else:
-        print("  kiro-cli:    ⏭  not configured (optional backend)")
+        print("  kiro-cli:    ⏭  not found (the agent backend)")
+        print("               Install kiro-cli per its docs, then: kiro-cli login")
+
+    claude_acp = shutil.which(_CLAUDE_ACP_BIN)
+    if claude_acp:
+        print(f"  claude-acp:  ✅ {claude_acp} (dormant seam — not used by the public core)")
 
     git = shutil.which("git")
     if git:

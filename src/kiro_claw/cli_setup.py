@@ -140,10 +140,9 @@ def _fix_shell_profiles() -> None:
 def _ensure_prerequisites() -> bool:
     """Report on optional prerequisites resolved from PATH.
 
-    The public build's default agent backend is ``claude-agent-acp`` (public
-    npm). This performs no installs and never blocks setup — it only prints
-    guidance for optional tooling that is missing from PATH. Always returns
-    True so setup proceeds.
+    The public build's agent backend is ``kiro-cli``. This performs no installs
+    and never blocks setup — it only prints guidance for tooling that is missing
+    from PATH. Always returns True so setup proceeds.
     """
     header_printed = False
 
@@ -153,16 +152,17 @@ def _ensure_prerequisites() -> bool:
             print("── Prerequisites ──\n")
             header_printed = True
 
-    # Node is required to run the claude-agent-acp backend and the dashboard build.
+    # Node is required for the dashboard build (and for MCP servers shipped as
+    # npm packages, e.g. the Playwright browser MCP).
     if not shutil.which("node"):
         _header()
         print("  ⚠️  node not found on PATH — install Node.js >= 16 from https://nodejs.org\n")
 
-    # kiro-cli is an OPTIONAL backend. Absence is fine; just note it.
+    # kiro-cli is the agent backend. Note its absence so the user can install it.
     if not shutil.which(KIRO_CLI_BIN):
         _header()
-        print("  ℹ️  kiro-cli not found (optional backend) — the default "
-              "claude-agent-acp backend will be used.\n")
+        print("  ℹ️  kiro-cli not found on PATH — install it (the agent backend) "
+              "and run 'kiro-cli login'.\n")
 
     return True
 
