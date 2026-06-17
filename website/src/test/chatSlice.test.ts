@@ -14,6 +14,8 @@ import reducer, {
   setSlotStatusDetail,
   clearMessages,
   sseChatMessage,
+  sseThinkingChunk,
+  refreshSlot,
   sseSubagentPending,
   sseSubagentSpawn,
   sseSubagentChunk,
@@ -1262,5 +1264,103 @@ describe('sseSideResult — side conversation reducer', () => {
     state = reducer(state, sideClose('slot-1'))
     expect(state.slotSide['slot-1']).toBeUndefined()
     expect(state.slotSide['slot-2']).toBeDefined()
+  })
+})
+
+describe('sseThinkingChunk (model reasoning)', () => {
+  const base = reducer(undefined, { type: '@@INIT' })
+  const active = reducer(base, setActiveSlot('chat-1'))
+
+  it('creates a content-bearing thinking message', () => {
+    const state = reducer(active, sseThinkingChunk({ slot: 'chat-1', content: 'Let me think' }))
+    const thinking = state.messages.filter(m => m.role === 'thinking')
+    expect(thinking).toHaveLength(1)
+    expect(thinking[0].content).toBe('Let me think')
+  })
+
+  it('accumulates into a single thinking message within a turn', () => {
+    let state = reducer(active, sseThinkingChunk({ slot: 'chat-1', content: 'Step 1. ' }))
+    state = reducer(state, sseThinkingChunk({ slot: 'chat-1', content: 'Step 2.' }))
+    const thinking = state.messages.filter(m => m.role === 'thinking')
+    expect(thinking).toHaveLength(1)
+    expect(thinking[0].content).toBe('Step 1. Step 2.')
+  })
+
+  it('ignores chunks for a non-active slot', () => {
+    const state = reducer(active, sseThinkingChunk({ slot: 'other', content: 'nope' }))
+    expect(state.messages).toHaveLength(0)
+  })
+
+  it('ignores empty content', () => {
+    const state = reducer(active, sseThinkingChunk({ slot: 'chat-1', content: '' }))
+    expect(state.messages).toHaveLength(0)
+  })
+
+  it('starts a fresh reasoning block in a new turn (after a user message)', () => {
+    let state = reducer(active, sseThinkingChunk({ slot: 'chat-1', content: 'first turn reasoning' }))
+    state = reducer(state, sseChatMessage({ slot: 'chat-1', role: 'user', content: 'follow up', ts: '' }))
+    state = reducer(state, sseThinkingChunk({ slot: 'chat-1', content: 'second turn reasoning' }))
+    const thinking = state.messages.filter(m => m.role === 'thinking')
+    expect(thinking).toHaveLength(2)
+    expect(thinking[1].content).toBe('second turn reasoning')
+  })
+
+  it('chat_chunk preserves a content-bearing reasoning block', () => {
+    let state = reducer(active, sseThinkingChunk({ slot: 'chat-1', content: 'reasoning text' }))
+    state = reducer(state, sseChatMessage({ slot: 'chat-1', role: 'chunk', content: 'answer', seq: 0 }))
+    const thinking = state.messages.filter(m => m.role === 'thinking')
+    const streaming = state.messages.filter(m => m.role === 'streaming')
+    expect(thinking).toHaveLength(1)
+    expect(thinking[0].content).toBe('reasoning text')
+    expect(streaming).toHaveLength(1)
+  })
+
+  it('chat_chunk still drops an empty thinking placeholder', () => {
+    let state = reducer(active, appendMessage({ role: 'thinking', content: '', cls: '' }))
+    state = reducer(state, sseChatMessage({ slot: 'chat-1', role: 'chunk', content: 'answer', seq: 0 }))
+    expect(state.messages.filter(m => m.role === 'thinking')).toHaveLength(0)
+  })
+})
+
+describe('thinking survives refreshSlot (client-only reasoning)', () => {
+  const base = reducer(undefined, { type: '@@INIT' })
+
+  const refreshPayload = (key: string, messages: { role: string; content: string; cls?: string; ts?: string }[]) => ({
+    key, messages, running: false, hasMore: false, total: messages.length, stopping: false,
+  })
+
+  it('re-inserts the reasoning block before its assistant after refresh', () => {
+    let state = reducer(base, setActiveSlot('chat-1'))
+    // model reasons, then answers
+    state = reducer(state, sseThinkingChunk({ slot: 'chat-1', content: 'because X then Y' }))
+    state = reducer(state, sseChatMessage({ slot: 'chat-1', role: 'chunk', content: 'The answer', seq: 0 }))
+    state = reducer(state, sseChatMessage({ slot: 'chat-1', role: '_done', content: '' }))
+    expect(state.messages.filter(m => m.role === 'thinking')).toHaveLength(1)
+
+    // server refresh carries only the persisted user/assistant (no thinking)
+    state = reducer(state, refreshSlot.fulfilled(
+      refreshPayload('chat-1', [{ role: 'assistant', content: 'The answer', cls: 'msg msg-a' }]),
+      'req', 'chat-1',
+    ))
+
+    const thinking = state.messages.filter(m => m.role === 'thinking')
+    expect(thinking).toHaveLength(1)
+    expect(thinking[0].content).toBe('because X then Y')
+    // anchored directly before its assistant
+    const ti = state.messages.findIndex(m => m.role === 'thinking')
+    const ai = state.messages.findIndex(m => m.role === 'assistant')
+    expect(ti).toBeGreaterThanOrEqual(0)
+    expect(ti).toBe(ai - 1)
+  })
+
+  it('does not duplicate the reasoning block across successive refreshes', () => {
+    let state = reducer(base, setActiveSlot('chat-1'))
+    state = reducer(state, sseThinkingChunk({ slot: 'chat-1', content: 'reasoning' }))
+    state = reducer(state, sseChatMessage({ slot: 'chat-1', role: 'chunk', content: 'Answer', seq: 0 }))
+    state = reducer(state, sseChatMessage({ slot: 'chat-1', role: '_done', content: '' }))
+    const payload = refreshPayload('chat-1', [{ role: 'assistant', content: 'Answer', cls: 'msg msg-a' }])
+    state = reducer(state, refreshSlot.fulfilled(payload, 'r1', 'chat-1'))
+    state = reducer(state, refreshSlot.fulfilled(payload, 'r2', 'chat-1'))
+    expect(state.messages.filter(m => m.role === 'thinking')).toHaveLength(1)
   })
 })

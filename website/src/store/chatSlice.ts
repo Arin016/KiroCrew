@@ -140,6 +140,51 @@ export const switchSlot = createAsyncThunk(
 )
 
 /** Re-fetch messages for a slot without changing activeSlot. Only applies if still active. */
+/** Re-insert client-only reasoning (`thinking`) messages into a server-refreshed
+ *  message list. The backend never persists reasoning, so a refresh (e.g. the
+ *  one fired on chat_done) would otherwise drop the thinking block the instant a
+ *  turn finishes. Each preserved block is anchored to the assistant message that
+ *  immediately followed it in the old list (matched by finalized content) and
+ *  re-inserted just before it. At most one reasoning block per assistant. Any
+ *  block whose anchor isn't found is appended so it is never silently lost.
+ *  Returns `incoming` unchanged (reference-equal) when there is nothing to
+ *  preserve. */
+function mergePreservedThinking<M extends { role: string; content: string; cls?: string }>(
+  existing: M[],
+  incoming: M[],
+): M[] {
+  const preserved: Array<{ msg: M; anchor: string | null }> = []
+  for (let i = 0; i < existing.length; i++) {
+    const m = existing[i]
+    if (m.role !== 'thinking' || !m.content) continue
+    let anchor: string | null = null
+    for (let j = i + 1; j < existing.length; j++) {
+      const r = existing[j].role
+      if (r === 'assistant' || r === 'streaming') { anchor = existing[j].content.trimEnd(); break }
+      if (r === 'user') break
+    }
+    preserved.push({ msg: m, anchor })
+  }
+  if (!preserved.length) return incoming
+  const used = new Set<number>()
+  const result: M[] = []
+  for (const item of incoming) {
+    if (item.role === 'assistant') {
+      const c = item.content.trimEnd()
+      for (let p = 0; p < preserved.length; p++) {
+        if (!used.has(p) && preserved[p].anchor === c) {
+          result.push({ ...preserved[p].msg }); used.add(p); break
+        }
+      }
+    }
+    result.push(item)
+  }
+  for (let p = 0; p < preserved.length; p++) {
+    if (!used.has(p)) result.push({ ...preserved[p].msg })
+  }
+  return result
+}
+
 export const refreshSlot = createAsyncThunk(
   'chat/refreshSlot',
   async (key: string, { getState }) => {
@@ -628,6 +673,20 @@ const chatSlice = createSlice({
       }
     },
     /** Handle chat messages pushed via global SSE/WS (works after refresh). */
+    /** Accumulate streamed model reasoning (`chat_thinking` WS event) into a
+     *  single content-bearing `thinking`-role message for the current turn.
+     *  Reasoning normally arrives before the visible answer, so the block sits
+     *  above the streamed assistant text. Scans back to the turn boundary (the
+     *  last user message) to keep one reasoning block per turn. */
+    sseThinkingChunk(state, action: PayloadAction<{ slot: string; content: string }>) {
+      const { slot, content } = action.payload
+      if (slot !== state.activeSlot || !content) return
+      for (let i = state.messages.length - 1; i >= 0; i--) {
+        if (state.messages[i].role === 'thinking') { state.messages[i].content += content; return }
+        if (state.messages[i].role === 'user') break
+      }
+      state.messages.push({ role: 'thinking', content, cls: '' })
+    },
     sseChatMessage(state, action: PayloadAction<{ slot: string; role: string; content: string; ts?: string; seq?: number; cls?: string; meta?: Record<string, unknown>; kind?: string }>) {
       const { slot, role, content, ts, seq, cls, meta, kind } = action.payload
       if (slot !== state.activeSlot) return
@@ -655,8 +714,11 @@ const chatSlice = createSlice({
       if (role === 'chunk') {
         state.slotState = 'streaming'
         state._wsChunkedDuringFetch = true
-        if (state.messages.some(m => m.role === 'thinking')) {
-          state.messages = state.messages.filter(m => m.role !== 'thinking')
+        // Drop only the empty "Thinking…" placeholder; keep content-bearing
+        // reasoning blocks (from chat_thinking) so they persist as a collapsible
+        // trace directly above the streamed answer.
+        if (state.messages.some(m => m.role === 'thinking' && !m.content)) {
+          state.messages = state.messages.filter(m => !(m.role === 'thinking' && !m.content))
         }
         // Accumulate reasoning text into activity timeline
         const last = state.toolLog[state.toolLog.length - 1]
@@ -931,9 +993,12 @@ const chatSlice = createSlice({
         const mergedWithPastes = mergePreservedPastes(state.messages, merged)
         // Only sort if permissions were re-injected (they need positional merge).
         // Backend messages arrive in order; sorting with mixed ts formats reorders them.
-        state.messages = statePerms.size > 0
+        const sorted = statePerms.size > 0
           ? mergedWithPastes.sort((a, b) => tsNum(a.ts) - tsNum(b.ts))
           : mergedWithPastes
+        // Reasoning is client-only (never persisted server-side); re-insert it so
+        // a finished turn's thinking block survives this refresh.
+        state.messages = mergePreservedThinking(state.messages, sorted)
         state.slotRunning = running
         state.slotStopping = action.payload.stopping ?? false
         state.pendingTurnSlot = null
@@ -1017,7 +1082,7 @@ const chatSlice = createSlice({
 
 export const {
   setActiveSlot, clearSlotState, setPendingInput, setQuestionCard, clearQuestionCard, appendMessage, updateStreamingMessage, finalizeAssistant,
-  removeThinking, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, startLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage,
+  removeThinking, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, startLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage,
   sseContextUsage, setVoicePlaying, setVoiceAudio,
   toggleActivity, openActivityToTab, openActivityToTool, clearFocusToolCallId, sseSubagentPending, markSubagentApproving, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentDone,
   sseSubagentSnapshot, sseToolActivity, sseToolResult, sseActivityEvent,

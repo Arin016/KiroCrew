@@ -33,13 +33,18 @@ import { captureScreen, screenSnipSupported } from '../hooks/useScreenSnip'
 import { useTouchedFiles } from '../hooks/useTouchedFiles'
 import { useTheme } from '../hooks/useTheme'
 import CollapsibleToolGroup from './chat/CollapsibleToolGroup'
+import ThinkingBlock from './chat/ThinkingBlock'
 import type { DisplayItem, TurnItem } from './chat/types'
 import { useScrollManager } from './chat/useScrollManager'
 import { useVirtualChat } from '../hooks/virtualizer/useVirtualChat'
 import { parseFiles, buildRelMap, prepareSendPayload } from '../utils/fileTokens'
 import { type PasteBlock, expandAll as expandPasteTokens, findTokenRanges, pruneBlocks as pruneBlocksUtil, saveStoredPaste } from '../utils/pasteTokens'
 import { extractPromptFromToken, extractSlackContextFromToken } from '../utils/tokenPrompt'
-const GROUPABLE = new Set(['thinking', 'permission'])
+// Roles that fold into a collapsible group in the turn view. Thinking is NOT
+// here: it carries real content and renders as its own standalone block (a
+// content-bearing reasoning trace), so grouping it into the "N tool calls"
+// collapsible would bury and mislabel it.
+const GROUPABLE = new Set(['permission'])
 /** Delay (ms) before scrolling to bottom after a state update, giving React time to commit. */
 const SCROLL_AFTER_RENDER_MS = 100
 export const PREFILL_STORAGE_KEY = 'kiroclaw_prefill'
@@ -2164,7 +2169,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
 
   const renderMessage = useCallback((i: number, m: ChatMessage) => {
     const key = m.ts ? `${m.role}-${m.ts}` : `${m.role}-${i}`
-    if (m.role === 'thinking') return null
+    if (m.role === 'thinking') return m.content ? <ThinkingBlock key={key} content={m.content} /> : null
     if (m.role === 'tool') {
       // Skip ✅/🚫 completion messages — completion shown via CircleCheckBig icon
       if (!m.content.startsWith('🔧')) return null
