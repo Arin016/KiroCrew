@@ -1584,3 +1584,61 @@ class TestProbeServerStderrCapture:
         assert result.status == "error"
         # The literal secret must not appear verbatim in the error field.
         assert "AKIAIOSFODNN7EXAMPLEXXX" not in (result.error or "")
+
+
+class TestProbeStdioMalformedResponse:
+    """Stdio probe must not crash on non-spec JSON-RPC response shapes.
+
+    Regression for: MCP probe failed [...]: 'str' object has no attribute 'get'
+    — some servers return an `error` value (or whole response) that is a bare
+    string rather than the spec's {"message": ...} object / dict.
+    """
+
+    def setup_method(self) -> None:
+        _clear_cache()
+
+    def _make_proc(self, init_line: bytes, list_line: bytes = b"") -> MagicMock:
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdin = MagicMock()
+        proc.stdin.write = MagicMock()
+        proc.stdin.drain = AsyncMock()
+        proc.stdin.close = MagicMock()
+        proc.stdout = MagicMock()
+        proc.stdout.readline = AsyncMock(side_effect=[init_line, list_line])
+        proc.wait = AsyncMock(return_value=0)
+        proc.kill = MagicMock()
+        return proc
+
+    def test_init_error_as_string_does_not_crash(self, monkeypatch) -> None:
+        """An `error` value that is a plain string is handled, not raised."""
+        server = McpServerInfo(name="srv", command="srv")
+        init_line = json.dumps({"jsonrpc": "2.0", "id": 1, "error": "boom"}).encode() + b"\n"
+        proc = self._make_proc(init_line)
+
+        monkeypatch.setattr("shutil.which", lambda cmd, path=None: "/usr/bin/srv")
+        with patch(
+            "kiro_claw.mcp_discovery.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=proc),
+        ):
+            result = asyncio.run(probe_server(server))
+
+        assert result.status == "error"
+        assert result.error == "boom"
+
+    def test_tools_list_non_dict_does_not_crash(self, monkeypatch) -> None:
+        """A tools/list response that parses to a bare string yields no tools."""
+        server = McpServerInfo(name="srv", command="srv")
+        init_line = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode() + b"\n"
+        list_line = json.dumps("unexpected-string").encode() + b"\n"
+        proc = self._make_proc(init_line, list_line)
+
+        monkeypatch.setattr("shutil.which", lambda cmd, path=None: "/usr/bin/srv")
+        with patch(
+            "kiro_claw.mcp_discovery.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=proc),
+        ):
+            result = asyncio.run(probe_server(server))
+
+        assert result.status == "ok"
+        assert result.tools == []

@@ -578,9 +578,10 @@ async def probe_server(server: McpServerInfo) -> McpServerInfo:
             return server
 
         resp = json.loads(line.decode())
-        if "error" in resp:
+        if isinstance(resp, dict) and resp.get("error"):
             server.status = "error"
-            server.error = resp["error"].get("message", "unknown error")
+            err = resp["error"]
+            server.error = err.get("message", "unknown error") if isinstance(err, dict) else str(err)
             return server
 
         # Send initialized notification
@@ -614,8 +615,13 @@ async def probe_server(server: McpServerInfo) -> McpServerInfo:
         line2 = await asyncio.wait_for(proc.stdout.readline(), timeout=_get_probe_timeout())
         if line2:
             resp2 = json.loads(line2.decode())
-            tools_data = resp2.get("result", {}).get("tools", [])
-            server.tools = [t.get("name", "") for t in tools_data if isinstance(t, dict)]
+            result = resp2.get("result", {}) if isinstance(resp2, dict) else {}
+            tools_data = result.get("tools", []) if isinstance(result, dict) else []
+            server.tools = [
+                name
+                for t in tools_data
+                if isinstance(t, dict) and (name := t.get("name", ""))
+            ]
 
         server.status = "ok"
 
