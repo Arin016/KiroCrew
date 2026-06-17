@@ -308,7 +308,11 @@ def _register_instances_hooks(
         if not _cfg.instances.enabled:
             return
         registry = InstancesRegistry()
-        manager = SshTunnelManager(registry, base_port=_cfg.instances.tunnel_base_port)
+        manager = SshTunnelManager(
+            registry,
+            base_port=_cfg.instances.tunnel_base_port,
+            ssh_compression=_cfg.instances.ssh_compression,
+        )
         state.instances_registry = registry
         state.instances_manager = manager
         # First-party cookies: embedded instances load from

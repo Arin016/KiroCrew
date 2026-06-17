@@ -47,9 +47,20 @@ class TestConfig:
         from kiro_claw.config.schema import SCHEMA_REGISTRY
 
         d = KiroClawConfig().to_dict()
-        assert d["instances"] == {"enabled": False, "warm_set_cap": 5, "tunnel_base_port": 7778}
+        assert d["instances"] == {
+            "enabled": False,
+            "warm_set_cap": 5,
+            "tunnel_base_port": 7778,
+            "ssh_compression": True,
+        }
         paths = {e.path for e in SCHEMA_REGISTRY}
-        for p in ("instances", "instances.enabled", "instances.warm_set_cap", "instances.tunnel_base_port"):
+        for p in (
+            "instances",
+            "instances.enabled",
+            "instances.warm_set_cap",
+            "instances.tunnel_base_port",
+            "instances.ssh_compression",
+        ):
             assert p in paths
 
 
@@ -251,7 +262,7 @@ class TestRegistry:
 
 
 class _FakeTunnel:
-    def __init__(self, iid, ssh_host, lp, rp, *, connect_timeout_secs=0, on_exit=None):
+    def __init__(self, iid, ssh_host, lp, rp, *, connect_timeout_secs=0, compression=True, on_exit=None):
         from kiro_claw.instances.ssh_tunnel_manager import TunnelState, TunnelStatus
 
         self.iid = iid
@@ -269,6 +280,62 @@ class _FakeTunnel:
     async def stop(self):
         self.stopped = True
         self.status.state = self._S.STOPPED
+
+
+class TestSshTunnelArgvCompression:
+    def test_compression_flag_present_by_default(self):
+        from kiro_claw.instances.ssh_tunnel_manager import _build_ssh_tunnel_argv
+
+        argv = _build_ssh_tunnel_argv("host-a", 7779, 7879)
+        assert "-C" in argv
+        # -C must sit before the -L forward / host (an ssh option, not a positional)
+        assert argv.index("-C") < argv.index("-L")
+        assert argv[0] == "ssh" and argv[-1] == "host-a"
+
+    def test_compression_flag_omitted_when_disabled(self):
+        from kiro_claw.instances.ssh_tunnel_manager import _build_ssh_tunnel_argv
+
+        argv = _build_ssh_tunnel_argv("host-a", 7779, 7879, compression=False)
+        assert "-C" not in argv
+        # the rest of the shape is intact
+        assert "BatchMode=yes" in argv and "AddressFamily=inet" in argv
+        assert "127.0.0.1:7779:127.0.0.1:7879" in argv
+
+    @pytest.mark.asyncio
+    async def test_manager_threads_compression_to_tunnel(self, tmp_path):
+        # The manager must thread ssh_compression to the tunnel factory on
+        # connect() -- that flag is what _build_ssh_tunnel_argv uses to add/omit
+        # -C. Drive a real connect and assert the captured value both ways.
+        from kiro_claw.instances.registry import InstancesRegistry
+        from kiro_claw.instances.ssh_tunnel_manager import SshTunnelManager, TunnelState
+
+        captured: dict = {}
+
+        def factory(*a, compression=True, **k):
+            captured["compression"] = compression
+            return _FakeTunnel(*a, compression=compression, **k)
+
+        async def ok_mint(host, *, remote_bin="", ttl="20h", remote_port=None):
+            return "SECRET_TOK"
+
+        reg = InstancesRegistry(path=tmp_path / "instances.json")
+
+        # ssh_compression=False -> factory receives compression=False
+        mgr_off = SshTunnelManager(
+            reg, base_port=53400, ssh_compression=False, mint_token=ok_mint, tunnel_factory=factory
+        )
+        reg.add(name="CD", ssh_host="cd-1-alias", instance_id="cd-1")
+        assert (await mgr_off.connect("cd-1")).state == TunnelState.CONNECTED
+        assert captured["compression"] is False
+
+        # default (on) -> factory receives compression=True
+        captured.clear()
+        mgr_on = SshTunnelManager(
+            reg, base_port=53500, mint_token=ok_mint, tunnel_factory=factory
+        )
+        reg.add(name="CD2", ssh_host="cd-2-alias", instance_id="cd-2")
+        assert (await mgr_on.connect("cd-2")).state == TunnelState.CONNECTED
+        assert captured["compression"] is True
 
 
 class TestSshTunnelManager:
@@ -1010,7 +1077,7 @@ class TestDiagnostics:
 class _ResilTunnel:
     """Controllable fake tunnel for self-heal tests."""
 
-    def __init__(self, iid, ssh_host, lp, rp, *, connect_timeout_secs=0, on_exit=None):
+    def __init__(self, iid, ssh_host, lp, rp, *, connect_timeout_secs=0, compression=True, on_exit=None):
         from kiro_claw.instances.ssh_tunnel_manager import TunnelState, TunnelStatus
 
         self._S = TunnelState

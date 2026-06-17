@@ -43,6 +43,7 @@ from kiro_claw.config.paths import (  # noqa: F401
     config_package_dir,
 )
 from kiro_claw.effort import is_valid_effort, model_supports_effort
+from kiro_claw.instances.constants import DEFAULT_SSH_COMPRESSION as _DEFAULT_SSH_COMPRESSION
 from kiro_claw.instances.constants import DEFAULT_TUNNEL_BASE_PORT as _DEFAULT_TUNNEL_BASE_PORT
 from kiro_claw.instances.constants import DEFAULT_WARM_SET_CAP as _DEFAULT_WARM_SET_CAP
 
@@ -1456,6 +1457,18 @@ class InstancesConfig:
             "increments from here, skipping ports already in use.",
         ),
     )
+    ssh_compression: bool = field(
+        default=_DEFAULT_SSH_COMPRESSION,
+        metadata=_meta(
+            "SSH Compression",
+            "Enable SSH transport compression (ssh -C) on instance tunnels. The "
+            "remote dashboard SPA bundle plus all API/WebSocket traffic travel over "
+            "this forwarded stream and are highly compressible; the gateway does not "
+            "gzip HTTP responses, so this is the only compression in the path. "
+            "Default on (best for a dedicated remote host over a slow link); turn off "
+            "on a fast/local link where compression CPU outweighs the bandwidth win.",
+        ),
+    )
 
     def __post_init__(self) -> None:
         if self.warm_set_cap < 1:
@@ -2022,6 +2035,9 @@ class KiroClawConfig:
                 warm_set_cap=int(instances_data.get("warm_set_cap", _DEFAULT_WARM_SET_CAP)),
                 tunnel_base_port=int(
                     instances_data.get("tunnel_base_port", _DEFAULT_TUNNEL_BASE_PORT)
+                ),
+                ssh_compression=bool(
+                    instances_data.get("ssh_compression", _DEFAULT_SSH_COMPRESSION)
                 ),
             ),
             skills=SkillsConfig(

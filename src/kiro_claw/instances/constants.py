@@ -23,6 +23,17 @@ DEFAULT_WARM_SET_CAP: int = 5
 # just above the default dashboard port (7777).
 DEFAULT_TUNNEL_BASE_PORT: int = 7778
 
+# Enable SSH transport compression (``ssh -C``) on instance tunnels. The whole
+# remote dashboard travels over this single forwarded stream: the SPA bundle on
+# first connect plus every subsequent API/WebSocket frame. That payload is
+# JS/HTML/JSON — highly compressible (typically 3-5x), and the gateway does not
+# gzip its HTTP responses, so nothing is double-compressed. Default on because
+# the dominant deployment is a dedicated remote gateway host where spare CPU to
+# save bandwidth on a high-latency/low-throughput link is the right trade. On a
+# fast/local link compression can be marginally slower, so it stays tunable via
+# ``kiroclaw config set instances.ssh_compression false``. See §5.2.
+DEFAULT_SSH_COMPRESSION: bool = True
+
 # Health-probe cadence/threshold for a connected tunnel. Poll every interval,
 # and after this many *consecutive* failures treat the tunnel as unhealthy
 # (Stage 2 self-heal hooks the existing exit seam). interval <= 0 disables the

@@ -143,15 +143,26 @@ class TunnelStatus:
         return d
 
 
-def _build_ssh_tunnel_argv(ssh_host: str, local_port: int, remote_port: int) -> list[str]:
+def _build_ssh_tunnel_argv(
+    ssh_host: str, local_port: int, remote_port: int, *, compression: bool = True
+) -> list[str]:
     """Build the supervised ``ssh -N -L`` argv (loopback-bound, no local shell).
 
     ``ssh_host`` must already be validated by :func:`validate_ssh_host`.
+
+    ``compression`` adds ``-C`` (zlib transport compression). The forwarded
+    stream carries the remote dashboard SPA bundle + all API/WS traffic, which
+    is highly compressible; the gateway does not gzip at the HTTP layer, so this
+    is the only compression in the path. See ``instances.ssh_compression``.
     """
     forward = f"{_LOOPBACK}:{local_port}:{_LOOPBACK}:{remote_port}"
-    return [
+    argv = [
         "ssh",
         "-N",  # no remote command; foreground so the gateway can supervise it
+    ]
+    if compression:
+        argv.append("-C")  # compress the forwarded stream (bundle + API/WS)
+    argv += [
         "-o",
         "BatchMode=yes",  # never prompt — fail fast if auth is needed
         "-o",
@@ -166,6 +177,7 @@ def _build_ssh_tunnel_argv(ssh_host: str, local_port: int, remote_port: int) -> 
         forward,
         ssh_host,
     ]
+    return argv
 
 
 class _SshTunnel:
@@ -179,6 +191,7 @@ class _SshTunnel:
         remote_port: int,
         *,
         connect_timeout_secs: float = _DEFAULT_CONNECT_TIMEOUT_SECS,
+        compression: bool = True,
         on_exit: Callable[[str], None] | None = None,
     ) -> None:
         self._id = instance_id
@@ -186,6 +199,7 @@ class _SshTunnel:
         self._local_port = local_port
         self._remote_port = remote_port
         self._connect_timeout = connect_timeout_secs
+        self._compression = compression
         self._on_exit = on_exit  # Phase 3 seam: called(instance_id) on unexpected exit
 
         self._proc: asyncio.subprocess.Process | None = None
@@ -214,7 +228,9 @@ class _SshTunnel:
         self._stopping = False
         self.status.state = TunnelState.CONNECTING
         self.status.error = ""
-        argv = _build_ssh_tunnel_argv(self._ssh_host, self._local_port, self._remote_port)
+        argv = _build_ssh_tunnel_argv(
+            self._ssh_host, self._local_port, self._remote_port, compression=self._compression
+        )
         logger.info(
             "Opening tunnel for %s: 127.0.0.1:%d -> %s:%d",
             self._id,
@@ -441,12 +457,14 @@ class SshTunnelManager:
         *,
         base_port: int = DEFAULT_TUNNEL_BASE_PORT,
         connect_timeout_secs: float = _DEFAULT_CONNECT_TIMEOUT_SECS,
+        ssh_compression: bool = True,
         mint_token: Callable[..., Awaitable[str]] = mint_remote_token,
         tunnel_factory: Callable[..., _SshTunnel] | None = None,
     ) -> None:
         self._registry = registry
         self._allocator = PortAllocator(base_port=base_port)
         self._connect_timeout = connect_timeout_secs
+        self._ssh_compression = ssh_compression
         self._mint_token = mint_token
         self._tunnel_factory = tunnel_factory or _SshTunnel
         # Only the real ssh path reaps OS-level orphans; injected fakes (tests)
@@ -586,6 +604,7 @@ class SshTunnelManager:
                 local_port,
                 inst.remote_port,
                 connect_timeout_secs=self._connect_timeout,
+                compression=self._ssh_compression,
                 on_exit=self._on_tunnel_exit,
             )
             self._tunnels[instance_id] = tunnel
@@ -696,6 +715,7 @@ class SshTunnelManager:
             local_port,
             inst.remote_port,
             connect_timeout_secs=self._connect_timeout,
+            compression=self._ssh_compression,
             on_exit=self._on_tunnel_exit,
         )
         self._tunnels[inst.id] = tunnel

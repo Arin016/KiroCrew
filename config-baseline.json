@@ -1683,7 +1683,8 @@
       "defaultValue": {
         "enabled": false,
         "warm_set_cap": 5,
-        "tunnel_base_port": 7778
+        "tunnel_base_port": 7778,
+        "ssh_compression": true
       }
     },
     {
@@ -1729,6 +1730,20 @@
       "defaultValue": 7778
     },
     {
+      "path": "instances.ssh_compression",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "SSH Compression",
+      "help": "Enable SSH transport compression (ssh -C) on instance tunnels. The remote dashboard SPA bundle plus all API/WebSocket traffic travel over this forwarded stream and are highly compressible; the gateway does not gzip HTTP responses, so this is the only compression in the path. Default on (best for a dedicated remote host over a slow link); turn off on a fast/local link where compression CPU outweighs the bandwidth win.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": true
+    },
+    {
       "path": "slack",
       "kind": "core",
       "type": "object",
@@ -1753,8 +1768,7 @@
         "reactions_enabled": true,
         "show_thinking": true,
         "home_tab_sessions_per_kind": 5,
-        "use_tunnel_url": false,
-        "challenge_redirect_enabled": false
+        "use_tunnel_url": false
       }
     },
     {
@@ -1992,22 +2006,6 @@
       ],
       "label": "Use Tunnel URL in Slack",
       "help": "When true, dashboard links posted to Slack (DM and channel challenge) use the tunnel URL if one is active. When false (default), Slack links always use the configured dashboard origin or host:port. Disabled by default until the tunnel mechanism is scaled for general use.",
-      "hasChildren": false,
-      "enumValues": null,
-      "defaultValue": false
-    },
-    {
-      "path": "slack.challenge_redirect_enabled",
-      "kind": "core",
-      "type": "boolean",
-      "required": false,
-      "deprecated": false,
-      "sensitive": false,
-      "tags": [
-        "slack"
-      ],
-      "label": "Challenge Redirect Enabled",
-      "help": "When true, all Slack messages are redirected to a dashboard session before the agent processes them (posture-verified access). Default false (opt-in phase).",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": false
