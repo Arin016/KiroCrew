@@ -3,6 +3,7 @@ import MarkdownRenderer from '../../components/MarkdownRenderer'
 import { EmptyState, Skeleton } from '../../components/ui'
 import { IMAGE_EXTS, LANG_BY_EXT } from './constants'
 import { extOf, basename, formatBytes, formatTime, isSensitivePath } from './utils'
+import { copyToClipboard } from '../../utils/clipboard'
 import type { FileMeta } from './types'
 
 interface FileViewerProps {
@@ -45,7 +46,7 @@ export default function FileViewer({ filePath, fileMeta, content, loading, error
 
   const ext = extOf(filePath)
   const fileName = basename(filePath)
-  const copyPath = () => { navigator.clipboard?.writeText(filePath) }
+  const copyPath = () => { copyToClipboard(filePath) }
 
   return (
     <>

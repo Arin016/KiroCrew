@@ -279,7 +279,8 @@ export default function KiroClawCfgTab() {
 function SubagentSettings({ cfg, onSaved }: { cfg: KiroClawCfg; onSaved: () => void }) {
   const [maxTurns, setMaxTurns] = useState(cfg.agent.subagent_max_turns ?? 100)
   const [maxSubs, setMaxSubs] = useState(cfg.agent.max_subagents ?? 3)
-  const hardCap = cfg.agent.subagent_auto_max ?? 16
+  const [autoMax, setAutoMax] = useState(cfg.agent.subagent_auto_max ?? 16)
+  const hardCap = autoMax
   const [conductor, setConductor] = useState(cfg.agent.conductor_skill ?? false)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<ReactNode>('')
@@ -288,15 +289,16 @@ function SubagentSettings({ cfg, onSaved }: { cfg: KiroClawCfg; onSaved: () => v
   useEffect(() => {
     setMaxTurns(cfg.agent.subagent_max_turns ?? 100)
     setMaxSubs(cfg.agent.max_subagents ?? 3)
+    setAutoMax(cfg.agent.subagent_auto_max ?? 16)
     setConductor(cfg.agent.conductor_skill ?? false)
   }, [cfg])
 
-  const dirty = maxTurns !== (cfg.agent.subagent_max_turns ?? 100) || maxSubs !== (cfg.agent.max_subagents ?? 3) || conductor !== (cfg.agent.conductor_skill ?? false)
+  const dirty = maxTurns !== (cfg.agent.subagent_max_turns ?? 100) || maxSubs !== (cfg.agent.max_subagents ?? 3) || autoMax !== (cfg.agent.subagent_auto_max ?? 16) || conductor !== (cfg.agent.conductor_skill ?? false)
 
   const save = async () => {
     setSaving(true); setMsg('')
     try {
-      const res = await api.saveKiroclawConfig({ subagent_max_turns: maxTurns, max_subagents: maxSubs, conductor_skill: conductor })
+      const res = await api.saveKiroclawConfig({ subagent_max_turns: maxTurns, max_subagents: maxSubs, subagent_auto_max: autoMax, conductor_skill: conductor })
       if (res.error) { setMsg(res.error); setMsgOk(false) } else { setMsg(<><Check className="lucide-inline" /> Saved</>); setMsgOk(true); onSaved() }
     } catch (e: any) { setMsg(e.message); setMsgOk(false) }
     finally { setSaving(false) }
@@ -326,6 +328,13 @@ function SubagentSettings({ cfg, onSaved }: { cfg: KiroClawCfg; onSaved: () => v
               className="w-20 px-2 py-1 rounded border border-border bg-bg-elevated text-text font-mono text-[13px] text-right" />
           </span>
         </label>
+        {maxSubs === 0 && (
+          <label className="flex justify-between items-center gap-3 py-1.5 border-b border-border text-sm">
+            <span className="text-muted inline-flex items-center gap-1">Auto-Size Max <InfoTip text="Ceiling on the auto-sized concurrent subagent count (only applies when Max Concurrent Subagents = 0). The host memory/CPU formula never exceeds this. Range 1–64. Default: 16." /></span>
+            <input type="number" min={1} max={64} value={autoMax} onChange={e => { const v = parseInt(e.target.value); setAutoMax(Number.isNaN(v) ? 1 : Math.min(64, Math.max(1, v))) }}
+              className="w-20 px-2 py-1 rounded border border-border bg-bg-elevated text-text font-mono text-[13px] text-right" />
+          </label>
+        )}
       </div>
       <div className="flex items-center gap-3 mt-3">
         <button onClick={save} disabled={!dirty || saving}

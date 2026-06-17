@@ -6,6 +6,7 @@ import { Skeleton } from '../../components/ui'
 import Clickable from '../../components/Clickable'
 import { fileExplorerApi } from './api'
 import { basename, dirname, loadState, saveState, isShortcut } from './utils'
+import { copyToClipboard } from '../../utils/clipboard'
 import { FE_CSS } from './styles'
 import TabStrip from './TabStrip'
 import PathBar from './PathBar'
@@ -395,7 +396,7 @@ export default function FileExplorerPage() {
           {contextMenu.node.type === 'dir' && (
             <Clickable className="mc-fe-ctx-row" onClick={() => { changeRoot(contextMenu.node.path); setContextMenu(null) }}><CornerDownRight size={12} /> Open as workspace root</Clickable>
           )}
-          <Clickable className="mc-fe-ctx-row" onClick={() => { navigator.clipboard?.writeText(contextMenu.node.path); setContextMenu(null) }}><Copy size={12} /> Copy path</Clickable>
+          <Clickable className="mc-fe-ctx-row" onClick={() => { copyToClipboard(contextMenu.node.path); setContextMenu(null) }}><Copy size={12} /> Copy path</Clickable>
           <Clickable className="mc-fe-ctx-row" onClick={() => { changeRoot(dirname(contextMenu.node.path)); setContextMenu(null) }}><ArrowUpFromLine size={12} /> Reveal parent</Clickable>
         </div>
       )}

@@ -296,10 +296,10 @@ export function OverflowMenu({ filePath, content, revealOrCopy }: { filePath: st
           <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { revealOrCopy(filePath, 'reveal'); setOpen(false) }}>
             Reveal in Finder
           </button>
-          <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { navigator.clipboard.writeText(filePath); setOpen(false) }}>
+          <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { copyToClipboard(filePath); setOpen(false) }}>
             Copy path
           </button>
-          <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { navigator.clipboard.writeText(content); setOpen(false) }}>
+          <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { copyToClipboard(content); setOpen(false) }}>
             Copy content
           </button>
           <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { downloadFile(filePath); setOpen(false) }}>
@@ -1110,7 +1110,7 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
         </>
       ) : undefined}
       footer={<>
-        <Clickable className="flex items-center gap-2 text-[11px] text-muted font-mono truncate cursor-pointer hover:text-text transition-colors" title="Click to copy path" onClick={() => navigator.clipboard.writeText(filePath)}>
+        <Clickable className="flex items-center gap-2 text-[11px] text-muted font-mono truncate cursor-pointer hover:text-text transition-colors" title="Click to copy path" onClick={() => copyToClipboard(filePath)}>
           {watchStatus === 'open' && <span className="inline-block w-1.5 h-1.5 rounded-full bg-ok animate-pulse" title="Live watching" />}
           {filePath}
         </Clickable>
@@ -1170,7 +1170,7 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
         {!editing && <SelectionToolbar containerRef={fullscreenBodyRef} actions={selectionActions} externalSelection={monacoSelection} />}
         <CommentOverlayBlock popover={popover} addComment={addComment} setPopover={clearPopover} onSubmitComments={onSubmitComments} comments={comments} editComment={editComment} removeComment={removeComment} submitAllComments={submitAllComments} scrollRef={fullscreenBodyRef} />
         {/* Footer */}
-        <Clickable className="shrink-0 flex items-center px-3 h-6 text-[11px] text-muted font-mono truncate cursor-pointer hover:text-text transition-colors" title="Click to copy path" onClick={() => navigator.clipboard.writeText(filePath)}>{filePath}</Clickable>
+        <Clickable className="shrink-0 flex items-center px-3 h-6 text-[11px] text-muted font-mono truncate cursor-pointer hover:text-text transition-colors" title="Click to copy path" onClick={() => copyToClipboard(filePath)}>{filePath}</Clickable>
       </div>,
       document.body
     )}

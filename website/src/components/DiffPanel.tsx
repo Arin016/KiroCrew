@@ -2,6 +2,7 @@ import { memo, lazy, Suspense } from 'react'
 import { monacoLang, useIsDark } from './MonacoCodeBlock'
 import { kiroclawDark, kiroclawLight } from './monacoTheme'
 import Clickable from './Clickable'
+import { copyToClipboard } from '../utils/clipboard'
 
 const MonacoDiffEditor = lazy(async () => {
   const { ensureMonacoLocal } = await import('../utils/monacoLocal')
@@ -59,7 +60,7 @@ export default memo(function DiffPanel({ filePath, original, modified, sideBySid
       <Clickable
         className="shrink-0 flex items-center px-5 py-3 border-t border-border text-[11px] font-mono truncate text-muted cursor-pointer hover:text-text transition-colors"
         title="Click to copy path"
-        onClick={() => navigator.clipboard.writeText(filePath)}
+        onClick={() => copyToClipboard(filePath)}
       >
         {filePath}
       </Clickable>
