@@ -1398,6 +1398,7 @@ class GatewayOrchestrator:
                 full_message, _ = self.ctx_builder.build_message(
                     msg, True, interactive=False, agent=job.agent_id or None,
                     provider_type=_provider,
+                    minimal_context=job.minimal_context,
                 )
 
                 result_text = await stream_and_collect(

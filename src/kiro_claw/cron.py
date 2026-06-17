@@ -116,6 +116,7 @@ class CronJob:
     skip_dates: list[str] = field(default_factory=list)  # ISO dates to skip ["2026-04-06"]
     timezone: str = ""  # IANA timezone for skip evaluation
     persistent_session: bool = True  # False → fresh ephemeral session per run (Mesh-1026)
+    minimal_context: bool = False  # True → skip memory/lessons/skills/history (Mesh-1632)
 
     # When agent_sequence is set, it takes precedence over agent_id.
     # The execution logic runs agents in order; see Phase 3.
@@ -154,9 +155,12 @@ def build_cron_session_context(job: CronJob) -> tuple[str, str]:
     if job.persistent_session:
         msg = job.message
         if job.last_result:
+            last = job.last_result
+            if job.minimal_context and len(last) > 2000:
+                last = "[truncated]…" + last[-2000:]
             msg = (
                 "[Previous run result — do NOT repeat the same content]\n"
-                f"{job.last_result}\n"
+                f"{last}\n"
                 "[End of previous run result]\n\n"
                 f"{msg}"
             )
@@ -667,6 +671,8 @@ class CronService:
                     job.strict_schedule = bool(kwargs["strict_schedule"])
                 if "persistent_session" in kwargs:
                     job.persistent_session = bool(kwargs["persistent_session"])
+                if "minimal_context" in kwargs:
+                    job.minimal_context = bool(kwargs["minimal_context"])
 
                 # Schedule changes (already validated above)
                 if "cron_expr" in kwargs and kwargs["cron_expr"]:
@@ -1140,6 +1146,7 @@ class CronService:
                     skip_dates=j.get("skip_dates", []),
                     timezone=j.get("timezone", ""),
                     persistent_session=j.get("persistent_session", True),
+                    minimal_context=j.get("minimal_context", False),
                     agent_sequence=j.get("agent_sequence", []),
                     env=j.get("env", {}),
                     timeout_secs=j.get("timeout_secs", _JOB_TIMEOUT_SECS),
@@ -1198,6 +1205,7 @@ class CronService:
                     "skip_dates": j.skip_dates,
                     "timezone": j.timezone,
                     "persistent_session": j.persistent_session,
+                    "minimal_context": j.minimal_context,
                     "agent_sequence": j.agent_sequence,
                     "env": j.env,
                     "timeout_secs": j.timeout_secs,

@@ -502,6 +502,7 @@ CRON_ADD_SCHEMA = ToolSchema(
         FieldSpec("skip_dates", list, item_type=str, item_max_len=10, max_items=366, item_pattern=re.compile(r"^\d{4}-\d{2}-\d{2}$")),
         FieldSpec("timezone", str, max_len=50, pattern=re.compile(r"^[A-Za-z0-9_/+-]+$")),
         FieldSpec("persistent_session", bool),
+        FieldSpec("minimal_context", bool),
         FieldSpec("strict_schedule", bool),
         # SECURITY NOTE: the patterns below are input-SHAPE checks, NOT security
         # sanitizers. The "command" regex only rejects control bytes and the
@@ -739,6 +740,7 @@ MCP_CRON_SCHEMAS: dict[str, ToolSchema] = {
             FieldSpec("skip_dates", list, item_type=str, item_max_len=10, max_items=366, item_pattern=re.compile(r"^\d{4}-\d{2}-\d{2}$")),
             FieldSpec("timezone", str, max_len=50, pattern=re.compile(r"^[A-Za-z0-9_/+-]+$")),
             FieldSpec("persistent_session", bool),
+            FieldSpec("minimal_context", bool),
         ],
     ),
     "cron_remove": CRON_REMOVE_SCHEMA,

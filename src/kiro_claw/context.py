@@ -698,6 +698,7 @@ class ContextBuilder:
         mode: str = "",
         blocks_reads: bool = False,
         provider_type: str = "acp",
+        minimal_context: bool = False,
         *,
         exclude_last_n: int = 0,
     ) -> str:
@@ -728,6 +729,24 @@ class ContextBuilder:
         _ = provider_type  # see docstring: retained for API symmetry, not branched on
         is_custom = agent and agent != "kiroclaw"
         parts: list[str] = []
+
+        # Minimal-context mode (Mesh-1632): only date/time + agent identity.
+        # Saves ~30-50k tokens per cron run for simple polling jobs.
+        if minimal_context:
+            _, tz = get_local_tz()
+            now = datetime.now(tz)
+            parts.append(f"[CURRENT DATE] {now.strftime('%A, %Y-%m-%d %H:%M %Z')}\n\n")
+            agent_label = agent or "kiroclaw"
+            parts.append(f"[CURRENT AGENT] {agent_label}\n")
+            if session_key:
+                runtime = _runtime_display_name(session_key)
+                parts.append(f"[RUNTIME] {runtime}\n")
+            parts.append("\n")
+            logger.debug(
+                "Minimal session context: agent=%s, %d chars",
+                agent_label, sum(len(p) for p in parts),
+            )
+            return "".join(parts)
 
         if is_custom:
             logger.info(
@@ -983,6 +1002,7 @@ class ContextBuilder:
         thread_parent_text: str | None = None,
         thread_meta: str | None = None,
         provider_type: str = "acp",
+        minimal_context: bool = False,
         *,
         exclude_last_n: int = 0,
         folder_path: str | None = None,
@@ -1052,15 +1072,19 @@ class ContextBuilder:
                 mode=mode,
                 blocks_reads=blocks_reads,
                 provider_type=provider_type,
+                minimal_context=minimal_context,
                 exclude_last_n=exclude_last_n,
             )
             if session_ctx:
-                parts.append(
-                    "[SESSION CONTEXT — background reference only, NOT a task to act on.\n"
-                    "This is your memory, lessons, and conversation history from prior "
-                    "sessions. Use it to stay consistent but ONLY respond to the "
-                    "CURRENT USER REQUEST below.]\n" + session_ctx + "[END OF SESSION CONTEXT]\n\n"
-                )
+                if minimal_context:
+                    parts.append(session_ctx)
+                else:
+                    parts.append(
+                        "[SESSION CONTEXT — background reference only, NOT a task to act on.\n"
+                        "This is your memory, lessons, and conversation history from prior "
+                        "sessions. Use it to stay consistent but ONLY respond to the "
+                        "CURRENT USER REQUEST below.]\n" + session_ctx + "[END OF SESSION CONTEXT]\n\n"
+                    )
             # Session replay: inject OUTSIDE the capped session context so it
             # doesn't get truncated at 165K. This is the full conversation
             # history from KiroClaw's conversation_log — provider-agnostic.
@@ -1123,7 +1147,9 @@ class ContextBuilder:
         # Episodic memory — only on new sessions to avoid cross-thread contamination;
         # ACP native history already provides in-thread context for follow-ups.
         # Skipped for temporary sessions.
-        if blocks_reads:
+        if minimal_context:
+            logger.info("🔍 Minimal context — episodic memory skipped")
+        elif blocks_reads:
             logger.info("🔍 Temporary session — episodic memory skipped")
         elif is_new_session:
             memory = self.get_memory_for(memory_store or workspace)
@@ -1162,7 +1188,7 @@ class ContextBuilder:
             )
 
         # Triggered skills (on-demand, any message) — skip for custom agents
-        if not is_custom:
+        if not is_custom and not minimal_context:
             triggered = self.skills.get_triggered_skills(text)
             if triggered:
                 logger.info("Triggered skills: %s", ", ".join(triggered))

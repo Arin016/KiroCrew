@@ -405,6 +405,13 @@ def _list_tools() -> list[dict[str, Any]]:
                         "avoids unbounded context growth. Set True (or omit) for "
                         "conversational reminders that should remember prior runs.",
                     },
+                    "minimal_context": {
+                        "type": "boolean",
+                        "description": "When true, skip memory, lessons, skills, and "
+                        "thread history injection — only date/time and agent identity "
+                        "are included (~200 tokens vs ~30-55k). Also caps last_result "
+                        "to 2000 chars. Use for simple polling/checker jobs.",
+                    },
                     "strict_schedule": {
                         "type": "boolean",
                         "description": "When true, fire exactly on schedule with no jitter. "
@@ -479,6 +486,11 @@ def _list_tools() -> list[dict[str, Any]]:
                     "persistent_session": {
                         "type": "boolean",
                         "description": "Whether this cron reuses one agent session across runs.",
+                    },
+                    "minimal_context": {
+                        "type": "boolean",
+                        "description": "When true, skip memory/lessons/skills/history "
+                        "injection. Only date/time + agent identity are included.",
                     },
                 },
                 "required": ["job_id"],
@@ -825,6 +837,10 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         persistent_session_explicit = isinstance(persistent_session, bool)
         if isinstance(persistent_session, bool):
             job.persistent_session = persistent_session
+        minimal_context = args.get("minimal_context")
+        minimal_context_explicit = isinstance(minimal_context, bool)
+        if isinstance(minimal_context, bool):
+            job.minimal_context = minimal_context
         strict_schedule = args.get("strict_schedule")
         strict_schedule_explicit = isinstance(strict_schedule, bool)
         if isinstance(strict_schedule, bool):
@@ -844,6 +860,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             or skip_dates
             or tz
             or persistent_session_explicit
+            or minimal_context_explicit
             or strict_schedule_explicit
             or script
             or command
@@ -881,6 +898,10 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             kwargs["strict_schedule"] = args["strict_schedule"]
         if "persistent_session" in args:
             kwargs["persistent_session"] = args["persistent_session"]
+        if "minimal_context" in args:
+            mc = args["minimal_context"]
+            if isinstance(mc, bool):
+                kwargs["minimal_context"] = mc
         if "cron_expr" in args and args["cron_expr"]:
             kwargs["cron_expr"] = args["cron_expr"]
         if "every" in args and args["every"]:
