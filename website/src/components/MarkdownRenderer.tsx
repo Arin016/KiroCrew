@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useId, useCallback, useState } from 'react'
-import { Paperclip, X } from 'lucide-react'
+import { Paperclip, X, Download } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -556,6 +556,56 @@ export default memo(function MarkdownRenderer({ content, streaming = false, onFi
 type LightboxImage = { src: string; alt: string }
 type LightboxDetail = { images: LightboxImage[]; index: number }
 
+/** True when a keyboard event originates from an editable element, so global
+ *  printable-key shortcuts (like the lightbox 'd' download) don't hijack typing. */
+function isEditableTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  if (!el || typeof el.tagName !== 'string') return false
+  return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable === true
+}
+
+/** Derive a download filename for a lightbox image. Local images are served
+ *  as `/api/file-raw?path=<abs>`, so prefer the basename of that path; for
+ *  other URLs fall back to the pathname basename, then the alt text. */
+function lightboxFilename(image: LightboxImage): string {
+  try {
+    const u = new URL(image.src, window.location.href)
+    const p = u.searchParams.get('path')
+    const fromPath = p ? p.split(/[\\/]/).pop() : ''
+    if (fromPath) return fromPath
+    const fromName = u.pathname.split('/').pop()
+    if (fromName && fromName.includes('.')) return decodeURIComponent(fromName)
+  } catch {
+    // image.src is not a parseable URL (e.g. a bare data: payload) -- fall through.
+  }
+  const altName = (image.alt || '').trim().replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '')
+  return altName || 'image'
+}
+
+/** Download the given lightbox image to the user's machine. Fetches the
+ *  already-served bytes (same-origin for /api/file-raw, or data:/blob:) into a
+ *  blob and triggers a browser download. If the fetch is blocked (e.g. a
+ *  cross-origin remote image with no CORS), falls back to opening the image in
+ *  a new tab so the user can save it manually. */
+async function downloadLightboxImage(image: LightboxImage): Promise<void> {
+  const name = lightboxFilename(image)
+  try {
+    const res = await fetch(image.src)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const blob = await res.blob()
+    const objUrl = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = objUrl
+    a.download = name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(objUrl), 1000)
+  } catch {
+    window.open(image.src, '_blank', 'noopener,noreferrer')
+  }
+}
+
 /** Build the lightbox payload for an image click. The set is "all images
  *  inside the nearest [data-image-scope] ancestor"; for markdown messages
  *  that's a MarkdownRenderer instance (one per chat message), and for the
@@ -581,6 +631,10 @@ export function dispatchLightbox(target: HTMLImageElement): void {
  *  payload and the legacy { src, alt } single-image shape. */
 export function Lightbox() {
   const [state, setState] = useState<LightboxDetail | null>(null)
+  // Keep a fresh ref so the global keydown handler (subscribed once per open)
+  // can read the current image for the download shortcut without a stale closure.
+  const stateRef = useRef<LightboxDetail | null>(null)
+  stateRef.current = state
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as Partial<LightboxDetail> & Partial<LightboxImage> | undefined
@@ -609,6 +663,10 @@ export function Lightbox() {
       } else if (e.key === 'ArrowRight') {
         e.preventDefault()
         setState(s => (s && s.index < s.images.length - 1 ? { ...s, index: s.index + 1 } : s))
+      } else if ((e.key === 'd' || e.key === 'D') && !isEditableTarget(e.target)) {
+        e.preventDefault()
+        const cur = stateRef.current
+        if (cur) void downloadLightboxImage(cur.images[cur.index])
       }
     }
     window.addEventListener('keydown', onKey)
@@ -619,7 +677,23 @@ export function Lightbox() {
   return (
     <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center cursor-pointer" onClick={() => setState(null)}>
       <img src={img.src} alt={img.alt} className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl" onClick={e => e.stopPropagation()} />
-      <button aria-label="Close" className="absolute top-4 right-4 text-white/80 hover:text-white text-2xl" onClick={() => setState(null)}><X className="lucide-inline" /></button>
+      <div className="absolute top-4 right-4 flex items-center gap-1">
+        <button
+          aria-label="Download image"
+          title="Download (d)"
+          className="text-white/80 hover:text-white p-1.5 rounded-md hover:bg-white/10 transition-colors"
+          onClick={(e) => { e.stopPropagation(); void downloadLightboxImage(img) }}
+        >
+          <Download className="lucide-inline" aria-hidden="true" />
+        </button>
+        <button
+          aria-label="Close"
+          className="text-white/80 hover:text-white p-1.5 rounded-md hover:bg-white/10 transition-colors"
+          onClick={() => setState(null)}
+        >
+          <X className="lucide-inline" aria-hidden="true" />
+        </button>
+      </div>
     </div>
   )
 }
