@@ -12,6 +12,7 @@ import { Provider } from 'react-redux'
 import { MemoryRouter, Routes, Route, useLocation, useSearchParams, useNavigate } from 'react-router-dom'
 import { createTestStore } from './helpers'
 import { switchSlot } from '../store/chatSlice'
+import { sseSlots } from '../store/dashboardSlice'
 import { ThemeProvider } from '../hooks/useTheme'
 import type { ChatSlot } from '../types'
 
@@ -365,5 +366,28 @@ describe('ChatPage ?sid= URL parameter', () => {
       await act(async () => { navForward() })
       await waitFor(() => expect(store.getState().chat.activeSlot).toBe('chat-2-200'))
     })
+  })
+})
+
+// Regression: a slow slot-list load must not override a session the user
+// already switched to. The deep-link ?sid activation effect runs when the slot
+// list first contains the linked slot; if that arrives AFTER the user clicked a
+// different session in the sidebar (switchSlot.pending sets activeSlot
+// synchronously), the late activation used to snap the UI back to the
+// deep-linked session. (Mesh chat-switch-after-deeplink race.)
+describe('late slot-list load does not override a user switch (deep-link race)', () => {
+  it('keeps the user-selected session when the deep-linked slot appears after the switch', async () => {
+    // Deep-linked to chat-1-100 but the slot list is still loading (empty).
+    const { store } = renderChatPage({ route: '/chat/x?sid=chat-1-100', slots: [] })
+    // Deep-link can't activate yet (no slots) — activeSlot stays null.
+    expect(store.getState().chat.activeSlot).toBeNull()
+    // User clicks a different session in the sidebar (dispatches switchSlot directly).
+    await act(async () => { await store.dispatch(switchSlot('chat-2-200')) })
+    expect(store.getState().chat.activeSlot).toBe('chat-2-200')
+    // The slot list now arrives (SSE), including the deep-linked chat-1-100.
+    await act(async () => { store.dispatch(sseSlots(slots)) })
+    // The late deep-link activation MUST NOT revert to chat-1-100.
+    await waitFor(() => expect(store.getState().chat.activeSlot).toBe('chat-2-200'))
+    expect(store.getState().chat.activeSlot).not.toBe('chat-1-100')
   })
 })

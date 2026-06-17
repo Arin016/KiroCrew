@@ -1431,12 +1431,18 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     if (embedded && !embedMode) return
     const urlSlot = initialSidRef.current
     if (!urlSlot || filteredSlots.length === 0) return
+    // The deep-link ?sid only sets the INITIAL active slot. The slot list can
+    // populate AFTER the user has already clicked a different session in the
+    // sidebar (switchSlot.pending sets activeSlot synchronously); without this
+    // guard the delayed activation would override that click and snap the UI
+    // back to the deep-linked session (Mesh chat-switch-after-deeplink bug).
+    if (activeSlot) { initialSidRef.current = null; return }
     if (filteredSlots.some(s => s.key === urlSlot)) {
       initialSidRef.current = null
       dispatch(switchSlot(urlSlot))
     }
     // Don't error immediately — slot may arrive via SSE shortly
-  }, [filteredSlots, dispatch])
+  }, [filteredSlots, activeSlot, dispatch])
   // React to ?sid= changes AFTER mount — required for plugin tab switching
   // where the URL is updated via react-router navigate() (soft nav). The
   // mount-only initialSidRef approach above misses these updates because
