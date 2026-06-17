@@ -2,7 +2,7 @@
 
 > ⚠️ **Be mindful of what you share with any AI agent. Avoid pasting secrets, credentials, or sensitive personal data into KiroClaw chats.**
 
-Open-source personal AI agent (CLI + Slack gateway + web dashboard). Powered by an ACP (Agent Client Protocol) backend — the default is `claude-agent-acp`. **[What's New](../CHANGELOG.md)**
+Open-source personal AI agent (CLI + Slack gateway + web dashboard). Powered by the `kiro-cli` agent over ACP (Agent Client Protocol) — the only provider. **[What's New](../CHANGELOG.md)**
 
 ```
 CLI / Slack DM / Dashboard → KiroClaw → ACP agent backend → LLM + MCP tools
@@ -211,7 +211,7 @@ Full-featured React SPA at `localhost:8765` (or `http://kiroclaw.localhost:8765`
 - **Interactive widgets** — mcwidgets support bidirectional `data-action` event bridge for in-chat forms and controls
 - **Settings export/import** — one-click backup and restore of all settings, lessons, and memory
 - **LLM usage chart** — daily token usage tracking with provider/model breakdown and filters
-- **Reasoning effort selector** — per-message reasoning effort dropdown for Claude Code (low/medium/high)
+- **Reasoning effort selector** — per-message reasoning effort dropdown for effort-capable kiro-cli models (low/medium/high)
 - **Shareable session URLs** — deep-link to specific messages within sessions via URL parameters
 - **Navigation panel** — context-aware link panel with extracted URLs and smart labels
 - **Session tags & columns** — Trello-style tag-based session organization with drag-drop columns
@@ -676,7 +676,7 @@ If you see Node/GLIBC errors, confirm your Node version (Node 16+ via nvm is the
 
 The agent backend didn't respond to the initialize handshake in time. Common causes:
 
-1. **Backend not installed** — confirm the default backend is present: `npm install -g @agentclientprotocol/claude-agent-acp` (or check your configured agent backend).
+1. **Backend not installed** — confirm `kiro-cli` is on your `PATH` and you are logged in (`kiro-cli login`); `kiroclaw doctor` reports its status.
 2. **Broken MCP servers in config** — a stale or missing MCP server binary in `~/.kiro/agents/kiroclaw.json` can cause the backend to hang during startup. Fix with a clean reinstall:
    ```bash
    kiroclaw setup --agent-only --clean

@@ -158,9 +158,7 @@ class AgentConfig:
     approval_mode: str = "auto"    # "auto" or "interactive"
     streaming: bool = True
     model: str = "auto"            # resolved from agent config
-    provider: str = "acp"          # "acp" or "bedrock"
-    bedrock_model_id: str = "anthropic.claude-sonnet-4-20250514"
-    bedrock_region: str = "us-west-2"
+    provider: str = "acp"          # fixed to "acp" (kiro-cli) — the only provider
     sandbox: str = "auto"          # "auto" (namespace on Linux, seatbelt on macOS), "strict", or "off"
     enforce_denied_commands: str = "all"  # "all" or "kiroclaw"
     soft_stop_budget_secs: float = 10.0  # seconds to wait for cooperative cancel before hard kill [0.5, 60.0]

@@ -6,7 +6,7 @@ Last Updated: 2026-05-18
 
 ## System Overview
 
-KiroClaw is a personal AI agent for Amazon engineers. Thin adapter between user interfaces (CLI, Slack, Dashboard) and `kiro-cli acp` (LLM calls, tool execution, MCP servers). Optional Bedrock provider for text-only Q&A.
+KiroClaw is an open-source personal AI agent. Thin adapter between user interfaces (CLI, Slack, Dashboard) and `kiro-cli acp` (LLM calls, tool execution, MCP servers). kiro-cli over ACP is the only provider.
 
 ## Message Flow
 
@@ -29,7 +29,7 @@ User → CLI / Slack / Dashboard → KiroClaw
 | `KiroClawWebsite/` | React 18 + TypeScript + Vite + Redux + Tailwind CSS SPA (separate package) |
 | `acp/` | JSON-RPC 2.0 client for kiro-cli |
 | `config/` | Dataclass config, `~/.kiroclaw/config.json` loader |
-| `providers/` | LLMProvider ABC, AcpProvider, BedrockProvider |
+| `providers/` | LLMProvider ABC + AcpProvider (kiro-cli — the only provider) |
 | `slack/` | Socket Mode gateway + handler |
 | `dashboard/` | Web dashboard backend (aiohttp + SSE + WebSocket) at localhost:8765 |
 | `session.py` | Thread-keyed provider pool with idle expiry + compaction |

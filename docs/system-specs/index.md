@@ -19,7 +19,7 @@ Load relevant module specs before making changes to that component. Read common 
 | [learn-cron-dashboard](modules/learn-cron-dashboard.md) | Self-learning, cron scheduler, web dashboard |
 | [memory-skills-hooks](modules/memory-skills-hooks.md) | Memory files, skill loading, message/tool hooks |
 | [persistent-agent-channels](modules/persistent-agent-channels.md) | Multi-agent collaboration channels |
-| [providers](modules/providers.md) | LLM provider abstraction (ACP, Bedrock, Claude Code) |
+| [providers](modules/providers.md) | LLM provider abstraction (KiroACP / kiro-cli — the sole provider) |
 | [security](modules/security.md) | Defense-in-depth: sandbox, XPIA hardening, auth, denied commands |
 | [sel](modules/sel.md) | Security Event Log — immutable audit trail for tool invocations |
 | [session](modules/session.md) | Thread-keyed ACP session pool with idle expiry |
@@ -45,7 +45,7 @@ Load relevant module specs before making changes to that component. Read common 
 
 | Feature | Description |
 |---------|-------------|
-| [claude-code-provider](features/claude-code-provider.md) | Claude Code CLI as LLM provider with sandbox, connection modes, session resume |
+| [claude-code-provider](features/claude-code-provider.md) | Removed — KiroClaw is KiroACP/kiro-cli only; documents the dormant ACP seam that remains |
 | [code-approvers](features/code-approvers.md) | Tier-based CR reviewer routing with drift validator |
 | [dashboard-token-auth](features/dashboard-token-auth.md) | Slack-gated HMAC token authentication for dashboard |
 | [inline-action-buttons](features/inline-action-buttons.md) | Interactive buttons in chat messages |

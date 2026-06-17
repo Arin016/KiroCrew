@@ -44,10 +44,11 @@ git config --global user.email "you@example.com"
 
 ### 2. Install the agent backend
 
-KiroClaw's default agent backend is `claude-agent-acp`, installed via npm:
+KiroClaw drives the `kiro-cli` agent over ACP. Install `kiro-cli` per its own
+docs, make sure it is on your `PATH`, and log in:
 
 ```bash
-npm install -g @agentclientprotocol/claude-agent-acp
+kiro-cli login
 ```
 
 See the [README](../README.md) for backend options and credentials.
@@ -375,7 +376,7 @@ open "$URL"
 | Issue | Fix |
 |---|---|
 | `kiroclaw: command not found` after install | Ensure pip's script dir is on `PATH` (often `~/.local/bin`); `source ~/.bashrc` or re-login |
-| Agent backend errors / timeouts | Confirm `claude-agent-acp` is installed (`npm ls -g @agentclientprotocol/claude-agent-acp`) and provider credentials are set in `~/.kiroclaw/.env` |
+| Agent backend errors / timeouts | Confirm `kiro-cli` is on your `PATH` and you are logged in (`kiro-cli login`); `kiroclaw doctor` reports its status |
 | Service won't start | `sudo journalctl -u kiroclaw -n 50` to check logs |
 | Service keeps restarting | Check `systemctl status kiroclaw` for exit code, then check logs |
 | SSH tunnel refuses connection | Confirm the gateway is running on the remote host and listening on the expected port (`ss -ltnp \| grep 8765`) |

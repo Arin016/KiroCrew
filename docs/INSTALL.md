@@ -6,8 +6,8 @@ desktop app). All builds are driven by the repo-root [`Makefile`](../Makefile)
 and use plain `pip` + `npm`/Vite + `pytest` — there is no proprietary build
 tooling.
 
-> **Windows is not supported.** The default `claude-agent-acp` backend (and the
-> optional `kiro-cli` backend) only run on macOS and Linux.
+> **Windows is not supported.** The `kiro-cli` backend only runs on macOS and
+> Linux.
 
 ## Prerequisites
 
@@ -15,26 +15,22 @@ tooling.
 |-------------|------------|-------|
 | **Python 3** | Backend | `pip` install; `make build` creates a `.venv` |
 | **Node.js + npm** | Frontend (dashboard) | Builds the React/Vite SPA; also for the desktop app |
-| **An agent backend** | Driving the LLM | See below — `claude-agent-acp` is the default |
+| **An agent backend** | Driving the LLM | `kiro-cli` — see below |
 | **Ollama** (optional) | Memory / knowledge embeddings | Graceful degradation if absent |
 
 ### Agent backend (required)
 
-KiroClaw drives an LLM through a pluggable provider layer. Install whichever
-backend you want:
+KiroClaw drives an LLM through the **`kiro-cli`** agent over the
+[Agent Client Protocol](https://github.com/zed-industries/agent-client-protocol)
+(ACP). It is the only provider (`agent.provider = acp`).
 
-- **`claude-agent-acp`** (default) — the Claude Code backend over the
-  [Agent Client Protocol](https://github.com/zed-industries/agent-client-protocol):
+Install `kiro-cli` per its own docs, make sure it is on your `PATH`, and log in:
 
-  ```bash
-  npm install -g @agentclientprotocol/claude-agent-acp
-  ```
+```bash
+kiro-cli login
+```
 
-  Make sure the adapter binary is on your `PATH`.
-- **`kiro-cli`** (optional) — install per its own docs; select with
-  `agent.provider = acp`.
-- **Amazon Bedrock** (optional) — configure AWS credentials; no extra binary.
-  Select with `agent.provider = bedrock`.
+`kiroclaw doctor` reports whether `kiro-cli` is found and logged in.
 
 ### Ollama (optional — for memory / knowledge embeddings)
 

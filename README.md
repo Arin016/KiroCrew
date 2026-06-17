@@ -6,14 +6,13 @@ unattended, schedule recurring jobs, and remember context across sessions.
 **[What's New](CHANGELOG.md)**
 
 ```
-CLI / Slack DM / Dashboard → KiroClaw → LLM agent (claude-agent-acp) + MCP tools
+CLI / Slack DM / Dashboard → KiroClaw → LLM agent (kiro-cli over ACP) + MCP tools
 ```
 
-KiroClaw talks to an LLM through a pluggable provider layer. The default
-provider is [`claude-agent-acp`](https://github.com/zed-industries/agent-client-protocol)
-(the Claude Code backend over the Agent Client Protocol). You can also point it
-at a local `kiro-cli` ACP agent or at Amazon Bedrock — see
-[Configuration](#configuration).
+KiroClaw drives an LLM through the **`kiro-cli`** agent over the
+[Agent Client Protocol](https://github.com/zed-industries/agent-client-protocol)
+(ACP). kiro-cli is the only provider — install it and log in, and KiroClaw
+talks to it for every session. See [Configuration](#configuration).
 
 ## Quick Start
 
@@ -21,8 +20,8 @@ KiroClaw ships as a Python backend (installed via `pip`) plus a React web
 dashboard (built with `npm`). Memory and the knowledge library use a local
 [Ollama](https://ollama.com) server for embeddings.
 
-> **Windows is not supported.** The default `claude-agent-acp` backend (and the
-> optional `kiro-cli` backend) only run on macOS and Linux.
+> **Windows is not supported.** The `kiro-cli` backend only runs on macOS and
+> Linux.
 
 ### 1. Install the backend (pip)
 
@@ -54,13 +53,14 @@ npm run build
 
 ### 3. Install the agent backend
 
-Install whichever LLM backend you want KiroClaw to drive:
+KiroClaw drives the **`kiro-cli`** agent over ACP. Install `kiro-cli` per its
+own docs, make sure it is on your `PATH`, and log in:
 
-- **`claude-agent-acp`** (default) — follow the
-  [Claude Code / agent-client-protocol](https://github.com/zed-industries/agent-client-protocol)
-  install instructions and make sure the adapter binary is on your `PATH`.
-- **`kiro-cli`** (optional) — install per its own docs.
-- **Amazon Bedrock** (optional) — configure AWS credentials; no extra binary.
+```bash
+kiro-cli login
+```
+
+`kiroclaw doctor` reports whether `kiro-cli` is found and logged in.
 
 ### 4. Install Ollama (for memory / knowledge embeddings)
 
@@ -180,8 +180,8 @@ Config: `~/.kiroclaw/config.json` — manage via `kiroclaw config get/set/edit`
 
 ```json
 {
-  "agent": { "provider": "claude_code", "approval_mode": "interactive", "sandbox": "auto" },
-  "session": { "timeout_secs": 1800, "pool_size": 0 },
+  "agent": { "provider": "acp", "approval_mode": "interactive", "sandbox": "auto" },
+  "session": { "timeout_secs": 1800, "pool_size": 2 },
   "dashboard": { "bot_name": "KiroClaw" },
   "slack": { "command": "kiroclaw" }
 }
@@ -191,13 +191,8 @@ Config: `~/.kiroclaw/config.json` — manage via `kiroclaw config get/set/edit`
 > `kiroclaw gateway --port <n>`, not in config. `dashboard.url` is the
 > externally-advertised URL only.
 
-**Choosing a provider** — set `agent.provider`:
-
-| Provider | Value | Backend |
-|----------|-------|---------|
-| Claude Code (default) | `claude_code` | `claude-agent-acp` over stdio |
-| kiro-cli | `acp` | `kiro-cli` ACP agent over stdio |
-| Amazon Bedrock | `bedrock` | AWS Bedrock (requires AWS credentials) |
+**Provider** — `agent.provider` is `acp`: KiroClaw drives the **`kiro-cli`** ACP
+agent over stdio. It is the only provider.
 
 **Embeddings** — `memory.embedding_model` (default `qwen3-embedding:0.6b`) and
 `memory.embedding_url` (default `http://localhost:11434`) control the Ollama
@@ -211,7 +206,7 @@ Credentials: `~/.kiroclaw/.env` — `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, `KIROC
 
 The agent backend didn't respond to the initialize handshake. Fixes:
 
-1. Confirm the backend binary (`claude-agent-acp` or `kiro-cli`) is on your `PATH`
+1. Confirm the `kiro-cli` backend binary is on your `PATH` and you are logged in (`kiro-cli login`)
 2. `kiroclaw setup --agent-only --clean` if MCP servers are broken
 3. Wait — first launch loads MCP servers and can take >60s
 4. `kiroclaw doctor` for a full health check
