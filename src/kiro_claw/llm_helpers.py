@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import random
 from collections.abc import Awaitable, Callable
 from enum import Enum
@@ -36,12 +35,15 @@ _PROMPT_BUSY_DELAY = 1.5  # seconds between retries
 _TRANSIENT_RETRIES = 3
 _TRANSIENT_DELAY = 2.0  # base seconds; exponential backoff + jitter
 
-# Per-process RNG for retry jitter, seeded from the PID at import. Seeding makes
-# the jitter deterministic *within* a process (so tests that patch asyncio.sleep
-# stay reproducible) while spreading uniformly *across* processes/machines — so a
+# Per-process RNG for retry jitter, auto-seeded from os.urandom at import. The
+# entropy seed spreads jitter uniformly *across* processes/machines — so a
 # fleet-wide transient (e.g. several gateways hitting the same backend 5xx at the
 # same minute) doesn't retry in lockstep and re-thunder the recovering backend.
-_JITTER_RNG = random.Random(os.getpid())
+# Auto-seeding (rather than os.getpid()) is container-safe: under Docker/ECS/K8s
+# the gateway is commonly PID 1, so a PID seed would be identical fleet-wide and
+# collapse the spread. Tests that need determinism patch asyncio.sleep (so the
+# jitter value is never observed) or reseed _JITTER_RNG in a fixture.
+_JITTER_RNG = random.Random()
 
 # Substrings (lowercased) that mark a RETRYABLE transient backend failure.
 # Matched against the formatted AcpError message (see acp.client._format_acp_error).
