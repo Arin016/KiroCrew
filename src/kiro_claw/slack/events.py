@@ -157,36 +157,11 @@ logging.getLogger("slack_sdk.socket_mode.websockets").setLevel(logging.WARNING)
 
 _MAX_SEEN = 5000
 
-# Challenge-and-redirect: controlled by slack.challenge_redirect_enabled config.
-# When enabled, ALL Slack messages that would reach the agent are redirected to a
-# posture-verified dashboard session. Deterministic commands bypass this.
-
-
-def _is_challenge_redirect_enabled() -> bool:
-    """Check if challenge-redirect is enabled via config.
-
-    During opt-in phase (default=false), a config load failure returns False
-    (feature stays off — no disruption). Once the default flips to True in
-    the opt-out/forced phases, the same failure path returns the dataclass
-    default (True), which is fail-closed by construction.
-    """
-    from kiro_claw.config import (
-        KiroClawConfig,  # circular import: events imports at runtime to avoid config->slack->events cycle
-    )
-
-    try:
-        cfg = KiroClawConfig.load()
-        return cfg.slack.challenge_redirect_enabled
-    except Exception:
-        from kiro_claw.config.loader import SlackConfig  # circular import: fallback only
-
-        logger.warning("Failed to load config for challenge-redirect; using dataclass default")
-        # NOTE: Intentionally returns the dataclass default (currently False) rather than
-        # hardcoding True. This feature is in opt-in rollout — forcing it on during a config
-        # failure would break every user's Slack flow before they've opted in. Once the
-        # dataclass default flips to True (opt-out phase), this path becomes fail-closed
-        # automatically.
-        return SlackConfig().challenge_redirect_enabled
+# Challenge-and-redirect is permanently enabled. All Slack messages that would
+# reach the agent are redirected to a posture-verified dashboard session.
+# Deterministic commands bypass this. The config field was removed — this is
+# no longer configurable.
+_CHALLENGE_REDIRECT_ENABLED = True
 
 
 # prevent GC of fire-and-forget tasks (Python event loop holds weak refs)
@@ -1918,7 +1893,7 @@ async def _route_message(
     # ALL messages that would reach the agent require dashboard session
     # verification first. Deterministic commands (!dashboard, !stop, status,
     # etc.) are handled earlier in the flow and never reach this point.
-    if _is_challenge_redirect_enabled():
+    if _CHALLENGE_REDIRECT_ENABLED:
         from kiro_claw.slack.allowlist import (
             send_channel_challenge,  # circular import: allowlist imports handler.is_allowed_user
         )

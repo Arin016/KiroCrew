@@ -275,45 +275,6 @@ class TestSendChannelChallenge:
         assert data["session_exp"] == pytest.approx(data["iat"] + 3600, abs=2)
 
 
-class TestChallengeRedirectDefault:
-    """Challenge-redirect is controlled by slack.challenge_redirect_enabled config."""
-
-    def _call_real_fn(self):
-        """Call the real _is_challenge_redirect_enabled, bypassing conftest patch."""
-        import importlib
-
-        mod = importlib.import_module("kiro_claw.slack.events")
-        # Get the real function from the module's source (reload restores it)
-        mod = importlib.reload(mod)
-        return mod._is_challenge_redirect_enabled()
-
-    def test_disabled_when_config_false(self, monkeypatch):
-        from unittest.mock import MagicMock
-
-        mock_cfg = MagicMock()
-        mock_cfg.slack.challenge_redirect_enabled = False
-        monkeypatch.setattr("kiro_claw.config.KiroClawConfig.load", lambda: mock_cfg)
-        assert self._call_real_fn() is False
-
-    def test_enabled_when_config_true(self, monkeypatch):
-        from unittest.mock import MagicMock
-
-        mock_cfg = MagicMock()
-        mock_cfg.slack.challenge_redirect_enabled = True
-        monkeypatch.setattr("kiro_claw.config.KiroClawConfig.load", lambda: mock_cfg)
-        assert self._call_real_fn() is True
-
-    def test_falls_back_to_default_on_config_error(self, monkeypatch):
-        """Config load failure returns dataclass default (fail-closed when forced)."""
-        monkeypatch.setattr(
-            "kiro_claw.config.KiroClawConfig.load",
-            lambda: (_ for _ in ()).throw(RuntimeError("corrupt")),
-        )
-        from kiro_claw.config.loader import SlackConfig
-
-        assert self._call_real_fn() == SlackConfig().challenge_redirect_enabled
-
-
 # -- Thread context in token (reconnect / auto-link) --
 
 
