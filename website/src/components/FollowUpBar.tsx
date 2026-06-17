@@ -128,7 +128,19 @@ function ScrollLayout({ options, picked, onSelect, onSend, quickSend }: Omit<Fol
     el.addEventListener('scroll', updateScroll, { passive: true })
     const ro = new ResizeObserver(updateScroll)
     ro.observe(el)
-    return () => { el.removeEventListener('scroll', updateScroll); ro.disconnect() }
+    const onWheel = (e: WheelEvent) => {
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return
+      if (el.scrollWidth <= el.clientWidth) return
+      e.preventDefault()
+      el.scrollLeft += e.deltaY
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+
+    return () => {
+      el.removeEventListener('scroll', updateScroll)
+      el.removeEventListener('wheel', onWheel)
+      ro.disconnect()
+    }
   }, [updateScroll, options])
 
   return (
