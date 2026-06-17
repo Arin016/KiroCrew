@@ -178,11 +178,21 @@ class TestBackendLifecycle:
         result = start_app_backend("bad-entry")
         assert result is None
 
-    def test_immediate_exit_is_not_reported_as_started(self, tmp_path, app_env):
+    def test_immediate_exit_is_not_reported_as_started(self, tmp_path, app_env, monkeypatch):
         # A backend that dies right away (e.g. EADDRINUSE port collision) must NOT be
         # reported as started — otherwise the gateway proxies to a dead port (502) and
         # respawns onto the same doomed port forever (the crash-loop we hit). The spawn
         # verifies the child survived its bind; an immediate exit → None + cleared state.
+        import kiro_claw.apps.backend as bmod
+
+        # Widen the survival-check grace window for this test only. The boom.py child
+        # exits immediately ONCE it runs, but under heavy pytest-xdist parallelism
+        # (-n auto, ~32 workers) the sandboxed interpreter can take well over the default
+        # 1.6s window just to start, so proc.poll() still reports it alive across the
+        # whole default window and the dying process gets mis-reported as 'started'
+        # (flaky failure on loaded build hosts). The poll loop breaks as soon as the
+        # child exits, so a longer ceiling only costs wall-time when the host is starved.
+        monkeypatch.setattr(bmod, "_SPAWN_SURVIVAL_CHECKS", 100)  # up to ~20s ceiling
         src = tmp_path / "source" / "die-app"
         src.mkdir(parents=True)
         (src / APP_MANIFEST_FILENAME).write_text(json.dumps({
@@ -190,6 +200,11 @@ class TestBackendLifecycle:
             "displayName": "Die", "description": "exits immediately",
             "backend": {"entryPoint": "boom.py", "port": "auto", "healthCheck": "/health"},
         }))
+        # boom.py: a backend that dies the instant it runs. The stderr line mimics
+        # the real EADDRINUSE crash this test guards against, but is cosmetic here —
+        # the test asserts on the None return, not the log contents. It is a
+        # deliberate fake, not a real bind; fixture stderr like this is the kind of
+        # thing that can mislead a static analyzer into flagging a phantom port.
         (src / "boom.py").write_text(
             'import sys\n'
             'sys.stderr.write("OSError: [Errno 98] address already in use\\n")\n'
@@ -199,7 +214,6 @@ class TestBackendLifecycle:
         result = start_app_backend("die-app")
         assert result is None
         # the STARTING placeholder was cleared — a later retry isn't wedged
-        import kiro_claw.apps.backend as bmod
         assert "die-app" not in bmod._processes
 
     def test_concurrent_starts_single_flight_one_spawn(self, tmp_path, app_env, monkeypatch):

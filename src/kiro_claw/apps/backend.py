@@ -33,6 +33,17 @@ _HEALTH_CHECK_TIMEOUT = 5
 _HEALTH_CHECK_RETRIES = 15
 _HEALTH_CHECK_INTERVAL = 2.0
 
+# Spawn survival check: poll the freshly-spawned child over a short grace window to
+# confirm it survived its initial bind (an immediate exit -> EADDRINUSE crash-loop must
+# be caught, see _start_app_backend_body). The loop breaks as soon as the process exits,
+# so a healthy backend only ever pays the full window on a machine where the child is
+# still starting up. Exposed as module constants so the test harness can widen the
+# window: under heavy pytest-xdist parallelism (-n auto, ~32 workers) a sandboxed child
+# can take longer than the default window just to reach its exit, which would otherwise
+# make the immediate-exit detection test flaky.
+_SPAWN_SURVIVAL_CHECKS = 8
+_SPAWN_SURVIVAL_INTERVAL = 0.2
+
 
 # ---------------------------------------------------------------------------
 # Port allocation
@@ -534,8 +545,8 @@ def _start_app_backend_body(app_name: str, manifest) -> AppProcess | None:
     # (the sandbox launcher adds startup latency, so a single 0.4s check can miss a
     # crash); if it exits, surface the real reason from its log and fail (caller clears
     # the placeholder; a fresh spawn then re-runs free-port selection).
-    for _ in range(8):  # ~1.6s total
-        time.sleep(0.2)
+    for _ in range(_SPAWN_SURVIVAL_CHECKS):  # default ~1.6s total
+        time.sleep(_SPAWN_SURVIVAL_INTERVAL)
         if proc.poll() is not None:
             break
     if proc.poll() is not None:
@@ -555,6 +566,10 @@ def _start_app_backend_body(app_name: str, manifest) -> AppProcess | None:
         )
         return None
 
+    # Surviving the bind check does not mean the backend is healthy: we have only
+    # confirmed it did not crash on startup. It is intentionally returned with
+    # healthy=False; the background health-check loop started below flips it to
+    # healthy=True once the health endpoint responds.
     ap = AppProcess(
         app_name=app_name,
         port=port,

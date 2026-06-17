@@ -7992,6 +7992,15 @@ class TestEmptyResponseRetry:
             "kiro_claw.dashboard.chat_runner._flush_file_changes"
         ) as mock_flush:
             await _run_chat(state, slot, "test message")
+            # The empty-response retry path re-queues the message, and _run_chat's
+            # finally block spawns a detached asyncio task to drain the queue (a
+            # second "attempt 2" turn). Cancel it before asserting: no await has run
+            # since create_task, so the task body has not started, which makes this
+            # safe and deterministic. Under build-fleet load the detached turn would
+            # otherwise race these module-scoped patches (its finally calls the
+            # patched _flush_file_changes a second time), flaking as assert 2 == 1.
+            for _bg_task in list(state._background_tasks):
+                _bg_task.cancel()
 
         assert slot._empty_response_retries == 1
         # The message must be re-queued at the front of the queue.
