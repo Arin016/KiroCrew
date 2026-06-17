@@ -46,8 +46,41 @@ _net_speed: dict[str, float] = {"rx_kbs": 0.0, "tx_kbs": 0.0}
 _prev_cpu: dict[str, float] = {"total": 0.0, "ts": 0.0}
 _proc_cpu_pct: float = 0.0
 
+# Server-side system CPU % tracking (/proc/stat busy/total jiffy delta)
+_prev_sys_cpu: dict[str, float] = {"busy": 0.0, "total": 0.0}
+_sys_cpu_pct: float = 0.0
+
 # Cached static system info (computed once)
 _STATIC_SYSTEM_INFO: dict[str, object] | None = None
+
+
+def _system_cpu_pct_from_proc_stat() -> float | None:
+    """System CPU % from the /proc/stat busy/total jiffy delta since the last
+    call; iowait and steal count as busy. Returns None on non-Linux or the
+    first (pre-delta) sample so the caller can fall back to ps."""
+    try:
+        with open("/proc/stat") as f:
+            fields = f.readline().split()
+        if len(fields) < 5 or fields[0] != "cpu":
+            return None
+        # First 8 cols only (user..steal); guest/guest_nice are already
+        # folded into user/nice, so summing them would double-count.
+        vals = [float(x) for x in fields[1:9]]
+    except (OSError, ValueError):
+        return None
+    total = sum(vals)
+    busy = total - vals[3]  # vals[3] is idle; iowait/steal stay in busy
+    global _sys_cpu_pct
+    prev_total, prev_busy = _prev_sys_cpu["total"], _prev_sys_cpu["busy"]
+    _prev_sys_cpu["total"], _prev_sys_cpu["busy"] = total, busy
+    if prev_total <= 0:
+        return None  # first sample, no delta yet
+    dtotal = total - prev_total
+    if dtotal <= 0:
+        return _sys_cpu_pct  # counters didn't advance; reuse last value
+    _sys_cpu_pct = min(100.0, max(0.0, round((busy - prev_busy) / dtotal * 100, 1)))
+    return _sys_cpu_pct
+
 
 # Eager fallback salt — trivial cost (32 bytes), eliminates race under run_in_executor
 _IN_MEMORY_SALT: bytes = secrets.token_bytes(32)
@@ -274,14 +307,19 @@ def _collect_system_metrics() -> dict[str, object]:
         data["load_15m"] = round(load15, 2)
     except Exception:
         pass
-    try:
-        ps_cpu = subprocess.check_output(
-            ["ps", "-A", "-o", "%cpu"], timeout=2, stderr=subprocess.DEVNULL
-        ).decode()
-        total_cpu = sum(float(x) for x in ps_cpu.strip().splitlines()[1:] if x.strip())
-        data["cpu_pct"] = min(100.0, round(total_cpu / cores, 1))
-    except Exception:
-        data["cpu_pct"] = 0
+    # Prefer the /proc/stat interval delta (no subprocess, counts iowait+steal);
+    # fall back to the ps lifetime-average on non-Linux or the first sample.
+    cpu_pct = _system_cpu_pct_from_proc_stat()
+    if cpu_pct is None:
+        try:
+            ps_cpu = subprocess.check_output(
+                ["ps", "-A", "-o", "%cpu"], timeout=2, stderr=subprocess.DEVNULL
+            ).decode()
+            total_cpu = sum(float(x) for x in ps_cpu.strip().splitlines()[1:] if x.strip())
+            cpu_pct = min(100.0, round(total_cpu / cores, 1))
+        except Exception:
+            cpu_pct = 0
+    data["cpu_pct"] = cpu_pct
 
     # Local IP address
     try:
