@@ -372,23 +372,37 @@ class TestValidateBuiltinApp:
             errors = _validate_builtin_app(app_data)
             assert errors == [], f"{app_data['name']} failed validation: {errors}"
 
-    def test_existing_builtins_default_enabled_true(self):
-        """The shipped builtin apps have defaultEnabled=True; newer apps may opt out."""
+    def test_all_builtins_default_disabled(self):
+        """Every shipped builtin app defaults to disabled (opt-in via App Store).
+
+        Builtin apps are hidden on a fresh install so the sidebar stays minimal;
+        users enable the ones they want from the Browse tab. Each entry must set
+        ``defaultEnabled: False`` explicitly rather than relying on the field's
+        backward-compat default of True.
+        """
         import kiro_claw.apps.manager as mgr
 
-        # Opt-in builtins register with defaultEnabled=False per the
-        # built-in app pattern — users opt-in from the App Store Browse tab.
-        opt_out_apps: set[str] = set()
         for app_data in mgr._BUILTIN_APPS:
-            effective = app_data.get("defaultEnabled", True)
-            if app_data["name"] in opt_out_apps:
-                assert effective is False, (
-                    f"{app_data['name']} should have defaultEnabled=False"
-                )
-            else:
-                assert effective is True, (
-                    f"{app_data['name']} has defaultEnabled={effective}"
-                )
+            assert app_data.get("defaultEnabled") is False, (
+                f"{app_data['name']} must ship with defaultEnabled=False "
+                f"(got {app_data.get('defaultEnabled')!r})"
+            )
+
+    def test_all_file_based_builtins_default_disabled(self):
+        """File-based builtin apps (apps/builtins/*/app.json) also default to disabled.
+
+        These manifests are merged with _BUILTIN_APPS by register_builtin_apps(),
+        so they follow the same opt-in policy. A manifest that omits defaultEnabled
+        (or sets it true) would surface the app on a fresh install, so require an
+        explicit False on every discovered manifest.
+        """
+        from kiro_claw.apps.discovery import discover_builtin_apps
+
+        for app_data in discover_builtin_apps():
+            assert app_data.get("defaultEnabled") is False, (
+                f"{app_data['name']} (file-based builtin) must ship with "
+                f"defaultEnabled=False (got {app_data.get('defaultEnabled')!r})"
+            )
 
 
 # ---------------------------------------------------------------------------

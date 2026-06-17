@@ -707,6 +707,14 @@ def register_external_app(
 # React tree directly (no ESM bundle) and their routes are hardcoded in
 # App.tsx.  The registration here is metadata-only so the App Store can
 # display them alongside installable apps.
+#
+# Default-disabled policy: every builtin app ships with ``defaultEnabled:
+# False`` so a fresh install presents a minimal sidebar (core surfaces only)
+# instead of every app at once. Apps are opt-in from the App Store Browse
+# tab. Because ``register_builtin_apps()`` applies ``defaultEnabled`` only on
+# first registration and preserves user state on restart, existing users keep
+# whatever they already enabled — this only changes the out-of-the-box
+# experience for new installs.
 
 _BUILTIN_APPS: list[dict[str, Any]] = [
     {
@@ -716,6 +724,7 @@ _BUILTIN_APPS: list[dict[str, Any]] = [
         "description": "Visualize your agents in interactive pixel-art scenes",
         "author": "kiroclaw",
         "tags": ["visualization", "agents"],
+        "defaultEnabled": False,
         "ui": {
             "pages": [
                 {"route": "/worlds", "label": "Worlds", "icon": "Gamepad2"}
@@ -729,6 +738,7 @@ _BUILTIN_APPS: list[dict[str, Any]] = [
         "description": "Multi-agent collaboration channels with persistent context",
         "author": "kiroclaw",
         "tags": ["collaboration", "agents"],
+        "defaultEnabled": False,
         "permissions": {
             "api": ["/api/channels"],
             "events": ["channel", "channel_message"],
@@ -746,6 +756,7 @@ _BUILTIN_APPS: list[dict[str, Any]] = [
         "description": "4-lane Kanban view — auto-sorts sessions by urgency",
         "author": "kiroclaw",
         "tags": ["dashboard", "sessions", "kanban"],
+        "defaultEnabled": False,
         "ui": {"pages": [{"route": "/board", "label": "Board", "icon": "KanbanSquare"}]},
     },
     {
@@ -755,10 +766,7 @@ _BUILTIN_APPS: list[dict[str, Any]] = [
         "description": "Autonomous task execution — break down complex requests into plans and execute them step by step",
         "author": "kiroclaw",
         "tags": ["autonomy", "orchestration", "agents"],
-        # Existing users had Autopilot as a permanent nav item before it became
-        # a disableable builtin app. Default to enabled so the migration is
-        # transparent — they keep the tab; it just becomes toggleable in Browse.
-        "defaultEnabled": True,
+        "defaultEnabled": False,
         "ui": {
             "pages": [
                 {"route": "/orchestrated", "label": "Autopilot", "icon": "MessageSquareDot"}
@@ -772,10 +780,7 @@ _BUILTIN_APPS: list[dict[str, Any]] = [
         "description": "Autonomous multi-step task execution — compose ideas, generate plans, and run them to completion",
         "author": "kiroclaw",
         "tags": ["tasks", "autonomy", "execution"],
-        # Existing users had Projects as a permanent nav item before it became
-        # a disableable builtin app. Default to enabled so the migration is
-        # transparent — they keep the tab; it just becomes toggleable in Browse.
-        "defaultEnabled": True,
+        "defaultEnabled": False,
         "ui": {
             "pages": [
                 {"route": "/projects", "label": "Projects", "icon": "BookOpenText"}
