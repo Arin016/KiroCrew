@@ -1,4 +1,4 @@
-import { Bell, Code, Cpu, Globe, LayoutGrid, MessageCircle, MessageSquare, Mic, Palette, Server, ShieldCheck } from 'lucide-react'
+import { Bell, Code, Globe, LayoutGrid, MessageCircle, MessageSquare, Mic, Palette, Server, ShieldCheck } from 'lucide-react'
 import { useAppSelector } from '../store'
 import SidePanelLayout from '../components/SidePanelLayout'
 import { BrowserPanel } from './settings/BrowserPanel'
@@ -11,12 +11,10 @@ import { GeneralPanel } from './settings/GeneralPanel'
 import { SecurityPanel } from './settings/SecurityPanel'
 import { SlackPanel } from './settings/SlackPanel'
 import { OverviewPanel } from './settings/OverviewPanel'
-import { ProviderPanel } from './settings/ProviderPanel'
 import { NotificationsPanel } from './settings/NotificationsPanel'
 
 const TABS = [
   { key: 'overview', label: 'Overview', icon: <LayoutGrid size={16} />, description: 'System status, memory, agent config, and usage metrics' },
-  { key: 'provider', label: 'Provider', icon: <Cpu size={16} />, description: 'LLM provider backend, model selection, and session limits' },
   { key: 'chat', label: 'Chat', icon: <MessageSquare size={16} />, description: 'Message behavior, history, timestamps, and context' },
   { key: 'voice', label: 'Voice', icon: <Mic size={16} />, description: 'Text-to-speech and speech-to-text (dictation) settings' },
   { key: 'display', label: 'Display', icon: <Palette size={16} />, description: 'Zoom, font, and color theme preferences' },
@@ -43,7 +41,6 @@ export default function SettingsPage() {
     >
       {tab => <>
         {tab === 'overview' && <OverviewPanel />}
-        {tab === 'provider' && <ProviderPanel />}
         {tab === 'chat' && <ChatPanel />}
         {tab === 'voice' && <VoicePanel />}
         {tab === 'display' && <DisplayPanel />}
@@ -53,7 +50,7 @@ export default function SettingsPage() {
         {tab === 'notifications' && <NotificationsPanel />}
         {tab === 'slack' && <SlackPanel />}
         {tab === 'developer' && <GeneralPanel />}
-        {tab !== 'overview' && tab !== 'provider' && tab !== 'chat' && tab !== 'voice' && tab !== 'display' && tab !== 'browser' && tab !== 'instances' && tab !== 'security' && tab !== 'notifications' && tab !== 'slack' && tab !== 'developer' && (
+        {tab !== 'overview' && tab !== 'chat' && tab !== 'voice' && tab !== 'display' && tab !== 'browser' && tab !== 'instances' && tab !== 'security' && tab !== 'notifications' && tab !== 'slack' && tab !== 'developer' && (
           <div className="text-muted text-sm py-12 text-center">
             {TABS.find(t => t.key === tab)?.label} settings — coming soon
           </div>

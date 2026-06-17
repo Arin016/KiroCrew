@@ -1,5 +1,5 @@
 export { ProviderProvider, useProvider } from './context'
-export { getAdapter, getAllProviderIds } from './registry'
+export { getAdapter } from './registry'
 export type {
   ProviderId,
   ProviderAdapter,

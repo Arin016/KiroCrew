@@ -3,11 +3,12 @@
  *
  * Regression guard ported (PARTIAL) from MeshClawWebsite dfbc99cd: the aaf7cfe
  * stale-branch merge once overwrote SettingsPage.tsx from an older base and
- * dropped tabs (Provider, Browser) whose panel files survived — so no panel
- * test failed; there was simply no test asserting SettingsPage *lists* the
- * tabs. These close that gap for the fork's tab roster. (Upstream's Cloud Sync
- * assertion is dropped — the fork has no GitFarm Cloud-Sync tab; we assert the
- * Provider + Browser pair instead.)
+ * dropped the Browser tab whose panel file survived — so no panel test failed;
+ * there was simply no test asserting SettingsPage *lists* the tabs. These close
+ * that gap for the fork's tab roster. (Upstream's Cloud Sync assertion is
+ * dropped — the fork has no GitFarm Cloud-Sync tab; we assert the Browser tab
+ * instead. There is no Provider tab: KiroClaw collapsed to its single KiroACP /
+ * kiro-cli provider, so there is no provider to select.)
  */
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
@@ -15,7 +16,6 @@ import { MemoryRouter } from 'react-router-dom'
 
 // Stub the heavy panels — we are testing the tab roster, not panel internals.
 vi.mock('../pages/settings/OverviewPanel', () => ({ OverviewPanel: () => <div data-testid="overview-panel" /> }))
-vi.mock('../pages/settings/ProviderPanel', () => ({ ProviderPanel: () => <div data-testid="provider-panel" /> }))
 vi.mock('../pages/settings/ChatPanel', () => ({ ChatPanel: () => <div data-testid="chat-panel" /> }))
 vi.mock('../pages/settings/DisplayPanel', () => ({ DisplayPanel: () => <div data-testid="display-panel" /> }))
 vi.mock('../pages/settings/BrowserPanel', () => ({ BrowserPanel: () => <div data-testid="browser-panel" /> }))
@@ -57,10 +57,9 @@ describe('SettingsPage tabs', () => {
     expect(screen.getByText('Browser')).toBeInTheDocument()
   })
 
-  it('lists both the Provider and Browser tabs (they coexist)', () => {
+  it('does not list a Provider tab (KiroACP is the only provider)', () => {
     renderAt('/settings')
-    expect(screen.getByText('Provider')).toBeInTheDocument()
-    expect(screen.getByText('Browser')).toBeInTheDocument()
+    expect(screen.queryByText('Provider')).not.toBeInTheDocument()
   })
 
   it('renders the BrowserPanel when the browser tab is active', () => {

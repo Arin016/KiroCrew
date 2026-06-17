@@ -1,4 +1,7 @@
-export type ProviderId = 'acp' | 'claude_code' | 'bedrock'
+// KiroClaw is KiroACP-only — kiro-cli over ACP is the sole provider. The
+// ClaudeCode/Bedrock providers were deleted; this stays a single-member union
+// so the adapter interface below still type-checks for its many consumers.
+export type ProviderId = 'acp'
 
 export interface ProviderCapabilities {
   hooks: boolean

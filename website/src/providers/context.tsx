@@ -1,22 +1,17 @@
-import { createContext, useContext, useMemo, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { api } from '../api/client'
+import { createContext, useContext, type ReactNode } from 'react'
 import { getAdapter } from './registry'
-import type { ProviderAdapter, ProviderId } from './types'
+import type { ProviderAdapter } from './types'
 
-const fallback = getAdapter('acp')
+// KiroACP-only: kiro-cli over ACP is the sole provider, so there is exactly one
+// adapter and no provider selection. The context is retained (rather than
+// inlining the adapter at each call site) so the many useProvider() consumers
+// stay unchanged.
+const acpAdapter = getAdapter()
 
-const ProviderContext = createContext<ProviderAdapter>(fallback)
+const ProviderContext = createContext<ProviderAdapter>(acpAdapter)
 
 export function ProviderProvider({ children }: { children: ReactNode }) {
-  const { data } = useQuery<any>({
-    queryKey: ['kiroclawConfig'],
-    queryFn: () => api.kiroclawConfig(),
-    staleTime: 30_000,
-  })
-  const providerId = (data?.agent?.provider || 'acp') as ProviderId
-  const adapter = useMemo(() => getAdapter(providerId), [providerId])
-  return <ProviderContext.Provider value={adapter}>{children}</ProviderContext.Provider>
+  return <ProviderContext.Provider value={acpAdapter}>{children}</ProviderContext.Provider>
 }
 
 export function useProvider(): ProviderAdapter {

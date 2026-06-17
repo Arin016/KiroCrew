@@ -26,7 +26,6 @@ vi.mock('../store/chatSlice', async () => {
 // Stub settings panels (heavy, not under test)
 vi.mock('../pages/settings/DisplayPanel', () => ({ DisplayPanel: () => <div data-testid="display-panel" /> }))
 vi.mock('../pages/settings/ChatPanel', () => ({ ChatPanel: () => <div data-testid="chat-panel" /> }))
-vi.mock('../pages/settings/ProviderPanel', () => ({ ProviderPanel: () => <div data-testid="provider-panel" /> }))
 vi.mock('../pages/settings/NotificationsPanel', () => ({ NotificationsPanel: () => <div data-testid="notifications-panel" /> }))
 
 import EmbedTabStrip from '../components/EmbedTabStrip'
@@ -270,12 +269,12 @@ describe('EmbedSettingsPage', () => {
     expect(screen.getByLabelText('Back')).toBeTruthy()
   })
 
-  it('renders all four tab buttons', () => {
+  it('renders the tab buttons (no Provider tab — KiroACP is the only provider)', () => {
     wrap(<EmbedSettingsPage />)
     expect(screen.getByText('Display')).toBeTruthy()
     expect(screen.getByText('Chat')).toBeTruthy()
-    expect(screen.getByText('Provider')).toBeTruthy()
     expect(screen.getByText('Notifications')).toBeTruthy()
+    expect(screen.queryByText('Provider')).toBeNull()
   })
 
   it('shows DisplayPanel by default', () => {

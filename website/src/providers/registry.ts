@@ -1,19 +1,15 @@
 import type { ProviderAdapter, ProviderId } from './types'
 import { AcpAdapter } from './adapters/acp'
-import { ClaudeCodeAdapter } from './adapters/claude-code'
-import { BedrockAdapter } from './adapters/bedrock'
 
+// KiroClaw is KiroACP-only: kiro-cli over ACP is the sole provider
+// (agent.provider enum is ["acp"]; the ClaudeCode/Bedrock providers were
+// deleted). The adapter registry therefore has a single entry; it is kept as a
+// thin indirection so the 15+ pages that consume useProvider()/the adapter
+// interface for labels/capabilities/model-windows stay unchanged.
 const ADAPTERS: Record<ProviderId, ProviderAdapter> = {
   acp: new AcpAdapter(),
-  claude_code: new ClaudeCodeAdapter(),
-  bedrock: new BedrockAdapter(),
 }
 
-export function getAdapter(id: ProviderId): ProviderAdapter {
-  // claude_code is the default provider; fall back to it for unknown ids.
-  return ADAPTERS[id] ?? ADAPTERS.claude_code
-}
-
-export function getAllProviderIds(): ProviderId[] {
-  return Object.keys(ADAPTERS) as ProviderId[]
+export function getAdapter(_id?: ProviderId): ProviderAdapter {
+  return ADAPTERS.acp
 }

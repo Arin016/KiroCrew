@@ -28,13 +28,14 @@ export function effortLabel(level: string): string {
 
 /**
  * Concrete effort levels offered in the dropdown, ordered low→high, with the
- * '' default sentinel first. Both claude_code and kiro-cli (acp) support these
- * on Opus/Sonnet models.
+ * '' default sentinel first. kiro-cli (acp) supports these on Opus/Sonnet
+ * models.
  */
 export const EFFORT_LEVELS = ['', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
-/** Providers whose backend accepts a reasoning-effort level. */
-export const REASONING_EFFORT_PROVIDERS = new Set(['claude_code', 'acp'])
+/** Providers whose backend accepts a reasoning-effort level. KiroClaw is
+ *  KiroACP-only, so this is just 'acp'. */
+export const REASONING_EFFORT_PROVIDERS = new Set(['acp'])
 
 /**
  * Per-model effort capability — mirrors the backend `model_supports_effort`

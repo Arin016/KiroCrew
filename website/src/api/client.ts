@@ -329,22 +329,6 @@ export const api = {
   kiroclawConfig: () => fetch('/api/config/kiroclaw').then(j),
   saveKiroclawConfig: (agent: object) => put('/api/config/kiroclaw', { agent }).then(j),
   patchConfig: (path: string, value: unknown) => fetch('/api/config/kiroclaw', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, value }) }).then(j),
-  // CC Deny Patterns
-  ccDenyPatterns: () => fetch('/api/config/cc-deny-patterns').then(j) as Promise<{ builtin: string[]; user: string[]; total: number }>,
-  saveCcDenyPatterns: (patterns: string[]) => put('/api/config/cc-deny-patterns', { patterns }).then(j),
-  // Claude Code migration (kiro → CC)
-  ccMirrorPreview: () => fetch('/api/cc/mirror/preview').then(j) as Promise<{
-    summary: { agents_total: number; mcp_total: number; skills_total: number; mirrored: number; skipped: number; errors: number }
-    agents: Array<{ name: string; action: string; hint?: string }>
-    mcp: Array<{ name: string; action: string; count?: number }>
-    skills: Array<{ name: string; action: string }>
-    errors: Array<{ source: string; error: string }>
-  }>,
-  ccMirrorRun: (force: boolean) => fetch('/api/cc/mirror/run', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ force }),
-  }).then(j),
   // Optional integrations — backend endpoints are graceful no-ops on a public
   // install (AIM / kiro usage are stubbed). Kept so the UI compiles and
   // degrades gracefully (panels render empty when the feature is absent).
@@ -360,12 +344,6 @@ export const api = {
   aimAgentsUninstall: (pkg: string) => post('/api/aim/agents/uninstall', { package: pkg }).then(j),
   aimUpdate: (kind: string, pkg?: string) => post('/api/aim/update', { kind, package: pkg || '' }).then(j),
   aimMcpRegistry: () => fetch('/api/aim/mcp/registry').then(j),
-  ccAimMissing: () => fetch('/api/cc/aim/missing').then(j) as Promise<{ missing: string[] }>,
-  ccAimSync: (packages?: string[]) => fetch('/api/cc/aim/sync', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ packages: packages ?? null }),
-  }).then(j) as Promise<{ installed: string[]; failed: Array<{ package: string; error: string }> }>,
   // STT
   sttConfig: () => fetch('/api/config/stt').then(j),
   saveSttConfig: (body: {

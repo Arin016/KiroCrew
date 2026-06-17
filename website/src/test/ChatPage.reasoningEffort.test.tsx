@@ -71,9 +71,9 @@ describe('ChatInput reasoning effort button', () => {
     expect(EFFORT_DISPLAY['max']).toBeDefined()
   })
 
-  it('REASONING_EFFORT_PROVIDERS includes claude_code and acp (kiro)', () => {
-    expect(REASONING_EFFORT_PROVIDERS.has('claude_code')).toBe(true)
+  it('REASONING_EFFORT_PROVIDERS is acp-only (kiro-cli is the sole provider)', () => {
     expect(REASONING_EFFORT_PROVIDERS.has('acp')).toBe(true)
+    expect(REASONING_EFFORT_PROVIDERS.has('claude_code')).toBe(false)
   })
 
   it('modelSupportsEffort gates per-model (Opus/Sonnet only)', () => {

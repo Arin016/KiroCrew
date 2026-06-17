@@ -1,16 +1,14 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowLeft, Palette, MessageSquare, Cpu, Bell } from 'lucide-react'
+import { ArrowLeft, Palette, MessageSquare, Bell } from 'lucide-react'
 import { useAppSelector } from '../store'
 import { DisplayPanel } from './settings/DisplayPanel'
 import { ChatPanel } from './settings/ChatPanel'
-import { ProviderPanel } from './settings/ProviderPanel'
 import { NotificationsPanel } from './settings/NotificationsPanel'
 
 const TABS = [
   { key: 'display', label: 'Display', icon: <Palette size={14} /> },
   { key: 'chat', label: 'Chat', icon: <MessageSquare size={14} /> },
-  { key: 'provider', label: 'Provider', icon: <Cpu size={14} /> },
   { key: 'notifications', label: 'Notifications', icon: <Bell size={14} /> },
 ]
 
@@ -63,7 +61,6 @@ export default function EmbedSettingsPage() {
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
         {tab === 'display' && <DisplayPanel />}
         {tab === 'chat' && <ChatPanel />}
-        {tab === 'provider' && <ProviderPanel />}
         {tab === 'notifications' && <NotificationsPanel />}
       </div>
     </div>
