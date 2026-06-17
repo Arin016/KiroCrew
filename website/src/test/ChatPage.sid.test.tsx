@@ -366,6 +366,29 @@ describe('ChatPage ?sid= URL parameter', () => {
       await act(async () => { navForward() })
       await waitFor(() => expect(store.getState().chat.activeSlot).toBe('chat-2-200'))
     })
+
+    // Regression (URL-lock bug): after a Back/Forward POP, useNavigationType()
+    // stays 'POP' until our own navigate() runs. A subsequent sidebar switch
+    // changes activeSlot, re-firing the POP→sid effect while still 'POP'; pre-fix
+    // it read the stale URL sid and reverted the switch, locking the URL to one
+    // chat. location.key gating must let the switch stick.
+    it('allows switching to a different session after a Back navigation', async () => {
+      const navSlots = [slot('chat-1-100', 'Alpha'), slot('chat-2-200', 'Beta'), slot('chat-3-300', 'Gamma')]
+      const { store } = renderForPop(navSlots)
+
+      await waitFor(() => expect(store.getState().chat.activeSlot).toBe('chat-1-100'))
+      await act(async () => { await store.dispatch(switchSlot('chat-2-200')) })
+      await waitFor(() => expect(currentUrl).toContain('sid=chat-2-200'))
+
+      // Back: B → A (a real POP, navigationType now sticks at 'POP').
+      await act(async () => { navBack() })
+      await waitFor(() => expect(store.getState().chat.activeSlot).toBe('chat-1-100'))
+
+      // Now pick a different session from the sidebar. Must NOT snap back to A.
+      await act(async () => { await store.dispatch(switchSlot('chat-3-300')) })
+      await waitFor(() => expect(store.getState().chat.activeSlot).toBe('chat-3-300'))
+      await waitFor(() => expect(currentUrl).toContain('sid=chat-3-300'))
+    })
   })
 })
 

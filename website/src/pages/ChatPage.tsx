@@ -418,6 +418,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
   const navigationType = useNavigationType()
+  const location = useLocation()
   const queryClient = useQueryClient()
   const provider = useProvider()
   const { botName, avatar } = useBranding()
@@ -1412,6 +1413,10 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   // run is the deep-link load (owned by initialSidRef), not a real Back/Forward —
   // skip it so the POP effect doesn't wrongly arm popInFlightRef on mount.
   const popReadyRef = useRef(false)
+  // Last history entry key honored by the POP effect — distinguishes a genuine
+  // Back/Forward (new location.key) from a re-render where navigationType is
+  // still stuck at 'POP'.
+  const lastLocKeyRef = useRef<string | null>(null)
   const [sidError, setSidError] = useState('')
   const [highlightTs, setHighlightTs] = useState<string | null>(null)
   // Embed ?new=1: create a new chat slot and navigate to it
@@ -1467,8 +1472,15 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     // the mount POP (deep-link load, owned by initialSidRef) so it can't wrongly
     // arm popInFlightRef and freeze the next switch.
     if (!embedMode) {
-      if (navigationType !== 'POP') { popReadyRef.current = true; return }
+      if (navigationType !== 'POP') { popReadyRef.current = true; lastLocKeyRef.current = location.key; return }
       if (!popReadyRef.current) return
+      // navigationType stays 'POP' after a Back/Forward until our own navigate()
+      // runs. Without this guard the effect re-fires on every activeSlot change
+      // (a sidebar click) while still 'POP', reads the stale URL sid, and reverts
+      // the click — locking the URL to one chat. location.key changes only on a
+      // genuine history navigation, so honor a POP exactly once per new entry.
+      if (location.key === lastLocKeyRef.current) return
+      lastLocKeyRef.current = location.key
     }
     const urlSid = searchParams.get('sid') || searchParams.get('slot')
     if (!urlSid || urlSid === activeSlot) return
@@ -1476,7 +1488,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       popInFlightRef.current = true
       dispatch(switchSlot(urlSid))
     }
-  }, [searchParams, filteredSlots, activeSlot, dispatch, embedMode, navigationType])
+  }, [searchParams, filteredSlots, activeSlot, dispatch, embedMode, navigationType, location.key])
   // Timeout: if slot never appears after 5s, show error
   useEffect(() => {
     const urlSlot = initialSidRef.current
@@ -1494,7 +1506,6 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   // Sync activeSlot → ?sid= in URL (persistent deep-link)
   // Skip entirely when embedded — URL belongs to the host app
   const basePath = embedMode === 'chat' || embedMode === 'sessions' ? '/embed/chat' : mode === 'orchestrator' ? '/orchestrated' : '/chat'
-  const location = useLocation()
   const searchParamsRef = useRef(searchParams)
   searchParamsRef.current = searchParams
   useEffect(() => {
