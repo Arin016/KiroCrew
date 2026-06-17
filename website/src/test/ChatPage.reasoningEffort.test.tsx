@@ -39,26 +39,26 @@ function renderInput(props: Partial<Parameters<typeof ChatInput>[0]> = {}) {
 describe('ChatInput reasoning effort button', () => {
   it('renders effort button with current level for claude_code provider', () => {
     renderInput()
-    expect(screen.getByTitle(/Reasoning: High/)).toBeInTheDocument()
+    expect(screen.getByText('High')).toBeInTheDocument()
   })
 
   it('does not render effort button when capability is off (prop undefined)', () => {
     renderInput({ onReasoningEffortClick: undefined })
-    expect(screen.queryByTitle(/Reasoning: High/)).not.toBeInTheDocument()
+    expect(screen.queryByText('High')).not.toBeInTheDocument()
   })
 
 
   it('calls onModelClick with rect on click (reasoning effort merged into model button)', () => {
     const onModelClick = vi.fn()
     renderInput({ onModelClick })
-    fireEvent.click(screen.getByTitle(/Reasoning: High/))
+    fireEvent.click(screen.getByTitle('Model: claude-opus-4.7'))
     expect(onModelClick).toHaveBeenCalledTimes(1)
     expect(onModelClick.mock.calls[0][0]).toHaveProperty('x')
   })
 
   it('shows disabled state when running', () => {
     renderInput({ isRunning: true })
-    const btn = screen.getByTitle('Stop the current response to switch models')
+    const btn = screen.getByTitle('Stop the current response to switch model')
     expect(btn).toBeDisabled()
   })
 

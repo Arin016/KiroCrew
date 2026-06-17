@@ -592,7 +592,7 @@ describe('ChatInput', () => {
           onModelClick={vi.fn()}
         />
       )
-      expect(screen.getByTitle(/Reasoning: High/)).toBeInTheDocument()
+      expect(screen.getByText('High')).toBeInTheDocument()
     })
 
     it('renders Default label when effort is empty', () => {
@@ -605,7 +605,7 @@ describe('ChatInput', () => {
           onModelClick={vi.fn()}
         />
       )
-      expect(screen.getByTitle(/Reasoning: Default/)).toBeInTheDocument()
+      expect(screen.getByText('Default')).toBeInTheDocument()
     })
 
     it('shown when onReasoningEffortClick provided regardless of providerId', () => {
@@ -618,21 +618,21 @@ describe('ChatInput', () => {
           onModelClick={vi.fn()}
         />
       )
-      expect(screen.getByTitle(/Reasoning: High/)).toBeInTheDocument()
+      expect(screen.getByText('High')).toBeInTheDocument()
     })
 
     it('hidden when handler missing even on supported provider', () => {
       renderWithProviders(
         <ChatInput {...defaultProps} providerId="acp" reasoningEffort="high" modelName="claude-opus-4.7" onModelClick={vi.fn()} />
       )
-      expect(screen.queryByTitle(/Reasoning:/)).not.toBeInTheDocument()
+      expect(screen.queryByText('High')).not.toBeInTheDocument()
     })
 
     it('shown when providerId is undefined but callback provided', () => {
       renderWithProviders(
         <ChatInput {...defaultProps} reasoningEffort="high" onReasoningEffortClick={vi.fn()} modelName="claude-opus-4.7" onModelClick={vi.fn()} />
       )
-      expect(screen.getByTitle(/Reasoning: High/)).toBeInTheDocument()
+      expect(screen.getByText('High')).toBeInTheDocument()
     })
 
     it('disabled while running', () => {
@@ -646,7 +646,7 @@ describe('ChatInput', () => {
           isRunning
         />
       )
-      const btn = screen.getByTitle('Stop the current response to switch models')
+      const btn = screen.getByTitle('Stop the current response to switch model')
       expect(btn).toBeDisabled()
     })
 
@@ -661,7 +661,7 @@ describe('ChatInput', () => {
           onModelClick={onModelClick}
         />
       )
-      fireEvent.click(screen.getByTitle(/Reasoning: Low/))
+      fireEvent.click(screen.getByTitle('Model: claude-opus-4.7'))
       expect(onModelClick).toHaveBeenCalledOnce()
       // First arg should be a DOMRect-like object
       expect(onModelClick.mock.calls[0][0]).toBeTruthy()
@@ -958,7 +958,7 @@ describe('ChatInput', () => {
       renderWithProviders(<ChatInput {...defaultProps} onProjectClick={vi.fn()} />)
       const btn = screen.getByLabelText('Select project')
       expect(btn).toBeInTheDocument()
-      expect(btn.getAttribute('title')).toBe('Select project…')
+      expect(btn.getAttribute('title')).toBe('Select project')
       expect(btn.textContent).toContain('Project')
     })
 

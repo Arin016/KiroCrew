@@ -18,7 +18,7 @@ import TrustDropdown from './TrustDropdown'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { isScreenSnipSupported } from '../hooks/useScreenSnip'
 import { useImeGuard } from '../hooks/useImeGuard'
-import ContextRing from './ContextRing'
+import ContextBar, { contextTip } from './ContextBar'
 import PasteHighlightLayer, { INPUT_TYPO } from './PasteHighlightLayer'
 import FollowUpBar from './FollowUpBar'
 import { dispatchLightbox } from './MarkdownRenderer'
@@ -398,6 +398,34 @@ function ChatInput({
   const fileInputRef = useRef<HTMLInputElement>(null)
   // "+" drop-up menu (upload file / image + browse toggle).
   const [plusOpen, setPlusOpen] = useState(false)
+  const [ctxPopoverOpen, setCtxPopoverOpen] = useState(false)
+  // Shelf responsiveness: measure the shelf row width and collapse chips to
+  // icon-only (agent/project) + drop the model effort label when space is tight.
+  // Truncation handles the in-between cases.
+  const [shelfWidth, setShelfWidth] = useState(9999)
+  const shelfRoRef = useRef<ResizeObserver | null>(null)
+  const shelfRef = useCallback((el: HTMLDivElement | null) => {
+    shelfRoRef.current?.disconnect()
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width
+      if (typeof w === 'number') setShelfWidth(w)
+    })
+    ro.observe(el)
+    shelfRoRef.current = ro
+  }, [])
+  // Below ~340px the labels no longer fit comfortably alongside the context bar
+  // + model chip, so collapse the chips (agent/project) to icon-only.
+  const shelfCompact = shelfWidth < 340
+  const ctxWrapRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!ctxPopoverOpen) return
+    const handler = (e: MouseEvent) => {
+      if (ctxWrapRef.current && !ctxWrapRef.current.contains(e.target as Node)) setCtxPopoverOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [ctxPopoverOpen])
   const plusWrapRef = useRef<HTMLDivElement>(null)
   const plusBtnRef = useRef<HTMLButtonElement>(null)
   const plusMenuRef = useRef<HTMLDivElement>(null)
@@ -1296,7 +1324,7 @@ function ChatInput({
   }, [hasFiles])
 
   return (
-    <div className={`px-5 pb-3 ${hasApproval ? 'pt-0' : 'pt-1'} mx-auto w-full flex flex-col`}
+    <div className={`px-5 pb-1 ${hasApproval ? 'pt-0' : 'pt-1'} mx-auto w-full flex flex-col`}
       style={{ maxWidth: 'var(--mc-input-width, 900px)', ...(manualHeight !== null ? { minHeight: (pendingFiles.length > 0 ? INPUT_DRAG_MIN_H + FILE_PREVIEW_H : INPUT_DRAG_MIN_H) + 'px' } : {}) }}>
 
       {/* Knowledge context chip */}
@@ -1618,41 +1646,7 @@ function ChatInput({
               </div>
             )}
             <div className="flex items-center gap-0.5 min-w-0 overflow-x-auto flex-1">
-              {onAgentClick && agentName && (
-                <button
-                  className={`h-7 px-2 rounded-lg text-[12px] font-mono hover:bg-bg-hover flex items-center gap-1 transition-all bg-transparent border-none shrink-0 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent ${agentSource === 'aim' ? 'text-[var(--aim)] hover:text-[var(--aim)]' : 'text-muted hover:text-text'} ${!isRunning ? 'cursor-pointer' : ''}`}
-                  onClick={e => onAgentClick(e.currentTarget.getBoundingClientRect())}
-                  disabled={isRunning}
-                  title={isRunning ? 'Stop the current response to switch agents' : `Agent: ${agentName}`}
-                >
-                  <Bot size={14} className="shrink-0" />
-                  {!isMobile && agentName}
-                </button>
-              )}
-              {onProjectClick && (() => {
-                const projLabel = project ? (project.split('/').filter(Boolean).pop() || project) : 'Project'
-                return (
-                  <button
-                    className={`h-7 px-2 rounded-lg text-[12px] font-mono hover:bg-bg-hover flex items-center gap-1 transition-all bg-transparent border-none shrink-0 whitespace-nowrap text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted ${!isRunning ? 'cursor-pointer' : ''}`}
-                    onClick={e => onProjectClick(e.currentTarget.getBoundingClientRect())}
-                    disabled={isRunning}
-                    title={isRunning ? 'Stop the current response to switch projects' : (project ? `Project: ${project}` : 'Select project…')}
-                    aria-label={project ? `Project: ${project}` : 'Select project'}
-                  >
-                    <FolderOpen size={13} className="shrink-0" />
-                    {!isMobile && <span className="truncate max-w-[140px]">{projLabel}</span>}
-                  </button>
-                )
-              })()}
-              {!isMobile && onApprovalClick && approvalMode && (() => {
-                const d = APPROVAL_DISPLAY[approvalMode] || APPROVAL_DISPLAY.normal
-                return (
-                  <button className="h-7 px-2 rounded-lg text-[12px] font-mono text-muted hover:text-text hover:bg-bg-hover flex items-center gap-1 cursor-pointer transition-all bg-transparent border-none shrink-0 whitespace-nowrap" onClick={e => onApprovalClick(e.currentTarget.getBoundingClientRect())} title="Approval mode">
-                    <span className={`shrink-0 ${d.color}`}>{d.icon}</span>
-                    {d.label}
-                  </button>
-                )
-              })()}
+
               {onAutoNudgeClick && (
                 <button
                   className={`h-8 px-2 rounded-lg text-[12px] font-mono flex items-center gap-1 cursor-pointer transition-all bg-transparent border-none shrink-0 whitespace-nowrap ${
@@ -1668,6 +1662,15 @@ function ChatInput({
                   {autoNudgeActive && autoNudgeCycleCount > 0 ? autoNudgeCycleCount : null}
                 </button>
               )}
+              {!isMobile && onApprovalClick && approvalMode && (() => {
+                const d = APPROVAL_DISPLAY[approvalMode] || APPROVAL_DISPLAY.normal
+                return (
+                  <button className="h-7 px-2 rounded-lg text-[12px] font-mono text-muted hover:text-text hover:bg-bg-hover flex items-center gap-1 cursor-pointer transition-all bg-transparent border-none shrink-0 whitespace-nowrap" onClick={e => onApprovalClick(e.currentTarget.getBoundingClientRect())} title="Approval mode">
+                    <span className={`shrink-0 ${d.color}`}>{d.icon}</span>
+                    {d.label}
+                  </button>
+                )
+              })()}
             </div>
             {isMobile && onApprovalClick && approvalMode && (() => {
               const d = APPROVAL_DISPLAY[approvalMode] || APPROVAL_DISPLAY.normal
@@ -1679,23 +1682,6 @@ function ChatInput({
             })()}
           </div>
           <div className="flex items-center gap-1 shrink-0">
-            {onModelClick && modelName && (
-              <button
-                className="h-7 px-2 rounded-lg text-[12px] font-mono text-muted hover:text-text hover:bg-bg-hover flex items-center gap-1.5 transition-all bg-transparent border-none shrink-0 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted cursor-pointer"
-                onClick={e => onModelClick(e.currentTarget.getBoundingClientRect())}
-                disabled={isRunning}
-                title={isRunning ? 'Stop the current response to switch models' : onReasoningEffortClick ? `Model: ${modelName} · Reasoning: ${effortLabel(reasoningEffort || '')}` : `Model: ${modelName}`}
-                aria-label={`Model: ${modelName}${onReasoningEffortClick ? ` · Reasoning: ${effortLabel(reasoningEffort || '')}` : ''}`}
-              >
-                {contextPct !== undefined && <ContextRing pct={contextPct} usedTokens={contextUsedTokens} windowTokens={contextWindowTokens} />}
-                {!isMobile && modelName}
-                {onReasoningEffortClick && !isMobile && (
-                  <span className="text-muted/70">
-                    {effortLabel(reasoningEffort || '')}
-                  </span>
-                )}
-              </button>
-            )}
             {onVoiceToggle && (
               <button
                 className={`w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer transition-all border-none ${
@@ -1764,6 +1750,99 @@ function ChatInput({
 
       </div></motion.div>)}
       </AnimatePresence>
+
+      {/* Context shelf — plain full-width row below input */}
+      {!showGhost && (onProjectClick || (onModelClick && modelName)) && (
+        <div ref={shelfRef} className="pt-1 flex items-center gap-2 min-w-0">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+          {onAgentClick && agentName && (
+            <button
+              className={`inline-flex items-center gap-1.5 h-7 min-w-0 text-[12px] font-mono px-2.5 rounded-md bg-transparent hover:bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))] transition-colors border-none cursor-pointer disabled:cursor-not-allowed disabled:hover:bg-transparent ${agentSource === 'aim' ? 'text-[var(--aim)] hover:text-[var(--aim)]' : 'text-muted hover:text-text disabled:hover:text-muted'}`}
+              onClick={e => onAgentClick(e.currentTarget.getBoundingClientRect())}
+              disabled={isRunning}
+              title={isRunning ? 'Stop the current response to switch agents' : `Agent: ${agentName}`}
+              aria-label={isRunning ? 'Stop the current response to switch agents' : `Agent: ${agentName}`}
+            >
+              <Bot size={13} className="shrink-0 opacity-70" />
+              {!shelfCompact && <span className="truncate max-w-[160px]">{agentName}</span>}
+            </button>
+          )}
+          {onProjectClick && (
+          <button
+            className="inline-flex items-center gap-1.5 h-7 min-w-0 text-[12px] font-mono text-muted hover:text-text px-2.5 rounded-md bg-transparent hover:bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))] transition-colors border-none cursor-pointer disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted"
+            onClick={e => onProjectClick(e.currentTarget.getBoundingClientRect())}
+            disabled={isRunning}
+            title={isRunning ? 'Stop the current response to switch project' : (project ? `Project: ${project}` : 'Select project')}
+            aria-label={isRunning ? 'Stop the current response to switch project' : (project ? `Project: ${project}` : 'Select project')}
+          >
+            <FolderOpen size={13} className="shrink-0 opacity-70" />
+            {!shelfCompact && <span className="truncate max-w-[200px]">{project ? (project.split('/').filter(Boolean).pop() || project) : 'Project'}</span>}
+          </button>
+          )}
+          </div>
+          <div className="flex items-center shrink-0">
+          {contextPct != null && (
+            <div ref={ctxWrapRef} className="relative flex items-center">
+              <button
+                className={`inline-flex items-center h-7 px-2.5 rounded-md transition-colors border-none cursor-pointer ${ctxPopoverOpen ? 'bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))]' : 'bg-transparent hover:bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))]'}`}
+                onClick={() => setCtxPopoverOpen(o => !o)}
+                title={contextTip(contextPct)}
+                aria-label="Context usage"
+              >
+                <ContextBar pct={contextPct} width={40} height={3} />
+              </button>
+              {ctxPopoverOpen && (
+                <div className="absolute bottom-full right-0 mb-1 z-[60] w-52 rounded-xl border border-border bg-bg-elevated shadow-xl p-3 animate-slide-up">
+                    {(() => {
+                      const pct = Math.round(contextPct)
+                      const win = contextWindowTokens || 0
+                      const used = contextUsedTokens != null ? contextUsedTokens : (win ? Math.round((pct / 100) * win) : 0)
+                      const remaining = win ? Math.max(win - used, 0) : 0
+                      const approx = contextUsedTokens == null
+                      const k = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}K` : `${n}`
+                      const pctColor = pct >= 90 ? 'var(--danger)' : pct >= 75 ? 'var(--warn)' : 'var(--accent)'
+                      return (
+                        <>
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-[11px] font-semibold text-text">Context window</span>
+                            <span className="text-[12px] font-mono font-bold" style={{ color: pctColor }}>{pct}%</span>
+                          </div>
+                          <div className="flex flex-col gap-1 text-[11px] font-mono">
+                            <div className="flex justify-between"><span className="text-muted">Used</span><span className="text-text">{approx ? '~' : ''}{k(used)}</span></div>
+                            <div className="flex justify-between"><span className="text-muted">Remaining</span><span className="text-text">{approx ? '~' : ''}{k(remaining)}</span></div>
+                            <div className="flex justify-between"><span className="text-muted">Total</span><span className="text-text">{k(win)}</span></div>
+                          </div>
+                          {modelName && (
+                            <div className="mt-2 pt-2 border-t border-border flex justify-between text-[11px] font-mono">
+                              <span className="text-muted">Model</span><span className="text-text truncate max-w-[120px]" title={modelName}>{modelName}</span>
+                            </div>
+                          )}
+                        </>
+                      )
+                    })()}
+                  </div>
+              )}
+            </div>
+          )}
+          {onModelClick && modelName && (
+            <button
+              className="inline-flex items-center gap-1.5 h-7 min-w-0 text-[12px] font-mono text-muted hover:text-text px-2 rounded-md bg-transparent hover:bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))] transition-colors border-none cursor-pointer disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted"
+              onClick={e => onModelClick(e.currentTarget.getBoundingClientRect())}
+              disabled={isRunning}
+              title={isRunning ? 'Stop the current response to switch model' : `Model: ${modelName}`}
+            >
+              <span className="truncate max-w-[180px]">{modelName}</span>
+              {onReasoningEffortClick && !shelfCompact && (
+                <>
+                  <span className="opacity-30 select-none shrink-0" aria-hidden="true">·</span>
+                  <span className="opacity-60 shrink-0">{effortLabel(reasoningEffort || '')}</span>
+                </>
+              )}
+            </button>
+          )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

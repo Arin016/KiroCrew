@@ -32,11 +32,15 @@ export default function AutoNudgePopover({ slotKey, anchorRect, loop, onClose, o
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose()
+      if (ref.current && ref.current.contains(e.target as Node)) return
+      // Ignore clicks on the anchor (goal) button so its own onClick can toggle
+      // the popover closed — matches the approval/model dropdown behavior.
+      if (anchorRect && e.clientX >= anchorRect.left && e.clientX <= anchorRect.right && e.clientY >= anchorRect.top && e.clientY <= anchorRect.bottom) return
+      onClose()
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
-  }, [onClose])
+  }, [onClose, anchorRect])
 
   async function save() {
     setSaving(true)
@@ -98,7 +102,7 @@ export default function AutoNudgePopover({ slotKey, anchorRect, loop, onClose, o
     <div
       ref={ref}
       style={style}
-      className="bg-chrome border border-border rounded-lg shadow-xl p-4 w-[420px] text-[12px]"
+      className="bg-bg-elevated border border-border rounded-xl shadow-xl p-4 w-[420px] text-[12px] animate-slide-up"
     >
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2 font-medium text-text">
