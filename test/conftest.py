@@ -320,3 +320,30 @@ class MockSlackClient(SlackClientOps):
     async def fetch_thread_replies(self, channel: str, thread_ts: str, limit: int = 200, warn_on_pagination: bool = True) -> list[dict]:
         self.actions.append(("fetch_thread_replies", {"channel": channel, "thread_ts": thread_ts, "limit": limit, "warn_on_pagination": warn_on_pagination}))
         return self._fetch_thread_replies_result
+
+
+@pytest.fixture(autouse=True)
+def _reset_platform_context(monkeypatch):
+    """Clear the process-global PlatformContext between tests.
+
+    A test that composes a non-default context (e.g. an Amazon-overlay probe)
+    must not leak it into the next test.  ``current_context()`` lazily rebuilds
+    the standalone default on next access.
+
+    Also pins ``KIROCLAW_PROFILE=standalone`` by default so a dev box that has a
+    real ``~/.midway`` directory does not make ``boot_platform`` resolve the
+    ``amazon`` profile and fail closed (no companion installed) for the many
+    pre-existing tests that drive ``run_gateway`` / boot.  A test that wants the
+    amazon profile overrides this env via its own ``monkeypatch.setenv`` (it
+    runs after this autouse fixture), or composes the context directly via
+    ``set_context`` without booting.
+    """
+    from kiro_claw.platform.bootstrap import _reset_boot_state
+    from kiro_claw.platform.context import reset_context
+
+    monkeypatch.setenv("KIROCLAW_PROFILE", "standalone")
+    reset_context()
+    _reset_boot_state()
+    yield
+    reset_context()
+    _reset_boot_state()

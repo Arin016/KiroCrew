@@ -27,7 +27,7 @@ from kiro_claw.dashboard.origin import (
 )
 from kiro_claw.mcp_cleanup import KIROCLAW_BIN_MCP_SERVERS as _MANAGED_MCPS
 from kiro_claw.mcp_discovery import McpServerInfo, probe_server
-from kiro_claw.slack.enterprise import validate_enterprise
+from kiro_claw.platform import current_context
 from kiro_claw.transcribe import _find_whisper, ensure_ffmpeg_in_path
 
 _MIN_NODE_VERSION = 16
@@ -500,7 +500,11 @@ def _doctor() -> None:
         bot_token = creds.get("SLACK_BOT_TOKEN", "")
         if bot_token:
             extra_ids = cfg.slack_enterprise_ids
-            if validate_enterprise(bot_token, extra_ids=extra_ids):
+            # Route through the active PlatformContext's Slack gate so the doctor
+            # reports the SAME enterprise-gate decision the gateway enforces
+            # (slack/events.py uses the context gate). The Default gate delegates
+            # to enterprise.validate_enterprise, so standalone is unchanged.
+            if current_context().slack_gate.validate_enterprise(bot_token, extra_ids=extra_ids):
                 print("  workspace:   ✅ allowed")
             else:
                 print("  workspace:   ❌ not in configured workspace allowlist")

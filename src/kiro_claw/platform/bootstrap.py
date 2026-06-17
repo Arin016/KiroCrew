@@ -1,0 +1,157 @@
+"""Boot-time composition root for the public (standalone) edition.
+
+``build_default_context`` assembles a :class:`PlatformContext` whose every
+interface field is a ``Default*`` adapter — i.e. today's open-source behavior.
+``bootstrap_context`` is the single entry point boot calls: it builds the
+default context, resolves the profile, and (for a non-standalone profile) swaps
+in the companion-composed context after validating the contract version and the
+ADD-only security floor.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
+from kiro_claw.platform.context import (
+    CONTRACT_VERSION,
+    PROFILE_STANDALONE,
+    PlatformCompositionError,
+    PlatformContext,
+    current_context,
+    set_context,
+)
+from kiro_claw.platform.defaults import (
+    DefaultAgentRuntime,
+    DefaultAppRegistryPolicy,
+    DefaultAppsLoader,
+    DefaultCredentialPolicy,
+    DefaultEmbeddingSource,
+    DefaultIdentityProvider,
+    DefaultMcpToolingProvider,
+    DefaultPackageManager,
+    DefaultProviderRegistry,
+    DefaultSandboxPolicy,
+    DefaultSlackEnterpriseGate,
+    DefaultTelemetryProvider,
+    DefaultTunnelProvider,
+)
+from kiro_claw.platform.discovery import discover_companion_context, plugin_entry_points
+from kiro_claw.platform.profile import resolve_profile
+from kiro_claw.platform.security_authority import PolicyAuthority, assert_security_floor
+
+if TYPE_CHECKING:
+    from kiro_claw.config.loader import KiroClawConfig
+
+logger = logging.getLogger(__name__)
+
+# Set True by ``boot_platform`` after the first successful composition so a
+# second entry point (e.g. ``cli.main`` dispatching into ``run_gateway`` in the
+# same process) does not re-resolve the profile or re-install the context.  The
+# standalone default that ``current_context`` lazily builds does NOT set this —
+# a real boot still runs once even if a call site touched ``current_context``
+# first, swapping the lazy default for the properly-resolved context.
+_BOOTED = False
+
+
+def boot_platform(cfg: "KiroClawConfig") -> PlatformContext:
+    """Idempotently bootstrap + install the platform context (call at startup).
+
+    The single entry point process-launch code should call.  Safe to invoke
+    more than once: only the first call resolves the profile and installs the
+    context; later calls return the already-installed context unchanged.  This
+    guards the case where both ``cli.main`` and ``run_gateway`` would otherwise
+    each call ``bootstrap_context`` in one process.
+    """
+    global _BOOTED
+    if _BOOTED:
+        return current_context()
+    ctx = bootstrap_context(cfg)
+    _BOOTED = True
+    return ctx
+
+
+def _reset_boot_state() -> None:
+    """Test helper — clear the one-shot boot guard so a test can boot again."""
+    global _BOOTED
+    _BOOTED = False
+
+
+def build_default_context(
+    cfg: "KiroClawConfig", *, profile: str = PROFILE_STANDALONE
+) -> PlatformContext:
+    """Compose the all-defaults context (the public/standalone edition)."""
+    return PlatformContext(
+        contract_version=CONTRACT_VERSION,
+        profile=profile,
+        cfg=cfg,
+        providers=DefaultProviderRegistry(),
+        agent_runtime=DefaultAgentRuntime(),
+        sandbox=DefaultSandboxPolicy(),
+        credentials=DefaultCredentialPolicy(),
+        security=PolicyAuthority(),  # _NullOverlay → baseline only
+        slack_gate=DefaultSlackEnterpriseGate(),
+        identity=DefaultIdentityProvider(),
+        embeddings=DefaultEmbeddingSource(),
+        mcp_tooling=DefaultMcpToolingProvider(),
+        registry=DefaultAppRegistryPolicy(),
+        apps_loader=DefaultAppsLoader(),
+        package_manager=DefaultPackageManager(),
+        tunnel=DefaultTunnelProvider(),
+        telemetry=DefaultTelemetryProvider(),
+        feature_apps=(),
+    )
+
+
+def _assert_contract(ctx: PlatformContext) -> None:
+    """Reject a companion context built against a different contract version."""
+    if ctx.contract_version != CONTRACT_VERSION:
+        raise PlatformCompositionError(
+            f"companion contract_version={ctx.contract_version} != core "
+            f"CONTRACT_VERSION={CONTRACT_VERSION}; rebuild the companion against this core."
+        )
+
+
+def bootstrap_context(cfg: "KiroClawConfig") -> PlatformContext:
+    """Build, validate, install, and return the active platform context.
+
+    Standalone: returns the all-defaults context.  Non-standalone: discovers the
+    companion context (fail-closed), validates the contract version and the
+    ADD-only security floor, then installs it as the process-global context.
+    """
+    eps = plugin_entry_points()
+    profile = resolve_profile(cfg, entry_points=eps)
+    ctx = build_default_context(cfg, profile=profile)
+
+    if profile != PROFILE_STANDALONE:
+        companion = discover_companion_context(profile, cfg)  # may raise (fail-closed)
+        if companion is None:
+            # Defense in depth: discovery is expected to raise rather than return
+            # None for a non-standalone profile.  If it ever returns None (e.g. a
+            # future "present but disabled" path), refuse to boot here too — never
+            # silently install an amazon-labeled context with open defaults and no
+            # security overlay.  The fail-closed guarantee must not depend solely
+            # on discovery's raising behavior.
+            raise PlatformCompositionError(
+                f"profile={profile!r} resolved no companion context; refusing to "
+                "boot with open-source defaults (fail-closed)."
+            )
+        _assert_contract(companion)
+        assert_security_floor(companion.security)
+        ctx = companion
+        logger.info("Composed %r platform context from companion", profile)
+
+    set_context(ctx)
+
+    # Register any edition-contributed ACP backends now that the context is
+    # installed.  The Default ProviderRegistry.register_acp_backends() is a
+    # no-op (standalone ships Kiro-CLI-ACP only), so this is a no-op for the
+    # public edition; the Amazon companion re-registers Claude Code through the
+    # dormant ACP_BACKEND_CLAUDE seam here.  Best-effort — a backend-registration
+    # failure must not abort boot (the provider factory still resolves).
+    try:
+        ctx.providers.register_acp_backends()
+    except Exception:
+        logger.warning("register_acp_backends failed; continuing", exc_info=True)
+
+    return ctx

@@ -43,13 +43,41 @@ from kiro_claw.aim_agents import installed_kiro_packages_missing_from_cc
 from kiro_claw.config import KiroClawConfig
 from kiro_claw.config import config_path as _mc_config_path
 from kiro_claw.mcp_utils import mcp_server_alias
-from kiro_claw.security import is_sensitive_path, redact
+from kiro_claw.platform import PlatformCompositionError, current_context, safe_context_call
+from kiro_claw.security import is_sensitive_path
+from kiro_claw.security import redact as _security_redact
 from kiro_claw.sel import (  # circular import: sel imports config which imports agent
     SecurityEvent,
     sel,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def redact(text: str) -> str:
+    """Redact credentials/exfil from *text* via the active PlatformContext.
+
+    Routes through ``current_context().credentials.redact`` so the Amazon
+    companion's extra credential regexes apply when loaded.  The Default
+    ``CredentialPolicy.redact`` delegates to ``security.redact`` — so a
+    standalone process is byte-for-byte today's redaction.  Recursion-safe:
+    the Default delegates to ``security.redact`` (imported here as
+    ``_security_redact``), which never calls back into the context; only the
+    SEL-audit *callers* below were switched to this context-routed shim.  A
+    genuinely-unexpected context failure falls back to the bare
+    ``security.redact`` so the pass never silently disappears — but the
+    fail-closed ``PlatformCompositionError`` is re-raised, never swallowed, so a
+    non-standalone host that cannot compose its context does NOT silently
+    downgrade to OSS-baseline redaction (which would drop the companion's
+    internal-token regexes).
+    """
+    try:
+        return current_context().credentials.redact(text)
+    except Exception as exc:
+        if isinstance(exc, PlatformCompositionError):
+            raise
+        logger.debug("credentials.redact via context failed; using security.redact", exc_info=True)
+        return _security_redact(text)
 
 
 def _atomic_json_write(path: Path, data: dict) -> None:
@@ -277,6 +305,27 @@ _MANAGED_MCP_SERVERS: dict[str, dict] = {
     "kiroclaw-cron": {"invocation_fn": lambda: _kiroclaw_mcp_invocation("mcp-cron")},
     "kiroclaw-core": {"invocation_fn": lambda: _kiroclaw_mcp_invocation("mcp-core")},
 }
+
+
+def _extra_mcp_servers() -> dict[str, dict]:
+    """Edition-contributed MCP servers from the active PlatformContext.
+
+    The Default adapter returns ``{}`` so the standalone spec is byte-for-byte
+    what it is today; the Amazon companion contributes builder-mcp (and other
+    internal servers).  Entries are already in kiro-cli's ``mcpServers`` shape
+    (``{"command", "args", optional "autoApprove", ...}``) — the consumer
+    *merges* them into the ``mcpServers`` map rather than restructuring the
+    spec, preserving the ``deny_unknown_fields`` invariant.
+    """
+    # Fail-closed via safe_context_call: a non-standalone host that cannot
+    # compose its context re-raises PlatformCompositionError (never silently
+    # degrades to the empty OSS server set); any other lookup failure -> none.
+    extra = safe_context_call(
+        lambda: current_context().mcp_tooling.extra_mcp_servers(),
+        fallback={},
+        log_message="extra_mcp_servers lookup failed; using none",
+    )
+    return dict(extra) if extra else {}
 
 
 def ensure_kiroclaw_on_path(bin_dir: Path | None = None) -> str | None:
@@ -1191,6 +1240,13 @@ def build_agent_config() -> dict:
             entry["autoApprove"] = list(spec["autoApprove"])
         mcp[name] = entry
 
+    # Edition-contributed MCP servers (PlatformContext).  ADD-only: standalone
+    # contributes {} (unchanged), the Amazon companion adds builder-mcp etc.
+    # Entries are already kiro-spec-shaped, so we only extend the map — no spec
+    # restructuring, deny_unknown_fields invariant preserved.
+    for name, spec in _extra_mcp_servers().items():
+        mcp.setdefault(name, dict(spec))
+
     # Default-model tracking ("managed" vs frozen) is recorded in the
     # agent_state sidecar by the install path (rebuild_agent_config), never as
     # a kiro-spec key — kiro-cli rejects unknown fields and would drop the whole
@@ -1230,6 +1286,13 @@ def _refresh_dynamic_fields(config: dict) -> None:
         # must not re-add it on every refresh.
         if "autoApprove" in spec and is_new:
             entry["autoApprove"] = list(spec["autoApprove"])
+
+    # Edition-contributed MCP servers (PlatformContext).  ADD-only: only seed a
+    # server the user doesn't already have, so user customizations on a refresh
+    # are preserved.  Standalone contributes {} (unchanged); Amazon adds
+    # builder-mcp etc.  Already kiro-spec-shaped — no restructuring.
+    for name, extra_spec in _extra_mcp_servers().items():
+        mcp.setdefault(name, dict(extra_spec))
 
     # Security: deniedCommands and hooks always from bundled config.
     # Hard-fail if bundled defaults are missing — deny-by-default.
@@ -1371,9 +1434,7 @@ def _normalize_mcp_server_keys(config: dict) -> None:
         for key in ("tools", "allowedTools"):
             lst = config.get(key)
             if isinstance(lst, list):
-                config[key] = list(
-                    dict.fromkeys(new_ref if t == old_ref else t for t in lst)
-                )
+                config[key] = list(dict.fromkeys(new_ref if t == old_ref else t for t in lst))
         logger.info("Normalized MCP server key %r -> %r (kiro-safe)", old_key, alias)
 
 

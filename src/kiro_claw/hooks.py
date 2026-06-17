@@ -15,7 +15,8 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from kiro_claw.security import is_denied, is_sensitive_bash_command, is_sensitive_path
+from kiro_claw.platform import current_context
+from kiro_claw.security import is_sensitive_bash_command, is_sensitive_path
 
 logger = logging.getLogger(__name__)
 
@@ -260,8 +261,15 @@ class HookManager:
         if reason:
             return ToolHookResult.deny(reason)
 
-        # Built-in security deny list (always enforced)
-        reason = is_denied(normalized, self._config.auto_deny_tools) or is_denied(
+        # Built-in security deny list (always enforced).  Route through the
+        # active PlatformContext's PolicyAuthority so the Amazon companion's
+        # ADD-only deny overlay (+ internal patterns) applies when loaded.  The
+        # standalone Default authority uses an empty overlay, so this resolves
+        # to ``security.is_denied(name, auto_deny_tools)`` exactly as before —
+        # no recursion (PolicyAuthority.is_denied calls security.is_denied with
+        # the overlay patterns appended; security.is_denied never calls back).
+        authority = current_context().security
+        reason = authority.is_denied(normalized, self._config.auto_deny_tools) or authority.is_denied(
             tool_name, self._config.auto_deny_tools
         )
         if reason:

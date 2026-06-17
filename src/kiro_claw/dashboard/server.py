@@ -61,6 +61,7 @@ from kiro_claw.dashboard.token_auth import token_auth_middleware
 from kiro_claw.hooks import ScriptHookStore, set_global_hook_store
 from kiro_claw.instances.registry import InstancesRegistry
 from kiro_claw.instances.ssh_tunnel_manager import SshTunnelManager
+from kiro_claw.platform import current_context
 from kiro_claw.safety_override import safety_override
 from kiro_claw.sel import sel
 from kiro_claw.suggestions import api_suggestions
@@ -159,14 +160,32 @@ def _precompute_telemetry(state: "DashboardState") -> None:
     """Pre-compute telemetry data (blocking I/O — call before server starts)."""
     from kiro_claw.dashboard.handlers_system import _get_owner_hash, _get_static_system_info
     _log = logging.getLogger(__name__)
+    owner_hash = "unknown"
     try:
-        _get_owner_hash(state)
+        owner_hash = _get_owner_hash(state)
     except Exception:
         _log.warning("Failed to pre-compute owner hash", exc_info=True)
+    static_info: dict = {}
     try:
-        _get_static_system_info()
+        static_info = dict(_get_static_system_info())
     except Exception:
         _log.warning("Failed to pre-compute system info", exc_info=True)
+
+    # Backend telemetry sink (PlatformContext).  The Default TelemetryProvider's
+    # record_event is a no-op, so standalone is unchanged; the companion
+    # records a gateway-start event.  Best-effort — a telemetry failure never
+    # blocks server startup.
+    try:
+        current_context().telemetry.record_event(
+            "gateway_start",
+            {
+                "owner_id_hash": owner_hash,
+                "os_type": static_info.get("os", ""),
+                "arch": static_info.get("arch", ""),
+            },
+        )
+    except Exception:
+        _log.debug("telemetry.record_event(gateway_start) failed", exc_info=True)
 
 
 def _register_mcp_routes(app: web.Application) -> None:
@@ -1238,8 +1257,19 @@ async def start_dashboard(
             )
 
     # ── AEA Tunnel ───────────────────────────────────────────────────────────
-    logger.debug("Tunnel config: enabled=%s", cfg.tunnel.enabled)
-    if cfg.tunnel.enabled:
+    _tunnel_enabled = cfg.tunnel.enabled
+    # The enable gate is also routed through the active PlatformContext's
+    # TunnelProvider.  The Default TunnelProvider.enabled() returns False, so
+    # standalone is gated solely by ``cfg.tunnel.enabled`` exactly as before;
+    # the companion can additionally enable the tunnel from its provider.
+    try:
+        _ctx_tunnel_enabled = current_context().tunnel.enabled()
+    except Exception:
+        logger.debug("tunnel.enabled() lookup failed; using cfg only", exc_info=True)
+        _ctx_tunnel_enabled = False
+    _tunnel_enabled = _tunnel_enabled or _ctx_tunnel_enabled
+    logger.debug("Tunnel config: enabled=%s ctx.enabled=%s", _tunnel_enabled, _ctx_tunnel_enabled)
+    if _tunnel_enabled:
         tunnel_mgr = await setup_tunnel(
             middlewares=list(app.middlewares),
             allowed_origins=app["allowed_origins"],

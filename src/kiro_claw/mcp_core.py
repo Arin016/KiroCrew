@@ -48,9 +48,12 @@ from kiro_claw.knowledge.embedder import create_embedder_from_config
 from kiro_claw.knowledge.retrieval import HybridRetriever
 from kiro_claw.knowledge.store import KnowledgeStore
 from kiro_claw.mcp_shared import call_tool_with_logging, run_mcp_stdio_loop
+from kiro_claw.platform import PlatformCompositionError, current_context
 from kiro_claw.security import (
     BINARY_MIME_ALLOWLIST,
-    redact,
+)
+from kiro_claw.security import redact as _security_redact
+from kiro_claw.security import (
     redact_credentials,
     redact_exfiltration_urls,
 )
@@ -79,6 +82,32 @@ from kiro_claw.validation import (
     WAIT_SCHEMA,
     validate_tool_args,
 )
+
+
+def redact(text: str) -> str:
+    """Redact credentials/exfil from *text* via the active PlatformContext.
+
+    Routes through ``current_context().credentials.redact`` so the Amazon
+    companion's M365 exfil guard (or any extra credential regexes) applies when
+    loaded.  The Default ``CredentialPolicy.redact`` delegates to
+    ``security.redact`` — so a standalone process gets byte-for-byte today's
+    redaction.  Recursion-safe: the Default delegates to ``security.redact``
+    (here imported as ``_security_redact``), which never calls back into the
+    context; only the *callers* were switched to this context-routed shim.
+    A genuinely-unexpected context failure falls back to the bare
+    ``security.redact`` so the security pass never silently disappears — but the
+    fail-closed ``PlatformCompositionError`` is re-raised, never swallowed, so a
+    non-standalone host that cannot compose its context does NOT silently
+    downgrade redaction to the OSS baseline (which the file_send sensitivity
+    gate relies on detecting internal tokens).  No logging here — ``mcp_core``
+    runs as a stdio MCP server and stray writes corrupt the JSON-RPC stream.
+    """
+    try:
+        return current_context().credentials.redact(text)
+    except Exception as exc:
+        if isinstance(exc, PlatformCompositionError):
+            raise
+        return _security_redact(text)
 
 
 def _resolve_api_base() -> str:

@@ -56,6 +56,7 @@ except ImportError:
     _sel_fn = None  # type: ignore[assignment]
 from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import config_dir
+from kiro_claw.platform import PlatformCompositionError, current_context
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +272,28 @@ def _configured_registry_hosts() -> frozenset[str]:
     return frozenset(hosts)
 
 
+def _context_clone_sandbox_mode(git_url: str) -> str:
+    """Pick the clone sandbox mode for *git_url* via the active PlatformContext.
+
+    Routes the trusted-host + clone-sandbox-mode decision through
+    ``current_context().registry``.  The Default ``AppRegistryPolicy`` delegates
+    to this module's ``_clone_sandbox_mode`` / ``_PUBLIC_GIT_HOSTS``, so
+    standalone is byte-for-byte today's decision (public forges + user-configured
+    registry hosts allowed for SSH, everything else strict).  A companion can add
+    further internal git hosts to the trusted set.  Any failure falls back to the
+    bare module decision so the security gate never disappears.
+    """
+    try:
+        policy = current_context().registry
+        trusted = frozenset(policy.public_git_hosts()) | _configured_registry_hosts()
+        return policy.clone_sandbox_mode(git_url, trusted)
+    except PlatformCompositionError:
+        raise
+    except Exception:
+        logger.debug("registry clone-sandbox-mode via context failed; using default", exc_info=True)
+        return _clone_sandbox_mode(git_url, _configured_registry_hosts())
+
+
 def _load_registry_file() -> list[dict[str, Any]]:
     """Load and parse the bundled app-registry.json."""
     if not _REGISTRY_FILE.is_file():
@@ -377,9 +400,7 @@ async def _fetch_app_manifest(
             git_url,
             tmp_root,
         ]
-        sandboxed_cmd, _cleanup = wrap_argv(
-            clone_cmd, mode=_clone_sandbox_mode(git_url, _configured_registry_hosts())
-        )
+        sandboxed_cmd, _cleanup = wrap_argv(clone_cmd, mode=_context_clone_sandbox_mode(git_url))
         proc = await asyncio.create_subprocess_exec(
             *sandboxed_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -699,9 +720,7 @@ async def _fetch_external_registry_index(
             git_url,
             tmp_root,
         ]
-        sandboxed_cmd, _ = wrap_argv(
-            clone_cmd, mode=_clone_sandbox_mode(git_url, _configured_registry_hosts())
-        )
+        sandboxed_cmd, _ = wrap_argv(clone_cmd, mode=_context_clone_sandbox_mode(git_url))
         proc = await asyncio.create_subprocess_exec(
             *sandboxed_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -1036,9 +1055,7 @@ async def _git_clone_or_pull(
         git_url,
         str(dest),
     ]
-    sandboxed_cmd, _cleanup = wrap_argv(
-        clone_cmd, mode=_clone_sandbox_mode(git_url, _configured_registry_hosts())
-    )
+    sandboxed_cmd, _cleanup = wrap_argv(clone_cmd, mode=_context_clone_sandbox_mode(git_url))
     proc = await asyncio.create_subprocess_exec(
         *sandboxed_cmd,
         stdout=asyncio.subprocess.PIPE,

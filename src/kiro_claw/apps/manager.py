@@ -6,6 +6,7 @@ Apps are installed to ``~/.kiroclaw/apps/{name}/``.  Each installed app has an
 The manager validates manifests, copies app files, and delegates resource
 registration (agents, skills, crons) to bridge functions.
 """
+
 from __future__ import annotations
 
 import json
@@ -21,6 +22,7 @@ from kiro_claw.apps.discovery import discover_builtin_apps
 from kiro_claw.apps.manifest import AppManifest
 from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import config_dir
+from kiro_claw.platform import current_context, safe_context_call
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,7 @@ INSTALLED_META_FILENAME = "installed.json"
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
+
 
 def apps_dir() -> Path:
     """Return the root directory for installed apps: ``~/.kiroclaw/apps/``."""
@@ -88,11 +91,13 @@ class InstalledApp:
     installedAt: str = ""  # noqa: N815
     updatedAt: str = ""  # noqa: N815
     source: str = ""  # concrete provenance: path, URL, "registry:name", "builtin"
-    origin: str = "registry"    # builtin | registry | local | external
+    origin: str = "registry"  # builtin | registry | local | external
     resources: str = "gateway"  # gateway | app
     lifecycle: str = "gateway"  # gateway | app | locked
     schemaVersion: int = 2  # noqa: N815  — schema version for future migrations
-    migratedTo: str = ""  # noqa: N815  — target standalone app: "registry:{name}" or "standalone:{name}"
+    migratedTo: str = (
+        ""  # noqa: N815  — target standalone app: "registry:{name}" or "standalone:{name}"
+    )
 
     def validate_fields(self) -> list[str]:
         """Validate classification field values. Returns error list (empty = valid)."""
@@ -150,7 +155,8 @@ class InstalledApp:
         if errors:
             logger.warning(
                 "InstalledApp %s has invalid fields: %s — using defaults",
-                inst.name, errors,
+                inst.name,
+                errors,
             )
             if inst.origin not in _VALID_ORIGIN:
                 inst.origin = "registry"
@@ -189,6 +195,7 @@ def _write_installed(name: str, meta: InstalledApp) -> None:
 # Result types
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class AppResult:
     """Result of an app lifecycle operation."""
@@ -212,6 +219,7 @@ class AppResult:
 # ---------------------------------------------------------------------------
 # Validation helpers
 # ---------------------------------------------------------------------------
+
 
 def _validate_source_path(source: Path) -> list[str]:
     """Validate that a source directory looks like a valid app."""
@@ -237,6 +245,7 @@ def _validate_source_path(source: Path) -> list[str]:
 def _check_min_version(min_version: str) -> str | None:
     """Return error string if current KiroClaw version is too old, else None."""
     from kiro_claw.apps.version import check_min_version
+
     return check_min_version(min_version)
 
 
@@ -253,6 +262,7 @@ def _check_path_safety(path: str) -> bool:
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
+
 
 def install_app(source: str | Path) -> AppResult:
     """Install an app from a local directory path.
@@ -281,9 +291,10 @@ def install_app(source: str | Path) -> AppResult:
     existing = _read_installed(name)
     if existing:
         return AppResult(
-            ok=False, name=name,
+            ok=False,
+            name=name,
             error=f"app {name!r} is already installed (v{existing.version}). "
-                  f"Uninstall first or use the update endpoint.",
+            f"Uninstall first or use the update endpoint.",
         )
 
     # Copy app files to install directory
@@ -313,6 +324,7 @@ def install_app(source: str | Path) -> AppResult:
 
     # Generate and write app secret for token-based auth (App Kit §5.1)
     from kiro_claw.dashboard.token_auth import generate_app_secret, write_app_secret
+
     write_app_secret(name, generate_app_secret())
 
     logger.info("Installed app %s v%s from %s", name, manifest.version, source)
@@ -322,6 +334,7 @@ def install_app(source: str | Path) -> AppResult:
 # ---------------------------------------------------------------------------
 # Update (re-install in place)
 # ---------------------------------------------------------------------------
+
 
 def update_app(source: str | Path) -> AppResult:
     """Update an already-installed app from a local directory path.
@@ -415,10 +428,14 @@ def update_app(source: str | Path) -> AppResult:
 
     logger.info(
         "Updated app %s: v%s -> v%s from %s",
-        name, old_version, manifest.version, source,
+        name,
+        old_version,
+        manifest.version,
+        source,
     )
     return AppResult(
-        ok=True, name=name,
+        ok=True,
+        name=name,
         message=f"updated {name} v{old_version} -> v{manifest.version}",
     )
 
@@ -426,6 +443,7 @@ def update_app(source: str | Path) -> AppResult:
 # ---------------------------------------------------------------------------
 # Uninstall
 # ---------------------------------------------------------------------------
+
 
 def uninstall_app(name: str, *, keep_data: bool = False) -> AppResult:
     """Uninstall an app by removing its directory.
@@ -440,7 +458,11 @@ def uninstall_app(name: str, *, keep_data: bool = False) -> AppResult:
     if not meta:
         return AppResult(ok=False, name=name, error=f"app {name!r} is not installed")
     if meta.lifecycle == "locked":
-        return AppResult(ok=False, name=name, error=f"app {name!r} cannot be uninstalled (lifecycle=locked) — use disable instead")
+        return AppResult(
+            ok=False,
+            name=name,
+            error=f"app {name!r} cannot be uninstalled (lifecycle=locked) — use disable instead",
+        )
     dest = app_dir(name)
     if not dest.is_dir():
         return AppResult(ok=False, name=name, error=f"app {name!r} is not installed")
@@ -468,6 +490,7 @@ def uninstall_app(name: str, *, keep_data: bool = False) -> AppResult:
 # ---------------------------------------------------------------------------
 # Enable / Disable
 # ---------------------------------------------------------------------------
+
 
 def enable_app(name: str) -> AppResult:
     """Enable an installed app."""
@@ -509,6 +532,7 @@ def disable_app(name: str) -> AppResult:
 # Listing
 # ---------------------------------------------------------------------------
 
+
 def list_apps() -> list[dict[str, Any]]:
     """Return metadata for all installed apps."""
     root = apps_dir()
@@ -533,10 +557,16 @@ def list_apps() -> list[dict[str, Any]]:
                 # app.json without going through update_app().  Sync
                 # the version from the manifest so the dashboard shows
                 # the real version instead of a stale installed.json.
-                if meta.lifecycle == "app" and manifest.version and manifest.version != meta.version:
+                if (
+                    meta.lifecycle == "app"
+                    and manifest.version
+                    and manifest.version != meta.version
+                ):
                     logger.debug(
                         "Syncing %s version: installed=%s manifest=%s",
-                        meta.name, meta.version, manifest.version,
+                        meta.name,
+                        meta.version,
+                        manifest.version,
                     )
                     meta.version = manifest.version
                     meta.updatedAt = _now_iso()
@@ -607,6 +637,7 @@ def set_app_source(name: str, source: str) -> bool:
 # ---------------------------------------------------------------------------
 # External (self-managed) app registration
 # ---------------------------------------------------------------------------
+
 
 def register_external_app(
     name: str,
@@ -682,6 +713,7 @@ def register_external_app(
 
     # Generate app secret only for new registrations — preserve existing secrets
     from kiro_claw.dashboard.token_auth import generate_app_secret, write_app_secret
+
     secret_path = dest / ".app_secret"
     is_new_secret = not (existing and secret_path.is_file())
     if is_new_secret:
@@ -691,10 +723,21 @@ def register_external_app(
         secret = ""
 
     action = "updated" if existing else "registered"
-    logger.info("External app %s %s: v%s (origin=%s, resources=%s, lifecycle=%s)",
-                name, action, version, origin, resources, lifecycle)
-    result = AppResult(ok=True, name=name, message=f"{action} {name} v{version}",
-                       secret=secret if is_new_secret else "")
+    logger.info(
+        "External app %s %s: v%s (origin=%s, resources=%s, lifecycle=%s)",
+        name,
+        action,
+        version,
+        origin,
+        resources,
+        lifecycle,
+    )
+    result = AppResult(
+        ok=True,
+        name=name,
+        message=f"{action} {name} v{version}",
+        secret=secret if is_new_secret else "",
+    )
     return result
 
 
@@ -726,9 +769,7 @@ _BUILTIN_APPS: list[dict[str, Any]] = [
         "tags": ["visualization", "agents"],
         "defaultEnabled": False,
         "ui": {
-            "pages": [
-                {"route": "/worlds", "label": "Worlds", "icon": "Gamepad2"}
-            ],
+            "pages": [{"route": "/worlds", "label": "Worlds", "icon": "Gamepad2"}],
         },
     },
     {
@@ -744,9 +785,7 @@ _BUILTIN_APPS: list[dict[str, Any]] = [
             "events": ["channel", "channel_message"],
         },
         "ui": {
-            "pages": [
-                {"route": "/channels", "label": "Channels", "icon": "Users"}
-            ],
+            "pages": [{"route": "/channels", "label": "Channels", "icon": "Users"}],
         },
     },
     {
@@ -768,9 +807,7 @@ _BUILTIN_APPS: list[dict[str, Any]] = [
         "tags": ["autonomy", "orchestration", "agents"],
         "defaultEnabled": False,
         "ui": {
-            "pages": [
-                {"route": "/orchestrated", "label": "Autopilot", "icon": "MessageSquareDot"}
-            ],
+            "pages": [{"route": "/orchestrated", "label": "Autopilot", "icon": "MessageSquareDot"}],
         },
     },
     {
@@ -782,9 +819,7 @@ _BUILTIN_APPS: list[dict[str, Any]] = [
         "tags": ["tasks", "autonomy", "execution"],
         "defaultEnabled": False,
         "ui": {
-            "pages": [
-                {"route": "/projects", "label": "Projects", "icon": "BookOpenText"}
-            ],
+            "pages": [{"route": "/projects", "label": "Projects", "icon": "BookOpenText"}],
         },
     },
     # -------------------------------------------------------------------------
@@ -863,6 +898,59 @@ def _effective_migrated_to(app_data: dict[str, Any]) -> str:
     return migrated_to
 
 
+def _edition_builtin_apps() -> list[dict[str, Any]]:
+    """Builtin apps contributed by the active PlatformContext's AppsLoader.
+
+    The Default ``AppsLoader`` returns empty ``manifest_sources`` so the
+    standalone discovery set is exactly the package's ``builtins/`` dir — no
+    extra apps, byte-for-byte today's behavior.  The Amazon companion returns a
+    directory (inside the companion package) holding the feature-app
+    ``app.json`` manifests; each such dir is scanned with the SAME
+    ``discover_builtin_apps`` logic (subdir-with-app.json → app dict), so the
+    companion's apps are namespaced/validated/registered identically to the
+    OSS builtins.  Missing dirs are skipped gracefully by ``discover_builtin_apps``.
+    """
+    # Fail-closed via safe_context_call: a non-standalone host that cannot compose
+    # re-raises PlatformCompositionError (never silently degrades to the OSS builtin
+    # set); any other lookup failure falls back to no edition sources.
+    sources = safe_context_call(
+        lambda: current_context().apps_loader.manifest_sources(),
+        fallback=[],
+        log_message="apps_loader.manifest_sources lookup failed; using none",
+    )
+
+    apps: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for source in sources:
+        # discover_builtin_apps already skips a non-existent dir and validates
+        # each manifest, so a bad/missing source can never break registration.
+        for app_data in discover_builtin_apps(Path(source)):
+            name = app_data.get("name", "")
+            if name and name not in seen:
+                seen.add(name)
+                apps.append(app_data)
+    return apps
+
+
+def _edition_bundled_app_names() -> list[str]:
+    """Names the active edition declares it bundles (PlatformContext).
+
+    The Default ``AppsLoader`` returns the OSS builtins (``auto_research`` /
+    ``file_explorer``) which are already covered by the package's ``builtins/``
+    discovery, so this is a no-op for standalone.  The Amazon companion declares
+    its feature-app names; used by orphan detection so a declared app is never
+    mis-orphaned even if its manifest dir is momentarily unavailable.
+    """
+    # Fail-closed via safe_context_call (see _edition_builtin_apps above).
+    return list(
+        safe_context_call(
+            lambda: current_context().apps_loader.bundled_app_names(),
+            fallback=[],
+            log_message="apps_loader.bundled_app_names lookup failed; using none",
+        )
+    )
+
+
 def register_builtin_apps() -> int:
     """Register built-in dashboard features as app entries.
 
@@ -880,9 +968,21 @@ def register_builtin_apps() -> int:
     Sources (merged, hardcoded list takes precedence on name collision):
     1. ``_BUILTIN_APPS`` hardcoded list (legacy, being phased out)
     2. Auto-discovered from ``builtins/`` directory via ``discovery.py``
+    3. Edition-contributed builtins from the active PlatformContext's
+       ``AppsLoader.manifest_sources()`` (empty in standalone; the Amazon
+       companion contributes its feature apps).  ADD-only: the hardcoded list
+       and the package's own builtins still take precedence on name collision.
     """
-    # Merge hardcoded list with auto-discovered builtins
+    # Merge hardcoded list with auto-discovered builtins + edition-contributed
+    # builtins (PlatformContext).  Standalone contributes nothing extra
+    # (manifest_sources == []), so ``discovered`` is exactly the package's
+    # builtins/ dir — unchanged from today.
     discovered = discover_builtin_apps()
+    discovered_names = {a["name"] for a in discovered}
+    for app_data in _edition_builtin_apps():
+        if app_data["name"] not in discovered_names:
+            discovered_names.add(app_data["name"])
+            discovered.append(app_data)
     hardcoded_names = {a["name"] for a in _BUILTIN_APPS}
 
     # Clean up apps that have been escalated to built-in surfaces.
@@ -918,7 +1018,8 @@ def register_builtin_apps() -> int:
         if migrated_to_raw and not migrated_to_effective:
             logger.warning(
                 "Builtin app %r has invalid migratedTo format %r — field ignored",
-                name, migrated_to_raw,
+                name,
+                migrated_to_raw,
             )
         elif migrated_to_effective:
             target_name = migrated_to_effective.split(":", 1)[1]
@@ -926,7 +1027,8 @@ def register_builtin_apps() -> int:
                 logger.warning(
                     "Builtin app %r migratedTo target %r differs from app name "
                     "— this may break data directory sharing",
-                    name, migrated_to_effective,
+                    name,
+                    migrated_to_effective,
                 )
 
         existing = _read_installed(name)
@@ -980,6 +1082,7 @@ def register_builtin_apps() -> int:
                 # Importing at module scope here would create a cycle, so
                 # we defer to the function body.
                 from kiro_claw.dashboard.token_auth import generate_app_secret, write_app_secret
+
                 write_app_secret(name, generate_app_secret())
             # Invalidate the proxy secret cache so the newly-written (or
             # previously existing) secret is picked up on the next request.
@@ -989,6 +1092,7 @@ def register_builtin_apps() -> int:
                 # at module load, so we cannot import routes at the top of
                 # this file without creating a cycle.
                 from kiro_claw.apps.routes import invalidate_app_secret_cache
+
                 invalidate_app_secret_cache(name)
             except Exception:
                 pass  # routes module may not be importable during bootstrap
@@ -1023,9 +1127,17 @@ def detect_orphaned_builtins(*, force_refresh: bool = False) -> set[str]:
     if _orphaned_builtins_cache is not None and not force_refresh:
         return _orphaned_builtins_cache
 
-    # Combine hardcoded list + auto-discovered names
+    # Combine hardcoded list + auto-discovered names + edition-contributed
+    # builtins (PlatformContext).  Standalone adds nothing (manifest_sources ==
+    # [] and bundled_app_names() == OSS builtins already covered); the Amazon
+    # companion's feature apps are recognized as builtins here so they are not
+    # mis-flagged as orphans after registration.  ``bundled_app_names()`` is
+    # also honored as a declaration so a declared app whose manifest dir is
+    # momentarily missing is not mis-orphaned.
     builtin_names = {app["name"] for app in _BUILTIN_APPS}
     builtin_names.update(app["name"] for app in discover_builtin_apps())
+    builtin_names.update(app["name"] for app in _edition_builtin_apps())
+    builtin_names.update(_edition_bundled_app_names())
 
     orphaned: set[str] = set()
     root = apps_dir()
@@ -1077,7 +1189,8 @@ def cleanup_migrated_builtin(name: str) -> AppResult:
     # the standalone installer has already replaced it — nothing to clean up.
     if meta.origin != "builtin":
         return AppResult(
-            ok=True, name=name,
+            ok=True,
+            name=name,
             message="already migrated — standalone version is in place",
         )
 
@@ -1085,7 +1198,8 @@ def cleanup_migrated_builtin(name: str) -> AppResult:
     builtin_names = {app["name"] for app in _BUILTIN_APPS}
     if name in builtin_names:
         return AppResult(
-            ok=False, name=name,
+            ok=False,
+            name=name,
             error=f"app {name!r} is not an orphaned builtin (still in _BUILTIN_APPS)",
             error_code="not_orphaned",
         )
@@ -1094,7 +1208,8 @@ def cleanup_migrated_builtin(name: str) -> AppResult:
     migrated_to = meta.migratedTo
     if not migrated_to:
         return AppResult(
-            ok=False, name=name,
+            ok=False,
+            name=name,
             error=f"app {name!r} has no migratedTo target",
         )
 
@@ -1102,20 +1217,24 @@ def cleanup_migrated_builtin(name: str) -> AppResult:
     parts = migrated_to.split(":", 1)
     if len(parts) != 2:
         return AppResult(
-            ok=False, name=name,
+            ok=False,
+            name=name,
             error=f"invalid migratedTo format: {migrated_to!r}",
         )
     target_name = parts[1]
 
     # Path safety check on target_name (deny-by-default — don't trust persisted data)
     if not _check_path_safety(target_name):
-        return AppResult(ok=False, name=name, error=f"unsafe target name in migratedTo: {target_name!r}")
+        return AppResult(
+            ok=False, name=name, error=f"unsafe target name in migratedTo: {target_name!r}"
+        )
 
     # For same-name migration (target_name == name): the standalone hasn't
     # installed yet (we'd have returned "already migrated" above). Tell user.
     if target_name == name:
         return AppResult(
-            ok=False, name=name,
+            ok=False,
+            name=name,
             error=f"standalone replacement {target_name!r} is not installed",
             error_code="replacement_missing",
         )
@@ -1124,7 +1243,8 @@ def cleanup_migrated_builtin(name: str) -> AppResult:
     replacement = _read_installed(target_name)
     if not replacement or replacement.origin == "builtin":
         return AppResult(
-            ok=False, name=name,
+            ok=False,
+            name=name,
             error=f"standalone replacement {target_name!r} is not installed",
             error_code="replacement_missing",
         )
@@ -1143,7 +1263,8 @@ def cleanup_migrated_builtin(name: str) -> AppResult:
             installed_path.unlink()
     except OSError as exc:
         return AppResult(
-            ok=False, name=name,
+            ok=False,
+            name=name,
             error=f"failed to clean up app metadata: {exc}",
             error_code="io_error",
         )
@@ -1153,6 +1274,7 @@ def cleanup_migrated_builtin(name: str) -> AppResult:
 
     logger.info("Cleaned up orphaned builtin %s (data preserved)", name)
     return AppResult(
-        ok=True, name=name,
+        ok=True,
+        name=name,
         message="cleaned up orphaned builtin entry, data preserved",
     )

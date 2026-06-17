@@ -26,6 +26,7 @@ from aiohttp import web
 
 import kiro_claw
 from kiro_claw.dashboard.state import DashboardState
+from kiro_claw.platform import current_context
 from kiro_claw.safety_override import safety_override
 from kiro_claw.stats import Stats
 
@@ -165,6 +166,18 @@ async def api_status(request: web.Request) -> web.Response:
         "cpu_count": static_info.get("cpu_count", 0),
         "mem_total_gb": static_info.get("mem_total_gb", 0),
     })
+    # Frontend RUM config blob (PlatformContext telemetry).  The Default
+    # TelemetryProvider returns None (RUM off), so the standalone status payload
+    # is byte-for-byte unchanged and the SPA's RUM shim stays a no-op.  The
+    # Amazon companion returns the Cognito/RUM config its frontend host consumes;
+    # only then is a ``rum`` key added.  Best-effort — a telemetry-lookup failure
+    # never breaks the status endpoint.
+    try:
+        rum_config = current_context().telemetry.frontend_rum_config()
+        if rum_config is not None:
+            data["rum"] = rum_config
+    except Exception:
+        logger.debug("frontend_rum_config lookup failed; RUM omitted", exc_info=True)
     return web.json_response(data)
 
 
@@ -575,9 +588,15 @@ async def api_system(request: web.Request) -> web.Response:
 
 async def api_midway_ttl(request: web.Request) -> web.Response:
     """Midway credential TTL — SSH cert primary, cookie fallback."""
-    from kiro_claw.midway import midway_status_async
-
-    data = await midway_status_async()
+    # Identity status via the active PlatformContext.  The Default adapter
+    # delegates to ``midway.midway_status()`` — the real Midway SSH-cert probe,
+    # which spawns up to 4 subprocesses (5s timeout each) — while the Amazon
+    # companion returns the real Midway TTL.  ``IdentityProvider.status()`` is
+    # SYNCHRONOUS and BLOCKING in both editions, so it must be offloaded to a
+    # thread-pool executor to avoid stalling the aiohttp event loop (matches the
+    # legacy ``midway_status_async()`` which wrapped midway_status() this way).
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(None, current_context().identity.status)
     return web.json_response(data)
 
 

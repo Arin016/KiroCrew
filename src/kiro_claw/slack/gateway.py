@@ -91,6 +91,7 @@ from kiro_claw.llm_helpers import (
     stream_and_collect,
 )
 from kiro_claw.memory import MemoryStore
+from kiro_claw.platform import boot_platform
 from kiro_claw.providers.base import LLMEvent
 from kiro_claw.safety_override import safety_override
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
@@ -3627,6 +3628,13 @@ async def run_gateway(
     all services (chat, cron, subagents, task runner) are available via
     the web dashboard, but Slack connectivity is disabled.
     """
+    # ── Platform context boot (CPP seam) ──
+    # Resolve + install the PlatformContext ONCE before any service spins up.
+    # Idempotent: a no-op when ``cli.main`` already booted in this process.
+    # Standalone composes the all-defaults context (identical to today); a
+    # non-standalone profile that cannot compose its companion fails closed.
+    boot_platform(cfg)
+
     orchestrator = GatewayOrchestrator(
         cfg,
         no_dashboard=no_dashboard,

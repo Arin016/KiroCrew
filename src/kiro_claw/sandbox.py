@@ -33,6 +33,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from kiro_claw.platform import current_context
+
 logger = logging.getLogger(__name__)
 
 # Sensitive directories to hide from the agent subprocess tree.
@@ -107,6 +109,19 @@ _AGENT_DENIED_ENV_KEYS: list[str] = [
     "SLACK_USER_TOKEN",
     "KIROCLAW_OWNER_ID",
 ]
+
+
+# ── Platform context accessor ──
+
+
+def _sandbox_policy():
+    """Return the active context's SandboxPolicy adapter.
+
+    The Default adapter delegates to ``_STRICT_DIRS`` / ``_CC_DIRS`` above, so a
+    standalone process gets today's exact lists; the Amazon companion extends
+    them.
+    """
+    return current_context().sandbox
 
 
 # ── Availability probes ──
@@ -249,12 +264,17 @@ def _build_launcher_script(sandbox_level: str = "strict") -> str:
     home = str(Path.home())
     uid = os.getuid()
     gid = os.getgid()
+    # Source the sensitive-dir lists from the active PlatformContext so the
+    # Amazon companion can extend them (+ .midway/.ada).  The Default adapter
+    # returns ``list(_STRICT_DIRS)`` / ``list(_CC_DIRS)``, so standalone is
+    # unchanged.  ``_STANDARD_DIRS`` is not an extension point (no interface
+    # method) and stays on the module global.
     if sandbox_level == "standard":
         dirs = _STANDARD_DIRS
     elif sandbox_level == "cc":
-        dirs = _CC_DIRS
+        dirs = _sandbox_policy().cc_dirs()
     else:
-        dirs = _STRICT_DIRS
+        dirs = _sandbox_policy().strict_dirs()
     files = _CC_FILES if sandbox_level in ("cc", "strict") else []
     expose_files = _CC_EXPOSE_FILES if sandbox_level == "cc" else []
     env_prefixes = list(_SENSITIVE_ENV_PREFIXES)
@@ -500,16 +520,19 @@ _SEATBELT_PROFILE = """\
 def _build_seatbelt_profile(sandbox_level: str = "strict") -> str:
     """Build a Seatbelt .sb profile denying reads of sensitive dirs."""
     home = str(Path.home())
+    # Source the sensitive-dir lists from the active PlatformContext (Default
+    # adapter == today's module globals; Amazon companion adds .midway/.ada).
     if sandbox_level == "standard":
         dirs = _STANDARD_DIRS
     elif sandbox_level == "cc":
         # On macOS, don't hide .aws — credential_process and SSO token
         # caches live under .aws/ and Seatbelt can't do partial exposure
         # as cleanly as Linux bind mounts. Deny patterns still block LLM
-        # tool reads of credential files.
-        dirs = [d for d in _CC_DIRS if d != ".aws"]
+        # tool reads of credential files. The .aws-exclusion is applied to the
+        # context-sourced list so a companion's extra cc dirs are still hidden.
+        dirs = [d for d in _sandbox_policy().cc_dirs() if d != ".aws"]
     else:
-        dirs = _STRICT_DIRS
+        dirs = _sandbox_policy().strict_dirs()
     files = _CC_FILES if sandbox_level in ("cc", "strict") else []
     expose_files = _CC_EXPOSE_FILES if sandbox_level == "cc" else []
     expose_abs = {os.path.join(home, f) for f in expose_files}

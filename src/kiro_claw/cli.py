@@ -45,6 +45,7 @@ from kiro_claw.config.loader import (
 )
 from kiro_claw.history import ConversationLog, HistoryConsolidator
 from kiro_claw.memory import MemoryStore
+from kiro_claw.platform import PlatformCompositionError, boot_platform
 from kiro_claw.seed import seed_cmd
 from kiro_claw.sel import sel
 from kiro_claw.session import SessionManager
@@ -1112,6 +1113,28 @@ Examples:
         print(BANNER)
         parser.print_help()
         return
+
+    # ── Platform context boot (CPP seam) ──
+    # Resolve + install the PlatformContext ONCE, before any subcommand spins up
+    # services.  Standalone (no companion, no KIROCLAW_PROFILE, no ~/.midway)
+    # composes the all-defaults context, so behavior is identical to today;
+    # ``boot_platform`` is idempotent so a later ``run_gateway`` boot is a no-op.
+    # Failure to compose a non-standalone profile is fail-closed (raises), but a
+    # standalone boot never raises — keep the call defensive so a corrupt config
+    # cannot break the CLI for the standalone edition.
+    try:
+        boot_platform(KiroClawConfig.load())
+    except Exception as exc:
+        # Fail-closed: a non-standalone profile that cannot compose (companion
+        # missing/rejected/version-mismatched) MUST NOT silently downgrade to
+        # open-source defaults — re-raise so the CLI aborts instead of running
+        # mcp-core/mcp-cron/etc. with no security overlay or credential
+        # redaction. PluginAdmissionError subclasses PlatformCompositionError.
+        if isinstance(exc, PlatformCompositionError):
+            raise
+        # Standalone boot never raises; only genuinely-unexpected errors reach
+        # here, and the standalone edition must not break on a corrupt config.
+        logging.getLogger("kiro_claw").debug("platform boot deferred", exc_info=True)
 
     if args.command == "chat":
         if getattr(args, "tui", False):

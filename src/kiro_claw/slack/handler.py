@@ -45,7 +45,7 @@ from kiro_claw.hooks import (
     validate_file_path,
 )
 from kiro_claw.llm_helpers import save_conversation_turn
-from kiro_claw.midway import get_midway_status_line
+from kiro_claw.platform import current_context
 from kiro_claw.providers.base import (
     EVENT_COMPACTION_STATUS,
     EVENT_COMPLETE,
@@ -2163,7 +2163,9 @@ async def handle_message(
 
     # ── Status keyword: reply with stats summary ──
     if text.strip().lower() == "status":
-        mw_line = await get_midway_status_line(prefix=" · midway")
+        # Identity status via the active PlatformContext (Default == OSS no-op
+        # stub returning ""; Amazon companion returns the real Midway line).
+        mw_line = await current_context().identity.status_line(prefix=" · midway")
         await slack.post_message(channel, Stats().summary() + mw_line, reply_ts)
         return
 

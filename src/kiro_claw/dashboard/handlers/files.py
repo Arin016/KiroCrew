@@ -24,9 +24,13 @@ from aiohttp.multipart import BodyPartReader
 
 from kiro_claw.config.loader import KiroClawConfig, WorkspaceConfig
 from kiro_claw.dashboard.state import DashboardState
+from kiro_claw.platform import PlatformCompositionError, current_context
 from kiro_claw.security import (
     BINARY_MIME_ALLOWLIST,
     is_sensitive_path,
+)
+from kiro_claw.security import redact as _security_redact
+from kiro_claw.security import (
     redact_credentials,
     redact_exfiltration_urls,
 )
@@ -55,6 +59,26 @@ mimetypes.add_type(
 )
 
 _INLINE_DISPOSITION_PREFIXES = frozenset({"audio/", "video/", "image/", "application/pdf"})
+
+
+def redact(text: str) -> str:
+    """Redact credentials/exfil via the active PlatformContext.
+
+    Routes the file_send sensitivity gates through
+    ``current_context().credentials.redact`` so the companion's extra
+    credential regexes apply uniformly across the dashboard file surfaces (the
+    same overlay-aware gate ``mcp_core`` uses for its file_send path). The
+    Default ``CredentialPolicy.redact`` delegates to ``security.redact`` so a
+    standalone process is byte-for-byte today's redaction. The fail-closed
+    ``PlatformCompositionError`` is re-raised, never swallowed.
+    """
+    try:
+        return current_context().credentials.redact(text)
+    except Exception as exc:
+        if isinstance(exc, PlatformCompositionError):
+            raise
+        return _security_redact(text)
+
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +147,6 @@ async def api_outbox_notify(request: web.Request) -> web.Response:
             error="invalid_json_body",
         )
         return web.json_response({"error": "Invalid JSON body"}, status=400)
-    from kiro_claw.security import redact  # noqa: F811
 
     raw_path = body.get("path", "")
     raw_filename = body.get("filename", "")
@@ -271,7 +294,6 @@ async def api_outbox_download(request: web.Request) -> web.StreamResponse:
 
     from kiro_claw.config.loader import outbox_dir  # noqa: F811
     from kiro_claw.hooks import FileTooLargeError, safe_read_file_bytes  # noqa: F811
-    from kiro_claw.security import redact  # noqa: F811
 
     filename = request.match_info["filename"]
     path = (outbox_dir() / filename).resolve()
@@ -374,7 +396,6 @@ async def api_outbox_download(request: web.Request) -> web.StreamResponse:
 async def api_outbox_list(request: web.Request) -> web.Response:
     """GET /api/outbox — list files in the outbox."""
     from kiro_claw.config.loader import outbox_dir  # noqa: F811
-    from kiro_claw.security import redact  # noqa: F811
 
     entries = []
     odir = outbox_dir()
@@ -403,7 +424,6 @@ async def api_outbox_list(request: web.Request) -> web.Response:
 async def api_slack_upload_file(request: web.Request) -> web.Response:
     """POST /api/slack/upload-file — upload a file to Slack (internal, called by file_send)."""
     from kiro_claw.hooks import FileTooLargeError, safe_read_file_bytes  # noqa: F811
-    from kiro_claw.security import redact  # noqa: F811
 
     state: DashboardState = request.app["state"]
     slack = state.slack_client

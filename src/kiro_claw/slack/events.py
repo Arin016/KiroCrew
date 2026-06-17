@@ -45,7 +45,7 @@ from kiro_claw.dashboard.handlers import get_update_info
 from kiro_claw.dashboard.token_auth import LINK_WINDOW_SECS, MAX_SESSION_TTL_SECS, parse_duration
 from kiro_claw.hooks import safe_read_file
 from kiro_claw.mcp_discovery import list_servers
-from kiro_claw.midway import get_midway_status_line
+from kiro_claw.platform import current_context
 from kiro_claw.safety_override import safety_override
 from kiro_claw.security import (
     redact_credentials,
@@ -62,7 +62,6 @@ from kiro_claw.slack.blocks import (
     dashboard_link_block,
     voice_config_modal,
 )
-from kiro_claw.slack.enterprise import check_message_origin, validate_enterprise
 from kiro_claw.slack.files import process_slack_files
 from kiro_claw.slack.handler import (
     _YOLO_TTL_SECS,
@@ -629,7 +628,9 @@ async def _handle_status(
     orch: GatewayOrchestrator, caller_id: str, args: str, respond: Callable
 ) -> None:
     """Show runtime stats summary."""
-    mw_line = await get_midway_status_line(prefix=" · midway")
+    # Identity status via the active PlatformContext (Default == OSS no-op stub
+    # returning ""; Amazon companion returns the real Midway status line).
+    mw_line = await current_context().identity.status_line(prefix=" · midway")
     await respond(Stats().summary() + mw_line)
 
 
@@ -673,7 +674,10 @@ def init_socket_mode(orch: GatewayOrchestrator, seen: SeenCache) -> None:
     # ── Enterprise Grid workspace validation ──
     # Blocks data exfiltration via personal/external Slack workspaces.
     extra_ids = orch._cfg.slack_enterprise_ids
-    if not validate_enterprise(orch._bot_token, extra_ids=extra_ids):
+    # Route through the active PlatformContext's Slack enterprise gate.  The
+    # Default gate is open (opt-in allowlist), identical to today; the Amazon
+    # companion supplies a fail-closed workspace allowlist.
+    if not current_context().slack_gate.validate_enterprise(orch._bot_token, extra_ids=extra_ids):
         logger.error("Slack workspace failed enterprise validation — Slack disabled")
         orch._slack_enabled = False
         orch.slack = None
@@ -837,7 +841,7 @@ async def _publish_home_tab(orch: GatewayOrchestrator, user_id: str) -> None:
         if orch.sessions is not None:
             status_lines.append(f"*Active sessions:* {orch.sessions.count}")
         status_lines.append(f"*Uptime:* {Stats().uptime_str()}")
-        status_lines.append(await get_midway_status_line())
+        status_lines.append(await current_context().identity.status_line())
         blocks.append(
             {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(status_lines)}}
         )
@@ -1755,7 +1759,9 @@ async def _route_message(
         return
 
     # ── Enterprise origin check: reject messages from swapped tokens ──
-    if not check_message_origin(team_id):
+    # Per-message gate via the active PlatformContext (default-open; Amazon
+    # companion fail-closed).
+    if not current_context().slack_gate.check_message_origin(team_id):
         logger.error("Message rejected: team_id=%s does not match validated workspace", team_id)
         sel().log_api_access(
             caller=sender_id,

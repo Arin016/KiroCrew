@@ -25,6 +25,7 @@ import aiohttp
 
 from kiro_claw.config.loader import KiroClawConfig, config_dir, config_path
 from kiro_claw.constants import OLLAMA_DOCKER_CONTAINER
+from kiro_claw.platform import current_context, safe_context_call
 
 # ── Optional dependency: botocore (AWS SigV4 signing) ──
 # Used only by the unmanaged-Ollama → API Gateway path (embedding_auth=aws_sigv4).
@@ -203,18 +204,78 @@ class EmbeddingClient:
         dim: int = _DEFAULT_DIM,
         timeout: float = _DEFAULT_TIMEOUT,
         allow_remote: bool = False,
-        model: str = _OLLAMA_MODEL,
+        model: str | None = None,
         auth: str = "none",
     ):
+        # Model + endpoint are sourced from the active PlatformContext's
+        # EmbeddingSource when the caller doesn't pin them.  The Default adapter
+        # returns ``_OLLAMA_MODEL`` and a ``None`` endpoint, so a standalone
+        # client with no explicit model/url is byte-for-byte today's local
+        # Ollama client.  An explicit ``model=`` / ``url=`` from a caller (e.g.
+        # ``cfg.memory.embedding_model``) always wins.  The Amazon companion
+        # supplies its internal model + remote endpoint.
+        model, ctx_endpoint = self._resolve_model_endpoint(model)
+        if ctx_endpoint and url == _DEFAULT_URL:
+            url = ctx_endpoint
+            allow_remote = True  # a context-supplied endpoint is trusted-by-edition
         _validate_url(url, allow_remote=allow_remote)
         self._url = url.rstrip("/")
         self.dim = dim
         self._timeout = aiohttp.ClientTimeout(total=timeout)
         self._model = model
         if auth not in _VALID_AUTH_SCHEMES:
-            raise ValueError(f"Unknown embedding auth scheme {auth!r}; expected one of {_VALID_AUTH_SCHEMES}")
+            raise ValueError(
+                f"Unknown embedding auth scheme {auth!r}; expected one of {_VALID_AUTH_SCHEMES}"
+            )
         self._auth = auth
         self._last_warn: float = 0
+
+    @staticmethod
+    def _resolve_model_endpoint(model: str | None) -> tuple[str, str | None]:
+        """Resolve (model, endpoint) from the active PlatformContext.
+
+        An explicit ``model`` from the caller always wins; only ``None`` falls
+        through to ``current_context().embeddings.registry_model()`` (Default:
+        ``_OLLAMA_MODEL``).  The endpoint is ``endpoint_url()`` (Default: None).
+        Best-effort: a transient context failure degrades to today's local
+        defaults rather than breaking embedding — but a ``PlatformCompositionError``
+        is re-raised (fail-closed) so a non-standalone host that cannot compose
+        does NOT silently point internal data at the public Ollama default.
+        """
+
+        def _resolve() -> tuple[str, str | None]:
+            src = current_context().embeddings
+            # Resolve both fields before committing either: registry_model() and
+            # endpoint_url() must land atomically.  If endpoint_url() raises after
+            # registry_model() already returned an edition model, committing the
+            # model alone would point an amazon-specific model at the local Ollama
+            # default endpoint (silent embed failures).
+            resolved_model = src.registry_model() if model is None else model
+            return resolved_model, src.endpoint_url()
+
+        resolved_model, endpoint = safe_context_call(
+            _resolve,
+            fallback=(model, None),
+            log_message="embeddings source lookup failed; using local defaults",
+        )
+        if resolved_model is None:
+            resolved_model = _OLLAMA_MODEL
+        return resolved_model, endpoint
+
+    def _context_sign(self, method: str, url: str, headers: dict, body: bytes | str) -> dict | None:
+        """Sign *url* via the active PlatformContext's EmbeddingSource, or None.
+
+        The Default adapter returns None (unsigned local Ollama), so standalone
+        falls through to the ``auth=="aws_sigv4"`` path in ``embed_batch``
+        unchanged.  The Amazon companion returns signed headers.  Best-effort:
+        any transient failure returns None so the caller's existing path takes
+        over — but a ``PlatformCompositionError`` is re-raised (fail-closed).
+        """
+        return safe_context_call(
+            lambda: current_context().embeddings.sign_request(method, url, headers, body),
+            fallback=None,
+            log_message="embeddings sign_request via context failed",
+        )
 
     async def embed_one(self, text: str) -> list[float] | None:
         """Embed a single text. Returns None on any error."""
@@ -227,7 +288,17 @@ class EmbeddingClient:
             endpoint = f"{self._url}/api/embed"
             body = json.dumps({"model": self._model, "input": texts}).encode()
             headers = {"Content-Type": "application/json"}
-            if self._auth == "aws_sigv4":
+            # Request signing is routed through the active PlatformContext's
+            # EmbeddingSource.  The Default adapter returns None (unsigned), so a
+            # standalone process with auth="none" sends the request exactly as
+            # before, and a standalone process with auth="aws_sigv4" still uses
+            # the local ``_sigv4_sign`` fallback below — byte-for-byte today's
+            # behavior.  The Amazon companion returns SigV4 headers from its own
+            # signer so it does not need ``embedding_auth`` configured.
+            ctx_signed = self._context_sign("POST", endpoint, dict(headers), body)
+            if ctx_signed is not None:
+                headers = ctx_signed
+            elif self._auth == "aws_sigv4":
                 signed = _sigv4_sign("POST", endpoint, headers, body)
                 if signed is None:
                     self._warn("SigV4 signing failed; aborting embed request")
@@ -256,7 +327,9 @@ class EmbeddingClient:
 
     async def health(self) -> bool:
         """Check if Ollama is running and the model is available."""
-        return await _ollama_has_model(self._url, self._model, timeout_s=int(self._timeout.total or 3))
+        return await _ollama_has_model(
+            self._url, self._model, timeout_s=int(self._timeout.total or 3)
+        )
 
     def _warn(self, msg: str, *args: object) -> None:
         now = time.monotonic()
@@ -272,7 +345,9 @@ class OllamaManager:
     ``ollama pull`` (default ``qwen3-embedding:0.6b``).
     """
 
-    def __init__(self, url: str = _DEFAULT_URL, base_dir: Path | None = None, model: str = _OLLAMA_MODEL):
+    def __init__(
+        self, url: str = _DEFAULT_URL, base_dir: Path | None = None, model: str = _OLLAMA_MODEL
+    ):
         self._url = url.rstrip("/")
         self._base = base_dir or config_dir()
         self._model = model
@@ -376,7 +451,9 @@ class OllamaManager:
                     sysctl = None
                     try:
                         sysctl = await asyncio.create_subprocess_exec(
-                            "sysctl", "-n", "hw.optional.arm64",
+                            "sysctl",
+                            "-n",
+                            "hw.optional.arm64",
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.DEVNULL,
                         )
@@ -389,7 +466,10 @@ class OllamaManager:
                             except (ProcessLookupError, OSError):
                                 pass
                     cmds = (
-                        [["arch", "-arm64", "brew", "install", "ollama"], ["brew", "install", "ollama"]]
+                        [
+                            ["arch", "-arm64", "brew", "install", "ollama"],
+                            ["brew", "install", "ollama"],
+                        ]
                         if is_arm
                         else [["brew", "install", "ollama"]]
                     )
@@ -401,17 +481,33 @@ class OllamaManager:
                                 stdout=asyncio.subprocess.PIPE,
                                 stderr=asyncio.subprocess.PIPE,
                             )
-                            stdout_data, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=1200)
+                            stdout_data, stderr_data = await asyncio.wait_for(
+                                proc.communicate(), timeout=1200
+                            )
                             if proc.returncode == 0:
                                 return True
-                            stderr_tail = stderr_data.decode(errors="replace").strip().splitlines()[-5:]
+                            stderr_tail = (
+                                stderr_data.decode(errors="replace").strip().splitlines()[-5:]
+                            )
                             if i < len(cmds) - 1:
-                                logger.warning("Command %s exited with code %s: %s, trying next option...", cmd, proc.returncode, "\n".join(stderr_tail))
+                                logger.warning(
+                                    "Command %s exited with code %s: %s, trying next option...",
+                                    cmd,
+                                    proc.returncode,
+                                    "\n".join(stderr_tail),
+                                )
                             else:
-                                logger.warning("Command %s exited with code %s: %s", cmd, proc.returncode, "\n".join(stderr_tail))
+                                logger.warning(
+                                    "Command %s exited with code %s: %s",
+                                    cmd,
+                                    proc.returncode,
+                                    "\n".join(stderr_tail),
+                                )
                         except (asyncio.TimeoutError, OSError) as exc:
                             if i < len(cmds) - 1:
-                                logger.warning("Failed running %s: %s, trying next option...", cmd, exc)
+                                logger.warning(
+                                    "Failed running %s: %s, trying next option...", cmd, exc
+                                )
                             else:
                                 logger.warning("Failed running %s: %s", cmd, exc)
                             if isinstance(exc, asyncio.TimeoutError) and proc is not None:
@@ -593,9 +689,15 @@ class OllamaManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
-                env={**os.environ, "OLLAMA_HOST": "127.0.0.1:11434",
-                     **({"PATH": f"{self._brew_bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
-                        if getattr(self, "_brew_bin_dir", None) else {})},
+                env={
+                    **os.environ,
+                    "OLLAMA_HOST": "127.0.0.1:11434",
+                    **(
+                        {"PATH": f"{self._brew_bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+                        if getattr(self, "_brew_bin_dir", None)
+                        else {}
+                    ),
+                },
             )
             for _ in range(_HEALTH_TIMEOUT):
                 await asyncio.sleep(1)
@@ -615,7 +717,8 @@ class OllamaManager:
                             if await self.install_ollama():
                                 # Set full path to brew ollama binary (no global PATH mutation)
                                 brew_proc = await asyncio.create_subprocess_exec(
-                                    "brew", "--prefix",
+                                    "brew",
+                                    "--prefix",
                                     stdout=asyncio.subprocess.PIPE,
                                     stderr=asyncio.subprocess.PIPE,
                                 )
@@ -828,7 +931,9 @@ class _EmbedFailed(Exception):
 
 
 def make_sync_embed_fn(
-    url: str = _DEFAULT_URL, timeout: float = 3.0, model: str = _OLLAMA_MODEL,
+    url: str = _DEFAULT_URL,
+    timeout: float = 3.0,
+    model: str = _OLLAMA_MODEL,
     auth: str = "none",
 ) -> callable:  # type: ignore[valid-type]
     """Return a sync callable ``(str) -> list[float] | None`` for Ollama embeddings.
@@ -844,7 +949,9 @@ def make_sync_embed_fn(
     embed_url = f"{url.rstrip('/')}/api/embed"
 
     if auth not in _VALID_AUTH_SCHEMES:
-        raise ValueError(f"Unknown embedding auth scheme {auth!r}; expected one of {_VALID_AUTH_SCHEMES}")
+        raise ValueError(
+            f"Unknown embedding auth scheme {auth!r}; expected one of {_VALID_AUTH_SCHEMES}"
+        )
 
     @functools.lru_cache(maxsize=_EMBED_CACHE_MAX)
     def _cached_embed(text: str) -> tuple[float, ...]:

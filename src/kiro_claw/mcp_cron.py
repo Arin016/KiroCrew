@@ -29,10 +29,10 @@ from kiro_claw.cron_script import resolve_script_path
 from kiro_claw.cron_trigger import trigger_cron_job
 from kiro_claw.mcp_core import _resolve_session_key
 from kiro_claw.mcp_shared import call_tool_with_logging, run_mcp_stdio_loop
+from kiro_claw.platform import current_context
 from kiro_claw.sandbox import _AGENT_DENIED_ENV_KEYS
 from kiro_claw.security import (
     _SENSITIVE_HOME_DIRS,
-    is_denied,
     is_sensitive_bash_command,
     is_sensitive_path,
     redact_credentials,
@@ -132,7 +132,14 @@ def _vet_shell_command(command: str) -> str | None:
     """
     if not command:
         return None
-    reason = is_denied(command) or is_sensitive_bash_command(command)
+    # Route the deny check through the active PlatformContext's PolicyAuthority so
+    # the companion's ADD-only deny overlay applies to cron commands too (the same
+    # enforcement hooks.on_tool_call uses). The Default authority evaluates
+    # BASELINE_DENY only, so standalone is byte-for-byte unchanged. This is the
+    # ONLY deny gate for the cron `command` field — it executes via ``sh -c``
+    # outside the kiro-cli ACP permission/hook flow — so an overlay-only deny
+    # pattern would otherwise be silently bypassed here.
+    reason = current_context().security.is_denied(command) or is_sensitive_bash_command(command)
     if reason:
         safe_reason = redact_exfiltration_urls(redact_credentials(reason)[0])[0]
         return f"Error: cron command blocked by security policy: {safe_reason}"
