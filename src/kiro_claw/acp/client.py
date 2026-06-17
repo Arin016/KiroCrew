@@ -609,6 +609,42 @@ def _format_acp_error(error: object) -> str:
                 "Bedrock InvokeModel access."
                 f"{req_id_suffix}"
             )
+        elif re.search(
+            r"\b(InternalServerError|InternalFailure|ServiceUnavailable(?:Exception)?"
+            r"|DispatchFailure|ConnectionReset(?:Error)?)\b",
+            data,
+        ) or re.search(
+            r"(?:HTTP|status)\s*(?:code\s*)?50[023]\b",
+            data,
+            re.IGNORECASE,
+        ) or re.search(
+            r"(please try again|response stream)",
+            data,
+            re.IGNORECASE,
+        ):
+            # Transient backend 5xx — Bedrock/Codewhisperer surfaces a
+            # momentary InternalServerError (often wrapped in a
+            # CodewhispererChatResponseStream ServiceError with a
+            # "please try again" hint). Distinct from throttling: this is a
+            # server-side blip, not a rate limit, so the guidance is just to
+            # retry rather than switch models or back off.
+            #
+            # Match only the provider `data` field, never the generic
+            # JSON-RPC `message`: -32603's canonical message is literally
+            # "Internal error", so keying off `message` would sweep *every*
+            # uncaught -32603 (malformed-request, context-length, deterministic
+            # backend bugs) into this transient bucket and tell the user to
+            # retry a condition that will never succeed — while killing the
+            # unknown-shape fallback for the most common error code. We also
+            # require a real transient token (named exception, HTTP/status-50x,
+            # or an explicit retry hint) rather than a bare numeric like
+            # "max_tokens 500", which is not a status code.
+            formatted = (
+                "The model backend hit a transient error (HTTP 5xx). This is "
+                "usually momentary — retry in a moment. If it keeps happening, "
+                "switch to a different model in the picker."
+                f"{req_id_suffix}"
+            )
         else:
             # Unknown shape — preserve the raw dict so we don't lose
             # information.  Redaction below scrubs any embedded secrets.

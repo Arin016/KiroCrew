@@ -5487,6 +5487,137 @@ class TestFormatAcpError:
         assert warnings, "expected a redaction warning to be logged"
         assert "AKIAIOSFODNN7EXAMPLE" not in warnings[0].getMessage()
 
+    def test_internal_server_error_rewrite(self):
+        """The real transient 5xx repro (Mesh-2149, live 2026-06-14) must
+
+        classify as a momentary backend error rather than dumping the raw
+        -32603 JSON-RPC dict at the user.
+        """
+        err = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": (
+                "Encountered an error in the response stream: "
+                "CodewhispererChatResponseStream(ServiceError(ServiceError "
+                "{ name: \"InternalServerError\", ... please try again ... })) "
+                "(request_id: 91c99864-7d2e-4f0a-9b1c-2a3b4c5d6e7f)"
+            ),
+        }
+        out = _format_acp_error(err)
+        assert "transient error" in out.lower()
+        assert "retry in a moment" in out.lower()
+        assert "5xx" in out
+        # Request id preserved for support correlation.
+        assert "91c99864-7d2e-4f0a-9b1c-2a3b4c5d6e7f" in out
+        # Must not dead-end the user with the raw dict.
+        assert "Prompt error: {" not in out
+
+    def test_please_try_again_phrasing_rewrite(self):
+        """A bare 'please try again' transient hint (no explicit 5xx token)
+
+        still classifies as transient.
+        """
+        err = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": "Service hiccup, please try again.",
+        }
+        out = _format_acp_error(err)
+        assert "transient error" in out.lower()
+        assert "Prompt error: {" not in out
+
+    def test_dispatch_failure_rewrite(self):
+        """DispatchFailure / connection-reset shapes are transient too."""
+        err = {
+            "code": -32603,
+            "message": "x",
+            "data": "DispatchFailure: ConnectionReset (request_id: bbbb2222-cccc-3333-dddd-444455556666)",
+        }
+        out = _format_acp_error(err)
+        assert "transient error" in out.lower()
+        assert "bbbb2222-cccc-3333-dddd-444455556666" in out
+
+    def test_transient_5xx_missing_request_id_omits_suffix(self):
+        err = {"code": -32603, "message": "Internal error", "data": "InternalServerError occurred"}
+        out = _format_acp_error(err)
+        assert "transient error" in out.lower()
+        assert "request_id" not in out
+
+    def test_transient_branch_does_not_leak_credentials(self):
+        """Defense-in-depth on the new transient path: an AWS key embedded in
+
+        the upstream `data` must never reach the UI. The rewrite drops the
+        `data` field (so the secret is gone by construction), and the function
+        still routes the result through redact_credentials/redact_exfiltration_urls
+        at the end — the new branch adds no early return that bypasses it.
+        """
+        err = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": "InternalServerError: leaked AKIAIOSFODNN7EXAMPLE please try again",
+        }
+        out = _format_acp_error(err)
+        assert "AKIAIOSFODNN7EXAMPLE" not in out
+        assert "transient error" in out.lower()
+
+    def test_throttle_precedence_over_transient(self):
+        """A throttle that also says 'please try again' stays a throttle —
+
+        throttling precedence must survive the new transient branch.
+        """
+        err = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": "ThrottlingException: slow down, please try again",
+        }
+        out = _format_acp_error(err)
+        assert "throttling" in out.lower()
+        assert "transient error" not in out.lower()
+
+    def test_non_transient_minus_32603_falls_through_to_fallback(self):
+        """A non-transient -32603 whose only 'internal'-ish signal is the
+
+        canonical JSON-RPC message 'Internal error' must NOT be misclassified
+        as transient. The transient branch keys off the provider `data` field
+        only (never the generic `message`), so a deterministic failure like a
+        ValidationException preserves the raw dict and the real cause survives.
+        """
+        err = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": "ValidationException: input contains an unsupported field 'foo'",
+        }
+        out = _format_acp_error(err)
+        assert "transient error" not in out.lower()
+        # Unknown-shape fallback preserved for the most common error code.
+        assert "Prompt error: {" in out
+
+    def test_bare_500_token_is_not_treated_as_5xx(self):
+        """A standalone numeric (e.g. a token-limit value) must not match the
+
+        5xx branch — the numeric match is anchored to an HTTP/status context,
+        not a bare 500/502/503 token.
+        """
+        err = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": "max_tokens 500 exceeds the model limit of 200000",
+        }
+        out = _format_acp_error(err)
+        assert "transient error" not in out.lower()
+        assert "Prompt error: {" in out
+
+    def test_http_500_status_context_still_classifies_transient(self):
+        """An HTTP/status-anchored 50x token IS a genuine transient signal."""
+        err = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": "upstream returned HTTP 503 (request_id: aaaa1111-bbbb-2222-cccc-333344445555)",
+        }
+        out = _format_acp_error(err)
+        assert "transient error" in out.lower()
+        assert "aaaa1111-bbbb-2222-cccc-333344445555" in out
+
 
 class TestAcpClientDrainEarlyExit:
     """_drain_notifications exits early once MCP servers go quiet, bounded by
