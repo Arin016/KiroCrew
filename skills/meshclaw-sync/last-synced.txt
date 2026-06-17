@@ -16,12 +16,46 @@
 #                so frontend sync is by CONTENT within the post-snapshot window, not a
 #                clean SHA range. This SHA records the upstream tip last triaged.
 
-beta 570a9ccf      # 2026-06-14 MeshClaw backend beta tip (batch-18). KEEP at tip (perf(acp) MCP-init drain cap, ported).
-frontend-beta ecc6e5a5c753ae0d271c0ac6c1ced6dd8977ac58  # 2026-06-14 MeshClawWebsite beta tip (batch-18, mid-batch fold-in). KEEP at tip (in-input trigger menu, ported).
-mainline ebd78ac4  # 2026-06-14 MeshClaw mainline tip (upstream). Mainline-only delta vs beta = ebd78ac4 (byte-identical dual-landing of beta 14ae0f50, already ported as a keeper) — no NEW mainline-only candidate.
+beta 36c205e4      # 2026-06-17 MeshClaw backend beta-braveheart tip (batch-19, v3.1.0). KEEP at tip (docs: version bump 3.0.2→3.1.0 + config baseline — version/changelog only, SKIP_INTERNAL; fork is 0.1.0).
+frontend-beta 08716b28ab61fff6a898ec07787c592c38bbaae0  # 2026-06-17 MeshClawWebsite beta-braveheart tip (batch-19). KEEP at tip (feat: Kiro credit usage pill + details modal, ported PARTIAL — last commit of this batch).
+mainline 199d7853  # 2026-06-17 MeshClaw mainline tip (upstream, v3.1.0 release merge). Mainline-only delta vs beta = the v3.1.0 release merge of beta-braveheart into mainline (199d7853 backend / e6cd760 frontend) — no NEW mainline-only candidate (everything landed via beta-braveheart, already triaged).
 # NOTE: this 'mainline' SHA is the UPSTREAM MeshClaw mainline tip (for the mainline-only
 # candidate check), NOT the fork's mainline — batch-12 mistakenly recorded the fork SHA
 # (796e21c5) here, which broke the `$MAIN..origin/mainline` scan. Corrected in batch-13.
+
+# --- Batch-19 (manual dual-repo sync 2026-06-17, content-port) -----------------
+# Fresh branch sync/beta-2026-06-17 off origin/mainline (batch-18 boundary).
+# Spans the post-batch-18 window up to the upstream v3.1.0 release on BOTH repos:
+#   backend  beta-braveheart 570a9ccf..36c205e4 (mainline merge 199d7853)
+#   frontend MeshClawWebsite  ecc6e5a..08716b28 (mainline merge e6cd760)
+# 48 commits ported BY CONTENT (no cherry-pick; repos share content lineage only),
+# path/symbol-mapped, in chronological order, one fix per commit. Verified per
+# commit: backend pytest(affected files) + flake8; frontend tsc -b + vitest.
+# Tally: ~36 KEEP, ~12 PARTIAL (internal/absent hunks dropped), 0 DEFER.
+# No NEW mainline-only delta — the v3.1.0 release is a straight beta-braveheart→
+# mainline merge on both repos; every commit landed via beta-braveheart (triaged).
+#
+# HEADLINE backend: 3aa01c0 agentic chat-history MCP search tools (Phase 1);
+#   f1f9914+1f65ff4 knowledge embedding correctness (embed chunk content, sig-gated
+#   async rebuild, watcher self-heal); c3e7241 cron credential-exfil block;
+#   2186d95 Slack tool-approval prompts for linked dashboard sessions; e10ce35 5xx
+#   classification in _format_acp_error; 8f1d32e cpu_pct from /proc/stat delta.
+# HEADLINE frontend: 5a3feab smooth text streaming; cd614c0 collapsible thinking
+#   block; 2c687ac Voice tab (TTS+STT); d0eb0ca topbar notifications bell;
+#   36c1451 chat-nav merged into activity sidebar; f4930b9 Kiro credit usage pill.
+#
+# PARTIAL drops (generic hunks ported, internal/absent dropped): d1091de knowledge
+#   sandbox KEPT fork CCWorker / dropped claude-via-ACP; llm_pool same; mcp_cron
+#   cred-vet ported without internal sub-tools; 2c687ac/36c1451/122f318 dropped the
+#   absent secretarySlice + SlackTab; 39cb03d dropped secretary hunks; f4930b9
+#   dropped the SkillsTab(PromptFarm) wait-budget hunk + re-anchored the pill beside
+#   system-metrics (the Midway TTL pill it anchored on is stripped from the fork).
+# SKIP_INTERNAL: backend 36c205e4 (version bump 3.0.2→3.1.0 + config baseline —
+#   version/changelog only; fork is 0.1.0) and the v3.1.0 release-merge commits
+#   (199d7853 / e6cd760 — no content delta beyond beta-braveheart). KIROACP-ONLY
+#   invariant held throughout: no ClaudeCode/Bedrock provider glue re-introduced;
+#   the inert ACP_BACKEND_CLAUDE seam in acp/client.py left untouched.
+#
 
 # --- Batch-18 (manual dual-repo sync 2026-06-14, ultracode comprehensive) ----
 # Fresh branch sync/beta-2026-06-14 off origin/mainline (3fc5d1d = batch-16 boundary).
