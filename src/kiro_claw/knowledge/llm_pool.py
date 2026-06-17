@@ -29,16 +29,70 @@ FETCH_TIMEOUT = 120.0
 AGENT_NAME = "kiroclaw-knowledge"
 
 
-def _get_provider_type() -> str:
-    """Read the configured provider from ~/.kiroclaw/config.json."""
+# Sandbox modes accepted by ``kiro_claw.sandbox.wrap_argv`` (see its docstring).
+# An out-of-set value from config falls back to the safe default rather than
+# reaching the subprocess wrapper as an unrecognised string.
+_VALID_SANDBOX_MODES = frozenset({"auto", "standard", "strict", "cc", "off"})
+
+
+def _read_config() -> dict:
+    """Read ``~/.kiroclaw/config.json`` once; ``{}`` on any error.
+
+    Synchronous disk read — call from a thread (e.g. ``asyncio.to_thread``) when
+    on the event loop, then thread the returned dict into the pure parsers below
+    so worker construction never blocks the loop.
+    """
     try:
         config_path = Path.home() / ".kiroclaw" / "config.json"
         if config_path.exists():
             data = json.loads(config_path.read_text())
-            return data.get("agent", {}).get("provider", "acp")
+            if isinstance(data, dict):
+                # Coerce nested sections to dicts so the pure parsers' chained
+                # ``.get(...).get(...)`` never hits a hand-edited leaf value
+                # (e.g. ``{"agent": "acp"}``) and raises AttributeError.
+                for key in ("agent", "knowledge"):
+                    if not isinstance(data.get(key, {}), dict):
+                        data[key] = {}
+                return data
     except Exception:
         pass
-    return "acp"
+    return {}
+
+
+def _section(data: dict, key: str) -> dict:
+    """Return ``data[key]`` if it is a dict, else ``{}``.
+
+    Parsers may be handed a raw dict (bypassing ``_read_config``'s coercion), so
+    they guard each nested section independently to stay AttributeError-safe on
+    hand-edited config like ``{"agent": "acp"}`` or ``{"knowledge": null}``.
+    """
+    section = data.get(key, {})
+    return section if isinstance(section, dict) else {}
+
+
+def _get_provider_type(config: Optional[dict] = None) -> str:
+    """Configured knowledge provider; defaults to ``"acp"``."""
+    data = _read_config() if config is None else config
+    provider = _section(data, "agent").get("provider", "acp")
+    return provider if isinstance(provider, str) and provider else "acp"
+
+
+def _get_sandbox_mode(config: Optional[dict] = None) -> str:
+    """OS-level sandbox mode for knowledge-worker subprocesses.
+
+    Knowledge workers are wrapped by the same ``wrap_argv`` OS-level sandbox the
+    chat/Slack providers use, honouring the operator's ``agent.sandbox`` setting
+    (default ``"auto"`` -> standard confinement). The earlier hardcoded ``"off"``
+    (from the initial Knowledge Library commit) was the only place that bypassed
+    this setting; reading it here restores least-privilege parity with chat. Set
+    ``agent.sandbox="off"`` to disable globally. An unrecognised value falls back
+    to ``"auto"`` rather than reaching ``wrap_argv`` as an unknown mode.
+    """
+    data = _read_config() if config is None else config
+    mode = _section(data, "agent").get("sandbox")
+    if isinstance(mode, str) and mode in _VALID_SANDBOX_MODES:
+        return mode
+    return "auto"
 
 
 class Worker(ABC):
@@ -64,14 +118,31 @@ class Worker(ABC):
 class AcpWorker(Worker):
     """Long-lived AcpClient session with kiroclaw-knowledge agent."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, sandbox_mode: Optional[str] = None) -> None:
         self._client: Optional[AcpClient] = None
+        # Pre-resolved by the caller (off the event loop). ``None`` -> resolve
+        # lazily in ``start`` (direct construction outside the pool / tests).
+        self._sandbox_mode = sandbox_mode
 
     async def start(self) -> None:
         if AcpClient is None:
             raise RuntimeError("AcpClient not available (kiro_claw.acp.client not installed)")
+        # Drop any prior client before respawning. send_message re-runs start()
+        # when the client is not ready (e.g. a stalled handshake left _session_id
+        # None); without this the previous subprocess would be orphaned.
+        if self._client is not None:
+            try:
+                await self._client.shutdown()
+            except Exception:
+                logger.debug("AcpWorker: stale client shutdown failed", exc_info=True)
+            self._client = None
+        sandbox_mode = (
+            self._sandbox_mode
+            if self._sandbox_mode is not None
+            else await asyncio.to_thread(_get_sandbox_mode)
+        )
         logger.info("AcpWorker: starting with agent=%s", AGENT_NAME)
-        self._client = AcpClient(agent=AGENT_NAME, sandbox_mode="off")
+        self._client = AcpClient(agent=AGENT_NAME, sandbox_mode=sandbox_mode)
         await self._client.ensure_ready()
         logger.info("AcpWorker: ready (agent=%s, pid=%s)", AGENT_NAME, getattr(self._client, '_pid', 'unknown'))
 
@@ -234,6 +305,8 @@ class LLMPool:
         self._available: asyncio.Queue[int] = asyncio.Queue()
         self._started = False
         self._provider_type: str = ""
+        self._sandbox_mode: str = "auto"
+        self._config: dict = {}
         self._start_lock = asyncio.Lock()
 
     @property
@@ -245,7 +318,11 @@ class LLMPool:
         async with self._start_lock:
             if self._started:
                 return
-            self._provider_type = _get_provider_type()
+            # Read config once, off the event loop, and reuse for every worker.
+            config = await asyncio.to_thread(_read_config)
+            self._provider_type = _get_provider_type(config)
+            self._sandbox_mode = _get_sandbox_mode(config)
+            self._config = config
             try:
                 for i in range(self._pool_size):
                     worker = await self._create_worker()
@@ -271,7 +348,7 @@ class LLMPool:
         if self._provider_type == "claude_code":
             worker: Worker = CCWorker()
         else:
-            worker = AcpWorker()
+            worker = AcpWorker(sandbox_mode=self._sandbox_mode)
         await worker.start()
         return worker
 

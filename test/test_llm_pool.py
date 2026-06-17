@@ -2,11 +2,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from kiro_claw.knowledge.llm_pool import AcpWorker, CCWorker, LLMPool, Worker, _get_provider_type
+from kiro_claw.knowledge.llm_pool import (
+    AcpWorker,
+    CCWorker,
+    LLMPool,
+    Worker,
+    _get_provider_type,
+    _get_sandbox_mode,
+    _read_config,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures — mock workers that don't spawn real processes
@@ -310,6 +319,150 @@ class TestProviderDetection:
 
 
 # ---------------------------------------------------------------------------
+# Tests: sandbox mode (knowledge workers honour agent.sandbox; default auto)
+# ---------------------------------------------------------------------------
+
+
+class TestSandboxMode:
+    """Knowledge workers run under the same OS-level sandbox as chat, honouring
+    ``agent.sandbox`` (default ``"auto"``). The earlier hardcoded ``"off"``
+    bypassed least-privilege; these lock in the restored behaviour."""
+
+    def test_default_is_auto(self, tmp_path):
+        with patch("kiro_claw.knowledge.llm_pool.Path.home", return_value=tmp_path):
+            assert _get_sandbox_mode() == "auto"
+
+    def test_reads_sandbox_from_config(self, tmp_path):
+        config = tmp_path / ".kiroclaw" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text('{"agent": {"sandbox": "off"}}')
+        with patch("kiro_claw.knowledge.llm_pool.Path.home", return_value=tmp_path):
+            assert _get_sandbox_mode() == "off"
+
+    def test_malformed_config_defaults_auto(self, tmp_path):
+        config = tmp_path / ".kiroclaw" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("not json")
+        with patch("kiro_claw.knowledge.llm_pool.Path.home", return_value=tmp_path):
+            assert _get_sandbox_mode() == "auto"
+
+    def test_unknown_mode_falls_back_to_auto(self, tmp_path):
+        """A value outside wrap_argv's accepted set must not reach the wrapper."""
+        config = tmp_path / ".kiroclaw" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text('{"agent": {"sandbox": "bogus"}}')
+        with patch("kiro_claw.knowledge.llm_pool.Path.home", return_value=tmp_path):
+            assert _get_sandbox_mode() == "auto"
+
+    @pytest.mark.parametrize("mode", ["auto", "standard", "strict", "cc", "off"])
+    def test_all_valid_modes_pass_through(self, mode, tmp_path):
+        config = tmp_path / ".kiroclaw" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps({"agent": {"sandbox": mode}}))
+        with patch("kiro_claw.knowledge.llm_pool.Path.home", return_value=tmp_path):
+            assert _get_sandbox_mode() == mode
+
+    def test_accepts_prereadm_config_dict(self):
+        """Pure-parser path: a passed dict is used without touching disk."""
+        assert _get_sandbox_mode({"agent": {"sandbox": "strict"}}) == "strict"
+        assert _get_sandbox_mode({"agent": {"sandbox": "nope"}}) == "auto"
+        assert _get_sandbox_mode({}) == "auto"
+
+
+# ---------------------------------------------------------------------------
+# Tests: shared config read (single disk read threaded into pure parsers)
+# ---------------------------------------------------------------------------
+
+
+class TestReadConfig:
+    def test_missing_file_returns_empty(self, tmp_path):
+        with patch("kiro_claw.knowledge.llm_pool.Path.home", return_value=tmp_path):
+            assert _read_config() == {}
+
+    def test_reads_dict(self, tmp_path):
+        config = tmp_path / ".kiroclaw" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text('{"agent": {"provider": "claude_code"}}')
+        with patch("kiro_claw.knowledge.llm_pool.Path.home", return_value=tmp_path):
+            assert _read_config() == {"agent": {"provider": "claude_code"}}
+
+    def test_malformed_returns_empty(self, tmp_path):
+        config = tmp_path / ".kiroclaw" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("not json")
+        with patch("kiro_claw.knowledge.llm_pool.Path.home", return_value=tmp_path):
+            assert _read_config() == {}
+
+    def test_non_dict_json_returns_empty(self, tmp_path):
+        config = tmp_path / ".kiroclaw" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("[1, 2, 3]")
+        with patch("kiro_claw.knowledge.llm_pool.Path.home", return_value=tmp_path):
+            assert _read_config() == {}
+
+    def test_parsers_accept_config_dict(self):
+        """provider parser reads the passed dict, no disk access."""
+        data = {
+            "agent": {"provider": "claude_code"},
+            "knowledge": {},
+        }
+        assert _get_provider_type(data) == "claude_code"
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {"agent": "acp"},
+            {"agent": None},
+            {"agent": 42},
+            {"knowledge": "claude_code"},
+            {"knowledge": None},
+            {"agent": ["acp"]},
+        ],
+    )
+    def test_parsers_survive_non_dict_sections(self, bad):
+        """A hand-edited config with a non-dict ``agent``/``knowledge`` section
+        must not crash the pure parsers — they fall back to defaults, matching
+        the no-op-on-malformed-config contract of ``_read_config``."""
+        assert _get_provider_type(bad) == "acp"
+        assert _get_sandbox_mode(bad) == "auto"
+
+    def test_read_config_coerces_non_dict_sections(self, tmp_path):
+        """``_read_config`` normalises non-dict ``agent``/``knowledge`` to ``{}``
+        so downstream ``.get(...).get(...)`` chains are always dict-safe."""
+        config = tmp_path / ".kiroclaw" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text('{"agent": "acp", "knowledge": 7}')
+        with patch("kiro_claw.knowledge.llm_pool.Path.home", return_value=tmp_path):
+            data = _read_config()
+        assert data["agent"] == {}
+        assert data["knowledge"] == {}
+
+    @pytest.mark.asyncio
+    async def test_start_passes_configured_sandbox_to_client(self, tmp_path):
+        """AcpWorker.start wires the configured sandbox mode into AcpClient."""
+        config = tmp_path / ".kiroclaw" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text('{"agent": {"sandbox": "off"}}')
+        mock_client = AsyncMock()
+        mock_client.is_ready = True
+        with patch("kiro_claw.knowledge.llm_pool.Path.home", return_value=tmp_path), \
+             patch("kiro_claw.knowledge.llm_pool.AcpClient", return_value=mock_client) as mk:
+            worker = AcpWorker()
+            await worker.start()
+        assert mk.call_args.kwargs["sandbox_mode"] == "off"
+
+    @pytest.mark.asyncio
+    async def test_start_defaults_sandbox_to_auto(self, tmp_path):
+        mock_client = AsyncMock()
+        mock_client.is_ready = True
+        with patch("kiro_claw.knowledge.llm_pool.Path.home", return_value=tmp_path), \
+             patch("kiro_claw.knowledge.llm_pool.AcpClient", return_value=mock_client) as mk:
+            worker = AcpWorker()
+            await worker.start()
+        assert mk.call_args.kwargs["sandbox_mode"] == "auto"
+
+
+# ---------------------------------------------------------------------------
 # Tests: Pool start (mocked workers)
 # ---------------------------------------------------------------------------
 
@@ -437,6 +590,36 @@ class TestAcpWorker:
         await worker.shutdown()
         mock_client.shutdown.assert_called_once()
         assert worker._client is None
+
+    @pytest.mark.asyncio
+    async def test_start_shuts_down_stale_client_before_respawn(self, tmp_path):
+        """A re-``start`` (e.g. ``send_message`` after a stalled handshake) must
+        shut the previous client down before creating a new one, so the prior
+        subprocess is not orphaned."""
+        stale = AsyncMock()
+        fresh = AsyncMock()
+        fresh.is_ready = True
+        with patch("kiro_claw.knowledge.llm_pool.Path.home", return_value=tmp_path), \
+             patch("kiro_claw.knowledge.llm_pool.AcpClient", return_value=fresh):
+            worker = AcpWorker()
+            worker._client = stale
+            await worker.start()
+        stale.shutdown.assert_called_once()
+        assert worker._client is fresh
+
+    @pytest.mark.asyncio
+    async def test_start_swallows_stale_shutdown_error(self, tmp_path):
+        """A failure shutting the stale client down must not abort the respawn."""
+        stale = AsyncMock()
+        stale.shutdown.side_effect = RuntimeError("boom")
+        fresh = AsyncMock()
+        fresh.is_ready = True
+        with patch("kiro_claw.knowledge.llm_pool.Path.home", return_value=tmp_path), \
+             patch("kiro_claw.knowledge.llm_pool.AcpClient", return_value=fresh):
+            worker = AcpWorker()
+            worker._client = stale
+            await worker.start()
+        assert worker._client is fresh
 
 
 # ---------------------------------------------------------------------------
