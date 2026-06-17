@@ -369,6 +369,65 @@ describe('WidgetFrame interactive event bridge', () => {
     expect(events).toHaveLength(1)
     expect(events[0].detail.text).toBe('[UI] cancel')
   })
+
+  // P454989291: shape validation / allowlist hardening of widget actions.
+  it('ignores a widget action with a non-string action (no event dispatched)', async () => {
+    const { container } = wrap(<WidgetFrame html="<p>test</p>" title="T" />)
+    const iframe = container.querySelector('iframe')!
+
+    const events: CustomEvent[] = []
+    const listener = (e: Event) => events.push(e as CustomEvent)
+    window.addEventListener('mc-widget-send', listener)
+
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { type: 'mc-widget-action', action: { evil: true }, payload: { id: '1' } },
+      source: iframe.contentWindow,
+    }))
+
+    await new Promise(r => setTimeout(r, 50))
+    window.removeEventListener('mc-widget-send', listener)
+    expect(events).toHaveLength(0)
+  })
+
+  it('ignores a non-object/array payload and emits the action only', async () => {
+    const { container } = wrap(<WidgetFrame html="<p>test</p>" title="T" />)
+    const iframe = container.querySelector('iframe')!
+
+    const events: CustomEvent[] = []
+    const listener = (e: Event) => events.push(e as CustomEvent)
+    window.addEventListener('mc-widget-send', listener)
+
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { type: 'mc-widget-action', action: 'go', payload: ['a', 'b'] },
+      source: iframe.contentWindow,
+    }))
+
+    await new Promise(r => setTimeout(r, 50))
+    window.removeEventListener('mc-widget-send', listener)
+    expect(events).toHaveLength(1)
+    expect(events[0].detail.text).toBe('[UI] go')
+    expect(events[0].detail.action).toBe('go')
+  })
+
+  it('caps an oversized widget action payload', async () => {
+    const { container } = wrap(<WidgetFrame html="<p>test</p>" title="T" />)
+    const iframe = container.querySelector('iframe')!
+
+    const events: CustomEvent[] = []
+    const listener = (e: Event) => events.push(e as CustomEvent)
+    window.addEventListener('mc-widget-send', listener)
+
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { type: 'mc-widget-action', action: 'flood', payload: { big: 'x'.repeat(20000) } },
+      source: iframe.contentWindow,
+    }))
+
+    await new Promise(r => setTimeout(r, 50))
+    window.removeEventListener('mc-widget-send', listener)
+    expect(events).toHaveLength(1)
+    expect(events[0].detail.text.length).toBeLessThanOrEqual(4001)
+    expect(events[0].detail.text.endsWith('…')).toBe(true)
+  })
 })
 
 // Regression test: when the widget unmounts mid-flight (user navigates away

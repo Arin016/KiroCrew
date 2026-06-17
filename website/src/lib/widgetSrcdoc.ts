@@ -139,6 +139,12 @@ const HEIGHT_REPORTER_BODY = `(function(){
   window.addEventListener('load', function(){ setTimeout(schedule, 100); });
   schedule();
   document.addEventListener('click', function(e){
+    // NOTE (P454989291): this isTrusted check runs INSIDE the sandboxed iframe
+    // and is NOT the security trust boundary. LLM-emitted <script> in this same
+    // document can call parent.postMessage({type:'mc-widget-action',...})
+    // directly and skip this handler entirely. The real protection is on the
+    // parent side: a widget action only PRE-FILLS the composer (it never
+    // auto-submits a user-role turn). Do not treat this guard as authoritative.
     if (!e.isTrusted) return;
     var el = e.target.closest('[data-action]');
     if (!el) return;

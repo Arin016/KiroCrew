@@ -722,6 +722,11 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   inputRef.current = input
   const browseModeRef = useRef(browseMode)
   browseModeRef.current = browseMode
+  // Holds the exact text a widget action pre-filled into the composer, so the
+  // eventual user-initiated send can be tagged meta.origin='widget' for
+  // forensic attribution (P454989291 item 4). Set on widget pre-fill, consumed
+  // and cleared in send(). A genuine from-scratch turn never sets this.
+  const widgetPrefillRef = useRef<string | null>(null)
 
   // Auto-dismiss prefill hint after 10 seconds
   useEffect(() => {
@@ -1613,6 +1618,11 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
 
   const send = useCallback(async (optionText?: string, targetSlot?: string) => {
     const raw = (optionText || inputRef.current).trim()
+    // Capture + clear the widget-origin tag (P454989291 item 4): attribute this
+    // turn to a widget only if the composer still carries the exact text a
+    // widget action pre-filled. Cleared on every send so it can't go stale.
+    const widgetOrigin = !!widgetPrefillRef.current && raw.includes(widgetPrefillRef.current)
+    widgetPrefillRef.current = null
     if (!raw && !pendingFilesRef.current.length) return
 
     // Slash command interception (e.g. /side): runs before knowledge so a
@@ -1670,6 +1680,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     if (filePaths.length) meta.files = filePaths
     if (bubblePastes.length) meta.pastes = bubblePastes
     if (knowledgeBlock) meta.knowledge = { items: knowledgeBlock.items.length, tokens: knowledgeBlock.totalTokens, titles: knowledgeBlock.items.map(i => i.title), content: knowledgeBlock.items.map(i => ({ title: i.title, text: i.content.slice(0, 2000) })) }
+    if (widgetOrigin) meta.origin = 'widget'
     const metaPayload = Object.keys(meta).length ? meta : undefined
     // Skip optimistic user bubble when the slot is already running — the
     // backend will send a "queued" role message instead, avoiding a duplicate.
@@ -1735,15 +1746,27 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   // Auto-send when navigated with ?autoSend=1 or ?token= with prompt
   useEffect(() => { if (connected && autoSendRef.current) { const txt = autoSendRef.current; autoSendRef.current = null; send(txt) } }, [send, connected, autoSendTick]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Widget interactivity: when a mcwidget iframe fires an action, auto-submit as user message
+  // Widget interactivity: when a mcwidget iframe fires an action, PRE-FILL the
+  // composer instead of auto-submitting (P454989291). Auto-send was a
+  // trust-boundary bypass: LLM-emitted <script> inside the sandboxed widget
+  // iframe can call parent.postMessage directly, bypassing the in-iframe
+  // isTrusted click guard, and the parent cannot distinguish that from a
+  // genuine click. So a widget action must never become a user-role turn
+  // without an explicit human gesture — the user reviews the pre-filled text
+  // and presses Enter. We also record the pre-filled text so the resulting
+  // send is tagged meta.origin='widget' for forensics (item 4).
   useEffect(() => {
     const handler = (e: Event) => {
       const text = (e as CustomEvent).detail?.text
-      if (text && !sendingRef.current) send(text)
+      if (typeof text !== 'string' || !text) return
+      widgetPrefillRef.current = text
+      setInput(prev => (prev.trim() ? `${prev.trimEnd()}\n${text}` : text))
+      setPrefillHint(true)
+      requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus())
     }
     window.addEventListener('mc-widget-send', handler)
     return () => window.removeEventListener('mc-widget-send', handler)
-  }, [send])
+  }, [])
 
   const approve = useCallback(async (action: string) => { if (activeSlot) await api.approveChatSlot(activeSlot, action) }, [activeSlot])
   const toApiDecision = (action: string): 'approve' | 'reject' =>

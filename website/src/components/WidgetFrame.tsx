@@ -8,6 +8,12 @@ import { effectiveWidgetSlug } from '../lib/widgetSlug'
 import { api, ApiError } from '../api/client'
 
 const MIN_HEIGHT = 80
+
+// Upper bound on the text a single widget action may pre-fill into the
+// composer (P454989291). A malicious LLM-emitted <script> can postMessage
+// directly, so cap the dispatched text to keep it reviewable and prevent a
+// widget from stuffing the composer with an oversized payload.
+const MAX_WIDGET_ACTION_TEXT = 4000
 // Height shrinks are deferred this long. A reload / Tailwind JIT reflow briefly
 // reports a smaller height before the content settles; applying it immediately
 // collapses-then-regrows the row, which accumulates into a growing gap at the
@@ -255,11 +261,22 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
         }
       }
       if (e.data?.type === 'mc-widget-action') {
-        const { action, payload } = e.data
-        const text = payload && Object.keys(payload).length > 0
+        // SECURITY (P454989291): a widget action can ONLY pre-fill the composer
+        // (see the mc-widget-send handler in ChatPage) — it can never submit a
+        // user-role turn on its own. We still validate/sanitize the shape here
+        // because LLM-emitted <script> can postMessage directly (bypassing the
+        // in-iframe isTrusted click guard), so an action must not be able to
+        // inject a malformed or oversized payload into the composer.
+        const action = typeof e.data.action === 'string' ? e.data.action.slice(0, 64) : ''
+        if (!action) return
+        const payload = e.data.payload && typeof e.data.payload === 'object' && !Array.isArray(e.data.payload)
+          ? (e.data.payload as Record<string, unknown>)
+          : {}
+        let text = Object.keys(payload).length > 0
           ? `[UI] ${action}: ${JSON.stringify(payload)}`
           : `[UI] ${action}`
-        window.dispatchEvent(new CustomEvent('mc-widget-send', { detail: { text } }))
+        if (text.length > MAX_WIDGET_ACTION_TEXT) text = text.slice(0, MAX_WIDGET_ACTION_TEXT) + '…'
+        window.dispatchEvent(new CustomEvent('mc-widget-send', { detail: { text, action } }))
       }
     }
     window.addEventListener('message', handler)
