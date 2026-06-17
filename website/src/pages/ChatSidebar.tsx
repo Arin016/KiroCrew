@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, memo, useMemo, useCallback, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import { LayoutGroup, AnimatePresence, motion } from 'framer-motion'
-import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, Folder, ChevronRight, ChevronDown, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns3, GripVertical, Zap, Check, Link2, Copy, ListFilter } from 'lucide-react'
+import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, MessageSquarePlus, Folder, ChevronRight, ChevronDown, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns3, GripVertical, Zap, Check, Link2, Copy, ListFilter } from 'lucide-react'
 import { DndContext, closestCenter, pointerWithin, KeyboardSensor, PointerSensor, useSensor, useSensors, useDraggable, useDroppable, DragOverlay, type DragEndEvent, type DragStartEvent, type CollisionDetection } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy, useSortable, sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -219,7 +219,7 @@ function FolderBody({ open, children }: { open: boolean; children: React.ReactNo
         transition: 'grid-template-rows 0.15s ease-out',
       }}
     >
-      <div style={{ overflow: 'hidden', visibility: open ? 'visible' : 'hidden', padding: '2px' }}>{children}</div>
+      <div style={{ overflow: 'hidden', visibility: open ? 'visible' : 'hidden', padding: open ? '2px' : 0 }}>{children}</div>
     </div>
   )
 }
@@ -935,7 +935,7 @@ function ChatSidebar({
               {installedAgents.map(a => <option key={a.name} value={a.name}>{a.name}</option>)}
             </select>
             <button type="button" data-testid={`col-${columnId}-folder-${folder.id}-new-chat`} className="text-muted hover:text-accent bg-transparent border-none cursor-pointer p-[2px]" title="New chat in folder" aria-label={`New chat in folder ${folder.name}`} onClick={e => { e.stopPropagation(); createChatInFolder(folder.id, columnId) }} onMouseDown={e => { e.stopPropagation() }}>
-              <Plus size={11} />
+              <MessageSquarePlus size={11} />
             </button>
             <button type="button" data-testid={`col-${columnId}-folder-${folder.id}-new-sub`} className="text-muted hover:text-accent bg-transparent border-none cursor-pointer p-[2px]" title="New subfolder" aria-label="New subfolder" onClick={e => { e.stopPropagation(); setCreatingIn(folder.id); setNewName('') }}>
               <FolderPlus size={10} />
@@ -947,6 +947,17 @@ function ChatSidebar({
         </div>
         <FolderBody open={!folder.collapsed}>
           <div className="border-l border-border ml-2 pl-1">
+            {/* Inline "New chat" affordance at the top of the column folder's
+             *  body, mirroring the list-view folder body. */}
+            <button key={`col-${columnId}-newchat-${folder.id}`} type="button"
+              onClick={() => createChatInFolder(folder.id, columnId)}
+              title="New chat in folder" aria-label={`New chat in ${folder.name}`}
+              className="w-full flex items-center gap-2.5 px-4 py-2 rounded-md text-[11px] text-muted hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none cursor-pointer text-left">
+              <MessageSquarePlus size={11} className="shrink-0" /><span>New chat in folder</span>
+            </button>
+            {(deepChildren.length > 0 || childSlots.length > 0) && (
+              <div className="mx-3 border-b border-border" />
+            )}
             {deepChildren.map(cf => renderColumnFolder(cf, columnId, colSlotKeys))}
             {creatingIn === folder.id && (
               <div className="px-2 py-1">
@@ -1076,7 +1087,7 @@ function ChatSidebar({
     return (
       <div key={`folder-header-${folder.id}`}
         {...(draggable ? dragHandleProps : {})}
-        className={`group relative flex items-center gap-2 pr-2 py-2 rounded-md cursor-pointer text-sm text-muted hover:text-text hover:bg-bg-hover transition-all ${draggable ? 'cursor-grab active:cursor-grabbing' : ''}`}
+        className={`group relative flex items-center gap-2 pr-2 py-1.5 rounded-md cursor-pointer text-sm text-muted hover:text-text hover:bg-bg-hover transition-all ${draggable ? 'cursor-grab active:cursor-grabbing' : ''}`}
         style={{ paddingLeft: '8px' }}
         onClick={() => toggleCollapse(folder.id)}>
         <span data-testid={`folder-collapse-${folder.id}`} className="shrink-0 text-muted transition-transform duration-150" style={{ transform: folder.collapsed ? 'rotate(0deg)' : 'rotate(90deg)' }}>
@@ -1099,7 +1110,7 @@ function ChatSidebar({
             {installedAgents.map(a => <option key={a.name} value={a.name}>{a.name}</option>)}
           </select>
           <span className="cursor-pointer p-[4px] rounded text-muted hover:text-text hover:bg-bg-hover transition-all" title="Rename folder" aria-label="Rename folder" data-testid={`folder-rename-${folder.id}`} onClick={e => { e.stopPropagation(); setEditingId(folder.id); setEditName(folder.name) }}><Pencil size={12} /></span>
-          <span className="cursor-pointer p-[4px] rounded text-muted hover:text-accent hover:bg-bg-hover transition-all" title="New chat in folder" aria-label="New chat in folder" onClick={e => { e.stopPropagation(); createChatInFolder(folder.id) }}><Plus size={12} /></span>
+          <span className="cursor-pointer p-[4px] rounded text-muted hover:text-accent hover:bg-bg-hover transition-all" title="New chat in folder" aria-label="New chat in folder" onClick={e => { e.stopPropagation(); createChatInFolder(folder.id) }}><MessageSquarePlus size={12} /></span>
           <span className="cursor-pointer p-[4px] rounded text-muted hover:text-accent hover:bg-bg-hover transition-all" title="New subfolder" aria-label="New subfolder" onClick={e => { e.stopPropagation(); setCreatingIn(folder.id); setNewName('') }}><FolderPlus size={12} /></span>
           <span className="cursor-pointer p-[4px] rounded text-muted hover:text-danger hover:bg-danger-subtle transition-all" data-testid={`folder-delete-${folder.id}`} title="Delete folder" aria-label="Delete folder" onClick={e => { e.stopPropagation(); if (confirm(`Delete "${folder.name}"?`)) deleteFolderMutation.mutate(folder.id) }}><X size={12} /></span>
         </div>
@@ -1133,9 +1144,30 @@ function ChatSidebar({
     // Wrap children in a bordered container so the folder's extent is visually
     // clear when multiple folders are open. Only wrap when there's content,
     // otherwise the FolderBody would render an empty 1px-tall strip with a line.
-    const wrapped = childNodes.length > 0 ? (
+    // Inline "New chat" affordance at the end of the slot list when the folder
+    // is expanded — a discoverable, always-visible way to start a session in
+    // this folder (complements the hover ⊕ on the header, which also works when
+    // the folder is collapsed). Hidden while searching/filtering to keep results
+    // clean; always present otherwise, so an empty folder is no longer a dead-end.
+    const showInlineNewChat = !(slotFilter || activeFilters.size > 0)
+    const inlineNewChatBtn = (
+      <button key={`folder-newchat-${folder.id}`} type="button"
+        onClick={() => createChatInFolder(folder.id)}
+        title="New chat in folder" aria-label={`New chat in ${folder.name}`}
+        className="w-full flex items-center gap-2.5 px-4 py-2 rounded-md text-[12px] text-muted hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none cursor-pointer text-left">
+        <MessageSquarePlus size={13} className="shrink-0" /><span>New chat in folder</span>
+      </button>
+    )
+    const bodyNodes: React.ReactNode[] = showInlineNewChat
+      ? (childNodes.length > 0
+          ? [inlineNewChatBtn,
+             <div key={`folder-newchat-sep-${folder.id}`} className="mx-3 border-b border-border" />,
+             ...childNodes]
+          : [inlineNewChatBtn])
+      : childNodes
+    const wrapped = bodyNodes.length > 0 ? (
       <div key={`folder-children-${folder.id}`} className="border-l border-border mb-1 ml-3 pl-1 rounded-bl-md">
-        {childNodes}
+        {bodyNodes}
       </div>
     ) : null
     // Outer container wraps header + body so the entire folder block is a
