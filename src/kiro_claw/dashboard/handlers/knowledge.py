@@ -494,29 +494,36 @@ async def add_source(request: web.Request) -> web.Response:
             store.db.execute("UPDATE sources SET sync_status = 'syncing' WHERE id = ?", (sid,))
             store.db.commit()
 
-            async def _bg_ingest(path: str, src_id: str) -> None:
-                try:
-                    # Re-validate at read time (defense-in-depth against TOCTOU)
-                    if is_sensitive_path(str(Path(path).resolve())):
-                        _sel_log("source.sensitive_path_blocked", path=path, source_id=src_id)
-                        logger.warning("Sensitive path detected at ingest time: %s", path)
-                        store.db.execute("UPDATE sources SET sync_status = 'error' WHERE id = ?", (src_id,))
-                        store.db.commit()
-                        return
-                    await pipeline.ingest_file(path, source_id=src_id)
-                    store.db.execute("UPDATE sources SET sync_status = 'synced' WHERE id = ?", (src_id,))
-                    store.db.commit()
-                except Exception:
-                    logger.exception("Background ingestion failed for %s", path)
-                    store.db.execute("UPDATE sources SET sync_status = 'error' WHERE id = ?", (src_id,))
-                    store.db.commit()
-
-            task = asyncio.create_task(_bg_ingest(uri, sid))
+            task = asyncio.create_task(_ingest_local_file_task(pipeline, store, uri, sid))
             app_tasks = request.app.setdefault("_bg_tasks", set())
             app_tasks.add(task)
             task.add_done_callback(app_tasks.discard)
 
     return web.json_response({"id": sid, "status": "created"}, status=201)
+
+
+async def _ingest_local_file_task(pipeline, store, path: str, source_id: str) -> None:  # type: ignore[no-untyped-def]
+    """Re-ingest a local_file source via the FileReader pipeline.
+
+    Shared by add_source (initial ingest) and sync_source (manual re-sync) so both
+    entry points route local files through the same FileReader path and apply the
+    same read-time sensitive-path re-validation (defense-in-depth against TOCTOU).
+    Updates sync_status to 'synced' on success or 'error' on failure.
+    """
+    try:
+        if is_sensitive_path(str(Path(path).resolve())):
+            _sel_log("source.sensitive_path_blocked", path=path, source_id=source_id)
+            logger.warning("Sensitive path detected at ingest time: %s", path)
+            store.db.execute("UPDATE sources SET sync_status = 'error' WHERE id = ?", (source_id,))
+            store.db.commit()
+            return
+        await pipeline.ingest_file(path, source_id=source_id)
+        store.db.execute("UPDATE sources SET sync_status = 'synced' WHERE id = ?", (source_id,))
+        store.db.commit()
+    except Exception:
+        logger.exception("Background ingestion failed for %s", path)
+        store.db.execute("UPDATE sources SET sync_status = 'error' WHERE id = ?", (source_id,))
+        store.db.commit()
 
 
 async def sync_source(request: web.Request) -> web.Response:
@@ -534,6 +541,28 @@ async def sync_source(request: web.Request) -> web.Response:
             result = await sync_scheduler.sync_source(source_id)
             _sel_log("source.sync", source_id=source_id)
             return web.json_response(result)
+
+    # local_file sources carry a filesystem path, not a URL -- re-ingest the file
+    # directly through the FileReader pipeline (same path as add_source), never the
+    # agent URL-fetch fallback below (which would hand the path to ReadInternalWebsites
+    # and fail with "Invalid URL format").
+    if source["source_type"] == "local_file":
+        file_uri = source["uri"] or ""
+        if not file_uri:
+            return web.json_response({"error": "no file path to sync"}, status=400)
+        if source["sync_status"] == "syncing":
+            return web.json_response({"error": "sync already in progress", "source_id": source_id}, status=409)
+        pipeline = _pipeline(request)
+        if not pipeline:
+            return web.json_response({"error": "pipeline not configured"}, status=503)
+        store.db.execute("UPDATE sources SET sync_status = 'syncing' WHERE id = ?", (source_id,))
+        store.db.commit()
+        task = asyncio.create_task(_ingest_local_file_task(pipeline, store, file_uri, source_id))
+        app_tasks = request.app.setdefault("_bg_tasks", set())
+        app_tasks.add(task)
+        task.add_done_callback(app_tasks.discard)
+        _sel_log("source.sync.local_file", source_id=source_id)
+        return web.json_response({"synced": False, "status": "syncing", "source_id": source_id})
 
     # Agent-assisted sync: fetch in background, no chat session needed
     uri = source["uri"] or ""
