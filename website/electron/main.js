@@ -1,4 +1,4 @@
-const { app, BaseWindow, BrowserWindow, WebContentsView, shell, dialog, Tray, Menu, nativeImage, nativeTheme } = require("electron");
+const { app, BaseWindow, BrowserWindow, WebContentsView, shell, dialog, Tray, Menu, nativeImage, nativeTheme, session, desktopCapturer, systemPreferences } = require("electron");
 const Store = require("electron-store");
 const fs = require("fs");
 const os = require("os");
@@ -7,6 +7,7 @@ const path = require("path");
 const http = require("http");
 const { findKiroclawBin } = require("./find-bin");
 const { createTokenRetryHandler } = require("./token-retry");
+const { createDisplayMediaHandler } = require("./display-media");
 
 // ── Persistent settings for remote tunnel mode ──
 
@@ -726,6 +727,29 @@ function mergeAllWindows() {
 
 // ── App lifecycle ──
 
+// Guide the user to grant macOS Screen Recording permission when it has been
+// explicitly denied — the snip tool cannot capture any frame without it. Opens
+// the exact Privacy pane. Note: the granted entity must be the packaged
+// KiroClaw.app, not the terminal that launched a dev build.
+function showScreenPermissionDialog() {
+  const pane = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+  dialog
+    .showMessageBox({
+      type: "info",
+      title: "Screen Recording permission needed",
+      message: "Allow KiroClaw to capture the screen",
+      detail:
+        "The screen-snip tool needs macOS Screen Recording permission. Open System Settings › Privacy & Security › Screen Recording, enable KiroClaw, then try the snip again.",
+      buttons: ["Open System Settings", "Cancel"],
+      defaultId: 0,
+      cancelId: 1,
+    })
+    .then(({ response }) => {
+      if (response === 0) shell.openExternal(pane);
+    })
+    .catch(() => {});
+}
+
 app.whenReady().then(async () => {
   // App menu with Rename Tab shortcut
   const appMenu = Menu.buildFromTemplate([
@@ -743,6 +767,27 @@ app.whenReady().then(async () => {
     { role: "windowMenu" },
   ]);
   Menu.setApplicationMenu(appMenu);
+
+  // Enable the chat input's screen-snip tool inside the Electron shell.
+  // Without a display-media request handler, Electron (>= 20) rejects the
+  // renderer's navigator.mediaDevices.getDisplayMedia(), so the snip button
+  // silently no-ops in the packaged app (it works in a plain browser because
+  // Chromium shows the OS picker natively). useSystemPicker uses macOS's native
+  // screen picker when available; the desktopCapturer-backed handler is the
+  // fallback for older macOS / other platforms.
+  session.defaultSession.setDisplayMediaRequestHandler(
+    createDisplayMediaHandler({
+      getSources: () => desktopCapturer.getSources({ types: ["screen", "window"] }),
+      getScreenAccessStatus: () =>
+        process.platform === "darwin"
+          ? systemPreferences.getMediaAccessStatus("screen")
+          : "granted",
+      onPermissionNeeded: (reason) => {
+        if (reason === "denied") showScreenPermissionDialog();
+      },
+    }),
+    { useSystemPicker: true },
+  );
 
   createTray();
   const win = createWindow();

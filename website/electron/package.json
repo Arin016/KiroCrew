@@ -50,6 +50,7 @@
       "find-bin.js",
       "remote-token.js",
       "token-retry.js",
+      "display-media.js",
       "validation.js",
       "context-menu.js",
       "preload.js",
