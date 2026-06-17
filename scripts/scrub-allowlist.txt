@@ -1,0 +1,51 @@
+# scrub-allowlist.txt — paths/patterns excluded from the scrub-lint scan.
+# Each line is a grep -v pattern. Lines starting with # are comments.
+# Add entries here for intentional stubs that reference internal names.
+
+# Auth stubs (OSS placeholders for Amazon-internal auth flows)
+src/kiro_claw/browser/auth.py
+src/kiro_claw/browser/setup.py
+src/kiro_claw/browser/screencast.py
+src/kiro_claw/dashboard/handlers/mwinit.py
+src/kiro_claw/dashboard/handlers/__init__.py
+src/kiro_claw/dashboard/handlers_system.py:.*midway
+src/kiro_claw/dashboard/handlers/messaging.py:.*Midway
+src/kiro_claw/dashboard/server.py:.*midway
+src/kiro_claw/dashboard/server.py:.*mwinit
+src/kiro_claw/midway.py
+
+# Brazil-aware runtime detection (checks if installed via brazil or pip)
+src/kiro_claw/slack/gateway.py:.*[Bb]razil
+src/kiro_claw/mcp_discovery.py:.*brazil
+src/kiro_claw/transcribe.py:.*brazil
+
+# Deny-pattern strings and security config (reference internal names as blocklist)
+src/kiro_claw/dashboard/state.py:.*brazil
+src/kiro_claw/config/defaults.json
+
+# Eval test scenarios (fictional stories using internal tool names as test data)
+src/kiro_claw/eval/scenarios/
+
+# Code comments referencing provenance CRs (historical context, not leaking anything)
+src/kiro_claw/agent.py:.*Amazon-specific Apollo/Brazil
+src/kiro_claw/apps/backend.py:.*Brazil
+src/kiro_claw/context.py:.*CR-
+src/kiro_claw/eval/runner.py:.*CR-
+src/kiro_claw/seed.py:.*CR-
+src/kiro_claw/slack/gateway.py:.*CR-
+
+# Frontend tests referencing brazil-build as test input
+website/src/test/RunInTerminalBtn.test.tsx
+website/src/test/sensitiveCommand.test.ts
+# Frontend source/test comments referencing CRs for provenance
+website/src/.*CR-
+
+# Documentation (contains internal references that will be scrubbed/removed before publish)
+docs/
+DEAMAZON_REPORT.md
+MIGRATION_PLAN.md
+CHANGELOG.md
+
+# This script and its allowlist
+scripts/scrub-lint.sh
+scripts/scrub-allowlist.txt
