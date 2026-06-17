@@ -156,24 +156,78 @@ export function StatCard({ label, value, accent, colorClass, delay, onClick, act
   )
 }
 
-export function Skeleton({ className = '' }: { className?: string }) {
-  return <div className={`skeleton ${className}`} />
+/** Shared loading-placeholder box. Mirrors shadcn's Skeleton: a pulsing rounded
+ *  box you size via `className`. (shadcn uses `bg-accent`; we map that neutral to
+ *  this app's `--bg-hover` token.) */
+export function Skeleton({ className, ...props }: React.ComponentProps<'div'>) {
+  return <div data-slot="skeleton" className={twMerge('bg-bg-hover animate-pulse rounded-md', className)} {...props} />
 }
 
 export function ContentSkeleton({ rows = 5 }: { rows?: number }) {
   return (
-    <div className="space-y-4 animate-pulse">
-      <div className="skeleton h-5 w-48 rounded" />
-      <div className="skeleton h-3 w-72 rounded" />
+    <div className="space-y-4">
+      <Skeleton className="h-5 w-48" />
+      <Skeleton className="h-3 w-72" />
       <div className="space-y-2 mt-4">
         {Array.from({ length: rows }).map((_, i) => (
           <div key={i} className="flex items-center gap-3">
-            <div className="skeleton h-4 w-4 rounded" />
-            <div className="skeleton h-4 rounded flex-1" style={{ maxWidth: `${60 + (i * 17) % 30}%` }} />
+            <Skeleton className="h-4 w-4" />
+            <Skeleton className="h-4 flex-1" style={{ maxWidth: `${60 + (i * 17) % 30}%` }} />
           </div>
         ))}
       </div>
     </div>
+  )
+}
+
+/* ── Form-shaped loading skeleton ──
+ * Composes the shared <Skeleton> box into form-row shapes (label box +
+ * full-width control box / toggle pill / info value). Reusable across any
+ * form-like view: compose the rows directly or pass a `rows` spec to FormSkeleton.
+ */
+
+/** Label block on the left, toggle pill on the right. */
+export function SkeletonToggleRow() {
+  return (
+    <div className="flex items-center justify-between py-1.5">
+      <Skeleton className="h-9 w-44 max-w-[55%]" />
+      <Skeleton className="h-5 w-9 rounded-full shrink-0" />
+    </div>
+  )
+}
+
+/** Small label box above a full-width control box (select / input). */
+export function SkeletonField() {
+  return (
+    <div className="flex flex-col gap-2 py-1.5">
+      <Skeleton className="h-4 w-28" />
+      <Skeleton className="h-9 w-full" />
+    </div>
+  )
+}
+
+/** Read-only info row: label box on the left, short value box on the right. */
+export function SkeletonInfoRow() {
+  return (
+    <div className="flex items-center justify-between py-1.5">
+      <Skeleton className="h-4 w-24" />
+      <Skeleton className="h-5 w-16" />
+    </div>
+  )
+}
+
+export type SkeletonRowKind = 'toggle' | 'field' | 'info'
+
+/** Compose a form skeleton from a row spec, e.g. ['toggle','field','field','info']. */
+export function FormSkeleton({ rows }: { rows: SkeletonRowKind[] }) {
+  return (
+    <>
+      {rows.map((kind, i) =>
+        kind === 'toggle' ? <SkeletonToggleRow key={i} />
+          : kind === 'info' ? <SkeletonInfoRow key={i} />
+            : <SkeletonField key={i} />,
+      )}
+    </>
   )
 }
 

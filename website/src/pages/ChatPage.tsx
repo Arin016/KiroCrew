@@ -62,6 +62,7 @@ import SearchHighlightContext, { MessageSearchScope } from '../hooks/SearchHighl
 import SearchBar from '../components/SearchBar'
 import QueueStack from '../components/QueueStack'
 import { useVoiceInput, voiceInputSupported } from '../hooks/useVoiceInput'
+import VoiceDisabledModal from '../components/VoiceDisabledModal'
 import { ChatFooter, AssistantMessage, UserMessage } from './chat'
 import MarkdownRenderer from '../components/MarkdownRenderer'
 import TypewriterText from '../components/TypewriterText'
@@ -956,10 +957,19 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const [uploadNotice, setUploadNotice] = useState('')
   const isMac = useAppSelector(s => s.dashboard.status?.platform) === 'darwin'
   const { data: sttCfg } = useQuery({
-    queryKey: ['stt-config'],
-    queryFn: () => api.sttConfig() as Promise<{ streaming?: boolean }>,
+    queryKey: ['sttConfig'],
+    queryFn: () => api.sttConfig() as Promise<{ streaming?: boolean; enabled?: boolean }>,
   })
   const sttStreaming = !!sttCfg?.streaming
+  const sttEnabled = !!sttCfg?.enabled
+  // Treat "config not loaded yet" as disabled so the guard never lets a
+  // recording start before STT is confirmed on. Stable boolean so toggleVoice's
+  // deps don't churn on every sttCfg object identity from a refetch.
+  const sttConfigLoaded = !!sttCfg
+  // Opened when the user clicks the mic while STT is disabled — points them at
+  // the setting that turns it on instead of starting a recording that would
+  // never be transcribed.
+  const [voiceSetupOpen, setVoiceSetupOpen] = useState(false)
   const frozenInputRef = useRef<string | null>(null)
   // Drops late-arriving partials/finals from a previous slot or stopped
   // session. `stop()` is async (up to 5s for backend close) — without
@@ -997,6 +1007,14 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   // render (hooks don't memoize their return by default), re-rendering all
   // child components that receive `toggleVoice` as a prop.
   const toggleVoice = useCallback(() => {
+    // Starting a recording while server-side STT is disabled would capture
+    // audio that never gets transcribed. Point the user at the enable setting
+    // instead. Guard on !recording so this only gates the *start* — stopping
+    // an in-progress recording is always allowed.
+    if (!voice.recording && (!sttConfigLoaded || !sttEnabled)) {
+      setVoiceSetupOpen(true)
+      return
+    }
     if (!voice.recording) {
       sttDisarmedRef.current = false
       // Reset stale snapshot from a prior session that ended without
@@ -1005,7 +1023,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       frozenInputRef.current = null
     }
     voice.toggle()
-  }, [voice.recording, voice.toggle])
+  }, [voice.recording, voice.toggle, sttEnabled, sttConfigLoaded])
   // Stop any in-flight recording and drop the frozen prefix when the user
   // switches slots so a late-arriving transcript can't leak into the wrong
   // session. Disarm first so any in-flight final from the previous slot is
@@ -2834,6 +2852,14 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
 
             />
             </div>
+            <VoiceDisabledModal
+              open={voiceSetupOpen}
+              onClose={() => setVoiceSetupOpen(false)}
+              onOpenSettings={() => {
+                setVoiceSetupOpen(false)
+                navigate(embedded ? '/embed/settings' : '/settings?tab=voice')
+              }}
+            />
             {/* Agent dropdown portal — triggered from input bar */}
             {agentDropdown && agentBtnRect && createPortal(
               <div ref={agentDropdownRef} className="fixed z-[9999] bg-bg-elevated border border-border rounded-xl shadow-xl min-w-[260px] max-w-[340px] flex flex-col p-1 gap-0.5 animate-slide-up" style={(() => { const left = Math.max(8, Math.min(agentBtnRect.left, window.innerWidth - 348)); return { bottom: window.innerHeight - agentBtnRect.top + 4, left } })()}>

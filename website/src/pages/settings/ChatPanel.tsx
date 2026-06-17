@@ -5,47 +5,6 @@ import { loadChatConfig, saveChatConfig, type ChatConfig, type ContentWidth, typ
 import { api } from '../../api/client'
 import { isMac } from '../../utils/platform'
 
-type VoiceConfig = {
-  enabled: boolean; voice: string; engine: string; rate: string
-  autoSpeak: boolean; aws_profile: string; region: string
-}
-
-type SttConfig = {
-  enabled: boolean
-  provider: string
-  model: string
-  available: boolean
-  streaming: boolean
-  transcribe_region: string
-  transcribe_profile: string
-  language_code: string
-  models: Record<string, string>
-  providers?: string[]
-  language_codes: string[]
-}
-
-const VOICE_OPTIONS_FALLBACK = [
-  { value: 'Ruth', label: 'Ruth (US F)' },
-  { value: 'Matthew', label: 'Matthew (US M)' },
-  { value: 'Joanna', label: 'Joanna (US F)' },
-  { value: 'Amy', label: 'Amy (UK F)' },
-]
-
-const ENGINE_OPTIONS = ['generative', 'neural', 'long-form', 'standard']
-const SPEED_OPTIONS = ['80%', '90%', '95%', '100%', '110%', '120%', '130%', '150%']
-// Human-readable provider names. The actual option list comes from the
-// backend's platform-aware `providers` field (mlx is only offered on Apple
-// Silicon). STT_PROVIDER_FALLBACK is used only until that response arrives —
-// it deliberately omits mlx since the client can't know the platform.
-const PROVIDER_LABELS: Record<string, string> = {
-  whisper: 'Whisper (local)',
-  mlx: 'Whisper MLX (local — Apple Silicon only)',
-  transcribe: 'Transcribe (AWS)',
-}
-const STT_PROVIDER_FALLBACK = ['whisper', 'transcribe']
-// Fallback when the server hasn't responded yet. The authoritative list comes
-// from the `/api/config/stt` GET response's `language_codes` field.
-const STT_LANGUAGE_FALLBACK = ['en-US']
 const NOTIF_OPTIONS = ['25', '50', '100', '200']
 const RESTORE_OPTIONS = ['15', '30', '60', '120', '360', '720', '1440', '0']
 const RESTORE_LABELS = ['15m', '30m', '1h', '2h', '6h', '12h', '24h', 'No limit']
@@ -71,10 +30,6 @@ const COMPLETION_KEEP_CHARS_DEFAULT = 3000
 export function ChatPanel() {
   const qc = useQueryClient()
   const [chatCfg, setChatCfg] = useState<ChatConfig>(loadChatConfig)
-  const [localProfile, setLocalProfile] = useState('')
-  const [localRegion, setLocalRegion] = useState('')
-  const [localSttProfile, setLocalSttProfile] = useState('')
-  const [localSttRegion, setLocalSttRegion] = useState('')
   const [saveError, setSaveError] = useState('')
 
   // ── Dashboard config (server-side) ──
@@ -160,97 +115,6 @@ export function ChatPanel() {
     onError: () => setSaveError('Failed to save completion-keep mode'),
   })
 
-  // ── Voice config (server-side) ──
-  const voiceQ = useQuery<VoiceConfig>({
-    queryKey: ['voiceConfig'],
-    queryFn: () => api.voiceConfig(),
-  })
-
-  type PollyVoice = { id: string; name: string; language: string; languageCode: string; gender: string; engines: string[] }
-  const voicesQ = useQuery<{ voices: PollyVoice[] }>({
-    queryKey: ['voiceVoices'],
-    queryFn: () => api.voiceVoices(),
-    staleTime: 3600_000,
-  })
-
-  const initializedRef = useRef(false)
-  useEffect(() => {
-    if (voiceQ.data && !initializedRef.current) {
-      initializedRef.current = true
-      setLocalProfile(voiceQ.data.aws_profile || '')
-      setLocalRegion(voiceQ.data.region || '')
-    }
-  }, [voiceQ.data])
-  const voiceCfg = voiceQ.data ?? { enabled: false, voice: 'Ruth', engine: 'generative', rate: '100%', autoSpeak: false, aws_profile: '', region: '' }
-  const voiceOptions = voicesQ.data?.voices
-    ? voicesQ.data.voices.map(v => ({ value: v.id, label: `${v.name} (${v.languageCode} ${v.gender[0]})`, engines: v.engines }))
-    : VOICE_OPTIONS_FALLBACK.map(v => ({ ...v, engines: ENGINE_OPTIONS }))
-  const selectedVoiceEngines = voiceOptions.find(v => v.value === voiceCfg.voice)?.engines ?? ENGINE_OPTIONS
-
-  const voiceMut = useMutation({
-    mutationFn: (patch: Partial<VoiceConfig>) => api.updateVoiceConfig(patch),
-    onMutate: async (patch) => {
-      await qc.cancelQueries({ queryKey: ['voiceConfig'] })
-      const prev = qc.getQueryData<VoiceConfig>(['voiceConfig'])
-      if (prev) {
-        const next = { ...prev, ...patch }
-        qc.setQueryData(['voiceConfig'], next)
-        window.dispatchEvent(new CustomEvent('voice-config-changed', { detail: next }))
-      }
-      return { prev }
-    },
-    onError: (_err, _vars, ctx) => {
-      if (ctx?.prev) {
-        qc.setQueryData(['voiceConfig'], ctx.prev)
-        setLocalProfile(ctx.prev.aws_profile || '')
-        setLocalRegion(ctx.prev.region || '')
-        window.dispatchEvent(new CustomEvent('voice-config-changed', { detail: ctx.prev }))
-      }
-      setSaveError('Failed to save voice config')
-    },
-    onSettled: () => qc.invalidateQueries({ queryKey: ['voiceConfig'] }),
-  })
-
-  // ── STT config (server-side) ──
-  const sttQ = useQuery<SttConfig>({
-    queryKey: ['sttConfig'],
-    queryFn: () => api.sttConfig(),
-  })
-
-  const sttInitializedRef = useRef(false)
-  useEffect(() => {
-    if (sttQ.data && !sttInitializedRef.current) {
-      sttInitializedRef.current = true
-      setLocalSttProfile(sttQ.data.transcribe_profile || '')
-      setLocalSttRegion(sttQ.data.transcribe_region || '')
-    }
-  }, [sttQ.data])
-
-  const sttCfg: SttConfig = sttQ.data ?? {
-    enabled: false, provider: 'whisper', model: 'turbo', available: false,
-    streaming: false, transcribe_region: '', transcribe_profile: '', language_code: 'en-US',
-    models: {}, language_codes: STT_LANGUAGE_FALLBACK,
-  }
-
-  const sttMut = useMutation({
-    mutationFn: (patch: Partial<SttConfig>) => api.saveSttConfig(patch),
-    onMutate: async (patch) => {
-      await qc.cancelQueries({ queryKey: ['sttConfig'] })
-      const prev = qc.getQueryData<SttConfig>(['sttConfig'])
-      if (prev) qc.setQueryData(['sttConfig'], { ...prev, ...patch })
-      return { prev }
-    },
-    onError: (_err, _vars, ctx) => {
-      if (ctx?.prev) {
-        qc.setQueryData(['sttConfig'], ctx.prev)
-        setLocalSttProfile(ctx.prev.transcribe_profile || '')
-        setLocalSttRegion(ctx.prev.transcribe_region || '')
-      }
-      setSaveError('Failed to save STT config')
-    },
-    onSettled: () => qc.invalidateQueries({ queryKey: ['sttConfig'] }),
-  })
-
   // ── Local chat config (localStorage) ──
   const setChat = useCallback(<K extends keyof ChatConfig>(k: K, v: ChatConfig[K]) => {
     setChatCfg(prev => {
@@ -264,29 +128,7 @@ export function ChatPanel() {
     dashMut.mutate({ ...dashCfg, ...patch })
   }
 
-  const setVoice = (patch: Partial<VoiceConfig>) => {
-    voiceMut.mutate(patch)
-  }
-
-  const setStt = (patch: Partial<SttConfig>) => {
-    sttMut.mutate(patch)
-  }
-
   const dashDisabled = !dashQ.isSuccess
-  const voiceDisabled = !voiceQ.isSuccess
-  const sttDisabled = !sttQ.isSuccess
-  const languageOptions = sttCfg.language_codes?.length ? sttCfg.language_codes : STT_LANGUAGE_FALLBACK
-  const isTranscribe = sttCfg.provider === 'transcribe'
-  const providerOptions = sttCfg.providers?.length ? sttCfg.providers : STT_PROVIDER_FALLBACK
-
-  // Switching to transcribe enables streaming by default (one-click off if not wanted).
-  const handleProviderChange = (v: string) => {
-    if (v === 'transcribe' && !sttCfg.streaming) {
-      setStt({ provider: v, streaming: true })
-    } else {
-      setStt({ provider: v })
-    }
-  }
 
   return (
     <>
@@ -429,34 +271,6 @@ export function ChatPanel() {
         </SettingsCard>
       </SettingsSection>
 
-      <SettingsSection title="Voice (TTS)">
-        <SettingsCard>
-          {voiceQ.isError && <div className="text-[13px] text-danger mb-2">Failed to load voice config. <button className="underline cursor-pointer bg-transparent border-none text-danger" onClick={() => voiceQ.refetch()}>Retry</button></div>}
-          <SettingsToggle label="Auto-speak Responses" description="Speak every assistant reply automatically" checked={voiceCfg.autoSpeak} onChange={v => setVoice({ autoSpeak: v, ...(v ? { enabled: true } : {}) })} disabled={voiceDisabled} />
-          <SettingsSelect label="Voice" description="AWS Polly voice for TTS" value={voiceCfg.voice} options={voiceOptions.map(o => o.value)} optionLabels={voiceOptions.map(o => o.label)} onChange={v => { const engines = voiceOptions.find(o => o.value === v)?.engines ?? ENGINE_OPTIONS; const patch: Partial<VoiceConfig> = { voice: v }; if (!engines.includes(voiceCfg.engine)) patch.engine = engines[0]; setVoice(patch) }} disabled={voiceDisabled} />
-          <SettingsSelect label="Engine" description="Polly engine type" value={voiceCfg.engine} options={selectedVoiceEngines} onChange={v => setVoice({ engine: v })} disabled={voiceDisabled} />
-          <SettingsSelect label="Speed" description="Speech rate" value={voiceCfg.rate} options={SPEED_OPTIONS} onChange={v => setVoice({ rate: v })} disabled={voiceDisabled} />
-          <SettingsInput label="AWS Profile" description="AWS credentials profile for Polly" value={localProfile} onChange={setLocalProfile} onBlur={() => setVoice({ aws_profile: localProfile.trim() })} placeholder="default" disabled={voiceDisabled} />
-          <SettingsInput label="AWS Region" description="AWS region for Polly API" value={localRegion} onChange={setLocalRegion} onBlur={() => setVoice({ region: localRegion.trim() })} placeholder="us-east-1" disabled={voiceDisabled} />
-        </SettingsCard>
-      </SettingsSection>
-
-      <SettingsSection title="Voice (STT)">
-        <SettingsCard>
-          {sttQ.isError && <div className="text-[13px] text-danger mb-2">Failed to load STT config. <button className="underline cursor-pointer bg-transparent border-none text-danger" onClick={() => sttQ.refetch()}>Retry</button></div>}
-          <SettingsToggle label="Enabled" description="Transcribe voice memos into the input box when you click the mic" checked={sttCfg.enabled} onChange={v => setStt({ enabled: v })} disabled={sttDisabled} />
-          <SettingsSelect label="Provider" description="Whisper runs locally; Transcribe calls AWS" value={sttCfg.provider} options={providerOptions} optionLabels={providerOptions.map(p => PROVIDER_LABELS[p] || p)} onChange={handleProviderChange} disabled={sttDisabled} />
-          <SettingsToggle label="Streaming" description="Stream live partial transcripts into the input box as you speak (Transcribe only)" checked={sttCfg.streaming} onChange={v => setStt({ streaming: v })} disabled={sttDisabled || !isTranscribe} />
-          <SettingsSelect label="Language" description="BCP-47 language code for speech recognition" value={sttCfg.language_code} options={languageOptions} onChange={v => setStt({ language_code: v })} disabled={sttDisabled} />
-          {isTranscribe && (
-            <>
-              <SettingsInput label="AWS Profile" description="AWS credentials profile for Transcribe (blank = default chain)" value={localSttProfile} onChange={setLocalSttProfile} onBlur={() => setStt({ transcribe_profile: localSttProfile.trim() })} placeholder="default" disabled={sttDisabled} />
-              <SettingsInput label="AWS Region" description="AWS region for Transcribe" value={localSttRegion} onChange={setLocalSttRegion} onBlur={() => setStt({ transcribe_region: localSttRegion.trim() })} placeholder="us-east-1" disabled={sttDisabled} />
-            </>
-          )}
-          <div className="text-muted text-[12px] mt-1">Whisper install and model selection live under Overview → Slack.</div>
-        </SettingsCard>
-      </SettingsSection>
     </>
   )
 }
