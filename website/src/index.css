@@ -900,6 +900,110 @@
   color-scheme:light;
 }
 
+/* ── AMOLED Midnight — pure-black dark + a true light variant ── */
+[data-theme="amoled-midnight-dark"]{
+  --bg:#000000;--bg-accent:#09090b;--bg-elevated:#121214;--bg-hover:#1a1a1d;
+  --card:#070708;--card-fg:#f4f4f5;--card-hl:rgba(255,255,255,.03);
+  --panel:#000000;--panel-strong:#09090b;
+  --chrome:rgba(0,0,0,.9);
+  --text:#d4d4d8;--text-strong:#ffffff;--muted:#6b6b72;--muted-fg:#fff;--muted-strong:#a1a1aa;
+  --border:#1a1a1d;--border-strong:#27272a;--border-hover:#3f3f46;
+  --accent:#7c73e6;--accent-fg:#fff;--accent-hover:#948df0;--accent-subtle:rgba(124,115,230,.12);
+  --accent-glow:rgba(124,115,230,.25);--ring:#5e54d9;
+  --ok:#10b981;--ok-fg:#000;--ok-subtle:rgba(16,185,129,.1);
+  --warn:#f59e0b;--warn-fg:#000;--warn-subtle:rgba(245,158,11,.1);
+  --danger:#ef4444;--danger-fg:#fff;--danger-subtle:rgba(239,68,68,.1);
+  --info:#6366f1;--info-fg:#fff;
+  --aim:#a855f7;--aim-fg:#fff;--aim-subtle:rgba(168,85,247,.12);
+  --clarify:#f59e0b;--clarify-subtle:rgba(245,158,11,.08);
+  --diff-add:rgba(16,185,129,.12);--diff-add-text:#6ee7b7;
+  --diff-del:rgba(239,68,68,.12);--diff-del-text:#fca5a5;
+  --diff-hunk:rgba(124,115,230,.12);--diff-hunk-text:#948df0;
+  --diff-meta-text:#a1a1aa;
+  --json-key:#948df0;--json-str:#6ee7b7;--json-num:#fbbf24;--json-bool:#fca5a5;
+  --shadow-sm:0 1px 2px rgba(0,0,0,1);
+  --shadow-md:0 4px 12px rgba(0,0,0,.8),0 0 0 1px #1a1a1d;
+  --shadow-lg:0 12px 28px rgba(0,0,0,.9);
+  color-scheme:dark;
+}
+[data-theme="amoled-midnight-light"]{
+  --bg:#ffffff;--bg-accent:#fafafa;--bg-elevated:#ffffff;--bg-hover:#f4f4f5;
+  --card:#ffffff;--card-fg:#18181b;--card-hl:rgba(0,0,0,.03);
+  --panel:#ffffff;--panel-strong:#fafafa;
+  --chrome:rgba(255,255,255,.92);
+  --text:#18181b;--text-strong:#000000;--muted:#71717a;--muted-fg:#000;--muted-strong:#52525b;
+  --border:#e4e4e7;--border-strong:#d4d4d8;--border-hover:#a1a1aa;
+  --accent:#5e54d9;--accent-fg:#fff;--accent-hover:#4f46c4;--accent-subtle:rgba(94,84,217,.10);
+  --accent-glow:rgba(94,84,217,.18);--ring:#5e54d9;
+  --ok:#059669;--ok-fg:#fff;--ok-subtle:rgba(5,150,105,.1);
+  --warn:#d97706;--warn-fg:#fff;--warn-subtle:rgba(217,119,6,.1);
+  --danger:#dc2626;--danger-fg:#fff;--danger-subtle:rgba(220,38,38,.1);
+  --info:#4f46e5;--info-fg:#fff;
+  --aim:#7c3aed;--aim-fg:#fff;--aim-subtle:rgba(124,58,237,.10);
+  --clarify:#d97706;--clarify-subtle:rgba(217,119,6,.08);
+  --diff-add:rgba(5,150,105,.12);--diff-add-text:#047857;
+  --diff-del:rgba(220,38,38,.12);--diff-del-text:#b91c1c;
+  --diff-hunk:rgba(94,84,217,.10);--diff-hunk-text:#4f46c4;
+  --diff-meta-text:#52525b;
+  --json-key:#5e54d9;--json-str:#047857;--json-num:#b45309;--json-bool:#b91c1c;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.06);
+  --shadow-md:0 4px 12px rgba(0,0,0,.08),0 0 0 1px rgba(0,0,0,.04);
+  --shadow-lg:0 12px 28px rgba(0,0,0,.12);
+  color-scheme:light;
+}
+
+/* ── AMOLED Grey Calm ── */
+[data-theme="amoled-grey-calm-dark"]{
+  --bg:#000000;--bg-accent:#0a0a0a;--bg-elevated:#111111;--bg-hover:#1a1a1a;
+  --card:#0d0d0d;--card-fg:#e5e7eb;--card-hl:rgba(255,255,255,.03);
+  --panel:#000000;--panel-strong:#111111;
+  --chrome:rgba(0,0,0,.95);
+  --text:#d1d5db;--text-strong:#f9fafb;--muted:#6b7280;--muted-fg:#fff;--muted-strong:#9ca3af;
+  --border:#1f1f1f;--border-strong:#2a2a2a;--border-hover:#3a3a3a;
+  --accent:#9ca3af;--accent-fg:#000;--accent-hover:#cbd5e1;--accent-subtle:rgba(156,163,175,.15);
+  --accent-glow:rgba(156,163,175,.2);--ring:#9ca3af;
+  --ok:#22c55e;--ok-fg:#000;--ok-subtle:rgba(34,197,94,.12);
+  --warn:#eab308;--warn-fg:#000;--warn-subtle:rgba(234,179,8,.12);
+  --danger:#f43f5e;--danger-fg:#fff;--danger-subtle:rgba(244,63,94,.12);
+  --info:#60a5fa;--info-fg:#000;
+  --aim:#a78bfa;--aim-fg:#fff;--aim-subtle:rgba(167,139,250,.12);
+  --clarify:#eab308;--clarify-subtle:rgba(234,179,8,.08);
+  --diff-add:rgba(34,211,238,.12);--diff-add-text:#22d3ee;
+  --diff-del:rgba(244,63,94,.12);--diff-del-text:#f43f5e;
+  --diff-hunk:rgba(96,165,250,.12);--diff-hunk-text:#60a5fa;
+  --diff-meta-text:#f3f4f6;
+  --json-key:#60a5fa;--json-str:#22c55e;--json-num:#a78bfa;--json-bool:#f43f5e;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.6);
+  --shadow-md:0 4px 12px rgba(0,0,0,.7);
+  --shadow-lg:0 12px 28px rgba(0,0,0,.85);
+  color-scheme:dark;
+}
+[data-theme="amoled-grey-calm-light"]{
+  --bg:#f9fafb;--bg-accent:#f3f4f6;--bg-elevated:#ffffff;--bg-hover:#e5e7eb;
+  --card:#ffffff;--card-fg:#111827;--card-hl:rgba(0,0,0,.03);
+  --panel:#f9fafb;--panel-strong:#ffffff;
+  --chrome:rgba(255,255,255,.9);
+  --text:#1f2933;--text-strong:#000000;--muted:#6b7280;--muted-fg:#000;--muted-strong:#374151;
+  --border:#e5e7eb;--border-strong:#d1d5db;--border-hover:#cbd5e1;
+  --accent:#4b5563;--accent-fg:#fff;--accent-hover:#1f2937;--accent-subtle:rgba(75,85,99,.12);
+  --accent-glow:rgba(75,85,99,.18);--ring:#6b7280;
+  --ok:#16a34a;--ok-fg:#fff;--ok-subtle:rgba(22,163,74,.1);
+  --warn:#ca8a04;--warn-fg:#fff;--warn-subtle:rgba(202,138,4,.1);
+  --danger:#dc2626;--danger-fg:#fff;--danger-subtle:rgba(220,38,38,.1);
+  --info:#2563eb;--info-fg:#fff;
+  --aim:#7c3aed;--aim-fg:#fff;--aim-subtle:rgba(124,58,237,.1);
+  --clarify:#ca8a04;--clarify-subtle:rgba(202,138,4,.08);
+  --diff-add:rgba(34,211,238,.1);--diff-add-text:#0891b2;
+  --diff-del:rgba(244,63,94,.1);--diff-del-text:#be123c;
+  --diff-hunk:rgba(96,165,250,.1);--diff-hunk-text:#2563eb;
+  --diff-meta-text:#111827;
+  --json-key:#2563eb;--json-str:#16a34a;--json-num:#7c3aed;--json-bool:#dc2626;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.08);
+  --shadow-md:0 4px 10px rgba(0,0,0,.12);
+  --shadow-lg:0 10px 20px rgba(0,0,0,.15);
+  color-scheme:light;
+}
+
 /* ── Base ── */
 @layer base {
   *{box-sizing:border-box;margin:0;padding:0}

@@ -137,6 +137,8 @@ export const THEMES: ThemeEntry[] = [
   { value: 'highcontrast', label: '🔆 High Contrast' },
   { value: 'lumon', label: '🛗 Lumon' },
   { value: 'everforest', label: '🌲 Everforest' },
+  { value: 'amoled-midnight', label: '🌌 AMOLED Midnight' },
+  { value: 'amoled-grey-calm', label: '🌑 AMOLED Grey Calm' },
 ]
 
 const SYNC_EVENT = 'mc-theme-sync'
