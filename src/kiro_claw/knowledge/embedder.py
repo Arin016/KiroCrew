@@ -21,6 +21,10 @@ DEFAULT_MODEL = "qwen3-embedding:0.6b"
 DEFAULT_BASE_URL = "http://localhost:11434"
 TIMEOUT = 10  # seconds
 NEGATIVE_CACHE_TTL = 300  # seconds before re-checking failed availability
+# Max chunk-content chars folded into an item embedding. Chunks are ~400 tokens
+# (~1600 chars) by the heading-aware chunker, so this covers a full chunk with
+# headroom while bounding the embed request well within the model's context.
+_EMBED_CONTENT_BUDGET = 2000
 
 
 class OllamaEmbedder:
@@ -71,11 +75,21 @@ class OllamaEmbedder:
             self._available = None  # invalidate so next call re-checks
             return None
 
-    def embed_for_item(self, title: str, summary: str | None) -> list[float] | None:
-        """Embed title + summary (the recommended content for knowledge items)."""
+    def embed_for_item(
+        self, title: str, summary: str | None, content: str | None = None
+    ) -> list[float] | None:
+        """Embed title + summary + chunk content for knowledge items.
+
+        Content is included so vector search matches on body text, not just the
+        title/summary. It is appended last and truncated to ``_EMBED_CONTENT_BUDGET``
+        chars to bound the embedding request (the model has a fixed context window;
+        title and summary carry the highest-signal terms and must not be crowded out).
+        """
         parts = [title]
         if summary:
             parts.append(summary)
+        if content:
+            parts.append(content[:_EMBED_CONTENT_BUDGET])
         return self.embed(" ".join(parts))
 
 

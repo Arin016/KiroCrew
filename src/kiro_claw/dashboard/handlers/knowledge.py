@@ -1010,18 +1010,19 @@ async def batch_embed_items(request: web.Request) -> web.Response:
 
     if rebuild:
         rows = store.db.execute(
-            "SELECT id, title, summary FROM items WHERE status = 'active' LIMIT 200"
+            "SELECT id, title, summary, content FROM items WHERE status = 'active' LIMIT 200"
         ).fetchall()
     else:
         rows = store.db.execute(
-            "SELECT id, title, summary FROM items WHERE status = 'active' AND embedding IS NULL LIMIT 200"
+            "SELECT id, title, summary, content FROM items "
+            "WHERE status = 'active' AND embedding IS NULL LIMIT 200"
         ).fetchall()
 
     loop = asyncio.get_running_loop()
     embedded = 0
     for row in rows:
         vec = await loop.run_in_executor(
-            None, embedder.embed_for_item, row["title"], row["summary"]
+            None, embedder.embed_for_item, row["title"], row["summary"], row["content"]
         )
         if vec:
             store.db.execute(

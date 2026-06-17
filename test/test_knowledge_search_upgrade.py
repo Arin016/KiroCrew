@@ -55,6 +55,44 @@ class TestOllamaEmbedder:
         result = emb.embed_for_item("My Title", "A summary of the content")
         assert result is None
 
+    def test_embed_for_item_includes_chunk_content(self, monkeypatch):
+        """Vector search must match body text, not just title/summary (Mesh bug).
+
+        Captures the exact string handed to embed() and asserts the chunk
+        content is present — RED before the content param was threaded through.
+        """
+        emb = OllamaEmbedder()
+        captured = {}
+        monkeypatch.setattr(emb, "embed", lambda text: captured.setdefault("text", text))
+        emb.embed_for_item(
+            "Short Title",
+            "Brief summary",
+            "The replication protocol uses a quorum write path with paxos ledgers.",
+        )
+        assert "quorum write path with paxos ledgers" in captured["text"]
+        # Title and summary remain present and ordered first (highest signal).
+        assert captured["text"].startswith("Short Title Brief summary")
+
+    def test_embed_for_item_truncates_long_content(self, monkeypatch):
+        """Content is bounded so a huge chunk can't blow the embed request."""
+        from kiro_claw.knowledge.embedder import _EMBED_CONTENT_BUDGET
+
+        emb = OllamaEmbedder()
+        captured = {}
+        monkeypatch.setattr(emb, "embed", lambda text: captured.setdefault("text", text))
+        big = "x" * (_EMBED_CONTENT_BUDGET * 3)
+        emb.embed_for_item("T", "S", big)
+        # title + summary + at most the budget of content (plus 2 join spaces).
+        assert len(captured["text"]) <= len("T") + len("S") + _EMBED_CONTENT_BUDGET + 2
+
+    def test_embed_for_item_content_optional(self, monkeypatch):
+        """Back-compat: omitting content still embeds title + summary only."""
+        emb = OllamaEmbedder()
+        captured = {}
+        monkeypatch.setattr(emb, "embed", lambda text: captured.setdefault("text", text))
+        emb.embed_for_item("My Title", "A summary")
+        assert captured["text"] == "My Title A summary"
+
 
 class TestSearchForContext:
     """search_for_context endpoint logic."""

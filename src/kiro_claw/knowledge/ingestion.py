@@ -185,7 +185,9 @@ class IngestionPipeline:
                     section_title=chunk.get('section_title'),
                 )
                 self._store_entities(extraction, item_id)
-                await self._embed_item(item_id, item_title, extraction.get('summary'))
+                await self._embed_item(
+                    item_id, item_title, extraction.get('summary'), chunk['content']
+                )
                 processed += 1
             except Exception:
                 logger.exception("Failed to process chunk %d of %s", i, path)
@@ -280,7 +282,12 @@ class IngestionPipeline:
                     section_title=chunk.get('section_title'),
                 )
                 self._store_entities(extraction, item_id)
-                await self._embed_item(item_id, chunk.get('section_title') or f"{title} chunk {i}", extraction.get('summary'))
+                await self._embed_item(
+                    item_id,
+                    chunk.get('section_title') or f"{title} chunk {i}",
+                    extraction.get('summary'),
+                    chunk['content'],
+                )
                 processed += 1
             except Exception:
                 logger.exception("Failed to process chunk %d of text '%s'", i, title)
@@ -343,12 +350,20 @@ class IngestionPipeline:
                     source_item_id=item_id,
                 )
 
-    async def _embed_item(self, item_id: str, title: str, summary: str | None) -> None:
-        """Generate and store embedding for an item. No-op if embedder is None."""
+    async def _embed_item(
+        self, item_id: str, title: str, summary: str | None, content: str | None = None
+    ) -> None:
+        """Generate and store embedding for an item. No-op if embedder is None.
+
+        Includes chunk ``content`` so vector search matches body text, not just
+        the title/summary (which previously left body-only queries unmatchable).
+        """
         if not self.embedder:
             return
         loop = asyncio.get_running_loop()
-        vec = await loop.run_in_executor(None, self.embedder.embed_for_item, title, summary)
+        vec = await loop.run_in_executor(
+            None, self.embedder.embed_for_item, title, summary, content
+        )
         if vec:
             self.store.db.execute(
                 "UPDATE items SET embedding = ? WHERE id = ?",
