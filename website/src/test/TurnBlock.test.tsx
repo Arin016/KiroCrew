@@ -45,6 +45,29 @@ describe('TurnBlock — file role visibility', () => {
     expect(screen.getByTestId('item-file')).toBeInTheDocument()
   })
 
+  it('file message mid-turn stays visible in collapseAll mode (not folded into reasoning)', () => {
+    const items: TurnItem[] = [
+      { kind: 'single', msg: { role: 'tool', content: '🔧 Running: file_send', ts: '1' }, idx: 0 },
+      { kind: 'single', msg: { role: 'file', content: '{"filename":"clip.wav","content_type":"audio/x-wav"}', ts: '2' }, idx: 1 },
+      { kind: 'single', msg: { role: 'tool', content: '🔧 Running: shell', ts: '3' }, idx: 2 },
+      { kind: 'single', msg: { role: 'assistant', content: 'Sent the audio clip. Can you see the player?', ts: '4' }, idx: 3 },
+    ]
+    const turn = makeTurn(items)
+    const { container } = render(
+      <TurnBlock
+        turn={turn}
+        renderItem={(it, i) => <div data-testid={`item-${i}`} data-role={it.kind === 'single' ? it.msg.role : 'group'}>{it.kind === 'single' ? it.msg.content : 'group'}</div>}
+        collapseAll={true}
+      />
+    )
+    // File message at idx 1 must be visible (not inside collapsed overflow:hidden section)
+    const fileItem = container.querySelector('[data-testid="item-1"]')
+    expect(fileItem).not.toBeNull()
+    expect(fileItem?.closest('[style*="overflow"]')).toBeNull()
+    // Conclusion still visible
+    expect(container.querySelector('[data-testid="item-3"]')).not.toBeNull()
+  })
+
   it('renders file in its original turn position (not hoisted to top)', () => {
     const items: TurnItem[] = [
       { kind: 'single', msg: { role: 'assistant', content: 'generating audio…', ts: '1' }, idx: 0 },

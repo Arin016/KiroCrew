@@ -23,7 +23,7 @@ const isAlwaysVisible = (it: TurnItem) => it.kind === 'single' && (it.msg.role =
  */
 const HAS_RENDERABLE_RE = /<mcwidget(?:\s|>)|!\[[^\]]*\]\([^)]+\)/
 const isRenderable = (it: TurnItem) =>
-  it.kind === 'single' && isConclusion(it) && HAS_RENDERABLE_RE.test(it.msg.content)
+  it.kind === 'single' && isConclusion(it) && (it.msg.role === 'file' || HAS_RENDERABLE_RE.test(it.msg.content))
 
 /** Either a renderable assistant message (widget/image) or a role that must
  *  surface inline (mcp_oauth, error). Both bypass the collapse pane. */
