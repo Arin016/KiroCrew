@@ -305,7 +305,6 @@ export function useWebSocket() {
             if (data.slot && store.getState().chat.slotStatusDetail[data.slot]?.kind !== 'streaming') {
               dispatch(setSlotStatusDetail({ slot: data.slot, kind: 'streaming', text: 'Streaming', ts: Date.now() }))
             }
-            if (data.slot && data.slot !== store.getState().chat.activeSlot && !reconnectingRef.current) dispatch(markSlotUnread(data.slot))
             // Streaming auto-speak: detect new complete sentences and synthesize
             if (autoSpeakRef.current && data.slot === store.getState().chat.activeSlot) {
               if (spokenLenRef.current === 0) voiceMutedRef.current = false
@@ -390,6 +389,7 @@ export function useWebSocket() {
             break
           case 'chat_done':
             dispatch(sseChatMessage({ ...data, role: '_done' }))
+            if (data.slot && data.slot !== store.getState().chat.activeSlot && !reconnectingRef.current) dispatch(markSlotUnread(data.slot))
             if (data.slot) {
               dispatch(setSlotStatusDetail({ slot: data.slot, kind: 'idle', text: 'Ready', ts: Date.now() }))
             }

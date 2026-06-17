@@ -122,3 +122,65 @@ describe('useWebSocket reconnect unread suppression', () => {
     unmount()
   })
 })
+
+describe('Mesh-2093: unread fires on chat_done not chat_chunk', () => {
+  let testStore: ReturnType<typeof createTestStore>
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    markSlotUnreadCalls.length = 0
+    WS_INSTANCES.length = 0
+    testStore = createTestStore({
+      chat: { activeSlot: 'chat-active' } as any,
+    })
+    vi.stubGlobal('WebSocket', MockWebSocket)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function wrapper({ children }: { children: React.ReactNode }) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    return createElement(Provider, { store: testStore },
+      createElement(QueryClientProvider, { client: qc }, children)
+    )
+  }
+
+  it('chat_chunk on non-active slot does NOT mark unread', () => {
+    const { unmount } = renderHook(() => useWebSocket(), { wrapper })
+    const ws = WS_INSTANCES[0]
+    act(() => { ws.simulateOpen() })
+
+    act(() => {
+      ws.simulateMessage({ type: 'chat_chunk', data: { slot: 'chat-other', content: 'thinking...', seq: 1 } })
+      ws.simulateMessage({ type: 'chat_chunk', data: { slot: 'chat-other', content: 'more thinking', seq: 2 } })
+    })
+    expect(markSlotUnreadCalls).toEqual([])
+    unmount()
+  })
+
+  it('chat_done on non-active slot DOES mark unread', () => {
+    const { unmount } = renderHook(() => useWebSocket(), { wrapper })
+    const ws = WS_INSTANCES[0]
+    act(() => { ws.simulateOpen() })
+
+    act(() => {
+      ws.simulateMessage({ type: 'chat_done', data: { slot: 'chat-other' } })
+    })
+    expect(markSlotUnreadCalls).toContain('chat-other')
+    unmount()
+  })
+
+  it('chat_done on active slot does NOT mark unread', () => {
+    const { unmount } = renderHook(() => useWebSocket(), { wrapper })
+    const ws = WS_INSTANCES[0]
+    act(() => { ws.simulateOpen() })
+
+    act(() => {
+      ws.simulateMessage({ type: 'chat_done', data: { slot: 'chat-active' } })
+    })
+    expect(markSlotUnreadCalls).toEqual([])
+    unmount()
+  })
+})
