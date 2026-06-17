@@ -1518,6 +1518,160 @@ async def _dispatch_queued(
     )
 
 
+# Maximum characters to recover from block extraction (DoS guard).
+# Slack message bodies can be ~40k; 16k is a safe recovery cap for downstream processing.
+_MAX_RECOVERED_TEXT_CHARS = 16000
+
+
+def _render_rich_text_element(el: dict) -> str:
+    """Render a single rich_text inline element to plain text.
+
+    Handles all documented Slack rich_text element types:
+    text, link, emoji, user, usergroup, channel, broadcast, date.
+    """
+    if not isinstance(el, dict):
+        return ""
+    el_type = el.get("type")
+    if el_type == "text":
+        return el.get("text", "")
+    if el_type == "link":
+        # link: show "text (url)" if both present; else whichever exists
+        text = el.get("text", "")
+        url = el.get("url", "")
+        if text and url:
+            return f"{text} ({url})"
+        return text or url
+    if el_type == "emoji":
+        # emoji: use :name: format; fall back to unicode if name missing
+        name = el.get("name")
+        if name:
+            return f":{name}:"
+        return el.get("unicode", "")
+    if el_type == "user":
+        user_id = el.get("user_id", "")
+        return f"<@{user_id}>" if user_id else ""
+    if el_type == "usergroup":
+        usergroup_id = el.get("usergroup_id", "")
+        return f"<!subteam^{usergroup_id}>" if usergroup_id else ""
+    if el_type == "channel":
+        channel_id = el.get("channel_id", "")
+        return f"<#{channel_id}>" if channel_id else ""
+    if el_type == "broadcast":
+        # broadcast range: here, channel, or everyone
+        range_val = el.get("range", "")
+        return f"<!{range_val}>" if range_val else ""
+    if el_type == "date":
+        # date: use fallback text if present (human-readable rendering)
+        return el.get("fallback", "")
+    # Unknown element type — attempt text field, log for observability
+    logger.debug("Unknown rich_text element type=%r, attempting text field", el_type)
+    return el.get("text", "")
+
+
+def _extract_blocks_text(blocks: list[dict]) -> str:
+    """Extract readable text from Block Kit blocks (rich_text, section, context).
+
+    Handles the common block types Slack uses for user messages and shared
+    content.  Returns empty string if no text can be recovered.
+    Defensive: never raises on malformed input.
+    """
+    parts: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "rich_text":
+            elements = block.get("elements", [])
+            if not isinstance(elements, list):
+                elements = []
+            for element in elements:
+                if not isinstance(element, dict):
+                    continue
+                el_type = element.get("type")
+                child_els = element.get("elements", [])
+                if not isinstance(child_els, list):
+                    child_els = []
+                if el_type == "rich_text_list":
+                    # Prefix each list item with "- " to preserve list structure.
+                    # (Numbered vs bulleted distinction not preserved — simple bullet.)
+                    for child in child_els:
+                        if not isinstance(child, dict):
+                            continue
+                        sub_els = child.get("elements", [])
+                        if not isinstance(sub_els, list):
+                            sub_els = []
+                        inline = "".join(
+                            _render_rich_text_element(el) for el in sub_els
+                        )
+                        if inline:
+                            parts.append(f"- {inline}")
+                elif el_type == "rich_text_quote":
+                    # Quote blocks: prefix with "> "
+                    inline = "".join(
+                        _render_rich_text_element(el) for el in child_els
+                    )
+                    if inline:
+                        parts.append(f"> {inline}")
+                else:
+                    # rich_text_section, rich_text_preformatted
+                    inline = "".join(
+                        _render_rich_text_element(el) for el in child_els
+                    )
+                    if inline:
+                        parts.append(inline)
+        elif block_type == "section":
+            text_obj = block.get("text")
+            if isinstance(text_obj, dict):
+                section_text = text_obj.get("text", "")
+                if section_text:
+                    parts.append(section_text)
+        elif block_type == "context":
+            ctx_elements = block.get("elements", [])
+            if not isinstance(ctx_elements, list):
+                ctx_elements = []
+            for el in ctx_elements:
+                if not isinstance(el, dict):
+                    continue
+                ctx_text = el.get("text", "")
+                if ctx_text:
+                    parts.append(ctx_text)
+    result = "\n".join(parts).strip()
+    if not result:
+        return ""
+    return result[:_MAX_RECOVERED_TEXT_CHARS]
+
+
+# Slack's generic fallback strings for messages whose content lives in blocks.
+# NOTE: These are best-effort, undocumented, English-only Slack placeholder strings.
+# They may change or be localized — recovery is best-effort for non-English workspaces.
+# No fuzzy/structural detection is attempted (out of scope; would change behavior broadly).
+_SLACK_BLOCK_FALLBACKS = frozenset({
+    "This message contains interactive elements.",
+    "This content can't be displayed.",
+})
+
+
+def _normalize_message_blocks(raw: list) -> list[dict]:
+    """Drill into the Slack message_blocks wrapper structure.
+
+    ``message_blocks`` is a wrapper list:
+    ``[{"team":..., "channel":..., "ts":..., "message": {"blocks": [...]}}]``
+    This extracts and flattens the inner blocks from each wrapper.
+    """
+    result: list[dict] = []
+    if not isinstance(raw, list):
+        return result
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        msg = item.get("message")
+        if isinstance(msg, dict):
+            inner_blocks = msg.get("blocks")
+            if isinstance(inner_blocks, list):
+                result.extend(b for b in inner_blocks if isinstance(b, dict))
+    return result
+
+
 def _extract_shared_text(event: dict) -> str:
     """Recover message text from forwarded-message attachments.
 
@@ -1525,12 +1679,50 @@ def _extract_shared_text(event: dict) -> str:
     flagged ``is_share`` / ``is_msg_unfurl``), not in the top-level ``text``
     field. Link-unfurl attachments are excluded so pasted URLs don't leak
     preview text into the routed message body.
+
+    When the attachment's ``text`` is empty and ``fallback`` is a generic
+    Slack placeholder (e.g. "This message contains interactive elements."),
+    attempts to reconstruct content from the attachment's ``blocks`` or the
+    event-level ``blocks`` array.
     """
-    parts = [
-        (att.get("text") or att.get("fallback") or "")
-        for att in (event.get("attachments") or [])
-        if att.get("is_share") or att.get("is_msg_unfurl")
-    ]
+    attachments = event.get("attachments") or []
+    parts: list[str] = []
+    for att in attachments:
+        if not (att.get("is_share") or att.get("is_msg_unfurl")):
+            continue
+        att_text = att.get("text") or ""
+        if att_text:
+            parts.append(att_text)
+            continue
+        # text is empty — try blocks before falling back to the generic fallback.
+        # att["blocks"] is already a flat block list; att["message_blocks"] is a
+        # wrapper list that must be normalized first.
+        att_blocks = att.get("blocks")
+        if isinstance(att_blocks, list) and att_blocks:
+            extracted = _extract_blocks_text(att_blocks)
+            if extracted:
+                parts.append(extracted)
+                continue
+        msg_blocks = att.get("message_blocks")
+        if msg_blocks:
+            normalized = _normalize_message_blocks(msg_blocks)
+            if normalized:
+                extracted = _extract_blocks_text(normalized)
+                if extracted:
+                    parts.append(extracted)
+                    continue
+        # Last resort: use fallback unless it's a generic Slack placeholder
+        fallback = att.get("fallback") or ""
+        if fallback and fallback not in _SLACK_BLOCK_FALLBACKS:
+            parts.append(fallback)
+    # If attachments yielded nothing, try event-level blocks (Slack sometimes
+    # puts the real content there for shared messages).
+    if not parts:
+        event_blocks = event.get("blocks") or []
+        if event_blocks:
+            extracted = _extract_blocks_text(event_blocks)
+            if extracted:
+                return extracted
     return "\n\n".join(part for part in parts if part).strip()
 
 
@@ -1552,8 +1744,10 @@ async def _route_message(
 
     # Slack forwards carry content in attachments, not text — recover it so the
     # forward isn't silently dropped by the (not text and not files) guard below.
-    if not text:
-        text = _extract_shared_text(event)
+    # Also recover when Slack sets text to a generic Block Kit fallback placeholder.
+    if not text or text in _SLACK_BLOCK_FALLBACKS:
+        fallback = "" if text in _SLACK_BLOCK_FALLBACKS else text
+        text = _extract_shared_text(event) or fallback
 
     logger.debug("Stream debug: team_id=%s user_id=%s channel=%s", team_id, sender_id, channel)
 
