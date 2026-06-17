@@ -98,8 +98,14 @@ from kiro_claw.sel import sel
 from kiro_claw.session import HEARTBEAT_KEY, SessionManager
 from kiro_claw.skills import SkillsLoader
 from kiro_claw.slack.client import RealSlackClient
-from kiro_claw.slack.format import build_cron_ack_block, split_message, to_slack_mrkdwn
-from kiro_claw.slack.handler import is_thread_incognito, is_thread_temporary
+from kiro_claw.slack.format import (
+    build_cron_ack_block,
+    build_options_blocks,
+    extract_options,
+    split_message,
+    to_slack_mrkdwn,
+)
+from kiro_claw.slack.handler import build_timing_footer, is_thread_incognito, is_thread_temporary
 from kiro_claw.subagent import (
     INJECTION_TIMEOUT,
     SubagentInfo,
@@ -2604,15 +2610,16 @@ class GatewayOrchestrator:
                                 if channel:
                                     reply_text, _ = redact_exfiltration_urls(to_slack_mrkdwn(response))
                                     reply_text, _ = redact_credentials(reply_text)
+                                    reply_text, options = extract_options(reply_text)
                                     for part in split_message(reply_text):
                                         await self.slack.post_message(channel, part, parent_key)
                                     try:
-                                        from kiro_claw.slack.handler import build_timing_footer
-
                                         elapsed = info.elapsed if info.elapsed > 0 else (time.monotonic() - info.started)
                                         footer_blocks, footer_text = build_timing_footer(
                                             elapsed, _footer_client,
                                         )
+                                        if options:
+                                            footer_blocks.extend(build_options_blocks(options))
                                         await self.slack.post_blocks(
                                             channel, footer_blocks, footer_text, parent_key,
                                         )
