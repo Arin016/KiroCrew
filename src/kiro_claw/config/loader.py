@@ -1857,7 +1857,7 @@ class KiroClawConfig:
             session=SessionConfig(
                 timeout_secs=session_data.get("timeout_secs", DEFAULT_SESSION_TIMEOUT),
                 autocompact_pct=float(session_data.get("autocompact_pct", 90.0)),
-                pool_size=int(session_data.get("pool_size", 0)),
+                pool_size=int(session_data.get("pool_size", 2)),
                 pool_agent=str(session_data.get("pool_agent", "")),
                 pool_ttl_secs=int(session_data.get("pool_ttl_secs", 1800)),
                 archive_retention_days=_archive_retention_days(session_data),
