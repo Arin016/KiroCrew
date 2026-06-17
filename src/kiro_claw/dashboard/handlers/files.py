@@ -220,15 +220,39 @@ async def api_outbox_notify(request: web.Request) -> web.Response:
             return web.json_response(
                 {"error": f"Binary file type not allowed: {guessed_type or 'unknown'}"}, status=400
             )
-    # Inject into the most recently active chat slot so the card persists
+    # Inject into the caller's chat slot so the card persists in the correct session
     if state._slots:
-        active = max(
-            state._slots.values(),
-            key=lambda s: s.messages[-1]["ts"] if s.messages else "",
-        )
-        if active and active.messages:
-            active.append("file", json.dumps(file_data))
-    state.broadcast_ws("file_ready", file_data)
+        # Prefer the caller's own slot via X-Session-Key header
+        session_key = request.headers.get("X-Session-Key", "").strip()
+        active = None
+        if session_key.startswith("dashboard:"):
+            slot_key = session_key.removeprefix("dashboard:")
+            active = state.get_slot(slot_key)
+        elif session_key.startswith("cron:"):
+            slot_key = f"cron-{session_key.removeprefix('cron:')}"
+            active = state.get_slot(slot_key)
+        # An explicitly header-targeted slot receives the file even when empty
+        header_targeted = active is not None
+        # Fallback: most recently active slot
+        if not active:
+            active = max(
+                state._slots.values(),
+                key=lambda s: s.messages[-1]["ts"] if s.messages else "",
+            )
+        if active and (active.messages or header_targeted):
+            redacted_file_json = json.dumps(file_data)
+            redacted_file_json, _ = redact_exfiltration_urls(redacted_file_json)
+            redacted_file_json, _ = redact_credentials(redacted_file_json)
+            active.append("file", redacted_file_json)
+            # Only broadcast explicitly when _has_reader suppresses append's
+            # built-in _on_message callback. Avoids duplicate file cards.
+            if getattr(active, "_has_reader", False):
+                state.broadcast_ws("chat_message", {
+                    "slot": active.key,
+                    "role": "file",
+                    "content": redacted_file_json,
+                    "ts": active.messages[-1]["ts"],
+                })
 
     _sel().log_tool_invocation(
         session_key="api",
@@ -522,8 +546,18 @@ async def api_slack_upload_file(request: web.Request) -> web.Response:
                 error=f"redaction_failed: {redact_err}",
             )
             return web.json_response({"error": f"Redaction failed: {redact_err}"}, status=500)
-    # Resolve channel: use explicit channel if provided, else owner DM
+    # Resolve thread_ts and channel from linked slot when not explicitly provided
     target_channel = body.get("channel", "")
+    channel_from_session_map = False
+    session_key = request.headers.get("X-Session-Key", "").strip()
+    if not thread_ts and session_key.startswith("dashboard:") and state.sessions:
+        link_ts, link_ch = state.sessions.get_slack_link(session_key)
+        if link_ts and (not target_channel or target_channel == link_ch):
+            thread_ts = link_ts
+            if not target_channel and link_ch:
+                target_channel = link_ch
+                channel_from_session_map = True
+    # Resolve channel: use explicit channel if provided, else owner DM
     channel = ""
     if target_channel:
         try:
@@ -543,23 +577,45 @@ async def api_slack_upload_file(request: web.Request) -> web.Response:
             return web.json_response(
                 {"error": "invalid channel value"}, status=400
             )
-        try:
-            tracked = is_tracked_channel(target_channel)
-        except Exception:
-            tracked = False  # deny-by-default extends to uncertainty
-        if not tracked:
-            _sel().log_tool_invocation(
-                session_key="api",
-                source="api",
-                tool_name="file_send",
-                tool_kind="slack",
-                outcome="denied",
-                downstream_service="slack",
-                error=f"channel_not_tracked: {target_channel}",
-            )
-            return web.json_response(
-                {"error": "channel not in tracked channels"}, status=403
-            )
+        # Session-map-sourced channels are trusted (system created the link).
+        # Only enforce tracking check for user-supplied channels.
+        # Defense-in-depth: session-map channels must be DMs (D-prefix) or tracked.
+        if not channel_from_session_map:
+            try:
+                tracked = is_tracked_channel(target_channel)
+            except Exception:
+                tracked = False  # deny-by-default extends to uncertainty
+            if not tracked:
+                _sel().log_tool_invocation(
+                    session_key="api",
+                    source="api",
+                    tool_name="file_send",
+                    tool_kind="slack",
+                    outcome="denied",
+                    downstream_service="slack",
+                    error=f"channel_not_tracked: {target_channel}",
+                )
+                return web.json_response(
+                    {"error": "channel not in tracked channels"}, status=403
+                )
+        else:
+            try:
+                allowed = target_channel.startswith("D") or is_tracked_channel(target_channel)
+            except Exception:
+                allowed = False  # deny-by-default extends to uncertainty
+            if not allowed:
+                _sel().log_tool_invocation(
+                    session_key="api",
+                    source="api",
+                    tool_name="file_send",
+                    tool_kind="slack",
+                    outcome="denied",
+                    downstream_service="slack",
+                    error=f"session_map_channel_not_authorized: {target_channel}",
+                )
+                return web.json_response(
+                    {"error": "channel not authorized"}, status=403
+                )
         channel = target_channel
     else:
         try:
