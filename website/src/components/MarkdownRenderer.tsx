@@ -13,6 +13,7 @@ import { useBlockAssembler, maskInlineCode } from '../hooks/useBlockAssembler'
 import { urlTransform, ALLOWED_PROTOCOLS } from '../utils/urlTransform'
 import DiffBlock from './DiffBlock'
 import MonacoCodeBlock from './MonacoCodeBlock'
+import { SmoothResize } from './SmoothResize'
 import type { ContentBlock } from '../types'
 
 const PATH_RE = /^~?(?:\.{0,2}\/)?[\w.@~\/ -]*\/[\w.@~: -]*[\w.]$/
@@ -334,6 +335,71 @@ function rehypeStreamingGlow(options?: { tailChars?: number }) {
   }
 }
 
+/** Split a text run into individual characters for per-char animation. */
+const REVEAL_CHAR_RE = /[\s\S]/g
+
+/**
+ * Rehype plugin: wrap streaming text in `<span class="ft-word">` so each
+ * character plays a one-shot CSS entrance (fade) as it is
+ * revealed.
+ *
+ * Wraps EVERY eligible text node in the streaming tail block (headers, list
+ * items, table cells, paragraphs, blockquotes, link/emphasis text) — not just
+ * the trailing run — so all markdown text fades, not only plain prose. Text
+ * inside `code`/`pre` (rendered by the code components) and `.streaming-glow`
+ * is skipped. Atomic block components (fenced code, widgets, mermaid, diffs)
+ * are separate non-text blocks and are not char-faded here.
+ *
+ * Safe against react-markdown re-parsing every frame: React reconciles the
+ * per-char spans by position, so already-streamed chars reuse their DOM nodes
+ * (no re-animation) and only newly-arrived trailing chars mount and fade. The
+ * MarkdownBlock memo skips re-render of unchanged blocks, so a completed block
+ * never re-fades when content changes elsewhere. On stream end the plugin
+ * drops out and the tail reverts to plain text (clean for selection/copy).
+ */
+function rehypeStreamingReveal() {
+  return (tree: any) => {
+    const candidates: { parent: any; index: number; value: string }[] = []
+    const walk = (node: any, parent: any, index: number, skip: boolean) => {
+      if (node.type === 'text') {
+        if (!skip && node.value && node.value.trim()) {
+          candidates.push({ parent, index, value: node.value })
+        }
+        return
+      }
+      const cls = node.properties?.className
+      const isGlow = Array.isArray(cls) && cls.includes('streaming-glow')
+      // Skip text inside `pre` (fenced code/diff render via their own
+      // components) and the glow window. Inline `code` is NOT skipped so it
+      // char-fades like the surrounding prose — fenced blocks are separate
+      // non-markdown blocks, so any `code` reached here is inline.
+      const next = skip || isGlow || node.tagName === 'pre'
+      if (node.children) {
+        for (let i = 0; i < node.children.length; i++) walk(node.children[i], node, i, next)
+      }
+    }
+    if (tree.children) {
+      for (let i = 0; i < tree.children.length; i++) walk(tree.children[i], tree, i, false)
+    }
+    if (candidates.length === 0) return
+    // Splice in reverse document order so that replacing one text node with N
+    // char spans doesn't invalidate the indices of earlier candidates that
+    // share the same parent (higher indices are spliced first).
+    for (let c = candidates.length - 1; c >= 0; c--) {
+      const { parent, index, value } = candidates[c]
+      const tokens = value.match(REVEAL_CHAR_RE)
+      if (!tokens || tokens.length === 0) continue
+      const spans = tokens.map(tok => ({
+        type: 'element',
+        tagName: 'span',
+        properties: { className: ['ft-word'] },
+        children: [{ type: 'text', value: tok }],
+      }))
+      parent.children.splice(index, 1, ...spans)
+    }
+  }
+}
+
 export function fixCodeFences(s: string): string {
   // Escape bare "N." lines so markdown doesn't render them as ordered lists.
   // CommonMark: 0-3 leading spaces = list item, 4+ = indented code block.
@@ -415,18 +481,23 @@ function stripStrayTags(content: string, openMarker: string, stripRe: RegExp): s
 const stripStrayWidgetTags = (content: string) => stripStrayTags(content, '<mcwidget', MCWIDGET_STRIP_RE)
 const stripStrayToolUseTags = (content: string) => stripStrayTags(content, '<tool_use', TOOL_USE_STRIP_RE)
 
-const MarkdownBlock = memo(function MarkdownBlock({ content, sourcePos, startLine, glow }: { content: string; sourcePos?: boolean; startLine?: number; glow?: boolean }) {
+const MarkdownBlock = memo(function MarkdownBlock({ content, sourcePos, startLine, glow, smooth }: { content: string; sourcePos?: boolean; startLine?: number; glow?: boolean; smooth?: boolean }) {
   // Strip any <mcwidget> or <tool_use> tags that leak through during
   // streaming transitions or when the agent emits protocol markup as text.
   // Both passes preserve mentions inside inline-code spans.
   const clean = stripStrayToolUseTags(stripStrayWidgetTags(content))
   if (!clean.trim()) return null
   const baseRehype = sourcePos ? REHYPE_PLUGINS_WITH_SOURCEPOS : REHYPE_PLUGINS
-  // Append the glow plugin (last, so it runs on the final tree) only for the
-  // streaming tail block — see MarkdownRenderer's `glow` prop.
-  const rehypePlugins: PluggableList = glow
-    ? [...baseRehype, [rehypeStreamingGlow, { tailChars: GLOW_TAIL_CHARS }]]
-    : baseRehype
+  // Streaming tail block only (see MarkdownRenderer's `glow` prop):
+  //   - in immediate mode: append the glow plugin for trailing-word shimmer;
+  //   - in smooth mode: append the reveal plugin for per-char fade entrance.
+  let rehypePlugins: PluggableList = baseRehype
+  if (glow) {
+    const tail: PluggableList = []
+    if (!smooth) tail.push([rehypeStreamingGlow, { tailChars: GLOW_TAIL_CHARS }])
+    if (smooth) tail.push(rehypeStreamingReveal)
+    rehypePlugins = [...baseRehype, ...tail]
+  }
   const md = (
     <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={rehypePlugins} urlTransform={urlTransform} components={MD_COMPONENTS}>
       {fixCodeFences(clean)}
@@ -467,30 +538,38 @@ function extractPathHintFromText(text: string | undefined): string | undefined {
   return undefined
 }
 
-function BlockRenderer({ block, prevBlock, onFileOpen, sourcePos, messageTs, widgetIndex, glow }: { block: ContentBlock; prevBlock?: ContentBlock; onFileOpen?: (path: string) => void; sourcePos?: boolean; messageTs?: string; widgetIndex?: number; glow?: boolean }) {
+function BlockRenderer({ block, prevBlock, onFileOpen, sourcePos, messageTs, widgetIndex, glow, smooth }: { block: ContentBlock; prevBlock?: ContentBlock; onFileOpen?: (path: string) => void; sourcePos?: boolean; messageTs?: string; widgetIndex?: number; glow?: boolean; smooth?: boolean }) {
   switch (block.type) {
     case 'diff': {
       const pathHint = prevBlock?.type === 'markdown'
         ? extractPathHintFromText(prevBlock.content)
         : undefined
-      return <DiffBlock code={block.content} complete={block.complete} onFileOpen={onFileOpen} pathHint={pathHint} />
+      const node = <DiffBlock code={block.content} complete={block.complete} onFileOpen={onFileOpen} pathHint={pathHint} streaming={!!smooth && !block.complete} />
+      // Smooth mode: wrap so the block height eases as lines arrive. The wrapper
+      // is mounted for the whole message lifecycle (smooth is constant) so the
+      // child never remounts when streaming flips to complete.
+      return smooth ? <SmoothResize enabled={!block.complete}>{node}</SmoothResize> : node
     }
     case 'mermaid':
       return block.complete ? <MermaidBlock code={block.content} /> : (
         <div className="my-2 p-3 bg-bg-elevated border border-border rounded-md text-muted text-[12px] italic animate-pulse">generating diagram…</div>
       )
-    case 'code':
-      return <MonacoCodeBlock code={block.content} lang={block.language} complete={block.complete} />
+    case 'code': {
+      const node = <MonacoCodeBlock code={block.content} lang={block.language} complete={block.complete} />
+      // Height-grow only — streaming code is a single highlighted innerHTML blob
+      // (no per-line nodes), so per-line content animation isn't applied here.
+      return smooth ? <SmoothResize enabled={!block.complete}>{node}</SmoothResize> : node
+    }
     case 'widget':
       return block.complete
         ? <WidgetFrame html={block.content} title={block.language} slug={block.slug} messageTs={messageTs} widgetIndex={widgetIndex} />
         : <WidgetPlaceholder title={block.language} />
     case 'markdown':
-      return <MarkdownBlock content={block.content} sourcePos={sourcePos} startLine={block.startLine} glow={glow} />
+      return <MarkdownBlock content={block.content} sourcePos={sourcePos} startLine={block.startLine} glow={glow} smooth={smooth} />
   }
 }
 
-export default memo(function MarkdownRenderer({ content, streaming = false, onFileOpen, rawMode = false, sourcePos = false, messageTs, glow = false }: { content: string; streaming?: boolean; onFileOpen?: (path: string) => void; rawMode?: boolean; sourcePos?: boolean; messageTs?: string; glow?: boolean }) {
+export default memo(function MarkdownRenderer({ content, streaming = false, onFileOpen, rawMode = false, sourcePos = false, messageTs, glow = false, smooth }: { content: string; streaming?: boolean; onFileOpen?: (path: string) => void; rawMode?: boolean; sourcePos?: boolean; messageTs?: string; glow?: boolean; smooth?: boolean }) {
   const blocks = useBlockAssembler(content, streaming)
 
   const handleClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -533,8 +612,16 @@ export default memo(function MarkdownRenderer({ content, streaming = false, onFi
     return <pre className="text-[13px] font-mono whitespace-pre-wrap break-words leading-relaxed text-muted">{content}</pre>
   }
 
+  // Root class drives the per-char entrance keyframe (.ft-word descendants
+  // only exist in the streaming tail block, so this is inert otherwise).
+  // ft-streaming scopes the animation to live streaming so history/scroll
+  // re-mounts don't re-fade.
+  const animOn = !!smooth
+  const animClass = animOn ? ' ft-anim-smooth' : ''
+  const streamClass = animOn && streaming ? ' ft-streaming' : ''
+
   return (
-    <div className="group" onClick={handleClick} data-image-scope="">
+    <div className={`group${animClass}${streamClass}`} onClick={handleClick} data-image-scope="">
       {blocks.map((block, i) => (
         // Key on startLine (stable across streaming) instead of block.type, so
         // a code -> diff reclassification mid-stream doesn't unmount the
@@ -547,6 +634,7 @@ export default memo(function MarkdownRenderer({ content, streaming = false, onFi
           messageTs={messageTs}
           widgetIndex={widgetIndices[i] >= 0 ? widgetIndices[i] : undefined}
           glow={glow && i === lastMarkdownIdx}
+          smooth={smooth}
         />
       ))}
     </div>

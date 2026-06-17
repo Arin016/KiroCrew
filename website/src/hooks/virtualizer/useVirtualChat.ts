@@ -41,7 +41,6 @@ import {
   computeAtBottom,
   isSelfScroll,
   stickAfterUserScroll,
-  evaluateAutoPin,
   bottomTarget,
 } from './FollowController'
 import type {
@@ -161,6 +160,13 @@ export function useVirtualChat<T>(
   // beating the RO-vs-scroll-event race.
   const stickRef = useRef<boolean>(followOutput)
   const lastWriteTopRef = useRef<number>(-1)
+  // True while a smooth scrollTo animation (from pinAuto) is in flight.
+  // During this period, scroll events are NOT treated as user-scrolls — they
+  // are intermediate frames of our own programmatic smooth-pin.
+  const smoothPinActiveRef = useRef(false)
+  // Previous scrollTop during smooth-pin animation. Used to detect genuine
+  // user scroll-up (scrollTop decreased) vs normal forward animation progress.
+  const prevSmoothTopRef = useRef(0)
   // Timestamp (performance.now) of the last genuine USER scroll. Used to gate
   // RO-driven follow pins so they don't fire mid-fling — see SCROLL_SETTLE_MS.
   const lastUserScrollAtRef = useRef<number>(0)
@@ -318,26 +324,28 @@ export function useVirtualChat<T>(
 
   // ---- Pin helpers (the only code that writes el.scrollTop for follow) ----
 
-  // Automatic pin: called when content changed (RO / append). Race-proof —
-  // delegates the keep/release decision to evaluateAutoPin reading LIVE
-  // geometry, so a user scroll-up that hasn't dispatched its scroll event yet
-  // still releases follow instead of yanking the user back down.
+  // Automatic pin: called when content changed (RO / append). When stick is
+  // armed, always scrolls to the bottom. Stick is released ONLY by the scroll
+  // handler detecting a genuine user scroll-up — never here.
   const pinAuto = useCallback(() => {
     const el = scrollerRef.current
     if (!el) return
-    const res = evaluateAutoPin({
-      stick: stickRef.current,
-      geom: { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight },
-      lastWriteTop: lastWriteTopRef.current,
-    })
-    stickRef.current = res.stick
-    if (res.pin) {
-      el.scrollTop = res.target
-      lastWriteTopRef.current = res.target
-    } else if (res.stick) {
-      // Already at the bottom — keep lastWriteTop in sync so the resulting
-      // scroll event (if any) is recognised as self.
-      lastWriteTopRef.current = res.target
+    const geom = { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight }
+    const target = Math.max(0, geom.scrollHeight - geom.clientHeight)
+    if (!stickRef.current) return
+    // Always pin when stick is armed. The scroll handler is the sole arbiter of
+    // releasing stick (it detects genuine user scroll-up). Previous approach
+    // tried to release here via a scrollTop-vs-lastWriteTop guard, but smooth
+    // scroll lag causes persistent false positives: the animation hasn't caught
+    // up to the last target when content grows and a new pinAuto fires, so it
+    // looks like "scrollTop < lastWriteTop" even though it's just animation lag.
+    if (Math.abs(geom.scrollTop - target) > 0.5) {
+      smoothPinActiveRef.current = true
+      prevSmoothTopRef.current = geom.scrollTop
+      el.scrollTo({ top: target, behavior: 'smooth' })
+      lastWriteTopRef.current = target
+    } else {
+      lastWriteTopRef.current = target
     }
   }, [])
 
@@ -376,7 +384,20 @@ export function useVirtualChat<T>(
       // flip stick. (Releasing on user scroll-up also happens synchronously
       // inside pinAuto via the live-scrollTop guard — this handler covers the
       // common case and re-arming when the user returns to the bottom.)
-      if (!isSelfScroll(el.scrollTop, lastWriteTopRef.current)) {
+      // During a smooth-pin animation, intermediate scroll events are ours —
+      // don't treat them as user scrolls.
+      if (smoothPinActiveRef.current) {
+        if (atBottom) smoothPinActiveRef.current = false
+        // If the user grabs the page mid-animation and scrolls up,
+        // scrollTop moves backward. Normal forward animation progress
+        // always increases scrollTop toward the target.
+        else if (el.scrollTop < prevSmoothTopRef.current - 1) {
+          smoothPinActiveRef.current = false
+          lastUserScrollAtRef.current = performance.now()
+          stickRef.current = false
+        }
+        prevSmoothTopRef.current = el.scrollTop
+      } else if (!isSelfScroll(el.scrollTop, lastWriteTopRef.current)) {
         lastUserScrollAtRef.current = performance.now()
         stickRef.current = stickAfterUserScroll(atBottom, followOutput)
       }
@@ -448,7 +469,7 @@ export function useVirtualChat<T>(
       // the row, which otherwise looks like a first-mount and skips the pin.
       // pinAuto still releases if the live geometry shows a real scroll-up.
       const shouldFollow = genuineResize || (firstMount && stickRef.current)
-      if (shouldFollow && performance.now() - lastUserScrollAtRef.current >= SCROLL_SETTLE_MS) {
+      if (shouldFollow && (stickRef.current || performance.now() - lastUserScrollAtRef.current >= SCROLL_SETTLE_MS)) {
         pinAuto()
       }
 

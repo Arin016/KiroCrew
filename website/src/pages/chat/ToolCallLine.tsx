@@ -214,7 +214,7 @@ export default memo(function ToolCallLine({ message, running: _running }: { mess
   }, [hasPendingPerm, toolCallId])
 
   return (
-    <div ref={containerRef} className="animate-scale-in">
+    <div ref={containerRef} className="ft-block-reveal">
       <button
         ref={pillButtonRef}
         className={`inline-flex items-start gap-1 text-[13px] font-mono px-2 py-0.5 rounded-md transition-all text-left focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:outline-none ${hasPendingPerm ? 'cursor-default' : 'cursor-pointer hover:brightness-110'}`}

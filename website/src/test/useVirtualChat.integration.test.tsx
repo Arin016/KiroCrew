@@ -91,7 +91,9 @@ describe('useVirtualChat integration: follow / pin wiring', () => {
     expect(el.scrollTop).toBe(1600)
 
     // User scrolls up to read history (well away from the bottom).
-    act(() => { state.scrollTop = 600 })
+    // Dispatch scroll event so the passive scroll handler detects the user
+    // scroll and releases stick (stick is now released ONLY by the scroll handler).
+    act(() => { state.scrollTop = 600; el.dispatchEvent(new Event('scroll')) })
 
     // A new message appends. The race-proof guard in pinAuto reads the live
     // scrollTop, sees the user moved up (distance from bottom >> epsilon), and

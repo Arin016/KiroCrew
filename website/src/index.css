@@ -1047,6 +1047,45 @@ body::before{content:'';position:fixed;top:-50%;left:-50%;width:200%;height:200%
 .streaming-glow::before{content:'';position:absolute;inset:0;border-radius:inherit;background:linear-gradient(90deg,transparent 25%,color-mix(in srgb,var(--accent) 50%,transparent) 50%,transparent 75%);background-size:250% 100%;animation:stream-sweep 2.5s ease-in-out infinite;-webkit-mask:linear-gradient(90deg,transparent 0%,black 40%,black 100%);mask:linear-gradient(90deg,transparent 0%,black 40%,black 100%)}
 @keyframes stream-sweep{0%{background-position:150% 0}100%{background-position:-50% 0}}
 
+/* ── Tool-pill entrance fade ──
+   ToolCallLine's container uses `.ft-block-reveal` for a smooth opacity
+   fade-in on mount. Reuses the existing `ft-fade` keyframe (no new keyframe);
+*/
+.ft-block-reveal{animation:ft-fade .6s ease-in-out both}
+@media (prefers-reduced-motion:reduce){
+  .ft-block-reveal{animation:none}
+}
+
+/* ── Per-char streaming reveal ──
+   `.ft-word` spans are injected by rehypeStreamingReveal around each character
+   during streaming. Each span animates once on mount; already-revealed chars
+   keep their (stable) DOM node so they don't re-fire. The parent
+   `.ft-anim-smooth` class (set on MarkdownRenderer's root) selects the
+   entrance animation. Reverts to plain text when streaming ends. */
+@keyframes ft-fade{from{opacity:0}to{opacity:1}}
+.ft-word{white-space:pre-wrap}
+.ft-anim-smooth .ft-word{animation:ft-fade .6s ease-in-out both}
+@media (prefers-reduced-motion:reduce){
+  .ft-anim-smooth .ft-word{animation:none}
+}
+
+/* ── Streaming block: height grow (code/diff) + per-line rise (diff) ──
+   SmoothResize wraps streaming code/diff blocks and eases their height as new
+   lines arrive instead of snapping. The block's own 8px margin is relocated
+   onto the `.ft-resize` wrapper (and zeroed on the child) so overflow:hidden
+   during the height animation doesn't swallow inter-block spacing. DiffBlock
+   rows additionally rise+fade in while the diff is still streaming
+   (`.ft-stream-block` scope) — gated so completed / history-reloaded diffs
+   render statically and never re-animate on a virtualizer re-mount. */
+.msg-content .ft-resize{margin:8px 0}
+.msg-content .ft-resize .code-block,.msg-content .ft-resize .diff-block{margin:0}
+@keyframes ft-line-rise{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
+.ft-stream-block .ft-drow{animation:ft-line-rise .5s cubic-bezier(.4,0,.2,1) both}
+@media (prefers-reduced-motion:reduce){
+  .ft-resize{transition:none!important}
+  .ft-stream-block .ft-drow{animation:none}
+}
+
 /* ── Shimmer bar ── */
 .think-bar{width:48px;height:3px;border-radius:2px;
   background:linear-gradient(90deg,var(--border),var(--accent),var(--border));

@@ -27,16 +27,21 @@ export interface ChatConfig {
   tagColumnsEnabled: boolean
   fileChipStyle: FileChipStyle
   followUpLayout: FollowUpLayout
+  streamMode: StreamMode
 }
 
 export type FileChipStyle = 'expanded' | 'minimal'
 export type FollowUpLayout = 'multiline' | 'scroll'
+/** Per-char streaming entrance animation. 'immediate' restores the pre-buffer
+ *  behavior (raw chunk paint + tail glow only). */
+export type StreamMode = 'immediate' | 'smooth'
 
 const LS_KEY = 'mc-chat-config'
-const DEFAULTS: ChatConfig = { historyExpanded: true, notifLimit: 50, showTimestamps: true, sendOnEnter: 'enter', collapseAllSteps: true, confirmCloseSession: false, simplifiedToolNames: true, contentWidth: 'compact', tagColumnsEnabled: true, fileChipStyle: 'expanded', followUpLayout: 'scroll' }
+const DEFAULTS: ChatConfig = { historyExpanded: true, notifLimit: 50, showTimestamps: true, sendOnEnter: 'enter', collapseAllSteps: true, confirmCloseSession: false, simplifiedToolNames: true, contentWidth: 'compact', tagColumnsEnabled: true, fileChipStyle: 'expanded', followUpLayout: 'scroll', streamMode: 'smooth' }
 
 const VALID_FILE_CHIP_STYLES: ReadonlySet<FileChipStyle> = new Set(['expanded', 'minimal'])
 const VALID_FOLLOW_UP_LAYOUTS: ReadonlySet<FollowUpLayout> = new Set(['multiline', 'scroll'])
+const VALID_STREAM_MODES: ReadonlySet<StreamMode> = new Set(['immediate', 'smooth'])
 
 /** Migrate legacy boolean sendOnEnter to new SendMode enum */
 function migrateSendMode(raw: unknown): SendMode {
@@ -61,6 +66,7 @@ export function loadChatConfig(): ChatConfig {
           || legacy === 'expanded-aurora' || legacy === 'expanded-domed') cfg.fileChipStyle = 'expanded'
     if (!VALID_FILE_CHIP_STYLES.has(cfg.fileChipStyle)) cfg.fileChipStyle = 'expanded'
     if (!VALID_FOLLOW_UP_LAYOUTS.has(cfg.followUpLayout)) cfg.followUpLayout = 'scroll'
+    if (!VALID_STREAM_MODES.has(cfg.streamMode)) cfg.streamMode = 'smooth'
     return cfg
   }
   catch { return { ...DEFAULTS } }

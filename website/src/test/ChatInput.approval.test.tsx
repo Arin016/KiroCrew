@@ -60,10 +60,10 @@ beforeEach(() => {
 })
 
 describe('ChatInput approval flow', () => {
-  it('shows approval bar when pending approval exists', () => {
+  it('shows approval bar when pending approval exists', async () => {
     const store = createTestStore(stateWithApproval())
     renderWithProviders(<ChatInput {...defaultProps} />, { store })
-    expect(screen.getByText(/Waiting for approval/)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText(/Waiting for approval/)).toBeInTheDocument())
   })
 
   it('shows Allow once button', () => {
@@ -216,10 +216,10 @@ describe('ChatInput approval flow', () => {
     })
   })
 
-  it('shows tool input preview in expanded approval bar', () => {
+  it('shows tool input preview in expanded approval bar', async () => {
     const store = createTestStore(stateWithApproval())
     renderWithProviders(<ChatInput {...defaultProps} />, { store })
-    expect(screen.getByText(/command/)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText(/command/)).toBeInTheDocument())
   })
 
   it('uses approvalFullCommand for TrustDropdown', () => {

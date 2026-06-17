@@ -8,6 +8,8 @@ import { useSearchHighlight, useCurrentOcc } from '../../hooks/SearchHighlightCo
 import { applySearchHighlights } from '../../utils/domHighlight'
 import FileChangeChips, { type FileChangeEntry } from '../../components/FileChangeChips'
 import type { FileChipStyle } from './ChatSettings'
+import { loadChatConfig } from './ChatSettings'
+import { useSmoothStream } from '../../hooks/useSmoothStream'
 
 const OPTION_RE = /\[OPTION:\s*(.+?)\]\s*$/
 const OPTIONS_RE = /\[OPTIONS:\s*(.+?)\]\s*$/
@@ -43,6 +45,9 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
   const effectiveContent = hasVariants && localIdx !== null && !onSwitchVariant ? (variants[localIdx]?.content ?? content) : content
   useEffect(() => { if (applied) setApplied(false) }, [effectiveContent])
   const { text } = parseOptions(effectiveContent)
+  const [smooth] = useState(() => loadChatConfig().streamMode !== 'immediate')
+  const speed = 4 // force high speed smooth streaming to avoid lagging behind raw model output
+  const smoothedText = useSmoothStream(text, isStreaming, smooth, speed)
 
   const planSteps = useMemo(() => {
     if (isStreaming || !planTaskId || !effectiveContent) return null
@@ -108,7 +113,7 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
 
   return <div data-role="assistant" className="group/msg">
     <div ref={contentRef} className="msg-content group/bubble relative text-sm leading-relaxed text-text overflow-hidden" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
-      <MarkdownRenderer content={text} streaming={isStreaming} onFileOpen={onFileOpen} rawMode={rawMode} messageTs={messageTs} glow={isStreaming} />
+      <MarkdownRenderer content={smoothedText} streaming={isStreaming} onFileOpen={onFileOpen} rawMode={rawMode} messageTs={messageTs} glow={isStreaming} smooth={smooth} />
       {!isStreaming && selectionActions.length > 0 && <SelectionToolbar containerRef={contentRef} actions={selectionActions} />}
     </div>
     {fileChanges && fileChanges.length > 0 && !isStreaming && (

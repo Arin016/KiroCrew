@@ -108,7 +108,7 @@ function isSafePath(p: string): boolean {
   return !segments.some(seg => sensitive.some(s => seg === s || seg.startsWith(s + '.')))
 }
 
-export default memo(function DiffBlock({ code, complete, onFileOpen, pathHint }: { code: string; complete: boolean; onFileOpen?: (path: string) => void; pathHint?: string }) {
+export default memo(function DiffBlock({ code, complete, onFileOpen, pathHint, streaming }: { code: string; complete: boolean; onFileOpen?: (path: string) => void; pathHint?: string; streaming?: boolean }) {
   const [copied, setCopied] = useState(false)
   const [sideBySide, setSideBySide] = useState(false)
   const [expandedCtx, setExpandedCtx] = useState<Set<number>>(new Set())
@@ -149,7 +149,7 @@ export default memo(function DiffBlock({ code, complete, onFileOpen, pathHint }:
   const renderUnifiedLine = (line: DiffLine, key: number) => {
     if (line.type === 'meta') return null
     return (
-    <div key={key} className={`flex text-[13px] font-mono leading-relaxed min-w-fit ${DIFF_BG[line.type]}`}>
+    <div key={key} className={`ft-drow flex text-[13px] font-mono leading-relaxed min-w-fit ${DIFF_BG[line.type]}`}>
       {hasLineNums && <span className="select-none text-muted/50 text-right w-[3.5ch] shrink-0 pr-1 border-r border-border/30">{line.type === 'add' ? '' : (line.oldNum ?? '')}</span>}
       {hasLineNums && <span className="select-none text-muted/50 text-right w-[3.5ch] shrink-0 pr-1 border-r border-border/30">{line.type === 'del' ? '' : (line.newNum ?? '')}</span>}
       <span className={`select-none w-[2ch] text-center shrink-0 ${DIFF_FG[line.type]}`}>{SIGN[line.type]}</span>
@@ -182,7 +182,7 @@ export default memo(function DiffBlock({ code, complete, onFileOpen, pathHint }:
         </div>
       </div>
       <pre className="p-0 overflow-x-auto scroll-fade min-w-full">
-        <div className="w-fit min-w-full">
+        <div className={`w-fit min-w-full${streaming ? ' ft-stream-block' : ''}`}>
         {sideBySide ? (
           /* Side-by-side view */
           sbsPairs.map((pair, i) => {

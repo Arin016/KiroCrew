@@ -108,7 +108,7 @@ const FileChangeChips = memo(function FileChangeChips({ fileChanges, onOpenDiff,
   if (!fileChanges?.length) return null
   const Chip = RENDERERS[style] ?? ExpandedChip
   return (
-    <div className="flex flex-wrap items-center gap-1.5 mb-1.5">
+    <div className="ft-block-reveal flex flex-wrap items-center gap-1.5 mb-1.5">
       {fileChanges.map(fc => (
         <Chip key={fc.path} fc={fc} onClick={() => onOpenDiff?.(fc.path, fc.after, fc.before)} />
       ))}

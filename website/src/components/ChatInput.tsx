@@ -363,7 +363,20 @@ function ChatInput({
   // so the user keeps full context (timestamp, purpose, input preview)
   // alongside the action buttons. See src/store/toolPillRegistry.ts.
   const pillVisible = useToolPillVisible(approvalToolCallId)
-  const showGhost = !!pendingApproval && !pillVisible
+
+  // Settle guard: when a new approval arrives, suppress the ghost for a brief
+  // window so the Virtuoso list has time to mount the ToolCallLine and register
+  // the pill. Without this, the ghost flashes for 1-2 frames then collapses
+  // once the in-chat pill reports itself visible.
+  const [ghostSettled, setGhostSettled] = useState(false)
+  useEffect(() => {
+    if (!approvalToolCallId) { setGhostSettled(false); return }
+    setGhostSettled(false)
+    const t = setTimeout(() => setGhostSettled(true), 150)
+    return () => clearTimeout(t)
+  }, [approvalToolCallId])
+
+  const showGhost = !!pendingApproval && !pillVisible && ghostSettled
   const showInChat = useCallback(() => {
     if (approvalToolCallId) dispatch(openActivityToTool(approvalToolCallId))
   }, [approvalToolCallId, dispatch])

@@ -6,6 +6,10 @@ import AssistantMessage, { parseOptions } from '../pages/chat/AssistantMessage'
 vi.mock('../components/MarkdownRenderer', () => ({
   default: ({ content }: { content: string }) => <div data-testid="md">{content}</div>,
 }))
+// Mock useSmoothStream to passthrough — its rAF loop conflicts with vi.useFakeTimers()
+vi.mock('../hooks/useSmoothStream', () => ({
+  useSmoothStream: (content: string) => content,
+}))
 vi.mock('../utils/shareUrl', () => ({ copySessionLink: vi.fn().mockResolvedValue(undefined) }))
 import { copySessionLink } from '../utils/shareUrl'
 

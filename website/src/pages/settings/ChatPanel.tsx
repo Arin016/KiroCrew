@@ -141,6 +141,13 @@ export function ChatPanel() {
 
       <SettingsSection title="Behavior">
         <SettingsCard>
+          <SettingsButtonGroup
+            label="Text Streaming Style"
+            description="Immediate mode shows raw chunks as they arrive. Smooth mode buffers and fades text in at a steady pace."
+            value={chatCfg.streamMode}
+            options={[{ value: 'immediate', label: 'Immediate' }, { value: 'smooth', label: 'Smooth' }]}
+            onChange={v => setChat('streamMode', v as ChatConfig['streamMode'])}
+          />
           <SettingsSelect
             label="Send shortcut"
             description={chatCfg.sendOnEnter === 'enter' ? 'Shift+Enter for newline' : chatCfg.sendOnEnter === 'ctrl-enter' ? 'Enter for newline' : `${isMac ? '⌘' : 'Ctrl'}+Enter for newline`}
