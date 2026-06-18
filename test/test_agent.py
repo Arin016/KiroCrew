@@ -3171,3 +3171,173 @@ class TestMigrateAgentSpecs:
         config = json.loads(path.read_text())
         assert "model_managed" not in config
         assert "cc_model" not in config
+
+
+# ---------------------------------------------------------------------------
+# MCP merge: CC-global vs Kiro-global priority + resolution-aware fallback
+# (regression coverage for the builder-mcp shadowing bug — a bare/unresolvable
+# command in the higher-priority source must not shadow a resolvable command
+# in a lower-priority source, and Kiro-global outranks CC-global.)
+# ---------------------------------------------------------------------------
+
+
+def _make_exec(tmp_path: Path, name: str) -> str:
+    """Create a real executable file and return its absolute path."""
+    p = tmp_path / "bin" / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("#!/bin/sh\n")
+    p.chmod(0o755)
+    return str(p)
+
+
+def _run_install_mcp_merge(
+    tmp_path: Path,
+    cfg_dir: Path,
+    *,
+    cc_servers: dict,
+    kiro_servers: dict,
+    kiroclaw_servers: dict | None = None,
+    which_side_effect=lambda c, **kw: c,
+) -> dict:
+    """Run install_agent with CC-global and Kiro-global mcp.json seeded and a
+    customizable shutil.which. Returns the parsed kiroclaw.json config."""
+    kiro_dir = tmp_path / "kiro_agents"
+    kiro_dir.mkdir(exist_ok=True)
+    prompt = cfg_dir / "prompt.md"
+    mc_config = tmp_path / "empty_mc_config.json"
+    if not mc_config.exists():
+        mc_config.write_text(json.dumps({"agent": {"kiro_hooks_autoimport": False}}))
+    kiro_mcp = tmp_path / "fake_kiro_mcp.json"
+    cc_mcp = tmp_path / "fake_cc_mcp.json"
+    kiro_mcp.write_text(json.dumps({"mcpServers": kiro_servers}))
+    cc_mcp.write_text(json.dumps({"mcpServers": cc_servers}))
+    if kiroclaw_servers is not None:
+        kc_home = tmp_path / "kiroclaw_home"
+        kc_home.mkdir(parents=True, exist_ok=True)
+        (kc_home / "mcp.json").write_text(json.dumps({"mcpServers": kiroclaw_servers}))
+
+    patches = [
+        patch.multiple(
+            "kiro_claw.agent",
+            KIRO_AGENTS_DIR=kiro_dir,
+            _BUNDLED_CFG_DIR=cfg_dir,
+            _KIROCLAW_BIN="/usr/bin/kiroclaw",
+            _USER_DIR=tmp_path / "kiroclaw_home",
+            _MANAGED_MCP_SERVERS=_DEFAULT_MANAGED_MCPS,
+            _KIRO_MCP_JSON=kiro_mcp,
+            _CC_MCP_JSON=cc_mcp,
+        ),
+        patch("kiro_claw.agent._prompt_path", return_value=prompt),
+        patch("kiro_claw.agent._shipped_defaults", return_value=cfg_dir / "defaults.json"),
+        patch("kiro_claw.agent._project_dir", return_value=None),
+        patch("kiro_claw.agent._aim_skill_paths", return_value=[]),
+        patch("kiro_claw.agent.shutil.which", side_effect=which_side_effect),
+        patch("kiro_claw.agent._enforce_denied_commands"),
+        patch("kiro_claw.agent._mc_config_path", return_value=mc_config),
+    ]
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        path = install_agent()
+    return json.loads(path.read_text())
+
+
+class TestMcpMergePriority:
+    def test_kiro_global_outranks_cc_global(self, tmp_path: Path):
+        """Same server in both globals → Kiro-global command wins (CC down-ranked)."""
+        cfg_dir = _bundled_defaults(tmp_path)
+        kiro_cmd = _make_exec(tmp_path, "kiro-srv")
+        cc_cmd = _make_exec(tmp_path, "cc-srv")
+        config = _run_install_mcp_merge(
+            tmp_path,
+            cfg_dir,
+            cc_servers={"shared-srv": {"command": cc_cmd}},
+            kiro_servers={"shared-srv": {"command": kiro_cmd}},
+        )
+        assert config["mcpServers"]["shared-srv"]["command"] == kiro_cmd
+
+    def test_unresolvable_cc_does_not_shadow_resolvable_kiro(self, tmp_path: Path):
+        """CC bare/unresolvable command must not shadow Kiro's resolvable absolute path."""
+        cfg_dir = _bundled_defaults(tmp_path)
+        kiro_cmd = _make_exec(tmp_path, "real-srv")
+        config = _run_install_mcp_merge(
+            tmp_path,
+            cfg_dir,
+            cc_servers={"srv": {"command": "bare-builder-mcp"}},
+            kiro_servers={"srv": {"command": kiro_cmd}},
+            which_side_effect=lambda c, **kw: None if c == "bare-builder-mcp" else c,
+        )
+        assert "srv" in config["mcpServers"], "server was dropped (shadowed by bare CC command)"
+        assert config["mcpServers"]["srv"]["command"] == kiro_cmd
+
+    def test_fallback_to_resolvable_lower_source(self, tmp_path: Path):
+        """If the winning source's command is unresolvable, fall back to a
+        resolvable command from another source instead of dropping the server."""
+        cfg_dir = _bundled_defaults(tmp_path)
+        cc_cmd = _make_exec(tmp_path, "cc-real")
+        config = _run_install_mcp_merge(
+            tmp_path,
+            cfg_dir,
+            cc_servers={"srv": {"command": cc_cmd}},
+            kiro_servers={"srv": {"command": "bare-kiro"}},
+            which_side_effect=lambda c, **kw: None if c == "bare-kiro" else c,
+        )
+        assert "srv" in config["mcpServers"], "server dropped instead of falling back"
+        assert config["mcpServers"]["srv"]["command"] == cc_cmd
+
+    def test_fallback_adopts_source_args_env_unit(self, tmp_path: Path):
+        """On cross-source fallback, the resolving source's command/args/env
+        are adopted as a unit — the winner's stale args/env must not leak in,
+        but non-command fields (autoApprove) are preserved."""
+        cfg_dir = _bundled_defaults(tmp_path)
+        cc_cmd = _make_exec(tmp_path, "cc-real")
+        config = _run_install_mcp_merge(
+            tmp_path,
+            cfg_dir,
+            # CC (lower priority) is the resolvable one and carries its own args.
+            cc_servers={"srv": {"command": cc_cmd, "args": ["--cc"], "env": {"CC": "1"}}},
+            # Kiro wins priority but is unresolvable and has different args +
+            # a non-command field (autoApprove) that should survive.
+            kiro_servers={
+                "srv": {
+                    "command": "bare-kiro",
+                    "args": ["--kiro"],
+                    "autoApprove": ["tool"],
+                }
+            },
+            which_side_effect=lambda c, **kw: None if c == "bare-kiro" else c,
+        )
+        srv = config["mcpServers"]["srv"]
+        assert srv["command"] == cc_cmd
+        assert srv["args"] == ["--cc"]          # adopted from the resolving source
+        assert srv.get("env") == {"CC": "1"}     # adopted from the resolving source
+        assert srv.get("autoApprove") == ["tool"]  # winner's non-command field kept
+
+    def test_server_without_command_is_dropped(self, tmp_path: Path):
+        """A server with no command in any source is dropped (no crash)."""
+        cfg_dir = _bundled_defaults(tmp_path)
+        config = _run_install_mcp_merge(
+            tmp_path,
+            cfg_dir,
+            cc_servers={},
+            kiro_servers={"srv": {"args": ["--x"]}},  # no command anywhere
+        )
+        assert "srv" not in config["mcpServers"]
+
+    def test_kiroclaw_override_does_not_corrupt_global_fallback(self, tmp_path: Path):
+        """Regression (AutoSDE): a kiroclaw mcp.json override carrying an
+        unresolvable command must not mutate the shared kiro-global source dict
+        that is reused as a fallback candidate. The resolvable kiro-global
+        command must still be recovered via the fallback (server not dropped)."""
+        cfg_dir = _bundled_defaults(tmp_path)
+        kiro_cmd = _make_exec(tmp_path, "kiro-real")
+        config = _run_install_mcp_merge(
+            tmp_path,
+            cfg_dir,
+            cc_servers={},
+            kiro_servers={"srv": {"command": kiro_cmd}},
+            kiroclaw_servers={"srv": {"command": "bare-unresolvable"}},
+            which_side_effect=lambda c, **kw: None if c == "bare-unresolvable" else c,
+        )
+        assert "srv" in config["mcpServers"], "server dropped: global source dict corrupted by override"
+        assert config["mcpServers"]["srv"]["command"] == kiro_cmd

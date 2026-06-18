@@ -1468,26 +1468,36 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
     if fresh_install and (clean or agent_state.get_model_managed(main_name) is None):
         agent_state.set_model_managed(main_name, True)
 
-    # Merge shared MCP servers from ~/.claude.json (Claude Code user-level
-    # config) FIRST so CC globals take precedence over Kiro globals when
-    # both define the same server (matches docs/mcp-architecture.md merge
-    # priority: CC global wins over Kiro global).  Skip managed servers —
-    # their command/args are set by _refresh_dynamic_fields() and must not
-    # be overwritten by stale global entries.  Write-through is never done
-    # here (KiroClaw reads globals but never mutates them).
-    managed_names = set(_MANAGED_MCP_SERVERS)
-    cc_shared_mcp = _load_json(_CC_MCP_JSON).get("mcpServers", {})
-    for name, spec in cc_shared_mcp.items():
-        if isinstance(spec, dict) and name not in managed_names:
-            config.setdefault("mcpServers", {}).setdefault(name, spec)
-
     # Merge shared MCP servers from ~/.kiro/settings/mcp.json (Kiro user-level
-    # config) — lower priority than CC global; setdefault is a no-op when CC
-    # already populated the same key, so CC wins on collisions per the docs.
+    # config) FIRST.  KiroClaw is kiro-first (ACP/kiro-cli only), so Kiro
+    # global OUTRANKS the Claude Code global on collisions — setdefault makes
+    # the first writer win.  Skip managed servers — their command/args are set
+    # by _refresh_dynamic_fields() and must not be overwritten by stale global
+    # entries.  Write-through is never done here (KiroClaw reads globals but
+    # never mutates them).
+    #
+    # NOTE: this reverses the prior "CC global wins over Kiro global" rule.
+    # See docs/mcp-architecture.md. CC global is kept only as a gap-filler so
+    # the Claude Code provider can be re-enabled later without rework; it must
+    # not shadow a Kiro-global entry.
+    managed_names = set(_MANAGED_MCP_SERVERS)
     shared_mcp = _load_json(_KIRO_MCP_JSON).get("mcpServers", {})
     for name, spec in shared_mcp.items():
         if isinstance(spec, dict) and name not in managed_names:
-            config.setdefault("mcpServers", {}).setdefault(name, spec)
+            # Copy so config never aliases the source dict — a later update()
+            # (kiroclaw merge) must not mutate shared_mcp, which is reused as a
+            # fallback candidate during command validation below.
+            config.setdefault("mcpServers", {}).setdefault(name, dict(spec))
+
+    # Merge shared MCP servers from ~/.claude.json (Claude Code user-level
+    # config) — now LOWER priority than Kiro global; setdefault is a no-op when
+    # Kiro already populated the same key, so CC only fills gaps.
+    cc_shared_mcp = _load_json(_CC_MCP_JSON).get("mcpServers", {})
+    for name, spec in cc_shared_mcp.items():
+        if isinstance(spec, dict) and name not in managed_names:
+            # Copy (see note above) so cc_shared_mcp stays pristine for the
+            # fallback-candidate lookup.
+            config.setdefault("mcpServers", {}).setdefault(name, dict(spec))
 
     # ~/.kiroclaw/mcp.json overrides kiro mcp.json for the kiroclaw agent —
     # kiroclaw-specific config wins in a tie.
@@ -1499,11 +1509,39 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
         if isinstance(spec, dict) and name not in managed_names:
             mcps = config.setdefault("mcpServers", {})
             if name in mcps and isinstance(mcps[name], dict):
+                # mcps[name] is a private copy (globals were copied in above),
+                # so update() no longer mutates any source dict.
                 mcps[name].update(spec)
             else:
-                mcps[name] = spec
+                mcps[name] = dict(spec)
 
-    # Resolve MCP commands to absolute paths and validate
+    # Resolve MCP commands to absolute paths and validate.
+    #
+    # Resolution-aware fallback: a server can be defined in several sources
+    # with different commands.  If the merged winner's command does not
+    # resolve (e.g. a bare command whose binary isn't on the rebuild PATH —
+    # the classic builder-mcp shadowing case), fall back to the SAME server's
+    # spec from the other sources before dropping it, in priority order
+    # (kiroclaw > kiro-global > cc-global).  This prevents one source's
+    # unresolvable command from killing a server another source can resolve.
+    aim_path = str(Path.home() / ".aim" / "mcp-servers")
+
+    def _resolve_command(cmd: str, env: dict | None) -> str | None:
+        """Resolve an MCP command to an absolute path, or None if not found.
+
+        Accepts an absolute path directly when the file exists and is
+        executable — shutil.which can fail inside user-namespace sandboxes
+        even when the file is fine.
+        """
+        if not cmd:
+            return None
+        if os.path.isabs(cmd) and os.path.isfile(cmd) and os.access(cmd, os.X_OK):
+            return cmd
+        env_path = (env or {}).get("PATH", "")
+        extra = os.pathsep.join(filter(None, [env_path, aim_path]))
+        search_path = extra + os.pathsep + os.environ.get("PATH", "")
+        return shutil.which(cmd, path=search_path)
+
     valid_servers: dict[str, Any] = {}
     for name, spec in config.get("mcpServers", {}).items():
         if not isinstance(spec, dict):
@@ -1512,26 +1550,61 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
         if spec.get("url"):
             valid_servers[name] = spec
             continue
-        cmd = spec.get("command", "")
-        if not cmd:
-            logger.warning("Dropping MCP server %r: no command", name)
-            continue
-        # Resolve using server's env PATH merged with system PATH.
-        # Accept absolute paths directly if the file exists — shutil.which
-        # can fail inside user-namespace sandboxes even when the file is fine.
-        if os.path.isabs(cmd) and os.path.isfile(cmd) and os.access(cmd, os.X_OK):
-            resolved = cmd
-        else:
-            env_path = spec.get("env", {}).get("PATH", "")
-            aim_path = str(Path.home() / ".aim" / "mcp-servers")
-            extra = os.pathsep.join(filter(None, [env_path, aim_path]))
-            search_path = extra + os.pathsep + os.environ.get("PATH", "")
-            resolved = shutil.which(cmd, path=search_path)
+        # Build candidate specs in priority order: the merged winner first,
+        # then the same server from each source as a resolution fallback.
+        candidates: list[tuple[str, dict]] = [("winner", spec)]
+        for label, src in (
+            ("kiroclaw", kiroclaw_mcp),
+            ("kiro-global", shared_mcp),
+            ("cc-global", cc_shared_mcp),
+        ):
+            alt = src.get(name)
+            if isinstance(alt, dict) and alt is not spec:
+                candidates.append((label, alt))
+
+        resolved: str | None = None
+        chosen: dict = spec
+        tried: list[str] = []
+        had_any_command = False
+        for label, cand in candidates:
+            cmd = cand.get("command", "")
+            if cmd:
+                had_any_command = True
+            r = _resolve_command(cmd, cand.get("env"))
+            tried.append(f"{label}={cmd or '<none>'}{' -> ok' if r else ''}")
+            if r:
+                resolved = r
+                chosen = cand
+                break
+
         if resolved:
-            spec["command"] = resolved
-            valid_servers[name] = spec
+            # Start from the merged winner so user-set NON-command fields
+            # (autoApprove, disabled, ...) are preserved.  When we fall back to
+            # a *different* source, adopt that source's command/args/env as a
+            # unit (args belong with their command) — drop the winner's stale
+            # args/env so we never pair one source's command with another's
+            # args.
+            merged = dict(spec)
+            merged["command"] = resolved
+            if chosen is not spec:
+                merged.pop("args", None)
+                merged.pop("env", None)
+                if "args" in chosen:
+                    merged["args"] = chosen["args"]
+                if "env" in chosen:
+                    merged["env"] = chosen["env"]
+            valid_servers[name] = merged
+        elif not had_any_command:
+            # No candidate defined a command at all — distinct from a command
+            # that was defined but couldn't be resolved.
+            logger.warning("Dropping MCP server %r: no command", name)
         else:
-            logger.warning("Dropping MCP server %r: command not found: %s", name, cmd)
+            logger.warning(
+                "Dropping MCP server %r: command not found: %s",
+                name,
+                spec.get("command", ""),
+            )
+            logger.debug("MCP %r resolution failed; tried %s", name, "; ".join(tried))
     config["mcpServers"] = valid_servers
 
     # Rewrite slash-containing server keys to kiro-safe aliases (also migrates

@@ -30,10 +30,28 @@ Highest wins at collisions:
 2. Existing `~/.kiro/agents/kiroclaw.json` — loaded as the merge base, so
    any server already present with user customizations (`autoApprove`,
    hand-edits, kiro-cli direct adds) survives the rebuild
-3. `~/.claude.json` `mcpServers` — Claude Code global (merged via
-   `setdefault`, only fills gaps the base didn't already have)
-4. `~/.kiro/settings/mcp.json` — Kiro global (merged via `setdefault`
-   after CC, so CC wins between the two globals)
+3. `~/.kiro/settings/mcp.json` — Kiro global (merged via `setdefault`
+   **first**, so Kiro global wins between the two globals)
+4. `~/.claude.json` `mcpServers` — Claude Code global (merged via
+   `setdefault` **after** Kiro, so it only fills gaps the base/Kiro didn't
+   already have; it must **not** shadow a Kiro-global entry)
+
+> **Kiro-first (changed 2026-06):** KiroClaw is ACP/kiro-cli-only, so Kiro
+> global now **outranks** the Claude Code global — the reverse of the prior
+> "CC wins over Kiro" rule. The CC global is retained only as a gap-filler so
+> the Claude Code (or another) provider can be re-enabled later without
+> rework. Fully removing the CC scope (`mcp_discovery` `SCOPE_CC_GLOBAL`, the
+> dashboard `ccGlobal` toggle, the hidden provider-switch UI) is
+> **intentionally deferred** pending a provider-strategy decision; the
+> interface code is left intact.
+>
+> **Resolution-aware fallback:** a server may be defined in several sources
+> with different commands. If the merged winner's command does not resolve
+> (e.g. a bare command whose binary isn't on the rebuild PATH — the
+> builder-mcp shadowing case), `rebuild_agent_config` falls back to the same
+> server's spec from the other sources (kiroclaw > kiro-global > cc-global)
+> before dropping it, so one source's unresolvable command can't kill a
+> server another source can resolve.
 
 The existing-agent-config layer is what keeps user-added remote servers
 (e.g. `kiro-cli mcp add --agent kiroclaw --url ...`) and tweaked
@@ -317,13 +335,17 @@ On gateway startup, `rebuild_agent_config()`:
 
 1. Load existing `~/.kiro/agents/kiroclaw.json` as base
 2. `_refresh_dynamic_fields()` — managed defaults, resolved binary path
-3. Merge `~/.kiro/settings/mcp.json` (setdefault, lowest priority)
-4. Merge `~/.claude.json` `mcpServers` (setdefault)
+3. Merge `~/.kiro/settings/mcp.json` (setdefault — Kiro global, wins
+   between the two globals)
+4. Merge `~/.claude.json` `mcpServers` (setdefault — CC global, fills gaps
+   only; lower priority than Kiro)
 5. Merge `~/.kiroclaw/mcp.json` (`update`, wins over globals)
 6. Re-resolve any per-server skill-directory paths from the local skill
    locations (project `skills/`, `~/.kiroclaw/skills`) so they never go
    stale across rebuilds
-7. Resolve commands to absolute paths
+7. Resolve commands to absolute paths, with a resolution-aware fallback:
+   if the winning source's command doesn't resolve, try the same server's
+   command from the other sources before dropping it
 8. Write `~/.kiro/agents/kiroclaw.json`
 9. Render `~/.claude/agents/kiroclaw.md` + `kiroclaw.mcp.json`
    (always, regardless of active provider)
