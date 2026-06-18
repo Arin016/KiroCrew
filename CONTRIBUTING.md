@@ -256,3 +256,8 @@ Rules: imperative mood, lowercase summary, no trailing period, wrap body at 72 c
 
 Open a [GitHub issue](https://github.com/YOUR_ORG/kiroclaw/issues) or start a
 discussion in the repository.
+
+## Security Issues
+
+**Do not** report security vulnerabilities through public GitHub issues. See
+[SECURITY.md](SECURITY.md) for responsible disclosure instructions.

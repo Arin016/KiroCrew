@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kiroclaw"
 version = "0.1.0"
-description = "KiroClaw"
+description = "Personal AI agent that runs locally — chat via CLI, dashboard, Slack, or desktop app"
 readme = "README.md"
 # macOS (x86_64 + arm64) and Linux (x86_64 + aarch64), CPython 3.9-3.13.
 # Must be declared in this [project] table: when it exists, setuptools reads
