@@ -56,12 +56,15 @@ function StatusBadge({ status }: { status: InstanceTunnelStatus }) {
   )
 }
 
-function AddInstanceForm({ onAdded }: { onAdded: () => void }) {
+function AddInstanceForm({ onAdded, usedPorts }: { onAdded: () => void; usedPorts: number[] }) {
   const [name, setName] = useState('')
   const [sshHost, setSshHost] = useState('')
   const [remotePort, setRemotePort] = useState('7777')
   const [ttl, setTtl] = useState('20h')
   const [remoteBin, setRemoteBin] = useState('')
+
+  const portNum = Number(remotePort) || 0
+  const dupPort = portNum > 0 && usedPorts.includes(portNum)
 
   const addMutation = useMutation({
     mutationFn: () =>
@@ -107,6 +110,17 @@ function AddInstanceForm({ onAdded }: { onAdded: () => void }) {
         <label className="flex flex-col gap-1 text-[13px] text-muted">
           Remote port
           <input className={inputCls} value={remotePort} onChange={e => setRemotePort(e.target.value)} placeholder="7777" inputMode="numeric" />
+          <span className="text-[12px] text-muted leading-snug">
+            Must match the port the remote gateway serves on (its{' '}
+            <code className="text-text">dashboard.url</code>). Each connected instance
+            needs a <strong>distinct</strong> port — the local forward mirrors it.
+          </span>
+          {dupPort ? (
+            <span className="text-[12px] text-danger leading-snug">
+              Port {portNum} is already used by another instance — choose a different one
+              (and configure that port on the remote host).
+            </span>
+          ) : null}
         </label>
         <label className="flex flex-col gap-1 text-[13px] text-muted">
           Token TTL
@@ -134,14 +148,15 @@ function AddInstanceForm({ onAdded }: { onAdded: () => void }) {
         <Btn
           primary
           onClick={() => addMutation.mutate()}
-          disabled={addMutation.isPending || !name.trim() || !sshHost.trim()}
+          disabled={addMutation.isPending || !name.trim() || !sshHost.trim() || dupPort}
         >
           {addMutation.isPending ? 'Adding…' : 'Add instance'}
         </Btn>
       </div>
       <p className="mt-2 text-[12px] text-muted">
         The gateway opens an SSH tunnel and mints a short-lived token on connect.
-        A local loopback port is auto-allocated.
+        The local forward port mirrors the remote port, so each connected instance
+        must use a distinct remote port.
       </p>
     </Card>
   )
@@ -170,8 +185,7 @@ function InstanceRow({
       <div className="min-w-0">
         <div className="text-text text-sm font-medium truncate">{inst.name}</div>
         <div className="text-[12px] text-muted truncate">
-          {inst.ssh_host} · remote {inst.remote_port}
-          {inst.local_port ? ` · local ${inst.local_port}` : ''} · ttl {inst.ttl}
+          {inst.ssh_host} · port {inst.remote_port} · ttl {inst.ttl}
           {typeof ttl === 'number' ? ` · token ${humanizeSecs(ttl)} left` : ''}
         </div>
         <div className="mt-1"><StatusBadge status={inst.status} /></div>
@@ -452,7 +466,7 @@ export function InstancesPanel() {
               </div>
             </Card>
           )}
-          <AddInstanceForm onAdded={reload} />
+          <AddInstanceForm onAdded={reload} usedPorts={instances.map(i => i.remote_port)} />
         </>
       )}
     </div>

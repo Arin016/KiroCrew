@@ -83,4 +83,36 @@ describe('InstancesPanel', () => {
       ),
     )
   })
+
+  it('blocks adding an instance whose remote port duplicates another (SEC-016 mirror)', async () => {
+    ;(api.listInstances as any).mockResolvedValue({
+      active: true,
+      warm_set_cap: 5,
+      instances: [
+        {
+          id: 'cd-1',
+          name: 'CD1',
+          ssh_host: 'cd-1-alias',
+          remote_port: 7777,
+          local_port: 0,
+          ttl: '20h',
+          status: { state: 'disconnected' },
+        },
+      ],
+    })
+    const u = userEvent.setup()
+    renderWithProviders(<InstancesPanel />)
+
+    // Default remote port is 7777, which collides with the existing instance.
+    expect(
+      await screen.findByText(/already used by another instance/i),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add instance' })).toBeDisabled()
+
+    // A distinct port clears the guard and re-enables Add.
+    const portInput = screen.getByPlaceholderText('7777')
+    await u.clear(portInput)
+    await u.type(portInput, '7800')
+    expect(screen.queryByText(/already used by another instance/i)).not.toBeInTheDocument()
+  })
 })
