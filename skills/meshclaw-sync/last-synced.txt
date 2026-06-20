@@ -16,12 +16,97 @@
 #                so frontend sync is by CONTENT within the post-snapshot window, not a
 #                clean SHA range. This SHA records the upstream tip last triaged.
 
-beta 36c205e4      # 2026-06-17 MeshClaw backend beta-braveheart tip (batch-19, v3.1.0). KEEP at tip (docs: version bump 3.0.2→3.1.0 + config baseline — version/changelog only, SKIP_INTERNAL; fork is 0.1.0).
-frontend-beta 08716b28ab61fff6a898ec07787c592c38bbaae0  # 2026-06-17 MeshClawWebsite beta-braveheart tip (batch-19). KEEP at tip (feat: Kiro credit usage pill + details modal, ported PARTIAL — last commit of this batch).
-mainline 199d7853  # 2026-06-17 MeshClaw mainline tip (upstream, v3.1.0 release merge). Mainline-only delta vs beta = the v3.1.0 release merge of beta-braveheart into mainline (199d7853 backend / e6cd760 frontend) — no NEW mainline-only candidate (everything landed via beta-braveheart, already triaged).
+beta b35c496be08430fcc0a81c3824ed829b7547865b      # 2026-06-20 MeshClaw backend beta-braveheart tip (batch-20). KEEP at tip (feat(dashboard): persist open tabs across gateway restart — last backend commit of this batch, ported as b6616fe).
+frontend-beta fdfe158b3e31822d2ac133fafb63d9fc7c0c2f0e  # 2026-06-20 MeshClawWebsite last TRIAGED+PORTED frontend tip (batch-20, ported as b1077f3 offline state). NOT advanced to the live beta tip ca99bb4 ("fix(voice): Pre-warm mic for instant recording") — that commit landed at 15:07Z, AFTER this batch's scan, was never triaged, and must be picked up next batch. Advancing the boundary onto it would make the next `fdfe158b..origin/beta-braveheart` scan skip it. Boundary = last triaged, NOT live tip, when a straggler lands mid-run.
+mainline 199d7853  # 2026-06-20 MeshClaw mainline tip (upstream, v3.1.0 release merge). Unchanged from batch-19 — no NEW mainline-only delta this window (everything landed via beta-braveheart; the v3.1.0 release merge 199d7853 backend / e6cd760 frontend was already triaged).
 # NOTE: this 'mainline' SHA is the UPSTREAM MeshClaw mainline tip (for the mainline-only
 # candidate check), NOT the fork's mainline — batch-12 mistakenly recorded the fork SHA
 # (796e21c5) here, which broke the `$MAIN..origin/mainline` scan. Corrected in batch-13.
+
+# --- Batch-20 (dual-repo sync 2026-06-20) ------------------------------------
+# Fresh branch sync/beta-2026-06-20 off origin/mainline (batch-19 boundary).
+# Spans the post-batch-19 window on BOTH repos:
+#   backend  beta-braveheart 36c205e4..b35c496b  (mainline unchanged 199d7853)
+#   frontend MeshClawWebsite  08716b28..fdfe158b  (ca99bb4 landed mid-finalize → DEFER)
+# 39 commits ported BY CONTENT (no cherry-pick; repos share content lineage only),
+# path/symbol-mapped, in chronological order, one fix per commit. Verified per
+# commit: backend pytest(affected files) + flake8; frontend tsc -b + vitest.
+# Tally: 39 PORTED (17 backend + 22 frontend) ; 19 SKIP/ALREADY_PRESENT ; 1 DEFER.
+# No NEW mainline-only delta — the upstream mainline tip is still the v3.1.0 release
+# merge; every in-window candidate reached us via beta-braveheart (already triaged).
+#
+# HEADLINE backend: 465268b CSE must-fix hardening (SEC-009/016/006/012, d2ebac3);
+#   2b2eaeb OAuth-style refresh tokens for dashboard auth (ec9c76b); a270bd1 auto-retry
+#   transient backend 5xx on the chat_runner path (c2713ac); 33dc71b block session when
+#   lessons exceed size cap (463feca); 2bc48022 SEC-016 instance tunnel port-mirror
+#   (c76a75e); e401fda deploy-web built-in app + publish-provider registry (c2d404e);
+#   d6e48920 resolve KRB5CCNAME at spawn for Kerberos-gated MCP servers (a7c4ba1).
+# HEADLINE frontend: 2d6a3e46 desktop auto-update + fail-fast gateway + boot splash
+#   (4b3a7e5); 9b6568c docked chat-search results pane (b7feb70); a8861d80 quota-safe
+#   localStorage writes (ebae724); 1603580 keyboard nav for dropdowns/pickers (e32e603);
+#   fdfe158 visible offline state + click-block + self-recovery (b1077f3); a1d2cd6
+#   Serengeti Watering Hole scene (f3dee15).
+#
+# 2 cross-candidate OVERRIDES of the per-commit triage (analyzers couldn't see each
+# other): 1e8f71cb (safeStorage reclaim escalate, e702543) DEFER->KEEP — its prereq
+#   a8861d80 (quota-safe localStorage, ebae724) is a keeper ported earlier this batch;
+#   2dc76572 (electron scrollable error UI + port recovery, d1fcbad) DEFER->KEEP — its
+#   prereq 2d6a3e46 (electron auto-update/splash, 4b3a7e5) is a keeper this batch.
+#
+# SKIP / ALREADY_PRESENT (19) — backend:
+#   754ef420 SKIP_INTERNAL — one-line Brazil versionSet edit (OncallWatchTower/development
+#     ->release) in apps/app-registry.json; Brazil registry data, no public-build effect.
+#   1464a0a7 SKIP_INTERNAL — appends one curated oncall-watchtower row to app-registry.json
+#     (repo:OncallWatchTower); App Store data only.
+#   08ae6866 ALREADY_PRESENT — resolution-aware MCP merge fallback (agent.py
+#     rebuild_agent_config + test); the production behavior is already live in the fork.
+#   35e6ca74 SKIP_INTERNAL — writing-review scanner-sync auth swaps aiohttp->curl; all
+#     logic confined to the absent writing-review subsystem.
+#   5f3c6555 ALREADY_PRESENT — doc-only Raycast PATH fix in REMOTE_DESKTOP_SETUP.md
+#     (toolbox/bin hand-built PATH); fork doc already correct.
+#   6b51f2eb SKIP_INTERNAL — adds "meetnote" (repo:KiroClawApp-MeetNote) to
+#     app-registry.json; App Store data only.
+#   6aba983d SKIP_INTERNAL — silent self-install Artifactory MCP on first publish; confined
+#     to the absent Harmony-Artifactory publish/install subsystem (PublishProvider.ensure_ready).
+#   439ae3b6 SKIP_INTERNAL — configurable mwinit FIDO2 flags; entirely in the Midway/mwinit
+#     auth subsystem the fork stubs.
+#   15ebbb04 SKIP_INTERNAL — mcp-gateway rewriter isolation/correctness; confined to the
+#     absent mcp_gateway/rewriter.py + its test.
+# SKIP / ALREADY_PRESENT (19) — frontend:
+#   7fdd2398 SKIP_INTERNAL — move Secretary settings into the Secretary app page; 4/5 files
+#     have no fork counterpart (SecretaryPage/SecretaryPanel — Secretary absent).
+#   eefae42a SKIP_INTERNAL — tidy TaskKeeper settings panel (settings/TaskKeeperPanel.tsx);
+#     TaskKeeper built-in app absent.
+#   6ab1d283 ALREADY_PRESENT — theme mascot positioning / cross-instance bleed / dynamic
+#     wordmark; the only generic core hunk (App.tsx dynamic wordmark) is already present.
+#   9287a3ac SKIP_INTERNAL — move TaskKeeper settings into the TaskKeeper app page; all 4
+#     files confined to the deleted TaskKeeper app.
+#   ed11a9ac SKIP_INTERNAL — writing-review "Download annotated copy" button; wholly in the
+#     absent writing-review subsystem (no WritingReviewPage.tsx).
+#   90e9478  ALREADY_PRESENT — one-line Tailwind w-full on TrustDropdown itemClass rows;
+#     already present in the fork's TrustDropdown.tsx.
+#   8e3ed110 SKIP_INTERNAL — Web Deploy console + unified publish-provider registry
+#     (Route B); every hunk gated on the absent Artifactory/publish-console subsystem.
+#   967849fb ALREADY_PRESENT — voice recording feedback + mic picker; the real feat port
+#     is fork commit c58b018 (cites 967849f) — verified by content, not title.
+#   aad8db00 ALREADY_PRESENT — topbar notifications bell popover; all 7 touched paths carry
+#     this behavior in the fork (3 new files present, confirmed by post-image content).
+#
+# DEFER (1, picked up next batch): frontend ca99bb4 (fix(voice): Pre-warm mic for instant
+#   recording) — landed on origin/beta-braveheart at 15:07Z mid-finalize, AFTER the batch's
+#   scan; never triaged. The frontend-beta boundary is deliberately LEFT at fdfe158b (the
+#   last triaged commit), NOT advanced onto ca99bb4 — advancing would make the next
+#   `fdfe158b..origin/beta-braveheart` scan exclude it (silent skip). It is the first
+#   candidate of batch-21.
+#
+# De-Amazon audit (Step 6) clean over LIVE added lines: 0 live couplings on either repo.
+# Expected inert hits only — the acp/client.py Bedrock-path comment + allowlist literals,
+# and the d6e48920 KRB5CCNAME helper (generic MIT Kerberos env passthrough, NOT a coupling;
+# its comments may inertly name amazon-quick-mcp). KIROACP-ONLY invariant held: no
+# ClaudeCode/Bedrock provider glue re-introduced; the dormant ACP_BACKEND_CLAUDE /
+# _is_claude seam in acp/client.py left untouched.
+# Boundaries advanced: beta 36c205e4->b35c496b, frontend-beta 08716b28->fdfe158b
+# (NOT ca99bb4 — that straggler landed post-scan, DEFER to batch-21), mainline unchanged 199d7853.
 
 # --- Batch-19 (manual dual-repo sync 2026-06-17, content-port) -----------------
 # Fresh branch sync/beta-2026-06-17 off origin/mainline (batch-18 boundary).
