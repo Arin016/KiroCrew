@@ -84,7 +84,7 @@ from kiro_claw.acp.types import (
     JsonRpcMessage,
     JsonRpcRequest,
 )
-from kiro_claw.env import augmented_path
+from kiro_claw.env import augmented_path, resolve_krb5_ccname
 from kiro_claw.sandbox import wrap_argv
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 
@@ -1203,6 +1203,11 @@ class AcpClient:
         # Resolve SSH_AUTH_SOCK dynamically — the gateway's env may be stale
         # after an ssh-agent restart.
         _resolve_ssh_auth_sock(env)
+        # Resolve KRB5CCNAME to a FILE: ccache — the kernel keyring (AL2023
+        # default) is invisible to this child, so Kerberos-gated MCP servers
+        # (e.g. amazon-quick-mcp) fail without it. Covers the session agent and
+        # all ACP-provider subagents, which spawn through this same path.
+        resolve_krb5_ccname(env)
 
         kwargs: dict = {
             "stdin": asyncio.subprocess.PIPE,

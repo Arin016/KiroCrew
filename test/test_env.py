@@ -3,8 +3,53 @@
 from __future__ import annotations
 
 import os
+import stat
 
-from kiro_claw.env import _node_version_manager_bins, augmented_path
+from kiro_claw.env import _node_version_manager_bins, augmented_path, resolve_krb5_ccname
+
+
+def _fake_statfns(spec):
+    """Build ``(lstat, stat)`` replacements for ccache-resolution tests.
+
+    ``spec`` maps a path to a descriptor:
+      * ``("reg", owner)``           regular file owned by uid ``owner``
+      * ``("link", owner, target)``  symlink owned by uid ``owner``; on
+                                     ``os.stat`` (follow) it resolves to a
+                                     regular file owned by uid ``target``
+                                     (``target=None`` = broken/dangling link).
+    Any path absent from ``spec`` raises ``OSError`` from both functions.
+    """
+
+    def _result(mode, owner):
+        return os.stat_result((mode | 0o600, 0, 0, 1, owner, 0, 0, 0, 0, 0))
+
+    def _lstat(path):  # inspects the link itself, does NOT follow
+        d = spec.get(path)
+        if d is None:
+            raise OSError("no such file")
+        if d[0] == "reg":
+            return _result(stat.S_IFREG, d[1])
+        return _result(stat.S_IFLNK, d[1])  # "link"
+
+    def _stat(path):  # follows symlinks
+        d = spec.get(path)
+        if d is None:
+            raise OSError("no such file")
+        if d[0] == "reg":
+            return _result(stat.S_IFREG, d[1])
+        if d[2] is None:  # "link" with dangling target
+            raise OSError("dangling symlink")
+        return _result(stat.S_IFREG, d[2])
+
+    return _lstat, _stat
+
+
+def _patch_statfns(monkeypatch, spec, *, uid=4242):
+    """Patch os.getuid/os.lstat/os.stat in kiro_claw.env for a ccache test."""
+    monkeypatch.setattr("kiro_claw.env.os.getuid", lambda: uid)
+    lstat, stat_fn = _fake_statfns(spec)
+    monkeypatch.setattr("kiro_claw.env.os.lstat", lstat)
+    monkeypatch.setattr("kiro_claw.env.os.stat", stat_fn)
 
 
 class TestAugmentedPath:
@@ -59,3 +104,144 @@ class TestNodeVersionManagerBins:
         bin_dir.mkdir(parents=True)
         result = _node_version_manager_bins(str(tmp_path))
         assert result == [str(bin_dir)]
+
+
+class TestResolveKrb5Ccname:
+    def test_prefers_uid_ccache(self, monkeypatch) -> None:
+        monkeypatch.setattr("kiro_claw.env.sys.platform", "linux")
+        _patch_statfns(monkeypatch, {"/tmp/krb5cc_4242": ("reg", 4242)})
+        env: dict[str, str] = {}
+        resolve_krb5_ccname(env)
+        assert env["KRB5CCNAME"] == "FILE:/tmp/krb5cc_4242"
+
+    def test_falls_back_to_username_ccache(self, monkeypatch) -> None:
+        import getpass
+
+        monkeypatch.setattr("kiro_claw.env.sys.platform", "linux")
+        monkeypatch.setattr(getpass, "getuser", lambda: "tuser")
+        # uid path missing, username path present
+        _patch_statfns(monkeypatch, {"/tmp/krb5cc_tuser": ("reg", 4242)})
+        env: dict[str, str] = {}
+        resolve_krb5_ccname(env)
+        assert env["KRB5CCNAME"] == "FILE:/tmp/krb5cc_tuser"
+
+    def test_respects_existing_file_value(self, monkeypatch) -> None:
+        monkeypatch.setattr("kiro_claw.env.sys.platform", "linux")
+        _patch_statfns(monkeypatch, {"/tmp/krb5cc_4242": ("reg", 4242)})
+        env = {"KRB5CCNAME": "FILE:/custom/cc"}
+        resolve_krb5_ccname(env)
+        assert env["KRB5CCNAME"] == "FILE:/custom/cc"  # operator override wins
+
+    def test_overrides_keyring_value(self, monkeypatch) -> None:
+        monkeypatch.setattr("kiro_claw.env.sys.platform", "linux")
+        _patch_statfns(monkeypatch, {"/tmp/krb5cc_4242": ("reg", 4242)})
+        env = {"KRB5CCNAME": "KEYRING:persistent:1000"}
+        resolve_krb5_ccname(env)
+        assert env["KRB5CCNAME"] == "FILE:/tmp/krb5cc_4242"
+
+    def test_noop_when_no_cache_file(self, monkeypatch) -> None:
+        monkeypatch.setattr("kiro_claw.env.sys.platform", "linux")
+        _patch_statfns(monkeypatch, {})
+        env: dict[str, str] = {}
+        resolve_krb5_ccname(env)
+        assert "KRB5CCNAME" not in env
+
+    def test_follows_uid_owned_symlink(self, monkeypatch) -> None:
+        # sssd/systemd ship /tmp/krb5cc_<uid> as a uid-owned symlink into
+        # /run/user/<uid>/krb5cc/... — follow it and trust the resolved target.
+        monkeypatch.setattr("kiro_claw.env.sys.platform", "linux")
+        _patch_statfns(monkeypatch, {"/tmp/krb5cc_4242": ("link", 4242, 4242)})
+        env: dict[str, str] = {}
+        resolve_krb5_ccname(env)
+        assert env["KRB5CCNAME"] == "FILE:/tmp/krb5cc_4242"
+
+    def test_rejects_foreign_owned_symlink(self, monkeypatch) -> None:
+        # A symlink owned by another uid is the attack vector — reject without
+        # following (a co-tenant could point it anywhere).
+        monkeypatch.setattr("kiro_claw.env.sys.platform", "linux")
+        _patch_statfns(monkeypatch, {"/tmp/krb5cc_4242": ("link", 9999, 4242)})
+        env: dict[str, str] = {}
+        resolve_krb5_ccname(env)
+        assert "KRB5CCNAME" not in env
+
+    def test_rejects_uid_symlink_to_foreign_target(self, monkeypatch) -> None:
+        # uid-owned symlink whose resolved target is owned by someone else.
+        monkeypatch.setattr("kiro_claw.env.sys.platform", "linux")
+        _patch_statfns(monkeypatch, {"/tmp/krb5cc_4242": ("link", 4242, 9999)})
+        env: dict[str, str] = {}
+        resolve_krb5_ccname(env)
+        assert "KRB5CCNAME" not in env
+
+    def test_rejects_dangling_uid_symlink(self, monkeypatch) -> None:
+        # uid-owned symlink whose target does not exist.
+        monkeypatch.setattr("kiro_claw.env.sys.platform", "linux")
+        _patch_statfns(monkeypatch, {"/tmp/krb5cc_4242": ("link", 4242, None)})
+        env: dict[str, str] = {}
+        resolve_krb5_ccname(env)
+        assert "KRB5CCNAME" not in env
+
+    def test_rejects_foreign_owned_ccache(self, monkeypatch) -> None:
+        # A regular file owned by a different uid (planted by a co-tenant on a
+        # shared /tmp) must NOT be trusted.
+        monkeypatch.setattr("kiro_claw.env.sys.platform", "linux")
+        _patch_statfns(monkeypatch, {"/tmp/krb5cc_4242": ("reg", 9999)})
+        env: dict[str, str] = {}
+        resolve_krb5_ccname(env)
+        assert "KRB5CCNAME" not in env
+
+    def test_preserves_kcm_scheme(self, monkeypatch) -> None:
+        # macOS default is KCM: — a stale /tmp file must NOT hijack it.
+        monkeypatch.setattr("kiro_claw.env.sys.platform", "darwin")
+        _patch_statfns(monkeypatch, {"/tmp/krb5cc_4242": ("reg", 4242)})
+        env = {"KRB5CCNAME": "KCM:"}
+        resolve_krb5_ccname(env)
+        assert env["KRB5CCNAME"] == "KCM:"
+
+    def test_preserves_dir_scheme(self, monkeypatch) -> None:
+        monkeypatch.setattr("kiro_claw.env.sys.platform", "linux")
+        _patch_statfns(monkeypatch, {"/tmp/krb5cc_4242": ("reg", 4242)})
+        env = {"KRB5CCNAME": "DIR:/run/user/4242/krb5cc"}
+        resolve_krb5_ccname(env)
+        assert env["KRB5CCNAME"] == "DIR:/run/user/4242/krb5cc"
+
+    def test_noop_on_non_linux(self, monkeypatch) -> None:
+        # On macOS with empty KRB5CCNAME, a stale /tmp file must not be adopted.
+        monkeypatch.setattr("kiro_claw.env.sys.platform", "darwin")
+        _patch_statfns(monkeypatch, {"/tmp/krb5cc_4242": ("reg", 4242)})
+        env: dict[str, str] = {}
+        resolve_krb5_ccname(env)
+        assert "KRB5CCNAME" not in env
+
+    def test_logs_resolved_path_on_success(self, monkeypatch, caplog) -> None:
+        import logging
+
+        monkeypatch.setattr("kiro_claw.env.sys.platform", "linux")
+        _patch_statfns(monkeypatch, {"/tmp/krb5cc_4242": ("reg", 4242)})
+        env: dict[str, str] = {}
+        with caplog.at_level(logging.DEBUG, logger="kiro_claw.env"):
+            resolve_krb5_ccname(env)
+        assert "FILE:/tmp/krb5cc_4242" in caplog.text
+
+    def test_logs_rejection_reason(self, monkeypatch, caplog) -> None:
+        # A present-but-rejected candidate must be logged with its reason so it
+        # is distinguishable from the plain "no ccache" no-op.
+        import logging
+
+        monkeypatch.setattr("kiro_claw.env.sys.platform", "linux")
+        _patch_statfns(monkeypatch, {"/tmp/krb5cc_4242": ("reg", 9999)})
+        env: dict[str, str] = {}
+        with caplog.at_level(logging.DEBUG, logger="kiro_claw.env"):
+            resolve_krb5_ccname(env)
+        assert "KRB5CCNAME" not in env
+        assert "foreign-owned" in caplog.text
+
+    def test_no_log_when_no_candidate(self, monkeypatch, caplog) -> None:
+        # The ordinary "no ccache present" case must NOT emit a rejection log.
+        import logging
+
+        monkeypatch.setattr("kiro_claw.env.sys.platform", "linux")
+        _patch_statfns(monkeypatch, {})
+        env: dict[str, str] = {}
+        with caplog.at_level(logging.DEBUG, logger="kiro_claw.env"):
+            resolve_krb5_ccname(env)
+        assert "rejected ccache candidate" not in caplog.text
