@@ -38,7 +38,6 @@ from kiro_claw.config.loader import (
     CRED_OWNER_ID,
     CRED_SLACK_APP_TOKEN,
     CRED_SLACK_BOT_TOKEN,
-    DASHBOARD_PORT,
     _default_workspace_base,
     _workspace_dir_file,
     config_path,
@@ -453,6 +452,15 @@ def _setup_slack_tokens() -> None:
 _CUSTOM_DOMAIN = "kiroclaw.localhost"
 
 
+def _configured_port() -> int:
+    """Return the dashboard port using the same resolution as other CLI commands."""
+    from kiro_claw.cli_server import (
+        resolve_client_port,  # local import keeps cli_server (heavy import graph) out of cli_setup's import time
+    )
+
+    return resolve_client_port(None)
+
+
 def _detect_system_timezone() -> str:
     """Return IANA tz name from TZ env var or /etc/localtime symlink, or empty string."""
     tz_env = os.environ.get("TZ", "").lstrip(":")
@@ -609,7 +617,7 @@ def _maybe_setup_dashboard_url() -> None:
         print("  Leave blank for localhost-only.\n")
 
     hint = f" [{current}]" if current else ""
-    answer = input(f"  Dashboard URL (e.g. http://{hostname}:{DASHBOARD_PORT}){hint}: ").strip()
+    answer = input(f"  Dashboard URL (e.g. http://{hostname}:{_configured_port()}){hint}: ").strip()
 
     if answer == "" and current:
         print(f"  ✅ Keeping: {current}\n")
@@ -635,8 +643,9 @@ def _maybe_setup_dashboard_url() -> None:
 
 def _maybe_setup_custom_domain() -> None:
     """Inform user about kiroclaw.localhost and clean up legacy mesh.claw from /etc/hosts."""
+    port = _configured_port()
     print("\n── Custom Domain ──\n")
-    print(f"  Dashboard available at http://{_CUSTOM_DOMAIN}:{DASHBOARD_PORT}")
+    print(f"  Dashboard available at http://{_CUSTOM_DOMAIN}:{port}")
     print("  (*.localhost resolves to 127.0.0.1 per RFC 6761 — no /etc/hosts edit needed)\n")
 
     # Advise removal of legacy "mesh.claw" entry from /etc/hosts if present
