@@ -810,6 +810,7 @@ async def start_dashboard(
 
     # Session revocation (called by `kiroclaw logout` CLI)
     app.router.add_post("/api/logout", handlers.api_logout)
+    app.router.add_post("/api/shutdown", handlers.api_shutdown)
 
     # Webhook hooks (external triggers)
     app.router.add_post("/api/hooks/agent", handlers.api_hooks_agent)

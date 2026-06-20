@@ -1146,6 +1146,60 @@ async def api_logout(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def api_shutdown(request: web.Request) -> web.Response:
+    """POST /api/shutdown — gracefully stop the gateway process.
+
+    Sets the process-wide ``shutdown_event``, which is the same trigger the
+    SIGTERM/SIGINT handler uses: it unblocks the gateway run loop, runs the
+    graceful ``_shutdown()`` sequence (flushes session/memory/cron state,
+    cleans up the dashboard runner), kills orphaned kiro-cli subprocesses, and
+    exits the process.
+
+    Intended for the desktop app to call before installing an auto-update, so
+    the Squirrel bundle swap never races a live gateway. Requires loopback +
+    the local secret (same auth as ``/api/token/local`` and ``/api/logout``)
+    so a web page cannot trigger a shutdown.
+    """
+    import kiro_claw.dashboard.handlers as _h  # noqa: F811
+    from kiro_claw import shutdown_event  # noqa: F811
+
+    if not _h.is_loopback(request.remote or ""):
+        _sel().log_api_access(
+            caller=request.remote or "unknown",
+            operation="shutdown",
+            outcome="denied",
+            source="local-app",
+            resources="non-loopback",
+        )
+        return web.json_response({"error": "loopback only"}, status=403)
+
+    expected = request.app.get("local_secret", "")
+    provided = request.headers.get("X-Local-Secret", "")
+    if not expected or not provided or not hmac.compare_digest(expected, provided):
+        _sel().log_api_access(
+            caller=request.remote or "unknown",
+            operation="shutdown",
+            outcome="denied",
+            source="local-app",
+            resources="invalid-secret",
+        )
+        return web.json_response({"error": "invalid secret"}, status=403)
+
+    _sel().log_api_access(
+        caller=request.remote or "unknown",
+        operation="shutdown",
+        outcome="success",
+        source="local-app",
+        resources="gateway",
+    )
+    logger.info("shutdown requested via /api/shutdown — triggering graceful stop")
+
+    # Fire the shutdown only AFTER this 200 has flushed to the client, so the
+    # desktop app receives a definitive ack before the gateway tears down.
+    asyncio.get_running_loop().call_later(0.25, shutdown_event.set)
+    return web.json_response({"ok": True, "shutting_down": True})
+
+
 async def api_app_token(request: web.Request) -> web.Response:
     """POST /api/apps/{name}/token — exchange app secret for app-scoped token.
 

@@ -445,6 +445,7 @@ from kiro_claw.dashboard.handlers.core import (  # noqa: E402, F401
     api_session_agent_result,
     api_session_agent_stream,
     api_session_agents_list,
+    api_shutdown,
     api_stt_config,
     api_stt_install,
     api_stt_transcribe,
