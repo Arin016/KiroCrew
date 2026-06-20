@@ -6,6 +6,7 @@ import { sanitizeCssValue } from '../lib/cssSanitize'
 import { THEME_VAR_NAMES, buildSrcdoc } from '../lib/widgetSrcdoc'
 import { effectiveWidgetSlug } from '../lib/widgetSlug'
 import { api, ApiError } from '../api/client'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 const MIN_HEIGHT = 80
 
@@ -351,20 +352,37 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
     }),
     [slug, messageTs, widgetIndex],
   )
-  // savedSlug === effectiveSlug when the artifact exists on the server,
-  // null when it doesn't. Initialized optimistically from the explicit
-  // slug attribute (so re-emissions render filled before the GET round-
-  // trip completes), then reconciled with server truth via the mount /
-  // visibilitychange effect below.
-  const [savedSlug, setSavedSlug] = useState<string | null>(slug ?? null)
-  // Sync savedSlug eagerly when the agent re-emits this widget with a
-  // different explicit slug (e.g. after artifact_update renames it). The
-  // verify effect below also reconciles via GET, but that's an async
-  // round-trip — until it lands, the title link would still point at the
-  // stale slug. This keeps the title link in lock-step with the prop.
-  useEffect(() => {
-    if (slug) setSavedSlug(slug)
-  }, [slug])
+  // Probe whether this widget's artifact exists on the server. Cached via
+  // React Query with a 5-min staleTime so repeated impressions / tab
+  // refocuses don't each fire a network request. 404s are cached as
+  // `false` (not retried) to avoid a 404 storm for unsaved widgets.
+  const queryClient = useQueryClient()
+  const savedProbe = useQuery({
+    queryKey: ['artifact-saved', effectiveSlug],
+    queryFn: async () => {
+      try {
+        await api.artifact(effectiveSlug!)
+        return true
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) return false
+        throw e
+      }
+    },
+    enabled: !!effectiveSlug,
+    retry: false,
+    staleTime: 5 * 60 * 1000,
+    // Optimistic fill: explicit slug attr means agent re-emitted a saved
+    // artifact — show bookmark filled before the probe resolves.
+    placeholderData: slug ? true : undefined,
+  })
+
+  // Derive savedSlug from probe result
+  const savedSlug = savedProbe.data === true
+    ? effectiveSlug
+    : savedProbe.data === false
+      ? null
+      : (slug ?? null)
+
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   // Track mount status so async save/remove callbacks can skip side-effects
@@ -379,43 +397,6 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
     }
   }, [])
 
-  // Reconcile bookmark state with server truth. Fires on mount and on
-  // tab visibilitychange, so bookmarks across tabs / sessions catch up
-  // when the user returns to a tab (covering the cross-tab consistency
-  // case without WebSockets / BroadcastChannel complexity).
-  //
-  // GET 200 → artifact exists at this slug → bookmark filled.
-  // GET 404 → no artifact at this slug → bookmark empty.
-  // No effective slug (no explicit attr + no message context) → leave
-  // savedSlug alone; the bookmark will be disabled in the UI.
-  useEffect(() => {
-    if (!effectiveSlug) return
-    let cancelled = false
-    const verify = async () => {
-      try {
-        await api.artifact(effectiveSlug)
-        if (cancelled || !mountedRef.current) return
-        setSavedSlug(effectiveSlug)
-      } catch (e) {
-        if (cancelled || !mountedRef.current) return
-        if (e instanceof ApiError && e.status === 404) {
-          setSavedSlug(null)
-        }
-        // Other status codes (auth, server error, network): leave state
-        // untouched so a transient hiccup doesn't flap the icon.
-      }
-    }
-    verify()
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') verify()
-    }
-    document.addEventListener('visibilitychange', onVisibility)
-    return () => {
-      cancelled = true
-      document.removeEventListener('visibilitychange', onVisibility)
-    }
-  }, [effectiveSlug])
-
   const saveAsArtifact = useCallback(async () => {
     if (saving || savedSlug || !effectiveSlug) return
     // Atomic one-click save with a deterministic slug — POST goes to the
@@ -428,29 +409,27 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
     setSaving(true)
     setSaveError(null)
     try {
-      const r = await api.createArtifact({
+      await api.createArtifact({
         name,
         content: html,
         kind: 'widget',
         source: 'chat',
         slug: effectiveSlug,
       })
-      if (!mountedRef.current) return
-      setSavedSlug(r?.slug || effectiveSlug)
+      queryClient.setQueryData(['artifact-saved', effectiveSlug], true)
     } catch (e) {
-      if (!mountedRef.current) return
       // 409 conflict → artifact already exists at this slug, treat as
       // already-saved (covers double-click races + cross-tab saves where
       // the verify-on-mount hasn't reconciled yet).
       if (e instanceof ApiError && e.status === 409) {
-        setSavedSlug(effectiveSlug)
-      } else {
+        queryClient.setQueryData(['artifact-saved', effectiveSlug], true)
+      } else if (mountedRef.current) {
         setSaveError(e instanceof Error ? e.message : String(e))
       }
     } finally {
       if (mountedRef.current) setSaving(false)
     }
-  }, [html, title, saving, savedSlug, effectiveSlug])
+  }, [html, title, saving, savedSlug, effectiveSlug, queryClient])
 
   const removeArtifact = useCallback(async () => {
     if (saving || !savedSlug) return
@@ -463,21 +442,19 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
     setSaveError(null)
     try {
       await api.deleteArtifact(savedSlug)
-      if (!mountedRef.current) return
-      setSavedSlug(null)
+      queryClient.setQueryData(['artifact-saved', effectiveSlug], false)
     } catch (e) {
-      if (!mountedRef.current) return
       // 404 → already gone (deleted from another tab / library page).
       // Reconcile to the empty state silently.
       if (e instanceof ApiError && e.status === 404) {
-        setSavedSlug(null)
-      } else {
+        queryClient.setQueryData(['artifact-saved', effectiveSlug], false)
+      } else if (mountedRef.current) {
         setSaveError(e instanceof Error ? e.message : String(e))
       }
     } finally {
       if (mountedRef.current) setSaving(false)
     }
-  }, [savedSlug, saving])
+  }, [savedSlug, saving, effectiveSlug, queryClient])
 
   const toggleArtifact = savedSlug ? removeArtifact : saveAsArtifact
 

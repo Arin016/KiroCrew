@@ -1,13 +1,28 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render } from '@testing-library/react'
+import { render, act, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
+import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import WidgetFrame from '../components/WidgetFrame'
 import { ThemeProvider } from '../hooks/useTheme'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
+import { effectiveWidgetSlug } from '../lib/widgetSlug'
 
-// WidgetFrame consumes useTheme(), which requires a ThemeProvider. Wrap every
-// render here to mirror the production setup (main.tsx wraps App in it).
-const wrap = (ui: ReactNode) => render(<ThemeProvider>{ui}</ThemeProvider>)
+// WidgetFrame consumes useTheme(), which requires a ThemeProvider, and now
+// useQuery, which requires a QueryClient. Wrap every render here to mirror the
+// production setup (main.tsx wraps App in both).
+// Fresh QueryClient per test to avoid cross-test cache pollution.
+let queryClient: QueryClient
+beforeEach(() => {
+  queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  })
+})
+const wrap = (ui: ReactNode) =>
+  render(
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider>{ui}</ThemeProvider>
+    </QueryClientProvider>,
+  )
 
 // The values we want readThemeVars() to see. Covers: normal hex, rgb(), oklch()
 // (modern color syntax), and values that must be rejected by the sanitizer.
@@ -83,11 +98,18 @@ beforeEach(() => {
     unobserve() {}
     disconnect() {}
   }
+
+  // Default mock: artifact probe returns 404 (unsaved) so the bookmark
+  // starts empty unless a test overrides it.
+  vi.spyOn(api, 'artifact').mockRejectedValue(
+    Object.assign(new ApiError('Not found', 404), { status: 404 }),
+  )
 })
 
 afterEach(() => {
   vi.restoreAllMocks()
   globalThis.Blob = OriginalBlob
+  queryClient.clear()
 })
 
 // Capture blob content passed to createObjectURL for test inspection
@@ -227,7 +249,11 @@ describe('WidgetFrame theme passthrough', () => {
         detail: { mode: 'light', colorTheme: 'emerald' },
       }))
     })
-    rerender(<ThemeProvider><WidgetFrame html="<p>hi</p>" title="T" /></ThemeProvider>)
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <ThemeProvider><WidgetFrame html="<p>hi</p>" title="T" /></ThemeProvider>
+      </QueryClientProvider>,
+    )
 
     // Assert: the srcdoc now reflects theme-B.
     const after = getSrcdoc(container)
@@ -471,15 +497,20 @@ describe('WidgetFrame unmount safety on bookmark actions', () => {
     // The component imports `api` once at module load. Patch the property
     // on the live object so the existing import sees the deferred mock.
     vi.spyOn(api, 'createArtifact').mockImplementation(createSpy)
-    // /api/artifacts/<slug> verify GET — return 404 so savedSlug starts null
-    // (no need for the spec to reach into render output to start unsaved).
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('', { status: 404 }) as Response,
+    // Artifact probe returns 404 so savedSlug starts null (unsaved state).
+    vi.spyOn(api, 'artifact').mockRejectedValue(
+      Object.assign(new ApiError('Not found', 404), { status: 404 }),
     )
 
     const { container, unmount } = wrap(
       <WidgetFrame html="<p>test</p>" title="T" messageTs="1779995123.456789" widgetIndex={0} />,
     )
+
+    // Wait for probe to settle so bookmark becomes clickable.
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="Save as artifact"]')).not.toBeNull()
+    })
+
     const bookmarkBtn = container.querySelector('[aria-label="Save as artifact"]') as HTMLButtonElement
     expect(bookmarkBtn).not.toBeNull()
 
@@ -512,7 +543,184 @@ describe('WidgetFrame unmount safety on bookmark actions', () => {
     // (no throw, microtask flush completes).
     expect(container.querySelector('[aria-label="Save as artifact"]')).toBeNull()
     expect(container.querySelector('[aria-label^="Remove artifact"]')).toBeNull()
+  })
+})
 
-    fetchSpy.mockRestore()
+describe('WidgetFrame saved-state probe (useQuery cache)', () => {
+  it('probes api.artifact on mount and caches 404 as unsaved', async () => {
+    const artifactSpy = vi.spyOn(api, 'artifact').mockRejectedValue(
+      Object.assign(new ApiError('Not found', 404), { status: 404 }),
+    )
+
+    const { container } = wrap(
+      <WidgetFrame html="<p>hi</p>" title="T" messageTs="1779995123.456789" widgetIndex={0} />,
+    )
+
+    await waitFor(() => {
+      expect(artifactSpy).toHaveBeenCalledTimes(1)
+    })
+
+    // Bookmark should be empty (unfilled)
+    const bookmarkBtn = container.querySelector('[aria-label="Save as artifact"]')
+    expect(bookmarkBtn).not.toBeNull()
+    const removeBtn = container.querySelector('[aria-label^="Remove artifact"]')
+    expect(removeBtn).toBeNull()
+  })
+
+  it('two impressions of same slug share cache — only one API call', async () => {
+    const artifactSpy = vi.spyOn(api, 'artifact').mockRejectedValue(
+      Object.assign(new ApiError('Not found', 404), { status: 404 }),
+    )
+
+    wrap(
+      <WidgetFrame html="<p>a</p>" title="A" messageTs="1779995123.456789" widgetIndex={0} />,
+    )
+    wrap(
+      <WidgetFrame html="<p>b</p>" title="B" messageTs="1779995123.456789" widgetIndex={0} />,
+    )
+
+    await waitFor(() => {
+      expect(artifactSpy).toHaveBeenCalled()
+    })
+    // React Query deduplicates concurrent requests for the same key
+    expect(artifactSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('visibilitychange within staleTime does not trigger extra call', async () => {
+    const artifactSpy = vi.spyOn(api, 'artifact').mockRejectedValue(
+      Object.assign(new ApiError('Not found', 404), { status: 404 }),
+    )
+
+    wrap(
+      <WidgetFrame html="<p>hi</p>" title="T" messageTs="1779995123.456789" widgetIndex={0} />,
+    )
+
+    await waitFor(() => {
+      expect(artifactSpy).toHaveBeenCalledTimes(1)
+    })
+
+    // Simulate tab refocus — React Query's refetchOnWindowFocus respects staleTime
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'))
+    })
+
+    // Still only 1 call because data is fresh (within 5min staleTime)
+    expect(artifactSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('click save fills bookmark instantly via cache set', async () => {
+    vi.spyOn(api, 'artifact').mockRejectedValue(
+      Object.assign(new ApiError('Not found', 404), { status: 404 }),
+    )
+    vi.spyOn(api, 'createArtifact').mockResolvedValue({ slug: 'msg-1779995123-456789-0', name: 'T' })
+
+    const { container } = wrap(
+      <WidgetFrame html="<p>hi</p>" title="T" messageTs="1779995123.456789" widgetIndex={0} />,
+    )
+
+    // Wait for probe to resolve
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="Save as artifact"]')).not.toBeNull()
+    })
+
+    // Click save
+    const bookmarkBtn = container.querySelector('[aria-label="Save as artifact"]') as HTMLButtonElement
+    await act(async () => {
+      bookmarkBtn.click()
+    })
+
+    // Bookmark should now be filled (remove label)
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label^="Remove artifact"]')).not.toBeNull()
+    })
+  })
+
+  it('setQueryData fires even if component unmounts before createArtifact resolves', async () => {
+    let resolveCreate!: (v: unknown) => void
+    const createPromise = new Promise((r) => { resolveCreate = r })
+    vi.spyOn(api, 'artifact').mockRejectedValue(
+      Object.assign(new ApiError('Not found', 404), { status: 404 }),
+    )
+    vi.spyOn(api, 'createArtifact').mockReturnValue(createPromise as Promise<unknown>)
+
+    const { container, unmount } = wrap(
+      <WidgetFrame html="<p>hi</p>" title="T" messageTs="1779995123.456789" widgetIndex={0} />,
+    )
+
+    // Wait for probe to resolve (404 -> unsaved)
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="Save as artifact"]')).not.toBeNull()
+    })
+
+    // Click save — starts createArtifact (deferred)
+    const bookmarkBtn = container.querySelector('[aria-label="Save as artifact"]') as HTMLButtonElement
+    await act(async () => { bookmarkBtn.click() })
+
+    // Unmount before createArtifact resolves
+    unmount()
+
+    // Resolve the deferred createArtifact
+    await act(async () => { resolveCreate({ slug: 'msg-1779995123-456789-0', name: 'T' }) })
+
+    // Cache should still be updated (global QueryClient, not gated by mountedRef)
+    const slug = effectiveWidgetSlug({ messageTs: '1779995123.456789', widgetIndex: 0 })
+    expect(queryClient.getQueryData(['artifact-saved', slug])).toBe(true)
+  })
+
+  // A transient 5xx must not cache as the 404 `false` sentinel, or a saved
+  // widget flaps to empty for the full staleTime.
+  it('does not cache a non-404 (transient) error as the unsaved sentinel', async () => {
+    const artifactSpy = vi.spyOn(api, 'artifact').mockRejectedValue(
+      Object.assign(new ApiError('Server error', 500), { status: 500 }),
+    )
+
+    wrap(
+      <WidgetFrame html="<p>hi</p>" title="T" messageTs="1779995123.456789" widgetIndex={0} />,
+    )
+
+    await waitFor(() => {
+      expect(artifactSpy).toHaveBeenCalledTimes(1)
+    })
+
+    const slug = effectiveWidgetSlug({ messageTs: '1779995123.456789', widgetIndex: 0 })
+    await waitFor(() => {
+      expect(queryClient.getQueryState(['artifact-saved', slug])?.status).toBe('error')
+    })
+    expect(queryClient.getQueryData(['artifact-saved', slug])).toBeUndefined()
+    expect(artifactSpy).toHaveBeenCalledTimes(1) // retry: false → no retry
+  })
+
+  it('re-probes on window focus after staleTime expires', async () => {
+    // v5 focusManager keys off document visibilitychange, not window 'focus',
+    // so drive it directly.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const artifactSpy = vi.spyOn(api, 'artifact').mockRejectedValue(
+        Object.assign(new ApiError('Not found', 404), { status: 404 }),
+      )
+
+      wrap(
+        <WidgetFrame html="<p>hi</p>" title="T" messageTs="1779995123.456789" widgetIndex={0} />,
+      )
+
+      await waitFor(() => {
+        expect(artifactSpy).toHaveBeenCalledTimes(1)
+      })
+
+      await act(async () => {
+        vi.advanceTimersByTime(5 * 60 * 1000 + 1000)
+      })
+      await act(async () => {
+        focusManager.setFocused(false)
+        focusManager.setFocused(true)
+      })
+
+      await waitFor(() => {
+        expect(artifactSpy).toHaveBeenCalledTimes(2)
+      })
+    } finally {
+      focusManager.setFocused(undefined)
+      vi.useRealTimers()
+    }
   })
 })
