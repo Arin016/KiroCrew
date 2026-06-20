@@ -18,6 +18,7 @@ import { useIsMobile } from '../hooks/useIsMobile'
 import { copySessionLink } from '../utils/shareUrl'
 import { safeSetItem } from '../utils/safeStorage'
 import { resolveFolderAgent } from '../utils/folderAgent'
+import FolderPickerSubmenu from '../components/FolderPickerSubmenu'
 import type { ChatFolder, ChatTag, TagColumn, TagColumnMode } from '../types'
 import { decideUnreadDrain } from './unreadDrain'
 import { loadChatConfig, saveChatConfig } from './chat/ChatSettings'
@@ -1264,16 +1265,11 @@ function ChatSidebar({
                       <ChevronRight size={13} className="ml-auto text-muted" />
                     </button>
                     {createSubmenuOpen && (
-                      <div role="menu"
-                        className="absolute left-full top-0 ml-1 min-w-[170px] max-w-[220px] max-h-[280px] overflow-y-auto rounded-lg border border-border bg-bg-elevated shadow-lg py-1">
-                        {folders.map(f => (
-                          <button key={f.id} role="menuitem" title={f.name}
-                            className="w-full px-3 py-1.5 text-left text-[12.5px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors"
-                            onClick={() => { setCreateMenuOpen(false); setCreateSubmenuOpen(false); createChatInFolder(f.id); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus()) }}>
-                            <Folder size={13} className="text-accent shrink-0" /> <span className="truncate">{f.name}</span>
-                          </button>
-                        ))}
-                      </div>
+                      <FolderPickerSubmenu folders={folders} onPick={fid => {
+                        if (!fid) return
+                        setCreateMenuOpen(false); setCreateSubmenuOpen(false); createChatInFolder(fid)
+                        requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus())
+                      }} />
                     )}
                   </div>
                 )}

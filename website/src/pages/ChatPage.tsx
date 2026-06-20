@@ -16,7 +16,7 @@ import {
 } from '../store/chatSlice'
 import { removeNotificationByTs } from '../store/notificationsSlice'
 import { interceptSlashCommand } from './chat/ChatInput'
-import { updateSlot, changeApprovalMode, sseSlotTitle, sseSlotColor } from '../store/dashboardSlice'
+import { updateSlot, changeApprovalMode, sseSlotTitle, sseSlotColor, updateSlotFolder } from '../store/dashboardSlice'
 import { filterSlotsBySurface, filterUnreadKeysBySurface } from '../surfaces/registry'
 import { api } from '../api/client'
 import { useProvider } from '../providers'
@@ -57,6 +57,7 @@ import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { useAgents } from '../hooks/useAgents'
 import AgentDropdownList from '../components/AgentDropdownList'
 import ProjectPicker from '../components/ProjectPicker'
+import FolderPickerSubmenu from '../components/FolderPickerSubmenu'
 import ModelEffortDropdown from '../components/ModelEffortDropdown'
 
 import ChatInput from '../components/ChatInput'
@@ -88,7 +89,7 @@ import { loadChatConfig, CONTENT_WIDTH, type ChatConfig } from './chat/ChatSetti
 import { useKnowledgeFetch, extractKnowledgeQuery, expandKnowledgeBlock } from './chat/useKnowledgeFetch'
 import { KnowledgePicker } from './chat/KnowledgePicker'
 import { useSessionPalette } from '../hooks/useSessionPalette'
-import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, PanelLeftOpen, PanelLeftClose, Pen, MessageSquareShare, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Locate, Link2, Link2Off, Hash, Undo2, Check } from 'lucide-react'
+import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, PanelLeftOpen, PanelLeftClose, Pen, MessageSquareShare, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Locate, Link2, Link2Off, Hash, Undo2, Check, Folder } from 'lucide-react'
 
 import InfoTip from '../components/InfoTip'
 import { FileCard } from '../components/FileCard'
@@ -102,7 +103,7 @@ const APPROVAL_SEGMENTS = [
 import { AnimatePresence, motion } from 'framer-motion'
 import DetailPanel from '../components/DetailPanel'
 
-import type { ChatMessage } from '../types'
+import type { ChatMessage, ChatFolder } from '../types'
 
 import ToolCallLine from './chat/ToolCallLine'
 import { renderMcpOAuthMessage } from './chat/McpOAuthBanner'
@@ -128,6 +129,13 @@ export function ChatHeaderMenu({ activeSlot, currentSlot, slackChannels, onSlack
     enabled: mcpHover,
   })
   const mcpTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [folderHover, setFolderHover] = useState(false)
+  const folderTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const { data: folders = [] } = useQuery<ChatFolder[]>({
+    queryKey: ['chat-folders'],
+    queryFn: () => api.chatFolders(),
+    enabled: open,
+  })
   const ref = useRef<HTMLDivElement>(null)
   const dispatch = useAppDispatch()
   const { paletteColors } = useSessionPalette()
@@ -137,7 +145,16 @@ export function ChatHeaderMenu({ activeSlot, currentSlot, slackChannels, onSlack
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [open])
-  useEffect(() => { if (!open) { setMcpHover(false) } }, [open])
+  useEffect(() => { if (!open) { setMcpHover(false); setFolderHover(false) } }, [open])
+
+  const moveToFolder = useCallback((folderId: string | null) => {
+    if (!activeSlot) return
+    const prev = currentSlot?.folder_id ?? ''
+    // Optimistic move with rollback on failure — same semantics as the sidebar drag-and-drop assign.
+    dispatch(updateSlotFolder({ key: activeSlot, folderId: folderId || '' }))
+    api.setSlotFolder(activeSlot, folderId).catch(() => { dispatch(updateSlotFolder({ key: activeSlot, folderId: prev })) })
+    setOpen(false)
+  }, [activeSlot, currentSlot, dispatch])
 
   const pickColor = (idx: number | null) => {
     if (!slotKey) return
@@ -177,6 +194,25 @@ export function ChatHeaderMenu({ activeSlot, currentSlot, slackChannels, onSlack
               <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { onReveal(); setOpen(false) }}>
                 <Locate size={13} className="shrink-0 text-muted" /> Reveal in sidebar
               </button>
+              {folders.length > 0 && (
+                <div className="relative" onMouseEnter={() => { if (folderTimer.current) clearTimeout(folderTimer.current); setFolderHover(true) }} onMouseLeave={() => { folderTimer.current = setTimeout(() => setFolderHover(false), 200) }}>
+                  <div className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text hover:bg-bg-hover cursor-default">
+                    <Folder size={13} className="shrink-0 text-muted" />
+                    <span className="flex-1">Move to folder</span>
+                    <ChevronRight size={12} className="text-muted" />
+                  </div>
+                  {folderHover && (
+                    <FolderPickerSubmenu
+                      folders={folders}
+                      currentFolderId={currentSlot?.folder_id}
+                      includeRoot
+                      onPick={moveToFolder}
+                      onMouseEnter={() => { if (folderTimer.current) clearTimeout(folderTimer.current) }}
+                      onMouseLeave={() => { folderTimer.current = setTimeout(() => setFolderHover(false), 200) }}
+                    />
+                  )}
+                </div>
+              )}
               <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { copySessionLink(activeSlot, currentSlot?.title, undefined, mode); setOpen(false) }}>
                 <Link2 size={13} className="shrink-0 text-muted" /> Copy session link
               </button>
