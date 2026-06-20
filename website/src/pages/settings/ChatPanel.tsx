@@ -195,6 +195,7 @@ export function ChatPanel() {
             }}
             disabled={!mcQ.isSuccess}
           />
+          <SettingsToggle label="Show Context Percentage" description="Display usage percentage next to the context progress bar" checked={chatCfg.showContextPct} onChange={v => setChat('showContextPct', v)} />
         </SettingsCard>
       </SettingsSection>
 

@@ -2861,6 +2861,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               contextPct={contextPct}
               contextUsedTokens={contextTokens?.used}
               contextWindowTokens={contextTokens?.window || provider.getContextWindow(currentSlot?.model || resolvedModel || 'auto')}
+              showContextPct={chatConfig.showContextPct}
               isRunning={slotRunning}
               onStop={() => {
                 const slot = activeSlot

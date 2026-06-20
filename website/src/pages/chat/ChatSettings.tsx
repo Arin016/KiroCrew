@@ -29,6 +29,7 @@ export interface ChatConfig {
   fileChipStyle: FileChipStyle
   followUpLayout: FollowUpLayout
   streamMode: StreamMode
+  showContextPct: boolean
 }
 
 export type FileChipStyle = 'expanded' | 'minimal'
@@ -38,7 +39,7 @@ export type FollowUpLayout = 'multiline' | 'scroll'
 export type StreamMode = 'immediate' | 'smooth'
 
 const LS_KEY = 'mc-chat-config'
-const DEFAULTS: ChatConfig = { historyExpanded: true, notifLimit: 50, showTimestamps: true, sendOnEnter: 'enter', collapseAllSteps: true, confirmCloseSession: false, simplifiedToolNames: true, contentWidth: 'compact', tagColumnsEnabled: true, fileChipStyle: 'expanded', followUpLayout: 'scroll', streamMode: 'smooth' }
+const DEFAULTS: ChatConfig = { historyExpanded: true, notifLimit: 50, showTimestamps: true, sendOnEnter: 'enter', collapseAllSteps: true, confirmCloseSession: false, simplifiedToolNames: true, contentWidth: 'compact', tagColumnsEnabled: true, fileChipStyle: 'expanded', followUpLayout: 'scroll', streamMode: 'smooth', showContextPct: false }
 
 const VALID_FILE_CHIP_STYLES: ReadonlySet<FileChipStyle> = new Set(['expanded', 'minimal'])
 const VALID_FOLLOW_UP_LAYOUTS: ReadonlySet<FollowUpLayout> = new Set(['multiline', 'scroll'])
@@ -68,6 +69,7 @@ export function loadChatConfig(): ChatConfig {
     if (!VALID_FILE_CHIP_STYLES.has(cfg.fileChipStyle)) cfg.fileChipStyle = 'expanded'
     if (!VALID_FOLLOW_UP_LAYOUTS.has(cfg.followUpLayout)) cfg.followUpLayout = 'scroll'
     if (!VALID_STREAM_MODES.has(cfg.streamMode)) cfg.streamMode = 'smooth'
+    if (typeof cfg.showContextPct !== 'boolean') cfg.showContextPct = false
     return cfg
   }
   catch { return { ...DEFAULTS } }
@@ -155,6 +157,7 @@ export default function ChatSettings({ config, onChange }: { config: ChatConfig;
           <Toggle label="History expanded by default" checked={config.historyExpanded} onChange={v => set('historyExpanded', v)} />
           <Toggle label="Show message timestamps" checked={config.showTimestamps} onChange={v => set('showTimestamps', v)} />
           <Toggle label="Simplified tool call names" hint="When enabled, tool pills show purpose instead of exact command" checked={config.simplifiedToolNames} onChange={v => set('simplifiedToolNames', v)} />
+          <Toggle label="Show context percentage" hint="Display usage percentage next to the context bar" checked={config.showContextPct} onChange={v => set('showContextPct', v)} />
           <div className="flex items-center justify-between">
             <div className="flex flex-col gap-0.5">
               <span className="text-[13px] text-text">Send shortcut</span>

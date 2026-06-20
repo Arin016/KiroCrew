@@ -20,7 +20,7 @@ import TrustDropdown from './TrustDropdown'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { isScreenSnipSupported } from '../hooks/useScreenSnip'
 import { useImeGuard } from '../hooks/useImeGuard'
-import ContextBar, { contextTip } from './ContextBar'
+import ContextBar, { contextTip, contextPctClamped, contextColor } from './ContextBar'
 import PasteHighlightLayer, { INPUT_TYPO } from './PasteHighlightLayer'
 import FollowUpBar from './FollowUpBar'
 import { dispatchLightbox } from './MarkdownRenderer'
@@ -189,6 +189,7 @@ interface ChatInputProps {
   contextPct?: number
   contextUsedTokens?: number
   contextWindowTokens?: number
+  showContextPct?: boolean
   isRunning?: boolean
   onStop?: () => void
   isQueued?: boolean
@@ -307,6 +308,7 @@ function ChatInput({
   contextPct,
   contextUsedTokens,
   contextWindowTokens,
+  showContextPct,
   isRunning = false,
   onStop,
   isQueued = false,
@@ -1817,6 +1819,7 @@ function ChatInput({
                 aria-label="Context usage"
               >
                 <ContextBar pct={contextPct} width={40} height={3} />
+                {showContextPct && <span className="text-[11px] font-mono ml-1.5 tabular-nums" style={{ color: contextColor(contextPct) }}>{contextPctClamped(contextPct)}%</span>}
               </button>
               {ctxPopoverOpen && (
                 <div className="absolute bottom-full right-0 mb-1 z-[60] w-52 rounded-xl border border-border bg-bg-elevated shadow-xl p-3 animate-slide-up">
