@@ -2995,18 +2995,6 @@ async def _run_chat(
         _stop_text = redact_credentials(_stop_text)[0]
         await _fire(HOOK_EVENT_STOP, _stop_text)
 
-        # ── AutoNudge: arm idle timer now that the turn has completed. ──
-        try:
-            from kiro_claw.autonudge import (
-                get_instance as _autonudge_get,  # circular: autonudge -> dashboard.chat -> chat_runner; circular: autonudge -> dashboard.chat -> chat_runner; circular: autonudge -> chat
-            )
-
-            _autonudge = _autonudge_get()
-            if _autonudge is not None:
-                _autonudge.notify_turn_complete(slot.key)
-        except Exception:
-            logger.debug("autonudge.notify_turn_complete failed", exc_info=True)
-
         # ── Tool-refusal recovery ──────────────────────────────────────────
         # A recoverable refusal (host-gate policy deny or the read-only bash
         # gate) ended this turn early via kiro-cli's tool-interrupted marker.
@@ -3242,8 +3230,27 @@ async def _run_chat(
         await state.sessions.record_failure(session_key)
     finally:
         slot._batch_rejected = False
-        # Ensure file changes always surface, even on cancel/error
-        _flush_file_changes(slot)
+        # Ensure file changes always surface, even on cancel/error. Wrapped so
+        # a raise here cannot skip the re-arm below and re-introduce the orphan
+        # bug this fix prevents (Mesh-2147).
+        try:
+            _flush_file_changes(slot)
+        except Exception:
+            logger.debug("_flush_file_changes failed", exc_info=True)
+        # ── AutoNudge: (re)arm the idle timer on EVERY turn-exit path. ──
+        # Must be in finally, not the happy path: a turn that ends via timeout
+        # / AcpProcessDied / AcpError / cancel would otherwise never re-arm,
+        # silently orphaning the loop (Mesh-2147).
+        try:
+            from kiro_claw.autonudge import (
+                get_instance as _autonudge_get,  # circular: autonudge -> dashboard.chat -> chat_runner
+            )
+
+            _autonudge = _autonudge_get()
+            if _autonudge is not None:
+                _autonudge.notify_turn_complete(slot.key)
+        except Exception:
+            logger.debug("autonudge.notify_turn_complete failed", exc_info=True)
         # Clean up mirror stream on any exit path
         if _mirror_stream_ts and state.slack_client and _mirror_chan:
             try:

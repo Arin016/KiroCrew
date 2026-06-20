@@ -40,6 +40,14 @@ _NUDGES_FILE = "autonudge.json"
 _STORE_VERSION = 1
 _MIN_IDLE_SECS = 15
 _MAX_IDLE_SECS = 86400  # 24h
+# Re-arm delay after a skipped/failed fire so a busy slot or a transient fire
+# error can't silently orphan the loop. The delay escalates exponentially per
+# consecutive failure (base << streak) up to _REARM_MAX_BACKOFF_SECS, and is
+# always capped by the loop's idle_secs, so a permanently-wedged callback backs
+# off to a slow poll instead of hammering every base interval.
+_REARM_BACKOFF_SECS = 15
+_REARM_MAX_BACKOFF_SECS = 300  # 5m ceiling for the escalated re-arm delay
+_REARM_BACKOFF_MAX_SHIFT = 16  # clamp the 2**shift exponent
 
 # Sentinel file per loop: creating it halts the loop on next cycle.
 STOP_SENTINEL = "STOP"
@@ -103,6 +111,10 @@ class AutoNudgeService:
         self._on_fire = on_fire
         self._loops: dict[str, NudgeLoop] = {}
         self._timers: dict[str, asyncio.Task] = {}
+        # Consecutive non-delivery count per loop (drives escalating re-arm
+        # backoff + once-per-streak failure logging). Not persisted; resets on
+        # a delivered fire, on removal, and on restart.
+        self._rearm_fail_count: dict[str, int] = {}
         self._observers: list[Callable[[str, NudgeLoop | None], None]] = []
         self._lock = asyncio.Lock()
 
@@ -246,6 +258,7 @@ class AutoNudgeService:
         if loop is None:
             return
         self._cancel_timer(loop_id)
+        self._rearm_fail_count.pop(loop_id, None)
         self._save()
         self._emit("removed", loop)
 
@@ -283,16 +296,19 @@ class AutoNudgeService:
 
     def _cancel_timer(self, loop_id: str) -> None:
         t = self._timers.pop(loop_id, None)
-        if t and not t.done():
+        # Never cancel the currently running timer task (self-re-arm from inside
+        # _timer): it is about to return on its own, and cancelling it would
+        # inject a spurious CancelledError into the finishing task.
+        if t and not t.done() and t is not asyncio.current_task():
             t.cancel()
 
-    def _arm_timer(self, loop: NudgeLoop) -> None:
+    def _arm_timer(self, loop: NudgeLoop, delay: float | None = None) -> None:
         self._cancel_timer(loop.id)
-        self._timers[loop.id] = asyncio.create_task(self._timer(loop))
+        self._timers[loop.id] = asyncio.create_task(self._timer(loop, delay))
 
-    async def _timer(self, loop: NudgeLoop) -> None:
+    async def _timer(self, loop: NudgeLoop, delay: float | None = None) -> None:
         try:
-            await asyncio.sleep(loop.idle_secs)
+            await asyncio.sleep(loop.idle_secs if delay is None else delay)
         except asyncio.CancelledError:
             return
         if shutdown_event.is_set():
@@ -315,10 +331,43 @@ class AutoNudgeService:
         try:
             delivered = await self._on_fire(loop)
         except Exception:
-            logger.exception("AutoNudge fire callback failed for %s", loop.id)
             delivered = False
+            # Full traceback only on the first failure of a streak; subsequent
+            # failures stay at debug so a permanently-wedged callback can't spam
+            # a traceback every re-arm.
+            if self._rearm_fail_count.get(loop.id, 0) == 0:
+                logger.exception("AutoNudge fire callback failed for %s", loop.id)
+            else:
+                logger.debug(
+                    "AutoNudge fire still failing for %s (streak=%d)",
+                    loop.id,
+                    self._rearm_fail_count.get(loop.id, 0) + 1,
+                )
         if not delivered:
+            # If the fire path already removed the loop (e.g. slot missing →
+            # remove()), do NOT resurrect it with a fresh timer — that would
+            # orphan-poll forever. Clear the streak and stop.
+            if loop.id not in self._loops:
+                self._rearm_fail_count.pop(loop.id, None)
+                return
+            # Slot was busy mid-turn, or the fire callback errored. Do NOT end
+            # the loop — re-arm so it self-heals and never depends solely on the
+            # external notify_turn_complete hook (skipped on a slot's error/
+            # timeout/cancel exit paths). Escalate the delay per consecutive
+            # failure so a never-delivering loop backs off to a slow poll
+            # instead of hammering, capped by idle_secs and _REARM_MAX_BACKOFF.
+            n = self._rearm_fail_count.get(loop.id, 0) + 1
+            self._rearm_fail_count[loop.id] = n
+            shift = min(n - 1, _REARM_BACKOFF_MAX_SHIFT)
+            backoff = min(
+                _REARM_BACKOFF_SECS * (2**shift),
+                _REARM_MAX_BACKOFF_SECS,
+                loop.idle_secs,
+            )
+            self._arm_timer(loop, delay=backoff)
             return
+        # Delivered — clear any failure streak so the next skip starts fresh.
+        self._rearm_fail_count.pop(loop.id, None)
         loop.cycle_count += 1
         loop.last_fire_ts = time.time()
         self._save()
