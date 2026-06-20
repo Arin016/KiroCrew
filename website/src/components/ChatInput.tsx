@@ -10,6 +10,7 @@ import { resolveByApprovalId, openActivityToTool } from '../store/chatSlice'
 import { useToolPillVisible } from '../store/toolPillRegistry'
 import { ToolDetails } from '../pages/chat/ToolDetails'
 import { api } from '../api/client'
+import { safeSetItem } from '../utils/safeStorage'
 import { createSelector } from 'reselect'
 import { shallowEqual } from 'react-redux'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -632,7 +633,7 @@ function ChatInput({
       // Commit final height to React state
       const finalH = wrapperRef.current.offsetHeight
       setManualHeight(finalH)
-      localStorage.setItem(INPUT_HEIGHT_LS_KEY, String(Math.round(finalH)))
+      safeSetItem(INPUT_HEIGHT_LS_KEY, String(Math.round(finalH)))
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)

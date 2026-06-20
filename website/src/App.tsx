@@ -20,6 +20,7 @@ import { useNotificationSound } from './hooks/useNotificationSound'
 import { recordSessionStart, recordEvent } from './rum'
 import { ZoomProvider } from './hooks/ZoomProvider'
 import { api } from './api/client'
+import { safeSetItem } from './utils/safeStorage'
 import { Rocket, Menu, Bell, Users, BookOpen, BookOpenText, MessageSquareDot, Settings, Code, RefreshCw, Palette, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, Sparkles, X, Inbox, Gamepad2, KanbanSquare, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain, FolderTree, ChevronUp, MoreHorizontal, Coins } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ChatPage from './pages/ChatPage'
@@ -594,7 +595,7 @@ export default function App() {
     if (!gatewayStart) return
     const KEY = 'mc-boot-revealed-at'
     if (localStorage.getItem(KEY) !== String(gatewayStart)) {
-      localStorage.setItem(KEY, String(gatewayStart))
+      safeSetItem(KEY, String(gatewayStart))
       setBooting(true)
     }
   }, [gatewayStart])
@@ -621,7 +622,7 @@ export default function App() {
   // the user expands (persisted).
   const APPS_NAV_LIMIT = 6
   const [appsExpanded, setAppsExpanded] = useState(() => localStorage.getItem('mc-apps-expanded') === '1')
-  const toggleAppsExpanded = useCallback(() => setAppsExpanded(v => { const next = !v; localStorage.setItem('mc-apps-expanded', next ? '1' : '0'); return next }), [])
+  const toggleAppsExpanded = useCallback(() => setAppsExpanded(v => { const next = !v; safeSetItem('mc-apps-expanded', next ? '1' : '0'); return next }), [])
   const sortedAppGroup = useMemo(() => {
     const items = [...NAV_ITEMS.filter(n => n.group === 'Apps'), ...appNavItems]
     if (appNavOrder.length === 0) return items
@@ -638,7 +639,7 @@ export default function App() {
     ids.splice(srcIdx, 1)
     ids.splice(tgtIdx, 0, srcId)
     setAppNavOrder(ids)
-    localStorage.setItem('mc-app-nav-order', JSON.stringify(ids))
+    safeSetItem('mc-app-nav-order', JSON.stringify(ids))
   }, [sortedAppGroup])
   const refreshAppNav = useCallback(() => {
     api.listApps()
@@ -890,7 +891,7 @@ export default function App() {
     const lastSeen = localStorage.getItem('mc-last-version')
     if (lastSeen === version) return
     // First visit — no baseline to diff, just record current version
-    if (!lastSeen) { localStorage.setItem('mc-last-version', version); return }
+    if (!lastSeen) { safeSetItem('mc-last-version', version); return }
     // Version changed — show only new entries since lastSeen
     api.changelog().then(d => {
       if (!d.content) return
@@ -907,7 +908,7 @@ export default function App() {
       }
       const text = filtered.join('\n').trim()
       if (text) { setChanges(text); setShowChangelog(true) }
-    }).catch(() => {}).finally(() => localStorage.setItem('mc-last-version', version))
+    }).catch(() => {}).finally(() => safeSetItem('mc-last-version', version))
   }, [version]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Browser tab title badge — sums every built-in surface's badge (chat,
@@ -966,7 +967,7 @@ export default function App() {
 
   const toggleNav = () => {
     if (isMobile) { setMobileNavOpen(p => !p) }
-    else { setNavCollapsed(prev => { const next = !prev; localStorage.setItem('mc-nav', next ? '1' : '0'); return next }) }
+    else { setNavCollapsed(prev => { const next = !prev; safeSetItem('mc-nav', next ? '1' : '0'); return next }) }
   }
   // Close mobile nav on route change
   useEffect(() => { if (isMobile) setMobileNavOpen(false) }, [location.pathname]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -1030,8 +1031,8 @@ export default function App() {
           {!connected && <span className="text-[11px] text-danger font-medium">Offline</span>}
           <NotificationsBellButton />
           {!isMobile && (() => {
-            if (!metricsOpen) return <button className="top-bar-pill bg-card text-muted hover:text-text !gap-0" onClick={() => { setMetricsOpen(true); localStorage.setItem('mc-topbar-metrics', '1') }} title="System metrics" aria-label="System metrics"><Activity size={13} /><span className="w-0 overflow-hidden">{'\u200B'}</span></button>
-            const m = sysMetrics; if (!m) return sysMetricsError ? (<button className="top-bar-pill bg-card text-danger flex items-center gap-1 text-[11px] cursor-pointer" title="Click to hide" onClick={() => { setMetricsOpen(false); localStorage.setItem('mc-topbar-metrics', '0') }}><Activity size={11} /> metrics unavailable</button>) : null
+            if (!metricsOpen) return <button className="top-bar-pill bg-card text-muted hover:text-text !gap-0" onClick={() => { setMetricsOpen(true); safeSetItem('mc-topbar-metrics', '1') }} title="System metrics" aria-label="System metrics"><Activity size={13} /><span className="w-0 overflow-hidden">{'\u200B'}</span></button>
+            const m = sysMetrics; if (!m) return sysMetricsError ? (<button className="top-bar-pill bg-card text-danger flex items-center gap-1 text-[11px] cursor-pointer" title="Click to hide" onClick={() => { setMetricsOpen(false); safeSetItem('mc-topbar-metrics', '0') }}><Activity size={11} /> metrics unavailable</button>) : null
             const memPct = m.memTotal > 0 ? m.memUsed / m.memTotal : 0
             const dskUsed = m.diskTotal - m.diskFree
             const dskPct = m.diskTotal > 0 ? dskUsed / m.diskTotal : 0
@@ -1039,7 +1040,7 @@ export default function App() {
             const dskValid = m.diskTotal > 0
             const cpuValid = typeof m.cpuPct === 'number' && Number.isFinite(m.cpuPct)
             const staleTitle = sysMetricsStale ? ' (stale: fetch failing)' : ''
-            return (<button className={`top-bar-pill bg-card flex items-center gap-2 text-[11px] font-mono cursor-pointer ${sysMetricsStale ? 'opacity-60 ring-1 ring-danger' : ''}`} title={sysMetricsStale ? 'Metrics are stale, latest fetch failed' : 'Click to hide'} onClick={() => { setMetricsOpen(false); localStorage.setItem('mc-topbar-metrics', '0') }}>
+            return (<button className={`top-bar-pill bg-card flex items-center gap-2 text-[11px] font-mono cursor-pointer ${sysMetricsStale ? 'opacity-60 ring-1 ring-danger' : ''}`} title={sysMetricsStale ? 'Metrics are stale, latest fetch failed' : 'Click to hide'} onClick={() => { setMetricsOpen(false); safeSetItem('mc-topbar-metrics', '0') }}>
               <span className={cpuValid ? metricColor(m.cpuPct / 100) : 'text-muted'} title={cpuValid ? `CPU: ${m.cpuPct.toFixed(0)}%${staleTitle}` : 'CPU: unavailable'}>CPU {cpuValid ? `${m.cpuPct.toFixed(0)}%` : '—'}</span>
               <span className={memValid ? metricColor(memPct) : 'text-muted'} title={memValid ? `Memory: ${m.memUsed.toFixed(1)}/${m.memTotal.toFixed(1)} GB${staleTitle}` : 'Memory: unavailable'}>MEM {memValid ? `${(memPct * 100).toFixed(0)}%` : '—'}</span>
               <span className={dskValid ? metricColor(dskPct) : 'text-muted'} title={dskValid ? `Disk: ${dskUsed.toFixed(0)}/${m.diskTotal.toFixed(0)} GB${staleTitle}` : 'Disk: unavailable'}>DSK {dskValid ? `${(dskPct * 100).toFixed(0)}%` : '—'}</span>
@@ -1192,7 +1193,7 @@ export default function App() {
                 <button key={t.value} className={`text-left px-2.5 py-1.5 rounded-md text-[12px] cursor-pointer border-none transition-colors ${colorTheme === t.value ? 'bg-accent-subtle text-accent font-medium' : 'bg-transparent text-muted hover:text-text hover:bg-bg-hover'}`} onClick={() => setColorTheme(t.value)}>{t.label}</button>
               ))}
             </div>
-            <button className="w-full py-2 rounded-lg text-[13px] font-medium cursor-pointer bg-accent text-accent-fg border-none hover:opacity-90 transition-opacity" onClick={() => { localStorage.setItem('mc-onboarded', '1'); setShowOnboarding(false) }}>
+            <button className="w-full py-2 rounded-lg text-[13px] font-medium cursor-pointer bg-accent text-accent-fg border-none hover:opacity-90 transition-opacity" onClick={() => { safeSetItem('mc-onboarded', '1'); setShowOnboarding(false) }}>
               Let's go
             </button>
           </div>

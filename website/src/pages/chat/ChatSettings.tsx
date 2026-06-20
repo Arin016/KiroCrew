@@ -3,6 +3,7 @@ import { Settings, Volume2 } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { useQueryClient, useQuery, useMutation } from '@tanstack/react-query'
 import { api } from '../../api/client'
+import { safeSetItem } from '../../utils/safeStorage'
 
 export type ContentWidth = 'compact' | 'comfortable' | 'full'
 
@@ -73,7 +74,7 @@ export function loadChatConfig(): ChatConfig {
 }
 
 export function saveChatConfig(cfg: ChatConfig) {
-  localStorage.setItem(LS_KEY, JSON.stringify(cfg))
+  safeSetItem(LS_KEY, JSON.stringify(cfg))
   window.dispatchEvent(new Event('mc-config-changed'))
 }
 

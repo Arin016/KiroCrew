@@ -22,6 +22,7 @@ import { api } from '../api/client'
 import { useProvider } from '../providers'
 import AutoNudgePopover, { type AutoNudgeLoop } from '../components/AutoNudgePopover'
 import { fileReadUrl } from '../utils/fileReadUrl'
+import { safeSetItem, safeSetSessionItem } from '../utils/safeStorage'
 import { handleStopPress } from '../utils/stopDebounce'
 import { EmptyState, Btn, Input } from '../components/ui'
 import MarkdownPanel from '../components/MarkdownPanel'
@@ -852,7 +853,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       if (slotKey) {
         newSessionRef.current = false
         dispatch(switchSlot(slotKey))
-        sessionStorage.setItem(
+        safeSetSessionItem(
           PREFILL_STORAGE_KEY,
           JSON.stringify({ slotKey, prompt, ts: Date.now() }),
         )
@@ -1413,10 +1414,10 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const slotStorageKeyRef = useRef(slotStorageKey); slotStorageKeyRef.current = slotStorageKey
   useEffect(() => {
     if (activeSlot && filteredSlots.some(s => s.key === activeSlot)) {
-      localStorage.setItem(slotStorageKey, activeSlot)
+      safeSetItem(slotStorageKey, activeSlot)
     }
   }, [activeSlot, slotStorageKey, filteredSlots])
-  useEffect(() => () => { if (activeSlotRef.current && filteredSlotsRef.current.find(s => s.key === activeSlotRef.current)) localStorage.setItem(slotStorageKeyRef.current, activeSlotRef.current) }, [])
+  useEffect(() => () => { if (activeSlotRef.current && filteredSlotsRef.current.find(s => s.key === activeSlotRef.current)) safeSetItem(slotStorageKeyRef.current, activeSlotRef.current) }, [])
   // Handle ?sid= (or legacy ?slot=) query parameter — activate the given session
   // Capture initial ?sid= at mount time before any effect can overwrite it
   const initialSidRef = useRef(searchParams.get('sid') || searchParams.get('slot'))
@@ -1967,7 +1968,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       if (filteredSlotsRef.current.length === 0) return
       setSidebarPinned(p => {
         const next = !p
-        localStorage.setItem('mc-sidebar-pinned', String(next))
+        safeSetItem('mc-sidebar-pinned', String(next))
         return next
       })
     }
@@ -2323,7 +2324,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   useEffect(() => {
     if (filteredSlots.length === 0 && !sidebarPinned) {
       setSidebarPinned(true)
-      localStorage.setItem('mc-sidebar-pinned', 'true')
+      safeSetItem('mc-sidebar-pinned', 'true')
     }
   }, [filteredSlots.length, sidebarPinned])
 
@@ -2997,7 +2998,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                       }}>Enable</Btn>
                       <Btn className="px-2.5 py-1 rounded-md text-muted hover:text-text hover:bg-bg-hover cursor-pointer" onClick={e => { e.stopPropagation(); setYoloConfirm(0) }}>Cancel</Btn>
                       <label className="flex items-center gap-1 text-[11px] text-muted cursor-pointer ml-auto">
-                        <Input type="checkbox" className="rounded" onChange={e => { if ((e.target as HTMLInputElement).checked) localStorage.setItem('mc-yolo-ack', '1'); else localStorage.removeItem('mc-yolo-ack') }} />
+                        <Input type="checkbox" className="rounded" onChange={e => { if ((e.target as HTMLInputElement).checked) safeSetItem('mc-yolo-ack', '1'); else localStorage.removeItem('mc-yolo-ack') }} />
                         Don't show again
                       </label>
                     </div>

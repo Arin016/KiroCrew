@@ -1,4 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useCallback } from 'react'
+import { safeSetItem } from '../utils/safeStorage'
 
 export type FontFamily = 'sans' | 'mono' | 'system'
 
@@ -92,7 +93,7 @@ export function useZoom() {
 
   const set = useCallback((v: number) => {
     const c = Math.max(MIN, Math.min(MAX, v))
-    localStorage.setItem('mc-zoom', String(c))
+    safeSetItem('mc-zoom', String(c))
     setZoom(c)
   }, [])
 
@@ -101,19 +102,19 @@ export function useZoom() {
   const reset = useCallback(() => set(100), [set])
 
   const setFontFamily = useCallback((f: FontFamily) => {
-    localStorage.setItem('mc-font-family', f)
+    safeSetItem('mc-font-family', f)
     setFamily(f)
   }, [])
 
   const cycleFamily = useCallback(() => {
     const next = FAMILIES[(FAMILIES.indexOf(family) + 1) % FAMILIES.length]
-    localStorage.setItem('mc-font-family', next)
+    safeSetItem('mc-font-family', next)
     setFamily(next)
   }, [family])
 
   const setFontScaleVal = useCallback((v: number) => {
     const c = Math.max(FONT_MIN, Math.min(FONT_MAX, v))
-    localStorage.setItem('mc-font-scale', String(c))
+    safeSetItem('mc-font-scale', String(c))
     setFontScale(c)
   }, [])
   const fontScaleUp = useCallback(() => setFontScaleVal(fontScale + FONT_STEP), [fontScale, setFontScaleVal])

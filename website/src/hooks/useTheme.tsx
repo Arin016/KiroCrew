@@ -8,6 +8,7 @@ import {
 } from 'react'
 import { api } from '../api/client'
 import { sanitizeCssValue } from '../lib/cssSanitize'
+import { safeSetItem } from '../utils/safeStorage'
 
 export type ModePreference = 'dark' | 'light' | 'system'
 export type ResolvedMode = 'dark' | 'light'
@@ -276,7 +277,7 @@ function useThemeState(): ThemeContextValue {
   }, [mode])
 
   const setMode_ = useCallback((pref: ModePreference) => {
-    localStorage.setItem('mc-theme', pref)
+    safeSetItem('mc-theme', pref)
     setMode(pref)
     setResolved(resolveMode(pref))
     const ct = (localStorage.getItem('mc-color-theme') as ColorTheme) || 'emerald'
@@ -289,7 +290,7 @@ function useThemeState(): ThemeContextValue {
   }, [mode, setMode_])
 
   const setColorTheme = useCallback((t: ColorTheme) => {
-    localStorage.setItem('mc-color-theme', t)
+    safeSetItem('mc-color-theme', t)
     setColorThemeState(t)
     const m = (localStorage.getItem('mc-theme') as ModePreference) || 'system'
     broadcast(m, t)

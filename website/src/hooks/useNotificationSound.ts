@@ -4,6 +4,7 @@
  */
 import { useEffect } from 'react'
 import { MC_NOTIFICATION_EVENT, MC_SOUND_SETTINGS_CHANGED_EVENT, type McNotificationDetail } from './notificationEvent'
+import { safeSetItem } from '../utils/safeStorage'
 
 export const SOUND_PRESETS = ['chime', 'ding', 'blip', 'pop'] as const
 export type SoundPreset = typeof SOUND_PRESETS[number] | 'none'
@@ -52,7 +53,7 @@ export function loadSoundSettings(): SoundSettings {
 }
 
 export function saveSoundSettings(s: SoundSettings): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(s))
+  safeSetItem(STORAGE_KEY, JSON.stringify(s))
   window.dispatchEvent(new CustomEvent(MC_SOUND_SETTINGS_CHANGED_EVENT))
 }
 

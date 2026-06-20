@@ -16,6 +16,7 @@ import { useSessionPalette } from '../hooks/useSessionPalette'
 import { useImeGuard } from '../hooks/useImeGuard'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { copySessionLink } from '../utils/shareUrl'
+import { safeSetItem } from '../utils/safeStorage'
 import { resolveFolderAgent } from '../utils/folderAgent'
 import type { ChatFolder, ChatTag, TagColumn, TagColumnMode } from '../types'
 import { decideUnreadDrain } from './unreadDrain'
@@ -312,8 +313,8 @@ function ChatSidebar({
     setActiveFilters(prev => {
       const next = new Set(prev)
       const filterDef = SESSION_FILTERS.find(sf => sf.key === key)!
-      if (next.has(key)) { next.delete(key); localStorage.setItem(filterDef.storageKey, '0') }
-      else { next.add(key); localStorage.setItem(filterDef.storageKey, '1') }
+      if (next.has(key)) { next.delete(key); safeSetItem(filterDef.storageKey, '0') }
+      else { next.add(key); safeSetItem(filterDef.storageKey, '1') }
       return next
     })
   }, [])
@@ -323,7 +324,7 @@ function ChatSidebar({
       const next = new Set(prev)
       next.delete(key)
       const filterDef = SESSION_FILTERS.find(sf => sf.key === key)!
-      localStorage.setItem(filterDef.storageKey, '0')
+      safeSetItem(filterDef.storageKey, '0')
       return next
     })
   }, [])
@@ -383,7 +384,7 @@ function ChatSidebar({
     const saved = parseInt(localStorage.getItem(HISTORY_HEIGHT_LS_KEY) || '', 10)
     return Number.isFinite(saved) && saved >= HISTORY_MIN_HEIGHT && saved <= HISTORY_MAX_HEIGHT ? saved : 240
   })
-  useEffect(() => { localStorage.setItem(HISTORY_HEIGHT_LS_KEY, String(historyHeight)) }, [historyHeight])
+  useEffect(() => { safeSetItem(HISTORY_HEIGHT_LS_KEY, String(historyHeight)) }, [historyHeight])
   const [historyDragging, setHistoryDragging] = useState(false)
   const onHistoryDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -482,7 +483,7 @@ function ChatSidebar({
       document.body.style.userSelect = ''
       onDragChangeRef.current?.(false)
       const w = sidebarWidthRef.current
-      localStorage.setItem(SIDEBAR_LS_KEY, String(w))
+      safeSetItem(SIDEBAR_LS_KEY, String(w))
       onWidthChangeRef.current?.(w)
     }
     window.addEventListener('mousemove', onMove)
@@ -1392,7 +1393,7 @@ function ChatSidebar({
                   role="menuitemradio"
                   aria-checked={sortKey === o.value}
                   className="w-full px-3 py-1.5 text-left text-[13px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors"
-                  onClick={() => { setSortKey(o.value); localStorage.setItem(SORT_LS_KEY, o.value); setFilterSortOpen(false) }}
+                  onClick={() => { setSortKey(o.value); safeSetItem(SORT_LS_KEY, o.value); setFilterSortOpen(false) }}
                 >
                   <span className="flex-1">{o.label}</span>
                   {sortKey === o.value && <Check size={14} className="text-accent" />}
@@ -1692,7 +1693,7 @@ function ChatSidebar({
       {/* Sidebar-hide tip */}
       {!tipDismissed && <div className="sidebar-toggle-tip mx-2 mb-1 mt-1 px-3 py-2 rounded-lg bg-accent/8 border border-dashed border-accent/10 text-[12px] text-muted leading-relaxed flex items-start gap-2 animate-rise">
         <span className="flex-1">You can now toggle this sidebar<br/>Enable in <strong>Settings → Chat → Sidebar</strong>.</span>
-        <Btn className="shrink-0 text-muted hover:text-text cursor-pointer bg-transparent border-none text-[14px] leading-none p-0" onClick={() => { localStorage.setItem('mc-sidebar-tip-dismissed', '1'); setTipDismissed(true) }}><X className="lucide-inline" /></Btn>
+        <Btn aria-label="Dismiss sidebar tip" className="shrink-0 text-muted hover:text-text cursor-pointer bg-transparent border-none text-[14px] leading-none p-0" onClick={() => { safeSetItem('mc-sidebar-tip-dismissed', '1'); setTipDismissed(true) }}><X className="lucide-inline" /></Btn>
       </div>}
 
       {/* When expanded: doubles as the resize handle (accent on hover, drag to resize, dbl-click to collapse).
