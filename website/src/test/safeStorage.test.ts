@@ -96,6 +96,137 @@ describe('safeSetItem', () => {
     expect(safeSetItem('k', 'v')).toBe(false)
     spy.mockRestore()
   })
+
+  it('escalates past tier 1 to evict mc-paste-store-v1 when height caches are absent', () => {
+    // The real-world failure mode behind the looping KIROCLAW boot reveal: the
+    // quota hog is the multi-MB mc-paste-store-v1 side table, and there are no
+    // vc_heights_* keys to reclaim. Single-tier reclaim freed nothing and the
+    // write was silently lost; tier escalation must drop mc-paste-store-v1.
+    window.localStorage.setItem('mc-paste-store-v1', 'x'.repeat(2000))
+
+    const real = Storage.prototype.setItem
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+      value: string,
+    ) {
+      // Fail until the paste store is gone (and never block its own removal path).
+      if (this.getItem('mc-paste-store-v1') !== null && key !== 'mc-paste-store-v1') {
+        throw quotaError()
+      }
+      real.call(this, key, value)
+    })
+
+    const ok = safeSetItem('mc-nav', '1')
+
+    expect(ok).toBe(true)
+    expect(window.localStorage.getItem('mc-paste-store-v1')).toBeNull()
+    expect(window.localStorage.getItem('mc-nav')).toBe('1')
+    spy.mockRestore()
+  })
+
+  it('reclaims touched-files lists as part of tier 2', () => {
+    window.localStorage.setItem('kiroclaw:touched-files:chat-1-100', '["a.ts"]')
+
+    const real = Storage.prototype.setItem
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+      value: string,
+    ) {
+      if (this.getItem('kiroclaw:touched-files:chat-1-100') !== null
+        && !key.startsWith('kiroclaw:touched-files:')) {
+        throw quotaError()
+      }
+      real.call(this, key, value)
+    })
+
+    expect(safeSetItem('k', 'v')).toBe(true)
+    expect(window.localStorage.getItem('kiroclaw:touched-files:chat-1-100')).toBeNull()
+    spy.mockRestore()
+  })
+
+  it('never evicts user drafts or config — returns false when only those remain', () => {
+    // Quota is permanently exhausted and nothing reclaimable exists. The write
+    // fails, but unsaved user input and config MUST survive untouched.
+    window.localStorage.setItem('mc-chat-drafts', 'unsaved user input')
+    window.localStorage.setItem('mc-onboarded', '1')
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw quotaError()
+    })
+
+    expect(safeSetItem('k', 'v')).toBe(false)
+    spy.mockRestore()
+
+    expect(window.localStorage.getItem('mc-chat-drafts')).toBe('unsaved user input')
+    expect(window.localStorage.getItem('mc-onboarded')).toBe('1')
+  })
+
+  it('preserves the :toolClearedAt watermark while reclaiming touched-files lists', () => {
+    // The watermark (useTouchedFiles) shares the touched-files prefix but must
+    // survive a tier-2 sweep — evicting it would resurface previously-cleared
+    // agent-touched files. Only the list entry should be reclaimed.
+    window.localStorage.setItem('kiroclaw:touched-files:chat-1-100', '["a.ts"]')
+    window.localStorage.setItem('kiroclaw:touched-files:chat-1-100:toolClearedAt', '1700000000000')
+
+    const real = Storage.prototype.setItem
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+      value: string,
+    ) {
+      // Fail until the (non-watermark) list entry is gone.
+      if (this.getItem('kiroclaw:touched-files:chat-1-100') !== null
+        && !key.startsWith('kiroclaw:touched-files:')) {
+        throw quotaError()
+      }
+      real.call(this, key, value)
+    })
+
+    expect(safeSetItem('k', 'v')).toBe(true)
+    expect(window.localStorage.getItem('kiroclaw:touched-files:chat-1-100')).toBeNull()
+    // Watermark survived the sweep.
+    expect(window.localStorage.getItem('kiroclaw:touched-files:chat-1-100:toolClearedAt'))
+      .toBe('1700000000000')
+    spy.mockRestore()
+  })
+
+  it('terminates (no infinite loop) when retries keep failing after reclaim', () => {
+    // A reclaimable tier-1 key exists, but the write fails even after it is
+    // dropped. The escalate-and-retry loop must end once tiers are exhausted.
+    window.localStorage.setItem('vc_heights_session-A', '{"a":1}')
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw quotaError()
+    })
+
+    expect(() => safeSetItem('k', 'v')).not.toThrow()
+    expect(safeSetItem('k', 'v')).toBe(false)
+    spy.mockRestore()
+    // The reclaimable key was still dropped during the attempt.
+    expect(window.localStorage.getItem('vc_heights_session-A')).toBeNull()
+  })
+
+  it('terminates even if removeItem silently no-ops (structural tier bound)', () => {
+    // Heimdall edge case: a Storage backend whose removeItem returns without
+    // removing and without throwing. Pre-fix, `while (reclaimSpace())` spun
+    // forever because the same key kept matching every pass. The for-loop now
+    // bounds iterations by RECLAIM_TIERS.length, so it terminates regardless
+    // of removeItem semantics. (vitest's per-test timeout is the backstop if
+    // this regresses.) setItem always throws quota → the write never succeeds.
+    window.localStorage.setItem('vc_heights_session-A', '{"a":1}')
+    window.localStorage.setItem('mc-paste-store-v1', 'x'.repeat(100))
+    const setSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw quotaError()
+    })
+    // removeItem no-ops: matched keys stay present on every reclaim pass, so a
+    // pre-fix loop relying on "did we remove something" would never exit.
+    const removeSpy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {})
+
+    expect(() => safeSetItem('k', 'v')).not.toThrow()
+    expect(safeSetItem('k', 'v')).toBe(false)
+    setSpy.mockRestore()
+    removeSpy.mockRestore()
+  })
 })
 
 describe('safeSetSessionItem', () => {

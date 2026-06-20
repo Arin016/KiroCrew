@@ -13,9 +13,11 @@
  *
  * `safeSetItem` makes every write defensive:
  *   1. Try the write.
- *   2. On a quota error, reclaim disposable space (height caches are pure
- *      derived measurement data — safe to drop; they rebuild from the DOM) and
- *      retry once.
+ *   2. On a quota error, reclaim disposable space one tier at a time
+ *      (cheapest-to-lose first — see RECLAIM_TIERS) and retry after each tier,
+ *      escalating until the write succeeds or nothing reclaimable is left. The
+ *      reclaimed data is pure derived/cache state that rebuilds from the DOM or
+ *      the server; user input (drafts) and config are never touched.
  *   3. If it still fails, swallow it (best-effort persistence) and warn in dev.
  *
  * This mirrors the existing guard patterns already used by `chatDrafts`,
@@ -28,6 +30,34 @@
  *  derived pixel measurements and are safe to drop under storage pressure;
  *  the virtualizer re-measures from the DOM and repopulates them. */
 const HEIGHT_CACHE_PREFIX = 'vc_heights_'
+
+/**
+ * Disposable-cache tiers reclaimed under quota pressure, cheapest-to-lose
+ * first. Every key matched here is pure derived/cache data that rebuilds from
+ * source (the DOM, the gateway, or the server transcript) — NEVER unsaved user
+ * input (drafts) or config. `reclaimSpace` drops one tier at a time so a write
+ * sacrifices only as much as it must to succeed.
+ *
+ * Why tiers (not just `vc_heights_*`): in practice the quota hog is often a
+ * DIFFERENT key — e.g. the `mc-paste-store-v1` sent-paste side table can reach
+ * multiple MB on its own (see Mesh-2139). When no `vc_heights_*` keys exist,
+ * single-tier reclaim freed nothing, `safeSetItem` gave up, and the write was
+ * silently lost — defeating the whole point of this module.
+ */
+const RECLAIM_TIERS: ReadonlyArray<(key: string) => boolean> = [
+  // Tier 1 — per-session virtualizer height caches. Pure pixel measurements,
+  // re-measured from the DOM. Dominant source of growth, cheapest to lose.
+  (k) => k.startsWith(HEIGHT_CACHE_PREFIX),
+  // Tier 2 — sent-paste rehydration side table + per-session touched-file
+  // lists. Both derive from server state: dropping them only un-collapses
+  // already-sent paste tokens / clears file chips until they rebuild. Exclude
+  // the `:toolClearedAt` clear-watermark (managed by useTouchedFiles): it is
+  // tiny, and evicting it would reset toolClearedAtRef to 0 so previously
+  // cleared agent-touched files re-surface on the next load after a sweep.
+  (k) =>
+    k === 'mc-paste-store-v1' ||
+    (k.startsWith('kiroclaw:touched-files:') && !k.endsWith(':toolClearedAt')),
+]
 
 /**
  * Detect a storage-quota exception across browsers.
@@ -48,37 +78,43 @@ export function isQuotaExceededError(err: unknown): boolean {
 }
 
 /**
- * Drop disposable localStorage entries to free space when the quota is hit.
+ * Drop one tier of disposable localStorage entries to free space when the
+ * quota is hit. Tiers are defined in `RECLAIM_TIERS`, cheapest-to-lose first;
+ * each call drops the first tier that actually removes something and stops, so
+ * a write sacrifices only as much cache as it needs. `safeSetItem` calls this
+ * repeatedly (retry/reclaim loop) to escalate through the tiers on demand.
  *
- * Currently reclaims every `vc_heights_*` key. These are the dominant source
- * of unbounded growth (one bounded cache per session, but unbounded in the
- * NUMBER of sessions, with no cleanup for closed/deleted sessions) and are the
- * cheapest data to lose. Returns true if anything was removed, so the caller
- * knows a retry is worthwhile.
+ * Returns true if anything was removed, so the caller knows a retry is
+ * worthwhile (and that further escalation may still be possible).
  */
 function reclaimSpace(): boolean {
   if (typeof localStorage === 'undefined') return false
-  let removed = false
   try {
-    // Collect first, then delete: removing while iterating by index shifts
-    // subsequent indices and would skip keys.
-    const doomed: string[] = []
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i)
-      if (k && k.startsWith(HEIGHT_CACHE_PREFIX)) doomed.push(k)
-    }
-    for (const k of doomed) {
-      try {
-        localStorage.removeItem(k)
-        removed = true
-      } catch {
-        /* best-effort */
+    for (const matches of RECLAIM_TIERS) {
+      // Collect first, then delete: removing while iterating by index shifts
+      // subsequent indices and would skip keys.
+      const doomed: string[] = []
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i)
+        if (k && matches(k)) doomed.push(k)
       }
+      let removed = false
+      for (const k of doomed) {
+        try {
+          localStorage.removeItem(k)
+          removed = true
+        } catch {
+          /* best-effort */
+        }
+      }
+      // Escalate one tier per call: as soon as a tier frees anything, stop and
+      // let the caller retry the write before sacrificing the next tier.
+      if (removed) return true
     }
   } catch {
     /* enumerating storage can throw in locked-down environments */
   }
-  return removed
+  return false
 }
 
 function warnDev(key: string, err: unknown): void {
@@ -104,16 +140,28 @@ export function safeSetItem(key: string, value: string): boolean {
   } catch (err) {
     // Only attempt reclaim+retry for genuine quota errors — a SecurityError
     // (storage disabled) or anything else won't be fixed by freeing space.
-    if (isQuotaExceededError(err) && reclaimSpace()) {
+    if (!isQuotaExceededError(err)) {
+      warnDev(key, err)
+      return false
+    }
+    // Escalate through the reclaim tiers: each reclaimSpace() frees one tier,
+    // then we retry. A single freed tier may not be enough (e.g. the height
+    // caches are tiny but mc-paste-store-v1 is multi-MB), so keep escalating
+    // until the write succeeds or there is nothing left to reclaim. The loop
+    // is bounded structurally by the tier count (one reclaimSpace() drains at
+    // most one tier), so termination never depends on removeItem actually
+    // freeing space — a Storage backend that silently no-ops removal cannot
+    // spin this loop. RECLAIM_TIERS.length iterations cover every tier.
+    let lastErr: unknown = err
+    for (let i = 0; i < RECLAIM_TIERS.length && reclaimSpace(); i++) {
       try {
         localStorage.setItem(key, value)
         return true
       } catch (retryErr) {
-        warnDev(key, retryErr)
-        return false
+        lastErr = retryErr
       }
     }
-    warnDev(key, err)
+    warnDev(key, lastErr)
     return false
   }
 }
