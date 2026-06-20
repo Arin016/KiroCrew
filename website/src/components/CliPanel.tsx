@@ -147,6 +147,33 @@ const SessionChip = memo(function SessionChip({
   )
 })
 
+/**
+ * Force xterm to re-measure the character cell, then refit. xterm measures the
+ * cell at open()/fit() time with whatever font is resolvable then; the terminal
+ * font ('JetBrains Mono') is a Google web font (display=swap) that can swap in
+ * *after* the first measure, widening the cell while `cols` stays stale, so the
+ * screen overflows the pane and the right edge is clipped (Mesh-2148, worst in
+ * the narrow right sidebar). xterm exposes no public "re-measure now" API, so we
+ * force CharSizeService.measure() via a transient fontFamily toggle (both sets
+ * run synchronously, so nothing paints between them). Verified against xterm
+ * 5.5.x, where CharSizeService re-measures on its
+ * `onMultipleOptionChange(['fontFamily','fontSize'])` subscription;
+ * CliPanel.fontRefit.test.ts pins that version so a future bump fails loudly.
+ *
+ * Skips detached / display:none panes (offsetParent === null), matching the
+ * sibling refit effects (the ResizeObserver gates on offsetHeight, the focus
+ * effect on `visible`): measuring a zero-size pane would cache a 0-width cell.
+ * Such a pane is re-measured by the becoming-visible refit when next shown.
+ */
+export function remeasureAndFit(term: Terminal, fit: FitAddon): void {
+  const el = term.element
+  if (!el || !el.offsetParent) return // offsetParent === null when display:none / detached
+  const ff = term.options.fontFamily
+  term.options.fontFamily = 'monospace' // transient — forces CharSizeService.measure()
+  term.options.fontFamily = ff          // restore — re-measures with the now-loaded font
+  fit.fit()
+}
+
 /* ── Terminal view for one session ── */
 function TerminalView({ sessionId, visible }: { sessionId: string; visible: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -156,6 +183,10 @@ function TerminalView({ sessionId, visible }: { sessionId: string; visible: bool
     entryRef.current = getOrCreateTerm(sessionId)
   }
   const { term, fit } = entryRef.current
+
+  // Re-measure + refit, gated on pane visibility (see remeasureAndFit). Stable
+  // per cached term/fit, so the effects below don't re-subscribe.
+  const doRefit = useCallback(() => remeasureAndFit(term, fit), [term, fit])
 
   useTerminalWs(sessionId, term, fit)
 
@@ -171,13 +202,15 @@ function TerminalView({ sessionId, visible }: { sessionId: string; visible: bool
     fit.fit()
   }, [term, fit])
 
-  // Focus + refit when becoming visible
+  // Focus + refit when becoming visible. Re-measure here too so a pane that
+  // gained the web font while it was hidden (display:none) picks up the correct
+  // cell metrics the moment it is shown.
   useEffect(() => {
-    if (visible) {
-      requestAnimationFrame(() => fit.fit())
-      term.focus()
-    }
-  }, [visible, term, fit])
+    if (!visible) return
+    const raf = requestAnimationFrame(doRefit)
+    term.focus()
+    return () => cancelAnimationFrame(raf)
+  }, [visible, term, doRefit])
 
   // Refit on container resize — always observe, not just when visible
   useEffect(() => {
@@ -188,6 +221,25 @@ function TerminalView({ sessionId, visible }: { sessionId: string; visible: bool
     ro.observe(containerRef.current)
     return () => ro.disconnect()
   }, [fit]) // stable — only depends on fit ref from cache
+
+  // Refit after web fonts finish loading (see remeasureAndFit). `ready` resolves
+  // once all pending @font-face loads settle; we also explicitly request the
+  // terminal font in case it has not started loading when `ready` first fires.
+  // doRefit no-ops on hidden panes — those are caught by the becoming-visible
+  // refit above.
+  useEffect(() => {
+    const fonts = document.fonts
+    if (!fonts) return
+    let cancelled = false
+    const onReady = () => { if (!cancelled) doRefit() }
+    // `ready` resolves immediately (harmless no-op) if the font loaded before mount.
+    fonts.ready.then(onReady)
+    try {
+      const px = term.options.fontSize ?? 13
+      fonts.load(`${px}px "JetBrains Mono"`).then(onReady, () => {})
+    } catch { /* invalid spec on some engines — `ready` handler covers it */ }
+    return () => { cancelled = true }
+  }, [term, doRefit]) // stable — term/doRefit come from the per-session cache
 
   // xterm instances persist in termCache across panel close/open — only destroyed on explicit tab close
 
