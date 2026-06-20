@@ -25,7 +25,7 @@ export default function AgentDropdownList({ agents, activeAgent, defaultAgent, o
         const active = activeAgent === a.name
         const isDefault = a.name === defaultAgent
         return (
-          <button key={a.name} ref={active ? activeRef : undefined} className={`w-full text-left px-2.5 py-2 flex flex-col gap-0.5 rounded-md cursor-pointer transition-all ${active ? 'bg-accent-subtle' : 'hover:bg-bg-hover'}`} onClick={() => onSelect(a.name)}>
+          <button key={a.name} ref={active ? activeRef : undefined} role="option" aria-selected={active} tabIndex={-1} className={`w-full text-left px-2.5 py-2 flex flex-col gap-0.5 rounded-md cursor-pointer transition-all ${active ? 'bg-accent-subtle' : 'hover:bg-bg-hover'}`} onClick={() => onSelect(a.name)}>
             <div className="flex items-center gap-2">
               <span className={`text-[13px] font-mono font-semibold truncate ${active ? 'text-accent' : 'text-text'}`}>{a.name}</span>
               <SourceBadge source={a.source}>{a.source}{isDefault ? <> <Star className="lucide-inline" /></> : ''}</SourceBadge>

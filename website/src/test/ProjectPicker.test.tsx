@@ -140,11 +140,15 @@ describe('ProjectPicker', () => {
       }
       Object.defineProperty(window, 'innerHeight', { value: 768, configurable: true })
       renderWithProviders(<Both />)
-      const drop = (await screen.findByText('Recent')).closest('div.fixed') as HTMLElement
+      await screen.findByText('Recent')
       // Live ref measurement wins so layout shifts (scroll/resize/keyboard) stay accurate.
       // jsdom returns a 0,0,0,0 rect for the button → bottom=0 → top = 0 + 4 = 4,
-      // NOT the captured anchorRect's 124 + 4 = 128.
-      expect(drop.style.top).toBe('4px')
+      // NOT the captured anchorRect's 124 + 4 = 128. The ref attaches after the
+      // first paint, so wait for the post-mount re-render to settle the value.
+      await waitFor(() => {
+        const drop = screen.getByText('Recent').closest('div.fixed') as HTMLElement
+        expect(drop.style.top).toBe('4px')
+      })
     })
   })
 
@@ -261,6 +265,64 @@ describe('ProjectPicker', () => {
       const input = await screen.findByPlaceholderText('/path/to/project')
       fireEvent.keyDown(input, { key: 'Escape' })
       expect(onSelect).not.toHaveBeenCalled()
+      expect(onOpenChange).toHaveBeenCalledWith(false)
+    })
+  })
+
+  describe('keyboard navigation', () => {
+    it('Recent tab: ArrowDown moves the highlight and Enter selects', async () => {
+      const onSelect = vi.fn()
+      const onOpenChange = vi.fn()
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={onOpenChange} anchorRect={rect(100, 50)} onSelect={onSelect} />
+      )
+      await screen.findByText('projA')
+      const optA = screen.getByText('projA').closest('[role="option"]') as HTMLElement
+      const optB = screen.getByText('projB').closest('[role="option"]') as HTMLElement
+      // First option highlighted by default.
+      expect(optA).toHaveAttribute('aria-selected', 'true')
+      // The Recent tab listens at the document level (no input to focus).
+      fireEvent.keyDown(document, { key: 'ArrowDown' })
+      await waitFor(() => expect(optB).toHaveAttribute('aria-selected', 'true'))
+      fireEvent.keyDown(document, { key: 'Enter' })
+      expect(onSelect).toHaveBeenCalledWith('/home/u/projB')
+      expect(onOpenChange).toHaveBeenCalledWith(false)
+    })
+
+    it('Browse tab: ArrowDown highlights a subdir and Enter drills into it', async () => {
+      vi.mocked(api.recentProjects).mockResolvedValue({ dirs: [] } as any)
+      const browseSpy = vi.mocked(api.browseDirs)
+      browseSpy.mockResolvedValue(mockBrowseDirs('/home/u', [
+        { name: 'alpha', path: '/home/u/alpha' },
+        { name: 'beta', path: '/home/u/beta' },
+      ]) as any)
+      const onSelect = vi.fn()
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={onSelect} />
+      )
+      const input = await screen.findByPlaceholderText('/path/to/project')
+      await screen.findByText('beta')
+      browseSpy.mockClear()
+      fireEvent.keyDown(input, { key: 'ArrowDown' }) // highlight index 1 (beta)
+      fireEvent.keyDown(input, { key: 'Enter' })     // Enter drills into the highlighted folder
+      await waitFor(() => expect(browseSpy).toHaveBeenCalledWith('/home/u/beta'))
+      expect(onSelect).not.toHaveBeenCalled()         // drilling, not committing
+    })
+
+    it('Browse tab: Cmd+Enter commits the current directory', async () => {
+      vi.mocked(api.recentProjects).mockResolvedValue({ dirs: [] } as any)
+      vi.mocked(api.browseDirs).mockResolvedValue(mockBrowseDirs('/home/u', [
+        { name: 'alpha', path: '/home/u/alpha' },
+      ]) as any)
+      const onSelect = vi.fn()
+      const onOpenChange = vi.fn()
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={onOpenChange} anchorRect={rect(100, 50)} onSelect={onSelect} />
+      )
+      const input = await screen.findByPlaceholderText('/path/to/project')
+      await screen.findByText('alpha')
+      fireEvent.keyDown(input, { key: 'Enter', metaKey: true }) // commit current dir, no drill
+      expect(onSelect).toHaveBeenCalledWith('/home/u')
       expect(onOpenChange).toHaveBeenCalledWith(false)
     })
   })

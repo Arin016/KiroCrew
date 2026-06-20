@@ -139,10 +139,8 @@ describe('StyledSelect', () => {
       mockPointerKind('mouse')
       openDropdown()
       const listbox = screen.getByRole('listbox')
-      const scrollDiv = listbox.querySelector('div.overflow-y-auto') as HTMLElement
-      expect(scrollDiv).toBeTruthy()
       const scrollEvent = new Event('scroll', { bubbles: true })
-      scrollDiv.dispatchEvent(scrollEvent)
+      listbox.dispatchEvent(scrollEvent)
       expect(screen.queryByRole('listbox')).toBeInTheDocument()
     })
 

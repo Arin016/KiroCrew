@@ -11,6 +11,7 @@ import { LAYOUT } from '../components/layout'
 import InfoTip from '../components/InfoTip'
 import { useProvider } from '../providers'
 import { useFilteredDropdown } from '../hooks/useFilteredDropdown'
+import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 
 function fmtTokens(n: number): string {
   return n >= 1_000_000 ? (n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1) + 'M' : (n / 1_000).toFixed(0) + 'K'
@@ -127,6 +128,22 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
   })
   const modelOptions = modelOptionsData ?? []
   const { open: modelDropOpen, setOpen: setModelDropOpen, filter: modelFilter, setFilter: setModelFilter, dropdownRef: modelDropRef, inputRef: modelInputRef, filtered: filteredModels } = useFilteredDropdown(modelOptions)
+  // Roving-focus keyboard nav for the model dropdown (shared with StyledSelect/AgentSelector).
+  const { onListKeyDown: onModelListKeyDown } = useListboxKeyboard({
+    open: modelDropOpen,
+    dropdownRef: modelDropRef,
+    inputRef: modelInputRef,
+    hasFilterInput: true,
+    filteredCount: filteredModels.length,
+    onEnterSingleMatch: () => {
+      if (!selectedAgent) return
+      const m = filteredModels[0].name === 'auto' ? '' : filteredModels[0].name
+      patchModelMut.mutate({ name: selectedAgent.name, model: m })
+      setModelDropOpen(false)
+      modelBtnRef.current?.focus()
+    },
+    closeToTrigger: () => { setModelDropOpen(false); modelBtnRef.current?.focus() },
+  })
   const modelBtnRef = useRef<HTMLButtonElement>(null)
   const patchModelMut = useMutation({
     mutationFn: ({ name, model }: { name: string; model: string }) => api.agentPatch(name, { model }),
@@ -236,11 +253,13 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
                           <span><Brain className="lucide-inline" /></span> {selectedAgent.model || 'auto'} <span className="text-muted text-[10px]"><ChevronDown className="lucide-inline" /></span>
                         </Btn>
                         {modelDropOpen && modelBtnRef.current && createPortal(
-                          <div ref={modelDropRef} className="fixed z-[9999] bg-card border border-border rounded-lg shadow-lg min-w-[260px] max-w-[340px] max-h-[320px] flex flex-col overflow-hidden animate-slide-up" style={(() => { const r = modelBtnRef.current!.getBoundingClientRect(); const dropH = 320; const top = r.bottom + 4 + dropH > window.innerHeight ? r.top - dropH - 4 : r.bottom + 4; const left = Math.max(8, Math.min(r.left, window.innerWidth - 348)); return { top, left } })()}>
+                          <div ref={modelDropRef} tabIndex={-1} onKeyDown={onModelListKeyDown} className="fixed z-[9999] bg-card border border-border rounded-lg shadow-lg min-w-[260px] max-w-[340px] max-h-[320px] flex flex-col overflow-hidden animate-slide-up" style={(() => { const r = modelBtnRef.current!.getBoundingClientRect(); const dropH = 320; const top = r.bottom + 4 + dropH > window.innerHeight ? r.top - dropH - 4 : r.bottom + 4; const left = Math.max(8, Math.min(r.left, window.innerWidth - 348)); return { top, left } })()}>
                             <div className="p-2 border-b border-border">
-                              <Input ref={modelInputRef} type="text" placeholder="Type to filter…" value={modelFilter} onChange={e => setModelFilter(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') setModelDropOpen(false); if (e.key === 'Enter' && filteredModels.length === 1) { const m = filteredModels[0].name === 'auto' ? '' : filteredModels[0].name; patchModelMut.mutate({ name: selectedAgent.name, model: m }); setModelDropOpen(false) } }} className="w-full px-2 py-1 text-[13px] font-mono" />
+                              <Input ref={modelInputRef} type="text" aria-label="Filter models" placeholder="Type to filter…" value={modelFilter} onChange={e => setModelFilter(e.target.value)} className="w-full px-2 py-1 text-[13px] font-mono" />
                             </div>
+                            <div role="listbox" aria-label="Model list" className="overflow-y-auto flex-1 min-h-0">
                             <ModelDropdownList models={filteredModels} activeModel={selectedAgent.model || 'auto'} onSelect={name => { const val = name === 'auto' ? '' : name; patchModelMut.mutate({ name: selectedAgent.name, model: val }); setModelDropOpen(false) }} />
+                            </div>
                           </div>,
                           document.body
                         )}

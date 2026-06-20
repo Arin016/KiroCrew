@@ -1,7 +1,8 @@
-import { useRef } from 'react'
+import { useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { Bot, Check } from 'lucide-react'
 import { useFilteredDropdown } from '../hooks/useFilteredDropdown'
+import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { useProvider } from '../providers'
 import { Input, Btn } from './ui'
 
@@ -30,6 +31,23 @@ export default function AgentSelector({ agents, defaultAgent, value, onChange }:
   const { open, setOpen, filter, setFilter, dropdownRef, inputRef, filtered: items } = useFilteredDropdown(agents)
   const active = value || defaultAgent || (agents[0]?.name ?? 'default')
 
+  /** Close the dropdown and return focus to the trigger (WAI-ARIA combobox). */
+  const closeToTrigger = useCallback(() => {
+    setOpen(false)
+    btnRef.current?.focus()
+  }, [setOpen])
+
+  // Roving-focus keyboard navigation (shared with StyledSelect via useListboxKeyboard).
+  const { onListKeyDown } = useListboxKeyboard({
+    open,
+    dropdownRef,
+    inputRef,
+    hasFilterInput: true,
+    filteredCount: items.length,
+    onEnterSingleMatch: () => { onChange(items[0].name); closeToTrigger() },
+    closeToTrigger,
+  })
+
   return (
     <div className="relative">
       <button
@@ -46,8 +64,8 @@ export default function AgentSelector({ agents, defaultAgent, value, onChange }:
       {open && btnRef.current && createPortal(
         <div
           ref={dropdownRef}
-          role="listbox"
-          aria-label="Agent list"
+          tabIndex={-1}
+          onKeyDown={onListKeyDown}
           className="fixed z-[9999] bg-card border border-border rounded-lg shadow-lg min-w-[240px] max-w-[340px] max-h-[280px] flex flex-col overflow-hidden animate-slide-up"
           style={(() => {
             const r = btnRef.current!.getBoundingClientRect()
@@ -61,20 +79,14 @@ export default function AgentSelector({ agents, defaultAgent, value, onChange }:
             <Input
               ref={inputRef}
               type="text"
+              aria-label="Filter agents"
               placeholder="Type to filter…"
               value={filter}
               onChange={e => setFilter(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Escape') setOpen(false)
-                if (e.key === 'Enter' && items.length === 1) {
-                  onChange(items[0].name)
-                  setOpen(false)
-                }
-              }}
               className="w-full px-2 py-1 text-[13px] font-mono"
             />
           </div>
-          <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-border">
+          <div role="listbox" aria-label="Agent list" className="flex-1 min-h-0 overflow-y-auto divide-y divide-border">
             {items.map(a => {
               const isCurrent = active === a.name
               const isDefault = a.name === defaultAgent
@@ -83,8 +95,9 @@ export default function AgentSelector({ agents, defaultAgent, value, onChange }:
                   key={a.name}
                   role="option"
                   aria-selected={isCurrent}
+                  tabIndex={-1}
                   className={`w-full text-left px-3 py-2 flex items-center gap-2 min-w-0 border-0 rounded-none ${isCurrent ? 'bg-accent-subtle hover:bg-accent-subtle' : 'hover:bg-bg-hover'}`}
-                  onClick={() => { onChange(a.name); setOpen(false) }}
+                  onClick={() => { onChange(a.name); closeToTrigger() }}
                 >
                   <div className="flex flex-col min-w-0 flex-1">
                     <div className="flex items-center gap-1.5">

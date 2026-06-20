@@ -52,6 +52,7 @@ import WelcomeView from '../components/WelcomeView'
 import { usePanelState, useDiffPanel } from '../hooks/usePanelState'
 import { useBranding } from '../hooks/useBranding'
 import { useFilteredDropdown } from '../hooks/useFilteredDropdown'
+import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { useAgents } from '../hooks/useAgents'
 import AgentDropdownList from '../components/AgentDropdownList'
 import ProjectPicker from '../components/ProjectPicker'
@@ -589,6 +590,25 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     },
   })
   const { open: modelDropdown, setOpen: setModelDropdown, filter: modelFilter, setFilter: setModelFilter, dropdownRef: modelDropdownRef, inputRef: modelInputRef, filtered: filteredModels } = useFilteredDropdown(availableModels)
+  // Roving-focus keyboard nav for the agent + model dropdowns (shared with StyledSelect/AgentSelector).
+  const { onListKeyDown: onAgentListKeyDown } = useListboxKeyboard({
+    open: agentDropdown,
+    dropdownRef: agentDropdownRef,
+    inputRef: agentInputRef,
+    hasFilterInput: true,
+    filteredCount: filteredAgents.length,
+    onEnterSingleMatch: () => { switchAgent(filteredAgents[0].name); setAgentDropdown(false) },
+    closeToTrigger: () => setAgentDropdown(false),
+  })
+  const { onListKeyDown: onModelListKeyDown } = useListboxKeyboard({
+    open: modelDropdown,
+    dropdownRef: modelDropdownRef,
+    inputRef: modelInputRef,
+    hasFilterInput: true,
+    filteredCount: filteredModels.length,
+    onEnterSingleMatch: () => { switchModel(filteredModels[0].name); setModelDropdown(false) },
+    closeToTrigger: () => setModelDropdown(false),
+  })
   const [pendingAgent, _setPendingAgent] = useState('')  // agent for next new slot
   const pendingAgentRef = useRef('')
   const setPendingAgent = useCallback((v: string) => { pendingAgentRef.current = v; _setPendingAgent(v) }, [])
@@ -2888,11 +2908,11 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
             />
             {/* Agent dropdown portal — triggered from input bar */}
             {agentDropdown && agentBtnRect && createPortal(
-              <div ref={agentDropdownRef} className="fixed z-[9999] bg-bg-elevated border border-border rounded-xl shadow-xl min-w-[260px] max-w-[340px] flex flex-col p-1 gap-0.5 animate-slide-up" style={(() => { const left = Math.max(8, Math.min(agentBtnRect.left, window.innerWidth - 348)); return { bottom: window.innerHeight - agentBtnRect.top + 4, left } })()}>
+              <div ref={agentDropdownRef} tabIndex={-1} onKeyDown={onAgentListKeyDown} className="fixed z-[9999] bg-bg-elevated border border-border rounded-xl shadow-xl min-w-[260px] max-w-[340px] flex flex-col p-1 gap-0.5 animate-slide-up" style={(() => { const left = Math.max(8, Math.min(agentBtnRect.left, window.innerWidth - 348)); return { bottom: window.innerHeight - agentBtnRect.top + 4, left } })()}>
                 <div className="px-1.5 pt-1.5 pb-1">
-                  <Input ref={agentInputRef} type="text" placeholder="Type to filter…" value={agentFilter} onChange={e => setAgentFilter(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') setAgentDropdown(false); if (e.key === 'Enter' && filteredAgents.length === 1) { switchAgent(filteredAgents[0].name); setAgentDropdown(false) } }} className="w-full px-2 py-1 text-[13px] font-mono" />
+                  <Input ref={agentInputRef} type="text" aria-label="Filter agents" placeholder="Type to filter…" value={agentFilter} onChange={e => setAgentFilter(e.target.value)} className="w-full px-2 py-1 text-[13px] font-mono" />
                 </div>
-                <div className="overflow-y-auto max-h-[280px]">
+                <div role="listbox" aria-label="Agent list" className="overflow-y-auto max-h-[280px]">
                 <AgentDropdownList agents={filteredAgents} activeAgent={currentSlot?.agent || 'default'} defaultAgent={defaultAgent} onSelect={name => { switchAgent(name); setAgentDropdown(false) }} />
                 </div>
               </div>,
@@ -2904,6 +2924,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                 anchorRect={modelBtnRect}
                 dropdownRef={modelDropdownRef}
                 inputRef={modelInputRef}
+                onListKeyDown={onModelListKeyDown}
                 models={filteredModels}
                 activeModel={currentSlot?.model || resolvedModel || 'auto'}
                 onSelectModel={name => switchModel(name)}

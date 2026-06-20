@@ -16,7 +16,7 @@ export default function ModelDropdownList({ models, activeModel, onSelect }: {
       {models.map(m => {
         const active = activeModel === m.name
         return (
-          <button key={m.name} ref={active ? activeRef : undefined} className={`w-full text-left px-2.5 py-2 flex flex-col gap-0.5 rounded-md cursor-pointer transition-all border-none bg-transparent ${active ? 'bg-accent-subtle' : 'hover:bg-bg-hover'}`} onClick={() => onSelect(m.name)}>
+          <button key={m.name} ref={active ? activeRef : undefined} role="option" aria-selected={active} tabIndex={-1} className={`w-full text-left px-2.5 py-2 flex flex-col gap-0.5 rounded-md cursor-pointer transition-all border-none bg-transparent ${active ? 'bg-accent-subtle' : 'hover:bg-bg-hover'}`} onClick={() => onSelect(m.name)}>
             <div className="flex items-center gap-2">
               <span className={`text-[13px] font-mono font-semibold truncate ${active ? 'text-accent' : 'text-text'}`}>{m.name}</span>
               {active && <span className="text-accent text-[12px]"><Check className="lucide-inline" /></span>}

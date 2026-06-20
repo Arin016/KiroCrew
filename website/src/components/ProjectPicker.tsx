@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { FolderOpen, ChevronRight, ChevronLeft, Clock } from 'lucide-react'
 import { api } from '../api/client'
+import { useListKeyboardNav } from '../hooks/useListKeyboardNav'
 
 interface Props {
   open: boolean
@@ -18,8 +19,11 @@ export default function ProjectPicker({ open, onOpenChange, anchorRef, anchorRec
   const [browseParent, setBrowseParent] = useState('')
   const [browseDirs, setBrowseDirs] = useState<{ name: string; path: string }[]>([])
   const [recentDirs, setRecentDirs] = useState<string[]>([])
+  const [browseSel, setBrowseSel] = useState(0)
   const btnRef = anchorRef
   const dropRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const browseItemRefs = useRef<(HTMLElement | null)[]>([])
   const anchorRectRef = useRef<DOMRect | null>(anchorRect ?? null)
   anchorRectRef.current = anchorRect ?? null
   const getAnchorRect = useCallback((): DOMRect | null => {
@@ -31,7 +35,9 @@ export default function ProjectPicker({ open, onOpenChange, anchorRef, anchorRec
 
   const browse = useCallback((path?: string) => {
     api.browseDirs(path).then(d => {
-      setBrowsePath(d.path); setBrowseParent(d.parent); setBrowseDirs(d.dirs); setInput(d.path)
+      setBrowsePath(d.path); setBrowseParent(d.parent); setBrowseDirs(d.dirs); setInput(d.path); setBrowseSel(0)
+      // Keep the combobox input focused so arrow/Enter nav continues after a drill.
+      requestAnimationFrame(() => inputRef.current?.focus())
     }).catch(() => {})
   }, [])
 
@@ -65,6 +71,27 @@ export default function ProjectPicker({ open, onOpenChange, anchorRef, anchorRec
 
   const select = (path: string) => { onSelect(path); onOpenChange(false) }
 
+  // Recent tab uses the shared selected-index keyboard nav (same model as the
+  // Skill/File pickers). The Browse tab has its own combobox input handler
+  // below, so the hook is only armed on Recent to avoid double-handling keys.
+  const recentNav = useListKeyboardNav({
+    open: open && tab === 'recent',
+    count: recentDirs.length,
+    onChoose: i => { const d = recentDirs[i]; if (d) select(d) },
+    onClose: () => onOpenChange(false),
+  })
+
+  // Reset the Browse highlight whenever the visible list changes (tab switch,
+  // drill into a new dir, or filter edit).
+  useEffect(() => { setBrowseSel(0) }, [tab, input, browsePath])
+
+  // Keep the highlighted Browse subdir scrolled into view.
+  useEffect(() => {
+    if (!open || tab !== 'browse') return
+    const el = browseItemRefs.current[browseSel]
+    if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' })
+  }, [browseSel, open, tab])
+
   const anchorR = getAnchorRect()
   if (!open || !anchorR) return null
 
@@ -79,9 +106,9 @@ export default function ProjectPicker({ open, onOpenChange, anchorRef, anchorRec
       const left = Math.max(8, Math.min(anchorR.right - 400, window.innerWidth - 408))
       if (flipUp) {
         const spaceAbove = anchorR.top - 8
-        return { bottom: window.innerHeight - anchorR.top + 4, left, maxHeight: Math.min(460, Math.max(200, spaceAbove)) }
+        return { bottom: window.innerHeight - anchorR.top + 4, left, height: Math.min(460, Math.max(200, spaceAbove)) }
       }
-      return { top: anchorR.bottom + 4, left, maxHeight: Math.min(460, Math.max(200, spaceBelow)) }
+      return { top: anchorR.bottom + 4, left, height: Math.min(460, Math.max(200, spaceBelow)) }
     })()}>
       {/* Tabs */}
       <div className="flex border-b border-border">
@@ -94,11 +121,21 @@ export default function ProjectPicker({ open, onOpenChange, anchorRef, anchorRec
       </div>
 
       {tab === 'recent' ? (
-        <div className="overflow-y-auto flex-1 min-h-0">
+        <div role="listbox" aria-label="Recent projects" className="overflow-y-auto flex-1 min-h-0">
           {recentDirs.length === 0 ? (
             <div className="px-3 py-6 text-[12px] text-muted text-center">No recent projects</div>
-          ) : recentDirs.map(d => (
-            <button key={d} className="w-full text-left px-3 py-2 flex items-center gap-2 cursor-pointer hover:bg-bg-hover transition-colors" onMouseDown={e => { e.preventDefault(); select(d) }}>
+          ) : recentDirs.map((d, i) => (
+            <button
+              key={d}
+              role="option"
+              aria-selected={i === recentNav.selected}
+              id={`pp-recent-${i}`}
+              tabIndex={-1}
+              ref={el => { recentNav.itemRefs.current[i] = el }}
+              className={`w-full text-left px-3 py-2 flex items-center gap-2 cursor-pointer transition-colors ${i === recentNav.selected ? 'bg-bg-hover' : 'hover:bg-bg-hover'}`}
+              onMouseEnter={() => recentNav.setSelected(i)}
+              onMouseDown={e => { e.preventDefault(); select(d) }}
+            >
               <FolderOpen size={12} className="text-accent shrink-0" />
               <div className="flex-1 min-w-0">
                 <div className="text-[13px] font-mono font-semibold text-text truncate">{d.split('/').pop()}</div>
@@ -111,15 +148,54 @@ export default function ProjectPicker({ open, onOpenChange, anchorRef, anchorRec
         <>
           <div className="p-2 border-b border-border flex gap-1 items-center">
             {browseParent && browseParent !== browsePath && (
-              <button onClick={() => browse(browseParent)} className="p-1 text-muted hover:text-text rounded hover:bg-bg-hover shrink-0" title="Back"><ChevronLeft size={16} /></button>
+              <button aria-label="Back" onClick={() => browse(browseParent)} className="p-1 text-muted hover:text-text rounded hover:bg-bg-hover shrink-0" title="Back"><ChevronLeft size={16} /></button>
             )}
-            <input autoFocus type="text" placeholder="/path/to/project" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && input.trim()) select(input.trim()); if (e.key === 'Escape') onOpenChange(false) }} className="flex-1 bg-bg-elevated border border-border rounded px-2 py-1.5 text-[13px] font-mono text-text placeholder:text-muted focus:outline-none focus:border-accent" />
+            <input
+              ref={inputRef}
+              autoFocus
+              type="text"
+              role="combobox"
+              aria-expanded={true}
+              aria-label="Project directory path"
+              aria-controls="pp-browse-list"
+              aria-activedescendant={filteredBrowse.length ? `pp-dir-${browseSel}` : undefined}
+              placeholder="/path/to/project"
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => {
+                const n = filteredBrowse.length
+                const commit = () => { const p = input.trim() || browsePath; if (p) select(p) }
+                if (e.key === 'ArrowDown') { e.preventDefault(); setBrowseSel(s => (n ? Math.min(s + 1, n - 1) : 0)) }
+                else if (e.key === 'ArrowUp') { e.preventDefault(); setBrowseSel(s => Math.max(s - 1, 0)) }
+                else if (e.key === 'Enter') {
+                  e.preventDefault()
+                  if (e.metaKey || e.ctrlKey) commit()                               // ⌘/Ctrl+Enter commits the current dir
+                  else if (n > 0 && filteredBrowse[browseSel]) browse(filteredBrowse[browseSel].path)  // Enter drills into the highlighted folder
+                  else commit()                                                       // nothing to drill into -> commit typed path
+                }
+                else if (e.key === 'ArrowLeft' && e.currentTarget.selectionStart === 0 && e.currentTarget.selectionEnd === 0 && browseParent && browseParent !== browsePath) {
+                  e.preventDefault(); browse(browseParent)                            // caret at start -> go to parent
+                }
+                else if (e.key === 'Escape' || e.key === 'Tab') { e.preventDefault(); onOpenChange(false); btnRef?.current?.focus() }
+              }}
+              className="flex-1 bg-bg-elevated border border-border rounded px-2 py-1.5 text-[13px] font-mono text-text placeholder:text-muted focus:outline-none focus:border-accent"
+            />
             <button disabled={!input.trim() && !browsePath} onMouseDown={e => { e.preventDefault(); select(input.trim() || browsePath) }} className="px-2 py-1 text-[11px] bg-accent/20 text-accent rounded hover:bg-accent/30 disabled:opacity-40 disabled:cursor-not-allowed shrink-0">Select</button>
           </div>
-          <div className="overflow-y-auto flex-1 min-h-0">
+          <div id="pp-browse-list" role="listbox" aria-label="Subdirectories" className="overflow-y-auto flex-1 min-h-0">
             {filteredBrowse.length === 0 && <div className="px-3 py-4 text-[12px] text-muted text-center">No subdirectories</div>}
-            {filteredBrowse.map(d => (
-              <button key={d.path} className="w-full text-left px-3 py-1.5 flex items-center gap-2 cursor-pointer hover:bg-bg-hover transition-colors" onClick={() => browse(d.path)}>
+            {filteredBrowse.map((d, i) => (
+              <button
+                key={d.path}
+                role="option"
+                aria-selected={i === browseSel}
+                id={`pp-dir-${i}`}
+                tabIndex={-1}
+                ref={el => { browseItemRefs.current[i] = el }}
+                className={`w-full text-left px-3 py-1.5 flex items-center gap-2 cursor-pointer transition-colors ${i === browseSel ? 'bg-bg-hover' : 'hover:bg-bg-hover'}`}
+                onMouseEnter={() => setBrowseSel(i)}
+                onClick={() => browse(d.path)}
+              >
                 <FolderOpen size={12} className="text-accent shrink-0" />
                 <span className="text-[13px] font-mono text-text truncate">{d.name}</span>
                 <ChevronRight size={12} className="text-muted ml-auto shrink-0" />

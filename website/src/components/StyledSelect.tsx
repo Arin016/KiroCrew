@@ -2,6 +2,7 @@ import { useRef, useCallback, useEffect } from 'react'
 import { Check } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { useFilteredDropdown } from '../hooks/useFilteredDropdown'
+import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { isTouchDevice } from '../utils/isTouchDevice'
 
 interface Props {
@@ -21,7 +22,24 @@ export default function StyledSelect({ options, value, onChange, action, placeho
   const items = options.map(o => ({ name: o }))
   const { open, setOpen, filter, setFilter, dropdownRef, inputRef, filtered } = useFilteredDropdown(items)
 
-  const select = useCallback((v: string) => { onChange(v); setOpen(false) }, [onChange, setOpen])
+  /** Close the listbox and return focus to the trigger (WAI-ARIA combobox). */
+  const closeToTrigger = useCallback(() => {
+    setOpen(false)
+    btnRef.current?.focus()
+  }, [setOpen])
+
+  const select = useCallback((v: string) => { onChange(v); closeToTrigger() }, [onChange, closeToTrigger])
+
+  // Roving-focus keyboard navigation (shared with AgentSelector via useListboxKeyboard).
+  const { onListKeyDown } = useListboxKeyboard({
+    open,
+    dropdownRef,
+    inputRef,
+    hasFilterInput: options.length > 5,
+    filteredCount: filtered.length,
+    onEnterSingleMatch: () => select(filtered[0].name),
+    closeToTrigger,
+  })
 
   // Close dropdown on scroll (outside the dropdown) or resize so it doesn't float detached
   useEffect(() => {
@@ -44,7 +62,7 @@ export default function StyledSelect({ options, value, onChange, action, placeho
       window.removeEventListener('scroll', close, true)
       window.removeEventListener('resize', closeResize)
     }
-  }, [open, setOpen])
+  }, [open, setOpen, dropdownRef])
 
   return (
     <div className="relative" style={style}>
@@ -62,7 +80,8 @@ export default function StyledSelect({ options, value, onChange, action, placeho
       {open && btnRef.current && createPortal(
         <div
           ref={dropdownRef}
-          role="listbox"
+          tabIndex={-1}
+          onKeyDown={onListKeyDown}
           className="fixed z-[9999] bg-card border border-border rounded-lg shadow-lg min-w-[180px] max-h-[240px] flex flex-col animate-slide-up overflow-hidden"
           style={(() => {
             const r = btnRef.current!.getBoundingClientRect()
@@ -78,21 +97,20 @@ export default function StyledSelect({ options, value, onChange, action, placeho
               <input
                 ref={inputRef}
                 type="text"
+                aria-label="Filter options"
                 placeholder="Filter…"
                 value={filter}
                 onChange={e => setFilter(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Escape') setOpen(false)
-                  if (e.key === 'Enter' && filtered.length === 1) select(filtered[0].name)
-                }}
                 className="w-full px-2 py-1 rounded text-[13px] font-mono bg-bg-elevated border border-border text-text placeholder:text-muted focus:outline-none focus:border-accent"
               />
             </div>
           )}
-          <div className="overflow-y-auto overflow-x-hidden rounded-b-lg">
+          <div role="listbox" aria-label={placeholder || 'Options'} className="overflow-y-auto overflow-x-hidden rounded-b-lg">
             {action && (
               <button
-                className="w-full text-left px-3 py-2 text-[13px] font-mono text-accent hover:bg-bg-hover cursor-pointer border-b border-border transition-colors"
+                data-option
+                tabIndex={-1}
+                className="w-full text-left px-3 py-2 text-[13px] font-mono text-accent hover:bg-bg-hover cursor-pointer border-b border-border transition-colors focus:outline-none focus:ring-1 focus:ring-inset focus:ring-accent"
                 onClick={() => { setOpen(false); action.onSelect() }}
               >
                 {action.label}
@@ -100,9 +118,11 @@ export default function StyledSelect({ options, value, onChange, action, placeho
             )}
             {placeholder && (
               <button
+                data-option
+                tabIndex={-1}
                 role="option"
                 aria-selected={!value}
-                className={`w-full text-left px-3 py-2 text-[13px] font-mono cursor-pointer border-b border-border transition-colors ${!value ? 'bg-accent-subtle text-accent font-semibold' : 'text-muted hover:bg-bg-hover'}`}
+                className={`w-full text-left px-3 py-2 text-[13px] font-mono cursor-pointer border-b border-border transition-colors focus:outline-none focus:ring-1 focus:ring-inset focus:ring-accent ${!value ? 'bg-accent-subtle text-accent font-semibold' : 'text-muted hover:bg-bg-hover'}`}
                 onClick={() => select('')}
               >
                 {placeholder}
@@ -112,9 +132,11 @@ export default function StyledSelect({ options, value, onChange, action, placeho
             {filtered.map(item => (
               <button
                 key={item.name}
+                data-option
+                tabIndex={-1}
                 role="option"
                 aria-selected={item.name === value}
-                className={`w-full text-left px-3 py-2 text-[13px] font-mono cursor-pointer border-b border-border last:border-0 transition-colors ${item.name === value ? 'bg-accent-subtle text-accent font-semibold' : 'text-text hover:bg-bg-hover'}`}
+                className={`w-full text-left px-3 py-2 text-[13px] font-mono cursor-pointer border-b border-border last:border-0 transition-colors focus:outline-none focus:ring-1 focus:ring-inset focus:ring-accent ${item.name === value ? 'bg-accent-subtle text-accent font-semibold' : 'text-text hover:bg-bg-hover'}`}
                 onClick={() => select(item.name)}
               >
                 <span className="truncate">{item.name}</span>

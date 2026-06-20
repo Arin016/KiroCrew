@@ -21,6 +21,7 @@ interface Props {
   hasEffort: boolean
   slot: string | null
   currentEffort: string
+  onListKeyDown: (e: React.KeyboardEvent) => void
 }
 
 const WIDTH = 340
@@ -32,7 +33,7 @@ const SPRING = { type: 'spring' as const, stiffness: 420, damping: 38 }
  *  a back chevron returns. The popover height springs to the active page. */
 export default function ModelEffortDropdown({
   anchorRect, dropdownRef, inputRef, models, activeModel, onSelectModel,
-  filter, setFilter, onClose, hasEffort, slot, currentEffort,
+  filter, setFilter, onClose, hasEffort, slot, currentEffort, onListKeyDown,
 }: Props) {
   const [showEffort, setShowEffort] = useState(false)
   const modelPage = useRef<HTMLDivElement>(null)
@@ -51,6 +52,8 @@ export default function ModelEffortDropdown({
   return (
     <div
       ref={dropdownRef}
+      tabIndex={-1}
+      onKeyDown={showEffort ? undefined : onListKeyDown}
       className="fixed z-[9999] bg-bg-elevated border border-border rounded-xl shadow-xl overflow-hidden animate-slide-up"
       style={{ width: WIDTH, bottom: window.innerHeight - anchorRect.top + 4, left }}
     >
@@ -62,17 +65,14 @@ export default function ModelEffortDropdown({
               <Input
                 ref={inputRef}
                 type="text"
+                aria-label="Filter models"
                 placeholder="Type to filter…"
                 value={filter}
                 onChange={e => setFilter(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Escape') onClose()
-                  if (e.key === 'Enter' && models.length === 1) onSelectModel(models[0].name)
-                }}
                 className="w-full px-2 py-1 text-[13px] font-mono"
               />
             </div>
-            <div className="overflow-y-auto max-h-[280px]">
+            <div role="listbox" aria-label="Model list" className="overflow-y-auto max-h-[280px]">
               <ModelDropdownList models={models} activeModel={activeModel} onSelect={onSelectModel} />
             </div>
             {hasEffort && slot && (
