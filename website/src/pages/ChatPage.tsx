@@ -8,7 +8,7 @@ import { useAppSelector, useAppDispatch, store } from '../store'
 import {
   switchSlot, createSlot, deleteSlot, fetchHistory,
   appendMessage, resumeFromHistory, forkSlot,
-  setSlotRunning, startLocalTurn, syncSlotRunningFromServer, setPendingInput, resolveByApprovalId, clearPendingPermissions, cancelQueuedMessage,
+  setSlotRunning, startLocalTurn, syncSlotRunningFromServer, setPendingInput, resolveByApprovalId, clearPendingPermissions, cancelQueuedMessage, reorderQueuedMessages,
   setVoiceAudio,
   toggleActivity, openActivityToTab,
   setActiveSlot, truncateAfterIndex, replaceMessages,
@@ -2154,6 +2154,12 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     api.interruptSlot(activeSlot, queueId).catch(() => {})
   }, [activeSlot])
 
+  const handleReorderQueued = useCallback((order: string[]) => {
+    if (!activeSlot) return
+    dispatch(reorderQueuedMessages({ slot: activeSlot, order }))
+    api.reorderQueue(activeSlot, order).catch(() => {})
+  }, [activeSlot, dispatch])
+
   // Search: map message index → displayItems index for scroll-to-match
   const messageToDisplayIdx = useMemo(() => {
     const map = new Map<number, number>()
@@ -2751,7 +2757,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                 </div>
               )}
               {!activityOpen && <SubagentProgressBar slot={activeSlot} />}
-              <QueueStack messages={queuedMessages} onCancel={handleCancelQueued} onInterrupt={handleInterruptQueued} />
+              <QueueStack messages={queuedMessages} onCancel={handleCancelQueued} onInterrupt={handleInterruptQueued} onReorder={handleReorderQueued} />
               {flyingQuote && <FlyingQuote text={flyingQuote.text} from={flyingQuote.from} targetRef={inputAreaRef} onComplete={() => setFlyingQuote(null)} />}
               <div ref={inputAreaRef} className="relative z-10">
               {showHistorySuggestions && (

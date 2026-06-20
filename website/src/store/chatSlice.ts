@@ -865,6 +865,18 @@ const chatSlice = createSlice({
       const idx = state.messages.findIndex(m => m.role === 'queued' && (m.meta?.queueId as string) === action.payload.queue_id)
       if (idx >= 0) state.messages.splice(idx, 1)
     },
+    /** Reorder queued messages to match the given id sequence (from backend queue_reorder WS event). */
+    reorderQueuedMessages(state, action: PayloadAction<{ slot: string; order: string[] }>) {
+      if (action.payload.slot !== state.activeSlot) return
+      const order = action.payload.order
+      const queued = state.messages.filter(m => m.role === 'queued')
+      const rest = state.messages.filter(m => m.role !== 'queued')
+      const getId = (m: typeof queued[number]) => (m.meta?.queueId as string) ?? m.ts ?? ''
+      const byId = new Map(queued.map(m => [getId(m), m]))
+      const sorted = order.map(id => byId.get(id)).filter(Boolean) as typeof queued
+      const remaining = queued.filter(m => !order.includes(getId(m)))
+      state.messages = [...rest, ...sorted, ...remaining]
+    },
     /** Add a queued message (from backend queue_push WS event). */
     appendQueuedMessage: {
       reducer(state, action: PayloadAction<{ slot: string; content: string; ts: string; queueId: string }>) {
@@ -1082,7 +1094,7 @@ const chatSlice = createSlice({
 
 export const {
   setActiveSlot, clearSlotState, setPendingInput, setQuestionCard, clearQuestionCard, appendMessage, updateStreamingMessage, finalizeAssistant,
-  removeThinking, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, startLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage,
+  removeThinking, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, startLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, reorderQueuedMessages,
   sseContextUsage, setVoicePlaying, setVoiceAudio,
   toggleActivity, openActivityToTab, openActivityToTool, clearFocusToolCallId, sseSubagentPending, markSubagentApproving, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentDone,
   sseSubagentSnapshot, sseToolActivity, sseToolResult, sseActivityEvent,

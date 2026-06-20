@@ -22,3 +22,4 @@ auth.json
 playwright/.auth/
 test-results/
 screenshot-cli.mjs
+.kiroclaw-dev/

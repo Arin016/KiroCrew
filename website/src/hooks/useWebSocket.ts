@@ -4,7 +4,7 @@ import { useAppDispatch } from '../store'
 import { store } from '../store'
 import { sseStatus, sseConnected, sseDisconnected, sseSlots, setChannelTrusted, sseSlotTitle, triggerRefresh, fetchSlots, markSlotUnread, setUpdateProgress, sseSubagentStatus, sseSubagentText, type SubagentDetail } from '../store/dashboardSlice'
 import { addNotification, ackNotificationByTs, unackNotificationByTs, removeNotificationByTs, fetchNotifications } from '../store/notificationsSlice'
-import { fetchHistory, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, refreshSlot, sseContextUsage, clearMessages, setVoicePlaying, setVoiceAudio, resolveByApprovalId, sseSubagentPending, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentDone, sseSubagentSnapshot, sseToolActivity, sseToolResult, sseActivityEvent, sseSideResult, setSlotStatusDetail, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, setQuestionCard } from '../store/chatSlice'
+import { fetchHistory, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, refreshSlot, sseContextUsage, clearMessages, setVoicePlaying, setVoiceAudio, resolveByApprovalId, sseSubagentPending, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentDone, sseSubagentSnapshot, sseToolActivity, sseToolResult, sseActivityEvent, sseSideResult, setSlotStatusDetail, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, reorderQueuedMessages, setQuestionCard } from '../store/chatSlice'
 import { api } from '../api/client'
 import { sanitizeLlmOutput } from '../utils/sanitize'
 import type { StatusData, ChatSlot, Notification } from '../types'
@@ -299,6 +299,9 @@ export function useWebSocket() {
             break
           case 'queue_cancel':
             dispatch(cancelQueuedMessage(data))
+            break
+          case 'queue_reorder':
+            dispatch(reorderQueuedMessages(data))
             break
           case 'chat_chunk':
             dispatch(sseChatMessage({ ...data, role: 'chunk', seq: data.seq }))
