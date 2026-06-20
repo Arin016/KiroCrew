@@ -1,5 +1,6 @@
 import { useState, memo } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
+import { ChevronRight } from 'lucide-react'
 import type { PasteBlock } from '../utils/pasteTokens'
 
 /**
@@ -18,11 +19,16 @@ function PastedChip({ block }: { block: PasteBlock }) {
       <button
         type="button"
         onClick={() => setExpanded(v => !v)}
-        className="inline align-baseline p-0 bg-transparent border-none text-accent text-[12px] cursor-pointer hover:text-accent-hover transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-accent rounded-sm"
+        className="inline-flex items-center gap-0.5 align-baseline p-0 bg-transparent border-none text-accent text-[12px] cursor-pointer hover:text-accent-hover transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-accent rounded-sm"
         aria-expanded={expanded}
-        aria-label={`${expanded ? 'Collapse' : 'Expand'} pasted ${block.lines} lines`}
+        aria-label={`${expanded ? 'Collapse' : 'Expand'} pasted ${block.lines} ${block.lines === 1 ? 'line' : 'lines'}`}
         title={expanded ? 'Collapse paste' : 'Expand paste'}
       >
+        <ChevronRight
+          size={12}
+          aria-hidden
+          className={`shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`}
+        />
         [ Paste #{block.seq} · {block.lines} {block.lines === 1 ? 'line' : 'lines'} ]
       </button>
       <AnimatePresence initial={false}>
