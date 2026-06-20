@@ -563,6 +563,7 @@ async def start_dashboard(
     app.router.add_post("/api/chat/slots/{slot}/stop", chat.api_chat_slot_stop)
     app.router.add_post("/api/chat/slots/{slot}/interrupt", chat.api_chat_slot_interrupt)
     app.router.add_delete("/api/chat/slots/{slot}/queue/{queue_id}", chat.api_chat_slot_queue_cancel)
+    app.router.add_put("/api/chat/slots/{slot}/queue/order", chat.api_chat_slot_queue_reorder)
     app.router.add_delete("/api/chat/slots/{slot}", chat.api_chat_slot_delete)
     app.router.add_post("/api/chat/slots/{slot}/agent", chat.api_chat_slot_agent)
 

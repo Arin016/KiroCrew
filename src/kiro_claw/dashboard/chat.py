@@ -55,6 +55,7 @@ from kiro_claw.dashboard.chat_handlers import (  # noqa: F401
     api_chat_slot_model,
     api_chat_slot_project,
     api_chat_slot_queue_cancel,
+    api_chat_slot_queue_reorder,
     api_chat_slot_reasoning_effort,
     api_chat_slot_resume,
     api_chat_slot_stop,

@@ -773,6 +773,59 @@ async def api_chat_slot_queue_cancel(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "content": _redacted})
 
 
+async def api_chat_slot_queue_reorder(request: web.Request) -> web.Response:
+    """PUT /api/chat/slots/{slot}/queue/order — reorder queued messages.
+
+    Accepts ``{"order": ["qid1", "qid2", ...]}`` and rearranges the slot's
+    ``_queue`` to match the given id sequence.  Broadcasts a ``queue_reorder``
+    WebSocket event so all connected clients update in sync.
+    """
+    state: DashboardState = request.app["state"]
+    name = request.match_info["slot"]
+    slot = state._slots.get(name)
+    if not slot:
+        return web.json_response({"error": "not found"}, status=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    order = body.get("order")
+    if not isinstance(order, list) or not all(isinstance(x, str) for x in order):
+        return web.json_response({"error": "order must be a list of queue id strings"}, status=400)
+    # Build lookup of current queue items by id
+    by_id = {item["id"]: item for item in slot._queue}
+    # Validate all ids exist
+    missing = [qid for qid in order if qid not in by_id]
+    if missing:
+        return web.json_response({"error": f"unknown queue ids: {missing}"}, status=400)
+    # Reorder: place requested ids first in given order, then any remaining
+    reordered = [by_id[qid] for qid in order if qid in by_id]
+    remaining = [item for item in slot._queue if item["id"] not in set(order)]
+    slot._queue[:] = reordered + remaining
+    # Reorder the queued messages in the messages list to match
+    queued_msgs = [m for m in slot.messages if m.get("role") == "queued"]
+    other_msgs = [m for m in slot.messages if m.get("role") != "queued"]
+    queued_by_id: dict[str | None, dict] = {}
+    for m in queued_msgs:
+        try:
+            cls = json.loads(m.get("cls", "{}"))
+            queued_by_id[cls.get("queue_id")] = m
+        except (json.JSONDecodeError, TypeError):
+            pass
+    reordered_msgs = [queued_by_id[qid] for qid in order if qid in queued_by_id]
+    remaining_msgs = [m for m in queued_msgs if m not in reordered_msgs]
+    slot.messages[:] = other_msgs + reordered_msgs + remaining_msgs
+    state.broadcast_ws("queue_reorder", {"slot": name, "order": [item["id"] for item in slot._queue]})
+    state.push_slots_update()
+    sel().log_tool_invocation(
+        session_key=f"dashboard:{name}", agent="kiroclaw", source="dashboard",
+        tool_name="queue_reorder", tool_kind="permission",
+        outcome="allowed",
+        metadata={"slot": name, "order_len": len(order)},
+    )
+    return web.json_response({"ok": True})
+
+
 async def api_chat_slot_delete(request: web.Request) -> web.Response:
     """DELETE /api/chat/slots/{slot} — stop and remove a UI slot.
 
