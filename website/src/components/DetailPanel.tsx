@@ -23,13 +23,24 @@ interface DetailPanelProps {
   headerClassName?: string
 }
 
+/**
+ * Upper bound for the panel width: 60% of the current viewport. The panel is
+ * `shrink-0` inside an `overflow-hidden` row (no horizontal scroll), and its
+ * width is persisted per `storageKey`. A width sized on a wide external
+ * monitor would otherwise push the panel's right-edge header actions (diff
+ * toggle, Edit/Preview, etc.) off-screen when the same panel is later opened
+ * on a smaller laptop screen. Matches the drag cap in onDragStart below.
+ */
+const maxPanelWidth = () => (typeof window !== 'undefined' ? Math.round(window.innerWidth * 0.6) : Infinity)
+const clampPanelWidth = (w: number, minWidth: number) => Math.max(minWidth, Math.min(w, maxPanelWidth()))
+
 export default function DetailPanel({ title, onClose, footer, headerActions, secondaryHeaderActions, initialWidth = 380, minWidth = 300, storageKey, children, noPadding = false, headerClassName }: DetailPanelProps) {
   const [width, setWidth] = useState(() => {
     if (storageKey) {
       const v = parseInt(localStorage.getItem(storageKey) || '', 10)
-      if (!isNaN(v) && v >= minWidth) return v
+      if (!isNaN(v) && v >= minWidth) return clampPanelWidth(v, minWidth)
     }
-    return initialWidth
+    return clampPanelWidth(initialWidth, minWidth)
   })
   const widthRef = useRef(width)
   widthRef.current = width
@@ -43,11 +54,22 @@ export default function DetailPanel({ title, onClose, footer, headerActions, sec
     }
   }, [])
 
+  // Re-clamp on viewport shrink so a persisted width that's wider than the
+  // current screen can never leave the right-edge header actions off-screen.
+  // Only clamps down (never auto-grows) so it won't fight an active drag; the
+  // preferred width stays in localStorage and is restored (re-clamped) on a
+  // larger screen.
+  useEffect(() => {
+    const onResize = () => setWidth((w) => clampPanelWidth(w, minWidth))
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [minWidth])
+
   const onDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     const startX = e.clientX; const startW = widthRef.current
     const onMove = (ev: MouseEvent) => {
-      setWidth(Math.max(minWidth, Math.min(startW + (startX - ev.clientX), window.innerWidth * 0.6)))
+      setWidth(clampPanelWidth(startW + (startX - ev.clientX), minWidth))
     }
     const onUp = () => {
       document.removeEventListener('mousemove', onMove)
