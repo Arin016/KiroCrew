@@ -46,6 +46,11 @@ export default function DetailPanel({ title, onClose, footer, headerActions, sec
   widthRef.current = width
   const moveRef = useRef<((ev: MouseEvent) => void) | null>(null)
   const upRef = useRef<(() => void) | null>(null)
+  // True while a resize-handle drag is in progress. The window `resize` listener
+  // must not fight an active drag: a viewport change mid-drag would otherwise
+  // clamp `width` down and, via onUp below, persist that clamped value over the
+  // width the user actually dragged to.
+  const draggingRef = useRef(false)
 
   useEffect(() => {
     return () => {
@@ -56,26 +61,40 @@ export default function DetailPanel({ title, onClose, footer, headerActions, sec
 
   // Re-clamp on viewport shrink so a persisted width that's wider than the
   // current screen can never leave the right-edge header actions off-screen.
-  // Only clamps down (never auto-grows) so it won't fight an active drag; the
-  // preferred width stays in localStorage and is restored (re-clamped) on a
+  // Only clamps down (never auto-grows), and is suppressed while a drag is in
+  // progress (see draggingRef) so it can't clobber the in-flight drag value;
+  // the preferred width stays in localStorage and is restored (re-clamped) on a
   // larger screen.
   useEffect(() => {
-    const onResize = () => setWidth((w) => clampPanelWidth(w, minWidth))
+    const onResize = () => {
+      if (draggingRef.current) return
+      setWidth((w) => clampPanelWidth(w, minWidth))
+    }
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [minWidth])
 
   const onDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
+    draggingRef.current = true
     const startX = e.clientX; const startW = widthRef.current
     const onMove = (ev: MouseEvent) => {
       setWidth(clampPanelWidth(startW + (startX - ev.clientX), minWidth))
     }
     const onUp = () => {
+      draggingRef.current = false
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
       moveRef.current = null; upRef.current = null
+      // Persist the width the user dragged to (their preferred width) BEFORE
+      // re-clamping the render. A resize that arrived mid-drag was suppressed,
+      // so widthRef.current still holds the dragged value; this keeps the
+      // preferred width in localStorage for restore (re-clamped) on a larger
+      // screen rather than saving a resize-clamped value.
       if (storageKey) localStorage.setItem(storageKey, String(widthRef.current))
+      // Re-clamp the live render once to the current viewport, in case a resize
+      // arrived mid-drag, so the panel can't stay wider than the screen.
+      setWidth((w) => clampPanelWidth(w, minWidth))
     }
     moveRef.current = onMove; upRef.current = onUp
     document.addEventListener('mousemove', onMove)
