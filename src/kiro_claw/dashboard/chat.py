@@ -79,6 +79,7 @@ from kiro_claw.dashboard.chat_persistence import (  # noqa: F401
     _build_history_prefix,
     _rehydrate_slot_from_history,
     _save_slot_to_history,
+    restore_open_slots,
     restore_recent_sessions,
     save_all_slots_to_history,
 )

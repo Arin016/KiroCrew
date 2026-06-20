@@ -11,7 +11,7 @@ import uuid
 from kiro_claw import model_registry
 from kiro_claw.agent import KIRO_AGENTS_DIR
 from kiro_claw.atomic_write import atomic_write
-from kiro_claw.config.loader import KiroClawConfig
+from kiro_claw.config.loader import KiroClawConfig, config_dir
 from kiro_claw.dashboard.chat_utils import (
     _history_key_for,
     _normalize_model,
@@ -160,6 +160,92 @@ def save_all_slots_to_history(state: DashboardState) -> None:
             _save_slot_to_history(state, slot, force=True)
         except Exception:
             logger.error("Shutdown: failed to save slot %s", slot.key, exc_info=True)
+    # Snapshot the open-tab set so the next startup restores them. This is
+    # belt-and-braces vs the periodic flush snapshot — it ensures graceful
+    # shutdown captures the very latest state, including tabs whose
+    # _dirty was False but were still visually present in the sidebar.
+    try:
+        state._persist_open_slots()
+    except Exception:
+        logger.debug("Shutdown: open_slots snapshot failed", exc_info=True)
+
+
+def restore_open_slots(state: DashboardState) -> int:
+    """Restore the tabs the user had open at the previous shutdown.
+
+    Reads ``<config_dir>/open_slots.json`` (written by
+    ``DashboardState._persist_open_slots`` on every flush) and rehydrates
+    each listed key from on-disk session metadata so it shows up in the
+    Sessions sidebar exactly as it did before the restart — independent of
+    the ``restore_window_minutes`` mtime cutoff used by
+    ``restore_recent_sessions``.
+
+    Path resolves through ``config_dir()`` (honors ``KIROCLAW_HOME``) so
+    dev/test instances with non-default homes don't read the production
+    ``~/.kiroclaw`` snapshot.
+
+    Returns the number of slots restored. Missing / malformed file is a
+    no-op (returns 0). Sessions that have been explicitly closed
+    (``meta.closed``) are skipped via _rehydrate_slot_from_history's own
+    guard, so closing a tab and then restarting still loses the tab.
+    """
+    if not state.conversation_log:
+        return 0
+    path = config_dir() / "open_slots.json"
+    if not path.exists():
+        return 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.debug("open_slots.json unreadable; skipping", exc_info=True)
+        return 0
+    keys = data.get("keys") if isinstance(data, dict) else None
+    if not isinstance(keys, list):
+        return 0
+    restored = 0
+    for raw in keys:
+        if not isinstance(raw, str) or not raw:
+            continue
+        # Defense-in-depth: slot keys flow into _history_key_for() ->
+        # filesystem path construction. open_slots.json is 0o600 so the threat
+        # is small, but a key smuggled in (symlink attack at write time or a
+        # separate vuln) could escape the sessions directory (e.g.
+        # "../../etc/passwd"). Live-gateway slot keys never contain path
+        # separators; reject any that do, warn so an attempted breakout is
+        # visible, and keep restoring the rest.
+        if "/" in raw or "\\" in raw:
+            logger.warning(
+                "restore_open_slots: rejecting key with path separators: %r", raw
+            )
+            continue
+        if raw in state._slots:
+            continue
+        try:
+            slot = _rehydrate_slot_from_history(state, raw)
+        except Exception:
+            logger.debug("restore_open_slots: rehydrate failed for %s", raw, exc_info=True)
+            # Roll back any partial slot leaked by _rehydrate_slot_from_history.
+            # It calls state.get_or_create_slot() BEFORE its fallible work
+            # (read_messages, redaction, slot.append), so a failure there
+            # leaves an empty slot registered in state._slots. Without this
+            # pop, restore_recent_sessions runs next, hits its
+            # `if slot_name in state._slots: continue` dedup guard, and skips
+            # the proper restore — the user would see a tab with the right
+            # title/agent but empty or wrong message history.
+            state._slots.pop(raw, None)
+            # _rehydrate_slot_from_history also adds `dashboard:{slot_name}`
+            # to _restricted_keys before that fallible work for any
+            # non-persistent memory_mode. Roll it back too, else a later
+            # get_or_create_slot(slot_name) (default memory_mode='persistent')
+            # silently inherits restricted status, blocking
+            # consolidation/lessons for what should be a normal session.
+            state._restricted_keys.discard(f"dashboard:{raw}")
+            continue
+        if slot is not None:
+            restored += 1
+    if restored:
+        logger.info("Restored %d open tab(s) from open_slots.json", restored)
+    return restored
 
 
 def _attach_variants(slot: _ChatSlot, m: dict) -> None:
@@ -283,12 +369,28 @@ def _rehydrate_slot_from_history(state: DashboardState, slot_name: str) -> _Chat
         state._restricted_keys.add(f"dashboard:{slot_name}")
     if meta.get("forked_from") is not None:
         slot.forked_from = meta["forked_from"]
-    messages = state.conversation_log.read_messages(history_key)
+    # Restore the persisted tab_id so cross-restart fork chaining survives.
+    # get_or_create_slot (called by our caller) assigns a fresh random uuid to
+    # slot._tab_id; if we don't overwrite it here, the next _flush_dirty_slots
+    # persists that uuid back into meta, severing the tab_id ancestry that
+    # read_messages_chained walks across forks — one restart + one flush
+    # permanently loses forked-session history. Mirrors restore_recent_sessions.
+    tab_id = meta.get("tab_id")
+    if not tab_id:
+        tab_id = uuid.uuid4().hex[:12]
+        state.conversation_log.update_metadata(history_key, {"tab_id": tab_id})
+    slot._tab_id = tab_id
+    # Use read_messages_chained (not read_messages) so the loaded window walks
+    # the tab_id ancestry across forks, matching restore_recent_sessions.
+    # read_messages alone caps visible history at 200 lines from THIS file and
+    # drops the ancestor chain — long-running forked sessions would lose 200+
+    # messages of context on every gateway restart.
+    messages = state.conversation_log.read_messages_chained(history_key)
     # Only the recent window is loaded into memory; older on-disk lines become
     # the FROZEN PREFIX that saves never rewrite. _disk_older_count must
     # therefore count those older lines so the save model preserves them.
-    slot._disk_older_count = max(0, len(messages) - 200)
-    for m in messages[-200:]:
+    slot._disk_older_count = max(0, len(messages) - 500)
+    for m in messages[-500:]:
         role = m.get("role", "assistant")
         cls = m.get("cls") or ("msg msg-u" if role == "user" else "msg msg-a")
         content = m.get("content", "")

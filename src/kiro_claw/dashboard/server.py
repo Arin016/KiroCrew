@@ -1206,6 +1206,12 @@ async def start_dashboard(
 
     safety_override().on_expired = _on_override_expired
 
+    # Restore exactly the tabs the user had open at last shutdown — these
+    # come back regardless of mtime, so long-running tabs don't silently
+    # fall off into History on every gateway restart. Closed tabs (meta.closed)
+    # are still excluded by the rehydrate guard. restore_open_slots() logs
+    # its own info line on success, so no caller-side log here.
+    chat.restore_open_slots(state)
     restored = chat.restore_recent_sessions(
         state,
         cfg.dashboard.restore_window_minutes if cfg.dashboard.restore_sessions else 0,

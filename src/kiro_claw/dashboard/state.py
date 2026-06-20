@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from aiohttp import web
 
+from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import DASHBOARD_PORT, config_dir
 from kiro_claw.dashboard.side_state import SideState
 from kiro_claw.knowledge.store import KnowledgeStore
@@ -1145,6 +1146,55 @@ class DashboardState:
                 slot._dirty = False
             except Exception:
                 logger.warning("Flush failed for slot %s", slot.key, exc_info=True)
+        # Snapshot the live tab set so a gateway restart can restore exactly
+        # the tabs the user had open, regardless of last-message age. Without
+        # this, restore_recent_sessions only brings back sessions whose
+        # JSONL file was written within `restore_window_minutes` (default
+        # 30) — long-running tabs that haven't seen a new message in 30 min
+        # would silently drop to History on every restart. This file is
+        # cheap (~one short string per tab) and overwritten on every flush.
+        self._persist_open_slots()
+
+    def _persist_open_slots(self) -> None:
+        """Atomically write the current open-slot keys to <config_dir>/open_slots.json.
+
+        The file shape is intentionally minimal:
+            {"keys": ["chat-1-...", "chat-2-..."], "ts": 1234567890.0}
+
+        Path resolves through ``config_dir()`` so the snapshot lives next to
+        every other dashboard persistence file and honors ``KIROCLAW_HOME``
+        — non-default homes (dev/test instances) restore from their own file
+        instead of bleeding through ``~/.kiroclaw``.
+
+        Restored on startup by ``restore_open_slots`` in chat_persistence.
+        Failures are logged at debug level — losing the snapshot only
+        degrades restore behaviour back to the legacy 30-min mtime window,
+        it never breaks the gateway.
+        """
+        try:
+            path = config_dir() / "open_slots.json"
+            # Only snapshot persistent-memory slots. Incognito/temporary tabs
+            # are ephemeral by contract ("closes when I'm done", no
+            # consolidation/lessons); persisting their keys would resurrect
+            # them on every restart indefinitely. Filter on the canonical
+            # "persistent" memory_mode so any non-default mode (incognito,
+            # temporary, future variants) is excluded.
+            keys = [
+                name for name, slot in list(self._slots.items())
+                if getattr(slot, "memory_mode", "persistent") == "persistent"
+            ]
+            payload = json.dumps({"keys": keys, "ts": time.time()})
+            # Use the canonical atomic_write helper, not a deterministic
+            # ".json.tmp" name — _persist_open_slots can run concurrently from
+            # two threads (the periodic _flush_dirty_slots executor every 5s
+            # and the shutdown thread via save_all_slots_to_history). A shared
+            # fixed temp file would hit an ENOENT race between the two writers;
+            # atomic_write uses tempfile.mkstemp for unique names so they can't
+            # collide. mode=0o600 because open_slots.json holds session
+            # identifier keys — default umask perms (0o644) are too permissive.
+            atomic_write(path, payload, mode=0o600)
+        except Exception:
+            logger.debug("Failed to persist open_slots.json", exc_info=True)
 
     def notify(self, kind: str, title: str, body: str, *, meta: dict | None = None) -> None:
         """Push a notification to ALL connected SSE clients and persist to disk."""
