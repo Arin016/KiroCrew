@@ -145,6 +145,135 @@ class TestApiChatDrainOnDisconnect:
         assert slot._has_reader is False
 
 
+@pytest.mark.asyncio
+class TestApiChatMemoryModeForwarding:
+    """api_chat propagates body.memory_mode to auto-created slot.
+
+    AgentRock skill dispatch sends `memory_mode: "temporary"` so one-shot
+    skill invocations don't bleed into the user's persistent memory. The
+    chat endpoint must honor this on the auto-create path because
+    AgentRock does not pre-create the slot via /api/chat/slots.
+    """
+
+    async def test_temporary_memory_mode_propagates_to_new_slot(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+
+        async def fake_run_chat(st, sl, msg):
+            sl.append("chunk", "ack", "chunk")
+
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers._run_chat", fake_run_chat
+        )
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat",
+                json={
+                    "message": "hello",
+                    "slot": "agentrock-skill-1",
+                    "memory_mode": "temporary",
+                },
+                timeout=None,
+            )
+            async for _chunk in resp.content.iter_any():
+                break  # only need to drive slot creation
+            resp.close()
+            await asyncio.sleep(0.05)
+
+        slot = state._slots.get("agentrock-skill-1")
+        assert slot is not None
+        assert slot.memory_mode == "temporary"
+
+    async def test_missing_memory_mode_defaults_to_persistent(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+
+        async def fake_run_chat(st, sl, msg):
+            sl.append("chunk", "ack", "chunk")
+
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers._run_chat", fake_run_chat
+        )
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat",
+                json={"message": "hello", "slot": "default-slot"},
+                timeout=None,
+            )
+            async for _chunk in resp.content.iter_any():
+                break
+            resp.close()
+            await asyncio.sleep(0.05)
+
+        slot = state._slots.get("default-slot")
+        assert slot is not None
+        assert slot.memory_mode == "persistent"
+
+    async def test_invalid_memory_mode_is_dropped(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+
+        async def fake_run_chat(st, sl, msg):
+            sl.append("chunk", "ack", "chunk")
+
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers._run_chat", fake_run_chat
+        )
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat",
+                json={
+                    "message": "hello",
+                    "slot": "garbage-mode-slot",
+                    "memory_mode": "garbage",
+                },
+                timeout=None,
+            )
+            async for _chunk in resp.content.iter_any():
+                break
+            resp.close()
+            await asyncio.sleep(0.05)
+
+        slot = state._slots.get("garbage-mode-slot")
+        assert slot is not None
+        assert slot.memory_mode == "persistent"
+
+    async def test_mismatched_memory_mode_on_existing_slot_returns_409(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        mock_sel = MagicMock()
+        monkeypatch.setattr("kiro_claw.dashboard.chat_handlers.sel", lambda: mock_sel)
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        # Pre-create a persistent slot
+        state.get_or_create_slot("locked", memory_mode="persistent")
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat",
+                json={
+                    "message": "hello",
+                    "slot": "locked",
+                    "memory_mode": "temporary",
+                },
+                timeout=None,
+            )
+            assert resp.status == 409
+            data = await resp.json()
+            assert "memory_mode" in data["error"]
+
+        # SEL audit event for the denial
+        denied_calls = [c for c in mock_sel.log_api_access.call_args_list
+                        if c[1].get("outcome") == "denied"]
+        assert len(denied_calls) == 1
+        kw = denied_calls[0][1]
+        assert kw["operation"] == "chat_send"
+        assert kw["source"] == "memory_mode_mismatch"
+        assert "slot=locked" in kw["resources"]
+
+
 # ── Slot detail pagination (HTTP) ──
 
 

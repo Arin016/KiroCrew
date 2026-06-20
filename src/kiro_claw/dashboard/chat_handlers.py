@@ -118,7 +118,28 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     if not isinstance(slot_name, str) and slot_name is not None:
         slot_name = None  # coerce non-string slot to auto-generate
 
-    slot = state.get_or_create_slot(slot_name, app=request.get("app", ""))
+    # Honor memory_mode from the body when auto-creating a slot (e.g. AgentRock
+    # skill dispatch defaults to "temporary"). Only validated values are passed
+    # through; anything else is dropped so get_or_create_slot uses its default.
+    # If the slot already exists, get_or_create_slot raises on a memory_mode
+    # mismatch, matching POST /api/chat/slots semantics.
+    requested_memory_mode = body.get("memory_mode")
+    if requested_memory_mode not in ("persistent", "incognito", "temporary"):
+        requested_memory_mode = None
+
+    try:
+        slot = state.get_or_create_slot(
+            slot_name,
+            app=request.get("app", ""),
+            memory_mode=requested_memory_mode,
+        )
+    except ValueError as exc:
+        sel().log_api_access(
+            caller=request.get("app", ""), operation="chat_send", outcome="denied",
+            source="memory_mode_mismatch", resources=f"slot={slot_name}",
+            error=str(exc),
+        )
+        return web.json_response({"error": str(exc)}, status=409)
 
     # App ownership check (App Kit §5.2): deny-by-default for app tokens.
     # Apps can only access slots they own. Dashboard users (empty request_app)
