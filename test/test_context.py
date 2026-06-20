@@ -779,3 +779,47 @@ class TestLoadSteeringResources:
             result = _load_steering_resources()
 
         assert "SECRET" not in result
+
+
+class TestLessonsCap:
+    def test_over_cap_injects_error_block(self, tmp_path):
+        from kiro_claw.context import _LESSONS_CAP
+        from kiro_claw.learn import Lesson
+
+        lessons = LessonStore(base_dir=tmp_path)
+        # Save enough long lessons that the formatted context exceeds the cap.
+        rule = "x" * 1000
+        for i in range(_LESSONS_CAP // 1000 + 5):
+            lessons.save(Lesson(ts=str(i), rule=f"{i}-{rule}", category="knowledge"))
+
+        builder = ContextBuilder(
+            memory=MemoryStore(workspace=tmp_path / "ws"),
+            skills=SkillsLoader(skills_path=tmp_path / "skills", install_builtins=False),
+            lessons=lessons,
+        )
+        ctx = builder.build_session_context()
+
+        assert "CRITICAL ERROR — LESSONS FILE TOO LARGE" in ctx
+        assert "remain in effect" in ctx
+        assert "[lessons truncated]" in ctx
+        assert "x" * 500 in ctx  # part of the kept lessons content is still present in ctx
+
+    def test_under_cap_no_error_block(self, tmp_path):
+        from kiro_claw.learn import Lesson
+
+        lessons = LessonStore(base_dir=tmp_path)
+        lessons.save(Lesson(ts="1", rule="always run the formatter", category="knowledge"))
+        lessons.save(Lesson(ts="2", rule="never force push to mainline", category="knowledge"))
+
+        builder = ContextBuilder(
+            memory=MemoryStore(workspace=tmp_path / "ws"),
+            skills=SkillsLoader(skills_path=tmp_path / "skills", install_builtins=False),
+            lessons=lessons,
+        )
+        ctx = builder.build_session_context()
+
+        # Under the cap: no error block, and ALL lessons preserved verbatim.
+        assert "CRITICAL ERROR — LESSONS FILE TOO LARGE" not in ctx
+        assert "always run the formatter" in ctx
+        assert "never force push to mainline" in ctx
+        assert "[lessons truncated]" not in ctx

@@ -944,6 +944,28 @@ class ContextBuilder:
                     lessons_ctx = ws_ctx
             if lessons_ctx:
                 if len(lessons_ctx) > _LESSONS_CAP:
+                    over = len(lessons_ctx) - _LESSONS_CAP
+                    parts.append(
+                        "[CRITICAL ERROR — LESSONS FILE TOO LARGE]\n"
+                        f"Your lessons file ({len(lessons_ctx):,} chars) exceeds the "
+                        f"maximum allowed size ({_LESSONS_CAP:,} chars) by {over:,} chars.\n"
+                        "The lessons shown below are INCOMPLETE — content beyond the cap "
+                        "has been DROPPED and will not be applied. The lessons that ARE "
+                        "shown below remain in effect and should still be followed.\n\n"
+                        "⚠️  YOU MUST inform the user that their lessons file is over the "
+                        "size cap and has been truncated, then help them reduce it below "
+                        "the cap.\n\n"
+                        "You MAY use the `learn_remove` tool to delete lessons. You MAY "
+                        "also suggest they run `kiroclaw learn remove <substring>` from "
+                        "their terminal.\n"
+                        "[End of critical error]\n\n"
+                    )
+                    logger.error(
+                        "Lessons file too large (%d chars, cap %d). "
+                        "Injecting error block and truncating.",
+                        len(lessons_ctx),
+                        _LESSONS_CAP,
+                    )
                     lessons_ctx = lessons_ctx[:_LESSONS_CAP] + "\n…[lessons truncated]\n"
                 parts.append(lessons_ctx)
 
