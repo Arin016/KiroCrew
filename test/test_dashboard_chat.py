@@ -8266,3 +8266,275 @@ class TestExpandDollarSkills:
         _, kwargs = sel_mock.log_tool_invocation.call_args
         assert kwargs.get("outcome") == "error"
         assert kwargs.get("tool_name") == "skill_dollar_expansion"
+
+
+# ── Transient backend 5xx retry on the interactive chat path (Mesh-2150) ──
+
+
+class TestRunChatTransientRetry:
+    """The interactive _run_chat stream loop reuses the llm_helpers transient
+    classifier + backoff (CR-281120435 / Mesh-1157) to retry a transient
+    backend 5xx WITHOUT resetting the live session, guarded so a partial
+    (already-streamed) response is never re-run. Mesh-2150."""
+
+    _TRANSIENT = (
+        "Prompt error: {'message': 'Internal error: API Error: Internal server error'}"
+    )
+    _AUTH = "Bedrock authentication failed. Run 'ada credentials update'"
+
+    @staticmethod
+    def _make_state(tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.broadcast_ws = MagicMock()
+        state.push_slots_update = MagicMock()
+        state.push_refresh = MagicMock()
+        state.context_builder = None
+        state.consolidator = None
+        state._hook_store = None
+        state._yolo = False
+        return state
+
+    @staticmethod
+    def _wire_sessions(state, client):
+        state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
+        state.sessions.get_pid = MagicMock(return_value=None)
+        state.sessions.check_context_usage = MagicMock()
+        state.sessions.record_success = MagicMock()
+        state.sessions.record_failure = AsyncMock()
+        state.sessions.release = MagicMock()
+        # reset is an AsyncMock so we can assert it is NEVER awaited — a
+        # transient 5xx must NOT reset the (still-alive) session.
+        state.sessions.reset = AsyncMock()
+        state.sessions.get_slack_link = MagicMock(return_value=(None, None))
+
+    @staticmethod
+    def _client(stream):
+        client = AsyncMock()
+        client.context_usage_pct = MagicMock(return_value=0.0)
+        client.stream = stream
+        client.stream_command = stream
+        return client
+
+    @staticmethod
+    async def _drain_bg(state, limit=30):
+        """Drive the finally-block re-queue cascade (each retry spawns a
+        background _run_chat task) to completion. Bounded by the retry budget."""
+        for _ in range(limit):
+            pending = [t for t in list(state._background_tasks) if not t.done()]
+            if not pending:
+                return
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def _err_texts(self, slot):
+        return [m["content"] for m in slot.messages if m.get("role") == "error"]
+
+    def _assistant_texts(self, slot):
+        return [m["content"] for m in slot.messages if m.get("role") == "assistant"]
+
+    @pytest.mark.asyncio
+    async def test_transient_pre_token_retries_then_recovers_no_reset(
+        self, tmp_path, monkeypatch
+    ):
+        """A transient 5xx before any token streams is retried on the SAME live
+        session (no reset); the second attempt succeeds."""
+        from kiro_claw.acp.client import AcpError
+        from kiro_claw.dashboard.chat import _run_chat
+        from kiro_claw.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK, LLMEvent
+
+        call_count = 0
+
+        async def _stream(msg):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise AcpError(self._TRANSIENT)
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="ok-result")
+            yield LLMEvent(kind=EVENT_COMPLETE)
+
+        state = self._make_state(tmp_path, monkeypatch)
+        client = self._client(_stream)
+        self._wire_sessions(state, client)
+        slot = state.get_or_create_slot("s1")
+        slot._titled = True  # skip background auto-title
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await _run_chat(state, slot, "hello")
+            await self._drain_bg(state)
+
+        assert call_count == 2  # initial transient failure + one retry
+        # Recovered: the response is persisted, no ❌ error surfaced.
+        assert any("ok-result" in t for t in self._assistant_texts(slot))
+        assert not any(t.startswith("❌") for t in self._err_texts(slot))
+        # The transient branch fired (status surfaced) ...
+        assert any("Backend hiccup" in t for t in self._err_texts(slot))
+        # ... and the live session was NOT reset.
+        state.sessions.reset.assert_not_awaited()
+        # Budget reset to 0 after the successful turn.
+        assert slot._transient_5xx_retries == 0
+
+    @pytest.mark.asyncio
+    async def test_transient_post_token_not_retried(self, tmp_path, monkeypatch):
+        """A transient 5xx AFTER a token has streamed must NOT be retried —
+        re-running would double-stream the already-emitted output."""
+        from kiro_claw.acp.client import AcpError
+        from kiro_claw.dashboard.chat import _run_chat
+        from kiro_claw.providers.base import EVENT_TEXT_CHUNK, LLMEvent
+
+        call_count = 0
+
+        async def _stream(msg):
+            nonlocal call_count
+            call_count += 1
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="partial ")
+            raise AcpError(self._TRANSIENT)
+
+        state = self._make_state(tmp_path, monkeypatch)
+        client = self._client(_stream)
+        self._wire_sessions(state, client)
+        slot = state.get_or_create_slot("s1")
+        slot._titled = True
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await _run_chat(state, slot, "hello")
+            await self._drain_bg(state)
+
+        assert call_count == 1  # no retry once a partial response streamed
+        assert slot._transient_5xx_retries == 0
+        # Partial output is preserved and a clean error is surfaced.
+        assert any("partial" in t for t in self._assistant_texts(slot))
+        assert any(t.startswith("❌") for t in self._err_texts(slot))
+        assert not any("Backend hiccup" in t for t in self._err_texts(slot))
+        state.sessions.reset.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_auth_error_fails_fast_no_retry(self, tmp_path, monkeypatch):
+        """An auth failure is excluded from the transient set — it fails fast
+        with a clean error and is never retried (a retry can't fix a token)."""
+        from kiro_claw.acp.client import AcpError
+        from kiro_claw.dashboard.chat import _run_chat
+
+        call_count = 0
+
+        async def _stream(msg):
+            nonlocal call_count
+            call_count += 1
+            raise AcpError(self._AUTH)
+            yield  # pragma: no cover — makes this an async generator
+
+        state = self._make_state(tmp_path, monkeypatch)
+        client = self._client(_stream)
+        self._wire_sessions(state, client)
+        slot = state.get_or_create_slot("s1")
+        slot._titled = True
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await _run_chat(state, slot, "hello")
+            await self._drain_bg(state)
+
+        assert call_count == 1  # fail-fast, no retry
+        assert slot._transient_5xx_retries == 0
+        assert any(t.startswith("❌") for t in self._err_texts(slot))
+        assert not any("Backend hiccup" in t for t in self._err_texts(slot))
+        state.sessions.reset.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_transient_exhausts_budget_then_clean_error_resumable(
+        self, tmp_path, monkeypatch
+    ):
+        """Persistent transient 5xx is retried up to the budget, then surfaces a
+        clean ❌ error while leaving the session resumable (never reset)."""
+        from kiro_claw.acp.client import AcpError
+        from kiro_claw.dashboard.chat import _run_chat
+        from kiro_claw.llm_helpers import TRANSIENT_RETRIES
+
+        call_count = 0
+
+        async def _stream(msg):
+            nonlocal call_count
+            call_count += 1
+            raise AcpError(self._TRANSIENT)
+            yield  # pragma: no cover
+
+        state = self._make_state(tmp_path, monkeypatch)
+        client = self._client(_stream)
+        self._wire_sessions(state, client)
+        slot = state.get_or_create_slot("s1")
+        slot._titled = True
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await _run_chat(state, slot, "hello")
+            await self._drain_bg(state)
+
+        # Initial attempt + TRANSIENT_RETRIES re-prompts, then it gives up.
+        assert call_count == TRANSIENT_RETRIES + 1
+        assert slot._transient_5xx_retries == TRANSIENT_RETRIES
+        # Clean error surfaced; session left resumable (no reset).
+        assert any(t.startswith("❌") for t in self._err_texts(slot))
+        state.sessions.reset.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_transient_after_thinking_only_retries(
+        self, tmp_path, monkeypatch
+    ):
+        """A transient 5xx that lands AFTER reasoning streamed but before any
+        answer token or tool call is still retried: thinking is ephemeral,
+        broadcast-only output, so it does NOT flip _turn_emitted. This pins the
+        deliberate decision in the EVENT_THINKING_CHUNK branch — if thinking
+        ever starts being persisted, this guard must become a turn-emit to
+        avoid a double-emit (Mesh-2150, reviewer: zejiangg)."""
+        from kiro_claw.acp.client import AcpError
+        from kiro_claw.dashboard.chat import _run_chat
+        from kiro_claw.providers.base import (
+            EVENT_COMPLETE,
+            EVENT_TEXT_CHUNK,
+            EVENT_THINKING_CHUNK,
+            LLMEvent,
+        )
+
+        call_count = 0
+        thinking_seen = 0
+
+        async def _stream(msg):
+            nonlocal call_count
+            call_count += 1
+            # Reasoning streams on BOTH attempts (cosmetic re-stream is the
+            # accepted cost of retrying a thinking-only turn).
+            yield LLMEvent(kind=EVENT_THINKING_CHUNK, text="let me think...")
+            if call_count == 1:
+                # Transient 5xx after thinking, before any answer token.
+                raise AcpError(self._TRANSIENT)
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="ok-result")
+            yield LLMEvent(kind=EVENT_COMPLETE)
+
+        state = self._make_state(tmp_path, monkeypatch)
+        client = self._client(_stream)
+        self._wire_sessions(state, client)
+
+        # Count chat_thinking broadcasts to prove reasoning re-streamed.
+        _orig_broadcast = state.broadcast_ws
+
+        def _count_thinking(event, payload, *a, **kw):
+            nonlocal thinking_seen
+            if event == "chat_thinking":
+                thinking_seen += 1
+            return _orig_broadcast(event, payload, *a, **kw)
+
+        state.broadcast_ws = MagicMock(side_effect=_count_thinking)
+
+        slot = state.get_or_create_slot("s1")
+        slot._titled = True
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await _run_chat(state, slot, "hello")
+            await self._drain_bg(state)
+
+        # Thinking did NOT block the retry: initial transient + one retry.
+        assert call_count == 2
+        assert thinking_seen == 2  # reasoning re-streamed on the retry
+        # Recovered cleanly on the live session (no reset, no ❌).
+        assert any("ok-result" in t for t in self._assistant_texts(slot))
+        assert not any(t.startswith("❌") for t in self._err_texts(slot))
+        assert any("Backend hiccup" in t for t in self._err_texts(slot))
+        state.sessions.reset.assert_not_awaited()
+        assert slot._transient_5xx_retries == 0

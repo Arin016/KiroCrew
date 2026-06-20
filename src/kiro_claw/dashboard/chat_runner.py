@@ -92,7 +92,12 @@ from kiro_claw.hooks import (
     fire_tool_hooks,
     validate_file_path,
 )
-from kiro_claw.llm_helpers import PromptBusyExhaustedError
+from kiro_claw.llm_helpers import (
+    TRANSIENT_RETRIES,
+    PromptBusyExhaustedError,
+    is_transient_backend_error,
+    transient_retry_delay,
+)
 from kiro_claw.providers.acp import is_claude_backend
 from kiro_claw.providers.base import (
     EVENT_COMPLETE,
@@ -1110,6 +1115,11 @@ async def _run_chat(
     last_heartbeat = time.time()
     chunk_seq = 0
     in_tool_group = False
+    # Partial-output guard for transient-5xx retry: flipped True once ANY
+    # assistant token streams or a tool call fires this turn. A transient
+    # backend 5xx is only retried while this is False, so a re-prompt can't
+    # double-stream text or re-run a side-effecting tool (Mesh-2150).
+    _turn_emitted = False
     _pending_tools: dict[str, str] = {}  # tool_call_id -> tool_name
     # session_id -> {started, done, agent, task} for native kiro-cli subagents,
     # reconciled from `_kiro.dev/subagent/list_update` (one card per sub-agent).
@@ -1695,6 +1705,7 @@ async def _run_chat(
                 safe_chunk, _ = redact_exfiltration_urls(event.text)
                 safe_chunk, _ = redact_credentials(safe_chunk)
                 assistant_text += safe_chunk
+                _turn_emitted = True  # tokens delivered — transient retry now unsafe
                 slot.append("chunk", safe_chunk, "chunk")
                 # Push chunk to WS clients (HTTP SSE reader drains from slot._pending)
                 state.broadcast_ws(
@@ -1718,6 +1729,16 @@ async def _run_chat(
                     "chat_thinking",
                     {"slot": slot.key, "content": safe_text},
                 )
+                # Deliberately NOT a turn-emit: do not flip _turn_emitted here.
+                # Thinking is ephemeral, broadcast-only (never persisted to
+                # slot.messages and never an irreversible side effect), so a
+                # thinking-only turn that then hits a transient backend 5xx is
+                # still safe — and worth — retrying. The only cost of a retry is
+                # a cosmetic re-stream of reasoning the user already saw; no
+                # answer text is doubled and no tool re-runs. If thinking ever
+                # starts being persisted/accumulated, this must become a
+                # turn-emit (set _turn_emitted = True) to avoid a double-emit —
+                # pinned by TestRunChatTransientRetry.test_transient_after_thinking_only_retries.
             elif event.kind == EVENT_TOOL_CALL:
                 # Flush pre-tool text silently (no broadcast) so it persists,
                 # but keep the streaming message in place for correct tool ordering.
@@ -1725,6 +1746,7 @@ async def _run_chat(
                     _flush_segment(state, slot, assistant_text, broadcast=False)
                     assistant_text = ""
                 in_tool_group = True
+                _turn_emitted = True  # tool side effect — transient retry now unsafe
                 # Broadcast for real-time visibility and persist
                 _title, _ = redact_exfiltration_urls(event.title)
                 _title, _ = redact_credentials(_title)
@@ -2945,6 +2967,7 @@ async def _run_chat(
             slot._empty_response_retries = 0
             slot._prompt_busy_retries = 0
             slot._acp_pipe_death_retries = 0
+            slot._transient_5xx_retries = 0
 
         if _stop_reason == STOP_REASON_CANCELLED:
             logger.info("Turn cancelled by user for slot %s", slot.key)
@@ -3155,6 +3178,49 @@ async def _run_chat(
                     else "⟳ Session busy — please retry."
                 )
                 slot.append("error", _retry_msg, "msg msg-err")
+        elif (
+            not _turn_emitted
+            and is_transient_backend_error(_msg)
+            and slot._transient_5xx_retries < TRANSIENT_RETRIES
+        ):
+            # Transient backend 5xx (InternalServerError / DispatchFailure /
+            # ConnectionReset, JSON-RPC -32603): the kiro-cli process is ALIVE —
+            # only the model backend hiccupped — so do NOT reset the session
+            # (needs_session_reset stays False). Re-prompt the SAME live session
+            # with bounded backoff, reusing the llm_helpers transient classifier
+            # + backoff curve landed for unattended callers in CR-281120435
+            # (Mesh-1157). The `not _turn_emitted` guard means no assistant tokens
+            # or tool calls have been delivered this turn, so re-prompting can't
+            # double-stream output or re-run a side-effecting tool. Auth/validation
+            # errors are excluded by the classifier and fall through to the bare
+            # error below (fail-fast). On budget exhaustion this elif goes false
+            # and the bare-error else surfaces a clean ❌ on a still-resumable
+            # session (Mesh-2150).
+            slot._transient_5xx_retries += 1
+            _delay = transient_retry_delay(slot._transient_5xx_retries)
+            logger.info(
+                "Transient backend 5xx in slot %s (attempt %d/%d) — re-prompting "
+                "live session in %.1fs: %s",
+                slot.key, slot._transient_5xx_retries, TRANSIENT_RETRIES,
+                _delay, _msg[:80],
+            )
+            # No tokens streamed (guarded above), so no chunk message exists;
+            # strip defensively before re-queue all the same.
+            slot.messages = [m for m in slot.messages if m.get("role") != "chunk"]
+            if _should_suppress_requeue(slot):
+                pass
+            elif _prompt_depth == 0:
+                # Single emit (see AcpProcessDied note): slot.append persists +
+                # broadcasts one chat_message; no explicit broadcast_ws. Back off,
+                # then re-queue — the finally block dequeues onto the SAME live
+                # session (no reset), preserving conversation state.
+                slot.append("error", "⟳ Backend hiccup — retrying…", "msg msg-err")
+                await asyncio.sleep(_delay)
+                slot.queue_insert(0, message)
+            else:
+                # depth>0 (nested turn): don't re-queue — surface a clean
+                # transient status; the live session stays resumable.
+                slot.append("error", "⟳ Backend hiccup — please retry.", "msg msg-err")
         else:
             if assistant_text:
                 _safe, _ = redact_exfiltration_urls(assistant_text)

@@ -80,6 +80,37 @@ def _is_transient_acp_error(msg: str) -> bool:
     return any(m in low for m in _TRANSIENT_MARKERS)
 
 
+# ── Public reuse surface for callers with their own stream loop ──
+#
+# stream_and_collect owns the transient retry for unattended callers, but the
+# interactive dashboard/Slack path (dashboard.chat_runner) consumes the ACP
+# stream directly and cannot funnel through stream_and_collect. These thin
+# wrappers let it reuse the SAME classifier, retry budget, and backoff curve —
+# one source of truth, no duplicated heuristics (Mesh-2150).
+
+# Public name for the transient retry budget (number of retries after the
+# initial attempt). Re-exported so external callers don't import the private.
+TRANSIENT_RETRIES = _TRANSIENT_RETRIES
+
+
+def is_transient_backend_error(msg: str) -> bool:
+    """True iff *msg* (a formatted AcpError string) is a retryable transient
+    backend failure (5xx / throttle / stream-reset) rather than an
+    auth/validation error. Public alias of :func:`_is_transient_acp_error`."""
+    return _is_transient_acp_error(msg)
+
+
+def transient_retry_delay(attempt: int) -> float:
+    """Backoff delay (seconds) for the *attempt*-th (1-based) transient retry.
+
+    Exponential (base ``_TRANSIENT_DELAY``, doubling per attempt) plus
+    per-process jitter, so every caller that retries transient backend errors
+    backs off on the identical curve and co-located peers don't retry in
+    lockstep (see ``_JITTER_RNG``)."""
+    base = _TRANSIENT_DELAY * (2 ** (attempt - 1))
+    return base + _JITTER_RNG.random() * 0.25 * base
+
+
 class PromptBusyExhaustedError(Exception):
     """Provider was shut down after prompt-busy retries were exhausted."""
 
@@ -219,9 +250,7 @@ async def stream_and_collect(
                 # Exponential backoff with per-process jitter (see _JITTER_RNG):
                 # deterministic within a process for tests, uniform across the
                 # fleet so co-located peers don't retry in lockstep.
-                base = _TRANSIENT_DELAY * (2 ** (transient_attempts - 1))
-                jitter = _JITTER_RNG.random() * 0.25 * base
-                delay = base + jitter
+                delay = transient_retry_delay(transient_attempts)
                 logger.warning(
                     "Transient backend error (attempt %d/%d), retrying in %.1fs: %s",
                     transient_attempts, _TRANSIENT_RETRIES, delay, exc,

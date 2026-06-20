@@ -385,6 +385,7 @@ class _ChatSlot:
         "_recovery_retrigger_count",
         "_prompt_busy_retries",
         "_acp_pipe_death_retries",
+        "_transient_5xx_retries",
         "_empty_response_retries",
         "_batch_rejected",
         "color_index",
@@ -467,6 +468,10 @@ class _ChatSlot:
         self._recovery_retrigger_count: int = 0
         self._prompt_busy_retries: int = 0
         self._acp_pipe_death_retries: int = 0
+        # Transient backend 5xx (InternalServerError / DispatchFailure /
+        # ConnectionReset) retries on the interactive stream path. Distinct
+        # budget from prompt-busy / pipe-death; reset on a completed turn.
+        self._transient_5xx_retries: int = 0
         self._empty_response_retries: int = 0
         self._batch_rejected: bool = False
         self.color_index: int | None = None
