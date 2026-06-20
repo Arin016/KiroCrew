@@ -1,4 +1,4 @@
-const { app, BaseWindow, BrowserWindow, WebContentsView, shell, dialog, Tray, Menu, nativeImage, nativeTheme, session, desktopCapturer, systemPreferences } = require("electron");
+const { app, BaseWindow, BrowserWindow, WebContentsView, shell, dialog, Tray, Menu, nativeImage, nativeTheme, autoUpdater, Notification, ipcMain, webContents, session, desktopCapturer, systemPreferences } = require("electron");
 const Store = require("electron-store");
 const fs = require("fs");
 const os = require("os");
@@ -8,6 +8,9 @@ const http = require("http");
 const { findKiroclawBin } = require("./find-bin");
 const { createTokenRetryHandler } = require("./token-retry");
 const { createDisplayMediaHandler } = require("./display-media");
+const { initAutoUpdate } = require("./auto-update");
+const { stopGatewayGracefully: _stopGatewayGracefully } = require("./gateway-stop");
+const { waitForGateway, describeGatewayFailure, tailLines } = require("./gateway-wait");
 
 // ── Persistent settings for remote tunnel mode ──
 
@@ -40,7 +43,7 @@ const PORT = resolvePort();
 const BACKEND_URL = `http://localhost:${PORT}`;
 const HEALTH_URL = `${BACKEND_URL}/api/status`;
 const POLL_INTERVAL_MS = 500;
-const MAX_WAIT_MS = 120_000; // 2 min max wait for backend
+const MAX_WAIT_MS = 30_000; // 30s max wait for backend
 const KIROCLAW_HOME = process.env.KIROCLAW_HOME || path.join(os.homedir(), ".kiroclaw");
 const TAB_BAR_HEIGHT = 28; // macOS native tab bar height in px
 
@@ -53,6 +56,11 @@ app.name = "KiroClaw";
 let mainWindow = null;
 let tray = null;
 let gatewayProcess = null;
+// Terminal exit of the gateway we SPAWNED, recorded so the readiness wait can
+// fail fast instead of polling a dead port. {code,signal} on exit, {error} on a
+// spawn error, null while the child is alive (or was never spawned — reuse
+// path). Consulted only during the primary boot wait (see showLoadingThenConnect).
+let gatewayStartFailure = null;
 let isQuitting = false;
 
 // ── Backend lifecycle ──
@@ -62,11 +70,44 @@ function sendStatus(msg) {
   mainWindow?.webContents?.send("status", msg);
 }
 
+// ── Gateway launch diagnostics ─────────────────────────────────────────────
+// A persistent, retrievable log of the gateway-launch path. This matters on a
+// CLEAN machine (a recipient not already running a gateway): there, the
+// checkBackend() probe fails, so the app must SPAWN the bundled backend farm —
+// the path the developer's own machine never exercises, because a gateway is
+// already listening on this port and the app just reuses it. The spawn
+// previously used stdio:"ignore", so any failure (Gatekeeper SIGKILL on an
+// unsigned/quarantined nested binary, a dylib/Python error, a missing or
+// non-executable bin) was completely silent. We now tee the child's
+// stdout+stderr to a file and record the resolved bin, the reuse-vs-spawn
+// decision, and the exit code AND signal.
+function gatewayLogPath() {
+  let dir;
+  try { dir = app.getPath("logs"); } catch { dir = os.tmpdir(); }
+  try { fs.mkdirSync(dir, { recursive: true }); } catch { /* best effort */ }
+  return path.join(dir, "gateway-launch.log");
+}
+
+function glog(line) {
+  const entry = `[${new Date().toISOString()}] ${line}\n`;
+  try { fs.appendFileSync(gatewayLogPath(), entry); } catch { /* never let logging break launch */ }
+  console.log(`[gateway-launch] ${line}`);
+}
+
 function startGateway() {
   return new Promise((resolve) => {
+    glog(`launch: port=${PORT} home=${KIROCLAW_HOME} packaged=${app.isPackaged} resourcesPath=${process.resourcesPath || "(none)"} log=${gatewayLogPath()}`);
     sendStatus("Checking if gateway is running…");
     checkBackend()
-      .then(() => { sendStatus("Gateway already running ✓"); resolve(true); })
+      .then(() => {
+        // A gateway is already listening on this port, so we reuse it and never
+        // spawn the bundled backend. This is the developer's usual path (their
+        // gateway is already up) and it HIDES any bug in the spawn path below —
+        // only a clean machine exercises the spawn.
+        glog(`reusing existing gateway on :${PORT} — bundled backend NOT spawned`);
+        sendStatus("Gateway already running ✓");
+        resolve(true);
+      })
       .catch(() => {
         // Ensure ~/.kiroclaw/ directory exists before starting gateway
         // (gateway generates .local_secret itself on startup via O_CREAT|O_TRUNC)
@@ -74,25 +115,54 @@ function startGateway() {
         try {
           fs.mkdirSync(kiroclawDir, { recursive: true, mode: 0o700 });
         } catch (err) {
-          console.warn("Failed to create kiroclaw dir:", err.message);
+          glog(`WARN failed to create kiroclaw dir ${kiroclawDir}: ${err.message}`);
         }
 
         const bin = findKiroclawBin(fs, os, path, process.resourcesPath, __dirname);
+        const bundled = bin.includes("backend-dist");
+        let execState = "executable";
+        try { fs.accessSync(bin, fs.constants.X_OK); } catch (e) { execState = `NOT-EXECUTABLE(${e.code})`; }
+        glog(`no gateway on :${PORT} — spawning bundled backend: bin=${bin} bundled=${bundled} ${execState}`);
         sendStatus("Starting gateway…");
-        console.log(`Starting gateway: ${bin} gateway`);
+
         const { KIROCLAW_PORT: _ignored, ...cleanEnv } = process.env;
+
+        // Tee the child's stdout+stderr straight to the launch log via a file
+        // descriptor — no JS pipe to drain, no backpressure on a long-running
+        // child. This is what surfaces a Python traceback / dylib load error /
+        // "killed: 9" on a recipient's machine.
+        let childOut = "ignore";
+        try { childOut = fs.openSync(gatewayLogPath(), "a"); } catch (e) { glog(`WARN could not open child log fd: ${e.message}`); }
+        glog("---- spawning gateway; child stdout+stderr follows ----");
+        gatewayStartFailure = null; // re-arm for this spawn attempt
+
         gatewayProcess = spawn(bin, ["gateway", "--no-open"], {
-          stdio: "ignore",
+          stdio: ["ignore", childOut, childOut],
           detached: false,
           env: { ...cleanEnv, KIROCLAW_PROJECT_DIR: path.resolve(__dirname, "..") },
         });
+        // The child inherits its own dup of the fd; close our copy so it doesn't leak.
+        if (typeof childOut === "number") { try { fs.closeSync(childOut); } catch { /* ignore */ } }
+
         gatewayProcess.on("error", (err) => {
-          console.error("Failed to start gateway:", err.message);
+          // ENOENT = bin not found on disk; EACCES = present but not executable.
+          glog(`spawn ERROR code=${err.code || "?"} msg=${err.message}`);
+          gatewayStartFailure = { error: err.message };
           sendStatus(`Gateway failed: ${err.message}`);
           resolve(false);
         });
-        gatewayProcess.on("exit", (code) => {
-          console.log(`Gateway exited with code ${code}`);
+        gatewayProcess.on("exit", (code, signal) => {
+          glog(`gateway child exited code=${code} signal=${signal}`);
+          if (signal === "SIGKILL") {
+            glog("HINT: SIGKILL on a freshly-spawned bundled binary almost always means macOS Gatekeeper blocked an unsigned/quarantined nested executable. On the recipient's Mac run: xattr -cr <path to KiroClaw.app>");
+          }
+          // Record the terminal exit so waitForBackend fails fast instead of
+          // polling a dead port. Harmless on a graceful shutdown (no wait is
+          // running) and on a healthy start (the wait already resolved); a
+          // user-initiated Retry clears it so a re-probe can genuinely succeed.
+          // Guard: preserve the root cause from the 'error' handler if it fired
+          // first (Node fires both 'error' then 'exit' on spawn failure).
+          if (!gatewayStartFailure) gatewayStartFailure = { code, signal };
           gatewayProcess = null;
         });
         resolve(true);
@@ -100,12 +170,26 @@ function startGateway() {
   });
 }
 
+/**
+ * Gracefully stop the embedded gateway and await its exit (POST /api/shutdown
+ * -> SIGTERM -> SIGKILL). Core logic lives in gateway-stop.js for testability;
+ * this thin wrapper binds the module-level child process + config.
+ */
+async function stopGatewayGracefully({ timeoutMs = 15000 } = {}) {
+  const proc = gatewayProcess;
+  if (!proc || proc.exitCode !== null) { gatewayProcess = null; return; }
+  console.log("Stopping gateway gracefully...");
+  await _stopGatewayGracefully(proc, {
+    backendUrl: BACKEND_URL,
+    kiroclawHome: KIROCLAW_HOME,
+    timeoutMs,
+  });
+  gatewayProcess = null;
+}
+
+/** Best-effort synchronous-ish stop for the before-quit path (can't await). */
 function stopGateway() {
-  if (gatewayProcess) {
-    console.log("Stopping gateway...");
-    gatewayProcess.kill("SIGTERM");
-    gatewayProcess = null;
-  }
+  stopGatewayGracefully().catch((err) => console.error("Gateway stop failed:", err?.message));
 }
 
 // ── Remote tunnel token fetch ──
@@ -173,17 +257,17 @@ function checkBackend(healthUrl = HEALTH_URL) {
   });
 }
 
-function waitForBackend(targetWin, healthUrl = HEALTH_URL) {
-  const start = Date.now();
-  return new Promise((resolve, reject) => {
-    const poll = () => {
-      if (targetWin?.isDestroyed()) return reject(new Error("Window closed"));
-      const now = Date.now();
-      if (now - start > MAX_WAIT_MS) return reject(new Error("Backend timeout"));
-      targetWin?.webContents?.send("status", `Waiting for gateway… ${Math.round((now - start) / 1000)}s`);
-      checkBackend(healthUrl).then(() => { targetWin?.webContents?.send("status", "Connected ✓"); resolve(); }).catch(() => setTimeout(poll, POLL_INTERVAL_MS));
-    };
-    poll();
+function waitForBackend(targetWin, healthUrl = HEALTH_URL, { watchSpawn = false } = {}) {
+  return waitForGateway({
+    checkBackend: () => checkBackend(healthUrl),
+    // Only the primary boot — our own spawned gateway on this port — should
+    // fail fast on a child exit. Connection tabs point at OTHER ports we never
+    // spawned, so they must not read this flag (it would be cross-talk).
+    getFailure: watchSpawn ? (() => gatewayStartFailure) : (() => null),
+    isWindowAlive: () => !targetWin?.isDestroyed(),
+    onStatus: (msg) => { try { targetWin?.webContents?.send("status", msg); } catch { /* window gone */ } },
+    maxWaitMs: MAX_WAIT_MS,
+    pollIntervalMs: POLL_INTERVAL_MS,
   });
 }
 
@@ -550,6 +634,30 @@ async function refreshToken() {
 
 // ── Loading screen ──
 
+/**
+ * Tell the boot-reveal loading screen the gateway is ready, then wait for it to
+ * finish its animation + fade-out before we navigate to the dashboard. The
+ * loading screen replies via the "boot-complete" IPC once its fade ends; a
+ * timeout is a safety net (reduced-motion, JS error, or a non-reveal screen).
+ */
+function fadeLoadingScreen(wc, timeoutMs = 8000) {
+  return new Promise((resolve) => {
+    if (!wc || wc.isDestroyed()) return resolve();
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ipcMain.removeListener("boot-complete", onComplete);
+      resolve();
+    };
+    const onComplete = (e) => { if (e.sender === wc) finish(); };
+    ipcMain.on("boot-complete", onComplete);
+    const timer = setTimeout(finish, timeoutMs);
+    try { wc.send("boot-ready"); } catch { finish(); }
+  });
+}
+
 async function showLoadingThenConnect(win, backendUrl = BACKEND_URL) {
   const healthUrl = `${backendUrl}/api/status`;
   const wc = win.webContents;
@@ -557,13 +665,17 @@ async function showLoadingThenConnect(win, backendUrl = BACKEND_URL) {
   win.show();
 
   try {
-    await waitForBackend(win, healthUrl);
+    await waitForBackend(win, healthUrl, { watchSpawn: backendUrl === BACKEND_URL });
     if (win.isDestroyed()) return;
     let token = await fetchLocalToken(backendUrl);
     if (!token && backendUrl === BACKEND_URL) token = await fetchRemoteToken();
     if (win.isDestroyed()) return;
 
     if (token) {
+      // Hold the boot reveal until it has both finished its animation and the
+      // gateway is ready, then fade out and hand off to the dashboard.
+      await fadeLoadingScreen(wc);
+      if (win.isDestroyed()) return;
       wc.loadURL(`${backendUrl}?token=${token}`);
     } else {
       // Fallback — check if gateway allows unauthenticated access
@@ -580,16 +692,50 @@ async function showLoadingThenConnect(win, backendUrl = BACKEND_URL) {
         wc.loadURL(backendUrl);
       }
     }
-  } catch {
+  } catch (err) {
     if (win.isDestroyed()) return;
+    // A spawned gateway that exited gives a tagged 'failed' error (see
+    // gateway-wait.js); surface the cause + a tail of the launch log inline so
+    // the user sees the real reason (e.g. ModuleNotFoundError / Gatekeeper kill)
+    // instead of a generic "couldn't connect".
+    const failedToStart = err && err.kind === "failed";
+    const logPath = gatewayLogPath();
+    let logTail = "";
+    try { logTail = tailLines(fs.readFileSync(logPath, "utf8"), 20); } catch { /* no log yet */ }
+
+    const detail = failedToStart
+      ? `${err.message}\n\nLast lines of ${logPath}:\n\n${logTail || "(launch log is empty)"}`
+      : `Make sure 'kiroclaw gateway' is running, or check kiroclaw doctor.\n\n`
+        + `Launch diagnostics were written to:\n${logPath}\n\n`
+        + (logTail ? `Last lines:\n\n${logTail}\n\n` : "")
+        + `Share that file to debug why the gateway didn't start.`;
+
     const { response } = await dialog.showMessageBox(win, {
       type: "error",
-      title: "KiroClaw",
-      message: "Could not connect to the KiroClaw backend.",
-      detail: `Make sure 'kiroclaw gateway' is running, or check kiroclaw doctor.`,
-      buttons: ["Retry", "Quit"],
+      title: failedToStart ? "KiroClaw — gateway failed to start" : "KiroClaw",
+      message: failedToStart
+        ? "The gateway exited before it was ready."
+        : "Could not connect to the KiroClaw backend.",
+      detail,
+      buttons: ["Retry", "Reveal Log", "Quit"],
+      defaultId: 0,
+      cancelId: 2,
     });
-    if (response === 0) return showLoadingThenConnect(win, backendUrl);
+    if (win.isDestroyed()) return;
+    if (response === 1) {
+      try { shell.showItemInFolder(logPath); } catch { /* best effort */ }
+    }
+    if (response === 0 || response === 1) {
+      gatewayStartFailure = null; // let the retry genuinely re-probe
+      // If our own spawned gateway is confirmed gone, respawn it before
+      // re-waiting; for a timeout (child may still be alive) or a tab pointed at
+      // another port, just re-poll without spawning a second process.
+      if (backendUrl === BACKEND_URL && !gatewayProcess) {
+        await startGateway();
+      }
+      return showLoadingThenConnect(win, backendUrl);
+    }
+    // Quit
     if (win === mainWindow) {
       isQuitting = true;
       app.quit();
@@ -822,6 +968,34 @@ app.whenReady().then(async () => {
 
   await startGateway();
   await showLoadingThenConnect(win);
+
+  // Desktop auto-update (Squirrel.Mac). No-op in dev / non-darwin. KiroClaw
+  // ships a single "stable" channel. The gateway is stopped gracefully before
+  // any bundle swap. Update state is mirrored to the renderer so the in-app
+  // UpdateModal + Settings > About can drive the prompt; the native dialog
+  // stays as the fallback only when no UI is wired.
+  function broadcastUpdateState(payload) {
+    try {
+      for (const wc of webContents.getAllWebContents()) {
+        if (!wc.isDestroyed()) {
+          try { wc.send("update-state", payload); } catch { /* view gone */ }
+        }
+      }
+    } catch { /* webContents unavailable */ }
+  }
+  const updater = initAutoUpdate({
+    app,
+    autoUpdater,
+    dialog,
+    Notification,
+    getFlavor: () => "stable",
+    stopGateway: () => stopGatewayGracefully(),
+    onUpdateState: broadcastUpdateState,
+  });
+  // Renderer-callable bridges for Settings > About + the UpdateModal.
+  ipcMain.handle("update:get-info", () => updater.getInfo());
+  ipcMain.handle("update:check", () => { updater.check(); return { ok: true }; });
+  ipcMain.handle("update:install", async () => { await updater.install(); return { ok: true }; });
 
   app.on("activate", () => {
     if (!mainWindow?.isVisible()) mainWindow?.show();

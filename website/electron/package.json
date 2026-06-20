@@ -25,7 +25,8 @@
       "category": "public.app-category.developer-tools",
       "icon": "icon.png",
       "target": [
-        "dmg"
+        "dmg",
+        "zip"
       ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
@@ -48,12 +49,16 @@
       "main.js",
       "context-menu.js",
       "find-bin.js",
+      "auto-update.js",
+      "gateway-stop.js",
+      "gateway-wait.js",
       "remote-token.js",
       "token-retry.js",
       "display-media.js",
       "validation.js",
       "context-menu.js",
       "preload.js",
+      "anime.global.js",
       "loading.html",
       "token-prompt.html",
       "icon.png"

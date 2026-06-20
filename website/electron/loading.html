@@ -4,267 +4,309 @@
   <meta charset="UTF-8">
   <title>KiroClaw</title>
   <style>
-    /*
-      KiroClaw boot animation. Brand palette:
-        Neon Purple  #8B5CF6   Midnight Black #0A0A0A
-        Ghost White  #F5F5F5   Soft Lavender  #DDD6FE
-      The ghost is recreated as inline SVG so each part (eyes, wrench, halo)
-      animates independently and stays crisp at any DPI. Honors
-      prefers-reduced-motion. The whole surface is a window drag region.
-    */
     * { margin: 0; padding: 0; box-sizing: border-box; }
-
-    :root {
-      --purple: #8B5CF6;
-      --purple-deep: #6D28D9;
-      --lavender: #DDD6FE;
-      --ghost: #F5F5F5;
-      --ink: #0A0A0A;
-    }
-
+    :root { --kiro: #9046FF; }
     html, body { height: 100%; }
     body {
-      background:
-        radial-gradient(120% 120% at 50% 38%, #16131f 0%, #0c0a12 55%, #08070d 100%);
-      color: var(--lavender);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      background: #0f1117;          /* neutral backdrop revealed during the final fade */
       overflow: hidden;
       -webkit-app-region: drag;
       user-select: none;
     }
-
-    .stage {
-      position: relative;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 30px;
-      animation: stage-in 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+    /* The whole reveal lives in #root; it fades out as one layer when ready. */
+    #root {
+      position: fixed; inset: 0; overflow: hidden;
+      background: var(--kiro);
+      opacity: 1;
+      transition: opacity 0.42s ease;
+      will-change: opacity;
     }
-    @keyframes stage-in { from { opacity: 0; } to { opacity: 1; } }
-
-    /* ── Ghost ── */
-    .ghost-wrap {
-      position: relative;
-      width: 180px;
-      height: 180px;
-      display: grid;
-      place-items: center;
+    /* White sweep panel — grows from the left with a lightly feathered right edge. */
+    #white {
+      position: absolute; top: 0; left: 0; height: 100%;
+      width: 0; background: #ffffff; z-index: 10;
+      filter: blur(1.5px);
+      -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 70px), transparent 100%);
+      mask-image: linear-gradient(to right, #000 calc(100% - 70px), transparent 100%);
+      will-change: width;
     }
-
-    /* Soft purple halo that breathes behind the ghost. */
-    .halo {
-      position: absolute;
-      width: 220px;
-      height: 220px;
-      border-radius: 50%;
-      background: radial-gradient(circle, rgba(139, 92, 246, 0.55) 0%, rgba(139, 92, 246, 0.18) 42%, transparent 68%);
-      filter: blur(6px);
-      animation: halo-breathe 3.2s ease-in-out infinite;
-      will-change: transform, opacity;
+    #wordWrap {
+      position: absolute; inset: 0; z-index: 20;
+      display: flex; align-items: center; justify-content: center;
     }
-    @keyframes halo-breathe {
-      0%, 100% { opacity: 0.55; transform: scale(0.92); }
-      50%      { opacity: 1;    transform: scale(1.08); }
+    .boot-word { max-width: 92vw; height: auto; }
+    /* Status line — absolutely positioned below the wordmark so it never shifts
+       the centered KIROCLAW. Hidden until the reveal completes. */
+    #status {
+      position: absolute; left: 50%; top: calc(50% + 92px);
+      transform: translate(-50%, 6px); opacity: 0;
+      transition: opacity 0.45s ease, transform 0.45s ease;
+      z-index: 21;
+      display: flex; align-items: center; gap: 9px;
+      font-size: 15px; font-weight: 600; letter-spacing: 0.01em;
+      color: var(--kiro);
     }
-
-    .ghost-svg {
-      position: relative;
-      width: 150px;
-      height: 150px;
-      overflow: visible;
-      transform-origin: 50% 60%;
-      /* float-in, then settle into a gentle infinite bob */
-      animation:
-        ghost-in 0.9s cubic-bezier(0.16, 1, 0.3, 1) both,
-        ghost-bob 3.6s ease-in-out 0.9s infinite;
-      filter: drop-shadow(0 8px 22px rgba(139, 92, 246, 0.45));
+    #status.show { opacity: 1; transform: translate(-50%, 0); }
+    .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--kiro);
+      animation: pulse 1s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.35; transform: scale(0.8); }
+      50%      { opacity: 1;    transform: scale(1); }
+    }
+    /* Kiro ghost. Off-screen left before JS runs (matches HIDDEN_X) so it never
+       flashes at the edge on first paint — request: render it first, animate later. */
+    #ghost {
+      position: absolute; top: 50%; left: 0; z-index: 30;
+      transform: translate(-260px, -50%);
       will-change: transform;
+      filter: drop-shadow(0 10px 26px rgba(40, 20, 90, 0.35));
     }
-    @keyframes ghost-in {
-      0%   { opacity: 0; transform: translateY(34px) scale(0.82); }
-      60%  { opacity: 1; }
-      100% { opacity: 1; transform: translateY(0) scale(1); }
-    }
-    @keyframes ghost-bob {
-      0%, 100% { transform: translateY(0) rotate(0deg); }
-      50%      { transform: translateY(-9px) rotate(-1.2deg); }
-    }
-
-    /* Eyes blink occasionally (scaleY pinch). */
-    .eyes {
-      transform-origin: center 112px;
-      animation: blink 5.4s ease-in-out 1.6s infinite;
-    }
-    @keyframes blink {
-      0%, 92%, 100% { transform: scaleY(1); }
-      95%           { transform: scaleY(0.12); }
-    }
-
-    /* Wrench-claw arm waves a couple of times after the ghost lands. */
-    .wrench {
-      transform-origin: 70px 150px;
-      animation: wave 2.4s ease-in-out 1.0s 2;
-    }
-    @keyframes wave {
-      0%, 100% { transform: rotate(0deg); }
-      25%      { transform: rotate(-18deg); }
-      55%      { transform: rotate(8deg); }
-      80%      { transform: rotate(-6deg); }
-    }
-
-    /* ── Wordmark ── */
-    .wordmark {
-      display: flex;
-      gap: 1px;
-      font-size: 34px;
-      font-weight: 800;
-      letter-spacing: -0.5px;
-      color: var(--ghost);
-    }
-    .wordmark span {
-      display: inline-block;
-      opacity: 0;
-      transform: translateY(14px);
-      animation: letter-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) forwards;
-      text-shadow: 0 2px 18px rgba(139, 92, 246, 0.5);
-    }
-    /* "Claw" tinted purple to echo the two-tone wordmark in the brand art. */
-    .wordmark .claw { color: var(--purple); }
-    @keyframes letter-in {
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    /* ── Status + progress ── */
-    .footer {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 14px;
-      animation: fade-up 0.6s ease 0.5s both;
-    }
-    @keyframes fade-up {
-      from { opacity: 0; transform: translateY(8px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-    .track {
-      width: 168px;
-      height: 3px;
-      border-radius: 99px;
-      background: rgba(221, 214, 254, 0.14);
-      overflow: hidden;
-      position: relative;
-    }
-    .track::after {
-      content: "";
-      position: absolute;
-      top: 0;
-      left: -45%;
-      width: 40%;
-      height: 100%;
-      border-radius: 99px;
-      background: linear-gradient(90deg, transparent, var(--purple), var(--lavender), var(--purple), transparent);
-      animation: sweep 1.5s ease-in-out infinite;
-    }
-    @keyframes sweep {
-      0%   { left: -45%; }
-      100% { left: 105%; }
-    }
-    .status {
-      font-size: 13px;
-      letter-spacing: 0.2px;
-      color: rgba(221, 214, 254, 0.66);
-      min-height: 16px;
-    }
-
     @media (prefers-reduced-motion: reduce) {
-      .stage, .ghost-svg, .halo, .eyes, .wrench, .wordmark span, .footer, .track::after {
-        animation: none !important;
-      }
-      .ghost-svg, .footer { opacity: 1; transform: none; }
-      .wordmark span { opacity: 1; transform: none; }
-      .track::after { left: 0; width: 100%; opacity: 0.5; }
+      .dot { animation: none; }
     }
   </style>
 </head>
 <body>
-  <div class="stage">
-    <div class="ghost-wrap">
-      <div class="halo"></div>
-      <!-- Ghost recreated from the KiroClaw brand mark: white body, neon-purple
-           outline, two eyes, open-end wrench-claw arm on the left. -->
-      <svg class="ghost-svg" viewBox="0 0 220 220" fill="none" aria-label="KiroClaw">
-        <!-- Wrench-claw arm (drawn first so the body edge overlaps its joint).
-             Thin stalk off the mid-left body to an open-end wrench head — an
-             almost-closed purple ring with a mouth facing out, echoing the
-             brand mark (and the "Claw"). -->
-        <g class="wrench">
-          <!-- stalk from mid-left body out to the claw joint -->
-          <path
-            d="M66 132 Q 54 130 48 123"
-            stroke="var(--purple)" stroke-width="8" stroke-linecap="round" fill="none"/>
-          <!-- open-jaw "C" claw: a stroked circle with a dash gap forming the
-               mouth, rotated so the opening faces up-left like the brand mark.
-               circumference = 2*pi*12 ≈ 75.4; dash 56 + gap 19.4 ≈ 92° mouth. -->
-          <circle
-            cx="38" cy="110" r="12"
-            stroke="var(--purple)" stroke-width="7" fill="none" stroke-linecap="round"
-            stroke-dasharray="56 19.4" stroke-dashoffset="9"
-            transform="rotate(-44 38 110)"/>
-        </g>
+  <div id="root">
+    <div id="white"></div>
 
-        <!-- Ghost body: domed top, scalloped bottom -->
-        <path
-          d="M62 176
-             C 52 120 58 50 110 48
-             C 162 50 168 120 158 176
-             C 156 188 146 188 142 178
-             C 138 168 130 168 126 178
-             C 122 188 112 188 108 178
-             C 104 168 96 168 92 178
-             C 88 188 78 188 74 178
-             C 70 168 66 184 62 176 Z"
-          fill="var(--ghost)" stroke="var(--purple)" stroke-width="9" stroke-linejoin="round"/>
-
-        <!-- Eyes -->
-        <g class="eyes" fill="var(--ink)">
-          <ellipse cx="100" cy="112" rx="9.5" ry="14"/>
-          <ellipse cx="134" cy="112" rx="9.5" ry="14"/>
-        </g>
-      </svg>
+    <div id="wordWrap">
+      <!-- KIROCLAW characters are injected + laid out by JS (one <text> each;
+           outline strokes on, then fills, as the ghost sweeps past). -->
+      <svg class="boot-word" width="900" height="160" viewBox="0 0 900 160" aria-hidden="true"></svg>
     </div>
 
-    <div class="wordmark" id="wordmark" aria-hidden="true"></div>
+    <!-- Appears below KIROCLAW only after the reveal finishes; shows live gateway
+         status and stays until the gateway is ready, then the whole screen fades. -->
+    <div id="status"><span class="dot"></span><span id="statusText">Starting gateway&hellip;</span></div>
 
-    <div class="footer">
-      <div class="track"></div>
-      <div class="status" id="status">Starting KiroClaw…</div>
+    <!-- Inline ghost (white body, black eyes) — inlined, not an <img>, so it paints
+         instantly with no first-load delay. -->
+    <div id="ghost">
+      <svg width="200" height="263" viewBox="255 110 745 980" fill="none" aria-hidden="true">
+        <path d="M398.554 818.914C316.315 1001.03 491.477 1046.74 620.672 940.156C658.687 1059.66 801.052 970.473 852.234 877.795C964.787 673.567 919.318 465.357 907.64 422.374C827.637 129.443 427.623 128.946 358.8 423.865C342.651 475.544 342.402 534.18 333.458 595.051C328.986 625.86 325.507 645.488 313.83 677.785C306.873 696.424 297.68 712.819 282.773 740.645C259.915 783.881 269.604 867.113 387.87 823.883L399.051 818.914H398.554Z" fill="#ffffff" />
+        <path d="M636.123 549.353C603.328 549.353 598.359 510.097 598.359 486.742C598.359 465.623 602.086 448.977 609.293 438.293C615.504 428.852 624.697 424.131 636.123 424.131C647.555 424.131 657.492 428.852 664.447 438.541C672.398 449.474 676.623 466.12 676.623 486.742C676.623 525.998 661.471 549.353 636.375 549.353H636.123Z" fill="#000000" />
+        <path d="M771.24 549.353C738.445 549.353 733.477 510.097 733.477 486.742C733.477 465.623 737.203 448.977 744.41 438.293C750.621 428.852 759.814 424.131 771.24 424.131C782.672 424.131 792.609 428.852 799.564 438.541C807.516 449.474 811.74 466.12 811.74 486.742C811.74 525.998 796.588 549.353 771.492 549.353H771.24Z" fill="#000000" />
+      </svg>
     </div>
   </div>
 
+  <!-- Same anime.js engine the dashboard's BootReveal.tsx uses (vendored from
+       src/lib/anime.es.js). Loaded as a classic script because file:// pages
+       cannot import ES modules. Exposes window.anime. -->
+  <script src="./anime.global.js"></script>
   <script>
-    // Build the wordmark with per-letter stagger. "Claw" is tinted purple.
     (function () {
-      const word = "KiroClaw";
-      const clawStart = 4; // index where "Claw" begins
-      const host = document.getElementById("wordmark");
-      [...word].forEach((ch, i) => {
-        const s = document.createElement("span");
-        s.textContent = ch;
-        if (i >= clawStart) s.className = "claw";
-        s.style.animationDelay = (0.55 + i * 0.05) + "s";
-        host.appendChild(s);
-      });
-    })();
+      "use strict";
 
-    // Live boot status from main.js (same "status" IPC channel as before).
-    window.electronAPI?.onStatus?.((msg) => {
-      const el = document.getElementById("status");
-      if (el && msg) el.textContent = msg;
-    });
+      var anime = window.anime;
+
+      // ── Constants (mirrors src/components/BootReveal.tsx) ──
+      var KIRO_PURPLE = "#9046FF";
+      var KIRO_RGB = "144,70,255";
+      var WORD = "KIROCLAW";
+      var GHOST_W = 200, FADE = 70, VB_W = 900, CHAR_SPACING = 8, OUTLINE_MULT = 7;
+      var FLOAT_MS = 2400, DRAW_MS = 320, FILL_MS = 260;
+      var DRAW_FRAC = DRAW_MS / FLOAT_MS, FILL_FRAC = FILL_MS / FLOAT_MS;
+      var HIDDEN_X = -GHOST_W - 30, PEEK_TILT = 16, PEEK_X = -GHOST_W + 130;
+      var GHOST_LOAD_DELAY = 500;   // request: let the ghost paint/settle before animating
+      var MIN_STATUS_HOLD = 500;    // keep the status text on screen briefly before fading
+
+      var root = document.getElementById("root");
+      var white = document.getElementById("white");
+      var ghost = document.getElementById("ghost");
+      var statusEl = document.getElementById("status");
+      var statusText = document.getElementById("statusText");
+      var svg = document.querySelector(".boot-word");
+      var SVG_NS = "http://www.w3.org/2000/svg";
+
+      var chars = [];
+      var revealDone = false, revealDoneAt = 0;
+      var gatewayReady = false, finished = false;
+      var latestStatus = "Starting gateway…";
+
+      function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
+      function setGhost(gx, bob, rot) {
+        ghost.style.transform =
+          "translate(" + gx + "px, -50%) translateY(" + (bob || 0) + "px) rotate(" + (rot || 0) + "deg)";
+      }
+
+      // Create the 8 character elements and measure/lay them out (centered).
+      function buildChars() {
+        var els = WORD.split("").map(function (ch) {
+          var t = document.createElementNS(SVG_NS, "text");
+          t.setAttribute("class", "boot-char");
+          t.setAttribute("x", "0");
+          t.setAttribute("y", "80");
+          t.setAttribute("text-anchor", "start");
+          t.setAttribute("dominant-baseline", "central");
+          t.setAttribute("font-size", "84");
+          t.setAttribute("font-weight", "800");
+          t.setAttribute("fill", "none");
+          t.setAttribute("stroke", KIRO_PURPLE);
+          t.setAttribute("stroke-width", "3");
+          t.setAttribute("stroke-linejoin", "round");
+          t.setAttribute("stroke-linecap", "round");
+          t.textContent = ch;
+          svg.appendChild(t);
+          return t;
+        });
+        var widths = els.map(function (c) { return c.getComputedTextLength() || 50; });
+        var total = widths.reduce(function (a, b) { return a + b; }, 0) + CHAR_SPACING * (els.length - 1);
+        var cur = (VB_W - total) / 2;
+        chars = els.map(function (c, i) {
+          c.setAttribute("x", String(cur));
+          var vbLeft = cur;
+          cur += widths[i] + CHAR_SPACING;
+          var len = widths[i] * OUTLINE_MULT;
+          c.style.strokeDasharray = String(len);
+          c.style.strokeDashoffset = String(len);
+          return { el: c, len: len, vbLeft: vbLeft, screenLeft: 0, triggerMp: -1 };
+        });
+      }
+
+      // Force the finished frame: full white sweep, all glyphs filled, ghost gone.
+      function settleFinalFrame() {
+        white.style.width = (window.innerWidth + GHOST_W + FADE + 60) + "px";
+        chars.forEach(function (c) {
+          c.el.style.strokeDashoffset = "0";
+          c.el.style.fill = KIRO_PURPLE;
+          c.el.style.stroke = "transparent";
+        });
+        setGhost(window.innerWidth + GHOST_W + 80, 0, 0);
+      }
+
+      function onRevealDone() {
+        if (revealDone) return;
+        revealDone = true;
+        revealDoneAt = performance.now();
+        settleFinalFrame();
+        statusText.textContent = latestStatus;
+        statusEl.classList.add("show");
+        maybeFinish();
+      }
+
+      function maybeFinish() {
+        if (!revealDone || !gatewayReady || finished) return;
+        var wait = Math.max(0, revealDoneAt + MIN_STATUS_HOLD - performance.now());
+        setTimeout(fadeOut, wait);
+      }
+
+      function fadeOut() {
+        if (finished) return;
+        finished = true;
+        var done = false;
+        function notifyMain() {
+          if (done) return;
+          done = true;
+          try { if (window.electronAPI && window.electronAPI.bootComplete) window.electronAPI.bootComplete(); } catch (e) {}
+        }
+        root.addEventListener("transitionend", function (e) {
+          if (e.propertyName === "opacity") notifyMain();
+        }, { once: true });
+        root.style.opacity = "0";
+        setTimeout(notifyMain, 700); // fallback if transitionend doesn't fire
+      }
+
+      // ── The reveal timeline — same anime.js engine + phases as BootReveal.tsx ──
+      function startReveal() {
+        var prog = { p: 0 };
+        var writeMp = { p: 0 };
+        var startX = 0, endX = 0;
+
+        setGhost(HIDDEN_X, 0, 0);
+
+        var tl = anime.timeline({ autoplay: false, complete: onRevealDone });
+
+        // 1. Peek in, head tilting to look around the edge.
+        tl.add({
+          targets: prog, p: [0, 1], duration: 560, easing: "easeOutBack",
+          update: function () { setGhost(HIDDEN_X + (PEEK_X - HIDDEN_X) * prog.p, Math.sin(prog.p * Math.PI) * -6, PEEK_TILT * prog.p); }
+        });
+        // 2. Curious look-around while peeking.
+        tl.add({
+          targets: prog, p: [0, 1], duration: 460, easing: "easeInOutSine",
+          update: function () { setGhost(PEEK_X, Math.sin(prog.p * Math.PI * 2) * 7, PEEK_TILT + Math.sin(prog.p * Math.PI * 2) * 3); }
+        });
+        // 3. Withdraw, straightening up.
+        tl.add({
+          targets: prog, p: [0, 1], duration: 380, easing: "easeInBack",
+          update: function () { setGhost(PEEK_X + (HIDDEN_X - PEEK_X) * prog.p, 0, PEEK_TILT * (1 - prog.p)); }
+        });
+        // 4. Constant-speed float; each glyph strokes its outline as the ghost
+        //    passes, then fills in just behind the sweep edge.
+        tl.add({
+          targets: writeMp, p: [0, 1], duration: FLOAT_MS, easing: "linear",
+          begin: function () {
+            var r = svg.getBoundingClientRect();
+            var rl = r && r.width ? r.left : 0;
+            var rw = r && r.width ? r.width : 1;
+            chars.forEach(function (c) { c.screenLeft = rl + (c.vbLeft / VB_W) * rw; });
+            startX = -GHOST_W - FADE - 20;
+            endX = window.innerWidth + GHOST_W + FADE + 40;
+          },
+          update: function () {
+            var mp = writeMp.p;
+            var gx = startX + (endX - startX) * mp;
+            setGhost(gx, Math.sin(mp * Math.PI * 3) * 14, 0);
+            var front = gx + 30;
+            white.style.width = clamp(front, 0, endX + FADE + 60) + "px";
+            var solidEdge = front - FADE;
+            for (var i = 0; i < chars.length; i++) {
+              var c = chars[i];
+              if (c.triggerMp < 0 && solidEdge >= c.screenLeft) c.triggerMp = mp;
+              if (c.triggerMp >= 0) {
+                var dp = clamp((mp - c.triggerMp) / DRAW_FRAC, 0, 1);
+                c.el.style.strokeDashoffset = String(c.len * (1 - dp));
+                var fp = clamp((mp - c.triggerMp - DRAW_FRAC) / FILL_FRAC, 0, 1);
+                c.el.style.fill = "rgba(" + KIRO_RGB + "," + fp + ")";
+                c.el.style.stroke = "rgba(" + KIRO_RGB + "," + (1 - fp) + ")";
+              }
+            }
+          }
+        }, "+=120");
+
+        // Request: ghost is rendered first (off-screen); animate only after 0.5s.
+        setTimeout(function () { tl.play(); }, GHOST_LOAD_DELAY);
+      }
+
+      // ── Gateway status / ready signals from the Electron main process ──
+      if (window.electronAPI && window.electronAPI.onStatus) {
+        window.electronAPI.onStatus(function (msg) {
+          if (msg) latestStatus = msg;
+          if (revealDone) statusText.textContent = latestStatus;
+        });
+      }
+      if (window.electronAPI && window.electronAPI.onBootReady) {
+        window.electronAPI.onBootReady(function () { gatewayReady = true; maybeFinish(); });
+      }
+
+      // ── Kick off ──
+      function start() {
+        buildChars();
+        var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        if (reduce || !anime) {
+          white.style.maskImage = "none";
+          white.style.webkitMaskImage = "none";
+          white.style.filter = "none";
+          ghost.style.display = "none";
+          settleFinalFrame();
+          onRevealDone();
+          return;
+        }
+        startReveal();
+      }
+
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", start);
+      } else {
+        start();
+      }
+    })();
   </script>
 </body>
 </html>

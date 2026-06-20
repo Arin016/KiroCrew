@@ -11,4 +11,26 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("status", handler);
     return () => ipcRenderer.removeListener("status", handler);
   },
+  // Boot-reveal handshake: main.js sends "boot-ready" once the gateway is up;
+  // loading.html replies "boot-complete" after its reveal animation fades out.
+  onBootReady: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("boot-ready", handler);
+    return () => ipcRenderer.removeListener("boot-ready", handler);
+  },
+  bootComplete: () => ipcRenderer.send("boot-complete"),
+});
+
+// Desktop auto-update bridge. Drives the in-app UpdateModal + Settings > About.
+// onState pushes update lifecycle events ({state, version, notes, channel});
+// check/install/getInfo are promise-based round-trips to the main process.
+contextBridge.exposeInMainWorld("updateAPI", {
+  onState: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on("update-state", handler);
+    return () => ipcRenderer.removeListener("update-state", handler);
+  },
+  check: () => ipcRenderer.invoke("update:check"),
+  install: () => ipcRenderer.invoke("update:install"),
+  getInfo: () => ipcRenderer.invoke("update:get-info"),
 });

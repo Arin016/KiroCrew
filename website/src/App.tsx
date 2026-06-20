@@ -44,9 +44,10 @@ import KiroClawNavBridge from './components/KiroClawNavBridge'
 import InstanceTabBar from './components/InstanceTabBar'
 import InstancesViewport from './components/InstancesViewport'
 import EmbedTabStrip from './components/EmbedTabStrip'
-import BootReveal from './components/BootReveal'
 import DeveloperPage from './pages/DeveloperPage'
 import SchedulePage from './pages/SchedulePage'
+import { useUpdateSubscription } from './hooks/useUpdateSubscription'
+import UpdateModal from './components/UpdateModal'
 import CliPanel from './components/CliPanel'
 import BrowserLiveView from './components/BrowserLiveView'
 import { toggleCliPanel } from './store/terminalSlice'
@@ -585,20 +586,9 @@ export default function App() {
   const navigate = useNavigate()
   const { colorTheme, setColorTheme, allThemes, preference: modePref, cycle: cycleMode, setTheme: setModePref } = useTheme()
   const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem('mc-onboarded'))
-  // Boot reveal overlay — plays once per gateway session (the first dashboard
-  // load after the gateway starts), then dissolves into the dashboard. Keyed on
-  // the gateway start_time so refreshes / new tabs / other windows in the same
-  // session skip it, and it replays after a gateway restart (new start_time).
-  const [booting, setBooting] = useState(false)
-  const gatewayStart = useAppSelector(s => s.dashboard.status?.start_time)
-  useEffect(() => {
-    if (!gatewayStart) return
-    const KEY = 'mc-boot-revealed-at'
-    if (localStorage.getItem(KEY) !== String(gatewayStart)) {
-      safeSetItem(KEY, String(gatewayStart))
-      setBooting(true)
-    }
-  }, [gatewayStart])
+  // Capture Electron update lifecycle events app-wide so UpdateModal fires on
+  // any page, not just after the user has opened Settings > About.
+  useUpdateSubscription()
   const { botName: _botName, avatar: _avatar } = useBranding()
   const isLumon = colorTheme === 'lumon'
   const botName = isLumon ? 'LumonClaw' : _botName
@@ -997,7 +987,6 @@ export default function App() {
       </div>
     ) : (
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-bg">
-      {booting && <BootReveal onDone={() => setBooting(false)} />}
       {/* Thin instance tab bar — renders null unless >=1 remote is connected, so
           the single-instance experience is unchanged. Everything below it is the
           switchable window: the Local dashboard, or a remote's embedded one. */}
@@ -1174,6 +1163,7 @@ export default function App() {
 
       {/* Updating overlay */}
       {(updating || showUpdateModal) && <UpdateOverlay onCancel={() => { setUpdating(false); setShowUpdateModal(false) }} />}
+      <UpdateModal />
 
       {/* Theme onboarding for new users */}
       {showOnboarding && (
