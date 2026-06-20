@@ -553,6 +553,10 @@ function ChatInput({
   const undoPointerRef = useRef(0)
   const undoLastEditRef = useRef(0)
   const applyingUndoRef = useRef(false)
+  // True for the next paste only when the user pressed Cmd/Ctrl+Shift+V, so
+  // handlePaste inserts the full text inline instead of collapsing it to a
+  // `[ Paste #N ]` chip. Set on that keydown, cleared on any other keydown.
+  const rawPasteRef = useRef(false)
   const prevUndoAfkRef = useRef(autoFocusKey)
   const slotSettlingRef = useRef(false)
   // True when the latest `value` change came from a real DOM edit (user typing,
@@ -871,6 +875,11 @@ function ChatInput({
   }, [runOptimize, chatMessages])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Cmd/Ctrl+Shift+V → next paste inserts full text inline (no chip collapse).
+    // Self-clearing: any other keydown resets the flag so it only ever affects
+    // the paste that immediately follows this exact shortcut. We do NOT
+    // preventDefault — the browser still fires the paste event we hook below.
+    rawPasteRef.current = (e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'v'
     // Undo / redo — drive the explicit per-slot history so Ctrl/Cmd+Z restores
     // text even after a programmatic reset (send-clear, ↑/↓ recall, optimize)
     // wiped the browser's native undo stack. We own the gesture and
@@ -1156,6 +1165,11 @@ function ChatInput({
 
   /** Intercept clipboard paste — files go to upload path, big text gets collapsed into a token. */
   const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    // Cmd/Ctrl+Shift+V bypass: consume the one-shot flag up front, before any
+    // early return below, so it can never leak into a later paste (e.g. a
+    // context-menu paste with no intervening keydown to clear it).
+    const forceRaw = rawPasteRef.current
+    rawPasteRef.current = false
     // File paste takes precedence — but not when text is also available (macOS Office
     // apps include an image rendering alongside the copied text in the clipboard).
     const clipTypes = e.clipboardData.types || []
@@ -1172,7 +1186,7 @@ function ChatInput({
     // Text paste — collapse only when the chunk is big enough and we have a sink.
     if (!onPasteBlocksChange) return
     const pasted = e.clipboardData.getData('text')
-    if (!shouldCollapsePaste(pasted)) return
+    if (forceRaw || !shouldCollapsePaste(pasted)) return
 
     e.preventDefault()
     const block: PasteBlock = { id: makePasteId(), seq: nextSeq(pasteBlocks), lines: countLines(pasted), content: pasted }
