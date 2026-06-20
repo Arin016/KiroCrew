@@ -48,7 +48,7 @@ from kiro_claw.instances.constants import (
     DEFAULT_TUNNEL_BASE_PORT,
 )
 from kiro_claw.instances.diagnostics import diagnose_instance
-from kiro_claw.instances.port_allocator import PortAllocator
+from kiro_claw.instances.port_allocator import PortAllocator, _is_port_free
 from kiro_claw.instances.registry import Instance, InstancesRegistry
 from kiro_claw.instances.token_mint import (
     TokenMintError,
@@ -583,19 +583,34 @@ class SshTunnelManager:
             except SshValidationError as e:
                 return self._error_status(inst, f"invalid ssh settings: {e}")
 
-            # Allocate a loopback port if the instance doesn't have one yet.
-            local_port = inst.local_port
-            if not local_port:
-                try:
-                    local_port = self._allocator.allocate(exclude=self._reserved_ports())
-                except RuntimeError as e:
-                    return self._error_status(inst, str(e))
+            # CSE SEC-016: mirror the local forward port to the remote (configured)
+            # port. The embedded dashboard runs in an iframe at
+            # http://127.0.0.1:<local_port>, and the remote gateway only trusts
+            # CSRF/WebSocket Origins on its own configured port. Forcing
+            # local_port == remote_port keeps the Origin valid without per-instance
+            # allow-listing. Each simultaneously-connected instance must therefore
+            # use a distinct remote port (a local port cannot be bound twice).
+            local_port = inst.remote_port
 
             # Clear any orphaned forwarder still holding this port from an
-            # unclean prior exit (hard kill bypasses graceful shutdown; macOS
-            # has no parent-death signal) so the new tunnel can bind it.
+            # unclean prior exit (hard kill bypasses graceful shutdown; macOS has no
+            # parent-death signal) so the new tunnel can bind it.
             if self._reaps_orphans:
                 await self._reap_orphan_forwarder(local_port)
+
+            # Hard-fail with a clear message if the mirrored port is still occupied
+            # (e.g. another instance on the same remote port, or the local gateway).
+            # No dynamic fallback — a different local port would break the SEC-016
+            # origin match and leave the embedded dashboard unable to stream/act.
+            if not _is_port_free(local_port):
+                return self._error_status(
+                    inst,
+                    f"local port {local_port} is already in use. Each connected "
+                    f"instance must use a distinct remote port — change this "
+                    f"instance's remote port (and set that same port on the remote "
+                    f"host's dashboard.url), or disconnect whatever is holding "
+                    f"port {local_port}.",
+                )
 
             # Open the tunnel first so the forward is live.
             tunnel = self._tunnel_factory(

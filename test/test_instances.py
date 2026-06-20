@@ -339,6 +339,14 @@ class TestSshTunnelArgvCompression:
 
 
 class TestSshTunnelManager:
+    @pytest.fixture(autouse=True)
+    def _free_ports(self, monkeypatch):
+        # Connect now probes _is_port_free (CSE SEC-016 mirror conflict check).
+        # Keep these unit tests hermetic / independent of the host's real ports.
+        import kiro_claw.instances.ssh_tunnel_manager as stm
+
+        monkeypatch.setattr(stm, "_is_port_free", lambda port, host="127.0.0.1": True)
+
     def _mgr(self, tmp_path, *, mint=None, factory=_FakeTunnel):
         from kiro_claw.instances.registry import InstancesRegistry
         from kiro_claw.instances.ssh_tunnel_manager import SshTunnelManager
@@ -363,7 +371,9 @@ class TestSshTunnelManager:
         assert st.state == TunnelState.CONNECTED
         assert mgr.get_token("cd-1") == "SECRET_TOK"
         inst = reg.get("cd-1")
-        assert inst.was_connected is True and inst.local_port >= 53400
+        # CSE SEC-016 mirror: local_port == remote_port (default 7777), not an
+        # allocator-assigned port.
+        assert inst.was_connected is True and inst.local_port == inst.remote_port == 7777
         assert reg.get_last_active().id == "cd-1"
         # idempotent
         assert (await mgr.connect("cd-1")).state == TunnelState.CONNECTED
@@ -1508,3 +1518,86 @@ class TestInstancesStartupHooks:
         # Flag off => no registry/manager created, and cleanup is a safe no-op.
         assert state.instances_manager is None
         asyncio.run(app.on_cleanup.send(app))
+
+
+class TestPortMirror:
+    """CSE SEC-016: the SSH tunnel's local port mirrors the remote (configured)
+    port so the embedded dashboard's Origin (http://127.0.0.1:<port>) matches the
+    remote gateway's trusted port. Each connected instance must use a distinct
+    remote port; a local bind conflict hard-fails (no dynamic fallback)."""
+
+    @staticmethod
+    def _mgr(reg, factory, monkeypatch, *, port_free=True):
+        import kiro_claw.instances.ssh_tunnel_manager as stm
+        from kiro_claw.instances.ssh_tunnel_manager import SshTunnelManager
+
+        monkeypatch.setattr(stm, "_is_port_free", lambda port, host="127.0.0.1": port_free)
+
+        async def ok_mint(host, *, remote_bin="", ttl="20h", remote_port=None):
+            return "TOK"
+
+        return SshTunnelManager(reg, mint_token=ok_mint, tunnel_factory=factory)
+
+    @pytest.mark.asyncio
+    async def test_local_port_mirrors_remote_port(self, tmp_path, monkeypatch):
+        from kiro_claw.instances.registry import InstancesRegistry
+        from kiro_claw.instances.ssh_tunnel_manager import TunnelState
+
+        captured: dict = {}
+
+        def factory(iid, ssh_host, lp, rp, **k):
+            captured["lp"], captured["rp"] = lp, rp
+            return _FakeTunnel(iid, ssh_host, lp, rp, **k)
+
+        reg = InstancesRegistry(path=tmp_path / "instances.json")
+        reg.add(name="CD", ssh_host="cd-1-alias", instance_id="cd-1", remote_port=7900)
+        mgr = self._mgr(reg, factory, monkeypatch)
+
+        status = await mgr.connect("cd-1")
+        assert status.state == TunnelState.CONNECTED
+        # local forward port == remote (configured) port
+        assert captured["lp"] == 7900 == captured["rp"]
+        assert reg.get("cd-1").local_port == 7900
+
+    @pytest.mark.asyncio
+    async def test_mirror_overrides_stale_local_port(self, tmp_path, monkeypatch):
+        from kiro_claw.instances.registry import InstancesRegistry
+        from kiro_claw.instances.ssh_tunnel_manager import TunnelState
+
+        captured: dict = {}
+
+        def factory(iid, ssh_host, lp, rp, **k):
+            captured["lp"] = lp
+            return _FakeTunnel(iid, ssh_host, lp, rp, **k)
+
+        reg = InstancesRegistry(path=tmp_path / "instances.json")
+        reg.add(name="CD", ssh_host="cd-1-alias", instance_id="cd-1", remote_port=7900)
+        reg.update("cd-1", local_port=8123)  # stale random local port from old allocator
+        mgr = self._mgr(reg, factory, monkeypatch)
+
+        status = await mgr.connect("cd-1")
+        assert status.state == TunnelState.CONNECTED
+        assert captured["lp"] == 7900  # stale 8123 ignored; mirror wins
+        assert reg.get("cd-1").local_port == 7900
+
+    @pytest.mark.asyncio
+    async def test_port_conflict_hard_fails(self, tmp_path, monkeypatch):
+        from kiro_claw.instances.registry import InstancesRegistry
+        from kiro_claw.instances.ssh_tunnel_manager import TunnelState
+
+        captured: dict = {}
+
+        def factory(iid, ssh_host, lp, rp, **k):
+            captured["called"] = True
+            return _FakeTunnel(iid, ssh_host, lp, rp, **k)
+
+        reg = InstancesRegistry(path=tmp_path / "instances.json")
+        reg.add(name="CD", ssh_host="cd-1-alias", instance_id="cd-1", remote_port=7900)
+        mgr = self._mgr(reg, factory, monkeypatch, port_free=False)
+
+        status = await mgr.connect("cd-1")
+        assert status.state == TunnelState.ERROR
+        assert "already in use" in (status.error or "")
+        assert "distinct remote port" in (status.error or "")
+        # We fail before opening the tunnel — factory never invoked.
+        assert "called" not in captured
