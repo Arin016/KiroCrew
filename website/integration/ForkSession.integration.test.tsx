@@ -127,39 +127,29 @@ describe('Fork Session Integration', () => {
     await waitFor(() => expect(btn).not.toBeDisabled())
   })
 
-  it('fork API failure leaves prompt in input box (mirrors ChatPage.handleFork)', async () => {
-    // Real ChatPage.handleFork clears input ONLY on success. On failure
-    // (rejection OR ok:false) the input is never cleared, so it stays intact.
+  it('fork never auto-submits the unsent composer draft (Mesh-2287)', async () => {
+    // Option B: forking must NOT pick up the composer text. The fork request
+    // carries no prompt, so nothing is auto-submitted into the new session and
+    // the unsent draft stays parked in the source slot. Mirrors the post-fix
+    // ChatPage.handleFork (fork + switchSlot only — the composer is untouched).
     const store = createTestStore()
+    let forkBody: Record<string, unknown> | null = null
     server.use(
-      http.post('/api/chat/slots/:slot/fork', () =>
-        HttpResponse.json({ ok: false, error: 'backend kaboom' }, { status: 500 }),
-      ),
+      http.post('/api/chat/slots/chat-1-100/fork', async ({ request }) => {
+        forkBody = (await request.json().catch(() => ({}))) as Record<string, unknown>
+        return HttpResponse.json({ ok: true, key: 'chat-2-777', title: 'Fork', messages: 2, prompt: '' })
+      }),
     )
 
-    let input = 'fix the bug'
-    const setInput = (v: string) => { input = v }
-
-    const handleFork = async () => {
-      const prompt = input
-      try {
-        const r = await store.dispatch(forkSlot({ slot: 'chat-1-100', prompt })).unwrap()
-        if (r.ok && prompt) setInput('')  // clear only on success
-      } catch {
-        // Input left untouched on rejection.
-      }
-    }
-
-    const slotsBefore = store.getState().dashboard.slots.length
     render(
       <Provider store={store}>
         <AssistantMessage
           content="Hello"
           isStreaming={false}
           slotRunning={false}
-         
-          onFork={handleFork}
-          forkIndex={0}
+
+          onFork={() => store.dispatch(forkSlot({ slot: 'chat-1-100', atIndex: 1 })) as unknown as Promise<void>}
+          forkIndex={1}
         />
       </Provider>,
     )
@@ -167,8 +157,12 @@ describe('Fork Session Integration', () => {
     fireEvent.click(screen.getByTitle('Fork conversation from here'))
 
     await waitFor(() => {
-      expect(input).toBe('fix the bug')  // never cleared on failure
+      expect(store.getState().dashboard.slots).toContainEqual(
+        expect.objectContaining({ key: 'chat-2-777' }),
+      )
     })
-    expect(store.getState().dashboard.slots).toHaveLength(slotsBefore)  // no optimistic slot
+    // The core fix: the fork POST carries NO prompt, so the parked composer
+    // draft is never auto-submitted into the forked session.
+    expect(forkBody?.prompt).toBeUndefined()
   })
 })

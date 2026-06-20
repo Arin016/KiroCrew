@@ -1221,36 +1221,19 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
 
   const handleFork = useCallback(async (visibleIndex: number) => {
     if (!activeSlot) return
-    const prompt = inputRef.current.trim()
     try {
-      const result = await dispatch(forkSlot({ slot: activeSlot, atIndex: visibleIndex, prompt: prompt || undefined })).unwrap()
+      // Fork WITHOUT a prompt: an unsent composer draft must never be
+      // auto-submitted into the freshly forked session (Mesh-2287). The
+      // per-slot draft mechanism saves the source slot's composer text on
+      // slot-switch, so the user's parked draft stays safe in the original
+      // session and the fork opens with an empty composer.
+      const result = await dispatch(forkSlot({ slot: activeSlot, atIndex: visibleIndex })).unwrap()
       if (result.ok) {
-        if (prompt) setInput('')
         await dispatch(switchSlot(result.key))
-        if (prompt) {
-          // Fire-and-forget: the forked slot's kiro-cli session spins up on
-          // first prompt. If the backend isn't ready yet, sendChat returns
-          // ok:false — restore the prompt to the input box AND surface an
-          // alert so the user sees *why* the prompt reappeared (raised in
-          // review). Silent restore was confusing UX.
-          const onSendFailure = (detail: string) => {
-            if (!inputRef.current.trim()) setInput(prompt)
-            alert(`Fork created, but sending the prompt failed (${detail}). Please retry.`)
-          }
-          api.sendChat(prompt, result.key).then(async r => {
-            if (!r.ok) {
-              const body = await r.text().catch(() => '')
-              onSendFailure(body || `HTTP ${r.status}`)
-            }
-          }).catch(e => {
-            onSendFailure(e instanceof Error ? e.message : String(e))
-          })
-        }
       } else {
         alert('Fork failed: ' + (result.error || 'unknown error'))
       }
     } catch (e) {
-      if (prompt && !inputRef.current.trim()) setInput(prompt)
       alert('Fork failed: ' + (e instanceof Error ? e.message : String(e)))
     }
   }, [activeSlot, dispatch])
