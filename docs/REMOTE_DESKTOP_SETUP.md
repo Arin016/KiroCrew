@@ -360,7 +360,10 @@ else
 fi
 
 SECONDS=0
-URL="$(ssh -o ConnectTimeout=10 "${REMOTE_HOST}" "${REMOTE_CMD}" 2>"${DEBUG_LOG}")"
+# `kiroclaw token` prints two URLs: a localhost one and a direct host one.
+# Keep only the localhost URL — that's what routes through the SSH tunnel opened
+# above.
+URL="$(ssh -o ConnectTimeout=10 "${REMOTE_HOST}" "${REMOTE_CMD}" 2>"${DEBUG_LOG}" | grep -m1 'localhost:8765')"
 echo "Token fetch took ${SECONDS}s (debug: ${DEBUG_LOG})"
 
 if [[ -z "$URL" ]]; then
