@@ -17,6 +17,7 @@ import { useRumPageView } from './hooks/useRumPageView'
 import { useIsMobile } from './hooks/useIsMobile'
 import { useNativeNotification } from './hooks/useNativeNotification'
 import { useNotificationSound } from './hooks/useNotificationSound'
+import { useRefreshScheduler } from './hooks/useRefreshScheduler'
 import { recordSessionStart, recordEvent } from './rum'
 import { ZoomProvider } from './hooks/ZoomProvider'
 import { api } from './api/client'
@@ -590,6 +591,11 @@ export default function App() {
   // any page, not just after the user has opened Settings > About.
   useUpdateSubscription()
   const { botName: _botName, avatar: _avatar } = useBranding()
+
+  // OAuth-style token refresh: silently rotates the access cookie before
+  // it expires so the user does not have to re-mint via `kiroclaw token`
+  // URL every ~20h. See KiroClaw docs/token-refresh/REQUIREMENTS.md
+  useRefreshScheduler()
   const isLumon = colorTheme === 'lumon'
   const botName = isLumon ? 'LumonClaw' : _botName
   const avatar = isLumon ? '/static/lumon-logo.png' : _avatar
