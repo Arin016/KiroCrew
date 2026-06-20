@@ -862,10 +862,10 @@ class DashboardConfig:
         ),
     )
     terminal: dict = field(
-        default_factory=lambda: {"enabled": False},
+        default_factory=lambda: {"enabled": True},
         metadata=_meta(
             "Terminal",
-            "Terminal panel configuration. Set enabled=true to show CLI panel in dashboard.",
+            "Terminal panel configuration. Set enabled=false to hide the CLI panel in the dashboard.",
         ),
     )
     default_project: str = field(
@@ -1948,7 +1948,7 @@ class KiroClawConfig:
                 auto_open_browser=dashboard_data.get("auto_open_browser", True),
                 quick_send=dashboard_data.get("quick_send", False),
                 widget_density=dashboard_data.get("widget_density", "more"),
-                terminal=dashboard_data.get("terminal", {"enabled": False}),
+                terminal=dashboard_data.get("terminal", {"enabled": True}),
                 default_project=dashboard_data.get("default_project", ""),
             ),
             tunnel=TunnelConfig(

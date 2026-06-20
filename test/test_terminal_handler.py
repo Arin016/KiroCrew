@@ -933,3 +933,22 @@ class TestTerminalSession:
         assert sess.reader_task is None
         assert sess.last_ws_disconnect is None
         assert sess.created_at > 0
+
+
+# ── _is_enabled default ──
+
+
+class TestIsEnabledDefault:
+    """Terminal is enabled by default; an explicit enabled=false still disables it."""
+
+    def test_enabled_by_default_when_key_absent(self):
+        req = _make_request()
+        terminal._enabled_cache[1] = 0.0  # bust the 30s cache to force a recompute
+        with patch.object(terminal, "_get_config", return_value={}):
+            assert terminal._is_enabled(req) is True
+
+    def test_explicit_disable_is_respected(self):
+        req = _make_request()
+        terminal._enabled_cache[1] = 0.0
+        with patch.object(terminal, "_get_config", return_value={"enabled": False}):
+            assert terminal._is_enabled(req) is False

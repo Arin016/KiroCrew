@@ -77,20 +77,20 @@ def _get_config(request: web.Request) -> dict:
 
 
 def _is_enabled(request: web.Request) -> bool:
-    """Terminal panel is disabled by default. Enable via config.json:
-    {"dashboard": {"terminal": {"enabled": true}}}
+    """Terminal panel is enabled by default. Disable via config.json:
+    {"dashboard": {"terminal": {"enabled": false}}}
     Cached for 30s to avoid disk I/O per request.
     """
     now = time.monotonic()
     if now - _enabled_cache[1] < 30:
         return _enabled_cache[0]
-    result = bool(_get_config(request).get("enabled", False))
+    result = bool(_get_config(request).get("enabled", True))
     _enabled_cache[0] = result
     _enabled_cache[1] = now
     return result
 
 
-_enabled_cache: list = [False, 0.0]  # [value, timestamp]
+_enabled_cache: list = [True, 0.0]  # [value, timestamp]
 
 
 async def _kill_session(sess: _TerminalSession) -> None:
