@@ -188,3 +188,51 @@ describe('MissionControlScene', () => {
     expect(canvas.style.imageRendering).toBe('pixelated')
   })
 })
+
+
+// WateringHoleScene uses useSceneInteraction (useDispatch + useNavigate) — needs providers
+import WateringHoleScene from '../pages/scenes/WateringHoleScene'
+
+function renderWH(props: { agents: AgentSource[]; visible?: boolean }) {
+  const store = configureStore({ reducer: { chat: chatReducer } })
+  return render(
+    <Provider store={store}>
+      <MemoryRouter>
+        <WateringHoleScene {...props} />
+      </MemoryRouter>
+    </Provider>
+  )
+}
+
+describe('WateringHoleScene', () => {
+  it('renders a canvas element', () => {
+    const { container } = renderWH({ agents: [] })
+    expect(container.querySelector('canvas')).toBeInTheDocument()
+  })
+
+  it('renders with agents provided (mixed species by id)', () => {
+    const animalsByKind: AgentSource[] = [
+      { id: 'slot-g', name: 'Giraffe1', label: 'default', kind: 'slot', running: true, detail: '5 msgs' },
+      { id: 'cron-w', name: 'Warthog1', label: 'cron', kind: 'cron', running: true, detail: 'every 5m' },
+      { id: 'spawn-e', name: 'Elephant1', label: 'spawn', kind: 'spawn', running: false, detail: 'idle' },
+    ]
+    const { container } = renderWH({ agents: animalsByKind })
+    expect(container.querySelector('canvas')).toBeInTheDocument()
+  })
+
+  it('renders when visible=false (kept mounted)', () => {
+    const { container } = renderWH({ agents: [], visible: false })
+    expect(container.querySelector('canvas')).toBeInTheDocument()
+  })
+
+  it('canvas has pixelated image rendering style', () => {
+    const { container } = renderWH({ agents: [] })
+    const canvas = container.querySelector('canvas')!
+    expect(canvas.style.imageRendering).toBe('pixelated')
+  })
+
+  it('renders both pixel canvas and text overlay canvas', () => {
+    const { container } = renderWH({ agents: mockAgents })
+    expect(container.querySelectorAll('canvas').length).toBe(2)
+  })
+})
