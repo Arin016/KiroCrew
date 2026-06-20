@@ -360,16 +360,26 @@ class TestResolveRealKiroBin:
 
 
 class TestSandboxNoWarningWhenExpected:
-    """Mesh-2054: no WARNING for expected no-sandbox states."""
+    """Mesh-2054: no WARNING for an *acknowledged* no-sandbox state.
 
+    CSE SEC-009 makes an unacknowledged no-sandbox fallback a loud WARNING
+    (covered in test_sandbox_no_isolation.py). When the operator has opted in
+    via ``agent.sandbox_allow_no_isolation`` the message is demoted to INFO —
+    this preserves Mesh-2054's "don't spam on expected states" intent.
+    """
+
+    @patch("kiro_claw.sandbox._allow_no_isolation", return_value=True)
     @patch("kiro_claw.sandbox.detect_backend", return_value="none")
-    def test_no_sandbox_logs_info_not_warning(self, mock_detect, caplog):
+    def test_no_sandbox_opted_in_logs_info_not_warning(self, mock_detect, mock_optin, caplog):
         import logging
         if hasattr(wrap_argv, "_warned"):
             del wrap_argv._warned  # type: ignore[attr-defined]
         with caplog.at_level(logging.DEBUG, logger="kiro_claw.sandbox"):
             wrap_argv(["kiro-cli", "acp"], mode="auto")
         warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
-        info_msgs = [r for r in caplog.records if r.levelno == logging.INFO and "sandbox" in r.message.lower()]
+        info_msgs = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO and "isolation" in r.message.lower()
+        ]
         assert not warning_msgs, f"Expected no WARNING but got: {warning_msgs}"
-        assert info_msgs, "Expected INFO about no OS-level sandbox"
+        assert info_msgs, "Expected INFO about running without isolation"

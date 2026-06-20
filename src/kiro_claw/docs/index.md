@@ -71,6 +71,7 @@ agent backend and Slack credentials.
 - Denied-command patterns with audit logging
 - Prompt-injection credential exfiltration protection
 - Multi-user Slack access disabled (owner-only)
+- [App Platform Trust Model](app-platform-trust-model.md) — enabled apps run in-process with full privileges; trust boundary and audit
 
 ## Contributing
 

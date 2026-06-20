@@ -350,6 +350,17 @@ class AgentConfig:
         default="auto",
         metadata=_meta("Sandbox", "Sandbox mode for ACP provider.", enum=["auto", "off"]),
     )
+    sandbox_allow_no_isolation: bool = field(
+        default=False,
+        metadata=_meta(
+            "Allow No-Isolation Fallback",
+            "Acknowledge running the agent subprocess WITHOUT OS-level credential "
+            "isolation when no sandbox backend is available (e.g. macOS >= 26, or "
+            "Linux without user namespaces). When false (default), that fallback is "
+            "logged as a loud SECURITY warning. When true, the operator has accepted "
+            "the risk and it is logged at info level.",
+        ),
+    )
     yolo: bool = field(
         default=False,
         metadata=_meta("YOLO Mode", "Skip tool approval confirmations."),
@@ -1834,6 +1845,9 @@ class KiroClawConfig:
                 provider=agent_data.get("provider", "acp"),
                 default_agent=agent_data.get("default_agent", ""),
                 sandbox=agent_data.get("sandbox", "auto"),
+                sandbox_allow_no_isolation=bool(
+                    agent_data.get("sandbox_allow_no_isolation", False)
+                ),
                 yolo=agent_data.get("yolo", False),
                 conductor_skill=agent_data.get("conductor_skill", False),
                 max_subagents=agent_data.get("max_subagents", 3),

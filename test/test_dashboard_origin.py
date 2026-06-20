@@ -235,9 +235,10 @@ class TestFormatDashboardUrls:
 
 
 class TestCheckOriginLoopbackTrust:
-    """check_origin should trust loopback origins regardless of port (SSH tunnel support)."""
+    """check_origin tightened (CSE SEC-016): only the bound port and explicitly
+    opted-in loopback ports are trusted — not every loopback port."""
 
-    def _make_request(self, origin: str, remote: str = "127.0.0.1") -> object:
+    def _make_request(self, origin: str, remote: str = "127.0.0.1", allowed=None) -> object:
         """Create a minimal mock request with Origin header and allowed_origins."""
         from unittest.mock import MagicMock
 
@@ -245,22 +246,30 @@ class TestCheckOriginLoopbackTrust:
         request.headers = {"Origin": origin} if origin else {}
         request.remote = remote
         # Only allow port 8765 — simulates the default config
-        request.app = {"allowed_origins": {"http://localhost:8765", "http://127.0.0.1:8765"}}
+        if allowed is None:
+            allowed = {"http://localhost:8765", "http://127.0.0.1:8765"}
+        request.app = {"allowed_origins": allowed}
         return request
 
-    def test_localhost_different_port_trusted(self) -> None:
-        """SSH tunnel with -L 8777:localhost:8765 should be accepted."""
+    def test_localhost_different_port_rejected_by_default(self) -> None:
+        """A loopback origin on a non-bound port is NOT trusted by default (CSRF guard)."""
         request = self._make_request("http://localhost:8777")
-        assert check_origin(request) is True
+        assert check_origin(request) is False
 
-    def test_127_0_0_1_different_port_trusted(self) -> None:
-        """SSH tunnel via 127.0.0.1 with non-standard port should be accepted."""
+    def test_127_0_0_1_different_port_rejected_by_default(self) -> None:
         request = self._make_request("http://127.0.0.1:9999")
-        assert check_origin(request) is True
+        assert check_origin(request) is False
 
-    def test_ipv6_loopback_bracket_notation_trusted(self) -> None:
-        """IPv6 loopback with bracket notation and non-standard port should be accepted."""
-        request = self._make_request("http://[::1]:8777")
+    def test_opted_in_loopback_port_trusted(self) -> None:
+        """A loopback port the operator added (via KIROCLAW_ALLOWED_LOOPBACK_PORTS,
+        folded into allowed_origins) is accepted — SSH-tunnel support, opt-in."""
+        allowed = {
+            "http://localhost:8765",
+            "http://127.0.0.1:8765",
+            "http://localhost:8777",
+            "http://127.0.0.1:8777",
+        }
+        request = self._make_request("http://localhost:8777", allowed=allowed)
         assert check_origin(request) is True
 
     def test_exact_match_still_works(self) -> None:
@@ -282,3 +291,26 @@ class TestCheckOriginLoopbackTrust:
         """No Origin header from non-loopback remote is rejected."""
         request = self._make_request("", remote="10.0.0.5")
         assert check_origin(request) is False
+
+
+class TestAllowedLoopbackPortsEnv:
+    """KIROCLAW_ALLOWED_LOOPBACK_PORTS opts specific loopback ports into the allowed set."""
+
+    @patch.dict("os.environ", {"KIROCLAW_ALLOWED_LOOPBACK_PORTS": "8777,9000"}, clear=True)
+    def test_env_ports_added(self) -> None:
+        origins = build_allowed_origins(7777, local_only=True)
+        assert "http://localhost:8777" in origins
+        assert "http://127.0.0.1:8777" in origins
+        assert "http://[::1]:8777" in origins
+        assert "http://localhost:9000" in origins
+
+    @patch.dict("os.environ", {"KIROCLAW_ALLOWED_LOOPBACK_PORTS": "notaport"}, clear=True)
+    def test_non_numeric_ignored(self) -> None:
+        origins = build_allowed_origins(7777, local_only=True)
+        assert not any(":notaport" in o for o in origins)
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_no_env_only_bound_port(self) -> None:
+        origins = build_allowed_origins(7777, local_only=True)
+        assert "http://localhost:7777" in origins
+        assert "http://localhost:8777" not in origins

@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kiro_claw.hooks import TOOL_DENY
 from kiro_claw.providers.base import EVENT_COMPLETE, EVENT_PERMISSION_REQUEST, EVENT_TEXT_CHUNK
 from kiro_claw.sel import sel
 from kiro_claw.task_models import (
@@ -248,6 +249,45 @@ async def decompose(
             if event.kind == EVENT_TEXT_CHUNK:
                 text += event.text
             elif event.kind == EVENT_PERMISSION_REQUEST:
+                # CSE SEC-006: gate decomposition-phase tool calls through the
+                # same deny-list/hook check used during execution, instead of
+                # unconditionally approving. A prompt-injection embedded in the
+                # spec content could otherwise trigger dangerous tools (fs/exec)
+                # during the planning phase, bypassing the execution-phase gate.
+                if ctx is not None and getattr(ctx, "hooks", None) is not None:
+                    hook_result = ctx.hooks.on_tool_call(event.title)
+                    if hook_result.action == TOOL_DENY:
+                        await client.reject_tool(event.request_id)
+                        sel().log_tool_invocation(
+                            session_key=session_key,
+                            agent=agent or "kiroclaw",
+                            source="taskrunner",
+                            tool_name=event.title,
+                            tool_kind=event.tool_kind,
+                            outcome="denied",
+                            request_id=event.request_id,
+                            error="hook_deny",
+                            metadata={"phase": "decomposition"},
+                        )
+                        continue
+                else:
+                    # Deny-by-default: with no hook store there is nothing to
+                    # gate the request, so reject rather than fall through to
+                    # approve. Decomposition normally only emits JSON (no tool
+                    # calls), so this blocks only the anomalous/injection case.
+                    await client.reject_tool(event.request_id)
+                    sel().log_tool_invocation(
+                        session_key=session_key,
+                        agent=agent or "kiroclaw",
+                        source="taskrunner",
+                        tool_name=event.title,
+                        tool_kind=event.tool_kind,
+                        outcome="denied",
+                        request_id=event.request_id,
+                        error="no_hook_store",
+                        metadata={"phase": "decomposition"},
+                    )
+                    continue
                 await client.approve_tool(event.request_id)
                 sel().log_tool_invocation(
                     session_key=session_key,

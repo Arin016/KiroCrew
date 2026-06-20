@@ -792,6 +792,7 @@ _EDITABLE_CONFIG: dict[str, dict] = {
     "agent.provider": {"type": "enum", "values": ["acp"]},
     "agent.approval_mode": {"type": "enum", "values": ["auto", "interactive"]},
     "agent.sandbox": {"type": "enum", "values": ["auto", "off"]},
+    "agent.sandbox_allow_no_isolation": {"type": "bool"},
     "agent.enforce_denied_commands": {"type": "enum", "values": ["all", "kiroclaw"]},
     "agent.completion_keep": {"type": "enum", "values": ["head", "tail", "both"]},
     "agent.completion_keep_chars": {"type": "int", "min": 0, "max": RESULT_FILE_MAX_BYTES},

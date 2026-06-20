@@ -584,6 +584,57 @@ _backend: str | None = None  # "namespace", "sandbox-exec", "none"
 _backend_config_mode: str | None = None  # config mode when backend was cached
 
 
+def _allow_no_isolation() -> bool:
+    """Whether the operator has explicitly opted into running the agent
+    subprocess without OS-level credential isolation.
+
+    Read lazily from config to avoid an import cycle with the config loader
+    (sandbox.py is a low-level dependency of much of the codebase).
+    """
+    try:
+        from kiro_claw.config.loader import (
+            KiroClawConfig,  # circular import: sandbox is a low-level dep of config.loader
+        )
+
+        return bool(getattr(KiroClawConfig.load().agent, "sandbox_allow_no_isolation", False))
+    except Exception:
+        return False
+
+
+def _warn_no_isolation(mode: str) -> None:
+    """Loudly surface that the agent subprocess is running WITHOUT OS-level
+    isolation, so the fallback is never silent (CSE SEC-009).
+
+    When no sandbox backend is available the credential paths (``~/.aws``,
+    ``~/.ssh``, ...) are visible to the (untrusted) agent subprocess and only
+    the bypassable app-level ``security.py`` checks remain. This is a real
+    degradation of the security posture, so it is logged as a WARNING unless
+    the operator has explicitly acknowledged it via
+    ``agent.sandbox_allow_no_isolation``. Emitted once per process.
+    """
+    if getattr(wrap_argv, "_warned", False):
+        return
+    wrap_argv._warned = True  # type: ignore[attr-defined]
+    if _allow_no_isolation():
+        logger.info(
+            "OS-level sandbox unavailable (mode=%s); running WITHOUT credential "
+            "isolation. Operator opted in via agent.sandbox_allow_no_isolation; "
+            "app-level checks are the only remaining boundary.",
+            mode,
+        )
+        return
+    logger.warning(
+        "SECURITY: no OS-level sandbox backend is available on this host "
+        "(mode=%s), so the agent subprocess runs WITHOUT credential isolation — "
+        "~/.aws, ~/.ssh and other secrets are readable by it and only the "
+        "bypassable app-level security.py checks remain. Install a supported "
+        "sandbox (Linux user namespaces, or macOS < 26 sandbox-exec), or set "
+        "agent.sandbox_allow_no_isolation=true in ~/.kiroclaw/config.json to "
+        "acknowledge the risk and silence this warning.",
+        mode,
+    )
+
+
 def detect_backend(config_mode: str = "auto") -> str:
     """Detect the best available sandbox backend.
 
@@ -654,7 +705,5 @@ def wrap_argv(argv: list[str], mode: str = "auto") -> tuple[list[str], str | Non
         return sandbox_exec_argv(argv, sandbox_level)
 
     if backend == "none":
-        if not getattr(wrap_argv, "_warned", False):
-            logger.info("No OS-level sandbox available — using app-level checks only")
-            wrap_argv._warned = True  # type: ignore[attr-defined]
+        _warn_no_isolation(mode)
     return argv, None

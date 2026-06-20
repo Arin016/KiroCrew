@@ -32,6 +32,62 @@ def _create_app_module(app_dir: Path, module_path: str, content: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# CSE SEC-012: third-party app code runs in-process — make the boundary loud
+# ---------------------------------------------------------------------------
+
+
+class TestThirdPartyTrustWarning:
+    """A third-party (non-builtin) app load logs a one-time SECURITY warning;
+    builtins do not."""
+
+    def _make_app(self, tmp_path: Path) -> Path:
+        app_dir = tmp_path / "evil-app"
+        _create_app_module(app_dir, "backend.routes:register_routes", """
+def register_routes(ctx):
+    return "ok"
+""")
+        return app_dir
+
+    def test_third_party_load_warns_once(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        import kiro_claw.apps.module_loader as ml
+
+        ml._warned_third_party_apps.discard("evil-app")
+        app_dir = self._make_app(tmp_path)
+        with caplog.at_level(logging.WARNING, logger=ml.logger.name):
+            load_app_module("evil-app", app_dir, "backend.routes:register_routes")
+            load_app_module("evil-app", app_dir, "backend.routes:register_routes")
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "third-party app" in warnings[0].getMessage()
+        assert "NOT sandboxed" in warnings[0].getMessage()
+        unload_app_modules("evil-app")
+
+    def test_builtin_load_does_not_warn(self, caplog) -> None:
+        import logging
+
+        import kiro_claw.apps.module_loader as ml
+
+        # The deploy_web builtin ships a backend module; loading it must not warn.
+        builtins = ml._BUILTINS_DIR
+        app_dir = builtins / "deploy_web"
+        if not (app_dir / "handlers.py").is_file():
+            pytest.skip("deploy_web builtin layout changed")
+        ml._warned_third_party_apps.discard("deploy-web")
+        with caplog.at_level(logging.WARNING, logger=ml.logger.name):
+            try:
+                load_app_module("deploy-web", app_dir, "handlers:register_routes")
+            except ImportError:
+                pass  # callable name may differ; we only assert on warnings
+        assert not [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "third-party" in r.getMessage()
+        ]
+        unload_app_modules("deploy-web")
+
+
+# ---------------------------------------------------------------------------
 # Property 15: Module isolation prevents namespace collisions
 # ---------------------------------------------------------------------------
 

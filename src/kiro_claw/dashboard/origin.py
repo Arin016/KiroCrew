@@ -271,6 +271,19 @@ def build_allowed_origins(
     for _co in os.environ.get("KIROCLAW_CORS_ORIGINS", "").split(","):
         if _co.strip():
             origins.add(_co.strip())
+    # Extra loopback ports the operator explicitly trusts — typically the
+    # local end of an SSH tunnel (``-L 8777:localhost:7777`` makes the browser
+    # send Origin ``http://localhost:8777``). This replaces the previous
+    # blanket "trust any loopback port" behaviour (CSE SEC-016): only the bound
+    # port and these opted-in ports are accepted, so a malicious local web page
+    # on an arbitrary port can no longer pass the CSRF origin check.
+    for _p in os.environ.get("KIROCLAW_ALLOWED_LOOPBACK_PORTS", "").split(","):
+        _p = _p.strip()
+        if _p.isdigit():
+            origins.add(f"http://127.0.0.1:{_p}")
+            origins.add(f"http://localhost:{_p}")
+            origins.add(f"http://[::1]:{_p}")
+            origins.add(f"http://kiroclaw.localhost:{_p}")
     return origins
 
 
@@ -304,13 +317,10 @@ def check_origin(
     origin_base = "/".join(origin.split("/")[:3]) if "://" in origin else ""
     if origin_base in allowed:
         return True
-    # Trust any loopback origin regardless of port — SSH tunnels commonly
-    # forward a different local port (e.g. -L 8777:localhost:8765) causing
-    # the browser to send an Origin with a port not in the allowed set.
-    # Token auth is the real security boundary; CSRF from localhost is not
-    # a realistic threat.
-    if origin_base:
-        parsed_host = urlparse(origin_base).hostname or ""
-        if is_loopback(parsed_host):
-            return True
+    # NOTE (CSE SEC-016): we deliberately do NOT blanket-trust every loopback
+    # origin regardless of port. A browser always sends an Origin header, so a
+    # malicious local web page on an arbitrary port would otherwise pass this
+    # CSRF check (cookies are auto-attached). SSH-tunnel users whose browser
+    # sends a different local port must opt that port in via
+    # ``KIROCLAW_ALLOWED_LOOPBACK_PORTS`` (folded into the allowed set above).
     return False

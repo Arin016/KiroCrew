@@ -16,6 +16,42 @@ from kiro_claw.sel import sel
 
 logger = logging.getLogger(__name__)
 
+# Builtin apps ship inside the KiroClaw package and are trusted like core code.
+# Anything loaded from outside this directory is a third-party / operator-installed
+# app whose Python executes in-process with full gateway privileges (CSE SEC-012).
+_BUILTINS_DIR = (Path(__file__).resolve().parent / "builtins")
+
+# One-time-per-app guard so the SEC-012 trust warning is not logged on every hook load.
+_warned_third_party_apps: set[str] = set()
+
+
+def _is_builtin_app(app_resolved: Path) -> bool:
+    """Return True if the resolved app dir lives under the shipped builtins dir."""
+    try:
+        return app_resolved.is_relative_to(_BUILTINS_DIR)
+    except ValueError:
+        return False
+
+
+def _warn_third_party_execution(app_name: str) -> None:
+    """Loudly surface (once per app) that untrusted third-party app code is being
+    executed in-process. The app permission system only gates the SDK tool surface
+    passed to the app context — it does NOT restrict ``import``, filesystem, network,
+    or access to in-memory credentials. Installing an app is therefore equivalent to
+    granting it full gateway-process privileges. Process-level isolation is tracked
+    as separate future work; until then this boundary is made explicit + auditable.
+    """
+    if app_name in _warned_third_party_apps:
+        return
+    _warned_third_party_apps.add(app_name)
+    logger.warning(
+        "SECURITY: executing third-party app %r Python in-process — it runs with "
+        "full gateway privileges (filesystem, network, in-memory credentials) and "
+        "is NOT sandboxed. The app permission system gates only the SDK tool "
+        "surface, not arbitrary code. Only enable apps you trust.",
+        app_name,
+    )
+
 
 def _module_namespace(app_name: str, dotted_path: str) -> str:
     """Build a unique sys.modules key for an app module."""
@@ -79,6 +115,12 @@ def load_app_module(app_name: str, app_dir: Path, module_path: str) -> Callable[
     # Unique module name to avoid sys.modules collisions
     unique_name = _module_namespace(app_name, dotted_path)
 
+    # CSE SEC-012: third-party (operator-installed) app code executes unsandboxed
+    # in the gateway process. Surface that trust boundary explicitly + auditably.
+    third_party = not _is_builtin_app(app_resolved)
+    if third_party:
+        _warn_third_party_execution(app_name)
+
     # Load the module
     spec = importlib.util.spec_from_file_location(unique_name, str(file_path))
     if spec is None or spec.loader is None:
@@ -119,7 +161,7 @@ def load_app_module(app_name: str, app_dir: Path, module_path: str) -> Callable[
         caller="gateway",
         operation="app_module_load",
         outcome="ok",
-        resources=f"{app_name}:{module_path}",
+        resources=f"{app_name}:{module_path} ({'third_party' if third_party else 'builtin'})",
     )
     return func
 
