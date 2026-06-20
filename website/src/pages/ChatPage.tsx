@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { useSwipeEdge } from '../hooks/useSwipeEdge'
 import { useAppSelector, useAppDispatch, store } from '../store'
+import { useConnected } from '../hooks/useConnected'
 import {
   switchSlot, createSlot, deleteSlot, fetchHistory,
   appendMessage, resumeFromHistory, forkSlot,
@@ -486,7 +487,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     [unreadSlots, filteredSlots, mode],
   )
   const refreshTrigger = useAppSelector(s => s.dashboard.refreshTrigger)
-  const connected = useAppSelector(s => s.dashboard.connected)
+  const connected = useConnected()
   const activeSlot = useAppSelector(s => s.chat.activeSlot)
   const messages = useAppSelector(s => s.chat.messages)
   const messagesRef = useRef(messages)
@@ -1498,6 +1499,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   // On mount, URL ?sid= drives which session is active (URL wins over localStorage)
   useEffect(() => {
     if (embedded && !embedMode) return
+    if (!connected) return  // offline: defer URL-driven switchSlot until reconnect
     const urlSlot = initialSidRef.current
     if (!urlSlot || filteredSlots.length === 0) return
     // The deep-link ?sid only sets the INITIAL active slot. The slot list can
@@ -1511,7 +1513,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       dispatch(switchSlot(urlSlot))
     }
     // Don't error immediately — slot may arrive via SSE shortly
-  }, [filteredSlots, activeSlot, dispatch])
+  }, [filteredSlots, activeSlot, dispatch, connected])
   // React to ?sid= changes AFTER mount — required for plugin tab switching
   // where the URL is updated via react-router navigate() (soft nav). The
   // mount-only initialSidRef approach above misses these updates because
@@ -1527,6 +1529,11 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   // guarded against. A session switch pushes a ?sid history entry (sync effect
   // below), so native browser/Electron Back/Forward (and Alt+←/→) retrace the
   // sessions you've visited.
+  //
+  // Also gated on `connected`: when offline the switchSlot dispatch fails
+  // (fetchSlotDetail rejects) and clears messages, leaving an activeSlot
+  // with empty messages — the WelcomeView fallback then renders. Defer
+  // the switch until reconnect so cached state stays put.
   useEffect(() => {
     // Embed: host app drives the URL — react to any ?sid change.
     // Main dashboard: honor only a genuine Back/Forward POP. react-router reports
@@ -1546,15 +1553,22 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       if (location.key === lastLocKeyRef.current) return
       lastLocKeyRef.current = location.key
     }
+    if (!connected) return
     const urlSid = searchParams.get('sid') || searchParams.get('slot')
     if (!urlSid || urlSid === activeSlot) return
     if (filteredSlots.some(s => s.key === urlSid)) {
       popInFlightRef.current = true
       dispatch(switchSlot(urlSid))
     }
-  }, [searchParams, filteredSlots, activeSlot, dispatch, embedMode, navigationType, location.key])
-  // Timeout: if slot never appears after 5s, show error
+  }, [searchParams, filteredSlots, activeSlot, dispatch, embedMode, navigationType, location.key, connected])
+  // Timeout: if slot never appears after 5s, show error.
+  // Gated on `connected` so the timer only runs while the gateway is reachable
+  // — otherwise an offline tab would burn its 5s while the resolve effects
+  // above are deferred, fire a false "Session not found", clear initialSidRef,
+  // and the resolve never happens once the gateway comes back. Re-runs the
+  // effect when connected flips so the timer starts fresh on reconnect.
   useEffect(() => {
+    if (!connected) return
     const urlSlot = initialSidRef.current
     if (!urlSlot) return
     const timer = setTimeout(() => {
@@ -1566,7 +1580,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       }
     }, 5000)
     return () => clearTimeout(timer)
-  }, [])
+  }, [connected])
   // Sync activeSlot → ?sid= in URL (persistent deep-link)
   // Skip entirely when embedded — URL belongs to the host app
   const basePath = embedMode === 'chat' || embedMode === 'sessions' ? '/embed/chat' : mode === 'orchestrator' ? '/orchestrated' : '/chat'
@@ -1720,6 +1734,14 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   planActionMutationRef.current = planActionMutation
 
   const send = useCallback(async (optionText?: string, targetSlot?: string) => {
+    // Defense-in-depth: ChatInput already gates Send/Optimize buttons and
+    // the keyboard Enter shortcut on `connected`, but a future caller (a
+    // programmatic dispatch from a hotkey, a follow-up option click, an
+    // intent handler) could call send() while offline. Bail before we
+    // clear the draft via setInput('') below — losing the user's typed
+    // message with no recovery path is the offline-UX regression we're
+    // guarding against. Cheap belt-and-braces.
+    if (!connected) return
     const raw = (optionText || inputRef.current).trim()
     // Capture + clear the widget-origin tag (P454989291 item 4): attribute this
     // turn to a widget only if the composer still carries the exact text a
@@ -1832,7 +1854,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
         }
       }
     }
-  }, [activeSlot, dispatch])
+  }, [activeSlot, dispatch, connected])
 
   // Submit inline document comments to the session the file was opened from,
   // not the currently-active one. If the user switched sessions while the
@@ -2996,7 +3018,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               pasteBlocks={pasteBlocks}
               onPasteBlocksChange={setPasteBlocks}
               knowledgeChip={knowledgeFetch.pendingKnowledge ? <div className="flex items-start gap-1"><KnowledgeBubbleChip knowledge={{ items: knowledgeFetch.pendingKnowledge.items.length, tokens: knowledgeFetch.pendingKnowledge.totalTokens, titles: knowledgeFetch.pendingKnowledge.items.map(i => i.title), content: knowledgeFetch.pendingKnowledge.items.map(i => ({ title: i.title, text: i.content.slice(0, 2000) })) }} /><button type="button" onClick={() => knowledgeFetch.clearPending()} className="shrink-0 mt-0.5 p-0.5 text-muted hover:text-danger bg-transparent border-none cursor-pointer rounded hover:bg-danger/10 transition-colors" aria-label="Remove knowledge context" title="Remove knowledge context">&times;</button></div> : undefined}
-
+              connected={connected}
             />
             </div>
             <VoiceDisabledModal

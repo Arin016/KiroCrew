@@ -49,7 +49,14 @@ function makeStore(activeSlot: string, slots: { key: string; mode?: string }[]) 
     reducer: { dashboard: dashboardReducer, chat: chatReducer, notifications: notificationsReducer },
     preloadedState: {
       dashboard: {
-        status: null, slots: slots.map(s => ({ key: s.key, messages: 1, running: false, mode: s.mode || '', pending_approval: false, waiting_for_input: false, last_activity_ts: undefined })),
+        // connected: true is required for any test that exercises ChatPage.send().
+        // The offline-UX feature added a defense-in-depth `if (!connected) return` at
+        // the top of send() (covers all 5 call sites: keyboard, follow-up option,
+        // reconnect auto-send, widget event, question card). Tests that submit
+        // a draft and assert on api.sendChat must opt in explicitly here —
+        // dashboardSlice initial state defaults connected to false, which is
+        // also the value during a fresh page load before the WS handshake.
+        status: null, connected: true, slots: slots.map(s => ({ key: s.key, messages: 1, running: false, mode: s.mode || '', pending_approval: false, waiting_for_input: false, last_activity_ts: undefined })),
         unreadSlots: [], refreshTrigger: 0, approvalMode: 'normal',
         subagentRunning: {}, subagentDetails: {}, subagentText: {},
       } as any,

@@ -101,7 +101,7 @@ function renderChatPage(opts: {
   const { route = '/chat', mode, activeSlot = null, slots = [] } = opts
   const store = createTestStore({
     dashboard: {
-      status: { platform: 'darwin' }, connected: false, slots, approvalMode: 'normal',
+      status: { platform: 'darwin' }, connected: true, slots, approvalMode: 'normal',
       channelTrusted: false, refreshTrigger: 0, unreadSlots: [], updateProgress: null,
       subagentRunning: {}, subagentDetails: {}, subagentText: {},
       sessionDefaultColor: null, sessionColorsMode: 'tint', sessionColorsPalette: 'horizon', sessionColorsIntensity: 'clear',
@@ -307,7 +307,12 @@ describe('ChatPage ?sid= URL parameter', () => {
     function renderForPop(initialSlots: ChatSlot[]) {
       const store = createTestStore({
         dashboard: {
-          status: { platform: 'darwin' }, connected: false, slots: initialSlots, approvalMode: 'normal',
+          // connected: true is required — the POP-handler effect bails on
+          // `if (!connected) return` (so offline tabs don't dispatch a
+          // switchSlot that would clear messages). These tests exercise
+          // the POP retrace logic itself, which inherently needs the
+          // gateway available.
+          status: { platform: 'darwin' }, connected: true, slots: initialSlots, approvalMode: 'normal',
           channelTrusted: false, refreshTrigger: 0, unreadSlots: [], updateProgress: null,
           subagentRunning: {}, subagentDetails: {}, subagentText: {},
           sessionDefaultColor: null, sessionColorsMode: 'tint', sessionColorsPalette: 'horizon', sessionColorsIntensity: 'clear',

@@ -41,6 +41,91 @@ describe('ChatInput', () => {
       renderWithProviders(<ChatInput {...defaultProps} disabled />)
       expect(screen.getByPlaceholderText('Stopping…')).toBeInTheDocument()
     })
+
+    it('shows offline placeholder when connected=false', () => {
+      renderWithProviders(<ChatInput {...defaultProps} connected={false} />)
+      expect(screen.getByPlaceholderText(/Gateway offline/)).toBeInTheDocument()
+    })
+  })
+
+  describe('offline state', () => {
+    it('disables Send button when connected=false even with text', () => {
+      renderWithProviders(<ChatInput {...defaultProps} value="hello" connected={false} />)
+      const btn = screen.getByRole('button', { name: /Send disabled/ })
+      expect(btn).toBeDisabled()
+    })
+
+    it('exposes offline-aware aria-label on Send button when offline', () => {
+      renderWithProviders(<ChatInput {...defaultProps} value="hi" connected={false} />)
+      expect(screen.getByLabelText('Send disabled — gateway offline')).toBeInTheDocument()
+    })
+
+    it('shows tooltip explaining offline state on Send button', () => {
+      renderWithProviders(<ChatInput {...defaultProps} value="hi" connected={false} />)
+      const btn = screen.getByRole('button', { name: /Send disabled/ })
+      expect(btn).toHaveAttribute('title', 'Gateway offline — reconnect to send')
+    })
+
+    it('keeps Send enabled when connected=true (default)', () => {
+      renderWithProviders(<ChatInput {...defaultProps} value="hi" />)
+      expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled()
+    })
+
+    it('disables Optimize button when connected=false even with text', () => {
+      renderWithProviders(<ChatInput {...defaultProps} value="hello" connected={false} />)
+      const btn = screen.getByRole('button', { name: /Optimize disabled/ })
+      expect(btn).toBeDisabled()
+    })
+
+    it('exposes offline-aware aria-label and tooltip on Optimize button', () => {
+      renderWithProviders(<ChatInput {...defaultProps} value="hi" connected={false} />)
+      const btn = screen.getByLabelText('Optimize disabled — gateway offline')
+      expect(btn).toHaveAttribute('title', 'Gateway offline — reconnect to optimize')
+    })
+
+    it('keeps Optimize enabled when connected=true with text', () => {
+      renderWithProviders(<ChatInput {...defaultProps} value="hi" />)
+      expect(screen.getByRole('button', { name: 'Optimize prompt' })).not.toBeDisabled()
+    })
+
+    // Keyboard send must not bypass the offline gate. Hitting Enter while
+    // offline used to call onSend()
+    // directly via handleKeyDown, which then triggered ChatPage.send() →
+    // setInput('') → createSlot network call → fail silently. The user's
+    // typed draft was lost with no recovery path. The fix gates the
+    // sendKey branch on `connected` AND adds defense-in-depth in
+    // ChatPage.send(). These tests pin both legs.
+    it('Enter key when offline does NOT call onSend (default sendOnEnter=enter)', () => {
+      const onSend = vi.fn()
+      renderWithProviders(<ChatInput {...defaultProps} value="hello" onSend={onSend} connected={false} />)
+      const ta = screen.getByLabelText('Message input')
+      fireEvent.keyDown(ta, { key: 'Enter' })
+      expect(onSend).not.toHaveBeenCalled()
+    })
+
+    it('Ctrl+Enter when offline does NOT call onSend (sendOnEnter=ctrl-enter)', () => {
+      const onSend = vi.fn()
+      renderWithProviders(<ChatInput {...defaultProps} value="hello" onSend={onSend} connected={false} sendOnEnter="ctrl-enter" />)
+      const ta = screen.getByLabelText('Message input')
+      fireEvent.keyDown(ta, { key: 'Enter', ctrlKey: true })
+      expect(onSend).not.toHaveBeenCalled()
+    })
+
+    it('Enter key when connected DOES call onSend (positive control)', () => {
+      const onSend = vi.fn()
+      renderWithProviders(<ChatInput {...defaultProps} value="hello" onSend={onSend} connected={true} />)
+      const ta = screen.getByLabelText('Message input')
+      fireEvent.keyDown(ta, { key: 'Enter' })
+      expect(onSend).toHaveBeenCalled()
+    })
+
+    // Note: Cmd+Shift+Enter optimize-shortcut gating is exercised in code
+    // (handleKeyDown line ~1043 has `&& connected`) but NOT pinned with a
+    // dedicated test here. A meaningful test requires observing
+    // optimizePrompt() directly, which goes through a network/dispatch
+    // boundary not surfaced as a prop. The risk if the gate regresses is
+    // a no-op network call when offline (no data loss), so the shielding
+    // is lower-priority than the Enter→onSend path above.
   })
 
   describe('send behavior', () => {

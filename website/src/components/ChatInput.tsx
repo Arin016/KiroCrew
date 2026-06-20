@@ -11,6 +11,7 @@ import { useToolPillVisible } from '../store/toolPillRegistry'
 import { ToolDetails } from '../pages/chat/ToolDetails'
 import { api } from '../api/client'
 import { safeSetItem } from '../utils/safeStorage'
+import { offlineProps } from '../utils/offline'
 import { createSelector } from 'reselect'
 import { shallowEqual } from 'react-redux'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -235,6 +236,10 @@ interface ChatInputProps {
   /** Browse mode — when true, [BROWSE] prefix is prepended to sent messages */
   browseMode?: boolean
   onBrowseToggle?: () => void
+  /** Gateway WebSocket connection state. When false, send is blocked and a
+   *  warning banner appears above the input. Defaults to true so callers that
+   *  don't track connectivity (e.g. tests, embedded previews) keep working. */
+  connected?: boolean
 }
 
 function FilePreviewStrip({ files, onRemove }: { files: string[]; onRemove?: (path: string) => void }) {
@@ -340,6 +345,7 @@ function ChatInput({
   autoFocusKey,
   browseMode = false,
   onBrowseToggle,
+  connected = true,
 }: ChatInputProps) {
   const dispatch = useAppDispatch()
   const pendingApproval = useAppSelector(selectPendingApproval, shallowEqual)
@@ -1075,10 +1081,14 @@ function ChatInput({
       }
     }
 
-    // Cmd+Shift+Enter (or Ctrl+Shift+Enter) → optimize prompt
+    // Cmd+Shift+Enter (or Ctrl+Shift+Enter) → optimize prompt.
+    // preventDefault always fires when the combo is detected so the browser's
+    // default Enter behavior (newline insert) doesn't leak through when the
+    // gateway is offline. The action itself is gated on `connected` to match
+    // the disabled-state on the Optimize button (line ~1734).
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && e.shiftKey) {
       e.preventDefault()
-      optimizePrompt()
+      if (connected) optimizePrompt()
       return
     }
     // Mode: enter-ctrl-newline — Ctrl/Cmd+Enter inserts newline, Enter sends
@@ -1096,8 +1106,12 @@ function ChatInput({
       ? (e.key === 'Enter' && (e.metaKey || e.ctrlKey))
       : (e.key === 'Enter' && !e.shiftKey)
     if (sendKey && !e.defaultPrevented && !ime.isComposing(e) && !optimizingRef.current) {
+      // preventDefault always fires when sendKey matches so the textarea's
+      // default Enter behavior (newline insert into draft) doesn't leak
+      // through when the gateway is offline. The send itself is gated on
+      // `connected` to match the disabled-state on the Send button.
       e.preventDefault()
-      onSend()
+      if (connected) onSend()
       return
     }
     // Prompt history: ↑/↓ cycles through prior user messages.
@@ -1161,7 +1175,7 @@ function ChatInput({
       }
       e.preventDefault()
     }
-  }, [onSend, onChange, sentMessages, sendOnEnter, pasteBlocks, onPasteBlocksChange])
+  }, [onSend, onChange, sentMessages, sendOnEnter, pasteBlocks, onPasteBlocksChange, connected])
 
   /** Intercept clipboard paste — files go to upload path, big text gets collapsed into a token. */
   const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -1552,7 +1566,7 @@ function ChatInput({
           aria-label="Message input"
           className={`relative w-full bg-transparent border-none ${INPUT_TYPO} text-text outline-none min-h-[44px] max-h-[calc(var(--mc-vh,100vh)*0.5)] placeholder:text-muted resize-none ${manualHeight !== null ? 'flex-1' : ''} ${disabled ? 'opacity-40 pointer-events-none' : ''} ${optimizing ? 'opacity-30' : ''}`}
           style={manualHeight !== null ? { height: '100%' } : undefined}
-          placeholder={disabled ? 'Stopping…' : voiceRecording ? 'Recording… click mic to stop' : voiceTranscribing ? 'Transcribing, please wait…' : resolvedPlaceholder}
+          placeholder={!connected ? 'Gateway offline — message will not send' : disabled ? 'Stopping…' : voiceRecording ? 'Recording… click mic to stop' : voiceTranscribing ? 'Transcribing, please wait…' : resolvedPlaceholder}
           readOnly={optimizing}
           rows={1}
           value={value}
@@ -1771,17 +1785,19 @@ function ChatInput({
               <button
                 className={`w-8 h-8 rounded-lg border-none flex items-center justify-center cursor-pointer transition-all ${optimizing ? 'bg-accent/20 text-accent animate-pulse' : 'bg-transparent text-muted hover:text-accent hover:bg-accent/10'}`}
                 onClick={(e) => { e.stopPropagation(); e.preventDefault(); optimizePrompt() }}
-                disabled={!value.trim() || optimizing}
+                disabled={!value.trim() || optimizing || !connected}
                 aria-label="Optimize prompt"
                 title={`Optimize prompt (${platformShortcut('Cmd+Shift+Enter')})`}
+                {...offlineProps(connected, 'optimize', 'Optimize')}
               >
                 {optimizing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
               </button>
               <button
                 className="w-8 h-8 rounded-full bg-accent text-accent-fg border-none flex items-center justify-center cursor-pointer hover:bg-accent-hover disabled:opacity-30 disabled:cursor-not-allowed transition-all"
                 onClick={onSend}
-                disabled={(!value.trim() && !pendingFiles.length) || disabled || optimizing}
+                disabled={(!value.trim() && !pendingFiles.length) || disabled || optimizing || !connected}
                 aria-label="Send"
+                {...offlineProps(connected, 'send', 'Send')}
               >
                 <ArrowUp size={18} />
               </button>

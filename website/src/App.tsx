@@ -11,6 +11,7 @@ import { getBuiltinSurfaces, getBuiltinSurface, selectSurfaceBadgeCount, selectA
 import { createSlot, appendMessage, setSlotRunning } from './store/chatSlice'
 import { fetchNotifications, ackNotification } from './store/notificationsSlice'
 import { useWebSocket } from './hooks/useWebSocket'
+import { useDashboardHealthProbe } from './hooks/useDashboardHealthProbe'
 import { useTheme } from './hooks/useTheme'
 import { useBranding } from './hooks/useBranding'
 import { useRumPageView } from './hooks/useRumPageView'
@@ -20,7 +21,7 @@ import { useNotificationSound } from './hooks/useNotificationSound'
 import { useRefreshScheduler } from './hooks/useRefreshScheduler'
 import { recordSessionStart, recordEvent } from './rum'
 import { ZoomProvider } from './hooks/ZoomProvider'
-import { api } from './api/client'
+import { api, isAuthBannerShown } from './api/client'
 import { safeSetItem } from './utils/safeStorage'
 import { Rocket, Menu, Bell, Users, BookOpen, BookOpenText, MessageSquareDot, Settings, Code, RefreshCw, Palette, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, Sparkles, X, Inbox, Gamepad2, KanbanSquare, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain, FolderTree, ChevronUp, MoreHorizontal, Coins } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -67,7 +68,11 @@ import ShortcutsModal from './components/ShortcutsModal'
 import Modal from './components/Modal'
 
 type LogSubscribeFn = (cb: ((data: { level: string; msg: string }) => void) | null) => void
-export const WsContext = createContext<{ subscribeLogs: LogSubscribeFn; subscribeSubagents: (s: boolean) => void }>({ subscribeLogs: () => {}, subscribeSubagents: () => {} })
+export const WsContext = createContext<{
+  subscribeLogs: LogSubscribeFn
+  subscribeSubagents: (s: boolean) => void
+  forceReconnect: () => void
+}>({ subscribeLogs: () => {}, subscribeSubagents: () => {}, forceReconnect: () => {} })
 
 /**
  * Built-in nav items. Sourced from the surface registry (see
@@ -554,6 +559,26 @@ export default function App() {
   const { connected, updateProgress } = useAppSelector(s => s.dashboard)
   const updateAvailable = useAppSelector(s => s.dashboard.status?.update_available)
   const version = useAppSelector(s => s.dashboard.status?.version) || '—'
+  // Track whether the session-expired auth banner is currently injected by
+  // api/client.ts. When auth is the real reason the gateway is unreachable,
+  // the red top-banner already tells the user what to do (paste a fresh
+  // `kiroclaw token` URL) -- showing the loud pulsing "Offline" pill on top
+  // of that just stacks two banners arguing about the same root cause. So
+  // when authRequired is true, we suppress the offline pill in the top bar;
+  // auth banner is the single canonical signal. `isAuthBannerShown()` seeds
+  // initial state in case the banner was injected before App mounted (e.g.
+  // a 403 fired during the very first /api/status before React hydrated).
+  const [authRequired, setAuthRequired] = useState<boolean>(isAuthBannerShown)
+  useEffect(() => {
+    const onRequired = () => setAuthRequired(true)
+    const onCleared = () => setAuthRequired(false)
+    window.addEventListener('mc-auth-required', onRequired)
+    window.addEventListener('mc-auth-cleared', onCleared)
+    return () => {
+      window.removeEventListener('mc-auth-required', onRequired)
+      window.removeEventListener('mc-auth-cleared', onCleared)
+    }
+  }, [])
   // Sum across every registered built-in surface — Chat (slot-based),
   // Autopilot (slot-based), Notifications (notifications slice), Secretary
   // (attention slice), etc. App badges (dynamic, via `mc:app:badge` and the
@@ -871,7 +896,8 @@ export default function App() {
     // Fetch status immediately to sync YOLO state (WS status push is periodic)
     api.status().then(s => { dispatch(sseStatus(s)); recordSessionStart(s) }).catch(() => {})
   }, [dispatch])
-  const { subscribeLogs, subscribeSubagents } = useWebSocket()
+  const { subscribeLogs, subscribeSubagents, forceReconnect } = useWebSocket()
+  useDashboardHealthProbe(forceReconnect)
 
   // Close update modal when progress clears (simulation complete or cancelled)
   useEffect(() => {
@@ -977,7 +1003,7 @@ export default function App() {
 
   return (
     <ZoomProvider>
-    <WsContext.Provider value={{ subscribeLogs, subscribeSubagents }}>
+    <WsContext.Provider value={{ subscribeLogs, subscribeSubagents, forceReconnect }}>
     {isEmbed ? (
       <div className="h-screen w-screen overflow-hidden bg-bg flex flex-col">
         <KiroClawNavBridge />
@@ -1022,8 +1048,32 @@ export default function App() {
         </div>
         <div className="flex items-center gap-1.5 relative">
           {!isMobile && <button className="top-bar-pill bg-transparent text-[12px]" onClick={requestFeature}>Request a Feature</button>}
-          <span className={`w-1.5 h-1.5 rounded-full shrink-0 transition-colors duration-300 ${connected ? 'bg-ok shadow-[0_0_8px_rgba(34,197,94,.4)]' : 'bg-danger'}`} />
-          {!connected && <span className="text-[11px] text-danger font-medium">Offline</span>}
+          {connected ? (
+            <span
+              role="status"
+              className="w-1.5 h-1.5 rounded-full shrink-0 bg-ok shadow-[0_0_8px_rgba(34,197,94,.4)] transition-colors duration-300"
+              title="Gateway connected"
+              aria-label="Gateway connected"
+            />
+          ) : authRequired ? (
+            // Auth-required: red "Session expired" banner is already up at
+            // top of page (managed by api/client.ts checkSessionExpired).
+            // Suppress the offline pill so the auth banner is the single
+            // canonical signal -- two banners about the same root cause is
+            // worse UX than one. Reserve a tiny screen-reader-only marker
+            // so a11y consumers still know the gateway is unreachable.
+            <span role="status" className="sr-only">Gateway offline — session expired, see banner above</span>
+          ) : (
+            <span
+              role="status"
+              className="top-bar-pill bg-danger text-danger-fg flex items-center gap-1.5 text-[11px] font-semibold animate-pulse motion-reduce:animate-none"
+              title="Gateway offline — reconnecting"
+              aria-label="Gateway offline"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-danger-fg" />
+              Offline
+            </span>
+          )}
           <NotificationsBellButton />
           {!isMobile && (() => {
             if (!metricsOpen) return <button className="top-bar-pill bg-card text-muted hover:text-text !gap-0" onClick={() => { setMetricsOpen(true); safeSetItem('mc-topbar-metrics', '1') }} title="System metrics" aria-label="System metrics"><Activity size={13} /><span className="w-0 overflow-hidden">{'\u200B'}</span></button>

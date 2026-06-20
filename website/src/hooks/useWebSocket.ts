@@ -513,6 +513,37 @@ export function useWebSocket() {
     ws.onerror = () => { /* onclose will fire */ }
   }, [dispatch])
 
+  /**
+   * Force an immediate reconnect: cancels any pending backoff timer, closes
+   * the existing WS (if any), resets the backoff window, and calls connect().
+   *
+   * Used by `useDashboardHealthProbe` when its periodic /api/status poll
+   * succeeds while the dashboard is in `connected: false` state — that's the
+   * signal that the gateway came back up. Without this, the next reconnect
+   * attempt could be up to 10s away (capped exponential backoff in onclose).
+   */
+  const forceReconnect = useCallback(() => {
+    if (closingRef.current) return
+    clearTimeout(reconnectTimerRef.current)
+    reconnectRef.current = 1000  // reset backoff window
+    const ws = wsRef.current
+    if (ws && ws.readyState !== WebSocket.CLOSED) {
+      // Detach handlers BEFORE close() so the onclose handler doesn't fire
+      // asynchronously and schedule a redundant reconnect on top of our 0ms
+      // timer below — that race would briefly create two parallel WebSocket
+      // connections. The existing onclose guard (wsRef.current !== ws) also
+      // catches this, but explicit detach is cleaner and removes the
+      // dispatch(sseDisconnected()) we don't want during a force-reconnect
+      // (we're already in connected:false state and forcing a reconnect
+      // because the probe just confirmed the gateway is back).
+      ws.onclose = null
+      ws.onerror = null
+      try { ws.close() } catch { /* ignore */ }
+    }
+    wsRef.current = null
+    reconnectTimerRef.current = setTimeout(connect, 0)
+  }, [connect])
+
   useEffect(() => {
     closingRef.current = false  // reset for StrictMode re-mount
     connect()
@@ -552,5 +583,5 @@ export function useWebSocket() {
     ws.send(JSON.stringify({ type: subscribe ? 'subscribe_subagents' : 'unsubscribe_subagents' }))
   }, [])
 
-  return { subscribeLogs, subscribeSubagents }
+  return { subscribeLogs, subscribeSubagents, forceReconnect }
 }

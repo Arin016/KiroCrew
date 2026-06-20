@@ -7,6 +7,8 @@ import { SortableContext, verticalListSortingStrategy, useSortable, sortableKeyb
 import { CSS } from '@dnd-kit/utilities'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAppDispatch, useAppSelector } from '../store'
+import { useConnected } from '../hooks/useConnected'
+import { offlineProps } from '../utils/offline'
 import { switchSlot, createSlot, deleteSlot, fetchHistory, resumeFromHistory, deleteHistorySession } from '../store/chatSlice'
 import { sseSlotTitle, updateSlotFolder, updateSlotPin, markSlotUnread, markSlotRead } from '../store/dashboardSlice'
 import { api, SEARCH_MIN_CHARS } from '../api/client'
@@ -334,6 +336,7 @@ function ChatSidebar({
   // loaded" from "data loaded and genuinely empty".
   const slotsLoaded = useAppSelector(s => s.dashboard.slotsLoaded)
   const slotStatusDetail = useAppSelector(s => s.chat.slotStatusDetail)
+  const connected = useConnected()
   // O(1) lookup set for the filter predicate (mirrors the `pinned` and
   // `slotSearchKeys` patterns elsewhere in this file).
   const unreadSet = useMemo(() => new Set(unreadSlots), [unreadSlots])
@@ -1012,11 +1015,29 @@ function ChatSidebar({
           {({ setNodeRef, listeners, isDragging }) => (
         <div ref={scope === 'list' ? setNodeRef : undefined} {...(scope === 'list' ? listeners : {})}
           data-draggable={(renamingSlot !== s.key).toString()}
-          className={`session-row group relative flex items-start gap-2.5 px-4 py-2 rounded-md cursor-pointer text-sm transition-all select-none ${isActive ? 'session-active text-text-strong bg-accent-subtle' : 'text-muted hover:text-text hover:bg-bg-hover'} ${rowColor ? 'session-colored' : ''} ${rowColor && colorMode === 'gradient' ? 'session-gradient' : ''} ${isDragging ? 'opacity-40' : ''}`}
+          className={`session-row group relative flex items-start gap-2.5 px-4 py-2 rounded-md text-sm transition-all select-none ${isActive ? !connected ? 'session-active text-text-strong bg-accent-subtle cursor-not-allowed' : 'session-active text-text-strong bg-accent-subtle cursor-pointer' : !connected ? 'text-muted opacity-50 cursor-not-allowed' : 'text-muted hover:text-text hover:bg-bg-hover cursor-pointer'} ${rowColor ? 'session-colored' : ''} ${rowColor && colorMode === 'gradient' ? 'session-gradient' : ''} ${isDragging ? 'opacity-40' : ''}`}
           style={boostStyle as React.CSSProperties}
-          draggable={scope !== 'list' && renamingSlot !== s.key}
+          draggable={(scope !== 'list' && renamingSlot !== s.key) && (connected || isActive)}
+          {...offlineProps(connected, 'switch sessions')}
           onDragStart={scope !== 'list' ? (e => { e.dataTransfer.setData('text/plain', s.key); e.dataTransfer.effectAllowed = 'move' }) : undefined}
-          onClick={() => { dispatch(switchSlot(s.key)); onSelectSlot?.(s.key) }}
+          onClick={e => {
+            if ((e.target as HTMLElement).closest?.('[data-fork]')) { forkMutation.mutate(s.key); return }
+            if ((e.target as HTMLElement).closest?.('[data-close]')) { if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(s.key)); return }
+            // When the gateway is offline, switching sessions silently fails
+            // (the HTTP fetch never returns) and the user is stuck staring at
+            // the previous session's transcript. Block ALL session clicks so
+            // the banner + cursor-not-allowed cue make the offline state obvious.
+            // Previously only non-active rows were blocked, but re-clicking the
+            // already-active row also dispatches switchSlot → fetchSlotDetail
+            // fails offline → switchSlot.rejected clears messages to [] → the
+            // ChatPage falls into its WelcomeView branch (activeSlot truthy +
+            // messages empty) showing "What can I do for you?". Closing/deleting
+            // /forking still works — those are local ops (or short-circuit) that
+            // don't depend on gateway state.
+            if (!connected) return
+            dispatch(switchSlot(s.key))
+            onSelectSlot?.(s.key)
+          }}
           onContextMenu={e => { e.preventDefault(); setCtxMenu({ key: s.key, x: e.clientX, y: e.clientY }) }}>
           {s.unread && (
             <span className="absolute right-1.5 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full pointer-events-none" style={{ background: 'var(--info)' }} />
@@ -1794,8 +1815,10 @@ function ChatSidebar({
                       {/* Row mirrors session-row two-line layout: agent+timestamp header, title body.
                           Platform glyph (Monitor for dashboard, Slack logo for Slack sessions) occupies
                           the same left column that session rows use for the unread dot — keeps widths aligned. */}
-                      <div className="group relative flex items-start gap-2.5 pr-4 py-2 rounded-md cursor-pointer text-sm text-muted hover:text-text hover:bg-bg-hover transition-all select-none" style={{ paddingLeft: '10px' }} title={s.title || s.key} onMouseDown={e => {
+                      <div className={`group relative flex items-start gap-2.5 pr-4 py-2 rounded-md text-sm transition-all select-none ${!connected ? 'text-muted opacity-50 cursor-not-allowed' : 'text-muted hover:text-text hover:bg-bg-hover cursor-pointer'}`} style={{ paddingLeft: '10px' }} title={s.title || s.key} {...offlineProps(connected, 'resume sessions')} onMouseDown={e => {
                         e.preventDefault()
+                        if ((e.target as HTMLElement).closest?.('[data-close]')) { if (confirm('Are you sure you want to delete this history session?')) dispatch(deleteHistorySession(s.key)); return }
+                        if (!connected) return
                         dispatch(resumeFromHistory({ key: s.key, title: s.title || s.key }))
                       }}>
                         {/* Platform glyph — fills the left column that session rows reserve for the unread dot */}

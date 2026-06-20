@@ -33,6 +33,10 @@ vi.mock('../api/client', () => ({
     chatMode: vi.fn().mockResolvedValue({}),
     listInstances: vi.fn().mockResolvedValue({ instances: [], warm_set_cap: 5 }),
   },
+  // Default to "no auth banner showing" so existing App tests render the
+  // normal connected/offline pill paths. The dedicated auth-banner
+  // suppression test lives in App.offlinePill.test.tsx.
+  isAuthBannerShown: vi.fn(() => false),
   ApiError: class ApiError extends Error {
     status: number
     constructor(status: number, message: string) {

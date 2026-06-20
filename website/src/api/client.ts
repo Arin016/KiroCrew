@@ -6,6 +6,43 @@ export const SEARCH_MIN_CHARS = 2  // backend session search threshold (must mat
 
 let _sessionExpiredShown = false
 
+/**
+ * Synchronous getter so React components can read the auth-banner state on
+ * mount (e.g. when the banner was already injected before the component
+ * subscribed to the `mc-auth-required` / `mc-auth-cleared` events).
+ */
+export function isAuthBannerShown(): boolean {
+  return _sessionExpiredShown
+}
+
+/**
+ * Internal: fire a window-level CustomEvent so React components can react
+ * to auth-banner state transitions. The banner itself is a vanilla DOM
+ * element managed by this module; the events let consumers (e.g.
+ * `ChatPage`) suppress redundant offline UI when auth is the real blocker.
+ */
+function _emitAuthEvent(kind: 'mc-auth-required' | 'mc-auth-cleared'): void {
+  if (typeof window === 'undefined') return
+  try { window.dispatchEvent(new CustomEvent(kind)) } catch { /* ignore */ }
+}
+
+/**
+ * Clear the session-expired banner if it is currently shown.
+ * Called automatically from the `j` response wrapper on any 2xx response so
+ * the banner self-dismisses once auth is restored (e.g. via the in-banner
+ * token-paste flow that reloads with `?token=X`, OR via a successful poll
+ * after gateway restart wiped the session table).
+ *
+ * Idempotent: safe to call on every response.
+ */
+function removeAuthBanner(): void {
+  if (!_sessionExpiredShown) return
+  _sessionExpiredShown = false
+  const el = document.getElementById('mc-session-expired')
+  if (el) el.remove()
+  _emitAuthEvent('mc-auth-cleared')
+}
+
 function checkSessionExpired(r: Response): Response {
   if (r.status === 403 && r.headers.get('X-Auth-Required') === 'true' && !_sessionExpiredShown) {
     // When this dashboard is running embedded in the Instances pane stack
@@ -24,6 +61,7 @@ function checkSessionExpired(r: Response): Response {
       return r
     }
     _sessionExpiredShown = true
+    _emitAuthEvent('mc-auth-required')
     const el = document.createElement('div')
     el.id = 'mc-session-expired'
     el.style.cssText =
@@ -60,6 +98,7 @@ function checkSessionExpired(r: Response): Response {
     dismiss.addEventListener('click', () => {
       el.remove()
       _sessionExpiredShown = false
+      _emitAuthEvent('mc-auth-cleared')
     })
     el.append(dismiss)
     document.body.prepend(el)
@@ -87,6 +126,7 @@ export class ApiError extends Error {
 
 const j = async (r: Response) => {
   checkSessionExpired(r)
+  if (r.ok) removeAuthBanner()
   if (!r.ok) {
     const errText = await r.text()
     throw new ApiError(r.status, errText || `HTTP ${r.status}`)
