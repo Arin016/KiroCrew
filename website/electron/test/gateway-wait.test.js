@@ -1,6 +1,6 @@
 const { test } = require("node:test");
 const assert = require("node:assert");
-const { waitForGateway, describeGatewayFailure, tailLines } = require("../gateway-wait");
+const { waitForGateway, describeGatewayFailure, tailLines, isPortInUse } = require("../gateway-wait");
 
 // Synchronous fake clock + timer so poll loops resolve instantly and
 // deterministically (no real waiting). setTimeoutFn advances the clock by the
@@ -132,4 +132,22 @@ test("tailLines trims trailing blank lines", () => {
 test("tailLines on empty/null input", () => {
   assert.strictEqual(tailLines("", 5), "");
   assert.strictEqual(tailLines(null, 5), "");
+});
+
+// ── isPortInUse ──
+
+test("isPortInUse detects a port-bind failure", () => {
+  assert.strictEqual(
+    isPortInUse("17:57:53 ERROR kiro_claw.dashboard.server: Port 7788 already in use -- is another KiroClaw gateway running?"),
+    true,
+  );
+  assert.strictEqual(isPortInUse("OSError: [Errno 48] Address already in use"), true);
+  assert.strictEqual(isPortInUse("Error: listen EADDRINUSE: address already in use :::7788"), true);
+});
+
+test("isPortInUse is false for unrelated logs / empty input", () => {
+  assert.strictEqual(isPortInUse("ModuleNotFoundError: No module named 'yaml'"), false);
+  assert.strictEqual(isPortInUse("gateway child exited code=1 signal=null"), false);
+  assert.strictEqual(isPortInUse(""), false);
+  assert.strictEqual(isPortInUse(null), false);
 });

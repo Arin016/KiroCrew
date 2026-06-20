@@ -111,4 +111,18 @@ function tailLines(text, n = 20) {
   return lines.slice(Math.max(0, lines.length - n)).join("\n");
 }
 
-module.exports = { waitForGateway, describeGatewayFailure, tailLines };
+/**
+ * True if the log text indicates the gateway could not bind its port because
+ * something already holds it (a wedged or other KiroClaw gateway). This is a
+ * distinct, recoverable failure from a crash: a plain retry can't help while
+ * the holder is still there, but force-stopping it can. Pure (no fs/network).
+ *
+ * @param {string} text  launch-log tail
+ * @returns {boolean}
+ */
+function isPortInUse(text) {
+  if (!text) return false;
+  return /address already in use|already in use|EADDRINUSE/i.test(String(text));
+}
+
+module.exports = { waitForGateway, describeGatewayFailure, tailLines, isPortInUse };

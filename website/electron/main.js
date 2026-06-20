@@ -10,7 +10,7 @@ const { createTokenRetryHandler } = require("./token-retry");
 const { createDisplayMediaHandler } = require("./display-media");
 const { initAutoUpdate } = require("./auto-update");
 const { stopGatewayGracefully: _stopGatewayGracefully } = require("./gateway-stop");
-const { waitForGateway, describeGatewayFailure, tailLines } = require("./gateway-wait");
+const { waitForGateway, describeGatewayFailure, tailLines, isPortInUse } = require("./gateway-wait");
 const { sanitizeWindowState, captureWindowState } = require("./window-state");
 
 // ── Persistent settings for remote tunnel mode ──
@@ -705,6 +705,121 @@ function fadeLoadingScreen(wc, timeoutMs = 8000) {
   });
 }
 
+/**
+ * Themed, fixed-size error window with a SCROLLABLE log pane. Replaces the
+ * native dialog.showMessageBox for gateway-launch failures: the native dialog's
+ * `detail` grows the dialog vertically with no scroll, so a long launch-log
+ * tail made it "super tall". Here the log lives in a <pre> with a capped
+ * max-height + overflow:auto, so the window stays a sane size no matter how
+ * long the log is. Returns the chosen action.
+ *
+ * @param {Electron.BaseWindow} parentWin
+ * @param {{title:string, message:string, logTail:string, logPath:string,
+ *          portConflict:boolean, port:number}} opts
+ * @returns {Promise<'retry'|'force-retry'|'reveal'|'quit'>}
+ */
+function showGatewayErrorDialog(parentWin, opts) {
+  const { title, message, logTail, logPath, portConflict } = opts;
+  return new Promise((resolve) => {
+    const dark = nativeTheme.shouldUseDarkColors;
+    const hasParent = parentWin && !parentWin.isDestroyed();
+    const win = new BrowserWindow({
+      width: 620, height: 460, minWidth: 460, minHeight: 320,
+      resizable: true, useContentSize: true,
+      parent: hasParent ? parentWin : undefined,
+      modal: !!hasParent,
+      backgroundColor: dark ? "#1e293b" : "#f8fafc",
+      webPreferences: { nodeIntegration: false, contextIsolation: true },
+    });
+    win.setMenu(null);
+
+    const esc = (s) => String(s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    // The primary action depends on whether the port is held: a plain retry
+    // can't clear a port conflict, so offer force-stop instead.
+    const primaryAction = portConflict ? "force-retry" : "retry";
+    const primaryLabel = portConflict ? "Force-stop &amp; Retry" : "Retry";
+    const fg = dark ? "#e2e8f0" : "#1e293b";
+    const muted = dark ? "#94a3b8" : "#64748b";
+    const html = `<!DOCTYPE html><html><head><style>
+      * { margin:0; padding:0; box-sizing:border-box; }
+      body { font-family:-apple-system,sans-serif; padding:20px; background:${dark ? "#1e293b" : "#f8fafc"}; color:${fg};
+        display:flex; flex-direction:column; height:100vh; }
+      .title { font-size:15px; font-weight:700; margin-bottom:6px; }
+      .msg { font-size:13px; line-height:1.45; margin-bottom:10px; }
+      .pathline { font-size:11px; color:${muted}; margin-bottom:6px; word-break:break-all; }
+      /* Scrollable, fixed-height log pane — the whole point of this window. */
+      pre.log { flex:1 1 auto; min-height:120px; overflow:auto; white-space:pre;
+        font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; line-height:1.45;
+        padding:10px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0;
+        margin-bottom:14px; }
+      .row { display:flex; gap:8px; flex:0 0 auto; }
+      button { flex:1; padding:9px; border-radius:6px; border:none; cursor:pointer; font-size:13px; font-weight:600; }
+      .ok { background:#f97316; color:#fff; } .ok:hover { background:#ea580c; }
+      .cancel { background:${dark ? "#334155" : "#e2e8f0"}; color:${dark ? "#94a3b8" : "#475569"}; }
+      .cancel:hover { background:${dark ? "#475569" : "#cbd5e1"}; }
+    </style></head><body>
+      <div class="title">${esc(title)}</div>
+      <div class="msg">${esc(message)}</div>
+      <div class="pathline">${esc(logPath)}</div>
+      <pre class="log">${esc(logTail || "(launch log is empty)")}</pre>
+      <div class="row">
+        <button class="ok" onclick="act('${primaryAction}')">${primaryLabel}</button>
+        <button class="cancel" onclick="act('reveal')">Reveal Log</button>
+        <button class="cancel" onclick="act('quit')">Quit</button>
+      </div>
+      <script>
+        function act(a){ document.title = 'mc-action:' + a; window.close(); }
+        document.addEventListener('keydown', e => {
+          if (e.key === 'Enter') act('${primaryAction}');
+          if (e.key === 'Escape') act('quit');
+        });
+      </script>
+    </body></html>`;
+
+    let action = null;
+    win.on("page-title-updated", (_e, t) => {
+      if (t && t.startsWith("mc-action:")) action = t.slice("mc-action:".length);
+    });
+    win.on("closed", () => resolve(action || "quit"));
+    win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  });
+}
+
+/**
+ * Best-effort force-stop of whatever holds `port`, scoped to KiroClaw processes
+ * only. Finds the LISTEN owners via lsof, verifies each is a kiroclaw/kiro_claw
+ * process via ps (so we never SIGKILL an unrelated app that happens to share
+ * the port), kills them, and waits briefly for the socket to free. Absolute
+ * tool paths because a packaged GUI app has a minimal PATH.
+ *
+ * @param {number} port
+ * @returns {Promise<{killed:number}>}
+ */
+function forceStopGatewayPort(port) {
+  return new Promise((resolve) => {
+    execFile("/usr/sbin/lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], { timeout: 5000 }, (err, stdout) => {
+      const pids = String(stdout || "").split(/\s+/)
+        .map((s) => parseInt(s, 10)).filter((n) => Number.isInteger(n) && n > 1);
+      if (!pids.length) { glog(`force-stop: no LISTEN owner found on :${port}`); return resolve({ killed: 0 }); }
+      let pending = pids.length;
+      let killed = 0;
+      pids.forEach((pid) => {
+        execFile("/bin/ps", ["-p", String(pid), "-o", "command="], { timeout: 5000 }, (_e2, cmdOut) => {
+          const cmd = String(cmdOut || "").trim();
+          if (/kiro_claw|kiroclaw/i.test(cmd)) {
+            try { process.kill(pid, "SIGKILL"); killed++; glog(`force-stop: SIGKILL pid=${pid} (${cmd.slice(0, 80)})`); }
+            catch (k) { glog(`force-stop: kill pid=${pid} failed: ${k.message}`); }
+          } else {
+            glog(`force-stop: SKIP pid=${pid} — not a KiroClaw process (${cmd.slice(0, 80)})`);
+          }
+          if (--pending === 0) setTimeout(() => resolve({ killed }), 800); // let the socket release
+        });
+      });
+    });
+  });
+}
+
 async function showLoadingThenConnect(win, backendUrl = BACKEND_URL) {
   const healthUrl = `${backendUrl}/api/status`;
   const wc = win.webContents;
@@ -742,52 +857,71 @@ async function showLoadingThenConnect(win, backendUrl = BACKEND_URL) {
   } catch (err) {
     if (win.isDestroyed()) return;
     // A spawned gateway that exited gives a tagged 'failed' error (see
-    // gateway-wait.js); surface the cause + a tail of the launch log inline so
-    // the user sees the real reason (e.g. ModuleNotFoundError / Gatekeeper kill)
-    // instead of a generic "couldn't connect".
+    // gateway-wait.js). Surface the cause + a SCROLLABLE tail of the launch log
+    // so the user sees the real reason (ModuleNotFoundError / Gatekeeper kill /
+    // port-in-use) — and so a long log can't make the dialog grow unbounded
+    // (it scrolls inside a fixed-size window; see showGatewayErrorDialog).
     const failedToStart = err && err.kind === "failed";
     const logPath = gatewayLogPath();
     let logTail = "";
-    try { logTail = tailLines(fs.readFileSync(logPath, "utf8"), 20); } catch { /* no log yet */ }
+    try { logTail = tailLines(fs.readFileSync(logPath, "utf8"), 60); } catch { /* no log yet */ }
 
-    const detail = failedToStart
-      ? `${err.message}\n\nLast lines of ${logPath}:\n\n${logTail || "(launch log is empty)"}`
-      : `Make sure 'kiroclaw gateway' is running, or check kiroclaw doctor.\n\n`
-        + `Launch diagnostics were written to:\n${logPath}\n\n`
-        + (logTail ? `Last lines:\n\n${logTail}\n\n` : "")
-        + `Share that file to debug why the gateway didn't start.`;
+    // A wedged/other gateway already holding this flavor's port is a distinct,
+    // recoverable case: the spawn dies with "address already in use" and a plain
+    // retry can't help (the holder is still there). Detect it and offer to
+    // force-stop the stuck KiroClaw process. Only meaningful for OUR own port.
+    const portConflict = failedToStart && backendUrl === BACKEND_URL && isPortInUse(logTail);
 
-    const { response } = await dialog.showMessageBox(win, {
-      type: "error",
-      title: failedToStart ? "KiroClaw — gateway failed to start" : "KiroClaw",
-      message: failedToStart
-        ? "The gateway exited before it was ready."
-        : "Could not connect to the KiroClaw backend.",
-      detail,
-      buttons: ["Retry", "Reveal Log", "Quit"],
-      defaultId: 0,
-      cancelId: 2,
-    });
-    if (win.isDestroyed()) return;
-    if (response === 1) {
-      try { shell.showItemInFolder(logPath); } catch { /* best effort */ }
-    }
-    if (response === 0 || response === 1) {
-      gatewayStartFailure = null; // let the retry genuinely re-probe
-      // If our own spawned gateway is confirmed gone, respawn it before
-      // re-waiting; for a timeout (child may still be alive) or a tab pointed at
-      // another port, just re-poll without spawning a second process.
-      if (backendUrl === BACKEND_URL && !gatewayProcess) {
-        await startGateway();
-      }
-      return showLoadingThenConnect(win, backendUrl);
-    }
-    // Quit
-    if (win === mainWindow) {
-      isQuitting = true;
-      app.quit();
+    let title, message;
+    if (portConflict) {
+      title = `KiroClaw — port ${PORT} already in use`;
+      message = `Another KiroClaw gateway is already using port ${PORT} (it may be wedged). `
+        + `Force-stop it and retry, or quit. From a terminal you can also run: `
+        + `kiroclaw stop --port ${PORT}`;
+    } else if (failedToStart) {
+      title = "KiroClaw — gateway failed to start";
+      message = err.message;
     } else {
-      win.destroy();
+      title = "KiroClaw — can't reach the gateway";
+      message = "Could not connect to the KiroClaw backend. Make sure "
+        + "'kiroclaw gateway' is running, or check kiroclaw doctor.";
+    }
+
+    // Loop so "Reveal Log" can re-show the dialog after opening Finder.
+    for (;;) {
+      const action = await showGatewayErrorDialog(win, {
+        title, message, logTail, logPath, portConflict, port: PORT,
+      });
+      if (win.isDestroyed()) return;
+      if (action === "reveal") {
+        try { shell.showItemInFolder(logPath); } catch { /* best effort */ }
+        continue; // re-show the dialog
+      }
+      if (action === "force-retry") {
+        await forceStopGatewayPort(PORT);
+      }
+      if (action === "retry" || action === "force-retry") {
+        gatewayStartFailure = null; // let the retry genuinely re-probe
+        // If our own spawned gateway is confirmed gone (or we just force-stopped
+        // the port holder), respawn before re-waiting. For a timeout (child may
+        // still be alive) or a tab on another port, just re-poll.
+        if (backendUrl === BACKEND_URL && !gatewayProcess) {
+          await startGateway();
+        }
+        // The dialog, force-stop, and respawn above are all async — the user may
+        // have closed the window meanwhile. Re-check before showLoadingThenConnect,
+        // which calls win.show()/loadFile and would throw on a destroyed window.
+        if (win.isDestroyed()) return;
+        return showLoadingThenConnect(win, backendUrl);
+      }
+      // Quit
+      if (win === mainWindow) {
+        isQuitting = true;
+        app.quit();
+      } else {
+        win.destroy();
+      }
+      return;
     }
   }
 }
