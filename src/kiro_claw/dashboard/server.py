@@ -48,6 +48,11 @@ from kiro_claw.dashboard.handlers.artifacts import (
     api_artifacts_create,
     api_artifacts_list,
 )
+from kiro_claw.dashboard.handlers.auth_refresh import (
+    api_auth_logout,
+    api_auth_me,
+    api_auth_refresh,
+)
 from kiro_claw.dashboard.handlers.knowledge import setup_knowledge_routes
 from kiro_claw.dashboard.handlers.tunnel import api_tunnel_status
 from kiro_claw.dashboard.origin import bind_address_for, build_allowed_origins, check_origin
@@ -745,6 +750,14 @@ async def start_dashboard(
     app.router.add_post(
         "/api/channels/{id}/agents/{aid}/approve", handlers_channel.api_channel_approve_agent
     )
+
+    # OAuth-style refresh tokens for dashboard auth. POST /api/auth/refresh and
+    # POST /api/auth/logout self-authenticate via the refresh cookie (the
+    # token_auth middleware exempts them); GET /api/auth/me is gated by the
+    # standard access-cookie auth.
+    app.router.add_get("/api/auth/me", api_auth_me)
+    app.router.add_post("/api/auth/refresh", api_auth_refresh)
+    app.router.add_post("/api/auth/logout", api_auth_logout)
 
     # Instances (multi-instance management) — owner-only, gated by instances.enabled
     app.router.add_get("/api/instances", handlers_instances.api_instances_list)

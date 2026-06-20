@@ -22,90 +22,29 @@ from typing import Any
 from aiohttp import web
 
 from kiro_claw.dashboard.origin import is_loopback
+from kiro_claw.dashboard.refresh_tokens import (
+    MAX_REFRESH_TTL_SECS,
+    REFRESH_COOKIE_PATH,
+    generate_refresh_token,
+    refresh_cookie_name,
+)
+
+# Canonical HMAC-secret definitions live in token_secret to break the import
+# cycle between token_auth and refresh_tokens. Re-exported here for backwards
+# compatibility — callers elsewhere import these names from token_auth. The
+# fork keeps the LAZY _get_secret() (NOT an eager module-level _SECRET =
+# _load_or_create_secret()) so that merely importing this module never writes
+# token_signing.key into $KIROCLAW_HOME (the CLI imports token_auth for every
+# kiroclaw subcommand; an import-time write would break gateway --seed and
+# pollute the home for read-only commands).
+from kiro_claw.dashboard.token_secret import (  # noqa: F401  # re-exports
+    _SECRET_KEY_FILE,
+    _get_secret,
+    _load_or_create_secret,
+)
 from kiro_claw.sel import sel as _sel_fn
 
 logger = logging.getLogger(__name__)
-
-_SECRET_KEY_FILE = "token_signing.key"
-
-
-def _load_or_create_secret() -> bytes:
-    """Return the HMAC signing secret, persisted across restarts.
-
-    The secret is stored at ``<config_dir>/token_signing.key`` (owner-only
-    0600). Persisting it is required for correctness: tokens and session
-    cookies are HMAC-signed with this key, so a fresh random secret on every
-    process start would invalidate every outstanding Slack link and cookie,
-    locking users out after any gateway restart.
-    """
-    # Local import: config.loader pulls in modules that import token_auth,
-    # so a top-level import here risks a circular import. Matches the other
-    # config_dir() call sites in this module.
-    from kiro_claw.config.loader import config_dir
-
-    try:
-        key_path = config_dir() / _SECRET_KEY_FILE
-        if key_path.exists():
-            existing = key_path.read_bytes()
-            if len(existing) >= 32:
-                # Re-enforce 0600 at load time, not just at creation: perms may
-                # have been relaxed since (backup restore, manual edit, migration)
-                # and this key signs all auth tokens/cookies.
-                try:
-                    os.chmod(key_path, 0o600)
-                except OSError:
-                    logger.warning(
-                        "failed to enforce 0600 permissions on token signing key %s; "
-                        "file may be readable by other users",
-                        key_path,
-                        exc_info=True,
-                    )
-                return existing
-        key = os.urandom(32)
-        key_path.parent.mkdir(parents=True, exist_ok=True)
-        key_path.write_bytes(key)
-        try:
-            os.chmod(key_path, 0o600)
-        except OSError:
-            # Security-sensitive: this key signs all auth tokens/cookies, so a
-            # world-readable key file is a real exposure. Warn loudly rather
-            # than failing — the secret still works for signing this session.
-            logger.warning(
-                "failed to set 0600 permissions on token signing key %s; "
-                "file may be readable by other users",
-                key_path,
-                exc_info=True,
-            )
-        return key
-    except OSError:
-        # Fall back to an ephemeral secret if the key file is unwritable.
-        # Tokens still work within this process; they just won't survive a
-        # restart (the pre-existing behaviour).
-        logger.warning("token signing key not persisted; using ephemeral secret", exc_info=True)
-        return os.urandom(32)
-
-
-_SECRET: bytes | None = None
-_SECRET_LOCK = threading.Lock()
-
-
-def _get_secret() -> bytes:
-    """Return the HMAC signing secret, loading/creating it on first use.
-
-    Lazy (NOT a module-level call) so that merely *importing* this module
-    does not write ``token_signing.key`` into ``$KIROCLAW_HOME``. The CLI
-    imports token_auth transitively for every ``kiroclaw`` subcommand, so an
-    import-time write (a) breaks ``gateway --seed`` — which requires an empty
-    target home and refuses a non-empty one — and (b) pollutes the home for
-    read-only commands like ``kiroclaw --help``. Memoized under a lock so the
-    key is loaded exactly once even under concurrent first use.
-    """
-    global _SECRET
-    if _SECRET is None:
-        with _SECRET_LOCK:
-            if _SECRET is None:
-                _SECRET = _load_or_create_secret()
-    return _SECRET
 
 
 _REVOCATION_FILE = "token_revocation.gen"
@@ -900,6 +839,22 @@ def token_auth_middleware(
         if re.match(r"^/api/apps/[a-z0-9][a-z0-9_-]*/token$", path) and request.method == "POST":
             return await handler(request)  # type: ignore[operator]
 
+        # Bypass /api/auth/refresh — the handler authenticates via the
+        # refresh cookie (path-restricted to this endpoint), not the access
+        # cookie. Adding here lets refresh succeed even when the access
+        # cookie has just expired (the whole point of the refresh flow).
+        # GET is also allowed for /api/auth/me which is gated by normal auth
+        # below — only POST /api/auth/refresh bypasses.
+        if path == "/api/auth/refresh" and request.method == "POST":
+            return await handler(request)  # type: ignore[operator]
+
+        # Bypass /api/auth/logout — same rationale as /api/auth/refresh:
+        # the handler authenticates via the refresh cookie and must work
+        # even if the access cookie has just expired (so a user can still
+        # tear down their refresh chain on the way out).
+        if path == "/api/auth/logout" and request.method == "POST":
+            return await handler(request)  # type: ignore[operator]
+
         # Extract token from query param or cookie
         cookie_name = f"mc_token_{_cookie_port_from_host(request, port)}"
         token = request.query.get("token") or ""
@@ -955,11 +910,56 @@ def token_auth_middleware(
                 token,
                 httponly=True,
                 samesite="Lax",
+                # Secure only when over HTTPS — localhost HTTP must
+                # not set this or the browser refuses to send it back.
+                secure=(request.scheme == "https"),
                 path="/",
                 max_age=cookie_max_age,
             )
             # Clean up legacy cookie from pre-port-specific era
             resp.set_cookie("mc_token", "", max_age=0, path="/")
+
+            # Initial mint via token URL: also attach a refresh cookie so
+            # the user does not have to re-mint via URL every ~20h. Inlined
+            # here (rather than calling handlers.auth_refresh) to keep the
+            # import top-level and the cycle direction one-way:
+            # token_auth → refresh_tokens, never the reverse.
+            try:
+                refresh_token, chain_id, _jti, refresh_exp = generate_refresh_token(user_id)
+                refresh_remaining = int(refresh_exp - time.time())
+                if refresh_remaining > 0:
+                    resp.set_cookie(
+                        refresh_cookie_name(_cookie_port_from_host(request, port)),
+                        refresh_token,
+                        httponly=True,
+                        samesite="Lax",
+                        secure=(request.scheme == "https"),
+                        path=REFRESH_COOKIE_PATH,
+                        max_age=min(refresh_remaining, MAX_REFRESH_TTL_SECS),
+                    )
+                    # Audit the initial-mint event so forensics can trace any
+                    # subsequent chain revocation back to the user it was issued to.
+                    try:
+                        _sel_fn().log_api_access(
+                            caller=user_id,
+                            operation="refresh_token_initial_mint",
+                            outcome="ok",
+                            source="refresh_tokens",
+                            resources=chain_id,
+                        )
+                    except Exception as exc:  # pragma: no cover
+                        # SEL must never block auth flows, but log the failure
+                        # so it's observable.
+                        logger.debug("token_auth: SEL audit failed: %s", exc)
+            except Exception as _refresh_err:
+                # Refresh cookie is best-effort. If something goes wrong
+                # here, the access cookie still works as before — the
+                # user just won't get the refresh upgrade until next mint.
+                logger.warning(
+                    "token_auth: failed to attach refresh cookie (%s); "
+                    "access cookie still set, user can re-mint as before",
+                    _refresh_err,
+                )
 
         _log_auth(request, user_id, "ok", "")
         return resp  # type: ignore[return-value]
