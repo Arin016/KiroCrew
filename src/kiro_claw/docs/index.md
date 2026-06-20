@@ -46,6 +46,7 @@ agent backend and Slack credentials.
 | Feature | Description |
 |---------|-------------|
 | App Kit | Build and distribute apps that run inside KiroClaw (App Store, SDK, manifest) |
+| [Web Deploy](deploy-web.md) | Publish artifacts to a public HTTPS URL on your own AWS (private S3 + CloudFront + OAC) |
 | Snapshot & Restore | Portable backup/restore of KiroClaw state for machine migration |
 | Eval Harness | Multi-session evaluation framework for testing agent behavior |
 | Autonudge | Reactive same-session self-nudge for autonomous goal loops |

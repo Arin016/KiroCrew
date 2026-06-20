@@ -229,6 +229,75 @@ async def handle_list_apps(request: web.Request) -> web.Response:
     return web.json_response(apps)
 
 
+def _provider_is_configured(app_name: str, pp: dict[str, Any]) -> bool:
+    """Resolve a provider's configured-state by reading the app's persisted config.
+
+    Core never imports app code: it reads ``<apps_dir>/<app>/data/<configFile>`` and
+    checks that ``configuredField`` is non-empty. When no ``configuredField`` is
+    declared, the provider is considered configured as soon as the app is enabled.
+    """
+    field_name = str(pp.get("configuredField", "")).strip()
+    if not field_name:
+        return True
+    config_file = str(pp.get("configFile", "config.json")) or "config.json"
+    if ".." in config_file or "/" in config_file or "\\" in config_file:
+        return False  # defensive: no path traversal in the declared config filename
+    cfg_path = apps_dir() / app_name / "data" / config_file
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return False
+    return bool(isinstance(cfg, dict) and str(cfg.get(field_name, "")).strip())
+
+
+def collect_publish_providers(
+    apps: list[dict[str, Any]],
+    configured_resolver: Any = None,
+) -> list[dict[str, Any]]:
+    """Aggregate **enabled** apps that declare a publishProvider (design §1.3, Route B).
+
+    Pure and testable — pass ``configured_resolver(app_name, pp_dict) -> bool`` to avoid
+    touching the filesystem in tests. Each returned provider carries a ``configured``
+    flag so the artifact page can render the publish action when configured or a
+    "set it up" link otherwise. Built-in providers (e.g. Artifactory) are registered
+    on the frontend; this function contributes only the app-declared ones.
+    """
+    resolver = configured_resolver or _provider_is_configured
+    providers: list[dict[str, Any]] = []
+    for app in apps:
+        if not app.get("enabled"):
+            continue
+        manifest = app.get("manifest") or {}
+        pp = manifest.get("publishProvider") or {}
+        if not isinstance(pp, dict) or not pp.get("id") or not pp.get("endpoint"):
+            continue
+        app_name = str(app.get("name", ""))
+        providers.append({
+            "id": str(pp["id"]),
+            "label": str(pp.get("label", pp["id"])),
+            "icon": str(pp.get("icon", "")),
+            "endpoint": str(pp["endpoint"]),
+            "kinds": [str(k) for k in pp.get("kinds", []) if k],
+            "setupRoute": str(pp.get("setupRoute", "")),
+            "app": app_name,
+            "origin": "app",
+            "configured": bool(resolver(app_name, pp)),
+        })
+    return providers
+
+
+async def handle_publish_providers(request: web.Request) -> web.Response:
+    """GET /api/publish-providers — app-declared publish destinations (Route B, §1.3).
+
+    Returns enabled apps' publish providers, each with a ``configured`` flag. Core
+    imports no app code and holds no AWS/credential logic: it only reads manifest
+    declarations + each app's persisted config field. Built-in providers (Artifactory)
+    are registered frontend-side and are not returned here.
+    """
+    providers = collect_publish_providers(list_apps())
+    return web.json_response({"providers": providers})
+
+
 async def handle_get_app(request: web.Request) -> web.Response:
     """GET /api/apps/{name} — get single app details."""
     name = request.match_info["name"]
@@ -1764,6 +1833,7 @@ def register_app_routes(app: web.Application) -> None:
     app.on_cleanup.append(_close_proxy_session)
 
     app.router.add_get("/api/apps", handle_list_apps)
+    app.router.add_get("/api/publish-providers", handle_publish_providers)
     app.router.add_get("/api/apps/registry", handle_registry)
     app.router.add_get("/api/apps/registries", handle_registries)
     app.router.add_put("/api/apps/registries", handle_registries)

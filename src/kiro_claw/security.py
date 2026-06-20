@@ -384,6 +384,19 @@ _CREDENTIAL_PATTERNS = re.compile(
     r")",
 )
 
+
+def get_credential_patterns() -> list[re.Pattern[str]]:
+    """Public accessor for the canonical credential regexes.
+
+    Lets other modules (e.g. deploy-web's pre-publish content scan) reuse the
+    same patterns without coupling to the private ``_CREDENTIAL_PATTERNS`` name,
+    so a future rename here can't silently turn a downstream scan into a no-op.
+    Returns a list so callers can iterate uniformly; the fork keeps a single
+    combined compiled regex, so the list has one element.
+    """
+    return [_CREDENTIAL_PATTERNS]
+
+
 # Base64 alphabet: at least 40 chars of [A-Za-z0-9+/] ending with optional =
 _B64_CHUNK_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 

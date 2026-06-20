@@ -491,6 +491,62 @@ class PlatformConfig:
         )
 
 
+@dataclass
+class PublishProviderConfig:
+    """Declares an external publish destination this app contributes to the core
+    artifact-page publish registry (design §1.3, Route B).
+
+    Core aggregates the **enabled + configured** providers via
+    ``GET /api/publish-providers`` and renders a publish action per provider on the
+    artifact page. Core never imports app code — it only reads this declaration and
+    calls ``endpoint``. ``configFile`` / ``configuredField`` let core resolve the
+    "configured" state by reading the app's own persisted config (under the app's
+    ``data/`` dir) without invoking the app.
+    """
+
+    id: str = ""  # stable provider id, e.g. "deploy-web-aws"
+    label: str = ""  # action label, e.g. "Publish to public web (your AWS)"
+    icon: str = ""  # lucide icon name
+    endpoint: str = ""  # app backend route the artifact page posts to (e.g. /api/apps/deploy-web/deploy)
+    kinds: list[str] = field(default_factory=list)  # supported artifact kinds (empty = all)
+    setupRoute: str = ""  # UI route to the app's setup/console page  # noqa: N815
+    configFile: str = "config.json"  # relative to <app_dir>/data/  # noqa: N815
+    configuredField: str = ""  # field in configFile that must be non-empty to count as configured  # noqa: N815
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {}
+        if self.id:
+            d["id"] = self.id
+        if self.label:
+            d["label"] = self.label
+        if self.icon:
+            d["icon"] = self.icon
+        if self.endpoint:
+            d["endpoint"] = self.endpoint
+        if self.kinds:
+            d["kinds"] = self.kinds
+        if self.setupRoute:
+            d["setupRoute"] = self.setupRoute
+        if self.configFile != "config.json":
+            d["configFile"] = self.configFile
+        if self.configuredField:
+            d["configuredField"] = self.configuredField
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PublishProviderConfig:
+        return cls(
+            id=str(data.get("id", "")),
+            label=str(data.get("label", "")),
+            icon=str(data.get("icon", "")),
+            endpoint=str(data.get("endpoint", "")),
+            kinds=[str(k) for k in data.get("kinds", []) if k],
+            setupRoute=str(data.get("setupRoute", "")),  # noqa: N815
+            configFile=str(data.get("configFile", "config.json")),  # noqa: N815
+            configuredField=str(data.get("configuredField", "")),  # noqa: N815
+        )
+
+
 # ---------------------------------------------------------------------------
 # Main AppManifest
 # ---------------------------------------------------------------------------
@@ -500,7 +556,7 @@ _KNOWN_FIELDS = frozenset({
     "name", "version", "displayName", "description", "author", "license",
     "minKiroClawVersion", "agents", "skills", "sops", "mcpServers", "crons",
     "ui", "backend", "permissions", "setup", "tags", "jobFamilies", "platform",
-    "dependencies",
+    "dependencies", "publishProvider",
 })
 
 
@@ -550,6 +606,9 @@ class AppManifest:
 
     # --- Platform ---
     platform: PlatformConfig = field(default_factory=PlatformConfig)
+
+    # --- Publish registry (Route B, §1.3) ---
+    publishProvider: PublishProviderConfig = field(default_factory=PublishProviderConfig)  # noqa: N815
 
     # --- Discovery ---
     tags: list[str] = field(default_factory=list)
@@ -668,6 +727,9 @@ class AppManifest:
         platform_d = self.platform.to_dict()
         if platform_d:
             d["platform"] = platform_d
+        pp_d = self.publishProvider.to_dict()
+        if pp_d:
+            d["publishProvider"] = pp_d
         if self.tags:
             d["tags"] = self.tags
         if self.jobFamilies:
@@ -730,6 +792,13 @@ class AppManifest:
             else PlatformConfig()
         )
 
+        pp_raw = data.get("publishProvider", {})
+        publish_provider = (
+            PublishProviderConfig.from_dict(pp_raw)
+            if isinstance(pp_raw, dict)
+            else PublishProviderConfig()
+        )
+
         return cls(
             name=str(data.get("name", "")),
             version=str(data.get("version", "")),
@@ -753,6 +822,7 @@ class AppManifest:
             setup=setup,
             dependencies=deps,
             platform=platform_cfg,
+            publishProvider=publish_provider,
             tags=[str(t) for t in data.get("tags", []) if t],
             jobFamilies=[str(j) for j in data.get("jobFamilies", []) if j],  # noqa: N815
             extra=extra,

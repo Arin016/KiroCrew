@@ -74,6 +74,11 @@ def _manifest_to_builtin_dict(manifest: AppManifest) -> dict[str, Any]:
     if setup_d:
         d["setup"] = setup_d
 
+    # Publish provider (Route B registry, §1.3)
+    pp_d = manifest.publishProvider.to_dict()
+    if pp_d:
+        d["publishProvider"] = pp_d
+
     return d
 
 
