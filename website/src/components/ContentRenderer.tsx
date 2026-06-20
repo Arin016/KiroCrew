@@ -121,7 +121,7 @@ export const ContentRenderer = memo(function ContentRenderer({
   isRichType, fileType, filePath, content, editing,
   lang, lineNums, wordWrap, autocomplete, onChange,
   previewRef, displayContent, isMarkdown, highlightedHtml,
-  gutterReadRef, markdownClassName,
+  gutterReadRef, markdownClassName, previewStyle,
 }: {
   isRichType: boolean
   fileType: string
@@ -140,8 +140,9 @@ export const ContentRenderer = memo(function ContentRenderer({
   highlightedHtml: string
   gutterReadRef?: React.RefObject<HTMLDivElement | null>
   markdownClassName?: string
+  previewStyle?: React.CSSProperties
 }) {
-  return (
+  const inner = (
     <>
       {isRichType && fileType === 'image' && filePath && <ImageViewer filePath={filePath} />}
       {isRichType && fileType === 'svg' && <SvgViewer content={content} />}
@@ -182,4 +183,5 @@ export const ContentRenderer = memo(function ContentRenderer({
       )}
     </>
   )
+  return previewStyle ? <div className="h-full" style={previewStyle}>{inner}</div> : inner
 })

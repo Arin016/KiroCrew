@@ -12,6 +12,8 @@ import { THEME_VAR_NAMES, buildSrcdoc } from '../lib/widgetSrcdoc'
 import { api } from '../api/client'
 import { PageHeader, Card, Badge, Btn } from '../components/ui'
 import { ContentRenderer, langFor, wrapCode } from '../components/ContentRenderer'
+import ReadingWidthToggle from '../components/ReadingWidthToggle'
+import { useReadingWidth } from '../hooks/useReadingWidth'
 import { CommentPopover, CommentList, formatCommentsMessage, type InlineComment } from '../components/CommentOverlay'
 import { findCoords, resolveSourcePos } from '../components/MarkdownPanel'
 import { PREFILL_STORAGE_KEY } from './ChatPage'
@@ -215,7 +217,7 @@ const ArtifactBodyNative = memo(function ArtifactBodyNative({
 
 /** Renders widget / html artifacts in a sandboxed iframe with theme-var
  * injection — the existing path, untouched by Phase 2. */
-const ArtifactBodyIframe = memo(function ArtifactBodyIframe({ artifact, slug }: { artifact: Artifact; slug: string }) {
+const ArtifactBodyIframe = memo(function ArtifactBodyIframe({ artifact, slug, previewStyle }: { artifact: Artifact; slug: string; previewStyle?: React.CSSProperties }) {
   const { theme, colorTheme, themeVersion } = useTheme()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const themeVars = useMemo(() => readThemeVars(), [theme, colorTheme, themeVersion])
@@ -232,7 +234,7 @@ const ArtifactBodyIframe = memo(function ArtifactBodyIframe({ artifact, slug }: 
     return () => URL.revokeObjectURL(url)
   }, [srcdoc])
   return (
-    <div className="rounded-xl border border-border bg-card overflow-hidden" style={{ minHeight: 480 }}>
+    <div className="rounded-xl border border-border bg-card overflow-hidden" style={{ minHeight: 480, ...previewStyle }}>
       {blobUrl ? (
         <iframe
           src={blobUrl}
@@ -261,6 +263,7 @@ export default function ArtifactDetailPage() {
   // toggle). Stays in edit mode — content isn't committed until Save
   // and isn't discarded until Cancel.
   const [previewDuringEdit, setPreviewDuringEdit] = useState(false)
+  const { readingWidth, toggle: toggleReadingWidth, previewStyle: mdPreviewStyle } = useReadingWidth()
   const [editedContent, setEditedContent] = useState('')
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -892,6 +895,9 @@ export default function ArtifactDetailPage() {
               </button>
             )}
 
+            {(!editing || previewDuringEdit) && (
+              <ReadingWidthToggle value={readingWidth} onToggle={toggleReadingWidth} />
+            )}
             <button
               type="button"
               onClick={openInNewTab}
@@ -933,11 +939,12 @@ export default function ArtifactDetailPage() {
         )}
 
         {usesIframe ? (
-          <ArtifactBodyIframe artifact={artifact} slug={slug} />
+          <ArtifactBodyIframe artifact={artifact} slug={slug} previewStyle={mdPreviewStyle} />
         ) : (
           <div
             ref={bodyRef}
             className="relative"
+            style={mdPreviewStyle}
             onMouseDown={() => { selectingRef.current = true }}
             onMouseUp={() => { selectingRef.current = false; handleMouseUp() }}
           >

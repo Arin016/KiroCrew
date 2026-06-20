@@ -17,6 +17,8 @@ import { api } from '../api/client'
 import { fileReadUrl, fileDownloadUrl } from '../utils/fileReadUrl'
 import { loadCommentDrafts, saveCommentDrafts, setCommentsForFile } from '../utils/commentDrafts'
 import { copyToClipboard } from '../utils/clipboard'
+import { useReadingWidth } from '../hooks/useReadingWidth'
+import ReadingWidthToggle from './ReadingWidthToggle'
 
 // ── CSS Custom Highlight API accessors ───────────────────────────────────────
 // Preview find highlights matches via the browser-native CSS Custom Highlight
@@ -528,6 +530,7 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
   const [lineNums, setLineNums] = useState(true)
   const [wordWrap, setWordWrap] = useState(true)
   const [autocomplete, setAutocomplete] = useState(true)
+  const { readingWidth, toggle: toggleReadingWidth, previewStyle: mdPreviewStyle } = useReadingWidth()
   // Hydrate pending draft comments for this file from localStorage so they
   // survive panel close, refresh, and crash. Submitting clears them.
   const draftsRef = useRef<ReturnType<typeof loadCommentDrafts>>(null!)
@@ -1151,6 +1154,7 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
           <div className="flex items-center gap-1.5">
             <button className="p-1.5 rounded-md border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all disabled:opacity-40" onClick={handleRefresh} disabled={refreshing || dirty} title={dirty ? 'Save or discard changes first' : 'Refresh file'} aria-label="Refresh file"><RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} /></button>
             <OverflowMenu filePath={filePath} content={content} revealOrCopy={revealOrCopy} />
+            {!editing && <ReadingWidthToggle value={readingWidth} onToggle={toggleReadingWidth} />}
             {editorToolbarButtons}
             <button className="p-1.5 rounded-md border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all" onClick={() => setFullscreen(false)} title="Exit full screen (Esc)" aria-label="Exit full screen"><Minimize2 size={14} /></button>
           </div>
@@ -1163,7 +1167,7 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
           <div ref={fullscreenBodyRef} className="h-full overflow-auto px-16 py-4">
             {!isRichType && <DiffEditorBlock diffMode={diffMode} lang={lang} originalContent={originalContent} content={content} dark={dark} diffActiveRef={diffActiveRef} handleChange={handleChange} editing={editing} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onSelect={onSubmitComments ? (text, rect) => setMonacoSelection({ text, x: rect.x, y: rect.y }) : undefined} />}
             {!diffMode && <ContentRenderer isRichType={isRichType} fileType={fileType} filePath={filePath} content={content} editing={editing} lang={lang} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onChange={handleChange}
-              previewRef={fullscreenPreviewRef} displayContent={displayContent} isMarkdown={isMarkdown} highlightedHtml={highlightedHtml} gutterReadRef={gutterFullscreenRef} />}
+              previewRef={fullscreenPreviewRef} displayContent={displayContent} isMarkdown={isMarkdown} highlightedHtml={highlightedHtml} gutterReadRef={gutterFullscreenRef} previewStyle={mdPreviewStyle} />}
           </div>
           {isMarkdown && !editing && <MarkdownOutlineRail containerRef={fullscreenBodyRef} />}
         </div>
