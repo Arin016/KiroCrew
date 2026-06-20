@@ -34,16 +34,19 @@ export function useScrollManager() {
   const scrollToDisplayIndex = useCallback((
     index: number,
     options: { behavior?: ScrollBehavior; align?: ScrollLogicalPosition; offset?: number } = {}
-  ) => {
+  ): boolean => {
     const { behavior = 'smooth', align = 'center', offset = 0 } = options
     const container = scrollerRef.current
-    if (!container) return
+    if (!container) return false
     const el = container.querySelector(`[data-display-index="${index}"]`) as HTMLElement | null
     if (!el) {
-      // Not in the DOM — nudge toward the top (legacy fallback).
-      if (typeof container.scrollTo === 'function') container.scrollTo({ top: 0, behavior })
-      else container.scrollTop = 0
-      return
+      // Row not committed to the DOM yet. Report the miss so the caller can
+      // retry on a later frame, and do NOTHING here. We deliberately do NOT
+      // teleport to top:0 — for a FAR jump the virtualizer REPLACES its window
+      // via a React state update, which takes more than one frame to commit and
+      // paint the target row; scrolling to top while we wait was the
+      // "far jump jumps to the top, second click works" bug.
+      return false
     }
     // getBoundingClientRect (not el.offsetTop, which is relative to the
     // element's offsetParent) so the offset within the scroll content — and
@@ -57,6 +60,7 @@ export function useScrollManager() {
     top = Math.max(0, Math.min(max, top))
     if (typeof container.scrollTo === 'function') container.scrollTo({ top, behavior })
     else container.scrollTop = top
+    return true
   }, [])
 
   return {

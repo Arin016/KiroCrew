@@ -1,7 +1,8 @@
-import { useState, useRef, useEffect, type ReactNode } from 'react'
+import { useState, useRef, useEffect, useMemo, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { ChevronRight } from 'lucide-react'
 import type { DisplayItem, TurnItem } from './types'
+import { useSearchHighlight } from '../../hooks/SearchHighlightContext'
 
 const isTool = (it: TurnItem) => it.kind === 'single' && it.msg.role === 'tool'
 const isHiddenTool = (it: TurnItem) => it.kind === 'single' && it.msg.role === 'tool' && !it.msg.content.startsWith('🔧')
@@ -34,6 +35,27 @@ function substantiveLength(text: string): number {
   return text.replace(/\[OPTION[S]?:.*?\]/gi, '').replace(/[#*_`>\-|]/g, '').trim().length
 }
 
+/**
+ * Find the index of a turn's conclusion item: the last `isConclusion` item that
+ * is substantive (>= 50 chars), falling back to the last `isConclusion` item of
+ * any length, else -1. Shared by the auto-expand decision and the render split
+ * so the "what's the always-visible conclusion vs collapsed reasoning" answer
+ * can't drift between them (a mismatch wrongly expands reasoning above a visible
+ * match and pushes it down).
+ */
+function findConclusionIdx(items: TurnItem[]): number {
+  let conclusionIdx = -1
+  let fallbackIdx = -1
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i]
+    if (isConclusion(it)) {
+      if (fallbackIdx === -1) fallbackIdx = i
+      if (it.kind === 'single' && substantiveLength(it.msg.content) >= 50) { conclusionIdx = i; break }
+    }
+  }
+  return conclusionIdx === -1 ? fallbackIdx : conclusionIdx
+}
+
 /** Collapsible agent turn. collapseAll=false (default): only tool calls collapse. collapseAll=true: all working steps collapse, only final assistant text visible. */
 export default function TurnBlock({ turn, renderItem, collapseAll = false }: { turn: Extract<DisplayItem, {kind:'turn'}>; renderItem: (item: TurnItem, i: number) => ReactNode; collapseAll?: boolean }) {
   const [expanded, setExpanded] = useState(!turn.complete)
@@ -43,21 +65,37 @@ export default function TurnBlock({ turn, renderItem, collapseAll = false }: { t
     wasComplete.current = turn.complete
   }, [turn.complete])
 
+  // Auto-expand only when the active search match lives inside a COLLAPSED
+  // segment of this turn — collapsed reasoning is mounted but height-0, so the
+  // match's <mark> would be invisible. Crucially we must NOT expand when the
+  // match is in the always-visible conclusion / inline items: expanding the
+  // reasoning above would shove the (already-visible) match down out of view.
+  const { term, currentMessageIdx } = useSearchHighlight()
+  const matchInCollapsedSegment = useMemo(() => {
+    if (!term || currentMessageIdx < 0) return false
+    // Default mode only collapses tool calls, which are never search matches.
+    if (!collapseAll) return false
+    const msgIdxs = (it: TurnItem): number[] =>
+      it.kind === 'single'
+        ? [it.idx]
+        : it.kind === 'group'
+          ? Array.from({ length: it.msgs.length }, (_, k) => it.startIdx + k)
+          : []
+    // Mirror the render's conclusion-finding so we know which items are the
+    // (always-visible) conclusion vs the collapsible pre-conclusion reasoning.
+    const conclusionIdx = findConclusionIdx(turn.items)
+    const beforeItems = conclusionIdx > 0 ? turn.items.slice(0, conclusionIdx) : []
+    // Only the non-visible-inline pre-conclusion items are actually collapsed.
+    return beforeItems.some(it => !isVisibleInline(it) && msgIdxs(it).includes(currentMessageIdx))
+  }, [turn.items, term, currentMessageIdx, collapseAll])
+  useEffect(() => {
+    if (matchInCollapsedSegment) setExpanded(true)
+  }, [matchInCollapsedSegment])
+
   // collapseAll mode: collapse everything except the last assistant message (original behavior)
   if (collapseAll) {
     // Find last substantive assistant message as conclusion (skip weak ones like bare OPTIONS)
-    let conclusionIdx = -1
-    let fallbackIdx = -1
-    for (let i = turn.items.length - 1; i >= 0; i--) {
-      if (isConclusion(turn.items[i])) {
-        if (fallbackIdx === -1) fallbackIdx = i
-        const it = turn.items[i]
-        if (it.kind === 'single' && substantiveLength(it.msg.content) >= 50) {
-          conclusionIdx = i; break
-        }
-      }
-    }
-    if (conclusionIdx === -1) conclusionIdx = fallbackIdx
+    const conclusionIdx = findConclusionIdx(turn.items)
     const conclusion = conclusionIdx >= 0 ? turn.items[conclusionIdx] : null
     const after = conclusionIdx >= 0 ? turn.items.slice(conclusionIdx + 1) : turn.items
     const beforeItems = conclusionIdx > 0 ? turn.items.slice(0, conclusionIdx) : []

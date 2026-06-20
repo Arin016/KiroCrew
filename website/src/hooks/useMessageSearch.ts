@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { ChatMessage } from '../types'
+import { searchableTextMemo } from '../utils/searchableText'
 
 export interface SearchMatch {
   /** Index into the messages[] Redux array. */
@@ -18,6 +19,9 @@ export function useMessageSearch(messages: ChatMessage[], activeSlot: string | n
   const [currentIdx, setCurrentIdx] = useState(0)
   const [caseSensitive, setCaseSensitive] = useState(false)
   const [matches, setMatches] = useState<SearchMatch[]>([])
+  // Bumped every time the find shortcut fires so the SearchBar can re-focus and
+  // select-all — letting the user immediately type a new query over the old one.
+  const [focusNonce, setFocusNonce] = useState(0)
 
   // Debounced match computation (50ms)
   useEffect(() => {
@@ -33,7 +37,7 @@ export function useMessageSearch(messages: ChatMessage[], activeSlot: string | n
           const next = messages[i + 1]
           if (next && next.role === 'tool') continue
         }
-        const haystack = caseSensitive ? m.content : m.content.toLowerCase()
+        const haystack = caseSensitive ? searchableTextMemo(m) : searchableTextMemo(m).toLowerCase()
         let pos = 0
         let occ = 0
         while (true) {
@@ -75,6 +79,12 @@ export function useMessageSearch(messages: ChatMessage[], activeSlot: string | n
   const prev = useCallback(() => {
     setCurrentIdx(prev => (matches.length === 0 ? 0 : (prev - 1 + matches.length) % matches.length))
   }, [matches.length])
+  // Jump directly to an arbitrary match (Home/End in the find bar, result-row clicks).
+  // Clamped to the valid range so a stale index from a shrinking match set
+  // can never point past the array.
+  const goTo = useCallback((idx: number) => {
+    setCurrentIdx(() => (matches.length === 0 ? 0 : Math.max(0, Math.min(idx, matches.length - 1))))
+  }, [matches.length])
   const toggleCaseSensitive = useCallback(() => setCaseSensitive(p => !p), [])
 
   // Keyboard shortcuts
@@ -83,6 +93,7 @@ export function useMessageSearch(messages: ChatMessage[], activeSlot: string | n
       if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
         e.preventDefault()
         setIsOpen(true)
+        setFocusNonce(n => n + 1)
       }
       if (e.key === 'Escape' && isOpen) {
         close()
@@ -104,11 +115,13 @@ export function useMessageSearch(messages: ChatMessage[], activeSlot: string | n
     currentIdx,
     next,
     prev,
+    goTo,
     open,
     close,
     caseSensitive,
     toggleCaseSensitive,
     currentMessageIdx,
     currentOccurrenceIdx,
+    focusNonce,
   }
 }

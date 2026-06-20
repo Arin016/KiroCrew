@@ -89,6 +89,20 @@ describe('SearchBar', () => {
     expect(close).toHaveBeenCalled()
   })
 
+  it('ArrowDown calls next() (navigates results from the input)', () => {
+    const next = vi.fn()
+    renderBar({ next, term: 'x', matches: [{ msgIdx: 0, occ: 0 }, { msgIdx: 1, occ: 0 }] })
+    fireEvent.keyDown(screen.getByPlaceholderText('Find in chat…'), { key: 'ArrowDown' })
+    expect(next).toHaveBeenCalled()
+  })
+
+  it('ArrowUp calls prev() (navigates results from the input)', () => {
+    const prev = vi.fn()
+    renderBar({ prev, term: 'x', matches: [{ msgIdx: 0, occ: 0 }, { msgIdx: 1, occ: 0 }] })
+    fireEvent.keyDown(screen.getByPlaceholderText('Find in chat…'), { key: 'ArrowUp' })
+    expect(prev).toHaveBeenCalled()
+  })
+
   it('up arrow button calls prev()', () => {
     const prev = vi.fn()
     renderBar({ prev })
@@ -115,5 +129,64 @@ describe('SearchBar', () => {
     renderBar({ toggleCaseSensitive })
     fireEvent.click(screen.getByTitle('Case sensitive'))
     expect(toggleCaseSensitive).toHaveBeenCalled()
+  })
+
+  const someMatches: SearchMatch[] = [
+    { msgIdx: 0, occ: 0 }, { msgIdx: 2, occ: 0 }, { msgIdx: 5, occ: 0 },
+  ]
+
+  it('Home at the cursor start jumps to the first result via goTo(0)', () => {
+    const goTo = vi.fn()
+    renderBar({ term: 'hello', matches: someMatches, currentIdx: 2, goTo })
+    const input = screen.getByPlaceholderText('Find in chat…') as HTMLInputElement
+    input.setSelectionRange(0, 0)
+    fireEvent.keyDown(input, { key: 'Home' })
+    expect(goTo).toHaveBeenCalledWith(0)
+  })
+
+  it('End at the cursor end jumps to the last result via goTo(length-1)', () => {
+    const goTo = vi.fn()
+    renderBar({ term: 'hello', matches: someMatches, currentIdx: 0, goTo })
+    const input = screen.getByPlaceholderText('Find in chat…') as HTMLInputElement
+    input.setSelectionRange(input.value.length, input.value.length)
+    fireEvent.keyDown(input, { key: 'End' })
+    expect(goTo).toHaveBeenCalledWith(2)
+  })
+
+  it('Home mid-query moves the text cursor, not the results (regression)', () => {
+    const goTo = vi.fn()
+    renderBar({ term: 'hello', matches: someMatches, currentIdx: 2, goTo })
+    const input = screen.getByPlaceholderText('Find in chat…') as HTMLInputElement
+    input.setSelectionRange(3, 3) // cursor in the middle of the query
+    fireEvent.keyDown(input, { key: 'Home' })
+    expect(goTo).not.toHaveBeenCalled()
+  })
+
+  it('Home/End do nothing when there are no matches', () => {
+    const goTo = vi.fn()
+    renderBar({ term: 'hello', matches: [], currentIdx: 0, goTo })
+    const input = screen.getByPlaceholderText('Find in chat…') as HTMLInputElement
+    input.setSelectionRange(0, 0)
+    fireEvent.keyDown(input, { key: 'Home' })
+    input.setSelectionRange(input.value.length, input.value.length)
+    fireEvent.keyDown(input, { key: 'End' })
+    expect(goTo).not.toHaveBeenCalled()
+  })
+
+  it('exposes combobox a11y wiring so the active result is announced', () => {
+    renderBar({ term: 'x', matches: someMatches, currentIdx: 1 })
+    const input = screen.getByPlaceholderText('Find in chat…')
+    expect(input).toHaveAttribute('role', 'combobox')
+    expect(input).toHaveAttribute('aria-controls', 'mc-search-results-listbox')
+    expect(input).toHaveAttribute('aria-expanded', 'true')
+    // aria-activedescendant points at the current option's id.
+    expect(input).toHaveAttribute('aria-activedescendant', 'mc-search-opt-1')
+  })
+
+  it('omits aria-activedescendant and collapses when there are no matches', () => {
+    renderBar({ term: 'zzz', matches: [], currentIdx: 0 })
+    const input = screen.getByPlaceholderText('Find in chat…')
+    expect(input).toHaveAttribute('aria-expanded', 'false')
+    expect(input).not.toHaveAttribute('aria-activedescendant')
   })
 })

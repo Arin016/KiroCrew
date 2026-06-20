@@ -6,6 +6,7 @@ import MarkdownRenderer from '../../components/MarkdownRenderer'
 import SelectionToolbar, { useSelectionActions } from '../../components/SelectionToolbar'
 import { useSearchHighlight, useCurrentOcc } from '../../hooks/SearchHighlightContext'
 import { applySearchHighlights } from '../../utils/domHighlight'
+import { scrollCurrentMatchIntoView } from '../../utils/searchScroll'
 import FileChangeChips, { type FileChangeEntry } from '../../components/FileChangeChips'
 import type { FileChipStyle } from './ChatSettings'
 import { loadChatConfig } from './ChatSettings'
@@ -77,6 +78,13 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
 
     const run = () => applySearchHighlights(el, term, caseSensitive, currentOcc)
     run()
+    // After highlighting, center the active occurrence so a jump lands on the
+    // exact searched text. Converges across frames so a far (just-mounted,
+    // unmeasured) row still lands correctly on the first click — see
+    // scrollCurrentMatchIntoView. Capture its cancel so the loop is aborted
+    // when this effect re-runs (next occurrence) or the message unmounts —
+    // otherwise rapid navigation piles up concurrent loops + window listeners.
+    const cancelScroll = currentOcc >= 0 ? scrollCurrentMatchIntoView(el) : undefined
 
     // Code blocks use dangerouslySetInnerHTML — hljs runs in a child
     // useEffect and sets innerHTML asynchronously after this effect.
@@ -93,7 +101,7 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
     // re-renders, hljs updates, our own marks). Each firing runs one
     // TreeWalker pass which is sub-millisecond even for long messages,
     // so the extra runs are negligible.
-    if (!term) return
+    if (!term) return () => cancelScroll?.()
     let disposed = false
     let scheduled = false
     const observer = new MutationObserver(() => {
@@ -108,7 +116,7 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
       })
     })
     observer.observe(el, { childList: true, subtree: true, characterData: true })
-    return () => { disposed = true; observer.disconnect() }
+    return () => { disposed = true; observer.disconnect(); cancelScroll?.() }
   }, [term, caseSensitive, currentOcc, effectiveContent, rawMode])
 
   return <div data-role="assistant" className="group/msg">

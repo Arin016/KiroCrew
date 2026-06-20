@@ -4,6 +4,7 @@ import { copyToClipboard } from '../../utils/clipboard'
 import { copySessionLink } from '../../utils/shareUrl'
 import { useSearchHighlight, useCurrentOcc } from '../../hooks/SearchHighlightContext'
 import { applySearchHighlights } from '../../utils/domHighlight'
+import { scrollCurrentMatchIntoView } from '../../utils/searchScroll'
 import { type PasteBlock, expandAll as expandPasteTokens } from '../../utils/pasteTokens'
 
 interface UserMessageProps {
@@ -65,7 +66,13 @@ const UserMessage = memo(function UserMessage({ content, meta, timestamp, render
   const currentOcc = useCurrentOcc()
 
   useEffect(() => {
-    if (userRef.current) applySearchHighlights(userRef.current, term, caseSensitive, currentOcc)
+    if (!userRef.current) return
+    const el = userRef.current
+    applySearchHighlights(el, term, caseSensitive, currentOcc)
+    // Converge-center the exact occurrence (see scrollCurrentMatchIntoView).
+    // Cancel on re-run/unmount so rapid navigation doesn't accumulate loops.
+    const cancelScroll = currentOcc >= 0 ? scrollCurrentMatchIntoView(el) : undefined
+    return () => cancelScroll?.()
   }, [term, caseSensitive, currentOcc, content])
 
   /** Native select+copy from a sent bubble gives the literal chip label

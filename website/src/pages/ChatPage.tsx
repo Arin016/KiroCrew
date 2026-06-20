@@ -68,6 +68,8 @@ import FlyingQuote from '../components/FlyingQuote'
 import { useMessageSearch } from '../hooks/useMessageSearch'
 import SearchHighlightContext, { MessageSearchScope } from '../hooks/SearchHighlightContext'
 import SearchBar from '../components/SearchBar'
+import SearchResultsList from '../components/SearchResultsList'
+import { pickSearchScrollBehavior, scrollCurrentMatchIntoView } from '../utils/searchScroll'
 import QueueStack from '../components/QueueStack'
 import { useVoiceInput, voiceInputSupported } from '../hooks/useVoiceInput'
 import VoiceDisabledModal from '../components/VoiceDisabledModal'
@@ -1344,10 +1346,17 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
 
   // Navigate to a (possibly off-window) display index: mount it first via the
   // virtualizer so the DOM-based scroll can find it, then scroll next frame.
+  // Tracks the in-flight row-mount poll (below) so a newer navigation cancels
+  // the previous one. Without this, an earlier far-jump loop whose target
+  // finally mounts would scroll to that stale destination, yanking away from
+  // the newer target (rapid stepping / click-then-click). cancelAnimationFrame(0)
+  // is a no-op, so 0 is a safe initial value.
+  const navScrollRafRef = useRef(0)
   const navToDisplayIndex = useCallback((
     idx: number,
     opts?: { behavior?: ScrollBehavior; align?: ScrollLogicalPosition; offset?: number },
   ) => {
+    cancelAnimationFrame(navScrollRafRef.current)
     // Signal WidgetFrames that a jump is starting so the span of widgets
     // mountIndex is about to union doesn't all build their iframes in one
     // frame (see PROGRAMMATIC_BUILD_DELAY_MS in WidgetFrame).
@@ -1361,7 +1370,22 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     // keeps it stable as its rows measure. NEAR jumps keep their smooth glide
     // (mountIndex unioned the whole path, so there's nothing blank to scrub).
     const behavior: ScrollBehavior = jumpedFar ? 'auto' : (opts?.behavior ?? 'smooth')
-    requestAnimationFrame(() => scrollToDisplayIndex(idx, { ...opts, behavior }))
+    // mountIndex queues a React state update (the virtualizer's window range).
+    // A FAR jump REPLACES the window, so the target row is NOT painted into the
+    // DOM within a single frame — one rAF then a DOM query misses it. Poll for
+    // the row across frames and scroll the instant it mounts: driven by the
+    // row's actual DOM presence (scrollToDisplayIndex returns false until it
+    // exists), not a guessed timer. While the row is missing we do nothing — we
+    // never teleport to top, which was the "far jump jumps to top, second click
+    // works" bug. Near jumps succeed on the first frame; the cap is a safety net.
+    let frames = 0
+    const MAX_FRAMES = 30 // ~0.5s ceiling
+    const attempt = () => {
+      if (scrollToDisplayIndex(idx, { ...opts, behavior })) return
+      if (++frames >= MAX_FRAMES) return
+      navScrollRafRef.current = requestAnimationFrame(attempt)
+    }
+    navScrollRafRef.current = requestAnimationFrame(attempt)
   }, [scrollToDisplayIndex])
 
   // "Scroll to previous user message" pill — tracks topmost visible item
@@ -2164,13 +2188,64 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     navToDisplayIndex(displayIdx, { behavior: 'smooth', align: 'start', offset: -72 })
   }, [navToDisplayIndex])
 
+  // Track the timestamp of the previous search-nav step so we can tell "user is
+  // holding Enter through many matches" apart from "user landed on one match".
+  // Rapid consecutive steps snap instantly (behavior:'auto') — a smooth glide
+  // would be interrupted and restarted on every keypress, producing the stutter
+  // of half-finished eased scrolls. A lone step (or the final one after a pause)
+  // glides smoothly and centers. navToDisplayIndex still forces 'auto' for FAR
+  // jumps regardless; this only governs NEAR jumps, which is where the queued-
+  // animation jank lived.
+  const lastSearchStepAtRef = useRef(0)
+  // Set when the user clicks a row in the results panel (vs. Enter/Arrow
+  // stepping). A click is a direct jump that's usually FAR and to an unmeasured
+  // virtualized row — a smooth scroll animates to the *estimated* offset and
+  // then visibly corrects once the row mounts. Snapping instantly collapses
+  // that into one jump.
+  const searchClickJumpRef = useRef(false)
+  // Cancel handle for the re-click converge loop (below) so repeated re-clicks
+  // of the same result don't stack concurrent loops + window listeners.
+  const reclickScrollCancelRef = useRef<(() => void) | null>(null)
+  // Read the display-index map via a ref so the scroll effect below does NOT
+  // re-fire when the map is rebuilt (every new message / stream chunk rebuilds
+  // it). Otherwise an open search pane would yank the chat back to the current
+  // match each time the agent emits output. The effect should scroll only on
+  // deliberate search navigation (currentIdx / currentMessageIdx change).
+  const messageToDisplayIdxRef = useRef(messageToDisplayIdx)
+  messageToDisplayIdxRef.current = messageToDisplayIdx
+  const jumpToSearchResult = useCallback((i: number) => {
+    // Re-clicking the already-selected result won't change currentIdx, so the
+    // nav effect won't fire — scroll back to it imperatively so a click always
+    // returns to the match even after the user has scrolled away from it.
+    if (i === search.currentIdx) {
+      const m = search.matches[i]
+      const di = m ? messageToDisplayIdxRef.current.get(m.msgIdx) : undefined
+      if (di !== undefined) {
+        requestAnimationFrame(() => {
+          navToDisplayIndex(di, { behavior: 'auto', align: 'center' })
+          // currentOcc is unchanged so the message's occurrence-scroll effect
+          // won't re-run; converge-center the already-rendered active mark.
+          reclickScrollCancelRef.current?.()
+          reclickScrollCancelRef.current = scrollCurrentMatchIntoView()
+        })
+      }
+      return
+    }
+    searchClickJumpRef.current = true
+    search.goTo(i)
+  }, [search, navToDisplayIndex])
   useEffect(() => {
     if (search.currentMessageIdx < 0) return
-    const di = messageToDisplayIdx.get(search.currentMessageIdx)
-    if (di !== undefined) {
-      navToDisplayIndex(di, { behavior: 'smooth', align: 'center' })
-    }
-  }, [search.currentMessageIdx, search.currentIdx, messageToDisplayIdx, navToDisplayIndex])
+    const di = messageToDisplayIdxRef.current.get(search.currentMessageIdx)
+    if (di === undefined) return
+    const now = performance.now()
+    const behavior = searchClickJumpRef.current
+      ? 'auto'
+      : pickSearchScrollBehavior(now, lastSearchStepAtRef.current)
+    searchClickJumpRef.current = false
+    lastSearchStepAtRef.current = now
+    navToDisplayIndex(di, { behavior, align: 'center' })
+  }, [search.currentMessageIdx, search.currentIdx, navToDisplayIndex])
 
   // "Show in chat" button on the approval bar dispatches openActivityToTool,
   // which sets `focusToolCallId`. Pulling a virtualised pill back into the DOM
@@ -2444,7 +2519,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
 
       {/* Chat pane */}
       {embedMode !== 'sessions' && (
-      <div className={`relative flex flex-col bg-bg min-w-0 min-h-0 h-full overflow-hidden ${panel.isOpen || activityOpen ? 'flex-[1_1_60%]' : 'flex-1'}`} style={{ transition: 'flex 0.2s', ...(!sidebarOpen && !isMobile ? { marginLeft: '-0.5rem' } : {}), '--mc-content-width': CONTENT_WIDTH[chatConfig.contentWidth].messages, '--mc-input-width': CONTENT_WIDTH[chatConfig.contentWidth].input } as React.CSSProperties}>
+      <div className={`relative flex flex-col bg-bg min-w-0 min-h-0 h-full overflow-hidden ${panel.isOpen || activityOpen || search.isOpen ? 'flex-[1_1_60%]' : 'flex-1'}`} style={{ transition: 'flex 0.2s', ...(!sidebarOpen && !isMobile ? { marginLeft: '-0.5rem' } : {}), '--mc-content-width': CONTENT_WIDTH[chatConfig.contentWidth].messages, '--mc-input-width': CONTENT_WIDTH[chatConfig.contentWidth].input } as React.CSSProperties}>
         {snipFrame && (
           <SnipOverlay
             frame={snipFrame}
@@ -2486,7 +2561,6 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
         ) : (
           <SearchHighlightContext.Provider value={searchCtxValue}>
           <div className="relative flex flex-col flex-1 min-h-0">
-            {search.isOpen && <SearchBar term={search.term} setTerm={search.setTerm} matches={search.matches} currentIdx={search.currentIdx} next={search.next} prev={search.prev} close={search.close} caseSensitive={search.caseSensitive} toggleCaseSensitive={search.toggleCaseSensitive} />}
             {/* Claude-style title row — absolute overlay, solid top fading to transparent.
                 Inset on the right by the 6px scrollbar width (see ::-webkit-scrollbar
                 in index.css) so the overlay never paints over the scroller's scrollbar
@@ -3046,8 +3120,32 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
         )}
       </div>
       )}
+      {search.isOpen && (
+          <DetailPanel
+            key="search-panel"
+            title={<SearchBar docked term={search.term} setTerm={search.setTerm} matches={search.matches} currentIdx={search.currentIdx} next={search.next} prev={search.prev} close={search.close} caseSensitive={search.caseSensitive} toggleCaseSensitive={search.toggleCaseSensitive} focusNonce={search.focusNonce} goTo={search.goTo} />}
+            onClose={search.close}
+            initialWidth={400}
+            minWidth={320}
+            storageKey="mc-search-width"
+            noPadding
+          >
+            {search.matches.length > 0 ? (
+              <SearchResultsList
+                matches={search.matches}
+                currentIdx={search.currentIdx}
+                messages={messages}
+                term={search.term}
+                caseSensitive={search.caseSensitive}
+                onJump={jumpToSearchResult}
+              />
+            ) : (
+              <div className="px-4 py-3 text-[13px] text-muted">{search.term ? 'No results' : 'Type to search this conversation.'}</div>
+            )}
+          </DetailPanel>
+        )}
       <AnimatePresence>
-        {diffPanel.isOpen && !panel.isOpen && (
+        {diffPanel.isOpen && !panel.isOpen && !search.isOpen && (
           <DetailPanel
             key="diff-panel"
             title={
@@ -3073,10 +3171,10 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
             <DiffPanel filePath={diffPanel.filePath} original={diffPanel.original} modified={diffPanel.modified} lineNumbers={diffLineNumbers} />
           </DetailPanel>
         )}
-        {panel.isOpen && !diffPanel.isOpen && (
+        {panel.isOpen && !diffPanel.isOpen && !search.isOpen && (
           <MarkdownPanel key="md-panel" filePath={panel.filePath} content={panel.content} onContentChange={panel.setContent} onSave={handleFileSave} onClose={panel.closePanel} liveWatch onSubmitComments={submitComments} />
         )}
-        {activityOpen && !panel.isOpen && !diffPanel.isOpen && (
+        {activityOpen && !panel.isOpen && !diffPanel.isOpen && !search.isOpen && (
           <DetailPanel key="activity-panel" title="Activity" onClose={toggleAct} initialWidth={420} storageKey="mc-activity-width">
             <ActivityViewer subagents={subagents} toolLog={toolLog} open={true} onToggle={toggleAct} slot={activeSlot || ''} files={touchedFiles.files} onFileOpen={handleFileOpen} onFileRemove={touchedFiles.removeFile} onFilesClear={touchedFiles.clearBySource} projectDir={currentSlot?.project || undefined} navLinks={chatNav.links} navSections={chatNav.sections} onScrollToNavSection={scrollToNavSection} navResolving={chatNav.resolving} />
           </DetailPanel>

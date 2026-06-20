@@ -131,6 +131,54 @@ describe('useMessageSearch', () => {
     expect(result.current.currentIdx).toBe(2) // wrapped to end
   })
 
+  it('goTo() jumps to an arbitrary match', () => {
+    const { result } = renderHook(() => useMessageSearch(messages, 'slot-1'))
+    act(() => result.current.setTerm('world'))
+    act(() => { vi.advanceTimersByTime(50) })
+    // 3 matches total (indices 0,1,2)
+    act(() => result.current.goTo(2))
+    expect(result.current.currentIdx).toBe(2)
+    act(() => result.current.goTo(1))
+    expect(result.current.currentIdx).toBe(1)
+  })
+
+  it('goTo() clamps out-of-range indices', () => {
+    const { result } = renderHook(() => useMessageSearch(messages, 'slot-1'))
+    act(() => result.current.setTerm('world'))
+    act(() => { vi.advanceTimersByTime(50) })
+    act(() => result.current.goTo(99))
+    expect(result.current.currentIdx).toBe(2) // clamped to last of 3 matches
+    act(() => result.current.goTo(-5))
+    expect(result.current.currentIdx).toBe(0) // clamped to first
+  })
+
+  it('goTo() is a no-op with zero matches', () => {
+    const { result } = renderHook(() => useMessageSearch(messages, 'slot-1'))
+    act(() => result.current.goTo(3))
+    expect(result.current.currentIdx).toBe(0)
+  })
+
+  it('excludes trailing [OPTIONS:] block from search (rendered as buttons)', () => {
+    const msgs: ChatMessage[] = [
+      msg('assistant', 'Body has widget once.\n\n[OPTIONS: rebuild widget | another widget]'),
+    ]
+    const { result } = renderHook(() => useMessageSearch(msgs, 'slot-x'))
+    act(() => result.current.setTerm('widget'))
+    act(() => { vi.advanceTimersByTime(50) })
+    // Only the body occurrence counts; the two inside OPTIONS are stripped.
+    expect(result.current.matches).toHaveLength(1)
+  })
+
+  it('Ctrl/Cmd+F opens the bar and bumps focusNonce (select-all trigger)', () => {
+    const { result } = renderHook(() => useMessageSearch(messages, 'slot-1'))
+    const before = result.current.focusNonce
+    act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true })) })
+    expect(result.current.isOpen).toBe(true)
+    expect(result.current.focusNonce).toBe(before + 1)
+    act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', metaKey: true })) })
+    expect(result.current.focusNonce).toBe(before + 2)
+  })
+
   it('currentIdx clamped when matches shrink', () => {
     const { result } = renderHook(() => useMessageSearch(messages, 'slot-1'))
     act(() => result.current.setTerm('world'))
