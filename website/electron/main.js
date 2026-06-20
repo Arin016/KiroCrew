@@ -1,4 +1,4 @@
-const { app, BaseWindow, BrowserWindow, WebContentsView, shell, dialog, Tray, Menu, nativeImage, nativeTheme, autoUpdater, Notification, ipcMain, webContents, session, desktopCapturer, systemPreferences } = require("electron");
+const { app, BaseWindow, BrowserWindow, WebContentsView, shell, dialog, Tray, Menu, nativeImage, nativeTheme, autoUpdater, Notification, ipcMain, webContents, session, desktopCapturer, systemPreferences, screen } = require("electron");
 const Store = require("electron-store");
 const fs = require("fs");
 const os = require("os");
@@ -11,6 +11,7 @@ const { createDisplayMediaHandler } = require("./display-media");
 const { initAutoUpdate } = require("./auto-update");
 const { stopGatewayGracefully: _stopGatewayGracefully } = require("./gateway-stop");
 const { waitForGateway, describeGatewayFailure, tailLines } = require("./gateway-wait");
+const { sanitizeWindowState, captureWindowState } = require("./window-state");
 
 // ── Persistent settings for remote tunnel mode ──
 
@@ -25,6 +26,7 @@ const store = new Store({
     remoteHost: "",                        // e.g. "myhost.corp.amazon.com"
     kiroclawBinPath: DEFAULT_REMOTE_BIN,   // full path for non-interactive SSH
     sshTimeoutMs: 20000,
+    windowState: null,                     // persisted main-window geometry (see window-state.js)
   },
 });
 
@@ -482,17 +484,57 @@ function setupWindowContents(win, backendUrl) {
 }
 
 function createWindow() {
-  mainWindow = new BaseWindow({
-    width: 1280,
-    height: 860,
+  // Restore the saved geometry so quitting from native fullscreen (or any size)
+  // comes back correctly. Without this the window is always rebuilt at the
+  // default size and macOS drops that fixed-size window into the fullscreen
+  // Space it restored — which is the long-standing "blacked out" (view doesn't
+  // fill the Space) / "super tiny" (window doesn't fill the Space) bug. We own
+  // the geometry and re-enter fullscreen ourselves instead. screen.* is only
+  // valid after app.whenReady(); createWindow runs from the whenReady handler.
+  const state = sanitizeWindowState(store.get("windowState"), {
+    displays: screen.getAllDisplays().map((d) => ({ workArea: d.workArea })),
+    defaults: { width: 1280, height: 860 },
+    minSize: { width: 550, height: 600 },
+  });
+
+  const opts = {
+    width: state.width,
+    height: state.height,
     minWidth: 550,
     minHeight: 600,
     tabbingIdentifier: "kiroclaw",
     titleBarStyle: "hidden",
     backgroundColor: "#0f1117",
-  });
+    // Come up already fullscreen when we left fullscreen, so the window fills
+    // its Space and updateViewBounds() (fired on show/enter-full-screen) sizes
+    // the WebContentsView with offset 0 — no black gap, no tiny window. The
+    // width/height above become the normal frame to return to on exit.
+    fullscreen: state.fullScreen,
+  };
+  if (typeof state.x === "number" && typeof state.y === "number") {
+    opts.x = state.x;
+    opts.y = state.y;
+  }
+  mainWindow = new BaseWindow(opts);
 
   setupWindowContents(mainWindow, BACKEND_URL);
+
+  // Persist geometry on every change (debounced) so a quit/crash at any point
+  // keeps the last good size + fullscreen flag. captureWindowState() uses
+  // getNormalBounds(), so we store the restore size, never the fullscreen frame.
+  let saveTimer = null;
+  const persist = () => {
+    const s = captureWindowState(mainWindow);
+    if (s) store.set("windowState", s);
+  };
+  const persistDebounced = () => {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(persist, 400);
+  };
+  mainWindow.on("resize", persistDebounced);
+  mainWindow.on("move", persistDebounced);
+  mainWindow.on("enter-full-screen", persist);
+  mainWindow.on("leave-full-screen", persist);
 
   // Auto-refresh token on 403 (gateway secret regenerated after restart)
   const onNavigate = createTokenRetryHandler(() => refreshToken());
@@ -504,7 +546,12 @@ function createWindow() {
     if (!isQuitting) {
       e.preventDefault();
       mainWindow.hide();
+      return;
     }
+    // Real quit — capture the final geometry synchronously before teardown so
+    // the pending debounced save can't be lost.
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    persist();
   });
 
   return mainWindow;
