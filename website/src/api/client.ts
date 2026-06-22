@@ -689,4 +689,33 @@ export const api = {
   browserAuthRetry: () => post('/api/browser-auth-retry', {}).then(j),
   getBrowserConfig: () => get('/api/browser/config').then(j) as Promise<{extension_mode: boolean; token: boolean}>,
   saveBrowserConfig: (body: {extension_mode: boolean; token: string}) => put('/api/browser/config', body).then(j),
+
+  // Auto-research
+  researchValidate: (body: object) => post("/api/apps/auto-research/validate", body).then(j),
+  researchGrillExpand: (body: object) => post("/api/apps/auto-research/grill/expand", body).then(j),
+  researchCampaigns: () => get("/api/apps/auto-research/campaigns").then(j),
+  researchCampaign: (id: string) => get("/api/apps/auto-research/campaigns/" + id).then(j),
+  researchCreate: (body: object) => post("/api/apps/auto-research/campaigns", body).then(j),
+  researchAction: (id: string, action: string, body?: object) => patch("/api/apps/auto-research/campaigns/" + id, { action, ...body }).then(j),
+  researchGrillTree: (id: string) => get("/api/apps/auto-research/campaigns/" + id + "/grill-tree").then(j),
+  researchNudge: (id: string, text: string) => post("/api/apps/auto-research/campaigns/" + id + "/nudge", { text }).then(j),
+  researchAddQuestion: (id: string, text: string) => post("/api/apps/auto-research/campaigns/" + id + "/questions", { text }).then(j),
+  researchToKnowledge: (id: string) => post("/api/apps/auto-research/campaigns/" + id + "/to-knowledge", {}).then(j),
+  researchKnowledgeStatus: (id: string) => get("/api/apps/auto-research/campaigns/" + id + "/knowledge-status").then(j),
+  researchToArtifact: (id: string) => post("/api/apps/auto-research/campaigns/" + id + "/to-artifact", {}).then(j),
+  researchReportStatus: (id: string) => get("/api/apps/auto-research/campaigns/" + id + "/report-status").then(j),
+  researchReport: (id: string) => get("/api/apps/auto-research/campaigns/" + id + "/report").then(j),
+  researchDelete: (id: string) => del("/api/apps/auto-research/campaigns/" + id).then(j),
+
+  // Web Deploy (deploy-web). deploy/recall/destroy are status-aware: the backend
+  // uses 200+requires_confirm (confirm-gate) and 409 (pre-publish scan-block) as
+  // normal control flow, so we surface {status, data} instead of throwing via j().
+  deployWebConfig: () => get('/api/apps/deploy-web/config').then(j) as Promise<{ profile: string; region: string }>,
+  deployWebSaveConfig: (body: { profile: string; region: string }) => put('/api/apps/deploy-web/config', body).then(j) as Promise<{ profile: string; region: string }>,
+  deployWebIamPolicy: (customDomain = false) => get('/api/apps/deploy-web/iam-policy' + (customDomain ? '?custom_domain=1' : '')).then(j) as Promise<{ policy: string }>,
+  deployWebVerify: () => post('/api/apps/deploy-web/verify', {}).then(async r => ({ status: r.status, data: await r.json() })),
+  deployWebSites: () => get('/api/apps/deploy-web/sites').then(j) as Promise<{ sites: Array<{ site_id: string; bucket: string; distribution_id: string }>; configured: boolean }>,
+  deployWebDeploy: (body: object) => post('/api/apps/deploy-web/deploy', body).then(async r => ({ status: r.status, data: await r.json() })),
+  deployWebRecall: (body: object) => post('/api/apps/deploy-web/recall', body).then(async r => ({ status: r.status, data: await r.json() })),
+  deployWebDestroy: (body: object) => post('/api/apps/deploy-web/destroy', body).then(async r => ({ status: r.status, data: await r.json() })),
 }
