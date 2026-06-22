@@ -18,6 +18,9 @@ export const voiceInputSupported =
   typeof navigator.mediaDevices.getUserMedia === 'function' &&
   pickMimeType() !== ''
 
+/** Release a pre-warmed mic if the user presses but doesn't start within this window. */
+const WARM_IDLE_MS = 15000
+
 interface Opts {
   streaming?: boolean
   onPartial?: (text: string) => void
@@ -33,6 +36,14 @@ export function useVoiceInput(onText: (text: string) => void, opts: Opts = {}) {
   const chunksRef = useRef<Blob[]>([])
   const startingRef = useRef(false)
   const levelStopRef = useRef<(() => void) | null>(null)
+  // Pre-warm: a mic stream acquired on pointer-down (before the click toggles
+  // recording) so capture can begin instantly. getUserMedia + the first audio
+  // frame have noticeable latency on macOS; warming during the press closes
+  // that gap so the user's opening words aren't lost to a silent warmup window
+  // (which Whisper otherwise hallucinates into a canned phrase like "Thank you.").
+  const warmRef = useRef<MediaStream | null>(null)
+  const warmPromiseRef = useRef<Promise<MediaStream> | null>(null)
+  const warmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const clearError = useCallback(() => setError(null), [])
 
   const streamEnabled = !!opts.streaming && streamingSupported
@@ -68,8 +79,11 @@ export function useVoiceInput(onText: (text: string) => void, opts: Opts = {}) {
   }, [streamEnabled, streamRecording, streamStop])
 
   const stopStream = useCallback(() => {
+    if (warmTimerRef.current) { clearTimeout(warmTimerRef.current); warmTimerRef.current = null }
     levelStopRef.current?.()
     levelStopRef.current = null
+    if (warmRef.current) { warmRef.current.getTracks().forEach(t => t.stop()); warmRef.current = null }
+    warmPromiseRef.current = null
     if (mediaRef.current) {
       mediaRef.current.stream.getTracks().forEach(t => t.stop())
       if (mediaRef.current.state === 'recording') mediaRef.current.stop()
@@ -80,16 +94,75 @@ export function useVoiceInput(onText: (text: string) => void, opts: Opts = {}) {
   // Cleanup on unmount — stop mic stream
   useEffect(() => () => { stopStream() }, [stopStream])
 
+  // Acquire (or reuse) a live mic stream and attach the level meter + device
+  // label exactly once. A single in-flight getUserMedia is shared so a
+  // pointer-down prewarm and the click-driven start() never double-acquire —
+  // start() reuses the same promise the press already kicked off.
+  const acquireWarm = useCallback(async (): Promise<MediaStream> => {
+    const live = warmRef.current
+    if (live && live.getAudioTracks()[0]?.readyState === 'live') return live
+    if (warmPromiseRef.current) return warmPromiseRef.current
+    const p = navigator.mediaDevices.getUserMedia(micAudioConstraints())
+    warmPromiseRef.current = p
+    try {
+      const stream = await p
+      // If releaseWarm()/stopStream() nulled (or replaced) the promise ref
+      // while we were awaiting -- idle timeout, stop, or unmount -- this
+      // acquisition was cancelled. Stop the now-orphaned stream instead of
+      // leaking a live mic + level meter that nothing will clean up.
+      if (warmPromiseRef.current !== p) {
+        stream.getTracks().forEach(t => t.stop())
+        throw new Error('mic acquisition cancelled')
+      }
+      setDeviceLabel(stream.getAudioTracks()[0]?.label || '')
+      levelStopRef.current = createLevelMeter(stream, setLevel)
+      warmRef.current = stream
+      return stream
+    } finally {
+      // Only clear if it's still our promise; a concurrent acquire may have
+      // installed a newer one we must not wipe.
+      if (warmPromiseRef.current === p) warmPromiseRef.current = null
+    }
+  }, [])
+
+  // Tear down a pre-warmed (not-yet-recording) stream. No-op once the stream
+  // has been handed off to an active recorder (warmRef cleared in start()), so
+  // the idle timer can never kill a live recording.
+  const releaseWarm = useCallback(() => {
+    if (warmTimerRef.current) { clearTimeout(warmTimerRef.current); warmTimerRef.current = null }
+    warmPromiseRef.current = null
+    if (!warmRef.current) return
+    levelStopRef.current?.()
+    levelStopRef.current = null
+    warmRef.current.getTracks().forEach(t => t.stop())
+    warmRef.current = null
+    setLevel(0)
+    setDeviceLabel('')
+  }, [])
+
+  // Pre-warm the mic on pointer-down so the click that follows starts capture
+  // instantly. Auto-releases if recording doesn't start within WARM_IDLE_MS so
+  // a press-without-record doesn't hold the mic open.
+  const prewarm = useCallback(() => {
+    if (streamEnabled || !voiceInputSupported || startingRef.current || mediaRef.current) return
+    acquireWarm().catch(() => { /* error is surfaced on the actual start() */ })
+    if (warmTimerRef.current) clearTimeout(warmTimerRef.current)
+    warmTimerRef.current = setTimeout(releaseWarm, WARM_IDLE_MS)
+  }, [streamEnabled, acquireWarm, releaseWarm])
+
   const start = useCallback(async () => {
     setError(null)
     if (streamEnabled) { await streamStart(); return }
     if (!voiceInputSupported || startingRef.current) return
     startingRef.current = true
+    if (warmTimerRef.current) { clearTimeout(warmTimerRef.current); warmTimerRef.current = null }
     let stream: MediaStream | null = null
     try {
-      stream = await navigator.mediaDevices.getUserMedia(micAudioConstraints())
-      setDeviceLabel(stream.getAudioTracks()[0]?.label || '')
-      levelStopRef.current = createLevelMeter(stream, setLevel)
+      // Reuse the pre-warmed stream (acquired on pointer-down) so recording
+      // starts instantly; otherwise acquire now. acquireWarm sets up the level
+      // meter + device label exactly once.
+      stream = await acquireWarm()
+      warmRef.current = null // ownership transfers to the recorder; releaseWarm now no-ops
       const mimeType = pickMimeType()
       const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
       chunksRef.current = []
@@ -97,6 +170,7 @@ export function useVoiceInput(onText: (text: string) => void, opts: Opts = {}) {
       mr.onstop = async () => {
         levelStopRef.current?.()
         levelStopRef.current = null
+        setLevel(0)
         setDeviceLabel('')
         stream?.getTracks().forEach(t => t.stop())
         const ext = mimeType.includes('mp4') ? 'mp4' : mimeType.includes('ogg') ? 'ogg' : 'webm'
@@ -114,14 +188,18 @@ export function useVoiceInput(onText: (text: string) => void, opts: Opts = {}) {
       mediaRef.current = mr
       setRecording(true)
     } catch (e) {
+      if (warmTimerRef.current) { clearTimeout(warmTimerRef.current); warmTimerRef.current = null }
       levelStopRef.current?.()
       levelStopRef.current = null
+      setLevel(0)
       setDeviceLabel('')
       stream?.getTracks().forEach(t => t.stop())
+      warmRef.current = null
+      warmPromiseRef.current = null
       setError(humanizeMicError(e))
     }
     startingRef.current = false
-  }, [onText, streamEnabled, streamStart])
+  }, [onText, streamEnabled, streamStart, acquireWarm])
 
   const stop = useCallback(() => {
     if (streamEnabled) { streamStop(); return }
@@ -137,5 +215,5 @@ export function useVoiceInput(onText: (text: string) => void, opts: Opts = {}) {
   const isRecording = streamEnabled ? streamRecording : recording
   const toggle = useCallback(() => { isRecording ? stop() : start() }, [isRecording, start, stop])
 
-  return { recording: isRecording, transcribing, toggle, error, level, deviceLabel, clearError }
+  return { recording: isRecording, transcribing, toggle, prewarm, error, level, deviceLabel, clearError }
 }

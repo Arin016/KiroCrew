@@ -175,6 +175,8 @@ interface ChatInputProps {
   voiceRecording?: boolean
   voiceTranscribing?: boolean
   onVoiceToggle?: () => void
+  /** Pre-warm the mic on pointer-down so recording starts instantly on click. */
+  onVoicePrewarm?: () => void
   /** Mic error (null = none), live input level [0,1], active device label, and error-dismiss. */
   voiceError?: string | null
   voiceLevel?: number
@@ -300,6 +302,7 @@ function ChatInput({
   voiceRecording = false,
   voiceTranscribing = false,
   onVoiceToggle,
+  onVoicePrewarm,
   voiceError = null,
   voiceLevel = 0,
   voiceDeviceLabel = '',
@@ -1744,6 +1747,7 @@ function ChatInput({
                   voiceRecording ? 'bg-danger-subtle text-danger animate-pulse' : voiceTranscribing ? 'bg-accent-subtle text-accent' : 'text-muted hover:text-text hover:bg-bg-hover bg-transparent'
                 } disabled:opacity-30`}
                 onClick={onVoiceToggle}
+                onPointerDown={onVoicePrewarm}
                 disabled={disabled || voiceTranscribing || optimizing}
                 aria-label={voiceRecording ? 'Stop recording' : voiceTranscribing ? 'Transcribing…' : 'Voice input'}
                 title={voiceRecording ? 'Stop recording' : voiceTranscribing ? 'Transcribing…' : 'Voice input'}

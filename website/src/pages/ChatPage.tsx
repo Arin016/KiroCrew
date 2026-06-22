@@ -2928,6 +2928,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               voiceDeviceLabel={voice.deviceLabel}
               onClearVoiceError={voice.clearError}
               onVoiceToggle={voiceInputSupported ? toggleVoice : undefined}
+              onVoicePrewarm={voiceInputSupported ? voice.prewarm : undefined}
               agentName={currentSlot?.agent || 'default'}
               agentSource={installedAgents.find(a => a.name === (currentSlot?.agent || 'default'))?.source}
               modelName={currentSlot?.model || resolvedModel || 'auto'}
