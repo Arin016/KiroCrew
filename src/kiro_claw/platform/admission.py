@@ -64,6 +64,33 @@ MODE_OPEN = "open"  # admit unless explicitly banned (public default)
 MODE_ENFORCE = "enforce"  # admit only what passes every active check
 
 
+def _coerce_str_list(value: object) -> List[str]:
+    """Coerce an untrusted JSON value into a list of strings.
+
+    Guards the ``{k: list(v)}`` footgun: a string value is the single-element
+    list ``[value]`` (NOT exploded into per-character entries the way ``list(v)``
+    would), and a list/tuple has each element stringified.  Any other type
+    (number, bool, dict, None) yields an empty list so a malformed manifest is
+    treated as declaring nothing rather than admitting a garbage capability set
+    into the signed payload / ceiling check.
+    """
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    return []
+
+
+def _normalize_name(name: str) -> str:
+    """Canonical form for kill-switch / allowlist membership comparisons.
+
+    Case-folds and strips so a ban on ``"amazon-evil"`` is not evaded by an
+    entry-point name of ``"Amazon-Evil"`` or ``"amazon-evil "`` (trailing
+    whitespace from hand-edited JSON).
+    """
+    return name.strip().casefold()
+
+
 @dataclass(frozen=True)
 class PluginManifest:
     """A plugin's self-declaration, read before its code is imported."""
@@ -82,7 +109,9 @@ class PluginManifest:
             name=str(d.get("name", "")),
             publisher=str(d.get("publisher", "")),
             version=str(d.get("version", "")),
-            capabilities={k: list(v) for k, v in (d.get("capabilities") or {}).items()},
+            capabilities={
+                str(k): _coerce_str_list(v) for k, v in (d.get("capabilities") or {}).items()
+            },
             signature=str(d.get("signature", "")),
         )
 
@@ -126,9 +155,12 @@ class AdmissionPolicy:
             mode=str(d.get("mode", MODE_OPEN)),
             require_signature=bool(d.get("require_signature", False)),
             trust_keys={str(k): str(v) for k, v in (d.get("trust_keys") or {}).items()},
-            approved=(list(approved) if approved is not None else None),
-            banned=list(d.get("banned", [])),
-            capability_ceiling={k: list(v) for k, v in (d.get("capability_ceiling") or {}).items()},
+            approved=(_coerce_str_list(approved) if approved is not None else None),
+            banned=_coerce_str_list(d.get("banned", [])),
+            capability_ceiling={
+                str(k): _coerce_str_list(v)
+                for k, v in (d.get("capability_ceiling") or {}).items()
+            },
         )
 
 
@@ -250,8 +282,11 @@ def evaluate_admission(
     manifest = _read_plugin_manifest(ep)
     plugin_name = manifest.name if manifest else ep.name
 
-    # 1) Kill-switch always wins, in any mode.
-    if plugin_name in policy.banned or ep.name in policy.banned:
+    # 1) Kill-switch always wins, in any mode.  Match case/whitespace-insensitively
+    #    so a ban cannot be evaded by a name-case or trailing-whitespace mismatch
+    #    (the manifest name and the entry-point name are both checked).
+    banned_norm = {_normalize_name(b) for b in policy.banned}
+    if _normalize_name(plugin_name) in banned_norm or _normalize_name(ep.name) in banned_norm:
         return AdmissionDecision(False, f"plugin {plugin_name!r} is banned (kill-switch)", manifest)
 
     # Whether the fleet has configured ANY active enforcement beyond the open
@@ -277,7 +312,9 @@ def evaluate_admission(
         )
 
     # 2) Marketplace allowlist (skipped when no allowlist is configured).
-    if policy.approved is not None and plugin_name not in policy.approved:
+    #    Normalized membership for the same reason as the kill-switch.
+    approved_norm = {_normalize_name(a) for a in policy.approved} if policy.approved else set()
+    if policy.approved is not None and _normalize_name(plugin_name) not in approved_norm:
         return AdmissionDecision(
             False, f"plugin {plugin_name!r} is not on the approved allowlist", manifest
         )

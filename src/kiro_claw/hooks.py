@@ -269,9 +269,8 @@ class HookManager:
         # no recursion (PolicyAuthority.is_denied calls security.is_denied with
         # the overlay patterns appended; security.is_denied never calls back).
         authority = current_context().security
-        reason = authority.is_denied(normalized, self._config.auto_deny_tools) or authority.is_denied(
-            tool_name, self._config.auto_deny_tools
-        )
+        deny = self._config.auto_deny_tools
+        reason = authority.is_denied(normalized, deny) or authority.is_denied(tool_name, deny)
         if reason:
             return ToolHookResult.deny(reason)
 

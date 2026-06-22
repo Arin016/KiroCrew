@@ -140,17 +140,31 @@ class TestProfileResolution:
         monkeypatch.delenv("KIROCLAW_PROFILE", raising=False)
         assert resolve_profile(cfg, entry_points=[object()]) == PROFILE_AMAZON
 
-    def test_midway_stat_triggers_amazon_without_companion(
+    def test_midway_stat_ignored_without_probe_optin(
         self, cfg: KiroClawConfig, monkeypatch
     ) -> None:
-        # A ~/.midway host with no companion still resolves amazon so discovery
-        # fails closed (rather than running open defaults).
+        # A stray ~/.midway must NOT force the amazon profile by default: the
+        # public edition has no companion to compose, so forcing amazon would
+        # brick every command at boot. The identity heuristic is opt-in only.
         monkeypatch.delenv("KIROCLAW_PROFILE", raising=False)
+        monkeypatch.delenv("KIROCLAW_MIDWAY_PROFILE_PROBE", raising=False)
+        monkeypatch.setattr("kiro_claw.platform.profile.Path.home", lambda: _FakeHome(True))
+        assert resolve_profile(cfg, entry_points=[]) == PROFILE_STANDALONE
+
+    def test_midway_stat_triggers_amazon_when_probe_opted_in(
+        self, cfg: KiroClawConfig, monkeypatch
+    ) -> None:
+        # With the opt-in set (the companion's managed launcher), a ~/.midway
+        # host with no companion resolves amazon so discovery fails closed
+        # (rather than running open defaults).
+        monkeypatch.delenv("KIROCLAW_PROFILE", raising=False)
+        monkeypatch.setenv("KIROCLAW_MIDWAY_PROFILE_PROBE", "1")
         monkeypatch.setattr("kiro_claw.platform.profile.Path.home", lambda: _FakeHome(True))
         assert resolve_profile(cfg, entry_points=[]) == PROFILE_AMAZON
 
     def test_no_signals_is_standalone(self, cfg: KiroClawConfig, monkeypatch) -> None:
         monkeypatch.delenv("KIROCLAW_PROFILE", raising=False)
+        monkeypatch.setenv("KIROCLAW_MIDWAY_PROFILE_PROBE", "1")
         monkeypatch.setattr("kiro_claw.platform.profile.Path.home", lambda: _FakeHome(False))
         assert resolve_profile(cfg, entry_points=[]) == PROFILE_STANDALONE
 

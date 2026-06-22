@@ -120,17 +120,16 @@ async def test_text_file_served_when_clean(tmp_path, mock_sel):
 @pytest.mark.asyncio
 async def test_text_file_redacted_blocks_download(tmp_path, mock_sel):
     """If text content trips the redaction pass, the download is aborted —
-    matches the api_outbox_download policy. The handler runs both
-    redact_exfiltration_urls() and redact_credentials() per the
-    security-controls rule; this test forces the credential pass to
-    mutate the text so the abort path is exercised regardless of the
-    rest of the redaction pipeline.
+    matches the api_outbox_download policy. The handler routes content through
+    the context-aware redact() shim (which runs both the exfil-URL and
+    credential passes, plus a loaded companion's extra regexes); this test
+    forces redact() to mutate the text so the abort path is exercised.
     """
     f = tmp_path / "leaky.txt"
     f.write_text("ok body")
-    redact_path = "kiro_claw.dashboard.handlers.files.redact_credentials"
+    redact_path = "kiro_claw.dashboard.handlers.files.redact"
     with patch("kiro_claw.dashboard.handlers._validate_dashboard_path", return_value=str(f)), \
-            patch(redact_path, return_value=("ok body REDACTED", 1)):
+            patch(redact_path, return_value="ok body REDACTED"):
         async with TestClient(TestServer(_make_app())) as client:
             resp = await client.get(f"/api/file-download?path={f}")
             assert resp.status == 400

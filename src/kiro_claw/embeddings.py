@@ -215,9 +215,16 @@ class EmbeddingClient:
         # ``cfg.memory.embedding_model``) always wins.  The Amazon companion
         # supplies its internal model + remote endpoint.
         model, ctx_endpoint = self._resolve_model_endpoint(model)
-        if ctx_endpoint and url == _DEFAULT_URL:
+        # Only adopt a context endpoint that is a non-empty string AND only when
+        # the caller did not pin a non-default url.  ``str.strip()`` guards the
+        # empty-string-treated-as-None footgun (an EmbeddingSource returning ""
+        # must mean "no endpoint", not "remote endpoint ''").  A context-supplied
+        # endpoint is trusted-by-edition (the companion vouches for its own
+        # internal host), so it implies allow_remote — this is the edition trust
+        # boundary, not a caller override of a security gate.
+        if isinstance(ctx_endpoint, str) and ctx_endpoint.strip() and url == _DEFAULT_URL:
             url = ctx_endpoint
-            allow_remote = True  # a context-supplied endpoint is trusted-by-edition
+            allow_remote = True
         _validate_url(url, allow_remote=allow_remote)
         self._url = url.rstrip("/")
         self.dim = dim
@@ -944,8 +951,21 @@ def make_sync_embed_fn(
     constant for size math). Failures (None) are not cached so transient
     errors are retried. Cache resets when a new callable is created (embedding
     disable/re-enable or gateway restart).
+
+    Model + endpoint + signing are sourced from the active PlatformContext's
+    EmbeddingSource — the SAME wiring the async ``EmbeddingClient`` uses — so the
+    sync vector-memory path does not diverge by edition.  The Default adapter
+    returns ``_OLLAMA_MODEL``, a ``None`` endpoint, and ``None`` signing, so a
+    standalone process is byte-for-byte today's local Ollama client (the
+    ``auth=="aws_sigv4"`` legacy fallback is preserved below).  The Amazon
+    companion supplies its internal model, remote endpoint, and SigV4 signer.
     """
 
+    # Resolve model + endpoint through the context (re-using the async client's
+    # atomic resolver), then anchor the embed URL on the resolved endpoint.
+    model, ctx_endpoint = EmbeddingClient._resolve_model_endpoint(model if model else None)
+    if ctx_endpoint and url == _DEFAULT_URL:
+        url = ctx_endpoint
     embed_url = f"{url.rstrip('/')}/api/embed"
 
     if auth not in _VALID_AUTH_SCHEMES:
@@ -967,7 +987,19 @@ def make_sync_embed_fn(
         try:
             body = json.dumps({"model": model, "input": [text]}).encode()
             headers = {"Content-Type": "application/json"}
-            if auth == "aws_sigv4":
+            # Sign through the context first (companion SigV4 signer); the
+            # Default returns None so standalone falls through to the legacy
+            # ``aws_sigv4`` path unchanged.
+            ctx_signed = safe_context_call(
+                lambda: current_context().embeddings.sign_request(
+                    "POST", embed_url, dict(headers), body
+                ),
+                fallback=None,
+                log_message="sync embeddings sign_request via context failed",
+            )
+            if ctx_signed is not None:
+                headers = ctx_signed
+            elif auth == "aws_sigv4":
                 signed = _sigv4_sign("POST", embed_url, headers, body)
                 if signed is None:
                     raise _EmbedFailed

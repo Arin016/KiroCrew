@@ -1327,8 +1327,7 @@ async def _fetch_git_blob(repo: str, ref: str, file_path: str, cache_path: Path)
     fallback) when no URL is resolvable or anything goes wrong.
     """
     from kiro_claw.apps.registry import (
-        _clone_sandbox_mode,
-        _configured_registry_hosts,
+        _context_clone_sandbox_mode,
         minimal_env,
     )
     from kiro_claw.sandbox import wrap_argv
@@ -1354,8 +1353,11 @@ async def _fetch_git_blob(repo: str, ref: str, file_path: str, cache_path: Path)
             git_url,
             tmp_root,
         ]
+        # Route through the context-aware clone-sandbox decision (same as the
+        # registry.py clone sites) so a companion's extended trusted-host set
+        # applies here too; standalone resolves to the same bare decision.
         sandboxed_cmd, _cleanup = wrap_argv(
-            clone_cmd, mode=_clone_sandbox_mode(git_url, _configured_registry_hosts())
+            clone_cmd, mode=_context_clone_sandbox_mode(git_url)
         )
         proc = await asyncio.create_subprocess_exec(
             *sandboxed_cmd,

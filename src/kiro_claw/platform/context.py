@@ -123,13 +123,23 @@ def current_context() -> PlatformContext:
 
     A lazy default keeps import-time and test call sites working even when boot
     has not run (e.g. a unit test that imports ``security`` directly).  Normally
-    boot installs the real context via :func:`set_context`.
+    boot installs the real context via :func:`set_context` at process start, so
+    the lazy path runs at most once before that.
+
+    Cost / ordering note: while ``_ACTIVE`` is None the lazy path loads config +
+    resolves the profile (a ``~/.midway`` stat).  On the STANDALONE happy path it
+    runs once and memoizes into ``_ACTIVE``, so subsequent hot-path callers
+    (``hooks.on_tool_call``, ``redact_via_context``) pay only an attribute read.
+    A NON-standalone profile re-raises every call (it never caches a fail-open
+    state).  Callers that drive a process/worker without ``boot_platform`` should
+    install a context first to avoid the unbooted resolution; the lazy default is
+    a fallback, not the intended boot path.
 
     Fail-closed guard: the lazy default is only safe when the host actually
     resolves to the standalone profile.  If the profile resolves to a
-    non-standalone edition (e.g. an Amazon host with ``~/.midway`` or
-    ``KIROCLAW_PROFILE=amazon``) but no context was installed — meaning boot
-    failed/was-skipped and a caller would otherwise get open-source defaults
+    non-standalone edition (e.g. an Amazon host with the opt-in ``~/.midway``
+    probe or ``KIROCLAW_PROFILE=amazon``) but no context was installed — meaning
+    boot failed/was-skipped and a caller would otherwise get open-source defaults
     with no security overlay or credential redaction — refuse to compose and
     raise :class:`PlatformCompositionError`.  Defense-in-depth so a future
     swallowing caller cannot reintroduce the silent fail-open.
@@ -202,3 +212,41 @@ def safe_context_call(
         if log_message is not None:
             _logger.debug(log_message, exc_info=True)
         return fallback
+
+
+def redact_via_context(text: str) -> str:
+    """Redact credentials/exfil from *text* through the active PlatformContext.
+
+    The single, canonical credential-redaction shim every egress site should
+    import — instead of hand-writing the ``try current_context().credentials
+    .redact / except PlatformCompositionError: raise / except Exception:
+    fallback`` idiom (the bug that previously recurred in several copies).
+
+    Routes through ``current_context().credentials.redact`` so a loaded Amazon
+    companion's extra credential/cookie regexes apply.  The Default
+    ``CredentialPolicy.redact`` delegates to ``security.redact``, so a standalone
+    process gets byte-for-byte today's redaction.  Recursion-safe: the Default
+    delegates to the bare ``security.redact``, which never calls back into the
+    context — only *callers* route through this shim.
+
+    Fail-closed: a :class:`PlatformCompositionError` (a non-standalone host that
+    could not compose its companion) is re-raised, never swallowed, so such a
+    host does NOT silently downgrade redaction to the OSS baseline.  Any other
+    (transient) adapter failure degrades to the bare ``security.redact`` so the
+    security pass never silently disappears.
+
+    No logging on the degrade path: this shim runs inside stdio MCP servers
+    (``mcp_core`` / ``mcp_cron``) whose stray writes would corrupt the JSON-RPC
+    stream.
+    """
+    # Deferred import: keep ``security`` (which pulls the redaction regex stack)
+    # off the platform module-load path; only the fallback path needs it, and
+    # the happy path never imports it.
+    try:
+        return current_context().credentials.redact(text)
+    except PlatformCompositionError:
+        raise
+    except Exception:
+        from kiro_claw.security import redact as _security_redact
+
+        return _security_redact(text)

@@ -46,13 +46,16 @@ class DefaultAgentRuntime:
         return dict(agent._MANAGED_MCP_SERVERS)
 
     def run_first_run_setup(self) -> None:
-        # KiroClaw delta: ``agent.py`` has no ``run_first_run_setup`` symbol
-        # (the KiroClaw reference delegates to ``agent.run_first_run_setup()``;
-        # KiroClaw performs first-run wiring inline along its install path).
-        # The public Default is therefore an explicit no-op rather than a call
-        # into a missing function — the Amazon companion supplies the real
-        # toolbox / Bedrock first-run setup when it overrides this adapter.
-        return None
+        # Delegate to the real ``agent.run_first_run_setup`` so that IF this
+        # NOT-YET-WIRED seam is ever consumed, the standalone Default reproduces
+        # today's first-run wiring (PATH shim + one-time stale managed-MCP purge)
+        # rather than silently no-op'ing.  Today nothing reads this adapter — the
+        # live path calls ``agent.run_first_run_setup()`` directly from the
+        # gateway boot — so this is inert; the Amazon companion overrides it to
+        # add internal first-run setup on top.
+        from kiro_claw import agent  # circular import: agent imports platform
+
+        agent.run_first_run_setup()
 
 
 class DefaultSandboxPolicy:
@@ -142,15 +145,14 @@ class DefaultMcpToolingProvider:
 
 
 class DefaultAppRegistryPolicy:
-    """Today's KiroClaw trusted-host set + clone-sandbox-mode decision.
+    """Today's public trusted-host set + clone-sandbox-mode decision.
 
-    KiroClaw delta: KiroClaw's ``apps/registry.py`` allows a single *internal*
-    GitFarm host (``_ALLOWED_GIT_HOST = "ssh://git.amazon.com/pkg/"``) and ships
-    no public-forge set — so the KiroClaw Default encodes KiroClaw's CURRENT
-    (Amazon-tinted) behavior: the internal host is trusted by default.  This is
-    correct for the authoring home: in KiroClaw the Default == full internal
-    behavior, and the de-amazon content sync strips it down to the public
-    baseline in the kiro_claw edition (where the Amazon companion re-adds it).
+    Delegates to ``apps/registry.py._PUBLIC_GIT_HOSTS`` — the public-forge set
+    (github / gitlab / bitbucket / sr.ht / codeberg), with NO internal host
+    trusted.  A clone from any host outside that set runs ``strict`` sandbox
+    mode.  The Amazon companion's ``AmazonAppRegistryPolicy`` overrides
+    ``public_git_hosts()`` to add the internal git hosts so its registry clones
+    are trusted; the public Default never trusts an internal host.
     """
 
     def public_git_hosts(self) -> "frozenset[str]":

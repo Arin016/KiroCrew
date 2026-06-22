@@ -355,13 +355,13 @@ class TestOutboxNotifyRedaction:
         wav.write_bytes(b"\x00" * 100)
         state, slot = _make_state_with_slot()
 
+        # Content egress is routed through the single context-aware redact()
+        # shim (which runs both the exfil-URL and credential passes and applies
+        # a loaded companion's extra regexes). Patch that one shim.
         with patch(
-            "kiro_claw.dashboard.handlers.files.redact_exfiltration_urls",
-            side_effect=lambda s: (s.replace("http://evil.com", "[REDACTED_URL]"), ["http://evil.com"]),
-        ) as mock_redact_urls, patch(
-            "kiro_claw.dashboard.handlers.files.redact_credentials",
-            side_effect=lambda s: (s, []),
-        ) as mock_redact_creds:
+            "kiro_claw.dashboard.handlers.files.redact",
+            side_effect=lambda s: s.replace("http://evil.com", "[REDACTED_URL]"),
+        ) as mock_redact:
             async with TestClient(TestServer(_make_app(state))) as client:
                 resp = await client.post("/api/outbox/notify", json={
                     "path": str(wav),
@@ -370,8 +370,7 @@ class TestOutboxNotifyRedaction:
                     "size": 100,
                 })
                 assert resp.status == 200
-                mock_redact_urls.assert_called_once()
-                mock_redact_creds.assert_called_once()
+                assert mock_redact.called
                 # Both append and broadcast must receive redacted content
                 append_content = slot.append.call_args[0][1]
                 assert "http://evil.com" not in append_content

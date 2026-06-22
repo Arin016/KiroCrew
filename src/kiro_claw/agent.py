@@ -43,41 +43,15 @@ from kiro_claw.aim_agents import installed_kiro_packages_missing_from_cc
 from kiro_claw.config import KiroClawConfig
 from kiro_claw.config import config_path as _mc_config_path
 from kiro_claw.mcp_utils import mcp_server_alias
-from kiro_claw.platform import PlatformCompositionError, current_context, safe_context_call
+from kiro_claw.platform import current_context, safe_context_call
+from kiro_claw.platform import redact_via_context as redact
 from kiro_claw.security import is_sensitive_path
-from kiro_claw.security import redact as _security_redact
 from kiro_claw.sel import (  # circular import: sel imports config which imports agent
     SecurityEvent,
     sel,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def redact(text: str) -> str:
-    """Redact credentials/exfil from *text* via the active PlatformContext.
-
-    Routes through ``current_context().credentials.redact`` so the Amazon
-    companion's extra credential regexes apply when loaded.  The Default
-    ``CredentialPolicy.redact`` delegates to ``security.redact`` — so a
-    standalone process is byte-for-byte today's redaction.  Recursion-safe:
-    the Default delegates to ``security.redact`` (imported here as
-    ``_security_redact``), which never calls back into the context; only the
-    SEL-audit *callers* below were switched to this context-routed shim.  A
-    genuinely-unexpected context failure falls back to the bare
-    ``security.redact`` so the pass never silently disappears — but the
-    fail-closed ``PlatformCompositionError`` is re-raised, never swallowed, so a
-    non-standalone host that cannot compose its context does NOT silently
-    downgrade to OSS-baseline redaction (which would drop the companion's
-    internal-token regexes).
-    """
-    try:
-        return current_context().credentials.redact(text)
-    except Exception as exc:
-        if isinstance(exc, PlatformCompositionError):
-            raise
-        logger.debug("credentials.redact via context failed; using security.redact", exc_info=True)
-        return _security_redact(text)
 
 
 def _atomic_json_write(path: Path, data: dict) -> None:

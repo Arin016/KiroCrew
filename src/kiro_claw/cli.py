@@ -1116,12 +1116,19 @@ Examples:
 
     # ── Platform context boot (CPP seam) ──
     # Resolve + install the PlatformContext ONCE, before any subcommand spins up
-    # services.  Standalone (no companion, no KIROCLAW_PROFILE, no ~/.midway)
-    # composes the all-defaults context, so behavior is identical to today;
-    # ``boot_platform`` is idempotent so a later ``run_gateway`` boot is a no-op.
-    # Failure to compose a non-standalone profile is fail-closed (raises), but a
-    # standalone boot never raises — keep the call defensive so a corrupt config
-    # cannot break the CLI for the standalone edition.
+    # services.  Standalone (no companion, no KIROCLAW_PROFILE) composes the
+    # all-defaults context, so behavior is identical to today; ``boot_platform``
+    # is idempotent so a later ``run_gateway`` boot is a no-op.  Failure to
+    # compose a non-standalone profile is fail-closed (raises), but a standalone
+    # boot never raises — keep the call defensive so a corrupt config cannot
+    # break the CLI for the standalone edition.
+    #
+    # ``doctor`` is exempt from the fail-closed re-raise: it is the read-only
+    # triage command whose whole job is to diagnose a broken setup (including a
+    # failed composition), so it must RUN rather than abort with a traceback —
+    # otherwise the one command that could explain the failure is also bricked
+    # by it.  It does no agent/credential work, so running it without an
+    # installed context is safe; _doctor() reports the composition failure.
     try:
         boot_platform(KiroClawConfig.load())
     except Exception as exc:
@@ -1131,10 +1138,21 @@ Examples:
         # mcp-core/mcp-cron/etc. with no security overlay or credential
         # redaction. PluginAdmissionError subclasses PlatformCompositionError.
         if isinstance(exc, PlatformCompositionError):
-            raise
-        # Standalone boot never raises; only genuinely-unexpected errors reach
-        # here, and the standalone edition must not break on a corrupt config.
-        logging.getLogger("kiro_claw").debug("platform boot deferred", exc_info=True)
+            if args.command == "doctor":
+                logging.getLogger("kiro_claw").debug(
+                    "platform composition failed; doctor will report it", exc_info=True
+                )
+                _platform_boot_error = exc
+            else:
+                raise
+        else:
+            # Standalone boot never raises; only genuinely-unexpected errors
+            # reach here, and the standalone edition must not break on a corrupt
+            # config.
+            logging.getLogger("kiro_claw").debug("platform boot deferred", exc_info=True)
+            _platform_boot_error = None
+    else:
+        _platform_boot_error = None
 
     if args.command == "chat":
         if getattr(args, "tui", False):
@@ -1158,7 +1176,7 @@ Examples:
             clean=getattr(args, "clean", False),
         )
     elif args.command == "doctor":
-        _doctor()
+        _doctor(platform_boot_error=_platform_boot_error)
     elif args.command == "manifest":
         _manifest(
             alias=getattr(args, "alias", None),

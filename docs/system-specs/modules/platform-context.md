@@ -79,15 +79,20 @@ installs the context. `bootstrap_context`:
 `resolve_profile(cfg, *, entry_points)` precedence (first match wins):
 1. `KIROCLAW_PROFILE` env (`standalone` | `amazon`; unknown → standalone).
 2. Non-empty `kiroclaw.plugins` entry-point group (companion installed).
-3. Identity signal: a present `~/.midway` directory (a cheap stat, no subprocess).
+3. Identity signal: a present `~/.midway` directory (a cheap stat, no
+   subprocess) — **only when the opt-in `KIROCLAW_MIDWAY_PROFILE_PROBE` env var
+   is truthy**. OFF by default so a stray `~/.midway` left by some other tool
+   cannot force the public edition into the `amazon` profile (which has no
+   companion to compose and would fail-closed at boot, bricking every command).
+   The companion's managed launcher sets `KIROCLAW_MIDWAY_PROFILE_PROBE=1`.
 4. Otherwise `standalone`.
 
 The profile is a **load trigger, not a security decision**: capability comes
 from the installed companion, so a spoofed signal at worst loads a stricter
 posture on a host that has nothing to enforce it. The core does NOT spawn a
-`whoami` subprocess — entry-point presence + the `~/.midway` stat cover the
-trigger cases; the companion's own identity provider refines the principal once
-loaded.
+`whoami` subprocess — entry-point presence + the opt-in `~/.midway` stat cover
+the trigger cases; the companion's own identity provider refines the principal
+once loaded.
 
 ## Fail-closed discovery
 
@@ -212,19 +217,30 @@ delegates to that same global. Wired sites:
 - `sandbox.py` — `_build_launcher_script` / `_build_seatbelt_profile` source the
   sensitive-dir lists from `current_context().sandbox` (the `.aws`-exclusion at
   the cc branch is preserved).
-- `hooks.py` — the deny check routes through `current_context().security.is_denied`.
+- `hooks.py` — the deny check routes through `current_context().security.is_denied`;
+  the kiro-hooks egress (`dashboard/handlers/hooks.py`) scrubs command/matcher
+  through the shared `redact_via_context` shim.
+- Credential redaction — all egress scrubs route through the single
+  `kiro_claw.platform.redact_via_context` shim (the one canonical
+  fail-closed-aware shim; modules import it as `redact`). Covers: `agent.py`
+  SEL-audit callers, `mcp_core.py` chat-history/spawn output, `mcp_cron.py`
+  deny-reason + script-vet + timezone messages, and `dashboard/handlers/files.py`
+  file-content egress (slot append, file-watch, file_read, download gate) as well
+  as the filename/path/description gates. Standalone is byte-for-byte the prior
+  exfil-then-credential two-pass (the Default `CredentialPolicy.redact` delegates
+  to `security.redact`); a loaded companion adds its internal-token regexes
+  uniformly across every egress surface.
 - `agent.py` — `current_context().mcp_tooling.extra_mcp_servers()` merged
-  additively (`setdefault`) into the agent config build + dynamic refresh; the
-  SEL-audit `redact` callers route through `current_context().credentials.redact`.
-- `mcp_core.py` — `redact` callers route through `current_context().credentials.redact`.
+  additively (`setdefault`) into the agent config build + dynamic refresh.
 - `slack/events.py` / `slack/handler.py` / `dashboard/handlers_system.py` —
   Slack enterprise gate + Midway status route through `slack_gate` / `identity`.
 - `apps/manager.py` — builtin discovery + orphan detection merge
   `current_context().apps_loader` sources.
-- `apps/registry.py` — clone-sandbox-mode decision routes through
-  `current_context().registry` (`_context_clone_sandbox_mode`).
+- `apps/registry.py` / `apps/routes.py` — clone-sandbox-mode decision routes
+  through `current_context().registry` (`_context_clone_sandbox_mode`).
 - `embeddings.py` — model/endpoint/sign_request source from
-  `current_context().embeddings` (explicit caller args win).
+  `current_context().embeddings` (explicit caller args win); BOTH the async
+  `EmbeddingClient` and the sync `make_sync_embed_fn` vector-memory path.
 - `dashboard/server.py` — telemetry `record_event` at boot; tunnel enable-gate
   ORs in `current_context().tunnel.enabled()`.
 - `dashboard/handlers_system.py` — `frontend_rum_config()` added to the status
@@ -239,7 +255,9 @@ delegates to that same global. Wired sites:
 - `cli_doctor.py` — `package_manager` is **not** wired: the ollama-install
   diagnostic is inline step-by-step logic, not a single plan-resolution site
   (TODO; Default `install_plan` returns `[]` = today's inline behavior).
-- `apps/routes.py` — the clone-sandbox-mode decision is routed through the
-  registry-side `_context_clone_sandbox_mode` (the single wired clone decision);
-  the other `wrap_argv` sites run local lifecycle scripts, so there is no
-  per-URL clone-sandbox-mode decision to route through the context here.
+- `apps/routes.py` — `_fetch_git_blob`'s per-URL clone-sandbox-mode decision IS
+  wired: it routes through `_context_clone_sandbox_mode` (same as the
+  `apps/registry.py` clone sites), so a companion's extended trusted-host set
+  applies to registry-blob fetches too. The other `wrap_argv` sites run local
+  lifecycle scripts (no per-URL git host), so they have no clone decision to
+  route.

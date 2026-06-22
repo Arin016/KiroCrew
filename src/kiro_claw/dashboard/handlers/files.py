@@ -24,15 +24,10 @@ from aiohttp.multipart import BodyPartReader
 
 from kiro_claw.config.loader import KiroClawConfig, WorkspaceConfig
 from kiro_claw.dashboard.state import DashboardState
-from kiro_claw.platform import PlatformCompositionError, current_context
+from kiro_claw.platform import redact_via_context as redact
 from kiro_claw.security import (
     BINARY_MIME_ALLOWLIST,
     is_sensitive_path,
-)
-from kiro_claw.security import redact as _security_redact
-from kiro_claw.security import (
-    redact_credentials,
-    redact_exfiltration_urls,
 )
 from kiro_claw.slack.handler import is_tracked_channel
 from kiro_claw.validation import (
@@ -59,25 +54,6 @@ mimetypes.add_type(
 )
 
 _INLINE_DISPOSITION_PREFIXES = frozenset({"audio/", "video/", "image/", "application/pdf"})
-
-
-def redact(text: str) -> str:
-    """Redact credentials/exfil via the active PlatformContext.
-
-    Routes the file_send sensitivity gates through
-    ``current_context().credentials.redact`` so the companion's extra
-    credential regexes apply uniformly across the dashboard file surfaces (the
-    same overlay-aware gate ``mcp_core`` uses for its file_send path). The
-    Default ``CredentialPolicy.redact`` delegates to ``security.redact`` so a
-    standalone process is byte-for-byte today's redaction. The fail-closed
-    ``PlatformCompositionError`` is re-raised, never swallowed.
-    """
-    try:
-        return current_context().credentials.redact(text)
-    except Exception as exc:
-        if isinstance(exc, PlatformCompositionError):
-            raise
-        return _security_redact(text)
 
 
 logger = logging.getLogger(__name__)
@@ -263,9 +239,10 @@ async def api_outbox_notify(request: web.Request) -> web.Response:
                 key=lambda s: s.messages[-1]["ts"] if s.messages else "",
             )
         if active and (active.messages or header_targeted):
-            redacted_file_json = json.dumps(file_data)
-            redacted_file_json, _ = redact_exfiltration_urls(redacted_file_json)
-            redacted_file_json, _ = redact_credentials(redacted_file_json)
+            # Route through the context-aware redact() so a loaded companion's
+            # extra credential regexes scrub the broadcast file JSON too — the
+            # same overlay-aware pass the filename/path/description gates use.
+            redacted_file_json = redact(json.dumps(file_data))
             active.append("file", redacted_file_json)
             # Only broadcast explicitly when _has_reader suppresses append's
             # built-in _on_message callback. Avoids duplicate file cards.
@@ -1322,8 +1299,7 @@ async def api_file_watch(request: web.Request) -> web.StreamResponse:
                     break
                 try:
                     content = await asyncio.to_thread(_read_file, current_resolved, read_cap)
-                    content, _ = redact_exfiltration_urls(content)
-                    content, _ = redact_credentials(content)
+                    content = redact(content)
                 except Exception:
                     logger.warning("file-watch read error for %s", path, exc_info=True)
                     await asyncio.sleep(poll_interval)
@@ -1412,8 +1388,7 @@ async def api_file_read(request: web.Request) -> web.Response:
             content = f.read(read_cap + 1)
         truncated = len(content) > read_cap
         content = content[:read_cap]
-        content, _ = redact_exfiltration_urls(content)
-        content, _ = redact_credentials(content)
+        content = redact(content)
         _sel().log_tool_invocation(
             session_key="dashboard", tool_name="file_read", outcome="success", resources=path
         )
@@ -1550,11 +1525,11 @@ async def api_file_download(request: web.Request) -> web.Response:
         )
         return web.json_response({"error": "cannot read file"}, status=500)
 
-    # Defense in depth: scan content for credentials / exfil URLs.
-    # The security-controls rule requires BOTH redact_exfiltration_urls() AND
-    # redact_credentials() before content reaches an external surface. Order
-    # matters: exfil URLs first so any embedded credentials in URL fragments
-    # are caught before the bare-credential pass runs against the URL fragment.
+    # Defense in depth: scan content for credentials / exfil URLs via the
+    # context-aware redact() shim, which runs BOTH the exfil-URL and credential
+    # passes (exfil URLs first so embedded credentials in URL fragments are
+    # caught) and additionally applies a loaded companion's extra regexes before
+    # content reaches an external surface.
     #
     # Mostly-binary files can still hide credential patterns in their
     # decodable runs (e.g. an ASCII-art `AKIA...` with one stray non-UTF-8
@@ -1565,8 +1540,10 @@ async def api_file_download(request: web.Request) -> web.Response:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         text = data.decode("utf-8", errors="replace")
-    scrubbed, _exfil_count = redact_exfiltration_urls(text)
-    scrubbed, _cred_count = redact_credentials(scrubbed)
+    # Route through the context-aware redact() so a loaded companion's extra
+    # credential regexes also abort the download; the scrubbed != text diff is
+    # the gate (no count needed).
+    scrubbed = redact(text)
     if scrubbed != text:
         _sel().log_tool_invocation(
             session_key="dashboard", tool_name="file_download",

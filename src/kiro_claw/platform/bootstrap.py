@@ -11,6 +11,7 @@ ADD-only security floor.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import TYPE_CHECKING
 
 from kiro_claw.platform.context import (
@@ -53,6 +54,14 @@ logger = logging.getLogger(__name__)
 # first, swapping the lazy default for the properly-resolved context.
 _BOOTED = False
 
+# Guards the check-then-act on ``_BOOTED`` / ``set_context`` so two threads (or a
+# thread racing the lazy ``current_context`` first-touch) cannot both run
+# ``bootstrap_context`` — which would re-resolve the profile, reload the
+# admission policy, re-run the companion ``ep.load()``, and call
+# ``register_acp_backends`` twice.  Re-entrant because ``bootstrap_context`` and
+# the lazy default both ultimately set the same global context.
+_BOOT_LOCK = threading.RLock()
+
 
 def boot_platform(cfg: "KiroClawConfig") -> PlatformContext:
     """Idempotently bootstrap + install the platform context (call at startup).
@@ -61,20 +70,23 @@ def boot_platform(cfg: "KiroClawConfig") -> PlatformContext:
     more than once: only the first call resolves the profile and installs the
     context; later calls return the already-installed context unchanged.  This
     guards the case where both ``cli.main`` and ``run_gateway`` would otherwise
-    each call ``bootstrap_context`` in one process.
+    each call ``bootstrap_context`` in one process.  The lock makes the
+    check-then-act atomic so concurrent first-boots compose exactly once.
     """
     global _BOOTED
-    if _BOOTED:
-        return current_context()
-    ctx = bootstrap_context(cfg)
-    _BOOTED = True
-    return ctx
+    with _BOOT_LOCK:
+        if _BOOTED:
+            return current_context()
+        ctx = bootstrap_context(cfg)
+        _BOOTED = True
+        return ctx
 
 
 def _reset_boot_state() -> None:
     """Test helper — clear the one-shot boot guard so a test can boot again."""
     global _BOOTED
-    _BOOTED = False
+    with _BOOT_LOCK:
+        _BOOTED = False
 
 
 def build_default_context(

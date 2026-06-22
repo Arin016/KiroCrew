@@ -98,6 +98,38 @@ class TestKillSwitch:
         assert not decision.allowed
         assert "kill-switch" in decision.reason
 
+    def test_ban_is_case_and_whitespace_insensitive(self, patch_manifest):
+        # A ban must not be evadable by a name-case or trailing-whitespace
+        # mismatch between the policy and the manifest/entry-point name.
+        patch_manifest(PluginManifest(name="Amazon-Evil", publisher="x", version="1"))
+        ep = _FakeEntryPoint(name="Amazon-Evil")
+        policy = AdmissionPolicy(mode=MODE_OPEN, banned=["amazon-evil "])
+        decision = evaluate_admission(ep, policy)
+        assert not decision.allowed
+        assert "banned" in decision.reason
+
+
+class TestManifestParsing:
+    def test_string_capability_value_is_not_exploded(self):
+        # A capability value given as a string (not a list) must become a
+        # single-element list, NOT be exploded into per-character entries by
+        # ``list(v)`` — which would corrupt both the ceiling check and the
+        # signed payload.
+        m = PluginManifest.from_dict(
+            {"name": "p", "capabilities": {"egress": "*.amazon.com"}}
+        )
+        assert m.capabilities["egress"] == ["*.amazon.com"]
+
+    def test_non_list_non_str_capability_value_drops_to_empty(self):
+        m = PluginManifest.from_dict({"name": "p", "capabilities": {"egress": 42}})
+        assert m.capabilities["egress"] == []
+
+    def test_policy_string_capability_ceiling_not_exploded(self):
+        p = AdmissionPolicy.from_dict(
+            {"mode": "enforce", "capability_ceiling": {"egress": "*.amazon.com"}}
+        )
+        assert p.capability_ceiling["egress"] == ["*.amazon.com"]
+
 
 class TestAllowlist:
     def test_not_on_allowlist_rejected(self, patch_manifest):

@@ -30,13 +30,12 @@ from kiro_claw.cron_trigger import trigger_cron_job
 from kiro_claw.mcp_core import _resolve_session_key
 from kiro_claw.mcp_shared import call_tool_with_logging, run_mcp_stdio_loop
 from kiro_claw.platform import current_context
+from kiro_claw.platform import redact_via_context as redact
 from kiro_claw.sandbox import _AGENT_DENIED_ENV_KEYS
 from kiro_claw.security import (
     _SENSITIVE_HOME_DIRS,
     is_sensitive_bash_command,
     is_sensitive_path,
-    redact_credentials,
-    redact_exfiltration_urls,
     scan_exfiltration_urls,
 )
 from kiro_claw.sel import sel
@@ -141,7 +140,10 @@ def _vet_shell_command(command: str) -> str | None:
     # pattern would otherwise be silently bypassed here.
     reason = current_context().security.is_denied(command) or is_sensitive_bash_command(command)
     if reason:
-        safe_reason = redact_exfiltration_urls(redact_credentials(reason)[0])[0]
+        # Scrub the echoed reason through the SAME context the deny check used,
+        # so a companion-overlay-detected token does not leak in the message
+        # returned to the model.
+        safe_reason = redact(reason)
         return f"Error: cron command blocked by security policy: {safe_reason}"
     if _CRON_CRED_PATH_RE.search(command):
         return (
@@ -153,7 +155,7 @@ def _vet_shell_command(command: str) -> str | None:
         return "Error: cron command blocked: references a protected secret environment variable"
     exfil = scan_exfiltration_urls(command)
     if exfil:
-        safe = redact_exfiltration_urls(redact_credentials("; ".join(exfil))[0])[0]
+        safe = redact("; ".join(exfil))
         return f"Error: cron command blocked: possible credential exfiltration ({safe})"
     return None
 
@@ -185,11 +187,11 @@ def _vet_script_contents(text: str) -> str | None:
         return "Error: cron script blocked: references a protected secret environment variable"
     reason = is_sensitive_bash_command(text)
     if reason:
-        safe_reason = redact_exfiltration_urls(redact_credentials(reason)[0])[0]
+        safe_reason = redact(reason)
         return f"Error: cron script blocked by security policy: {safe_reason}"
     exfil = scan_exfiltration_urls(text)
     if exfil:
-        safe = redact_exfiltration_urls(redact_credentials("; ".join(exfil))[0])[0]
+        safe = redact("; ".join(exfil))
         return f"Error: cron script blocked: possible credential exfiltration ({safe})"
     return None
 
@@ -579,8 +581,12 @@ def _format_next_run(job: Any, now: float, local_tz: Any) -> str:
 
 
 def _sanitize(s: str) -> str:
-    """Redact credentials and exfiltration URLs from a string."""
-    return redact_credentials(redact_exfiltration_urls(s)[0])[0]
+    """Redact credentials and exfiltration URLs from a string.
+
+    Routes through the context-aware ``redact`` shim so a loaded companion's
+    extra regexes apply; standalone is byte-for-byte today's two-pass.
+    """
+    return redact(s)
 
 
 def _job_kind(job: Any) -> str:
@@ -834,7 +840,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             job.skip_dates = skip_dates
         if tz:
             if tz not in available_timezones():
-                safe_tz = redact_credentials(redact_exfiltration_urls(tz)[0])[0]
+                safe_tz = redact(tz)
                 return f"Error: invalid timezone: {safe_tz!r}"
             job.timezone = tz
         # persistent_session: only override the default (True) when explicitly provided.
@@ -898,7 +904,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         if "timezone" in args:
             tz_val = args["timezone"]
             if tz_val and tz_val not in available_timezones():
-                safe_tz = redact_credentials(redact_exfiltration_urls(tz_val)[0])[0]
+                safe_tz = redact(tz_val)
                 return f"Error: invalid timezone: {safe_tz!r}"
             kwargs["timezone"] = tz_val
         if "strict_schedule" in args:

@@ -109,6 +109,36 @@ class TestDoctor:
         ):
             _doctor()
 
+    def test_doctor_reports_platform_boot_error_without_crashing(self, tmp_path, capsys):
+        """A PlatformCompositionError from boot must be REPORTED by the doctor,
+        not crash it — the doctor is the tool that diagnoses a broken setup, so
+        it has to survive the very failure it explains."""
+        from kiro_claw.platform import PlatformCompositionError
+
+        agent_file = tmp_path / "kiroclaw.json"
+        _healthy_agent_file(agent_file)
+        mock_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
+        boot_err = PlatformCompositionError(
+            "profile=amazon resolved no companion; set KIROCLAW_PROFILE=standalone"
+        )
+        with (
+            patch("kiro_claw.cli_doctor.shutil.which", side_effect=lambda b: f"/usr/local/bin/{b}"),
+            patch("kiro_claw.cli_doctor.KIRO_AGENTS_DIR", tmp_path),
+            patch("kiro_claw.cli_doctor.subprocess.run", return_value=mock_run),
+            patch("urllib.request.urlopen", side_effect=urllib.error.URLError("no gateway")),
+            patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
+            patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
+            patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
+        ):
+            # Must not raise — and must exit 1 since a composition failure is a
+            # blocking issue.
+            with pytest.raises(SystemExit) as exc:
+                _doctor(platform_boot_error=boot_err)
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "composition failed" in out
+        assert "KIROCLAW_PROFILE=standalone" in out
+
     def test_doctor_without_kiro(self, tmp_path):
         with (
             patch("kiro_claw.cli_doctor.shutil.which", return_value=None),

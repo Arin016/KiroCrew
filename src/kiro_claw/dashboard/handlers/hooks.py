@@ -48,7 +48,7 @@ async def api_hooks(request: web.Request) -> web.Response:
 async def api_kiro_hooks(request: web.Request) -> web.Response:
     """GET /api/kiro-hooks — read-only view of kiro-cli agent hooks from kiroclaw.json."""
     from kiro_claw.agent import _VALID_HOOK_EVENTS, KIRO_AGENTS_DIR, _shipped_defaults
-    from kiro_claw.security import redact
+    from kiro_claw.platform import redact_via_context as redact
 
     agent_cfg = KIRO_AGENTS_DIR / "kiroclaw.json"
     try:
@@ -75,7 +75,9 @@ async def api_kiro_hooks(request: web.Request) -> web.Response:
         for e in entries if isinstance(entries, list) else []:
             if isinstance(e, dict):
                 key = (event, e.get("command") or "", e.get("matcher") or "")
-                # redact() wraps redact_exfiltration_urls + redact_credentials
+                # Context-aware redact(): runs the exfil-URL + credential passes
+                # and applies a loaded companion's extra regexes (so an internal
+                # token in a hook command is scrubbed on this egress surface too).
                 tagged.append({
                     "command": redact(e.get("command") or ""),
                     "matcher": redact(e.get("matcher") or ""),

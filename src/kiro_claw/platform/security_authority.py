@@ -28,9 +28,22 @@ from typing import Protocol, Tuple, final, runtime_checkable
 from kiro_claw import security
 from kiro_claw.platform.context import PlatformCompositionError
 
-# The immutable baseline — the public core's always-on deny patterns.  Snapshot
+# The immutable baseline — the public core's always-on deny *patterns*.  Snapshot
 # as a tuple so it cannot be mutated in place.
+#
+# NOTE: this is the pattern-list portion of the floor only.  ``security.is_denied``
+# ALSO enforces deny rules that are NOT expressed as patterns here — most notably
+# the git-publish verb anchoring (``_is_git_publish``).  ``assert_security_floor``
+# therefore verifies BOTH that the pattern set is a superset of this baseline AND
+# that a representative git-publish command is still denied behaviorally, so the
+# floor check does not silently under-cover the non-pattern rules.
 BASELINE_DENY: Tuple[str, ...] = tuple(security.BUILTIN_DENY_PATTERNS)
+
+# A command the baseline ``security.is_denied`` MUST block via its (non-pattern)
+# git-publish verb anchoring.  Used as a behavioral floor probe so a weakened
+# authority cannot pass the floor check by leaving the pattern set intact while
+# defeating the git-publish rule.
+_GIT_PUBLISH_PROBE = "git push origin main"
 
 
 @runtime_checkable
@@ -115,4 +128,13 @@ def assert_security_floor(authority: object) -> None:
     if missing:
         raise PlatformCompositionError(
             f"security floor violated: overlay dropped baseline patterns {sorted(missing)}"
+        )
+    # Behavioral floor probe: the pattern superset above does not cover the
+    # non-pattern git-publish rule enforced inside ``security.is_denied``.  Verify
+    # the authority still denies a representative git-publish command so the floor
+    # check covers the full deny floor, not just the pattern list.
+    if authority.is_denied(_GIT_PUBLISH_PROBE) is None:
+        raise PlatformCompositionError(
+            "security floor violated: authority does not deny git-publish "
+            f"({_GIT_PUBLISH_PROBE!r}); the deny floor must block it."
         )

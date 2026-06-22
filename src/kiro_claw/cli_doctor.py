@@ -207,11 +207,35 @@ def _doctor_ollama_install(issues: list[str]) -> None:
         issues.append("ollama (unsupported platform)")
 
 
-def _doctor() -> None:
-    """Verify KiroClaw setup — check dependencies, config, credentials, connectivity."""
+def _doctor(platform_boot_error: "Exception | None" = None) -> None:
+    """Verify KiroClaw setup — check dependencies, config, credentials, connectivity.
+
+    ``platform_boot_error`` carries a :class:`PlatformCompositionError` from
+    ``cli.main`` when the platform context failed to compose (e.g. a profile
+    resolved to a non-standalone edition whose companion is missing).  The
+    doctor is deliberately allowed to run in that state — diagnosing a broken
+    setup is its job — and reports the failure here instead of aborting.
+    """
 
     print("KiroClaw Doctor 🐾\n")
     issues: list[str] = []
+
+    # ── Platform edition ──
+    # Report the composed profile, and surface a boot-composition failure as a
+    # blocking issue with the remediation hint rather than letting it abort the
+    # whole CLI before the doctor can run.
+    if platform_boot_error is not None:
+        print("Platform")
+        print(f"  edition:     ❌ composition failed: {platform_boot_error}")
+        issues.append(f"platform composition failed: {platform_boot_error}")
+    else:
+        try:
+            profile = current_context().profile
+            print("Platform")
+            print(f"  edition:     ✅ {profile}")
+        except Exception:
+            # Never let edition reporting itself break the doctor.
+            pass
 
     # ── Dependencies ──
     print("Dependencies")
