@@ -238,12 +238,22 @@ class TestCheckOriginLoopbackTrust:
     """check_origin tightened (CSE SEC-016): only the bound port and explicitly
     opted-in loopback ports are trusted — not every loopback port."""
 
-    def _make_request(self, origin: str, remote: str = "127.0.0.1", allowed=None) -> object:
-        """Create a minimal mock request with Origin header and allowed_origins."""
+    def _make_request(self, origin: str, remote: str = "127.0.0.1", allowed=None,
+                      host: str = "") -> object:
+        """Create a minimal mock request with Origin header and allowed_origins.
+
+        *host* sets the request ``Host`` header (used by the same-origin
+        loopback fallback — Mesh-1864).
+        """
         from unittest.mock import MagicMock
 
         request = MagicMock()
-        request.headers = {"Origin": origin} if origin else {}
+        headers = {}
+        if origin:
+            headers["Origin"] = origin
+        if host:
+            headers["Host"] = host
+        request.headers = headers
         request.remote = remote
         # Only allow port 8765 — simulates the default config
         if allowed is None:
@@ -290,6 +300,46 @@ class TestCheckOriginLoopbackTrust:
     def test_no_origin_non_loopback_remote_rejected(self) -> None:
         """No Origin header from non-loopback remote is rejected."""
         request = self._make_request("", remote="10.0.0.5")
+        assert check_origin(request) is False
+
+    # --- Mesh-1864: same-origin loopback fallback (embedded multi-instance iframe) ---
+
+    def test_same_origin_loopback_port_trusted(self) -> None:
+        """The embedded instance iframe is served at <host>:<tunnelPort> and opens
+        its WS to that same location.host, so Origin == Host. Trust it even though
+        the port is not in allowed_origins (Mesh-1864)."""
+        request = self._make_request(
+            "http://kiroclaw.localhost:7779",
+            host="kiroclaw.localhost:7779",
+        )
+        assert check_origin(request) is True
+
+    def test_same_origin_127_loopback_port_trusted(self) -> None:
+        request = self._make_request(
+            "http://127.0.0.1:8777", host="127.0.0.1:8777"
+        )
+        assert check_origin(request) is True
+
+    def test_origin_host_mismatch_rejected(self) -> None:
+        """SEC-016 boundary preserved: a malicious local page on an arbitrary port
+        sends its own Origin while the Host is the gateway's — they differ, so the
+        same-origin fallback must NOT trust it."""
+        request = self._make_request(
+            "http://localhost:9999", host="kiroclaw.localhost:7779"
+        )
+        assert check_origin(request) is False
+
+    def test_same_origin_non_loopback_not_trusted_by_fallback(self) -> None:
+        """The fallback is loopback-only: a public host with Origin == Host must
+        still go through the allowlist (not auto-trusted)."""
+        request = self._make_request(
+            "http://evil.com:7779", host="evil.com:7779"
+        )
+        assert check_origin(request) is False
+
+    def test_same_origin_missing_host_header_rejected(self) -> None:
+        """No Host header -> the same-origin fallback cannot confirm a match."""
+        request = self._make_request("http://localhost:8777")
         assert check_origin(request) is False
 
 

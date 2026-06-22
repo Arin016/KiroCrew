@@ -317,6 +317,22 @@ def check_origin(
     origin_base = "/".join(origin.split("/")[:3]) if "://" in origin else ""
     if origin_base in allowed:
         return True
+    # Same-origin loopback fallback (Mesh-1864): allow a loopback Origin when it
+    # matches the request's own Host, i.e. a genuine same-origin request. This
+    # is what the multi-instance embedded iframe produces — it is served at
+    # ``<host>:<tunnelPort>`` and opens its WebSocket to that very same
+    # ``location.host``, so Origin == Host. It does NOT reopen CSE SEC-016: a
+    # malicious local page on an arbitrary port sends its own Origin (e.g.
+    # ``localhost:9999``) while the Host is the gateway's port, so they differ
+    # and this branch rejects it. Browsers forbid scripts from forging either
+    # the Origin or Host header, so the equality is a sound CSRF boundary.
+    if origin_base:
+        parsed = urlparse(origin_base)
+        if is_loopback(parsed.hostname or ""):
+            req_host = request.headers.get("Host", "")
+            origin_hostport = origin_base.split("://", 1)[-1]
+            if req_host and origin_hostport == req_host:
+                return True
     # NOTE (CSE SEC-016): we deliberately do NOT blanket-trust every loopback
     # origin regardless of port. A browser always sends an Origin header, so a
     # malicious local web page on an arbitrary port would otherwise pass this

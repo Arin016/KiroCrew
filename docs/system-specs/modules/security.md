@@ -182,6 +182,14 @@ Centralized validation for all 12 MCP tool handlers (SDO-183):
 - `_check_ws_origin()` calls shared `check_origin(require=True)` before `ws.prepare()`
 - Reads `app["allowed_origins"]` (same set as CSRF middleware)
 - Rejects missing Origin (non-browser clients) and cross-origin requests
+- **Same-origin loopback fallback (Mesh-1864)**: when an `Origin` is not in the
+  allowed set, it is still accepted if its host is loopback **and** it exactly
+  equals the request `Host` header — a genuine same-origin request. This covers
+  the multi-instance embedded iframe, which is served at `<host>:<tunnelPort>`
+  and opens its WebSocket to that same `location.host` (so `Origin == Host`),
+  without reopening SEC-016: an arbitrary-port local page's `Origin` differs
+  from the gateway `Host`, and browsers forbid scripts from forging either
+  header. Non-loopback `Origin == Host` is **not** auto-trusted (still allowlist-only).
 
 ### Slack Owner Authorization
 
