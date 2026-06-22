@@ -165,7 +165,7 @@ class TestDoctor:
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
             patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
             patch("kiro_claw.cli_doctor.KiroClawConfig.load_credentials", return_value=slack_creds),
-            patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True) as mock_ve,
+            patch("kiro_claw.slack.enterprise.validate_enterprise", return_value=True) as mock_ve,
         ):
             _doctor()
         out = capsys.readouterr().out
@@ -191,7 +191,7 @@ class TestDoctor:
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
             patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
             patch("kiro_claw.cli_doctor.KiroClawConfig.load_credentials", return_value=slack_creds),
-            patch("kiro_claw.cli_doctor.validate_enterprise", return_value=False),
+            patch("kiro_claw.slack.enterprise.validate_enterprise", return_value=False),
         ):
             with pytest.raises(SystemExit) as exc:
                 _doctor()
@@ -2038,7 +2038,7 @@ class TestDoctorStt:
             patch("kiro_claw.cli_doctor._find_whisper", return_value="/usr/local/bin/whisper"),
             patch("kiro_claw.cli_doctor.ensure_ffmpeg_in_path"),
             patch("kiro_claw.cli_doctor.KiroClawConfig.load", return_value=cfg),
-            patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True),
+            patch("kiro_claw.slack.enterprise.validate_enterprise", return_value=True),
             patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
         ):
             try:
@@ -2075,7 +2075,7 @@ class TestDoctorStt:
             patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
             patch("kiro_claw.cli_doctor.KiroClawConfig.load", return_value=cfg),
-            patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True),
+            patch("kiro_claw.slack.enterprise.validate_enterprise", return_value=True),
             patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
             patch("kiro_claw.cli_doctor._find_whisper", return_value=None),
             patch("kiro_claw.cli_doctor.ensure_ffmpeg_in_path"),
@@ -2117,7 +2117,7 @@ class TestDoctorStt:
             patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
             patch("kiro_claw.cli_doctor.KiroClawConfig.load", return_value=cfg),
-            patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True),
+            patch("kiro_claw.slack.enterprise.validate_enterprise", return_value=True),
             patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
             patch("kiro_claw.cli_doctor._find_whisper", return_value=None),
             patch("kiro_claw.cli_doctor.ensure_ffmpeg_in_path"),
@@ -2169,7 +2169,7 @@ class TestDoctorStt:
             patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
             patch("kiro_claw.cli_doctor.KiroClawConfig.load", return_value=cfg),
-            patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True),
+            patch("kiro_claw.slack.enterprise.validate_enterprise", return_value=True),
             patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
             patch("kiro_claw.cli_doctor._find_whisper", return_value=None),
             patch("kiro_claw.cli_doctor.ensure_ffmpeg_in_path"),
@@ -2215,7 +2215,7 @@ class TestDoctorStt:
             patch("kiro_claw.cli_doctor.is_local_only", return_value=True),
             patch("kiro_claw.cli_doctor.config_dir", return_value=tmp_path),
             patch("kiro_claw.cli_doctor.KiroClawConfig.load", return_value=cfg),
-            patch("kiro_claw.cli_doctor.validate_enterprise", return_value=True),
+            patch("kiro_claw.slack.enterprise.validate_enterprise", return_value=True),
             patch("kiro_claw.cli_doctor.probe_server", side_effect=_noop_probe_server),
             patch("kiro_claw.cli_doctor._find_whisper", return_value=None),
             patch("kiro_claw.cli_doctor.ensure_ffmpeg_in_path"),

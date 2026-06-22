@@ -83,7 +83,7 @@ class TestPublishHomeTabHappyPath:
     @patch("kiro_claw.slack.events.is_yolo_mode", return_value=False)
     @patch("kiro_claw.slack.events.format_schedule", return_value="every 5m")
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅ 5.0h remaining",
     )
@@ -114,7 +114,7 @@ class TestPublishHomeTabHappyPath:
     @patch("kiro_claw.slack.events.is_yolo_mode", return_value=True)
     @patch("kiro_claw.slack.events.format_schedule", return_value="daily")
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅ 5.0h remaining",
     )
@@ -203,7 +203,7 @@ class TestPublishHomeTabCapabilities:
         "kiro_claw.slack.events._get_skills_loader",
     )
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅ 5.0h remaining",
     )
@@ -225,7 +225,7 @@ class TestPublishHomeTabCapabilities:
     @patch("kiro_claw.slack.events.list_servers", return_value=[])
     @patch("kiro_claw.slack.events._get_skills_loader")
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅ 5.0h remaining",
     )
@@ -241,7 +241,7 @@ class TestPublishHomeTabCapabilities:
     @patch("kiro_claw.slack.events.is_yolo_mode", return_value=False)
     @patch("kiro_claw.slack.events.list_servers", side_effect=RuntimeError("boom"))
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅ 5.0h remaining",
     )
@@ -262,7 +262,7 @@ class TestPublishHomeTabUptime:
     @patch("kiro_claw.slack.events.list_servers", return_value=[])
     @patch("kiro_claw.slack.events._get_skills_loader")
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅ 5.0h remaining",
     )
@@ -284,7 +284,7 @@ class TestPublishHomeTabVectorStore:
     @patch("kiro_claw.slack.events.is_yolo_mode", return_value=False)
     @patch("kiro_claw.slack.events.format_schedule", return_value="every 5m")
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅ 5.0h remaining",
     )
@@ -308,7 +308,7 @@ class TestPublishHomeTabVectorStore:
     @patch("kiro_claw.slack.events.is_yolo_mode", return_value=False)
     @patch("kiro_claw.slack.events.format_schedule", return_value="every 5m")
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅ 5.0h remaining",
     )
@@ -366,7 +366,7 @@ class TestPublishHomeTabSessions:
     @patch("kiro_claw.slack.events.is_yolo_mode", return_value=False)
     @patch("kiro_claw.slack.events.format_schedule", return_value="every 5m")
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅",
     )
@@ -387,7 +387,7 @@ class TestPublishHomeTabSessions:
     @patch("kiro_claw.slack.events.is_yolo_mode", return_value=False)
     @patch("kiro_claw.slack.events.format_schedule", return_value="every 5m")
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅",
     )
@@ -420,7 +420,7 @@ class TestPublishHomeTabSessions:
     @patch("kiro_claw.slack.events.is_yolo_mode", return_value=False)
     @patch("kiro_claw.slack.events.format_schedule", return_value="every 5m")
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅",
     )
@@ -448,7 +448,7 @@ class TestPublishHomeTabSessions:
     @patch("kiro_claw.slack.events.is_yolo_mode", return_value=False)
     @patch("kiro_claw.slack.events.format_schedule", return_value="every 5m")
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅",
     )
@@ -484,7 +484,7 @@ class TestPublishHomeTabSessions:
     @patch("kiro_claw.slack.events.is_yolo_mode", return_value=False)
     @patch("kiro_claw.slack.events.format_schedule", return_value="every 5m")
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅",
     )
@@ -523,7 +523,7 @@ class TestPublishHomeTabSessions:
     @patch("kiro_claw.slack.events.is_yolo_mode", return_value=False)
     @patch("kiro_claw.slack.events.format_schedule", return_value="every 5m")
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅",
     )
@@ -550,7 +550,7 @@ class TestPublishHomeTabSessions:
     @patch("kiro_claw.slack.events.is_yolo_mode", return_value=False)
     @patch("kiro_claw.slack.events.format_schedule", return_value="every 5m")
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅",
     )
@@ -597,7 +597,7 @@ class TestPublishHomeTabSessions:
     @patch("kiro_claw.slack.events.is_yolo_mode", return_value=False)
     @patch("kiro_claw.slack.events.format_schedule", return_value="every 5m")
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅",
     )
@@ -635,7 +635,7 @@ class TestPublishHomeTabSessions:
     @patch("kiro_claw.slack.events.is_yolo_mode", return_value=False)
     @patch("kiro_claw.slack.events.format_schedule", return_value="every 5m")
     @patch(
-        "kiro_claw.slack.events.get_midway_status_line",
+        "kiro_claw.midway.get_midway_status_line",
         new_callable=AsyncMock,
         return_value="*Midway:* ✅",
     )

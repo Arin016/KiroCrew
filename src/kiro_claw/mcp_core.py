@@ -1216,10 +1216,13 @@ def _redact_history_output(text: str) -> str:
 
     Used on EVERY return path (including early-return error strings that echo an
     LLM-supplied session_key) so nothing reaches the dashboard unredacted.
+
+    Routes through the context-aware :func:`redact` shim so the companion's extra
+    credential patterns apply to verbatim chat-transcript egress; the Default
+    ``CredentialPolicy`` delegates to ``security.redact`` (the same
+    exfil-then-credential dual pass), so standalone is byte-for-byte unchanged.
     """
-    text, _ = redact_exfiltration_urls(text)
-    text, _ = redact_credentials(text)
-    return text
+    return redact(text)
 
 
 def _parse_iso_date_epoch(date_str: str) -> float | None:
@@ -1345,9 +1348,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         parent_session = _resolve_session_key()
 
         def _redact_sa(text: str) -> str:
-            text, _ = redact_exfiltration_urls(text)
-            text, _ = redact_credentials(text)
-            return text
+            return redact(text)
 
         # Validate individual agent entries (schema guarantees dict entries)
         for entry in agents_input:
@@ -1481,10 +1482,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         agents = d.get("agents", [])
 
         def _redact(text: str) -> str:
-
-            text, _ = redact_exfiltration_urls(text)
-            text, _ = redact_credentials(text)
-            return text
+            return redact(text)
 
         lines: list[str] = []
         if not agents:

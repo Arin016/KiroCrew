@@ -338,7 +338,7 @@ def _make_route_orch() -> MagicMock:
 
 _ROUTE_PATCHES = [
     patch("kiro_claw.slack.events.is_allowed_user", return_value=True),
-    patch("kiro_claw.slack.events.check_message_origin", return_value=True),
+    patch("kiro_claw.slack.enterprise.check_message_origin", return_value=True),
 ]
 
 
@@ -417,7 +417,7 @@ class TestOnDoneDrain:
         event = {"user": "U1", "text": "first", "ts": "ts1", "channel": "D1", "channel_type": "im", "team": "T1"}
         with patch("kiro_claw.slack.events.handle_message", new_callable=AsyncMock), \
              patch("kiro_claw.slack.events.is_allowed_user", return_value=True), \
-             patch("kiro_claw.slack.events.check_message_origin", return_value=True):
+             patch("kiro_claw.slack.enterprise.check_message_origin", return_value=True):
             await _route_message(orch, event, SeenCache(), is_mention=True)
             await asyncio.sleep(0.05)
             # Drain should have dispatched the queued message via _dispatch_queued
@@ -439,7 +439,7 @@ class TestOnDoneDrain:
         event = {"user": "U1", "text": "first", "ts": "ts1", "channel": "D1", "channel_type": "im", "team": "T1"}
         with patch("kiro_claw.slack.events.handle_message", new_callable=AsyncMock), \
              patch("kiro_claw.slack.events.is_allowed_user", return_value=True), \
-             patch("kiro_claw.slack.events.check_message_origin", return_value=True):
+             patch("kiro_claw.slack.enterprise.check_message_origin", return_value=True):
             await _route_message(orch, event, SeenCache(), is_mention=True)
             await asyncio.sleep(0.05)
             tasks = list(orch._handler_tasks)

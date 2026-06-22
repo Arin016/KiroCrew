@@ -333,7 +333,7 @@ class TestRouteMessageStop:
 
         with patch("kiro_claw.slack.events.is_owner", return_value=True), patch(
             "kiro_claw.slack.events.is_allowed_user", return_value=True
-        ), patch("kiro_claw.slack.events.check_message_origin", return_value=True):
+        ), patch("kiro_claw.slack.enterprise.check_message_origin", return_value=True):
             await _route_message(orch, event, seen, is_mention=False)
 
         # Let cancellation propagate — await the task so CancelledError
@@ -377,7 +377,7 @@ class TestRouteMessageStop:
         ) as mock_hm, patch("kiro_claw.slack.events.is_owner", return_value=True), patch(
             "kiro_claw.slack.events.is_allowed_user", return_value=True
         ), patch(
-            "kiro_claw.slack.events.check_message_origin", return_value=True
+            "kiro_claw.slack.enterprise.check_message_origin", return_value=True
         ):
             await _route_message(orch, event, seen, is_mention=False)
             await asyncio.sleep(0)

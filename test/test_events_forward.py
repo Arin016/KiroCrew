@@ -444,7 +444,7 @@ class TestRouteMessageFallbackRecovery:
         mock_seen = AsyncMock()
         mock_seen.check_and_add = lambda x: False
 
-        with patch("kiro_claw.slack.events.check_message_origin", return_value=True), \
+        with patch("kiro_claw.slack.enterprise.check_message_origin", return_value=True), \
              patch("kiro_claw.slack.events.sel") as mock_sel, \
              patch("kiro_claw.slack.events.is_allowed_user", return_value=True), \
              patch("kiro_claw.slack.events.handle_message", new_callable=AsyncMock) as mock_handle:
@@ -494,7 +494,7 @@ class TestRouteMessageFallbackRecovery:
         mock_seen = MagicMock()
         mock_seen.check_and_add = lambda x: False
 
-        with patch("kiro_claw.slack.events.check_message_origin", return_value=True), \
+        with patch("kiro_claw.slack.enterprise.check_message_origin", return_value=True), \
              patch("kiro_claw.slack.events.sel") as mock_sel, \
              patch("kiro_claw.slack.events.is_allowed_user", return_value=True), \
              patch("kiro_claw.slack.events.is_owner", return_value=True), \
