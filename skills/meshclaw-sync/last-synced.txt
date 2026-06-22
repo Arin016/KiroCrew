@@ -16,12 +16,46 @@
 #                so frontend sync is by CONTENT within the post-snapshot window, not a
 #                clean SHA range. This SHA records the upstream tip last triaged.
 
-beta b35c496be08430fcc0a81c3824ed829b7547865b      # 2026-06-20 MeshClaw backend beta-braveheart tip (batch-20). KEEP at tip (feat(dashboard): persist open tabs across gateway restart — last backend commit of this batch, ported as b6616fe).
-frontend-beta fdfe158b3e31822d2ac133fafb63d9fc7c0c2f0e  # 2026-06-20 MeshClawWebsite last TRIAGED+PORTED frontend tip (batch-20, ported as b1077f3 offline state). NOT advanced to the live beta tip ca99bb4 ("fix(voice): Pre-warm mic for instant recording") — that commit landed at 15:07Z, AFTER this batch's scan, was never triaged, and must be picked up next batch. Advancing the boundary onto it would make the next `fdfe158b..origin/beta-braveheart` scan skip it. Boundary = last triaged, NOT live tip, when a straggler lands mid-run.
-mainline 199d7853  # 2026-06-20 MeshClaw mainline tip (upstream, v3.1.0 release merge). Unchanged from batch-19 — no NEW mainline-only delta this window (everything landed via beta-braveheart; the v3.1.0 release merge 199d7853 backend / e6cd760 frontend was already triaged).
+beta 59ec6e1d94a3df9ea597285dac97a53c0ed98959      # 2026-06-22 MeshClaw backend beta-braveheart tip (batch-21). KEEP at tip (fix(dashboard): same-origin loopback WS for embedded iframe — ported as 2092347).
+frontend-beta ca99bb4a6d352c7f1c73ac28fd8520e7c2c01c8b  # 2026-06-22 MeshClawWebsite beta-braveheart tip (batch-21). Picked up the batch-20 DEFER straggler ca99bb4 ("fix(voice): Pre-warm mic for instant recording") — ported as d6856a2. Boundary now == live frontend tip (no straggler this run).
+mainline 199d7853  # 2026-06-22 MeshClaw mainline tip (upstream). Unchanged from batch-19/20 — no NEW mainline-only delta this window (everything landed via beta-braveheart).
 # NOTE: this 'mainline' SHA is the UPSTREAM MeshClaw mainline tip (for the mainline-only
 # candidate check), NOT the fork's mainline — batch-12 mistakenly recorded the fork SHA
 # (796e21c5) here, which broke the `$MAIN..origin/mainline` scan. Corrected in batch-13.
+
+# --- Batch-21 (dual-repo sync 2026-06-22) ------------------------------------
+# Fresh branch sync/beta-2026-06-22 off origin/mainline (b10b070 = batch-20 MERGED).
+# Branch tracks origin/mainline from creation (batch-20's CR-base bug fix — see memory).
+# Window:
+#   backend  beta-braveheart b35c496b..59ec6e1d  (mainline unchanged 199d7853)
+#   frontend MeshClawWebsite  fdfe158b..ca99bb4
+# 5 candidates triaged (4 backend + 1 frontend), small-batch read-each-diff (no Workflow).
+# Tally: 3 PORTED (2 backend + 1 frontend) ; 2 SKIP_INTERNAL.
+# PORTED:
+#   59ec6e1d -> 2092347  fix(dashboard): same-origin loopback WS for embedded instance
+#     iframe (Mesh-1864). Generic CSRF fix in dashboard/origin.py check_origin(): trust a
+#     loopback Origin only when it == request Host. Pairs the SEC-016 work taken in batch-20.
+#     +5 regression tests (port 8765/kiroclaw.localhost adapted). docs/security.md note.
+#   d10750e2 -> 5891deb  fix(apps): gracefully handle missing app config.json. Seed empty
+#     {} on GET when config absent (data dir wiped by update) so app UI doesn't hang on
+#     "Initializing". Generic apps/routes.py handle_app_config; new test_app_config_self_heal.py.
+#   ca99bb4  -> d6856a2  fix(voice): pre-warm mic for instant recording (the batch-20 DEFER
+#     straggler). useVoiceInput.ts regenerated from post-image (byte-identical pre-image);
+#     ChatInput/ChatPage prop-wired surgically. +6 prewarm vitest.
+# SKIP_INTERNAL (2):
+#   5d99a8d4  feat(security): MCS-Jail Midway AgentContext enforcement (Mesh-1517) — Midway/MCS
+#     coupling; jail.py absent, MCS-Jail Brazil dep. Its only generic hunk (sandbox.py
+#     userns_available() public alias) has NO fork consumer — only the absent jail.py calls
+#     it (anti-miss (b): same precedent as batch-16 useVisibilityInterval). cli.py --no-jail,
+#     config agent.jail enum, cli_doctor jail status, config-baseline all confined to the jail.
+#   afed9312  fix(mcp-gateway): raise pooled-backend cap 20->64 — 100% confined to mcp_gateway/
+#     (manager.py GatewaySpec + McpGatewayConfig in loader.py). Fork has NO McpGatewayConfig
+#     (grep empty) — no anchor.
+# Verify: backend test_dashboard_origin 54 pass + test_app_config_self_heal 3 pass, flake8
+#   clean; frontend tsc -b clean + 14 voice vitest (6 new prewarm) + ChatInput 111 pass.
+# de-Amazon audit (Step 6): 0 live couplings; KiroACP invariant held (no provider glue).
+# Boundaries advanced: beta b35c496b->59ec6e1d, frontend-beta fdfe158b->ca99bb4 (== live tip,
+#   no straggler), mainline unchanged 199d7853.
 
 # --- Batch-20 (dual-repo sync 2026-06-20) ------------------------------------
 # Fresh branch sync/beta-2026-06-20 off origin/mainline (batch-19 boundary).

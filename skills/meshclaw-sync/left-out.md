@@ -236,6 +236,22 @@ The largest real-port batch — all 8 candidates (7 backend + 1 frontend) ported
 | [`b9036ac4`](https://code.amazon.com/packages/MeshClaw/commits/b9036ac4) | backend | SKIP_INTERNAL | Mocks `summarize_standup` in standup async tests — team_manager/standup absent. |
 | [`1ae3c85`](https://code.amazon.com/packages/MeshClawWebsite/commits/1ae3c85) | frontend | SKIP | Generic `useVisibilityInterval` hook, but its only consumer is the absent midway-ttl topbar countdown; anti-miss grep found no other fork caller → would be dead code. |
 
+### Batch 21 — CR pending (3 ported, 2 SKIP_INTERNAL)
+
+Window: backend `b35c496b..59ec6e1d`, frontend `fdfe158b..ca99bb4`. Ported:
+`59ec6e1d` (loopback-WS, → `2092347`), `d10750e2` (app-config self-heal, →
+`5891deb`), `ca99bb4` (voice prewarm — the batch-20 DEFER straggler, → `d6856a2`).
+
+| Upstream SHA | Repo | Verdict | Reason |
+|---|---|---|---|
+| [`5d99a8d4`](https://code.amazon.com/packages/MeshClaw/commits/5d99a8d4198a5904f91eacff87b02380bf781bcb) | backend | SKIP_INTERNAL | feat(security) MCS-Jail Midway AgentContext (Mesh-1517) — Midway/MCS coupling; `jail.py` absent, MCS-Jail Brazil dep. Its one generic hunk (`sandbox.py` `userns_available()` public alias) has **no fork consumer** — only the absent `jail.py` calls it (anti-miss (b); same precedent as batch-16 `useVisibilityInterval`). `cli.py --no-jail`, `agent.jail` enum, cli_doctor jail status, config-baseline all confined to the jail. |
+| [`afed9312`](https://code.amazon.com/packages/MeshClaw/commits/afed93127c82625d7287735202eef6d449ee01da) | backend | SKIP_INTERNAL | fix(mcp-gateway) raise pooled-backend cap 20→64 — 100% confined to `mcp_gateway/` (`manager.py` `GatewaySpec` + `McpGatewayConfig` in loader.py). Fork has **no `McpGatewayConfig`** (grep empty) — no anchor. |
+
+> **Batches 19 & 20 were not back-filled into this table** — their exhaustive
+> per-commit left-out provenance lives in the published CR comments on
+> [CR-282682422](https://code.amazon.com/reviews/CR-282682422) (batch-19) and
+> [CR-283464369](https://code.amazon.com/reviews/CR-283464369) (batch-20, rev 2).
+
 ### Batch 18 — [CR-281902310](https://code.amazon.com/reviews/CR-281902310) (44 ported, 2 DEFER + 13 SKIP_INTERNAL)
 
 > ⚠️ **The exhaustive provenance comment was NEVER posted for this batch**
