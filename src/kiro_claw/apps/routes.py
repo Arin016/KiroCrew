@@ -1169,6 +1169,13 @@ async def handle_app_config(request: web.Request) -> web.Response:
 
     if request.method == "GET":
         if not config_path.is_file():
+            # Missing config (e.g. data dir wiped by an app update) — seed an
+            # empty config so the app gets a valid response instead of hanging
+            # on a perpetual "loading" state. The app repopulates it on first use.
+            try:
+                await asyncio.to_thread(atomic_write, config_path, "{}\n")
+            except OSError:
+                pass
             return web.json_response({})
         try:
             text = await asyncio.to_thread(config_path.read_text, encoding="utf-8")
