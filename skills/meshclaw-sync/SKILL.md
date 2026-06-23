@@ -97,6 +97,12 @@ removed or stubbed. These have no public-fork equivalent:
 | Cognito / RUM ids / AEA | removed identity/telemetry |
 | **non-KiroACP providers**: `providers/claude_code.py` (`ClaudeCodeProvider`), `providers/bedrock.py` (`BedrockProvider`), `cc_agent.py`, `mirror.py` | **KiroClaw is KiroACP (kiro-cli) ONLY.** These modules + the config `claude_code`/`bedrock` factory branches, the `cc_*`/`bedrock_*` `AgentConfig` fields, and the `provider` enum beyond `["acp"]` were deleted. Any upstream commit confined to them is SKIP/NA_INTERNAL. |
 
+> **NOT a SKIP — `platform/` (CPP seam + Governance):** `src/kiro_claw/platform/`
+> and the two-level governance wiring are **fork-side generic core**, not an
+> Amazon coupling. A commit touching them (or colliding security/hooks/sandbox/sel
+> files) is KEEP-and-reconcile, never SKIP. See "What stays KEPT → `platform/`"
+> below for the reconciliation rules.
+
 ### Frontend (`MeshClawWebsite`) SKIP rubric
 
 The SPA mirrors the backend's removals. **SKIP** a frontend commit confined to
@@ -374,6 +380,40 @@ And keep the OSS-flipped defaults: provider **`acp` (kiro-cli, the only
 provider)**, Ollama public embeddings, Piper TTS default, Slack enterprise
 default-open, lazy boto3/transcribe imports (STT-only; the `[aws]`/Bedrock
 extra was removed with the providers).
+
+### `platform/` (CPP seam + Governance) — fork-side core, sync with care
+
+`src/kiro_claw/platform/` (the Composed Platform Providers seam) and the
+**two-level Governance model** (`platform/governance.py`,
+`platform/governance_profiles.py`, the `security._SENSITIVE_HOME_DIRS` keystone,
+the `hooks.on_tool_call` governance check, and the `governance_permits`
+chokepoints in `mcp_cron`/`subagent`/`mcp_core`/`sandbox`) are **generic core
+security infrastructure that lives in the public fork**. Treat them like the
+other KEPT controls. Specifically, when triaging/porting:
+
+- **Do NOT strip or weaken** them during a sync, and do NOT treat them as
+  Amazon couplings (they are the opposite — the seam that lets the Amazon
+  companion exist WITHOUT the core importing it).
+- An upstream commit that touches `security.py`'s sensitive-path /
+  deny-pattern / bash-command matchers, `hooks.on_tool_call`, `sandbox.wrap_argv`,
+  `sel.py`, or any `mcp_cron`/`subagent`/`mcp_core` tool gate **collides with the
+  governance wiring** — port the *fix*, but re-apply it on top of the governance
+  edits (the `_governance_denial` call, the threaded `session_key`/`agent` kwargs,
+  the `_WRITE_CMDS`/extraction matchers, the `assert_*` boot floors). Verify the
+  `test_governance_*.py` suites still pass after porting (Step 4).
+- `CONTRACT_VERSION` (`platform/context.py`) is a lockstep marker — never lower it
+  on a sync; bump only when a `PlatformContext` field/interface genuinely changes.
+- The governance trust-root files (`~/.kiroclaw/security_policy.json`,
+  `profiles/`, `admission_policy.json`) MUST stay in `_SENSITIVE_HOME_DIRS` — if a
+  sync reorders or rewrites that list, re-add them (the keystone; a missing entry
+  fails the boot integrity check and the `test_governance_self_protection.py`
+  suite).
+- Upstream (internal MeshClaw) may carry its OWN, divergent governance/provider
+  code — those are **SKIP_NONKIROACP / internal-only** unless the commit is a
+  generic fix to the seam itself. When unsure, run the `test_governance_*` +
+  `test_cpp_wiring_*` suites and treat a governance behavior change as
+  spec-governed: cross-check `docs/system-specs/modules/governance.md` +
+  `platform-context.md` before porting.
 
 ## Step 7 — Build, verify, and ship (used by the recurring auto-sync)
 

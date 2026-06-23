@@ -58,6 +58,33 @@ sensitive-path blocking, SEL audit log.
 > leftover internal files not used by the public build — don't treat them as
 > the build system, and don't add new ones.
 
+## Platform layer: CPP seam + Governance (read before touching `platform/`)
+
+`src/kiro_claw/platform/` is the **Composed Platform Providers (CPP)** edition
+seam **and** the two-level security **Governance model**. It is load-bearing and
+generic core infrastructure — it survives the MeshClaw sync. See
+`docs/system-specs/modules/platform-context.md` + `.../governance.md`, and
+`AGENTS.md` → "Platform layer" for the full map.
+
+- **CPP:** the core defines extension-point Protocols (`interfaces.py`) and ships
+  a `Default*` adapter for each; `PlatformContext` (`context.py`) is the frozen
+  bundle, read via `current_context()`. The core **never** imports a companion or
+  branches on edition. `CONTRACT_VERSION` is **2** — bump it on any
+  `PlatformContext` field/interface change (forces a companion rebuild).
+- **Governance:** `governance.py` (archetypes + evaluator + policy loader) +
+  `governance_profiles.py` (profile store + resolution). `effective = POLICY ∩
+  PROFILE`, tightest-wins; the PreToolUse gate denies a tool/MCP call even if the
+  kiro agent granted it. The evaluator is scope-name-agnostic — adding a scope is
+  a `SCOPE_CATALOG` data change, never an evaluator edit.
+- **Keystone (do NOT weaken):** `~/.kiroclaw/security_policy.json`, `profiles/`,
+  and `admission_policy.json` are in `security._SENSITIVE_HOME_DIRS` so the agent
+  cannot read/write its own ceiling. This is the single mechanism that makes the
+  ceiling un-disableable. When editing `security.py`'s sensitive-path or
+  bash-command matchers, keep these covered (incl. write/extract verbs).
+- This layer is the seam an internal companion composes against — keep the
+  `ACP_BACKEND_CLAUDE` seam and `platform/` extension points intact; don't add
+  public registration glue, and keep the stubs stubbed.
+
 ## Build / install
 
 ```bash

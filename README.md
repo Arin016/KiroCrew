@@ -156,6 +156,7 @@ the app locates and launches the bundled backend.
 - **Self-learning** — corrections persist as lessons that change future behavior
 - **App platform** — install and build apps that extend KiroClaw (App Store + SDK)
 - **Security sandbox** — OS-level isolation (namespaces/seatbelt), credential redaction, denied command patterns
+- **Governance model** — optional two-level security policy (an enterprise ceiling the running app cannot weaken, intersected with per-surface/app/task profiles) enforced at KiroClaw's own tool gate; `kiroclaw policy show|validate|explain`
 - **MCP tool ecosystem** — auto-discovers and manages MCP servers (slack-mcp and any MCP server you add)
 - **Voice** — optional speech-to-text input + text-to-speech replies (Piper, or AWS via the `voice` extra)
 - **Knowledge Library** — ingest docs/code into a searchable graph with SQLite FTS5 + Ollama embeddings

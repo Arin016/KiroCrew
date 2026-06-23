@@ -246,6 +246,55 @@ Jane Doe (janedoe), John Smith (jsmith)
 | `chat_runner.py` | Chat execution logic (split from chat.py) |
 | `chat_context.py` | Chat context assembly (split from chat.py) |
 | `chat_tools.py` | Chat tool handling (split from chat.py) |
+| `platform/` | **Composed Platform Providers (CPP) seam + Governance model** — see the dedicated section below. |
+
+### Platform layer: Composed Platform Providers (CPP) + Governance
+
+`src/kiro_claw/platform/` is the **edition seam** and the **two-level security
+governance model**. Touch it carefully — it is load-bearing for both the
+public/standalone edition and the (out-of-repo) Amazon companion, and it is the
+trust root for the security ceiling. Full spec:
+`docs/system-specs/modules/platform-context.md` and
+`docs/system-specs/modules/governance.md`.
+
+**CPP seam** (one core, two editions; the core NEVER imports a companion):
+- `interfaces.py` — extension-point Protocols. `context.py` — the frozen
+  `PlatformContext` (one chosen adapter per interface) + `current_context()`
+  (fail-closed lazy default) + `CONTRACT_VERSION` (**now 2** — a companion built
+  against a different version refuses to compose). `defaults.py` — the `Default*`
+  adapters that reproduce today's open-source behavior. `bootstrap.py` —
+  `boot_platform`/`bootstrap_context` compose the context, assert the floors,
+  install it. `discovery.py` / `profile.py` — companion discovery + edition
+  resolution (`standalone` | `amazon`). `security_authority.py` — the `@final`
+  ADD-only deny floor (`PolicyAuthority` + `assert_security_floor`).
+  `admission.py` — signed-plugin admission (the trust-root precedent the
+  governance loader mirrors).
+- **Reading the context:** module-level code reads `current_context()`; never
+  hard-code an Amazon class or branch on the edition in the core.
+
+**Governance model** (`governance.py` + `governance_profiles.py`): two levels,
+`effective = POLICY ∩ PROFILE`, tightest-wins. Level 1 POLICY is the
+enterprise security ceiling (`GovernanceCeiling`, loaded at boot from the
+trust-root path — `KIROCLAW_SECURITY_POLICY` env, else
+`~/.kiroclaw/security_policy.json`; **never** merged from `config.json`); once
+present the app + agent cannot weaken it. Level 2 PROFILE
+(`~/.kiroclaw/profiles/<name>.json`) is a per-surface/app/task narrow-only
+ceiling KiroClaw enforces at its OWN PreToolUse gate — it denies a tool/MCP call
+even if the kiro agent config granted it. Every control is one of four
+archetypes (ScopedRuleset / OrdinalControl / CapabilityGate / ScopedMap), each
+with one composition algebra; the evaluator is **scope-name-agnostic** (dispatch
+by archetype) so adding a scope/capability/transport is a `SCOPE_CATALOG` data
+change, never an evaluator edit.
+
+**Keystone:** the policy/profile/admission files live in
+`security._SENSITIVE_HOME_DIRS` so the agent cannot read OR write its own ceiling
+(`is_sensitive_path` is the shared gate; bash write/extract verbs are covered).
+This single mechanism is what makes the ceiling un-disableable — do not weaken it.
+
+**If you change `platform/`:** read the two spec docs first and update them in
+the same commit; bump `CONTRACT_VERSION` on any `PlatformContext` field/interface
+change (lockstep companion rebuild); keep the evaluator scope-name-agnostic; keep
+the governance trust-root files on the sensitive-path floor.
 
 ### Frontend Architecture
 
