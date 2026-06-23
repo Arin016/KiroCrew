@@ -323,7 +323,9 @@ async def execute_task(
                     run.tokens_used += max(1, len(event.text) // 4)
                 elif event.kind == EVENT_PERMISSION_REQUEST:
                     if ctx:
-                        tool_result = ctx.hooks.on_tool_call(event.title)
+                        tool_result = ctx.hooks.on_tool_call(
+                            event.title, session_key=session_key, agent=agent
+                        )
                         if tool_result.action == TOOL_DENY:
                             await client.reject_tool(event.request_id)
                             sel().log_tool_invocation(

@@ -108,6 +108,34 @@ _CRON_SECRET_NAME_RE = re.compile(
 _MAX_SCRIPT_SCAN_BYTES = 256 * 1024
 
 
+def _vet_command_governance(command: str) -> str | None:
+    """Apply the governance ``commands`` ceiling ∩ cron profile to a cron command.
+
+    The cron command executes via ``sh -c`` outside the ACP hook flow, so the
+    host gate's governance check (hooks.on_tool_call) never runs on it.  We
+    evaluate it here against the ``cron`` surface so an enterprise command deny
+    or a per-cron profile's command scope still applies.  Best-effort: any
+    governance error returns None (the always-on guards in the caller stand).
+    """
+    from kiro_claw.platform.context import PlatformCompositionError
+
+    try:
+        from kiro_claw.platform.governance_profiles import governance_permits
+
+        decision = governance_permits("commands", command, session_key="cron:_vet")
+        if not getattr(decision, "permitted", True):
+            return "Error: cron command blocked by governance policy: " + redact(
+                getattr(decision, "reason", "")
+            )
+    except PlatformCompositionError:
+        # Fail-closed CPP invariant: a host that could not compose its companion
+        # must abort, never silently fall open. Always propagate.
+        raise
+    except Exception:
+        logger.debug("cron command governance check failed; no opinion", exc_info=True)
+    return None
+
+
 def _vet_shell_command(command: str) -> str | None:
     """Apply the bash-tool security guards to a model-supplied cron shell command.
 
@@ -145,6 +173,13 @@ def _vet_shell_command(command: str) -> str | None:
         # returned to the model.
         safe_reason = redact(reason)
         return f"Error: cron command blocked by security policy: {safe_reason}"
+    # Governance: the cron `command` runs out-of-band (sh -c), so the host gate
+    # never sees it — apply the governance ceiling ∩ cron profile here against
+    # the cron surface. Covers both an enterprise commands-deny and the per-cron
+    # profile's command scope. Best-effort beyond the always-on checks above.
+    gov_reason = _vet_command_governance(command)
+    if gov_reason:
+        return gov_reason
     if _CRON_CRED_PATH_RE.search(command):
         return (
             "Error: cron command blocked: references a credential path "

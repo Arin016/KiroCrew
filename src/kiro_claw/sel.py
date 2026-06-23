@@ -344,6 +344,60 @@ class SecurityEventLog:
             )
         )
 
+    def log_governance_decision(
+        self,
+        *,
+        session_key: str,
+        agent: str = "kiroclaw",
+        tool_name: str,
+        scope: str = "",
+        item: str = "",
+        outcome: str,
+        rule: str = "",
+        layer: str = "",
+        reason: str = "",
+    ) -> None:
+        """Convenience: log a governance (Level 1 ∩ Level 2) decision.
+
+        ``outcome`` is the existing permit/deny vocabulary — ``"allowed"`` /
+        ``"denied"`` (NOT "approved"; matches the dominant token used across the
+        codebase).  ``scope``/``item``/``rule``/``layer`` go in ``metadata`` for
+        ``policy explain`` and forensic queries.
+
+        On-disk SEL records are NOT redacted by the writer, and the persisted
+        HMAC chain signs the bytes as-written, so the operation/resources/reason
+        are redacted HERE (before ``log``) via ``redact_via_context`` — a command
+        body or path that tripped governance must not leak a credential into the
+        audit log.
+        """
+        # Lazy import: sel.py is imported very early (security.py imports it), and
+        # platform.context imports security indirectly — keep this off the
+        # module-load path to avoid a cycle (documented pattern).
+        from kiro_claw.platform.context import redact_via_context
+
+        safe_operation = redact_via_context(tool_name)
+        safe_item = redact_via_context(item) if item else ""
+        safe_reason = redact_via_context(reason) if reason else ""
+        self.log(
+            SecurityEvent(
+                event_id=uuid.uuid4().hex[:16],
+                timestamp=datetime.now(tz=timezone.utc).isoformat(),
+                event_type="governance_decision",
+                caller_identity=session_key,
+                agent=agent,
+                source=_infer_source(session_key),
+                operation=safe_operation[:_MAX_ARG_LEN],
+                outcome=outcome,
+                resources=safe_item[:_MAX_ARG_LEN],
+                metadata={
+                    "scope": scope,
+                    "rule": rule,
+                    "layer": layer,
+                    "reason": safe_reason[:_MAX_ARG_LEN],
+                },
+            )
+        )
+
     def log_api_access(
         self,
         *,

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Callable, Optional, Tuple, TypeVar
 
 if TYPE_CHECKING:  # avoid import cycles — config.loader imports heavy modules
     from kiro_claw.config.loader import KiroClawConfig
+    from kiro_claw.platform.governance import GovernanceCeiling
     from kiro_claw.platform.interfaces import (
         AgentRuntime,
         AppRegistryPolicy,
@@ -44,7 +45,10 @@ if TYPE_CHECKING:  # avoid import cycles — config.loader imports heavy modules
 # Bumped on any field add/rename or interface-semantics change.  A companion
 # built against a different CONTRACT_VERSION refuses to compose (see
 # bootstrap._assert_contract).
-CONTRACT_VERSION = 1
+#
+# v2: added the ``governance`` carrier (the enterprise security ceiling — see
+# ``kiro_claw.platform.governance``).  A companion built against v1 must rebuild.
+CONTRACT_VERSION = 2
 
 # Valid profiles.  ``standalone`` is the public default; ``amazon`` loads the
 # internal companion.  ``enterprise`` is reserved for a future third edition.
@@ -98,6 +102,14 @@ class PlatformContext:
 
     # ── bundled feature apps ──
     feature_apps: "Tuple[FeatureApp, ...]"
+
+    # ── governance carrier (Level 1 enterprise security ceiling) ──
+    # Frozen at boot from the trust-root policy path; ``None`` on a standalone
+    # host with no policy present (editable secure-defaults).  Read at every
+    # enforcement chokepoint via ``current_context().governance``.  Defaulted so
+    # the single constructor and the companion's ``dataclasses.replace`` paths
+    # need no change beyond opting in.
+    governance: "Optional[GovernanceCeiling]" = None
 
     @property
     def is_amazon(self) -> bool:

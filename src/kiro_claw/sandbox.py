@@ -690,6 +690,57 @@ def reset_backend() -> None:
     _backend_config_mode = None
 
 
+# wrap_argv's ``mode`` vocabulary is a superset of the governance ``sandbox``
+# ordinal scale: ``auto`` is an alias that resolves to ``standard`` below.  Only
+# this alias mapping lives here; the strictness ORDER is owned solely by
+# governance._ORDINAL_SCALES["sandbox"] (the single source of truth) — we never
+# re-encode the order, so a new tier added there is honoured here without edit.
+_SANDBOX_MODE_ALIASES = {"auto": "standard"}
+
+
+def _clamp_sandbox_mode(mode: str) -> str:
+    """Clamp *mode* UP to the governed ``sandbox.min_level`` floor, if any.
+
+    Derives strictness ranking from the enforcer-owned ordinal registry
+    (``OrdinalControl`` over ``_ORDINAL_SCALES['sandbox']``) — NOT a private
+    duplicate table — so the floor cannot silently no-op if a tier is added to
+    the scale.  Returns *mode* unchanged when there is no governance opinion or
+    the floor is already satisfied.
+
+    Fail-closed: a ``PlatformCompositionError`` (a non-standalone host that could
+    not compose) propagates — the sandbox floor must never silently downgrade
+    from DENY to ALLOW on the very host that is supposed to be governed.  Any
+    OTHER (transient) error leaves *mode* as-is (a missing tighten is backstopped
+    by the always-on controls), and an unknown floor/mode value raises rather
+    than ranking it as 0 (which would fail open).
+    """
+    from kiro_claw.platform.context import PlatformCompositionError
+    from kiro_claw.platform.governance import _ORDINAL_SCALES, OrdinalControl
+
+    try:
+        from kiro_claw.platform.governance_profiles import governance_floor_ordinal
+
+        floor = governance_floor_ordinal("sandbox.min_level")
+    except PlatformCompositionError:
+        raise
+    except Exception:
+        return mode
+    if not floor:
+        return mode
+    scale = _ORDINAL_SCALES["sandbox"]
+    # The floor already validated through OrdinalControl inside
+    # governance_floor_ordinal, so it is in-scale; an unrecognised caller mode is
+    # treated as the loosest tier so the floor still clamps it UP (fail-closed —
+    # never let an unknown mode skip the tighten).
+    cur_value = _SANDBOX_MODE_ALIASES.get(mode, mode)
+    floor_rank = OrdinalControl("sandbox", floor).rank()
+    cur_rank = scale.index(cur_value) if cur_value in scale else -1
+    if floor_rank <= cur_rank:
+        return mode
+    # The floor's scale value IS a valid wrap_argv mode (off/standard/cc/strict).
+    return floor
+
+
 def wrap_argv(argv: list[str], mode: str = "auto") -> tuple[list[str], str | None]:
     """Wrap a command argv with OS-level sandbox if available.
 
@@ -705,6 +756,12 @@ def wrap_argv(argv: list[str], mode: str = "auto") -> tuple[list[str], str | Non
         (macOS seatbelt profile or Linux launcher script).
         ``None`` when no cleanup is needed.
     """
+    # Governance ordinal floor: a policy/profile may require a MINIMUM sandbox
+    # tier (off < standard < cc < strict).  Clamp the requested mode up to that
+    # floor before resolving the level — so an enterprise "min_level: cc" makes
+    # even a mode="off" call run confined.  Cheap no-op when ungoverned.
+    mode = _clamp_sandbox_mode(mode)
+
     if mode == "off":
         return argv, None
 

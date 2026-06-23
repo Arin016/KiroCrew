@@ -971,6 +971,91 @@ def _security(args: argparse.Namespace) -> None:
         print("Usage: kiroclaw security {audit|deny-list|events|verify}")
 
 
+def _policy(args: argparse.Namespace) -> None:
+    """Governance policy + profile inspection (read-only; safe to expose to LLM).
+
+    Mirrors the ``security`` command shape.  Boot already ran (cli.main calls
+    ``boot_platform`` first), so ``current_context().governance`` carries the
+    effective ceiling.  No mutation — purely diagnostic, so it is MCP-safe.
+    """
+    from kiro_claw.platform.context import current_context
+    from kiro_claw.platform.governance import SCOPE_CATALOG, gate_decision, resolve
+    from kiro_claw.platform.governance_profiles import (
+        get_store_profile,
+        resolve_active_scope,
+    )
+
+    action = getattr(args, "policy_action", None)
+    ceiling = getattr(current_context(), "governance", None)
+
+    if action == "show":
+        if ceiling is None:
+            print("No enterprise security policy is active (editable secure-defaults).")
+            return
+        print(f"🛡️  Security policy v{ceiling.version} (issuer: {ceiling.identity_issuer or '—'})")
+        print(
+            f"   boot: require_sandbox={ceiling.boot.require_sandbox} "
+            f"allow_terminal={ceiling.boot.allow_terminal} fail_closed={ceiling.boot.fail_closed}"
+        )
+        if not ceiling.controls:
+            print("   (no governed scopes)")
+        for scope in sorted(ceiling.controls):
+            print(f"   • {scope}: {ceiling.controls[scope]}")
+
+    elif action == "validate":
+        ok = True
+        if ceiling is None:
+            print("Policy: none (editable secure-defaults) — nothing to validate.")
+        else:
+            print(f"Policy: v{ceiling.version} OK ({len(ceiling.controls)} governed scopes).")
+        # Force-load every profile; the store records invalid ones as deny-all.
+        from kiro_claw.platform.governance_profiles import _profiles_dir
+
+        pdir = _profiles_dir()
+        if pdir.is_dir():
+            for f in sorted(pdir.glob("*.json")):
+                prof = get_store_profile(f.stem)
+                status = "OK" if prof and not prof.name.startswith("_deny") else "INVALID→deny-all"
+                if status != "OK":
+                    ok = False
+                print(f"   profile {f.name}: {status}")
+        else:
+            print("   (no profiles directory)")
+        print("✅ valid" if ok else "⚠️  some profiles failed validation (fell back to deny-all)")
+
+    elif action == "explain":
+        scope = args.scope
+        if scope not in SCOPE_CATALOG:
+            print(f"Unknown scope {scope!r}. Known: {', '.join(sorted(SCOPE_CATALOG))}")
+            return
+        profile = resolve_active_scope(args.session_key, agent=args.agent, app=args.app)
+        decision = resolve(ceiling, profile, scope, args.item)
+        verdict = "ALLOWED" if decision.permitted else "DENIED"
+        print(f"{verdict}: {scope} → {args.item!r}")
+        print(f"   surface session: {args.session_key!r}")
+        print(f"   active profile : {profile.name if profile else '(none — policy only)'}")
+        print(f"   rule/layer     : {decision.rule} / {decision.layer or '—'}")
+        print(f"   reason         : {decision.reason}")
+        # Also show the raw title-classified path (mirrors the live gate).
+        gate = gate_decision(ceiling, profile, args.item)
+        print(f"   gate verdict   : {'ALLOWED' if gate.permitted else 'DENIED'} ({gate.reason})")
+
+    elif action == "profile":
+        prof = get_store_profile(args.name)
+        if prof is None:
+            print(f"No profile named {args.name!r} in ~/.kiroclaw/profiles/.")
+            return
+        bind = f"{prof.bind.type}:{prof.bind.id}" if prof.bind else "(unbound)"
+        print(f"📄 Profile {prof.name!r}  bind={bind}  extends={prof.extends or '—'}")
+        if not prof.controls:
+            print("   (no governed scopes — inherits policy ceiling unchanged)")
+        for scope in sorted(prof.controls):
+            print(f"   • {scope}: {prof.controls[scope]}")
+
+    else:
+        print("Usage: kiroclaw policy {show|validate|explain <scope> <item>|profile <name>}")
+
+
 async def _run_eval(args: argparse.Namespace) -> None:
     """Run multi-session evaluation scenarios."""
 

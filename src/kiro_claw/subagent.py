@@ -116,6 +116,44 @@ def _validate_agent(requested: str) -> tuple[str, str]:
     return "", ""
 
 
+def _vet_spawn_governance(parent_session_key: str, agent: str) -> str | None:
+    """Return a denial reason if governance forbids spawning, else None.
+
+    Two checks against the parent surface's ceiling ∩ profile:
+    1. ``capabilities.spawn`` must be enabled.
+    2. if enabled with an ``agents`` scope, the target *agent* must be permitted.
+
+    Best-effort beyond the always-on guards: a ``PlatformCompositionError``
+    propagates (fail-closed CPP); any other error returns None (no opinion).
+    """
+    from kiro_claw.platform.context import PlatformCompositionError
+
+    try:
+        from kiro_claw.platform.governance_profiles import governance_permits
+
+        # Gate enabled?  (item ignored when no inner scope — checks ``enabled``.)
+        gate = governance_permits(
+            "capabilities.spawn", "", session_key=parent_session_key
+        )
+        if not getattr(gate, "permitted", True):
+            return getattr(gate, "reason", "spawn capability disabled")
+        # Agent-scope check (capabilities.spawn.scopes.agents).
+        if agent:
+            scoped = governance_permits(
+                "capabilities.spawn",
+                f"agents:{agent}",
+                session_key=parent_session_key,
+            )
+            if not getattr(scoped, "permitted", True):
+                return f"agent {agent!r} not permitted by spawn policy"
+        return None
+    except PlatformCompositionError:
+        raise
+    except Exception:
+        logger.debug("spawn governance check failed; no opinion", exc_info=True)
+        return None
+
+
 def _redact(text: str) -> str:
     """Redact credentials and exfiltration URLs from text."""
     text, _ = redact_exfiltration_urls(text)
@@ -1326,6 +1364,30 @@ class SubagentManager:
                 )
                 return info
 
+        # --- Governance: spawn capability gate (blast-radius containment) ---
+        # A policy/profile may disable sub-agent spawning entirely, or bound it
+        # to named agents (capabilities.spawn.scopes.agents).  Resolved against
+        # the PARENT surface so a per-app/per-surface profile contains what it
+        # can spawn — even if the kiro side would allow it.
+        gov_spawn_err = _vet_spawn_governance(parent_session_key, agent)
+        if gov_spawn_err:
+            logger.warning("Subagent spawn refused by governance: %s", gov_spawn_err)
+            sel().log_tool_invocation(
+                session_key=parent_session_key or "",
+                source="subagent",
+                tool_name="spawn_run",
+                outcome="denied",
+                error=gov_spawn_err,
+                metadata={"agent": agent, "task": _redacted_task[:120]},
+            )
+            return SubagentInfo(
+                id=uuid.uuid4().hex[:8],
+                task=_redacted_task,
+                agent=agent,
+                done=True,
+                error=f"spawn refused by governance: {gov_spawn_err}",
+            )
+
         now = time.monotonic()
         should_queue, slot_free = self._should_stagger_queue(now)
         if should_queue:
@@ -1929,7 +1991,9 @@ class SubagentManager:
                     logger.warning("Subagent %s hit turn limit (%d)", info.id, turn_limit)
                     self._write_tombstone(info, "turn_limit")
                     return
-                tool_result = self._ctx_builder.hooks.on_tool_call(event.title)
+                tool_result = self._ctx_builder.hooks.on_tool_call(
+                    event.title, session_key=session_key, agent=info.agent or ""
+                )
                 if tool_result.action == TOOL_DENY:
                     await self._reject_and_log(
                         client, event.request_id, session_key, event, error="hook_deny"

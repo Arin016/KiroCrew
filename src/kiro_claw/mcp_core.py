@@ -1048,6 +1048,37 @@ def _resolve_session_key() -> str:
     return ""
 
 
+def _vet_messaging_governance(caller_session: str) -> str | None:
+    """Return a denial reason if governance forbids outbound messaging, else None.
+
+    Proactive/outbound messaging is a ``capabilities.messaging`` gate (an exfil
+    surface a policy/profile may disable per surface/app).  Runs in the
+    ``kiroclaw-core`` stdio subprocess, which DOES boot the platform via
+    ``cli.main`` — so ``current_context()`` carries the ceiling.  Best-effort:
+    a ``PlatformCompositionError`` propagates; any other error returns None.
+    Emits no stray stdout (would corrupt the JSON-RPC stream); the debug log
+    goes to stderr/logging only.
+    """
+    from kiro_claw.platform.context import PlatformCompositionError
+
+    try:
+        from kiro_claw.platform.governance_profiles import governance_permits
+
+        decision = governance_permits(
+            "capabilities.messaging", "", session_key=caller_session
+        )
+        if not getattr(decision, "permitted", True):
+            return "outbound messaging blocked by governance policy"
+        return None
+    except PlatformCompositionError:
+        raise
+    except Exception:
+        # No logging here: this runs inside the kiroclaw-core stdio MCP server,
+        # whose stray stdout/stderr would corrupt the JSON-RPC stream (same
+        # constraint as redact_via_context). Degrade silently to "no opinion".
+        return None
+
+
 def _post(path: str, body: dict | None = None) -> dict:
     data = json.dumps(body or {}).encode()
     headers = {"Content-Type": "application/json", "X-Internal-Secret": _internal_secret()}
@@ -1695,6 +1726,11 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         is_cron = caller_session.startswith("cron:")
         if is_cron:
             payload["caller_session"] = caller_session
+        # Governance: outbound messaging is a capability gate (exfil surface).
+        # A policy/profile may disable proactive messaging for a surface/app.
+        _gov_msg = _vet_messaging_governance(caller_session)
+        if _gov_msg:
+            return f"Error: {_gov_msg}"
         resp = _post("/api/send-message", payload)
         if not resp.get("ok"):
             return f"Failed: {resp}"

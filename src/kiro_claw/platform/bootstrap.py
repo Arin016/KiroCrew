@@ -38,6 +38,10 @@ from kiro_claw.platform.defaults import (
     DefaultTunnelProvider,
 )
 from kiro_claw.platform.discovery import discover_companion_context, plugin_entry_points
+from kiro_claw.platform.governance import (
+    assert_governance_paths_protected,
+    load_security_policy,
+)
 from kiro_claw.platform.profile import resolve_profile
 from kiro_claw.platform.security_authority import PolicyAuthority, assert_security_floor
 
@@ -92,7 +96,19 @@ def _reset_boot_state() -> None:
 def build_default_context(
     cfg: "KiroClawConfig", *, profile: str = PROFILE_STANDALONE
 ) -> PlatformContext:
-    """Compose the all-defaults context (the public/standalone edition)."""
+    """Compose the all-defaults context (the public/standalone edition).
+
+    The single composition chokepoint that backs BOTH a real boot
+    (``bootstrap_context``) and the lazy ``current_context`` default — so loading
+    the enterprise security ceiling HERE means every path (including a stray
+    stdio subprocess that reaches the lazy default without routing through
+    ``cli.main``) carries the same frozen ceiling.  A present-but-unreadable
+    policy raises ``PlatformCompositionError`` (fail-closed); a standalone host
+    with no policy gets ``governance=None`` (editable secure-defaults).  The
+    companion supplies its bundled policy via the discovery/composition root, so
+    the standalone load does not consult a bundled resource here.
+    """
+    governance = load_security_policy()
     return PlatformContext(
         contract_version=CONTRACT_VERSION,
         profile=profile,
@@ -112,6 +128,7 @@ def build_default_context(
         tunnel=DefaultTunnelProvider(),
         telemetry=DefaultTelemetryProvider(),
         feature_apps=(),
+        governance=governance,
     )
 
 
@@ -152,6 +169,12 @@ def bootstrap_context(cfg: "KiroClawConfig") -> PlatformContext:
         assert_security_floor(companion.security)
         ctx = companion
         logger.info("Composed %r platform context from companion", profile)
+
+    # Keystone integrity check: the governance trust-root files must be on the
+    # sensitive-path floor so a prompt-injected agent cannot rewrite its own
+    # ceiling.  Independent of the deny-pattern floor (which assert_security_floor
+    # covers) — fail closed at boot if a refactor ever dropped them.
+    assert_governance_paths_protected()
 
     set_context(ctx)
 

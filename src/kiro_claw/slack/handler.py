@@ -2736,7 +2736,9 @@ async def handle_message(
                 _tool_gap = True
                 # Check tool hooks
                 if context_builder:
-                    tool_result = context_builder.hooks.on_tool_call(event.title)
+                    tool_result = context_builder.hooks.on_tool_call(
+                        event.title, session_key=session_key, agent=_agent or ""
+                    )
                     if tool_result.action == TOOL_DENY:
                         accumulated += f"\n🚫 _Tool `{event.title}` blocked by hooks._"
                         sel().log_tool_invocation(
@@ -2820,7 +2822,9 @@ async def handle_message(
             elif event.kind == EVENT_PERMISSION_REQUEST:
                 # Check tool hooks for auto-approve
                 if context_builder:
-                    tool_result = context_builder.hooks.on_tool_call(event.title)
+                    tool_result = context_builder.hooks.on_tool_call(
+                        event.title, session_key=session_key, agent=_agent or ""
+                    )
                     if tool_result.action == TOOL_AUTO_APPROVE:
                         await client.approve_tool(event.request_id)
                         Stats().inc_tool_auto_approved()

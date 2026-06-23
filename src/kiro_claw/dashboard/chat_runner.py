@@ -2032,7 +2032,9 @@ async def _run_chat(
                     assistant_text = ""
                 _pre_tool_hooks_fired = False
                 if state.context_builder:
-                    tool_result = state.context_builder.hooks.on_tool_call(event.title)
+                    tool_result = state.context_builder.hooks.on_tool_call(
+                        event.title, session_key=session_key, agent=slot.agent or ""
+                    )
                     if tool_result.action == TOOL_DENY:
                         await client.reject_tool(event.request_id)
                         # Surface WHY: carry the deny reason into the pill so

@@ -140,6 +140,17 @@ _SENSITIVE_HOME_DIRS: list[str] = [
     ".netrc",
     ".git-credentials",
     ".kiroclaw/.env",
+    # Governance trust-root files (KEYSTONE of the two-level governance model).
+    # Under "secure by default, not by mandate" the ONLY thing preventing a
+    # prompt-injected agent from rewriting its own ceiling is that it cannot
+    # WRITE these files — and is_sensitive_path() is the shared read+write gate
+    # (hooks.on_tool_call, validate_file_path, artifacts) across every surface.
+    # The agent (the governed subject) is blocked; the operator (trust root)
+    # edits them out-of-band.  admission_policy.json is the existing plugin
+    # trust root; security_policy.json + profiles/ are the new governance ones.
+    ".kiroclaw/security_policy.json",
+    ".kiroclaw/profiles",
+    ".kiroclaw/admission_policy.json",
 ]
 
 # Regex for bash commands that read sensitive paths.
@@ -147,12 +158,21 @@ _SENSITIVE_HOME_DIRS: list[str] = [
 # followed by a path containing any sensitive dir.
 _READ_CMDS = r"(?:cat|head|tail|less|more|strings|xxd|base64|cp|scp|open|vi|vim|nano|code)\s"
 
+# Regex for bash commands that WRITE/MODIFY a path argument.  Reads alone were
+# not enough: a prompt-injected agent could rewrite the governance trust-root
+# (or plant a credential) with a write verb that carries no redirect char and
+# is not a read verb — e.g. ``tee ~/.kiroclaw/security_policy.json``,
+# ``mv evil ~/.kiroclaw/profiles/x.json``, ``sed -i ... ~/.aws/credentials``,
+# ``dd of=...``, ``truncate``, ``ln -sf``, ``install``.  is_sensitive_path() is
+# the keystone that must block WRITES too, so the bash matcher must cover these.
+_WRITE_CMDS = r"(?:tee|mv|dd|truncate|ln|install|sed|chmod|chown|rm|rmdir|touch|mkdir|rsync)\s"
+
 # Matches python/ruby/perl one-liners that open sensitive paths
 _SCRIPT_OPEN = r"(?:python|ruby|perl)\S*\s.*open\s*\("
 
 
 def _build_sensitive_regex() -> re.Pattern[str]:
-    """Build a compiled regex matching bash reads of sensitive paths."""
+    """Build a compiled regex matching bash reads OR writes of sensitive paths."""
     home = re.escape(str(Path.home()))
     tilde = re.escape("~")
     home_var = re.escape("$HOME")
@@ -160,7 +180,8 @@ def _build_sensitive_regex() -> re.Pattern[str]:
     escaped_dirs = [re.escape(d) for d in _SENSITIVE_HOME_DIRS]
     dirs_pattern = "|".join(escaped_dirs)
     return re.compile(
-        rf"(?:{_READ_CMDS}.*|{_SCRIPT_OPEN}.*|.*[<>|]\s*){home_alts}/(?:{dirs_pattern})(?:/|\s|$|['\"])",
+        rf"(?:{_READ_CMDS}.*|{_WRITE_CMDS}.*|{_SCRIPT_OPEN}.*|.*[<>|]\s*)"
+        rf"{home_alts}/(?:{dirs_pattern})(?:/|\s|$|['\"])",
         re.IGNORECASE,
     )
 
@@ -192,9 +213,18 @@ def is_sensitive_path(path_str: str) -> bool:
         home = str(Path.home().resolve())
     except (OSError, ValueError):
         home = str(Path.home())
+    # Case-fold both sides for the membership test.  On a case-insensitive
+    # filesystem (macOS APFS/HFS+ default — a supported platform) the OS opens
+    # ``~/.kiroclaw/Security_Policy.json`` and ``~/.kiroclaw/security_policy.json``
+    # as the SAME file, so a byte-exact comparison would let the agent write its
+    # own governance ceiling via an alternate-case path. Folding is strictly more
+    # protective (it can only ever over-match an alternate-case variant of an
+    # already-sensitive path, which is itself suspicious), so it is safe on
+    # case-sensitive Linux too — matching the IGNORECASE bash-read matcher.
+    resolved_cf = resolved.casefold()
     for sensitive_dir in _SENSITIVE_HOME_DIRS:
-        sensitive_path = os.path.join(home, sensitive_dir)
-        if resolved == sensitive_path or resolved.startswith(sensitive_path + os.sep):
+        sensitive_path = os.path.join(home, sensitive_dir).casefold()
+        if resolved_cf == sensitive_path or resolved_cf.startswith(sensitive_path + os.sep):
             return True
     return False
 

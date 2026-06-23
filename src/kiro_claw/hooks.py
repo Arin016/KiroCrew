@@ -238,8 +238,23 @@ class HookManager:
 
     # ── Tool hooks ──
 
-    def on_tool_call(self, tool_name: str) -> ToolHookResult:
-        """Check if a tool should be auto-approved, denied, or handled normally."""
+    def on_tool_call(
+        self,
+        tool_name: str,
+        *,
+        session_key: str = "",
+        agent: str = "",
+        app: str = "",
+    ) -> ToolHookResult:
+        """Check if a tool should be auto-approved, denied, or handled normally.
+
+        The optional keyword-only ``session_key`` / ``agent`` / ``app`` identify
+        the calling surface so the governance ceiling ∩ active-profile can be
+        resolved and a tool/MCP call denied even when the kiro agent config
+        granted it (the governance headline behavior).  They default to ``""`` so
+        every existing caller is unaffected; a caller that supplies identity opts
+        into per-surface governance.
+        """
         # Strip display prefixes (e.g. "Running: ls *" → "ls *") so config
         # patterns like "ls" or "rm *" match without the prefix.
         normalized = _normalize_tool_name(tool_name)
@@ -268,11 +283,24 @@ class HookManager:
         # to ``security.is_denied(name, auto_deny_tools)`` exactly as before —
         # no recursion (PolicyAuthority.is_denied calls security.is_denied with
         # the overlay patterns appended; security.is_denied never calls back).
-        authority = current_context().security
+        ctx = current_context()
+        authority = ctx.security
         deny = self._config.auto_deny_tools
         reason = authority.is_denied(normalized, deny) or authority.is_denied(tool_name, deny)
         if reason:
             return ToolHookResult.deny(reason)
+
+        # Governance ceiling ∩ active profile (Level 1 ∩ Level 2).  Runs BEFORE
+        # the auto-approve loop so a governance deny wins over a user
+        # auto-approve and is never bypassed.  This is the layer that denies a
+        # tool/MCP call even when the kiro agent config granted it: the title for
+        # an MCP tool arrives as ``mcp__server__tool`` and is governed by name
+        # here regardless of kiro's allowedTools.  No-op on a standalone host
+        # with no policy and no bound profile (gate_decision permits), so today's
+        # behavior is preserved unless governance is configured.
+        gov_reason = _governance_denial(ctx, tool_name, session_key, agent, app)
+        if gov_reason:
+            return ToolHookResult.deny(gov_reason)
 
         # Auto-approve — match against both the original title (preserves
         # "Running: "/"Reading " prefixes) and the normalized name (stripped)
@@ -282,6 +310,67 @@ class HookManager:
                 return ToolHookResult.auto_approve()
 
         return ToolHookResult.allow()
+
+
+def _governance_denial(
+    ctx: object,
+    tool_name: str,
+    session_key: str,
+    agent: str,
+    app: str,
+) -> str | None:
+    """Return a denial reason if governance forbids *tool_name*, else None.
+
+    Resolves the active profile (Level 2) for the calling surface and intersects
+    it with the boot-frozen ceiling (Level 1).  Fast no-op when the host has
+    neither a policy ceiling nor any profiles, so an ungoverned standalone host
+    pays only an attribute read.  Emits a governance audit record on a deny.
+
+    Fail-closed discipline mirrors the CPP shims: a ``PlatformCompositionError``
+    (a non-standalone host that could not compose) is re-raised, never swallowed;
+    any other unexpected error degrades to "no governance opinion" (None) so a
+    transient profile-load glitch cannot wedge every tool call — the always-on
+    deny floor above already ran.
+    """
+    from kiro_claw.platform.context import PlatformCompositionError
+
+    ceiling = getattr(ctx, "governance", None)
+    try:
+        from kiro_claw.platform.governance import gate_decision
+        from kiro_claw.platform.governance_profiles import resolve_active_scope
+
+        profile = resolve_active_scope(session_key, agent=agent, app=app)
+        # Nothing to enforce: no ceiling and no bound/forced profile.
+        if ceiling is None and profile is None:
+            return None
+        decision = gate_decision(ceiling, profile, tool_name)
+        if not decision.permitted:
+            _audit_governance(session_key, agent, tool_name, decision)
+            return f"Blocked by governance policy: {decision.reason}"
+        return None
+    except PlatformCompositionError:
+        raise
+    except Exception:
+        logger.debug("governance evaluation failed; no opinion", exc_info=True)
+        return None
+
+
+def _audit_governance(session_key: str, agent: str, tool_name: str, decision: object) -> None:
+    """Best-effort SEL audit of a governance denial (records scope/rule/layer)."""
+    try:
+        from kiro_claw.sel import sel
+
+        sel().log_governance_decision(
+            session_key=session_key,
+            agent=agent or "kiroclaw",
+            tool_name=tool_name,
+            outcome="denied",
+            rule=getattr(decision, "rule", ""),
+            layer=getattr(decision, "layer", ""),
+            reason=getattr(decision, "reason", ""),
+        )
+    except Exception:
+        logger.debug("governance audit emit failed", exc_info=True)
 
 
 # Display prefixes that kiro-cli ACP adds to tool titles

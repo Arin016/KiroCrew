@@ -693,6 +693,26 @@ Examples:
     sel_parser.add_argument("-n", "--limit", type=int, default=20, help="Number of entries")
     sec_sub.add_parser("verify", help="Verify security event log HMAC integrity")
 
+    # policy — governance model inspection (read-only; MCP-safe)
+    policy_parser = sub.add_parser(
+        "policy", help="Inspect the governance security policy + profiles"
+    )
+    policy_sub = policy_parser.add_subparsers(dest="policy_action")
+    policy_sub.add_parser("show", help="Show the effective enterprise security policy")
+    policy_sub.add_parser("validate", help="Validate the policy + all profiles (load-check)")
+    explain_parser = policy_sub.add_parser(
+        "explain", help="Explain a tool/scope decision for a surface"
+    )
+    explain_parser.add_argument("scope", help="Governed scope, e.g. 'commands' or 'mcp'")
+    explain_parser.add_argument("item", help="The item to evaluate, e.g. 'git push origin'")
+    explain_parser.add_argument(
+        "--session-key", default="cli_chat", help="Surface session key (default: cli_chat)"
+    )
+    explain_parser.add_argument("--agent", default="", help="Agent name (optional)")
+    explain_parser.add_argument("--app", default="", help="App slug (optional)")
+    profile_show = policy_sub.add_parser("profile", help="Show a profile by name")
+    profile_show.add_argument("name", help="Profile file stem (without .json)")
+
     sub.add_parser("update", help="Update KiroClaw to the latest version")
 
     # stop
@@ -1212,6 +1232,10 @@ Examples:
         asyncio.run(_run_eval(args))
     elif args.command == "security":
         _security(args)
+    elif args.command == "policy":
+        from kiro_claw.cli_commands import _policy
+
+        _policy(args)
     elif args.command == "update":
         _update()
     elif args.command == "stop":
