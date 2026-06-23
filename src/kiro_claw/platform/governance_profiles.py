@@ -205,6 +205,11 @@ class ProfileStore:
         name = self._by_bind.get((bind.type, bind.id))
         return self._by_name.get(name) if name else None
 
+    def all_profiles(self) -> "list[Profile]":
+        """Every loaded profile (for the boot-time floor assertion)."""
+        self._ensure_fresh()
+        return list(self._by_name.values())
+
 
 # Process-global store (cheap; hot-reloads itself on access).
 _STORE = ProfileStore()
@@ -219,6 +224,26 @@ def reset_store() -> None:
 def get_store_profile(name: str) -> Optional[Profile]:
     """Return a profile by file stem (read-only; used by ``policy``/``profile`` CLI)."""
     return _STORE.get(name)
+
+
+def assert_profiles_within_ceiling(ceiling: "object") -> None:
+    """Boot-time floor gate: every loaded profile must be ≥ as strict as the ceiling.
+
+    Implements Validation rules 3 & 7 and the Combined-order "app/profile ≥
+    ceiling for every control? no → ABORT fail-closed" step: a profile whose
+    ordinal (approval_mode / sandbox.min_level) is LOOSER than the policy mark
+    raises ``PlatformCompositionError`` and aborts boot, rather than being
+    silently re-tightened only at runtime.  No-op when no ceiling is present
+    (standalone, ungoverned).  Called once at boot from ``bootstrap_context``.
+    """
+    if ceiling is None:
+        return
+    from kiro_claw.platform.governance import GovernanceCeiling, assert_governance_floor
+
+    if not isinstance(ceiling, GovernanceCeiling):
+        return
+    for profile in _STORE.all_profiles():
+        assert_governance_floor(ceiling, profile)  # raises PlatformCompositionError on weakening
 
 
 def governance_permits(

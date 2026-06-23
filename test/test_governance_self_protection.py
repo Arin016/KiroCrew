@@ -77,6 +77,37 @@ def test_benign_write_verbs_not_overblocked():
         assert security.is_sensitive_bash_command(cmd) is None
 
 
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "git checkout -- ~/.kiroclaw/security_policy.json",
+        "git restore ~/.kiroclaw/security_policy.json",
+        "cp evil /home/someuser/.kiroclaw/security_policy.json",
+        "unzip evil.zip -d ~/.kiroclaw/profiles/",
+        "tar -xf evil.tar -C ~/.kiroclaw/",
+        "tar xzf x -C /home/u/.kiroclaw/",
+        "curl x | tar xf - -C ~/.aws",
+    ],
+)
+def test_archive_and_vcs_keystone_writes_blocked(cmd):
+    # Write-verb allowlist was bypassable via extraction/checkout verbs and the
+    # /home/<user> literal anchor; the verb-independent + extraction-destination
+    # backstops must block these.
+    assert security.is_sensitive_bash_command(cmd) is not None
+
+
+def test_benign_archive_and_vcs_not_overblocked():
+    for cmd in [
+        "tar -xf release.tar -C /tmp/build",
+        "git checkout -- src/main.py",
+        "unzip data.zip -d /tmp/data",
+        "git commit -m 'update'",
+        "tar -cf out.tar ~/.kiroclaw/sessions.db",  # reading a non-sensitive .kiroclaw file
+        "cat ~/.kiroclaw/config.json",
+    ]:
+        assert security.is_sensitive_bash_command(cmd) is None, cmd
+
+
 def test_case_variant_policy_path_is_sensitive():
     # Case-fold keystone: an alternate-case policy path (the same file on a
     # case-insensitive FS) must still be treated as sensitive.

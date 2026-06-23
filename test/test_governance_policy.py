@@ -738,3 +738,70 @@ class TestExtensibility:
     def test_unknown_nested_child_still_fails_closed(self):
         with pytest.raises(PlatformCompositionError):
             parse_policy(_policy_body(filesystem={"bogus": {"mode": "allow"}}))
+
+    def test_unknown_capability_key_aborts(self):
+        with pytest.raises(PlatformCompositionError):
+            parse_policy(_policy_body(capabilities={"bogus": {"enabled": True}}))
+
+
+class TestSchemaStrictness:
+    """FIX-C: leaf additionalProperties:false + name regex + Rule-1 warning + posture-member."""
+
+    def test_scopedruleset_rejects_unknown_key(self):
+        with pytest.raises(PlatformCompositionError):
+            ScopedRuleset.from_dict({"mode": "allow", "allowww": ["read"]})
+
+    def test_scopedruleset_deny_typo_is_rejected_not_allow_everything(self):
+        # The dangerous case: a 'deney' typo must NOT silently become an empty
+        # deny list (= allow-everything). It must raise.
+        with pytest.raises(PlatformCompositionError):
+            ScopedRuleset.from_dict({"mode": "deny", "deney": ["secret_tool"]})
+
+    def test_capabilitygate_rejects_unknown_key(self):
+        with pytest.raises(PlatformCompositionError):
+            CapabilityGate.from_dict({"enabled": True, "scopez": {}}, default_enabled=False)
+
+    def test_scopedmap_rejects_unknown_key(self):
+        with pytest.raises(PlatformCompositionError):
+            ScopedMap.from_dict(
+                {"members": {"mode": "allow", "allow": ["slack"]}, "postures": {}},
+                allow_posture=True,
+            )
+
+    def test_allow_mode_deny_warns(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            ScopedRuleset.from_dict({"mode": "allow", "allow": ["read"], "deny": ["grep"]})
+        assert any("Rule 1" in r.message or "allow beats deny" in r.message for r in caplog.records)
+
+    def test_posture_key_must_be_admitted_member(self):
+        # posture for a member not in the members allow-set is rejected.
+        with pytest.raises(PlatformCompositionError):
+            ScopedMap.from_dict(
+                {
+                    "members": {"mode": "allow", "allow": ["slack"]},
+                    "posture": {"discord": {"allowed_guild_ids": {"mode": "allow", "allow": ["G"]}}},
+                },
+                allow_posture=True,
+            )
+
+    def test_posture_key_admitted_member_ok(self):
+        m = ScopedMap.from_dict(
+            {
+                "members": {"mode": "allow", "allow": ["slack"]},
+                "posture": {"slack": {"allowed_enterprise_ids": {"mode": "allow", "allow": ["E1"]}}},
+            },
+            allow_posture=True,
+        )
+        assert m.posture_permits("slack", "allowed_enterprise_ids", "E1").permitted
+
+    @pytest.mark.parametrize("bad", ["Foo_Bar", "UPPER", "has spaces", "-leading", "under_score"])
+    def test_profile_name_pattern_rejected(self, bad):
+        with pytest.raises(PlatformCompositionError):
+            parse_profile({"name": bad})
+
+    @pytest.mark.parametrize("ok", ["app-deploy-web", "cron", "a1", "x"])
+    def test_profile_name_pattern_accepted(self, ok):
+        prof = parse_profile({"name": ok})
+        assert prof.name == ok

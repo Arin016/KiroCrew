@@ -132,10 +132,31 @@ not change runtime behavior until the corresponding gate lands:
 - **`channels` (members + posture)** — outbound messaging is gated by the
   `capabilities.messaging` on/off gate; the per-transport `channels` map is not
   yet consulted at a transport chokepoint.
-- **`approval_mode`** — the ordinal is parsed and floor-checked, but no approval
-  chokepoint clamps the live approval pipeline through it yet (the live approval
-  vocabulary — `reads`/`yolo`/`auto`/`interactive` — is not yet reconciled onto
-  the `approval` scale).
+- **`approval_mode`** — the ordinal is parsed and **boot-floor-checked** (a
+  profile looser than the policy mark aborts boot, like `sandbox.min_level`), but
+  no approval chokepoint clamps the live approval pipeline through it yet (the
+  live approval vocabulary — `reads`/`yolo`/`auto`/`interactive` — is not yet
+  reconciled onto the `approval` scale).
+- **`apps`** — the per-app activation allowlist parses/resolves, but no
+  app-launch chokepoint consults it yet; app blast-radius is contained today by
+  binding a per-app *profile* (the `bind.type == "app"` path), not by the `apps`
+  scope itself.
+- **`capabilities.memory_writes`** (default on) — modeled; no durable-memory
+  write chokepoint consults it yet.
+- **`capabilities.script_hooks`** (default off) — modeled; `run_script_hook` is
+  not yet gated by this capability.
+- **`capabilities.cron`** (default off) — the cron chokepoint gates the command
+  *body* (`commands` scope), not the on/off *capability* gate; the `enabled`
+  gate is modeled but not yet consulted at `cron_add`.
+
+> **Capability `profile-absence` semantics (deliberate deviation from spec A.4
+> rule 8).** The spec says a profile that OMITS a capability defaults it to
+> `false`. KiroClaw instead treats an omitted scope as *not governed by the
+> profile* (truth-table "not-governed" → bounded by policy alone), because the
+> stricter reading would turn every minimal profile (e.g. one that governs only
+> `tools`) into a near-deny-all of all capabilities. To disable a capability a
+> profile sets `enabled: false` explicitly, or uses the deny-all built-in. This
+> is intentional and documented here rather than silently divergent.
 
 The **enforced** scopes in v1 are: `tools`, `mcp`, `commands` (the host gate +
 cron command), `capabilities.spawn`, `capabilities.messaging`, and

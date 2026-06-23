@@ -163,25 +163,54 @@ _READ_CMDS = r"(?:cat|head|tail|less|more|strings|xxd|base64|cp|scp|open|vi|vim|
 # (or plant a credential) with a write verb that carries no redirect char and
 # is not a read verb — e.g. ``tee ~/.kiroclaw/security_policy.json``,
 # ``mv evil ~/.kiroclaw/profiles/x.json``, ``sed -i ... ~/.aws/credentials``,
-# ``dd of=...``, ``truncate``, ``ln -sf``, ``install``.  is_sensitive_path() is
-# the keystone that must block WRITES too, so the bash matcher must cover these.
-_WRITE_CMDS = r"(?:tee|mv|dd|truncate|ln|install|sed|chmod|chown|rm|rmdir|touch|mkdir|rsync)\s"
+# ``dd of=...``, ``truncate``, ``ln -sf``, ``install``, plus archive-extraction
+# and VCS-checkout verbs that materialise a file at a destination
+# (``tar -xf … -C``, ``unzip -d``, ``git checkout/restore -- <path>``).  This
+# list is defense-in-depth; the verb-independent catch-all below is the real
+# backstop, so a write verb we forgot is still caught when it names a
+# sensitive path as an argument.
+_WRITE_CMDS = (
+    r"(?:tee|mv|dd|truncate|ln|install|sed|chmod|chown|rm|rmdir|touch|mkdir|rsync"
+    r"|tar|unzip|gunzip|gzip|cpio|git|patch)\s"
+)
 
 # Matches python/ruby/perl one-liners that open sensitive paths
 _SCRIPT_OPEN = r"(?:python|ruby|perl)\S*\s.*open\s*\("
 
 
 def _build_sensitive_regex() -> re.Pattern[str]:
-    """Build a compiled regex matching bash reads OR writes of sensitive paths."""
+    """Build a compiled regex matching bash reads OR writes of sensitive paths.
+
+    Three matching strategies, OR'd:
+      1. a READ verb / WRITE verb / script-open / shell-redirect followed by a
+         sensitive path (the original verb-anchored form);
+      2. a verb-INDEPENDENT catch-all: a sensitive path appearing ANYWHERE in
+         the command as an argument token.  This is the real backstop — a write
+         verb the allowlist forgot (or a novel one) is still blocked because the
+         destination path is sensitive.  Reading a sensitive path is itself
+         already blocked by is_sensitive_path on the file-read title, so flagging
+         any command that *names* the trust-root/credential path is correct and
+         fail-safe.
+    The home anchor accepts ``~`` / ``$HOME`` / the literal ``Path.home()`` AND a
+    generic ``/home/<user>`` / ``/Users/<user>`` literal so an unexpanded
+    ``/home/$USER/...`` or another user's literal path is still caught.
+    """
     home = re.escape(str(Path.home()))
     tilde = re.escape("~")
     home_var = re.escape("$HOME")
-    home_alts = f"(?:{home}|{tilde}|{home_var})"
+    # Generic home roots so a literal "/home/<user>" or "/Users/<user>" token
+    # (not just the running user's resolved home) is anchored too.
+    generic_home = r"/home/[^/\s]+|/Users/[^/\s]+"
+    home_alts = f"(?:{home}|{tilde}|{home_var}|{generic_home})"
     escaped_dirs = [re.escape(d) for d in _SENSITIVE_HOME_DIRS]
     dirs_pattern = "|".join(escaped_dirs)
+    sensitive_path = rf"{home_alts}/(?:{dirs_pattern})(?:/|\s|$|['\"])"
     return re.compile(
-        rf"(?:{_READ_CMDS}.*|{_WRITE_CMDS}.*|{_SCRIPT_OPEN}.*|.*[<>|]\s*)"
-        rf"{home_alts}/(?:{dirs_pattern})(?:/|\s|$|['\"])",
+        # (1) verb/redirect-anchored, OR (2) verb-independent: the sensitive path
+        # appears anywhere as a token (preceded by start, whitespace, or a quote).
+        rf"(?:(?:{_READ_CMDS}.*|{_WRITE_CMDS}.*|{_SCRIPT_OPEN}.*|.*[<>|]\s*)"
+        rf"{sensitive_path}"
+        rf"|(?:^|.*[\s'\"=]){sensitive_path})",
         re.IGNORECASE,
     )
 
@@ -229,13 +258,29 @@ def is_sensitive_path(path_str: str) -> bool:
     return False
 
 
+# Archive/extraction destination flags (tar -C, unzip -d, rsync dest) pointing
+# INTO the governance trust-root parent ``~/.kiroclaw`` — an extraction there can
+# drop/overwrite ``security_policy.json`` or a ``profiles/`` entry even though the
+# bare ``~/.kiroclaw`` dir is not itself a sensitive-path entry.  Match the
+# destination-dir form specifically so normal ``~/.kiroclaw`` access (sessions.db,
+# config.json) is not over-blocked.
+_EXTRACT_INTO_TRUST_ROOT_RE = re.compile(
+    r"-(?:C|d)\s+(?:~|\$HOME|/home/[^/\s]+|/Users/[^/\s]+|"
+    + re.escape(str(Path.home()))
+    + r")/\.kiroclaw(?:/profiles)?/?(?:\s|$|['\"])",
+    re.IGNORECASE,
+)
+
+
 def is_sensitive_bash_command(command: str) -> str | None:
-    """Check if a bash command reads sensitive paths.
+    """Check if a bash command reads OR writes sensitive paths.
 
     Returns denial reason string, or None if clean.
     """
     if _get_sensitive_re().search(command):
         return "Blocked: command accesses sensitive credential path"
+    if _EXTRACT_INTO_TRUST_ROOT_RE.search(command):
+        return "Blocked: command extracts into the governance trust-root directory"
     return None
 
 

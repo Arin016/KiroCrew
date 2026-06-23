@@ -176,6 +176,16 @@ def bootstrap_context(cfg: "KiroClawConfig") -> PlatformContext:
     # covers) — fail closed at boot if a refactor ever dropped them.
     assert_governance_paths_protected()
 
+    # Governance floor gate (Validation rules 3 & 7 / combined-order ABORT step):
+    # when an enterprise ceiling is present, every bound profile must be at least
+    # as strict as it for every ordinal control.  A looser-ordinal profile raises
+    # PlatformCompositionError and ABORTS boot fail-closed here — rather than only
+    # being silently re-tightened at runtime.  No-op on a standalone host with no
+    # ceiling.
+    from kiro_claw.platform.governance_profiles import assert_profiles_within_ceiling
+
+    assert_profiles_within_ceiling(ctx.governance)
+
     set_context(ctx)
 
     # Register any edition-contributed ACP backends now that the context is

@@ -39,6 +39,7 @@ import fnmatch
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Mapping, Optional, Protocol, Tuple, runtime_checkable
@@ -58,6 +59,9 @@ _POLICY_HOME_PATH = Path.home() / ".kiroclaw" / "security_policy.json"
 # Schema version this loader understands.  A file declaring a different version
 # fails closed rather than being parsed under guessed semantics.
 POLICY_VERSION = 1
+
+# Profile name schema (Appendix A): lowercase alnum + hyphen, alnum-initial.
+_PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 # ScopedRuleset modes.
 MODE_ALLOW = "allow"  # opt-in / closed set (deny-by-default)
@@ -147,6 +151,21 @@ _DEFAULT_MATCHER = "identifier"
 def _expand(path_str: str) -> str:
     """Expand ``~`` and ``$VAR`` without touching the filesystem (no resolve())."""
     return os.path.expanduser(os.path.expandvars(path_str))
+
+
+def _reject_unknown_keys(d: Mapping[str, object], known: "set[str]", container: str) -> None:
+    """Enforce ``additionalProperties:false`` on an archetype container.
+
+    Raise ``PlatformCompositionError`` if *d* carries any key outside *known* so a
+    typo is a validation error (the schema's documented intent) rather than a
+    silently-dropped — and potentially dangerous — setting.
+    """
+    extra = set(d) - known
+    if extra:
+        raise PlatformCompositionError(
+            f"{container} has unknown key(s) {sorted(extra)} (additionalProperties:false; "
+            "a typo is rejected fail-closed)"
+        )
 
 
 _RUNNING_PREFIX = "Running: "
@@ -264,6 +283,11 @@ class ScopedRuleset:
 
     @staticmethod
     def from_dict(d: Mapping[str, object], *, matcher: str = _DEFAULT_MATCHER) -> "ScopedRuleset":
+        # additionalProperties:false — a typo'd key (e.g. "deney" instead of
+        # "deny") must be a validation error, NOT silently dropped.  The
+        # dangerous case is a deny-list typo: it would otherwise become an empty
+        # deny list = allow-everything.  Fail closed instead.
+        _reject_unknown_keys(d, {"mode", "allow", "deny"}, "ScopedRuleset")
         mode = str(d.get("mode", "")).strip().lower()
         if mode not in _MODES:
             raise PlatformCompositionError(
@@ -271,12 +295,17 @@ class ScopedRuleset:
             )
         if matcher not in _MATCHERS:
             raise PlatformCompositionError(f"unknown matcher {matcher!r} for ScopedRuleset")
-        return ScopedRuleset(
-            mode=mode,
-            allow=_str_tuple(d.get("allow")),
-            deny=_str_tuple(d.get("deny")),
-            matcher=matcher,
-        )
+        allow = _str_tuple(d.get("allow"))
+        deny = _str_tuple(d.get("deny"))
+        # Rule 1: in allow-mode the deny array is ignored — warn so an operator
+        # who set both does not believe a dead deny entry is protecting anything.
+        if mode == MODE_ALLOW and deny:
+            logger.warning(
+                "ScopedRuleset mode=allow ignores its deny=%r (Rule 1: allow beats deny); "
+                "put hard bounds in policy, not a profile deny",
+                list(deny),
+            )
+        return ScopedRuleset(mode=mode, allow=allow, deny=deny, matcher=matcher)
 
     def permits(self, item: str) -> Decision:
         """Rule 1 — within a single level."""
@@ -369,11 +398,13 @@ class OrdinalControl:
     def compose(self, narrower: "OrdinalControl") -> "OrdinalControl":
         """strictest-of(self, narrower).  A looser profile does NOT win here.
 
-        The floor check (``assert_governance_floor``) separately *rejects* a
-        profile looser than the ceiling at boot; this method is the runtime
-        resolution and takes the stricter of the two so a stricter profile is
-        honoured and an (already-rejected-at-boot) looser one cannot downgrade
-        the effective value.
+        Two layers enforce the ceiling: at BOOT, ``assert_governance_floor`` (wired
+        via ``governance_profiles.assert_profiles_within_ceiling`` in
+        ``bootstrap_context``) *rejects* a profile looser than the ceiling and
+        aborts startup fail-closed; at RUNTIME, this method takes the stricter of
+        the two so a stricter profile is honoured and a looser one can never
+        downgrade the effective value (defense in depth even if a profile is
+        hot-reloaded after boot).
         """
         if narrower.scale != self.scale:
             raise PlatformCompositionError(
@@ -408,6 +439,7 @@ class CapabilityGate:
         default_enabled: bool,
         scope_matchers: Optional[Mapping[str, str]] = None,
     ) -> "CapabilityGate":
+        _reject_unknown_keys(d, {"enabled", "scopes"}, "CapabilityGate")
         raw_scopes = d.get("scopes") or {}
         if not isinstance(raw_scopes, dict):
             raise PlatformCompositionError("CapabilityGate.scopes must be an object")
@@ -462,6 +494,7 @@ class ScopedMap:
 
     @staticmethod
     def from_dict(d: Mapping[str, object], *, allow_posture: bool) -> "ScopedMap":
+        _reject_unknown_keys(d, {"members", "posture"}, "ScopedMap")
         raw_members = d.get("members")
         if not isinstance(raw_members, dict):
             raise PlatformCompositionError("ScopedMap.members is required and must be an object")
@@ -475,6 +508,14 @@ class ScopedMap:
             for member, leaves in raw_posture.items():
                 if not isinstance(leaves, dict):
                     continue
+                # Rule 6: a posture key is valid only if its member id is admitted
+                # by ``members`` — an orphan posture entry is dead config and a
+                # likely typo, so fail closed rather than carry it silently.
+                if not members.permits(str(member)).permitted:
+                    raise PlatformCompositionError(
+                        f"ScopedMap.posture key {member!r} is not admitted by members; "
+                        "a posture entry must name an allowed member"
+                    )
                 posture[str(member)] = {
                     str(leaf): ScopedRuleset.from_dict(val, matcher="identifier")
                     for leaf, val in leaves.items()
@@ -800,6 +841,13 @@ def parse_profile(data: Mapping[str, object]) -> Profile:
     name = str(data.get("name", "")).strip()
     if not name:
         raise PlatformCompositionError("profile requires a 'name'")
+    # Schema: name MUST match ^[a-z0-9][a-z0-9-]*$ (Appendix A).  A non-conforming
+    # name is a schema-invalid profile → the loader turns this raise into the
+    # most-restrictive deny-all built-in (Validation rule 5), never the ceiling.
+    if not _PROFILE_NAME_RE.match(name):
+        raise PlatformCompositionError(
+            f"profile name {name!r} must match ^[a-z0-9][a-z0-9-]*$"
+        )
     bind: Optional[Bind] = None
     raw_bind = data.get("bind")
     if isinstance(raw_bind, dict):

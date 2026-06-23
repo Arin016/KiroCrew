@@ -53,6 +53,67 @@ def test_unreadable_policy_aborts_boot(monkeypatch, tmp_path):
         build_default_context(KiroClawConfig.load())
 
 
+def test_looser_profile_ordinal_aborts_boot(monkeypatch, tmp_path):
+    """Validation rules 3 & 7: a profile looser than the ceiling aborts boot."""
+    from kiro_claw.platform import governance_profiles as gp
+
+    # Ceiling requires sandbox >= cc; a profile that sets sandbox off is looser.
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    (profiles / "weak.json").write_text(
+        json.dumps(
+            {
+                "name": "weak",
+                "bind": {"type": "surface", "id": "cron"},
+                "sandbox": {"min_level": "off"},
+            }
+        )
+    )
+    monkeypatch.setattr(gp, "_PROFILES_DIR", profiles)
+    gp.reset_store()
+    p = tmp_path / "policy.json"
+    p.write_text(
+        json.dumps({"version": 1, "boot": {"fail_closed": True}, "sandbox": {"min_level": "cc"}})
+    )
+    monkeypatch.setenv("KIROCLAW_SECURITY_POLICY", str(p))
+    try:
+        from kiro_claw.platform import bootstrap
+
+        with pytest.raises(PlatformCompositionError):
+            bootstrap.bootstrap_context(KiroClawConfig.load())
+    finally:
+        gp.reset_store()
+
+
+def test_profile_within_ceiling_boots(monkeypatch, tmp_path):
+    from kiro_claw.platform import governance_profiles as gp
+
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    (profiles / "ok.json").write_text(
+        json.dumps(
+            {
+                "name": "ok",
+                "bind": {"type": "surface", "id": "cron"},
+                "sandbox": {"min_level": "strict"},  # stricter than ceiling cc → fine
+            }
+        )
+    )
+    monkeypatch.setattr(gp, "_PROFILES_DIR", profiles)
+    gp.reset_store()
+    p = tmp_path / "policy.json"
+    p.write_text(
+        json.dumps({"version": 1, "boot": {"fail_closed": True}, "sandbox": {"min_level": "cc"}})
+    )
+    monkeypatch.setenv("KIROCLAW_SECURITY_POLICY", str(p))
+    try:
+        from kiro_claw.platform import bootstrap
+
+        bootstrap.bootstrap_context(KiroClawConfig.load())  # no raise
+    finally:
+        gp.reset_store()
+
+
 def test_lazy_default_carries_ceiling(monkeypatch, tmp_path):
     """The lazy current_context() path (stray subprocess) also gets the ceiling."""
     from kiro_claw.platform import context as ctx_mod
