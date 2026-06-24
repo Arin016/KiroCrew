@@ -1992,7 +1992,11 @@ class SubagentManager:
                     self._write_tombstone(info, "turn_limit")
                     return
                 tool_result = self._ctx_builder.hooks.on_tool_call(
-                    event.title, session_key=session_key, agent=info.agent or ""
+                    event.title,
+                    session_key=session_key,
+                    agent=info.agent or "",
+                    tool_kind=event.tool_kind,
+                    raw_params=event.raw_tool_params,
                 )
                 if tool_result.action == TOOL_DENY:
                     await self._reject_and_log(

@@ -256,7 +256,11 @@ async def decompose(
                 # during the planning phase, bypassing the execution-phase gate.
                 if ctx is not None and getattr(ctx, "hooks", None) is not None:
                     hook_result = ctx.hooks.on_tool_call(
-                        event.title, session_key=session_key, agent=agent
+                        event.title,
+                        session_key=session_key,
+                        agent=agent,
+                        tool_kind=event.tool_kind,
+                        raw_params=event.raw_tool_params,
                     )
                     if hook_result.action == TOOL_DENY:
                         await client.reject_tool(event.request_id)

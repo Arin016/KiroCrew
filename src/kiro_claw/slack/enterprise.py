@@ -87,6 +87,39 @@ def _load_allowed_team_ids() -> None:
     _allowed_team_ids = allowed
 
 
+def _governance_posture_permits_workspace(enterprise_id: str, team_id: str) -> bool:
+    """Check the workspace against ``channels.posture.slack.allowed_enterprise_ids``.
+
+    The governance ``channels`` ScopedMap may carry a policy-only ``posture`` for
+    the ``slack`` member pinning ``allowed_enterprise_ids`` (and/or
+    ``allowed_team_ids``) — an enterprise ceiling the agent cannot edit. We query
+    it via ``governance_permits("channels", "slack/<leaf>:<value>")`` for each
+    candidate id. Default-open (True) when no policy / no posture governs it, so a
+    standalone host is unaffected. Fail-closed only via PlatformCompositionError
+    (a host that could not compose its companion); any other error → permissive
+    (the config allowlist above already ran).
+    """
+    from kiro_claw.platform.context import PlatformCompositionError
+
+    try:
+        from kiro_claw.platform.governance_profiles import governance_permits
+
+        # An empty session key resolves policy-only (the posture is policy-only),
+        # which is exactly the ceiling we want here.
+        for leaf, value in (("allowed_enterprise_ids", enterprise_id), ("allowed_team_ids", team_id)):
+            if not value:
+                continue
+            decision = governance_permits("channels", f"slack/{leaf}:{value}")
+            if not getattr(decision, "permitted", True):
+                return False
+        return True
+    except PlatformCompositionError:
+        raise
+    except Exception:
+        logger.debug("governance channels posture check failed; no opinion", exc_info=True)
+        return True
+
+
 def validate_enterprise(
     bot_token: str,
     *,
@@ -209,6 +242,29 @@ def validate_enterprise(
                 error="enterprise_id_not_allowed",
             )
             return False
+
+    # Governance posture (un-weakenable): the enterprise security policy may pin
+    # ``channels.posture.slack.allowed_enterprise_ids`` — an enterprise ceiling the
+    # AGENT cannot edit (config.json's slack.allowed_enterprise_ids is operator-
+    # editable; the posture is the policy-level, agent-unweakenable equivalent).
+    # This composes as an ADDITIONAL ceiling: the workspace must satisfy the
+    # governance posture too. Default-open when no posture is configured.
+    if not _governance_posture_permits_workspace(enterprise_id, team_id):
+        logger.error(
+            "Enterprise validation FAILED: enterprise_id=%s (team=%s) is not "
+            "permitted by the governance channels.posture allowlist.",
+            enterprise_id,
+            team,
+        )
+        sel().log_api_access(
+            caller="gateway",
+            operation="slack.enterprise_validation",
+            outcome="denied",
+            source="startup",
+            resources=f"enterprise_id={enterprise_id} team={team} url={url}",
+            error="enterprise_id_not_allowed_by_governance",
+        )
+        return False
 
     logger.info(
         "Enterprise validation OK: enterprise_id=%s team=%s team_id=%s",

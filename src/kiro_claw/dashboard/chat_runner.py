@@ -2033,7 +2033,11 @@ async def _run_chat(
                 _pre_tool_hooks_fired = False
                 if state.context_builder:
                     tool_result = state.context_builder.hooks.on_tool_call(
-                        event.title, session_key=session_key, agent=slot.agent or ""
+                        event.title,
+                        session_key=session_key,
+                        agent=slot.agent or "",
+                        tool_kind=event.tool_kind,
+                        raw_params=event.raw_tool_params,
                     )
                     if tool_result.action == TOOL_DENY:
                         await client.reject_tool(event.request_id)

@@ -260,14 +260,18 @@ def governance_permits(
     profile for the calling surface, and returns the ``Decision``.  This is the
     single entry point every wired chokepoint calls so they share one decision
     source and audit path — no chokepoint re-implements resolution.  Wired
-    chokepoints today: the PreToolUse host gate (tools/mcp/commands), cron command
-    authoring (``commands``), sub-agent spawn (``capabilities.spawn``), outbound
-    messaging (``capabilities.messaging``), and the sandbox ordinal floor
-    (``sandbox.min_level`` via ``governance_floor_ordinal``).  The
-    ``filesystem``/``folders``, ``channels``, ``network.egress``, and
-    ``approval_mode`` scopes are modeled + resolvable but NOT yet wired to a
-    dedicated chokepoint (see ``docs/system-specs/modules/governance.md`` →
-    "Modeled-but-not-yet-enforced scopes"); a future change adds those gates.
+    chokepoints today: the PreToolUse host gate (``tools``/``mcp``/``commands``,
+    plus ``filesystem.read``/``filesystem.write``/``network.egress`` via the
+    tool kind + real args — see ``governance.classify_tool_args``); cron command
+    authoring (``commands``) and the cron on/off gate (``capabilities.cron``);
+    sub-agent spawn (``capabilities.spawn``); outbound messaging
+    (``capabilities.messaging``) and per-transport ``channels``; durable memory
+    writes (``capabilities.memory_writes``); script-hook execution
+    (``capabilities.script_hooks``); app activation (``apps``); and the sandbox
+    ordinal floor (``sandbox.min_level`` via ``governance_floor_ordinal``).  Only
+    the *live* ``approval_mode`` clamp remains reserved (the ordinal is still
+    boot-floor-checked) — see ``docs/system-specs/modules/governance.md`` →
+    "Still-reserved in v1".
 
     Fail-closed discipline matches the gate: a ``PlatformCompositionError``
     propagates; any other unexpected error returns a permissive Decision (the

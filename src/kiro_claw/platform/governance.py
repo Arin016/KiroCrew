@@ -188,20 +188,133 @@ def classify_tool_title(tool_name: str) -> Tuple[Tuple[str, str], ...]:
 
     * ``mcp__…`` → ``("mcp", "@server/tool")`` — the headline case.
     * ``Running: <cmd>`` → ``("commands", "<cmd>")``.
-    * ``Reading <path>`` → ``()`` (filesystem scope handles paths elsewhere).
+    * ``Reading <path>`` → ``("filesystem.read", "<path>")`` — kiro-cli's
+      file-read tool title carries the path after the prefix, so the path
+      ScopedRuleset (deny-oriented read block) applies at the name gate.  An
+      ungoverned ``filesystem.read`` scope permits (the standalone default), so
+      this is a no-op unless a policy/profile governs read paths.
     * unprefixed → BOTH ``("commands", <title>)`` and ``("tools", <title>)`` —
       whichever scope the operator actually governs applies; the other is a
       no-op (an ungoverned scope permits).
+
+    Note on writes: kiro-cli's file-WRITE/edit title format is not a stable
+    prefix the way ``Reading``/``Running:`` are, so ``filesystem.write`` is NOT
+    classified from the title here — it is enforced from the real tool arguments
+    (``raw_tool_params['path']`` + ``tool_kind == 'edit'``) via
+    :func:`classify_tool_args`, which the gate consults alongside the title.
     """
     if tool_name.startswith("mcp__"):
         return (("mcp", mcp_title_to_ref(tool_name)),)
     if tool_name.startswith(_RUNNING_PREFIX):
         return (("commands", tool_name[len(_RUNNING_PREFIX) :]),)
     if tool_name.startswith(_READING_PREFIX):
-        return ()
+        path = tool_name[len(_READING_PREFIX) :].strip()
+        return (("filesystem.read", path),) if path else ()
     # Unprefixed + heterogeneous: evaluate against BOTH the commands and tools
     # ceilings so neither is bypassed regardless of which kind the title is.
     return (("commands", tool_name), ("tools", tool_name))
+
+
+# ACP tool_kind values (acp/client.py): "execute" (Bash), "read" (fs_read),
+# "edit" (fs_write/code), "fetch" (web_fetch).  The kind + raw params are the
+# RELIABLE signal for path/URL scopes — the display title is backend-variable.
+_KIND_READ = "read"
+_KIND_EDIT = "edit"
+_KIND_FETCH = "fetch"
+
+
+def classify_tool_args(
+    tool_kind: str, raw_params: Optional[Mapping[str, object]]
+) -> Tuple[Tuple[str, str], ...]:
+    """Map a tool's semantic ``kind`` + real arguments to ``(scope, item)`` pairs.
+
+    This is the args-based companion to :func:`classify_tool_title`.  The display
+    title is backend-variable and unreliable for extracting a path or URL, but the
+    ACP event carries the tool's ``kind`` and ``raw_tool_params`` — the
+    authoritative signal.  Used by the gate to enforce the path/host scopes that a
+    title cannot carry:
+
+    * ``kind == "edit"`` with a ``path`` → ``("filesystem.write", "<path>")``.
+    * ``kind == "read"`` with a ``path`` → ``("filesystem.read", "<path>")``
+      (redundant with the ``Reading`` title path, harmless — both must permit).
+    * ``kind == "fetch"`` with a ``url`` → ``("network.egress", "<host>")`` —
+      the host is extracted from the URL so the ``host`` matcher applies.
+
+    **Empty/unknown ``kind`` fallback (the `kind` field is spec-OPTIONAL — some
+    ACP backends omit it, so it arrives ``""``).**  When the kind is not one of
+    the known fs/fetch kinds, we infer from the param SHAPE so an edit/fetch is
+    still governed: a ``url``/``uri`` (and no shell ``command``) → egress; a
+    ``path``/``file_path`` (and no shell ``command``) → BOTH read and write
+    (we cannot tell read from write without the kind, so we apply both ceilings —
+    an ungoverned one permits, so this only tightens and never misroutes a shell
+    command, which carries ``command`` and is governed by the ``commands`` scope).
+
+    Returns an empty tuple when the params carry no governed item (an ungoverned
+    scope permits, so this only ever tightens).
+    """
+    if not raw_params or not isinstance(raw_params, Mapping):
+        return ()
+    pairs: list = []
+    path = raw_params.get("path") or raw_params.get("file_path")
+    url = raw_params.get("url") or raw_params.get("uri")
+    has_command = bool(raw_params.get("command"))  # a shell tool → commands scope
+    if tool_kind == _KIND_EDIT:
+        if isinstance(path, str) and path:
+            pairs.append(("filesystem.write", path))
+    elif tool_kind == _KIND_READ:
+        if isinstance(path, str) and path:
+            pairs.append(("filesystem.read", path))
+    elif tool_kind == _KIND_FETCH:
+        if isinstance(url, str) and url:
+            host = _url_host(url)
+            if host:
+                pairs.append(("network.egress", host))
+    elif not has_command:
+        # Unknown/empty kind and NOT a shell command: infer from param shape so
+        # an edit/fetch is not silently ungoverned when the backend omits `kind`.
+        if isinstance(url, str) and url:
+            host = _url_host(url)
+            if host:
+                pairs.append(("network.egress", host))
+        if isinstance(path, str) and path:
+            # Can't distinguish read from write without the kind → apply both
+            # ceilings (tightest-wins; an ungoverned scope permits).
+            pairs.append(("filesystem.read", path))
+            pairs.append(("filesystem.write", path))
+    return tuple(pairs)
+
+
+def _url_host(url: str) -> str:
+    """Extract the host from a URL for the ``host`` matcher (no network I/O).
+
+    Returns ``""`` for a URL that carries no network host (e.g. ``file:///…``),
+    so a hostless URL is NOT mis-classified as egress to a phantom host (the
+    ``//``-prefix retry only fires for a genuinely scheme-less ``host/path``
+    form, never for a scheme whose authority is legitimately empty).
+    """
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url.strip())
+        netloc = parsed.netloc
+        # A scheme-less ``host/path`` (e.g. "example.com/x") parses with empty
+        # netloc; retry with a ``//`` authority marker so the host is recovered.
+        # Do NOT retry when a scheme was present (``file:///…`` has no host).
+        # The scheme-less ``host:port`` form (e.g. "example.com:8080") is the
+        # exception: urlparse reads "example.com" as the SCHEME, so retry with
+        # ``//`` when the "scheme" is non-empty but there is no netloc and no
+        # ``://`` separator in the original (a true scheme always uses ``://``
+        # for a network URL).
+        scheme_less = not parsed.scheme or "://" not in url
+        if not netloc and scheme_less:
+            netloc = urlparse("//" + url.strip()).netloc
+    except Exception:
+        return ""
+    # Strip userinfo + port: ``user:pass@host:443`` → ``host``.
+    host = netloc.rsplit("@", 1)[-1]
+    if host.startswith("["):  # IPv6 literal [::1]:443
+        return host[1 : host.index("]")] if "]" in host else host
+    return host.rsplit(":", 1)[0] if ":" in host else host
 
 
 def mcp_title_to_ref(title: str) -> str:
@@ -669,7 +782,9 @@ def deny_all_profile(name: str = "_deny_all") -> Profile:
     controls: Dict[str, object] = {
         scope: ScopedRuleset(mode=MODE_ALLOW, allow=(), matcher=spec.matcher)
         for scope, spec in SCOPE_CATALOG.items()
-        if spec.kind == RULESET
+        # Skip alias scopes (folders.* → filesystem.*): the gate queries the
+        # canonical target, so emitting the alias key too is dead config.
+        if spec.kind == RULESET and scope not in _SCOPE_ALIASES
     }
     controls["channels"] = ScopedMap(members=ScopedRuleset(mode=MODE_ALLOW, allow=()))
     for scope, spec in SCOPE_CATALOG.items():
@@ -739,6 +854,18 @@ _KEY_OPEN_NAMESPACES = frozenset({"capabilities"})
 # (require_isolation, env_scrub_prefixes) kept raw under a reserved scope.
 _SANDBOX_FLAGS_SCOPE = "sandbox._flags"
 
+# Scope aliases: the Pippin doc names the profile's path scopes ``folders.read``/
+# ``folders.write`` but the policy names them ``filesystem.read``/``.write`` (App.
+# A.3 note + the worked example). They are the SAME path ceiling — both resolve
+# through the ``path`` matcher and the gate queries ``filesystem.*`` — so a
+# ``folders.*`` key is normalized to its ``filesystem.*`` scope at parse time.
+# Without this, a profile's ``folders.write`` would land in a separate control
+# key and silently fail to narrow the ``filesystem.write`` the gate evaluates.
+_SCOPE_ALIASES: Dict[str, str] = {
+    "folders.read": "filesystem.read",
+    "folders.write": "filesystem.write",
+}
+
 
 def _parse_controls(data: Mapping[str, object], *, is_policy: bool) -> Dict[str, object]:
     """Flatten a policy/profile JSON body into the catalog's dotted-scope map.
@@ -764,10 +891,21 @@ def _parse_controls(data: Mapping[str, object], *, is_policy: bool) -> Dict[str,
             nested_children.setdefault(head, set()).add(tail)
 
     def take(scope: str, raw: object) -> None:
+        # Normalize an alias (folders.* → filesystem.*) so it lands in the SAME
+        # control key the gate queries, and a profile's folders.* actually narrows
+        # the policy's filesystem.* ceiling.
+        scope = _SCOPE_ALIASES.get(scope, scope)
         spec = SCOPE_CATALOG.get(scope)
         if spec is None:
             raise PlatformCompositionError(f"unknown governed scope {scope!r} (fail-closed)")
-        controls[scope] = _parse_control(scope, spec, raw, is_policy=is_policy)
+        if scope in controls:
+            # Both folders.* and filesystem.* present (or a dup) → intersect so
+            # neither silently wins; keeps the narrow-only invariant.
+            existing = controls[scope]
+            new = _parse_control(scope, spec, raw, is_policy=is_policy)
+            controls[scope] = _compose_controls(existing, new)
+        else:
+            controls[scope] = _parse_control(scope, spec, raw, is_policy=is_policy)
 
     for key, raw in data.items():
         if key in _STRUCTURAL_KEYS:
@@ -1013,21 +1151,28 @@ def gate_decision(
     ceiling: Optional[GovernanceCeiling],
     profile: Optional[Profile],
     tool_title: str,
+    *,
+    tool_kind: str = "",
+    raw_params: Optional[Mapping[str, object]] = None,
 ) -> Decision:
     """Resolve a PreToolUse gate title against the governance ceiling ∩ profile.
 
     Classifies the (heterogeneous) title to its governed scope + item, then
-    ``resolve``s it.  A title the name-gate does not govern (a file read, an
-    unclassifiable title) is permitted here — its scope is enforced at a
-    dedicated chokepoint, not the name gate.  When BOTH levels are ungoverned the
-    result permits (the standalone default), so a host with no policy + no
-    profile behaves exactly as today.
+    ``resolve``s it.  When ``tool_kind`` / ``raw_params`` are supplied (the ACP
+    event carries them), the real arguments are ALSO classified
+    (:func:`classify_tool_args`) so path/host scopes the title cannot carry —
+    ``filesystem.write`` (edit path), ``network.egress`` (fetch host) — are
+    enforced at the same gate.  A title/args pair the gate does not govern is
+    permitted here — an ungoverned scope permits.  When BOTH levels are
+    ungoverned the result permits (the standalone default), so a host with no
+    policy + no profile behaves exactly as today.
     """
-    pairs = classify_tool_title(tool_title)
+    pairs = list(classify_tool_title(tool_title))
+    pairs.extend(classify_tool_args(tool_kind, raw_params))
     if not pairs:
         return Decision(True, "title not name-gate-governed", rule="default")
-    # Deny if ANY governed scope the title maps to denies it (the unprefixed case
-    # maps to both commands+tools; an ungoverned scope permits, so this only
+    # Deny if ANY governed scope the title/args map to denies it (the unprefixed
+    # case maps to both commands+tools; an ungoverned scope permits, so this only
     # tightens).  Return the first denial for a precise audit reason.
     for scope, item in pairs:
         decision = resolve(ceiling, profile, scope, item)
@@ -1176,6 +1321,7 @@ __all__ = [
     "register_matcher",
     "mcp_title_to_ref",
     "classify_tool_title",
+    "classify_tool_args",
     "deny_all_profile",
     "parse_policy",
     "parse_profile",

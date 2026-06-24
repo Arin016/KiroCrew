@@ -212,3 +212,80 @@ def test_check_message_origin_denies_empty_team_id_when_allowlist():
     enterprise._allowlist_configured = True
     enterprise._allowed_team_ids = {"T_GOOD"}
     assert enterprise.check_message_origin("") is False
+
+
+# --------------------------------------------------------------------------
+# Governance channels.posture (un-weakenable, agent cannot edit) — the
+# enterprise security policy pins allowed_enterprise_ids ABOVE the operator's
+# config.json allowlist. A workspace must satisfy BOTH.
+# --------------------------------------------------------------------------
+
+
+def _install_governance_posture(allowed_enterprise_ids: list[str]):
+    """Install a PlatformContext carrying a channels.posture slack allowlist."""
+    import dataclasses
+
+    from kiro_claw.config.loader import KiroClawConfig
+    from kiro_claw.platform import context as ctx_mod
+    from kiro_claw.platform.bootstrap import build_default_context
+    from kiro_claw.platform.governance import parse_policy
+
+    policy = parse_policy(
+        {
+            "version": 1,
+            "boot": {"fail_closed": True},
+            "channels": {
+                "members": {"mode": "allow", "allow": ["slack"]},
+                "posture": {
+                    "slack": {
+                        "allowed_enterprise_ids": {
+                            "mode": "allow",
+                            "allow": list(allowed_enterprise_ids),
+                        }
+                    }
+                },
+            },
+        }
+    )
+    base = build_default_context(KiroClawConfig.load())
+    ctx_mod.set_context(dataclasses.replace(base, governance=policy))
+
+
+def test_governance_posture_blocks_workspace_outside_policy():
+    # config.json has NO allowlist (default-open), but the governance posture
+    # pins enterprise E_GOOD. A workspace E_EVIL must be REJECTED by the policy
+    # ceiling even though the operator config would have accepted it.
+    from kiro_claw.platform import context as ctx_mod
+
+    resp = {"enterprise_id": "E_EVIL", "team_id": "T1", "team": "Evil", "url": "https://x"}
+    try:
+        _install_governance_posture(["E_GOOD"])
+        with _install_fake_slack_sdk(resp), patch.object(
+            enterprise.KiroClawConfig, "load", return_value=_fake_config([])
+        ):
+            assert enterprise.validate_enterprise("xoxb-token") is False
+    finally:
+        ctx_mod.reset_context()
+
+
+def test_governance_posture_allows_pinned_workspace():
+    from kiro_claw.platform import context as ctx_mod
+
+    resp = {"enterprise_id": "E_GOOD", "team_id": "T1", "team": "Good", "url": "https://x"}
+    try:
+        _install_governance_posture(["E_GOOD"])
+        with _install_fake_slack_sdk(resp), patch.object(
+            enterprise.KiroClawConfig, "load", return_value=_fake_config([])
+        ):
+            assert enterprise.validate_enterprise("xoxb-token") is True
+    finally:
+        ctx_mod.reset_context()
+
+
+def test_no_governance_posture_is_default_open():
+    # No policy installed → the governance posture check is a no-op (default-open).
+    resp = {"enterprise_id": "E_ANY", "team_id": "T1", "team": "Any", "url": "https://x"}
+    with _install_fake_slack_sdk(resp), patch.object(
+        enterprise.KiroClawConfig, "load", return_value=_fake_config([])
+    ):
+        assert enterprise.validate_enterprise("xoxb-token") is True

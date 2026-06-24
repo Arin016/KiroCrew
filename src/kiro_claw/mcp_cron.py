@@ -108,6 +108,66 @@ _CRON_SECRET_NAME_RE = re.compile(
 _MAX_SCRIPT_SCAN_BYTES = 256 * 1024
 
 
+def _audit_governance_deny(session_key: str, tool_name: str, scope: str, decision: object) -> None:
+    """Best-effort SEL audit of an out-of-band governance denial (file-backed).
+
+    Mirrors hooks._audit_governance so the chokepoint denials beyond the host
+    gate (cron capability, etc.) leave the same ``governance_decision`` forensic
+    trail. Never raises (audit must not wedge the deny path).
+    """
+    try:
+        from kiro_claw.sel import sel
+
+        sel().log_governance_decision(
+            session_key=session_key,
+            tool_name=tool_name,
+            scope=scope,
+            outcome="denied",
+            rule=getattr(decision, "rule", ""),
+            layer=getattr(decision, "layer", ""),
+            reason=getattr(decision, "reason", ""),
+        )
+    except Exception:
+        logger.debug("governance deny audit emit failed", exc_info=True)
+
+
+def _vet_cron_capability_governance() -> str | None:
+    """Apply the ``capabilities.cron`` gate before authoring ANY cron job.
+
+    Distinct from :func:`_vet_command_governance` (which gates the command
+    *body* under the ``commands`` scope): this is the on/off *capability* gate.
+    When a policy/profile sets ``capabilities.cron.enabled = false`` for the
+    calling surface, no cron job may be authored at all — regardless of whether
+    it carries a command, a script, or only a message.  ``capabilities.cron``
+    defaults OFF in the catalog, so a profile that does not mention it leaves
+    cron bounded by policy alone (profile-absence = not-governed, the documented
+    deviation) — only an explicit ``enabled: false`` (or a deny-all profile)
+    disables it.  Best-effort beyond the caller's always-on guards.
+    """
+    from kiro_claw.platform.context import PlatformCompositionError
+
+    try:
+        from kiro_claw.platform.governance_profiles import governance_permits
+
+        # item="" → the CapabilityGate's ``enabled`` flag is what is queried.
+        # Fall back to a ``cron:``-prefixed key so an empty session key still
+        # classifies to the CRON surface (a bare "mcp_cron" misclassifies to the
+        # attended "slack" surface via sel._infer_source, skipping a cron-bound
+        # profile) — matching _vet_command_governance's "cron:_vet".
+        sk = _resolve_session_key() or "cron:_vet"
+        decision = governance_permits("capabilities.cron", "", session_key=sk)
+        if not getattr(decision, "permitted", True):
+            _audit_governance_deny(sk, "cron_add", "capabilities.cron", decision)
+            return "Error: cron scheduling blocked by governance policy: " + redact(
+                getattr(decision, "reason", "cron capability disabled")
+            )
+    except PlatformCompositionError:
+        raise
+    except Exception:
+        logger.debug("cron capability governance check failed; no opinion", exc_info=True)
+    return None
+
+
 def _vet_command_governance(command: str) -> str | None:
     """Apply the governance ``commands`` ceiling ∩ cron profile to a cron command.
 
@@ -804,6 +864,14 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         return _render_cron_list_compact(jobs)
 
     if name == "cron_add":
+        # Capability gate FIRST: if the calling surface's policy/profile disables
+        # the cron capability, no job may be authored at all (command, script, or
+        # message). This is the on/off gate, distinct from the per-command body
+        # check below (the ``commands`` scope).
+        cap_err = _vet_cron_capability_governance()
+        if cap_err:
+            _log_cron_denial("cron_add", cap_err)
+            return cap_err
         n = args["name"]
         msg = args.get("message", "")
         script = args.get("script", "")

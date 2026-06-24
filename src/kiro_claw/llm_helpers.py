@@ -308,7 +308,13 @@ async def _resolve_permission(
         return False
 
     if policy == ToolApprovalPolicy.HOOK_BASED and hooks:
-        tool_result = hooks.on_tool_call(event.title, session_key=session_key, agent=agent)
+        tool_result = hooks.on_tool_call(
+            event.title,
+            session_key=session_key,
+            agent=agent,
+            tool_kind=event.tool_kind,
+            raw_params=event.raw_tool_params,
+        )
         if tool_result.action == TOOL_DENY:
             await provider.reject_tool(event.request_id)
             _log("denied", error=tool_result.reason)

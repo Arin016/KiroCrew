@@ -823,13 +823,22 @@ def start_enabled_app_backends() -> list[str]:
     Called during gateway startup to restore app backends.
     Returns list of app names that were started.
     """
-    from kiro_claw.apps.manager import list_apps
+    from kiro_claw.apps.manager import _app_activation_denied, list_apps
 
     started: list[str] = []
     for app_info in list_apps():
         if not app_info.get("enabled"):
             continue
         name = app_info.get("name", "")
+        # Governance: the ``apps`` allowlist is an activation ceiling, so it must
+        # gate startup re-activation too — not just the manual enable transition.
+        # A policy tightened AFTER an app was enabled would otherwise let the app
+        # load on the next restart (its persisted enabled=true bypasses the
+        # enable_app gate). Re-vet here so a now-forbidden app stays down.
+        gov_denied = _app_activation_denied(name)
+        if gov_denied:
+            logger.warning("App %s not started: blocked by governance policy: %s", name, gov_denied)
+            continue
         manifest = app_info.get("manifest", {})
         if not manifest.get("backend", {}).get("entryPoint"):
             continue

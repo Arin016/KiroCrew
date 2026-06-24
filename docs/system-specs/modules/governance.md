@@ -110,44 +110,109 @@ profile falls back to deny-all (Validation rule 5), **not** the ceiling.
   KiroClaw does not regenerate `~/.kiro/agents/*.json`.
 - **Plane C — out-of-band executors**: the cron `command` (runs via `sh -c`
   outside the ACP flow) is gated in `mcp_cron._vet_command_governance`; the
-  sandbox ordinal floor is clamped in `sandbox.wrap_argv`; spawn in
-  `subagent._vet_spawn_governance`; outbound messaging in
-  `mcp_core._vet_messaging_governance`. All route through the same
-  `governance_permits` / `governance_floor_ordinal` decision source.
+  cron *capability* on/off gate in `mcp_cron._vet_cron_capability_governance`
+  (at `cron_add`); the sandbox ordinal floor is clamped in `sandbox.wrap_argv`;
+  spawn in `subagent._vet_spawn_governance`; outbound messaging in
+  `mcp_core._vet_messaging_governance` plus the per-transport `channels` check
+  in `mcp_core._vet_channel_governance`; durable memory writes in
+  `mcp_core._vet_memory_writes_governance` (at `learn_add`); script-hook
+  execution in `hooks._script_hooks_capability_denied` (at `run_script_hook`);
+  app activation in `apps.manager._app_activation_denied` (at `enable_app`). All
+  route through the same `governance_permits` / `governance_floor_ordinal`
+  decision source.
 
-### Modeled-but-not-yet-enforced scopes (v1)
+### Filesystem + egress at the host gate (tool kind + real args)
 
-Several scopes are fully modeled — they parse, validate, compose, and resolve,
-and `kiroclaw policy show`/`explain` display them — but are **not yet wired to a
-runtime chokepoint**. They are reserved so the policy/profile vocabulary is
-stable; a profile/policy authoring them is honoured by the evaluator but does
-not change runtime behavior until the corresponding gate lands:
+`filesystem.read` / `filesystem.write` / `network.egress` are enforced at the
+**host gate** (`HookManager.on_tool_call` → `gate_decision`), not at a separate
+per-call chokepoint, because every tool call already passes through that gate on
+every surface. The display *title* is backend-variable and cannot reliably carry
+a path or URL, so these scopes are resolved from the tool's **semantic kind +
+real arguments** the ACP event carries:
 
-- **`network.egress`** — no governed HTTP/socket client exists yet (the locked
-  v1 decision); a later change adds the single governed client.
-- **`filesystem.read` / `filesystem.write` / `folders.*`** — file reads/writes
-  are gated today only by the fixed `is_sensitive_path` keystone list, not by a
-  per-policy path ruleset. (Writes to the trust-root + credential dirs ARE
-  blocked; arbitrary per-policy path allow/deny is not yet enforced.)
-- **`channels` (members + posture)** — outbound messaging is gated by the
-  `capabilities.messaging` on/off gate; the per-transport `channels` map is not
-  yet consulted at a transport chokepoint.
+- A `Reading <path>` title classifies to `filesystem.read` (the read path is in
+  the title); `classify_tool_args` also maps `tool_kind == "read"` +
+  `raw_params["path"]` → `filesystem.read`.
+- `tool_kind == "edit"` + `raw_params["path"]` → `filesystem.write`.
+- `tool_kind == "fetch"` + `raw_params["url"]` → `network.egress` (the host is
+  extracted from the URL so the `host` matcher applies).
+
+`on_tool_call(..., tool_kind=, raw_params=)` carries these from the ACP event
+(`AcpEvent.tool_kind` / `.raw_tool_params`); the call sites thread them
+(`llm_helpers`, `subagent`, `task_executor`, `task_planner`, dashboard
+`chat_runner`, slack `handler`). **The `EVENT_PERMISSION_REQUEST` event the gate
+runs on must carry `raw_tool_params`** — `acp/client.py` caches the structured
+rawInput at the ToolCall notification (`_tool_call_params`, keyed by
+`toolCallId`) and attaches it to the later permission event, because that
+message itself carries only a truncated title. Without this the two arg-derived
+scopes would be inert in production.
+
+The `kind` field is **spec-optional**: some ACP backends omit it (it arrives
+`""`). `classify_tool_args` therefore falls back to the param SHAPE when the kind
+is unknown — a `url` (and no shell `command`) → egress; a `path` (and no
+`command`) → BOTH `filesystem.read` and `filesystem.write` (it cannot tell read
+from write without the kind, so it applies both ceilings; an ungoverned one
+permits, and a `command` param routes to the `commands` scope, never filesystem).
+
+This keeps the existing always-on `is_sensitive_path` keystone (the fixed
+credential/trust-root block) in force regardless — **and extends it**: the gate
+now runs `is_sensitive_path` on the real `raw_params['path']` too, so an edit to
+`~/.ssh`, `~/.aws`, or the governance trust-root files is blocked even when the
+display title hides the path. The per-policy path/host rulesets compose **on
+top** of this keystone.
+
+> **`folders.*` vs `filesystem.*`.** The profile `folders.read`/`folders.write`
+> are **aliases** of the policy `filesystem.read`/`filesystem.write` path scopes
+> (the profile schema names them `folders`; the policy names them `filesystem`).
+> They are normalized to `filesystem.*` at parse time (`_SCOPE_ALIASES`), so a
+> profile's `folders.write` actually narrows the `filesystem.write` ceiling the
+> gate queries (both present in one file → intersect). Without the alias they
+> would land in separate control keys and silently fail to compose.
+
+### Channels posture (per-transport identity ceiling)
+
+`channels.posture.slack.allowed_enterprise_ids` (policy-only) is enforced in
+`slack.enterprise.validate_enterprise`: a workspace must satisfy the governance
+posture in ADDITION to the operator's `config.json`
+`slack.allowed_enterprise_ids`. The posture is the **agent-unweakenable**
+ceiling (the config allowlist is operator-editable; the policy posture is not).
+Default-open when no policy posture is configured.
+
+### Audit
+
+Every new chokepoint denial emits a `governance_decision` SEL record (file-
+backed, so safe even in the stdio MCP server) via `log_governance_decision`,
+matching the host-gate deny path — so cron/script-hook/memory/channel/app
+denials leave the same forensic trail.
+
+### Scope boundaries (documented, not gaps)
+
+- **`network.egress` governs the dedicated fetch tool only.** A `fetch`
+  tool-kind call is classified to `network.egress` by host. Command-driven
+  egress (`curl`/`wget`/`nc` inside a Bash tool) arrives as `tool_kind ==
+  "execute"` and is governed by the **`commands`** scope (the command body),
+  not `network.egress` — a policy that wants to bound shell egress denies the
+  relevant `commands` patterns. This is the same plane split the rest of the
+  model uses (a shell command is a `commands` item, never re-parsed into its
+  sub-effects).
+- **Per-app profile binding via MCP chokepoints is best-effort.** The managed
+  `kiroclaw-core` MCP server is spawned by kiro-cli, not by an app backend, so
+  `KIROCLAW_APP_NAME` is absent there — `learn_add`/`send_message` resolve the
+  per-SURFACE profile + policy ceiling (the enforced path), not a per-app
+  profile. An app's own in-process tool calls (which carry `KIROCLAW_APP_NAME`)
+  do bind a per-app profile. App blast-radius is contained today by the `apps`
+  activation allowlist + per-surface profiles.
+
+### Still-reserved in v1
+
 - **`approval_mode`** — the ordinal is parsed and **boot-floor-checked** (a
   profile looser than the policy mark aborts boot, like `sandbox.min_level`), but
-  no approval chokepoint clamps the live approval pipeline through it yet (the
-  live approval vocabulary — `reads`/`yolo`/`auto`/`interactive` — is not yet
-  reconciled onto the `approval` scale).
-- **`apps`** — the per-app activation allowlist parses/resolves, but no
-  app-launch chokepoint consults it yet; app blast-radius is contained today by
-  binding a per-app *profile* (the `bind.type == "app"` path), not by the `apps`
-  scope itself.
-- **`capabilities.memory_writes`** (default on) — modeled; no durable-memory
-  write chokepoint consults it yet.
-- **`capabilities.script_hooks`** (default off) — modeled; `run_script_hook` is
-  not yet gated by this capability.
-- **`capabilities.cron`** (default off) — the cron chokepoint gates the command
-  *body* (`commands` scope), not the on/off *capability* gate; the `enabled`
-  gate is modeled but not yet consulted at `cron_add`.
+  no approval chokepoint clamps the *live* approval pipeline through it yet: the
+  live approval vocabulary (`""`/`auto` in cron; the dashboard trust toggles) is
+  not yet reconciled onto the `yolo < auto < interactive` scale. The boot floor
+  is the enforced half; the live clamp is the reserved half. Wiring it is the one
+  genuinely-architectural follow-up (a single approval-policy resolution point
+  fed by `governance_floor_ordinal("approval_mode")`).
 
 > **Capability `profile-absence` semantics (deliberate deviation from spec A.4
 > rule 8).** The spec says a profile that OMITS a capability defaults it to
@@ -158,10 +223,14 @@ not change runtime behavior until the corresponding gate lands:
 > profile sets `enabled: false` explicitly, or uses the deny-all built-in. This
 > is intentional and documented here rather than silently divergent.
 
-The **enforced** scopes in v1 are: `tools`, `mcp`, `commands` (the host gate +
-cron command), `capabilities.spawn`, `capabilities.messaging`, and
-`sandbox.min_level` (the ordinal floor at `wrap_argv`). Adding a chokepoint for a
-reserved scope is the documented follow-up; the evaluator already supports them.
+The **enforced** scopes in v1 are: `tools`, `mcp`, `commands` (host gate + cron
+command body), `filesystem.read` / `filesystem.write` / `folders.*` and
+`network.egress` (host gate via tool kind + args), `channels` (per-transport at
+the messaging chokepoint), `apps` (app activation), `sandbox.min_level` (ordinal
+floor at `wrap_argv`), `approval_mode` (boot floor only), and every capability
+gate — `capabilities.spawn`, `capabilities.messaging`, `capabilities.cron`,
+`capabilities.memory_writes`, `capabilities.script_hooks`. Only the live
+`approval_mode` clamp remains reserved.
 
 ## Audit
 

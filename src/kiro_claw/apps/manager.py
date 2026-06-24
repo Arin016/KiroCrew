@@ -492,6 +492,46 @@ def uninstall_app(name: str, *, keep_data: bool = False) -> AppResult:
 # ---------------------------------------------------------------------------
 
 
+def _app_activation_denied(name: str) -> str | None:
+    """Return a denial reason if governance forbids activating app *name*, else None.
+
+    The ``apps`` scope (a ScopedRuleset over app slugs) is the per-app activation
+    allowlist: an enterprise policy may restrict which apps may run at all (e.g.
+    ``apps: {mode: allow, allow: ["auto-research", "file-explorer"]}``).  Enabling
+    is the activation chokepoint — a disabled app contributes no agents, skills,
+    crons, or routes — so the gate lives here.  Resolution is policy-only
+    (``session_key=""``): app activation is an operator/host action, not bound to
+    a calling surface.  Best-effort beyond the always-on checks: a
+    ``PlatformCompositionError`` propagates (fail-closed CPP); any other error
+    degrades to "no opinion" (None).
+    """
+    from kiro_claw.platform.context import PlatformCompositionError
+
+    try:
+        from kiro_claw.platform.governance_profiles import governance_permits
+
+        decision = governance_permits("apps", name)
+        if not getattr(decision, "permitted", True):
+            try:
+                from kiro_claw.sel import sel
+
+                sel().log_governance_decision(
+                    session_key="", tool_name=f"enable_app:{name}", scope="apps",
+                    item=name, outcome="denied",
+                    rule=getattr(decision, "rule", ""), layer=getattr(decision, "layer", ""),
+                    reason=getattr(decision, "reason", ""),
+                )
+            except Exception:
+                logger.debug("app activation deny audit failed", exc_info=True)
+            return getattr(decision, "reason", f"app {name!r} not permitted by policy")
+        return None
+    except PlatformCompositionError:
+        raise
+    except Exception:
+        logger.debug("app activation governance check failed; no opinion", exc_info=True)
+        return None
+
+
 def enable_app(name: str) -> AppResult:
     """Enable an installed app."""
     if not _check_path_safety(name):
@@ -499,6 +539,10 @@ def enable_app(name: str) -> AppResult:
     meta = _read_installed(name)
     if not meta:
         return AppResult(ok=False, name=name, error=f"app {name!r} is not installed")
+    # Governance: the ``apps`` allowlist may forbid activating this app entirely.
+    gov_denied = _app_activation_denied(name)
+    if gov_denied:
+        return AppResult(ok=False, name=name, error=f"blocked by governance policy: {gov_denied}")
     if meta.enabled:
         return AppResult(ok=True, name=name, message=f"{name} is already enabled")
 

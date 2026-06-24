@@ -245,6 +245,8 @@ class HookManager:
         session_key: str = "",
         agent: str = "",
         app: str = "",
+        tool_kind: str = "",
+        raw_params: dict | None = None,
     ) -> ToolHookResult:
         """Check if a tool should be auto-approved, denied, or handled normally.
 
@@ -254,6 +256,13 @@ class HookManager:
         granted it (the governance headline behavior).  They default to ``""`` so
         every existing caller is unaffected; a caller that supplies identity opts
         into per-surface governance.
+
+        ``tool_kind`` (the ACP semantic kind: ``read``/``edit``/``fetch``/…) and
+        ``raw_params`` (the real tool arguments — ``path``/``url``) let the gate
+        enforce the path/host scopes a display title cannot carry
+        (``filesystem.write``, ``network.egress``).  Both default to empty, so a
+        caller that does not thread them only loses those two arg-derived scopes,
+        never the title-derived ones.
         """
         # Strip display prefixes (e.g. "Running: ls *" → "ls *") so config
         # patterns like "ls" or "rm *" match without the prefix.
@@ -271,6 +280,17 @@ class HookManager:
         # is instead caught by is_sensitive_bash_command below.
         if is_sensitive_path(normalized):
             return ToolHookResult.deny(f"Blocked: access to sensitive path: {normalized}")
+        # The display title is backend-variable and may NOT carry the path (an
+        # "Editing <file>" / generic "code" title does not). The real path lives
+        # in raw_params['path'] for file read/edit tools — run the SAME always-on
+        # keystone on it so an edit/write to ~/.ssh, ~/.aws, or the governance
+        # trust-root files (security_policy.json / profiles) is blocked even when
+        # the title hides it. This is the keystone the governance model leans on
+        # (agent-cannot-rewrite-its-own-ceiling), so it must not be title-gated.
+        if raw_params:
+            real_path = raw_params.get("path") or raw_params.get("file_path")
+            if isinstance(real_path, str) and real_path and is_sensitive_path(real_path):
+                return ToolHookResult.deny(f"Blocked: access to sensitive path: {real_path}")
         # execute_bash (prefixed or bare) — check for reads of sensitive paths.
         reason = is_sensitive_bash_command(normalized)
         if reason:
@@ -298,7 +318,9 @@ class HookManager:
         # here regardless of kiro's allowedTools.  No-op on a standalone host
         # with no policy and no bound profile (gate_decision permits), so today's
         # behavior is preserved unless governance is configured.
-        gov_reason = _governance_denial(ctx, tool_name, session_key, agent, app)
+        gov_reason = _governance_denial(
+            ctx, tool_name, session_key, agent, app, tool_kind, raw_params
+        )
         if gov_reason:
             return ToolHookResult.deny(gov_reason)
 
@@ -318,6 +340,8 @@ def _governance_denial(
     session_key: str,
     agent: str,
     app: str,
+    tool_kind: str = "",
+    raw_params: dict | None = None,
 ) -> str | None:
     """Return a denial reason if governance forbids *tool_name*, else None.
 
@@ -343,7 +367,9 @@ def _governance_denial(
         # Nothing to enforce: no ceiling and no bound/forced profile.
         if ceiling is None and profile is None:
             return None
-        decision = gate_decision(ceiling, profile, tool_name)
+        decision = gate_decision(
+            ceiling, profile, tool_name, tool_kind=tool_kind, raw_params=raw_params
+        )
         if not decision.permitted:
             _audit_governance(session_key, agent, tool_name, decision)
             return f"Blocked by governance policy: {decision.reason}"
@@ -521,6 +547,34 @@ class ScriptHookResult:
         return self.exit_code == 0
 
 
+def _script_hooks_capability_denied(session_key: str = "") -> str | None:
+    """Return a denial reason if governance disables ``capabilities.script_hooks``.
+
+    Script hooks run an operator/agent-authored shell command in a subprocess
+    (``run_script_hook`` → ``/bin/sh -c``), an arbitrary code-execution surface.
+    The ``capabilities.script_hooks`` gate (default OFF in the catalog) lets a
+    policy/profile forbid firing them.  Best-effort beyond the always-on
+    sandbox/redaction guards: a ``PlatformCompositionError`` propagates
+    (fail-closed CPP); any other error degrades to "no opinion" (None) so a
+    transient governance glitch cannot wedge every hook.
+    """
+    from kiro_claw.platform.context import PlatformCompositionError
+
+    try:
+        from kiro_claw.platform.governance_profiles import governance_permits
+
+        # item="" → the CapabilityGate's ``enabled`` flag is what is queried.
+        decision = governance_permits("capabilities.script_hooks", "", session_key=session_key)
+        if not getattr(decision, "permitted", True):
+            return getattr(decision, "reason", "script_hooks capability disabled")
+        return None
+    except PlatformCompositionError:
+        raise
+    except Exception:
+        logger.debug("script_hooks governance check failed; no opinion", exc_info=True)
+        return None
+
+
 async def run_script_hook(
     hook: ScriptHook, context: str = "", hook_event: dict | None = None
 ) -> ScriptHookResult:
@@ -531,6 +585,38 @@ async def run_script_hook(
     import os
 
     start = time.monotonic()
+    # Governance: the ``capabilities.script_hooks`` gate (default OFF) may forbid
+    # running script hooks for the active surface. Checked before the subprocess
+    # spawns. The session key is carried on the hook_event when a caller threads
+    # it (parent_session_key); absent → policy-only resolution.
+    sk = ""
+    if hook_event:
+        sk = str(hook_event.get("parent_session_key") or hook_event.get("session_key") or "")
+    gov_denied = _script_hooks_capability_denied(sk)
+    if gov_denied:
+        hook.last_run = time.time()
+        hook.last_status = "blocked"
+        hook.run_count += 1
+        try:
+            from kiro_claw.sel import sel
+
+            sel().log_governance_decision(
+                session_key=sk,
+                tool_name=f"run_script_hook:{hook.name or hook.id}",
+                scope="capabilities.script_hooks",
+                outcome="denied",
+                reason=gov_denied,
+            )
+        except Exception:
+            logger.debug("script_hook deny audit failed", exc_info=True)
+        return ScriptHookResult(
+            hook_id=hook.id,
+            hook_name=hook.name,
+            event=hook.event,
+            error=f"Blocked by governance policy: {gov_denied}",
+            exit_code=2,  # PreToolUse "block tool" convention
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
     # Build hook event JSON for STDIN
     if hook_event is None:
         hook_event = {"hook_event_name": hook.event, "cwd": os.getcwd()}

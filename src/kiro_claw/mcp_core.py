@@ -1068,6 +1068,7 @@ def _vet_messaging_governance(caller_session: str) -> str | None:
             "capabilities.messaging", "", session_key=caller_session
         )
         if not getattr(decision, "permitted", True):
+            _audit_governance_deny(caller_session, "send_message", "capabilities.messaging", decision)
             return "outbound messaging blocked by governance policy"
         return None
     except PlatformCompositionError:
@@ -1076,6 +1077,105 @@ def _vet_messaging_governance(caller_session: str) -> str | None:
         # No logging here: this runs inside the kiroclaw-core stdio MCP server,
         # whose stray stdout/stderr would corrupt the JSON-RPC stream (same
         # constraint as redact_via_context). Degrade silently to "no opinion".
+        return None
+
+
+def _vet_channel_governance(caller_session: str, transport: str) -> str | None:
+    """Return a denial reason if governance forbids messaging *via transport*.
+
+    The ``channels`` scope (a ScopedMap) is the per-transport allowlist: which
+    chat transports (``slack``, future ``discord``/``telegram``) outbound
+    messaging may use.  It is finer-grained than the on/off
+    ``capabilities.messaging`` gate above — a policy may permit messaging
+    generally but restrict it to specific transports (e.g. Slack only).  We
+    query the ScopedMap ``members`` allowlist for *transport*.  ``posture`` (the
+    per-transport identity ceiling, policy-only) is enforced at the transport's
+    own admission path, not here.  Same stdio-silent, fail-closed-CPP discipline
+    as :func:`_vet_messaging_governance`.
+    """
+    from kiro_claw.platform.context import PlatformCompositionError
+
+    try:
+        from kiro_claw.platform.governance_profiles import governance_permits
+
+        # A bare member id queries the ScopedMap ``members`` ruleset.
+        decision = governance_permits(
+            "channels", transport, session_key=caller_session, app=_governance_app()
+        )
+        if not getattr(decision, "permitted", True):
+            _audit_governance_deny(caller_session, f"send_message:{transport}", "channels", decision)
+            return f"messaging via transport {transport!r} blocked by governance policy"
+        return None
+    except PlatformCompositionError:
+        raise
+    except Exception:
+        return None
+
+
+def _audit_governance_deny(session_key: str, tool_name: str, scope: str, decision: object) -> None:
+    """Best-effort SEL audit of a governance denial (writes to the JSONL file,
+    NOT stdout — safe in the stdio MCP server). Never raises."""
+    try:
+        from kiro_claw.sel import sel
+
+        sel().log_governance_decision(
+            session_key=session_key,
+            tool_name=tool_name,
+            scope=scope,
+            outcome="denied",
+            rule=getattr(decision, "rule", ""),
+            layer=getattr(decision, "layer", ""),
+            reason=getattr(decision, "reason", ""),
+        )
+    except Exception:
+        # No stdout/stderr in the stdio server; SEL writes to a file so this is
+        # safe, but a failure here must never wedge the deny path.
+        pass
+
+
+def _governance_app() -> str:
+    """Best-effort active app slug for per-app profile binding, or "".
+
+    An app backend process carries ``KIROCLAW_APP_NAME`` (set in
+    ``apps.backend.start_app_backend``); when an app's own tool call reaches a
+    governance chokepoint in-process, this lets a per-app profile
+    (``bind:{type:"app"}``) resolve.  NOTE: the managed ``kiroclaw-core`` MCP
+    server is spawned by kiro-cli, NOT by an app backend, so this env var is
+    absent there — a per-app profile is therefore only reachable for in-app tool
+    calls today, not for the agent's MCP-routed ``learn_add``/``send_message``
+    (those still resolve the per-SURFACE profile + policy ceiling, which is the
+    enforced path).  Returns "" when not in an app context.
+    """
+    return os.environ.get("KIROCLAW_APP_NAME", "")
+
+
+def _vet_memory_writes_governance(caller_session: str) -> str | None:
+    """Return a denial reason if governance forbids durable memory writes, else None.
+
+    A durable memory/lesson write (``learn_add`` → persisted lesson) is an
+    instruction-injection surface: content written here is re-injected into
+    every future session's context.  The ``capabilities.memory_writes`` gate
+    (default ON in the catalog) lets a policy/profile forbid it for a surface/app
+    (e.g. a sandboxed app must not be able to plant a durable instruction).  Same
+    stdio-silent, fail-closed-CPP discipline as :func:`_vet_messaging_governance`.
+    """
+    from kiro_claw.platform.context import PlatformCompositionError
+
+    try:
+        from kiro_claw.platform.governance_profiles import governance_permits
+
+        decision = governance_permits(
+            "capabilities.memory_writes", "", session_key=caller_session, app=_governance_app()
+        )
+        if not getattr(decision, "permitted", True):
+            _audit_governance_deny(
+                caller_session, "learn_add", "capabilities.memory_writes", decision
+            )
+            return "durable memory writes blocked by governance policy"
+        return None
+    except PlatformCompositionError:
+        raise
+    except Exception:
         return None
 
 
@@ -1536,6 +1636,12 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         category = args.get("category", "knowledge")
         if not rule:
             return "Error: rule is required"
+        # Governance: a durable lesson write is re-injected into every future
+        # session, so it is gated by capabilities.memory_writes (default on; a
+        # policy/profile may disable it for a sandboxed surface/app).
+        _gov_mem = _vet_memory_writes_governance(_resolve_session_key())
+        if _gov_mem:
+            return f"Error: {_gov_mem}"
         scope = args.get("scope", "global")
         payload: dict[str, str] = {"rule": rule, "category": category, "scope": scope}
         if scope == "workspace":
@@ -1731,6 +1837,26 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         _gov_msg = _vet_messaging_governance(caller_session)
         if _gov_msg:
             return f"Error: {_gov_msg}"
+        # Governance: the per-transport ``channels`` allowlist is finer-grained
+        # than the on/off messaging gate — a policy may permit messaging but
+        # restrict it to specific transports (e.g. Slack only). Slack is the only
+        # transport KiroClaw sends over today. The gateway routes a send to Slack
+        # whenever session=="slack" OR an explicit channel/user is set OR the
+        # caller is a cron (see messaging.api_send_message), so we mirror that
+        # exact predicate here — checking only session=="slack" would let a
+        # channel=/user=-addressed send reach Slack while bypassing the gate. A
+        # bare send (no session/channel/user, non-cron) is the in-process
+        # dashboard notification path, governed by the messaging gate above.
+        slack_bound = (
+            payload.get("session") == "slack"
+            or bool(payload.get("channel"))
+            or bool(payload.get("user"))
+            or is_cron
+        )
+        if slack_bound:
+            _gov_chan = _vet_channel_governance(caller_session, "slack")
+            if _gov_chan:
+                return f"Error: {_gov_chan}"
         resp = _post("/api/send-message", payload)
         if not resp.get("ok"):
             return f"Failed: {resp}"

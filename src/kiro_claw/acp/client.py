@@ -446,6 +446,12 @@ _STDOUT_BUFFER_LIMIT = 10 * 1024 * 1024  # 10MB
 # Max consecutive empty reads before checking if process is alive
 _MAX_CONSECUTIVE_EMPTY = 5
 
+# Cap the structured-tool-params cache so a stream of ToolCall notifications with
+# no matching request_permission can't grow it without bound (the entries are
+# popped on the permission event and wholesale-cleared per prompt; this is just a
+# backstop for the pathological no-permission case).
+_MAX_CACHED_TOOL_PARAMS = 256
+
 # Emitted by kiro-cli as a plain agent_message_chunk when its built-in, non-overridable
 # security filter cancels every tool use in an assistant turn (e.g. shell commands
 # containing "credentials").  After this text kiro-cli returns to an idle state waiting
@@ -888,6 +894,11 @@ class AcpClient:
         self._child_pids: dict[int, int | None] = {}  # pid → start_time snapshot
         self.last_prompt_stats = AcpPromptStats()
         self._tool_call_inputs: dict[str, str] = {}
+        # Structured raw tool params (rawInput dict) keyed by toolCallId, cached
+        # from the ToolCall notification so the later request_permission event —
+        # which carries only a truncated title — can recover the real path/url
+        # the governance gate needs (filesystem.write / network.egress scopes).
+        self._tool_call_params: dict[str, dict] = {}
         # Map JSON-RPC request id → {"once": optionId, "always": optionId} so
         # the host can echo back the exact optionIds the agent advertised.
         # kiro-cli uses "allow_once"/"allow_always"; claude-agent-acp uses
@@ -2180,6 +2191,7 @@ class AcpClient:
             context_window_tokens=_prev_window,
         )
         self._tool_call_inputs.clear()
+        self._tool_call_params.clear()
         # Clear stale permission options so an aborted/cancelled request from
         # a prior turn cannot leak into this one (memory + correctness).
         self._permission_options.clear()
@@ -2852,6 +2864,15 @@ class AcpClient:
                 input_str, _ = redact_credentials(input_str)
             if tool_call_id and input_str:
                 self._tool_call_inputs[tool_call_id] = input_str
+            # Cache the STRUCTURED raw params (path/url/command) so the later
+            # request_permission event can feed the governance gate's arg-derived
+            # scopes (filesystem.write / network.egress). Bounded by the same
+            # clear() as _tool_call_inputs; capped to avoid unbounded growth on a
+            # stream that never sends a matching permission request.
+            if tool_call_id and isinstance(raw_input, dict):
+                if len(self._tool_call_params) > _MAX_CACHED_TOOL_PARAMS:
+                    self._tool_call_params.clear()
+                self._tool_call_params[tool_call_id] = raw_input
             # Redact LLM-influenced fields before dashboard display
             if purpose:
                 purpose, _ = redact_exfiltration_urls(purpose)
@@ -3157,6 +3178,14 @@ class AcpClient:
         if tool_call_id and tool_call_id in self._tool_call_inputs:
             tool_input = self._tool_call_inputs.pop(tool_call_id)
 
+        # Recover the STRUCTURED raw params cached at the ToolCall notification
+        # (or carried inline on this permission message) so the governance gate
+        # can evaluate the filesystem.write (edit path) / network.egress (fetch
+        # url) scopes — the title alone cannot carry these.
+        raw_params: dict | None = None
+        if tool_call_id and tool_call_id in self._tool_call_params:
+            raw_params = self._tool_call_params.pop(tool_call_id)
+
         # 2. Fallback: check if toolCall itself carries input/params
         if not tool_input:
             raw_input = tool_call.get("input") or tool_call.get("params")
@@ -3166,6 +3195,14 @@ class AcpClient:
                     if isinstance(raw_input, (dict, list))
                     else str(raw_input)
                 )
+                if raw_params is None and isinstance(raw_input, dict):
+                    raw_params = raw_input
+        elif raw_params is None:
+            # tool_input came from the cache; the permission message may still
+            # carry an inline params dict the gate can use.
+            inline = tool_call.get("input") or tool_call.get("params")
+            if isinstance(inline, dict):
+                raw_params = inline
 
         logger.info("Permission requested for tool: %s (req=%s)", title, request_id)
         logger.debug("Permission toolCall payload: %s", tool_call)
@@ -3177,6 +3214,7 @@ class AcpClient:
             options=options,
             tool_input=tool_input,
             tool_call_id=tool_call_id,
+            raw_tool_params=raw_params,
         )
 
     def _track_metadata(self, msg: JsonRpcMessage) -> None:

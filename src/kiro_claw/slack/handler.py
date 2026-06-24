@@ -2823,7 +2823,11 @@ async def handle_message(
                 # Check tool hooks for auto-approve
                 if context_builder:
                     tool_result = context_builder.hooks.on_tool_call(
-                        event.title, session_key=session_key, agent=_agent or ""
+                        event.title,
+                        session_key=session_key,
+                        agent=_agent or "",
+                        tool_kind=event.tool_kind,
+                        raw_params=event.raw_tool_params,
                     )
                     if tool_result.action == TOOL_AUTO_APPROVE:
                         await client.approve_tool(event.request_id)

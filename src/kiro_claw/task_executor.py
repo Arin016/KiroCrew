@@ -324,7 +324,11 @@ async def execute_task(
                 elif event.kind == EVENT_PERMISSION_REQUEST:
                     if ctx:
                         tool_result = ctx.hooks.on_tool_call(
-                            event.title, session_key=session_key, agent=agent
+                            event.title,
+                            session_key=session_key,
+                            agent=agent,
+                            tool_kind=event.tool_kind,
+                            raw_params=event.raw_tool_params,
                         )
                         if tool_result.action == TOOL_DENY:
                             await client.reject_tool(event.request_id)
