@@ -16,7 +16,7 @@ and distributed across KiroClaw, kiro-cli, and Claude Code.
 | File | Owner | Purpose | Read by |
 |------|-------|---------|---------|
 | `~/.kiro/agents/kiroclaw.json` | KiroClaw gateway (`rebuild_agent_config`) | Rendered Kiro agent: merged model + tools + MCP servers | kiro-cli when running as kiroclaw agent |
-| `~/.claude/agents/kiroclaw.md` + `~/.claude/agents/kiroclaw.mcp.json` | KiroClaw gateway (`install_cc_agent_config`) | Rendered Claude Code agent + MCP registry passed via `--mcp-config` | Claude Code when KiroClaw is the CC provider |
+| `~/.claude/agents/kiroclaw.md` + `~/.claude/agents/kiroclaw.mcp.json` | _(removed)_ — the CC agent renderer was deleted with the Claude Code provider; KiroClaw is `kiro-cli`-only | Was the rendered Claude Code agent + MCP registry; no longer written | (no current reader — dormant CC seam only) |
 | `~/.kiro/settings/mcp.json` | User | Kiro global MCP servers | kiro-cli for ALL agents (merged into KiroClaw's agent file at render time) |
 | `~/.claude.json` (`mcpServers`) | User / Claude Code | Claude Code global MCP servers | Interactive CC sessions (merged into KiroClaw's CC agent file at render time) |
 | `~/.kiroclaw/mcp.json` | User (dashboard MCP panel) | KiroClaw-specific additions and per-server disables | KiroClaw gateway only |
@@ -136,45 +136,37 @@ Key implication: if a sub-agent needs kiroclaw-core tools (`learn_add`,
 `spawn_run`, `send_message`), those must be in the agent config that
 kiro-cli reads. They are — `kiroclaw.json` always contains them.
 
-## How Claude Code Uses MCP Servers
+## How Claude Code Uses MCP Servers (removed)
 
-Source: `src/kiro_claw/agent.py::install_cc_agent_config`,
-`src/kiro_claw/providers/claude_code.py`
+> **Removed during de-Amazoning — KiroClaw is KiroACP / `kiro-cli`-only**
+> (`agent.provider` is fixed to `acp`). The standalone Claude Code provider
+> (`providers/claude_code.py`), the CC agent renderer (`install_cc_agent_config`,
+> `_apply_cc_provider_defaults`) and the rendered `~/.claude/agents/kiroclaw.md`
+> + `kiroclaw.mcp.json` files were **deleted**. Nothing renders those files;
+> there is no Claude Code provider to select. This subsection is retained only as
+> a record of the former design.
 
-When KiroClaw's provider is Claude Code, KiroClaw renders two files:
+What the renderer used to do: when the provider was Claude Code, KiroClaw wrote a
+`kiroclaw.md` agent definition plus a `kiroclaw.mcp.json` server registry under
+`~/.claude/agents/` and passed the latter to CC via
+`--mcp-config ~/.claude/agents/kiroclaw.mcp.json`, so the CC session loaded
+KiroClaw's scoped server set instead of the user's `~/.claude.json` global.
 
-```
-~/.claude/agents/
-├── kiroclaw.md          ← YAML-frontmatter agent definition
-│                          (name-only `mcpServers` list = scope filter)
-└── kiroclaw.mcp.json    ← full MCP server definitions (stdio/http specs)
-```
+What remains today:
 
-At session spawn time the provider passes the mcp.json file via
-`--mcp-config ~/.claude/agents/kiroclaw.mcp.json` so CC loads it
-instead of (not in addition to) `~/.claude.json`. This keeps KiroClaw's
-server set scoped to KiroClaw sessions and leaves the user's
-interactive CC global untouched.
-
-### Always-Render Contract
-
-`install_cc_agent_config` renders its two files on **every rebuild**,
-regardless of which provider is currently active. This means a user on
-`kiro` can install a new server via the dashboard and the CC agent file
-is already current when they later switch to `claude_code`. The cost
-is a ~5KB file write per rebuild; the win is zero stale-file surprises
-across provider switches.
-
-### Provider-Defaults Layer
-
-The renderer calls `_apply_cc_provider_defaults()` as a post-merge step
-when building `kiroclaw.mcp.json`. This is an extension point: a provider
-can ship a per-server defaults file (e.g. tool exclusions) that gets
-folded into the rendered config because `--mcp-config` overrides CC's own
-default-loading. On public installs no such defaults file exists, so the
-function returns the merged server map unchanged. The hook is preserved so
-custom providers can register their own defaults without touching the
-renderer.
+- The **dormant `ACP_BACKEND_CLAUDE` / `_is_claude` protocol seam** in
+  `src/kiro_claw/acp/client.py`, kept inert so an internal companion package can
+  re-register a Claude-Code-over-`claude-agent-acp` backend without forking the
+  client. The public core never selects it — do not re-add the registration glue
+  or a CC agent-file renderer. See
+  [`system-specs/features/claude-code-provider.md`](system-specs/features/claude-code-provider.md)
+  ("Claude Code Provider — removed") and the repo-root `CLAUDE.md`.
+- The **CC-global gap-filler merge**: `~/.claude.json` `mcpServers` is still read
+  (lowest priority — `kiroclaw > kiro-global > cc-global`) in
+  `rebuild_agent_config`, and the dashboard `ccGlobal` toggle / `SCOPE_CC_GLOBAL`
+  scope still exist, so a future provider re-enable needs no rework (see the
+  "Kiro-first (changed 2026-06)" note above). The merge layer is interface code
+  left intact; it does **not** imply a selectable CC provider exists today.
 
 ## Agent Config vs Global Config
 

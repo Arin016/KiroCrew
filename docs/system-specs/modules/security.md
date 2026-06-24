@@ -106,7 +106,15 @@ Wired into `AcpClient._spawn()` — all kiro-cli processes are sandboxed. Parent
   - **Pass 1 (whole-string glob):** every deny glob is matched against the full input. If a pattern matches and no exception pattern also matches the full input, the command is denied immediately. This closes evasion vectors where the deny string spans a shell separator boundary.
   - **Pass 2 (per-segment glob):** only runs if pass 1 found a glob match AND the full input also matched at least one exception. The input is split on shell separators (`;`, `&&`, `||`, `|`, `&`, `$()`, backticks, newlines) into independent segments, and each segment is re-evaluated. `_DENY_EXCEPTIONS` is currently empty (the former git-stash carve-out is obsolete under the verb-anchored detector); the machinery is retained for any future scoped exception.
   - SEL audit events emitted on every denial (`deny_event`, recorded under the `git push` label for git-publish) and every exception grant (`deny_exception`).
-**User-configured Claude Code `permissions.deny` (over-broad rule detection)**: the `claude_code` (claude-agent-acp) backend's native permission engine reads `permissions.deny` from `~/.claude/settings.json` and project `.claude/settings.json` and hard-blocks matching tools **before** KiroClaw's `canUseTool` host gate runs. An over-broad user rule like `Bash(*)` / `Bash(git *)` therefore aborts ordinary commands with a cryptic `Tool use aborted` and **no approval prompt**, entirely upstream of and invisible to KiroClaw — which cannot override the user's own config. `cc_agent.find_overbroad_cc_deny_rules(settings)` detects these by matching each `Bash(<glob>)` deny rule against benign canary commands (`ls`, `git status`, …); KiroClaw's own scoped patterns match no canary and are never flagged. `kiroclaw doctor` surfaces any such rule (with the file and the offending pattern) so the user can remove/narrow it. The CC isolation seed (`seed_isolated_cc_config`) already replaces `permissions.deny` with only KiroClaw's patterns, so an isolated session does not inherit a user `Bash(*)`; the doctor check covers non-isolated sessions and project-scoped settings.
+> **Removed with the Claude Code provider.** A former check
+> (`cc_agent.find_overbroad_cc_deny_rules`, the `seed_isolated_cc_config`
+> isolation seed, and the `kiroclaw doctor` surfacing of over-broad CC
+> `permissions.deny` rules) guarded against a user's `~/.claude/settings.json`
+> `Bash(*)` rule aborting commands upstream of KiroClaw's gate. It was specific
+> to the `claude-agent-acp` backend and was **deleted** when KiroClaw became
+> KiroACP / `kiro-cli`-only (`agent.provider` fixed to `acp`). kiro-cli's
+> permission model routes every tool decision back through KiroClaw's
+> `HookManager.on_tool_call` gate, so there is no equivalent upstream-deny gap.
 
 - `_enforce_denied_commands()` replaces denied commands in ALL agent configs from bundled defaults (not union — stale patterns are removed on update)
 - Runs at install, gateway startup, and periodically (~60s) with mtime-based skip

@@ -122,7 +122,7 @@ Settings are persisted via `electron-store` in
 |-------|-----|
 | "SSH token fetch failed" | Check `ssh YOUR_HOST` works from Terminal |
 | "kiroclaw binary not found in any of …" | None of the default candidates exist on the remote host. Install kiroclaw (`pip install kiroclaw`) or set a custom path in **Set Remote Host…** |
-| "command not found: kiro-cli" in SSH | kiro-cli is an optional backend; the default is claude-agent-acp. Upgrade the Electron app, or set the binary path to your kiroclaw install (e.g. `$HOME/.local/bin/kiroclaw`) |
+| "command not found: kiro-cli" in SSH | kiro-cli is the agent backend; install it on the remote host and log in (`kiro-cli login`), or set the binary path to your kiroclaw install (e.g. `$HOME/.local/bin/kiroclaw`) |
 | Token fetched but 403 | Gateway may need restart — `ssh host systemctl --user restart kiroclaw` |
 
 ## Notes

@@ -5,11 +5,11 @@ we welcome issues and pull requests.
 
 ## Prerequisites
 
-- macOS or Linux (Windows is not supported by the default `claude-agent-acp` backend)
+- macOS or Linux (Windows is not supported by the `kiro-cli` backend)
 - Python ≥ 3.9
 - Node.js ≥ 18 and npm (for the frontend)
-- An LLM backend on your `PATH` — `claude-agent-acp` (default), or optionally
-  `kiro-cli` / Amazon Bedrock
+- The `kiro-cli` agent on your `PATH`, logged in (`kiro-cli login`) — it is the
+  only LLM backend (`agent.provider = acp`)
 - [Ollama](https://ollama.com) for memory and knowledge-library embeddings
 
 ## First-Time Setup

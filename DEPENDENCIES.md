@@ -8,10 +8,10 @@ knowledge library use a local [Ollama](https://ollama.com) embedding server.
 
 | Requirement | Notes |
 |---|---|
-| **OS** | macOS or Linux (Windows is not supported by the default `claude-agent-acp` backend) |
+| **OS** | macOS or Linux (Windows is not supported by the `kiro-cli` backend) |
 | **Python** | ≥ 3.9 |
 | **Node.js + npm** | ≥ 18 (frontend build only) |
-| **LLM backend** | `claude-agent-acp` (default), or optionally `kiro-cli` / Amazon Bedrock |
+| **LLM backend** | `kiro-cli` over ACP — the only provider (`agent.provider = acp`) |
 | **Ollama** | For memory + knowledge-library embeddings (`http://localhost:11434`) |
 
 ## Backend (pip)
@@ -177,5 +177,5 @@ For dual-licensed packages, we choose the permissive option (Apache-2.0 or MIT).
   provide FTS5/UPSERT on older system SQLite builds.
 - **Linux ARM / aarch64**: Supported; ships with a recent SQLite, so no
   `pysqlite3-binary` is needed.
-- **Windows**: Not supported (the default `claude-agent-acp` backend and the
-  optional `kiro-cli` backend run only on macOS and Linux).
+- **Windows**: Not supported (the `kiro-cli` backend runs only on macOS and
+  Linux).
