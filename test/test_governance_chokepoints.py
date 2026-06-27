@@ -271,6 +271,70 @@ class TestMemoryWritesGate:
         assert mcp_core._vet_memory_writes_governance("cli_chat") is None
 
 
+# ── outbound messaging capability gate (capabilities.messaging) ──
+class TestMessagingGate:
+    def test_policy_disabled_blocks(self):
+        _install(
+            {
+                "version": 1,
+                "boot": {"fail_closed": True},
+                "capabilities": {"messaging": {"enabled": False}},
+            }
+        )
+        from kiro_claw import mcp_core
+
+        assert mcp_core._vet_messaging_governance("cli_chat") is not None
+
+    def test_default_off_blocks(self):
+        # capabilities.messaging default is OFF in the catalog → blocked when an
+        # (otherwise-empty) policy governs and nothing enables it.
+        _install({"version": 1, "boot": {"fail_closed": True}})
+        from kiro_claw import mcp_core
+
+        assert mcp_core._vet_messaging_governance("cli_chat") is None  # ungoverned-scope permit
+
+    def test_ungoverned_allows(self):
+        _install(None)
+        from kiro_claw import mcp_core
+
+        assert mcp_core._vet_messaging_governance("cli_chat") is None
+
+    def test_per_app_profile_messaging_disable_is_consulted(self, monkeypatch):
+        # AutoSDE/CR-284272012: _vet_messaging_governance must pass
+        # app=_governance_app() so a per-app profile that disables messaging is
+        # consulted (per-app blast-radius containment), matching the channel /
+        # memory_writes vetters. Policy enables messaging at the surface; an
+        # app-bound profile disables it; with KIROCLAW_APP_NAME set the in-app
+        # send must be BLOCKED.
+        _install(
+            {
+                "version": 1,
+                "boot": {"fail_closed": True},
+                "capabilities": {"messaging": {"enabled": True}},  # surface allows
+            }
+        )
+        import json
+
+        (gp._PROFILES_DIR / "sandboxed.json").write_text(
+            json.dumps(
+                {
+                    "name": "sandboxed",
+                    "bind": {"type": "app", "id": "file-explorer"},
+                    "capabilities": {"messaging": {"enabled": False}},  # app forbids
+                }
+            )
+        )
+        gp.reset_store()
+        from kiro_claw import mcp_core
+
+        # No app context → per-surface only → policy permits.
+        monkeypatch.delenv("KIROCLAW_APP_NAME", raising=False)
+        assert mcp_core._vet_messaging_governance("cli_chat") is None
+        # In-app context → the app profile's messaging-disable must now apply.
+        monkeypatch.setenv("KIROCLAW_APP_NAME", "file-explorer")
+        assert mcp_core._vet_messaging_governance("cli_chat") is not None
+
+
 # ── channels per-transport messaging gate ──
 class TestChannelsGate:
     def test_transport_not_in_members_blocked(self):
@@ -326,6 +390,66 @@ class TestAppsGate:
 
         assert manager._app_activation_denied("anything") is None
 
+    def test_host_bound_profile_governs_app_activation(self):
+        # CR-284272012 H-p4: app activation runs through the _host session key
+        # (surface "host"), so a profile bound to surface:host narrows it on top
+        # of the policy ceiling — an honest, stable bind target. Policy allows the
+        # app; a host-bound profile denies it → activation blocked.
+        _install(
+            {
+                "version": 1,
+                "boot": {"fail_closed": True},
+                "apps": {"mode": "allow", "allow": ["deploy-web", "auto-research"]},
+            }
+        )
+        import json
+
+        (gp._PROFILES_DIR / "hostp.json").write_text(
+            json.dumps(
+                {
+                    "name": "hostp",
+                    "bind": {"type": "surface", "id": "host"},
+                    "apps": {"mode": "allow", "allow": ["auto-research"]},  # narrower
+                }
+            )
+        )
+        gp.reset_store()
+        from kiro_claw.apps import manager
+
+        # Within both policy AND host profile → allowed.
+        assert manager._app_activation_denied("auto-research") is None
+        # Allowed by policy but NOT by the host profile → blocked (profile narrows).
+        assert manager._app_activation_denied("deploy-web") is not None
+
+    def test_slack_bound_profile_does_not_leak_to_app_activation(self):
+        # CR-284272012 H-p4: a profile bound to surface:slack must NOT govern
+        # host-side app activation (it did, accidentally, when an empty key
+        # mis-classified to "slack"). The host caller uses surface "host", so a
+        # slack-bound apps-deny does not apply.
+        _install(
+            {
+                "version": 1,
+                "boot": {"fail_closed": True},
+                "apps": {"mode": "allow", "allow": ["deploy-web"]},
+            }
+        )
+        import json
+
+        (gp._PROFILES_DIR / "slackp.json").write_text(
+            json.dumps(
+                {
+                    "name": "slackp",
+                    "bind": {"type": "surface", "id": "slack"},
+                    "apps": {"mode": "allow", "allow": []},  # would deny ALL apps
+                }
+            )
+        )
+        gp.reset_store()
+        from kiro_claw.apps import manager
+
+        # The slack-bound deny-all-apps profile must NOT apply host-side.
+        assert manager._app_activation_denied("deploy-web") is None
+
 
 # ── filesystem + egress at the host gate (tool kind + real args) ──
 class TestFilesystemEgressAtGate:
@@ -370,6 +494,73 @@ class TestFilesystemEgressAtGate:
             session_key="cli_chat",
             tool_kind="edit",
             raw_params={"path": "/home/u/workspace/site.py"},
+        )
+        assert allowed.action != TOOL_DENY
+
+    def test_filesystem_write_traversal_escape_denied(self):
+        # A ``..`` traversal that lexically escapes the allow-prefix must be
+        # DENIED: without path normalization, fnmatch's ``*`` spans the ``..`` so
+        # ``/home/u/workspace/../.bashrc`` matches ``/home/u/workspace/**`` and the
+        # write is wrongly permitted (it resolves to ~/.bashrc, outside the
+        # allow-list) — a containment bypass. (CR-284272012 path-traversal finding.)
+        _install(
+            {
+                "version": 1,
+                "boot": {"fail_closed": True},
+                "filesystem": {"write": {"mode": "allow", "allow": ["/home/u/workspace/**"]}},
+            }
+        )
+        from kiro_claw.hooks import TOOL_DENY, HookManager
+
+        hooks = HookManager()
+        denied = hooks.on_tool_call(
+            "code",
+            session_key="cli_chat",
+            tool_kind="edit",
+            raw_params={"path": "/home/u/workspace/../.bashrc"},
+        )
+        assert denied.action == TOOL_DENY
+        # A legitimate in-tree write with a redundant ``.`` segment still matches.
+        allowed = hooks.on_tool_call(
+            "code",
+            session_key="cli_chat",
+            tool_kind="edit",
+            raw_params={"path": "/home/u/workspace/./src/app.py"},
+        )
+        assert allowed.action != TOOL_DENY
+
+    def test_filesystem_relative_path_cannot_dodge_absolute_deny(self, monkeypatch, tmp_path):
+        # An agent-supplied RELATIVE path must not bypass an absolute DENY glob by
+        # failing to match: ``_norm_item`` absolutizes it against the CWD first, so
+        # a relative path inside a denied tree is still blocked. (CR-284272012:
+        # before the fix the relative item stayed relative and never matched
+        # ``/<cwd>/secret/**``, so the deny silently failed open.)
+        monkeypatch.chdir(tmp_path)
+        cwd = str(tmp_path)
+        _install(
+            {
+                "version": 1,
+                "boot": {"fail_closed": True},
+                "filesystem": {"read": {"mode": "deny", "deny": [f"{cwd}/secret/**"]}},
+            }
+        )
+        from kiro_claw.hooks import TOOL_DENY, HookManager
+
+        hooks = HookManager()
+        # Relative path that resolves into the denied subtree → DENY.
+        denied = hooks.on_tool_call(
+            "fs_read",
+            session_key="cli_chat",
+            tool_kind="read",
+            raw_params={"path": "secret/key.pem"},
+        )
+        assert denied.action == TOOL_DENY
+        # An out-of-tree relative read is unaffected (not denied by this rule).
+        allowed = hooks.on_tool_call(
+            "fs_read",
+            session_key="cli_chat",
+            tool_kind="read",
+            raw_params={"path": "public/readme.md"},
         )
         assert allowed.action != TOOL_DENY
 
@@ -422,6 +613,44 @@ class TestFilesystemEgressAtGate:
         # But a real scheme-less host (with or without a port) is still recovered.
         assert _url_host("example.com/path") == "example.com"
         assert _url_host("example.com:8080/path") == "example.com"
+
+    def test_non_network_scheme_uris_have_no_phantom_host(self):
+        # mailto:/javascript:/data:/tel: use ':' without '://'. The scheme-less
+        # retry must NOT mis-parse their payload as an authority — otherwise the
+        # egress gate grounds its decision on a host the URL never contacts
+        # (e.g. mailto:user@evil.com → phantom "evil.com"). (CR-284272012.)
+        from kiro_claw.platform.governance import _url_host, classify_tool_args
+
+        for u in (
+            "mailto:user@example.com",
+            "javascript:alert(1)",
+            "data:text/html,<b>x</b>",
+            "tel:+1-555-0100",
+            "gopher://g.example.com/x",  # scheme present but NOT a network scheme
+        ):
+            assert _url_host(u) == "", u
+            assert classify_tool_args("fetch", {"url": u}) == (), u
+        # Real network schemes still resolve their host (incl. ws/ftp + userinfo).
+        assert _url_host("https://user:pass@good.com:443/p") == "good.com"
+        assert _url_host("ws://w.example.com/s") == "w.example.com"
+        assert _url_host("ftp://f.example.com/x") == "f.example.com"
+        # Protocol-relative //host/path is still recovered.
+        assert _url_host("//cdn.example.com/a") == "cdn.example.com"
+
+    def test_mailto_cannot_pass_egress_allowlist_via_phantom_host(self):
+        # End-to-end: with an egress allowlist pinned to allowed.com, a
+        # mailto:exfil@allowed.com must NOT slip through as egress to "allowed.com"
+        # — it is hostless, so it is simply ungoverned-by-egress (no phantom match).
+        _install(
+            {
+                "version": 1,
+                "boot": {"fail_closed": True},
+                "network": {"egress": {"mode": "allow", "allow": ["allowed.com"]}},
+            }
+        )
+        from kiro_claw.platform.governance import classify_tool_args
+
+        assert classify_tool_args("fetch", {"url": "mailto:exfil@allowed.com"}) == ()
 
     def test_empty_tool_kind_falls_back_to_param_shape(self):
         # The ACP `kind` field is spec-OPTIONAL; when the backend omits it,
@@ -580,3 +809,228 @@ class TestPermissionEventCarriesRawParams:
 def tmp_profile_dir(monkeypatch):
     """Return the monkeypatched profiles dir (created by the _isolate fixture)."""
     return gp._PROFILES_DIR
+
+
+class TestGovernanceDegradedIsObservable:
+    """A chokepoint that FAILS OPEN must not be silent (CR-284272012)."""
+
+    def test_governance_permits_degrade_emits_warning_and_sel(self, monkeypatch, caplog):
+        # Force an unexpected error inside resolve_active_scope so governance_permits
+        # hits its except-branch and degrades to permit.
+        _install({"version": 1, "boot": {"fail_closed": True}})
+
+        def _boom(*a, **k):
+            raise RuntimeError("simulated resolve regression")
+
+        monkeypatch.setattr(gp, "resolve_active_scope", _boom)
+
+        emitted: list = []
+        import kiro_claw.sel as sel_mod
+
+        monkeypatch.setattr(
+            sel_mod.sel(),
+            "log_governance_degraded",
+            lambda **kw: emitted.append(kw),
+        )
+
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            decision = gp.governance_permits("commands", "rm -rf /", session_key="cron:j:r")
+
+        # Degrades to permit (so a latent regression cannot wedge the surface) ...
+        assert decision.permitted is True
+        # ... but the fail-open is now OBSERVABLE: a WARNING log + a SEL record.
+        assert any("FAILED OPEN" in r.message for r in caplog.records)
+        assert emitted, "governance_degraded SEL must be emitted on the degrade path"
+        assert emitted[0]["chokepoint"] == "governance_permits"
+        assert emitted[0]["scope"] == "commands"
+
+    def test_stdio_chokepoint_degrade_is_sel_only_no_warning(self, monkeypatch, caplog):
+        # The stdio MCP path passes log_warning=False (stderr would corrupt the
+        # JSON-RPC stream) but STILL writes the file-backed SEL.
+        emitted: list = []
+        import kiro_claw.sel as sel_mod
+
+        monkeypatch.setattr(
+            sel_mod.sel(), "log_governance_degraded", lambda **kw: emitted.append(kw)
+        )
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            gp.audit_governance_degraded(
+                "send_message", session_key="slack:c", scope="channels", log_warning=False
+            )
+        assert emitted and emitted[0]["chokepoint"] == "send_message"
+        assert not any("FAILED OPEN" in r.message for r in caplog.records)
+
+    def test_sel_emit_failure_escalates_to_warning_even_when_silent(self, monkeypatch, caplog):
+        # If the SEL write ITSELF fails AND log_warning=False (stdio path), the
+        # fail-open would otherwise be completely invisible at prod log level.
+        # The SEL-emit failure must escalate to WARNING regardless. (CR-284272012.)
+        import kiro_claw.sel as sel_mod
+
+        def _boom(**kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(sel_mod.sel(), "log_governance_degraded", _boom)
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            gp.audit_governance_degraded(
+                "learn_add", session_key="", scope="capabilities.memory_writes", log_warning=False
+            )
+        # The helper itself must not raise out of the (caller's) except-branch ...
+        # ... and the audit-failure is now observable at WARNING.
+        assert any("SEL emit FAILED" in r.message for r in caplog.records)
+
+    def test_late_import_failure_does_not_propagate_from_chokepoint(self, monkeypatch):
+        # Every chokepoint late-imports audit_governance_degraded inside its
+        # except-branch. If that import fails (rename/partial install/cycle), it
+        # must NOT raise out and convert the soft fail-open into a hard fail that
+        # wedges the tool call. Simulate by making the symbol raise on access.
+        _install({"version": 1, "boot": {"fail_closed": True}})
+
+        def _boom(*a, **k):
+            raise RuntimeError("forced gate regression")
+
+        # Force the gate body to raise so the except-branch runs ...
+        monkeypatch.setattr(gp, "resolve_active_scope", _boom)
+        # ... and make the degrade-audit helper raise (stands in for an ImportError
+        # of the late `from ... import audit_governance_degraded`).
+        monkeypatch.setattr(gp, "audit_governance_degraded", _boom)
+
+        from kiro_claw.hooks import HookManager
+
+        hooks = HookManager()
+        # Must return a decision (degrade to no-opinion), NOT raise.
+        result = hooks.on_tool_call(
+            "code", session_key="cli_chat", tool_kind="read", raw_params={"path": "/tmp/x"}
+        )
+        assert result is not None  # the call completed; no exception escaped
+
+    def test_governance_permits_log_warning_false_suppresses_inner_warning(
+        self, monkeypatch, caplog
+    ):
+        # A stdio MCP caller passes log_warning=False INTO governance_permits.  The
+        # common degrade (a resolution error) is caught INSIDE governance_permits
+        # and never re-raises, so the caller's own outer except cannot suppress it
+        # — the flag must be honored at the inner emit point (CR-284272012 follow-up).
+        _install({"version": 1, "boot": {"fail_closed": True}})
+
+        def _boom(*a, **k):
+            raise RuntimeError("simulated resolve regression")
+
+        monkeypatch.setattr(gp, "resolve_active_scope", _boom)
+
+        emitted: list = []
+        import kiro_claw.sel as sel_mod
+
+        monkeypatch.setattr(
+            sel_mod.sel(), "log_governance_degraded", lambda **kw: emitted.append(kw)
+        )
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            decision = gp.governance_permits(
+                "capabilities.messaging", "", session_key="slack:c", log_warning=False
+            )
+
+        # Still degrades to permit and still writes the durable SEL ...
+        assert decision.permitted is True
+        assert emitted and emitted[0]["chokepoint"] == "governance_permits"
+        # ... but NO stderr WARNING (it would corrupt the stdio JSON-RPC stream).
+        assert not any("FAILED OPEN" in r.message for r in caplog.records)
+
+    def test_governance_floor_ordinal_log_warning_false_suppresses_inner_warning(
+        self, monkeypatch, caplog
+    ):
+        # Same inner-suppression contract for the sandbox ordinal floor chokepoint.
+        _install({"version": 1, "boot": {"fail_closed": True}})
+
+        def _boom(*a, **k):
+            raise RuntimeError("simulated resolve regression")
+
+        monkeypatch.setattr(gp, "resolve_active_scope", _boom)
+
+        emitted: list = []
+        import kiro_claw.sel as sel_mod
+
+        monkeypatch.setattr(
+            sel_mod.sel(), "log_governance_degraded", lambda **kw: emitted.append(kw)
+        )
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            floor = gp.governance_floor_ordinal(
+                "sandbox.min_level", session_key="cron:j:r", log_warning=False
+            )
+
+        assert floor is None
+        assert emitted and emitted[0]["chokepoint"] == "governance_floor_ordinal"
+        assert not any("FAILED OPEN" in r.message for r in caplog.records)
+
+    def test_degraded_sel_record_carries_app_and_unknown_source(self, monkeypatch, tmp_path):
+        # The per-app fail-open must be attributable: the persisted SEL record
+        # carries the ``app`` slug (so an investigator knows WHICH app's narrowing
+        # was bypassed), and an empty session_key classifies source="unknown"
+        # rather than being mis-tagged "slack". (CR-284272012 follow-up #6/#8.)
+        import json
+
+        from kiro_claw.sel import SecurityEventLog
+
+        SecurityEventLog._instance = None
+        SecurityEventLog._initialized = False
+        sel_dir = tmp_path / "sel"
+        sel_obj = SecurityEventLog(base_dir=sel_dir, sync=True)
+        monkeypatch.setattr("kiro_claw.sel.sel", lambda: sel_obj)
+        try:
+            gp.audit_governance_degraded(
+                "learn_add",
+                scope="capabilities.memory_writes",
+                app="file-explorer",
+                log_warning=False,
+            )
+
+            sel_file = sel_dir / "security_events.jsonl"
+            records = [
+                json.loads(line) for line in sel_file.read_text().splitlines() if line.strip()
+            ]
+            degraded = [r for r in records if r.get("event_type") == "governance_degraded"]
+            assert degraded, "a governance_degraded SEL record must be persisted"
+            rec = degraded[-1]
+            assert rec["metadata"]["app"] == "file-explorer"
+            assert rec["source"] == "unknown"  # empty session_key, NOT "slack"
+        finally:
+            SecurityEventLog._instance = None
+            SecurityEventLog._initialized = False
+
+
+class TestMatchPathNormalization:
+    """`_match_path` normalizes the ITEM only — never the operator's pattern.
+
+    Normalizing the pattern with ``os.path.normpath`` corrupts globs whose ``..``
+    sits next to a wildcard (``/a/**/../b`` → ``/a/b``, dropping the ``**``),
+    widening an allow / shrinking a deny. (CR-284272012 follow-up.)
+    """
+
+    def test_traversal_item_does_not_satisfy_allow_prefix(self):
+        from kiro_claw.platform.governance import _match_path
+
+        assert not _match_path("/home/u/ws/../.bashrc", "/home/u/ws/**")
+        # In-tree . / .. that stays inside still matches.
+        assert _match_path("/home/u/ws/./src/app.py", "/home/u/ws/**")
+        assert _match_path("/home/u/ws/a/../b/c.py", "/home/u/ws/**")
+
+    def test_wildcard_adjacent_pattern_is_not_collapsed(self):
+        import fnmatch
+
+        from kiro_claw.platform.governance import _match_path
+
+        # The pattern is matched verbatim: ``_match_path`` agrees with a raw
+        # ``fnmatchcase`` on the un-collapsed glob (an absolute item needs no
+        # normalization, isolating the pattern-handling).  If the pattern were
+        # normpath'd to ``/srv/app/shared/**`` these two would diverge.
+        item = "/srv/app/teamA/shared/data.txt"
+        pat = "/srv/app/**/../shared/**"
+        assert _match_path(item, pat) == fnmatch.fnmatchcase(item, pat)

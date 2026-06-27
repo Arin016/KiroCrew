@@ -150,7 +150,16 @@ def _vet_spawn_governance(parent_session_key: str, agent: str) -> str | None:
     except PlatformCompositionError:
         raise
     except Exception:
-        logger.debug("spawn governance check failed; no opinion", exc_info=True)
+        # Wrapped: a late-import failure must not turn the soft fail-open into a
+        # hard fail that wedges spawn (CR-284272012).
+        try:
+            from kiro_claw.platform.governance_profiles import audit_governance_degraded
+
+            audit_governance_degraded(
+                "subagent_spawn", session_key=parent_session_key, scope="capabilities.spawn"
+            )
+        except Exception:
+            logger.debug("governance degrade audit unavailable", exc_info=True)
         return None
 
 

@@ -289,3 +289,57 @@ def test_no_governance_posture_is_default_open():
         enterprise.KiroClawConfig, "load", return_value=_fake_config([])
     ):
         assert enterprise.validate_enterprise("xoxb-token") is True
+
+
+def test_governance_posture_blocks_empty_enterprise_id_when_pinned():
+    # Slack returns enterprise_id="" for EVERY non-Enterprise-Grid workspace (the
+    # common case). An empty id cannot satisfy an explicitly-pinned
+    # allowed_enterprise_ids ceiling, so it must FAIL CLOSED — not silently pass
+    # via the old `if not value: continue`. (CR-284272012 Heimdall blocking.)
+    from kiro_claw.platform import context as ctx_mod
+
+    resp = {"enterprise_id": "", "team_id": "T1", "team": "NonGrid", "url": "https://x"}
+    try:
+        _install_governance_posture(["E_GOOD"])
+        with _install_fake_slack_sdk(resp), patch.object(
+            enterprise.KiroClawConfig, "load", return_value=_fake_config([])
+        ):
+            assert enterprise.validate_enterprise("xoxb-token") is False
+    finally:
+        ctx_mod.reset_context()
+
+
+def test_governance_posture_empty_enterprise_id_ok_when_not_pinned():
+    # Symmetry: with NO enterprise_ids leaf pinned (only allowed_team_ids is), an
+    # empty enterprise_id must NOT be over-rejected — the sentinel probe sees the
+    # enterprise leaf is unpinned and skips it, while the pinned team leaf still
+    # gates. The common non-Enterprise-Grid workspace (enterprise_id="") on a
+    # team-pinned policy is accepted iff its team matches.
+    import dataclasses
+
+    from kiro_claw.config.loader import KiroClawConfig
+    from kiro_claw.platform import context as ctx_mod
+    from kiro_claw.platform.bootstrap import build_default_context
+    from kiro_claw.platform.governance import parse_policy
+
+    policy = parse_policy(
+        {
+            "version": 1,
+            "boot": {"fail_closed": True},
+            "channels": {
+                "members": {"mode": "allow", "allow": ["slack"]},
+                "posture": {"slack": {"allowed_team_ids": {"mode": "allow", "allow": ["T_OK"]}}},
+            },
+        }
+    )
+    resp = {"enterprise_id": "", "team_id": "T_OK", "team": "NonGrid", "url": "https://x"}
+    try:
+        base = build_default_context(KiroClawConfig.load())
+        ctx_mod.set_context(dataclasses.replace(base, governance=policy))
+        with _install_fake_slack_sdk(resp), patch.object(
+            enterprise.KiroClawConfig, "load", return_value=_fake_config([])
+        ):
+            # enterprise leaf unpinned → empty id skipped; team T_OK matches → True.
+            assert enterprise.validate_enterprise("xoxb-token") is True
+    finally:
+        ctx_mod.reset_context()

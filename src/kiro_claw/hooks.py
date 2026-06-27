@@ -377,7 +377,16 @@ def _governance_denial(
     except PlatformCompositionError:
         raise
     except Exception:
-        logger.debug("governance evaluation failed; no opinion", exc_info=True)
+        # Wrap the late import + audit so a broken/renamed/partially-installed
+        # governance_profiles cannot raise ImportError out of this except-branch
+        # and convert the intended soft fail-open into a hard fail-closed that
+        # wedges every tool call (CR-284272012).
+        try:
+            from kiro_claw.platform.governance_profiles import audit_governance_degraded
+
+            audit_governance_degraded("hooks.on_tool_call", session_key=session_key, app=app)
+        except Exception:
+            logger.debug("governance degrade audit unavailable", exc_info=True)
         return None
 
 
@@ -571,7 +580,16 @@ def _script_hooks_capability_denied(session_key: str = "") -> str | None:
     except PlatformCompositionError:
         raise
     except Exception:
-        logger.debug("script_hooks governance check failed; no opinion", exc_info=True)
+        # Wrapped (see _governance_denial): a late-import failure must not turn the
+        # soft fail-open into a hard fail that wedges every script hook.
+        try:
+            from kiro_claw.platform.governance_profiles import audit_governance_degraded
+
+            audit_governance_degraded(
+                "run_script_hook", session_key=session_key, scope="capabilities.script_hooks"
+            )
+        except Exception:
+            logger.debug("governance degrade audit unavailable", exc_info=True)
         return None
 
 

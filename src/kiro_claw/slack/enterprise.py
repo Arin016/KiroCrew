@@ -104,10 +104,24 @@ def _governance_posture_permits_workspace(enterprise_id: str, team_id: str) -> b
     try:
         from kiro_claw.platform.governance_profiles import governance_permits
 
-        # An empty session key resolves policy-only (the posture is policy-only),
-        # which is exactly the ceiling we want here.
+        # An empty session key resolves policy-only — exactly the ceiling we want:
+        # the posture is policy-only (Rule 6 rejects a profile carrying it), so a
+        # surface-bound profile must NOT additionally intersect here.  (The degrade
+        # audit below uses the _host surface only for honest SEL attribution.)
         for leaf, value in (("allowed_enterprise_ids", enterprise_id), ("allowed_team_ids", team_id)):
             if not value:
+                # An EMPTY id (Slack returns enterprise_id="" for every
+                # non-Enterprise-Grid workspace, the common case) cannot satisfy
+                # an explicitly-pinned allowlist, so it must fail CLOSED when the
+                # leaf is pinned — otherwise an operator's un-weakenable
+                # allowed_enterprise_ids ceiling is silently bypassed.  Probe the
+                # posture with a sentinel that no real id can equal: if the leaf
+                # is an allow-mode allowlist the sentinel is DENIED (pinned →
+                # close); if the leaf is ungoverned / deny-mode / allow-any the
+                # sentinel PERMITS (not pinned → the empty id is fine, skip).
+                probe = governance_permits("channels", f"slack/{leaf}:\x00__unpinned_probe__")
+                if not getattr(probe, "permitted", True):
+                    return False
                 continue
             decision = governance_permits("channels", f"slack/{leaf}:{value}")
             if not getattr(decision, "permitted", True):
@@ -116,7 +130,21 @@ def _governance_posture_permits_workspace(enterprise_id: str, team_id: str) -> b
     except PlatformCompositionError:
         raise
     except Exception:
-        logger.debug("governance channels posture check failed; no opinion", exc_info=True)
+        # Wrapped: a late-import failure must not raise out of this except-branch
+        # (the posture check is best-effort above the operator allowlist).
+        # session_key=_host so the degrade SEL records the honest "host" surface
+        # (this in-process admission check is not driven by a Slack session).
+        try:
+            from kiro_claw.platform.governance_profiles import (
+                HOST_SESSION_KEY,
+                audit_governance_degraded,
+            )
+
+            audit_governance_degraded(
+                "slack_enterprise_posture", session_key=HOST_SESSION_KEY, scope="channels.posture"
+            )
+        except Exception:
+            logger.debug("governance degrade audit unavailable", exc_info=True)
         return True
 
 

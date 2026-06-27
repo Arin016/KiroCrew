@@ -39,6 +39,36 @@ can reorder strictness or redefine matching):
   `sandbox = off < standard < cc < strict` (verified against `sandbox.py`).
 - `_MATCHERS`: `identifier` (case-insensitive), `command` (case-sensitive
   `fnmatchcase`), `path`, `host`, `mcp` (a `@server` grant covers `@server/tool`).
+  The `path` matcher normalizes **only the queried item** (`_norm_item`: expand
+  `~`/`$VAR` → `os.path.abspath`, which anchors a relative path to the host CWD
+  and collapses `.`/`..`) and matches it against the operator's pattern **expanded
+  but otherwise verbatim**. This does two jobs and avoids one trap (CR-284272012):
+  (1) a `..` traversal cannot satisfy an allow-prefix (`/home/u/ws/../.bashrc`
+  collapses to `/home/u/.bashrc` and no longer matches `/home/u/ws/**`, which an
+  un-normalized `*` would wrongly span); (2) an agent-supplied **relative** item
+  is absolutized so it can still match an absolute *deny* glob (`../../etc/passwd`
+  cannot dodge `/etc/**` by failing to match). The pattern is **never** run
+  through `normpath` — `normpath` treats `*`/`**` as ordinary segments and would
+  collapse an adjacent `..` against them (`/a/**/../b` → `/a/b`, silently dropping
+  the `**`), widening an allow or shrinking a deny. Normalization is purely
+  lexical (no filesystem `resolve()`), so it is mode-safe and adds no I/O; the
+  `abspath` anchor cannot reconstruct an ACP backend's actual CWD, so the
+  resolved `is_sensitive_path` keystone remains the separate, always-on,
+  authoritative block for the trust-root / credential dirs. `_norm_item` also
+  collapses a leading `//` to `/` (POSIX leaves a two-slash prefix
+  implementation-defined and `normpath` preserves it, so `//etc/passwd` would
+  otherwise dodge a `/etc/**` deny while the OS opens `/etc/passwd`).
+
+  **Path matcher — lexical-only contract.** The `path` matcher does **not**
+  resolve symlinks (no `realpath`): a symlink lexically inside an allow-prefix
+  (`<allow>/link -> <secret>/key`) passes the matcher even though the OS write
+  lands outside the allow-list. This is intentional — resolving would add I/O to
+  every gate call and refuse writes through operator-placed symlinks. Treat
+  allow-mode prefixes as a **lexical scoping aid, not a hardened sandbox against
+  symlinks**; the resolved `is_sensitive_path` keystone is the authoritative
+  guard for trust-root / credential dirs, and operators must not rely on an
+  allow-mode prefix to confine writes in a directory containing untrusted
+  symlinks.
 
 `SCOPE_CATALOG` is the single place a scope name binds to its archetype +
 matcher. `register_scope` / `register_matcher` are append-only extension seams;
@@ -92,6 +122,19 @@ canonical taxonomy parser — never re-implemented). Resolution is:
 - No bound profile on an **unattended + unproven** surface → `deny_all_profile`
   (fail-closed, never a permissive fall-through), mirroring the dashboard
   `api_session_tool_policy` precedent.
+
+**`host` surface (in-process host actions).** A governance check that is not
+driven by a user-facing surface — app activation
+(`apps.manager._app_activation_denied`) and Slack workspace admission
+(`slack.enterprise`) — runs under the `_host` sentinel session key, which
+classifies to surface `host`. Operators can bind a `surface:host` profile to
+narrow these on top of the policy ceiling (e.g. an `apps` allowlist that further
+restricts which apps may activate). NOTE: these callers used to pass an empty
+session key, which mis-classified to `slack` and accidentally picked up
+`surface:slack` profiles; they now use the honest `host` surface, so a
+`surface:slack` profile no longer governs host-side app activation. The Slack
+posture check itself stays policy-only (a profile cannot carry `posture`,
+Rule 6).
 
 Profiles hot-reload via an mtime fingerprint (`ProfileStore`); a schema-invalid
 profile falls back to deny-all (Validation rule 5), **not** the ceiling.
@@ -177,6 +220,14 @@ posture in ADDITION to the operator's `config.json`
 `slack.allowed_enterprise_ids`. The posture is the **agent-unweakenable**
 ceiling (the config allowlist is operator-editable; the policy posture is not).
 Default-open when no policy posture is configured.
+
+An **empty** id is fail-closed against a *pinned* leaf: Slack returns
+`enterprise_id=""` for every non-Enterprise-Grid workspace, and an empty id
+cannot satisfy an explicitly-configured allowlist, so it must be DENIED rather
+than skipped. `_governance_posture_permits_workspace` distinguishes "leaf is
+pinned" from "id is provided" by probing the posture with a sentinel value no
+real id can equal: if the leaf is an allow-mode allowlist the sentinel is denied
+(pinned → close), otherwise it permits (unpinned → the empty id is fine).
 
 ### Audit
 

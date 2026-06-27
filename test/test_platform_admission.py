@@ -108,6 +108,21 @@ class TestKillSwitch:
         assert not decision.allowed
         assert "banned" in decision.reason
 
+    def test_ban_is_unicode_canonical_insensitive(self, patch_manifest):
+        # A ban on the NFC form of a name must not be evadable by publishing under
+        # the NFD-decomposed form (visually identical, different code points). A
+        # publisher controls its package's Unicode form, so the kill-switch must
+        # NFKC-canonicalize both sides before comparing. (CR-284272012 Heimdall.)
+        banned_nfc = "café-app"  # 'é' = U+00E9 (composed)
+        plugin_nfd = "café-app"  # 'e' + U+0301 combining acute (decomposed)
+        assert banned_nfc != plugin_nfd  # genuinely different code-point strings
+        patch_manifest(PluginManifest(name=plugin_nfd, publisher="x", version="1"))
+        ep = _FakeEntryPoint(name=plugin_nfd)
+        policy = AdmissionPolicy(mode=MODE_OPEN, banned=[banned_nfc])
+        decision = evaluate_admission(ep, policy)
+        assert not decision.allowed, "NFD-decomposed name must not evade an NFC-form ban"
+        assert "banned" in decision.reason
+
 
 class TestManifestParsing:
     def test_string_capability_value_is_not_exploded(self):

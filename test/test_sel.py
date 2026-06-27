@@ -350,6 +350,12 @@ class TestInferSource:
         ("cli_chat", "cli"),
         ("C08HZAWV4TP:thread123", "slack"),
         ("random_key", "slack"),
+        # An empty key carries no surface signal → "unknown", NOT "slack"
+        # (an app-activation governance degrade passes no session_key).
+        ("", "unknown"),
+        # The explicit host-process sentinel → "host" (stable bind target for
+        # host-side governance: app activation, workspace admission).
+        ("_host", "host"),
     ])
     def test_infer_source(self, key, expected):
         assert _infer_source(key) == expected

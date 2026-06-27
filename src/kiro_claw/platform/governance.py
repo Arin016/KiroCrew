@@ -101,14 +101,51 @@ def _match_command(item: str, pattern: str) -> bool:
 
 
 def _match_path(item: str, pattern: str) -> bool:
-    """Glob match for filesystem paths, expanding ``~`` / ``$HOME`` on both sides.
+    """Glob match for filesystem paths, expanding ``~`` / ``$HOME``.
 
     Case-sensitive (POSIX path semantics).  ``fnmatch``'s ``*`` already crosses
     directory separators, which is the documented (broad) behaviour for a
     deny-oriented read block; callers wanting precise segment semantics should
     prefer narrower patterns.
+
+    Only the ITEM is normalized (``_norm_item``: expand → absolutize → lexically
+    collapse ``.``/``..``); the PATTERN is only ``~``/``$VAR``-expanded and is
+    matched verbatim.  Normalizing the item — never the pattern — does two jobs
+    and avoids one trap (CR-284272012):
+
+    * a ``..`` traversal cannot satisfy an ALLOW-mode prefix:
+      ``/home/u/ws/../.bashrc`` normalizes to ``/home/u/.bashrc`` and no longer
+      fnmatches ``/home/u/ws/**`` (without this ``*`` spans the ``..`` and the
+      write is wrongly PERMITTED though the OS resolves it outside the allow-list);
+    * an agent-supplied RELATIVE item is anchored to an absolute form, so it can
+      still match an absolute DENY glob (``../../etc/passwd`` cannot dodge
+      ``/etc/**``) instead of silently failing to match and falling open;
+    * the trap avoided: ``os.path.normpath`` must NOT touch the pattern — it treats
+      ``*``/``**`` as ordinary segments and collapses an adjacent ``..`` against
+      them (``/a/**/../b`` → ``/a/b``, silently dropping the ``**``), which would
+      widen an allow / shrink a deny.  Matching the pattern verbatim preserves the
+      operator's authored globs exactly.
+
+    Normalization is purely lexical (no filesystem ``resolve()``), so it adds no
+    I/O.  The relative-item anchor is the host process CWD (the same anchor the
+    resolved ``is_sensitive_path`` keystone uses); it cannot perfectly reconstruct
+    a backend's CWD, so that always-on keystone remains the authoritative,
+    resolved block for the trust-root / credential dirs.
+
+    LEXICAL-ONLY CONTRACT (no ``realpath``): matching does NOT resolve symlinks.
+    A symlink that lexically sits inside an allow-prefix
+    (``<allow>/link -> <secret>/key``) passes ``_match_path`` even though the OS
+    write lands at ``<secret>/key`` outside the allow-list.  This is intentional:
+    resolving would add filesystem I/O on every gate call and would refuse writes
+    through symlinks an operator placed deliberately (a common workspace layout).
+    The contract is therefore: **allow-mode prefixes are a lexical scoping aid,
+    not a hardened sandbox against symlinks** — the resolved ``is_sensitive_path``
+    keystone (which DOES ``resolve()``) is the authoritative guard for the
+    trust-root / credential dirs, and an operator must not rely on an allow-mode
+    prefix to confine writes in a directory that contains untrusted symlinks.
+    See ``docs/system-specs/modules/governance.md`` → "Path matcher".
     """
-    return fnmatch.fnmatchcase(_expand(item), _expand(pattern))
+    return fnmatch.fnmatchcase(_norm_item(item), _expand(pattern))
 
 
 def _match_host(item: str, pattern: str) -> bool:
@@ -151,6 +188,36 @@ _DEFAULT_MATCHER = "identifier"
 def _expand(path_str: str) -> str:
     """Expand ``~`` and ``$VAR`` without touching the filesystem (no resolve())."""
     return os.path.expanduser(os.path.expandvars(path_str))
+
+
+def _norm_item(path_str: str) -> str:
+    """Expand, absolutize, then lexically collapse ``.``/``..`` in a queried item.
+
+    Applied to the queried ITEM only (never a pattern — see ``_match_path``).
+    Three steps, all purely lexical (no filesystem ``resolve()``, no I/O):
+
+    1. ``_expand`` — ``~`` / ``$VAR`` substitution.
+    2. ``os.path.abspath`` — anchor a relative path (e.g. ``../../etc/passwd`` or
+       ``etc/passwd``) to the host CWD so it cannot dodge an absolute DENY glob by
+       failing to match; ``abspath`` also runs ``normpath``, collapsing ``..``.
+       An already-absolute path is unchanged except for the collapse.
+    3. collapse a leading ``//`` to ``/`` — POSIX (4.13) leaves a path beginning
+       with exactly two slashes implementation-defined, and ``normpath`` PRESERVES
+       it (``normpath('//etc/passwd') == '//etc/passwd'``).  An item supplied as
+       ``//etc/passwd`` would then not match a ``/etc/**`` deny even though the OS
+       opens ``/etc/passwd`` — a deny bypass.  Collapse so the lexical form equals
+       what the OS resolves (CR-284272012).  A leading ``///+`` already normalizes
+       to a single ``/``, so only the exact ``//`` case needs this.
+
+    Collapsing ``..`` is what stops a traversal from satisfying an allow-prefix
+    glob.  ``abspath`` cannot reconstruct an ACP backend's actual CWD, so it is a
+    best-effort anchor; the resolved ``is_sensitive_path`` keystone remains the
+    authoritative block for the trust-root / credential dirs.
+    """
+    p = os.path.abspath(_expand(path_str))
+    if p.startswith("//") and not p.startswith("///"):
+        p = p[1:]
+    return p
 
 
 def _reject_unknown_keys(d: Mapping[str, object], known: "set[str]", container: str) -> None:
@@ -284,30 +351,73 @@ def classify_tool_args(
     return tuple(pairs)
 
 
+# Schemes that actually open a network connection to a host. A URL on any other
+# scheme (mailto:, data:, javascript:, tel:, file:, blob:, …) contacts no host,
+# so the egress gate must not derive a phantom host from it.
+_NETWORK_SCHEMES = frozenset({"http", "https", "ws", "wss", "ftp", "ftps"})
+
+
+def _looks_like_host(token: str) -> bool:
+    """True if *token* looks like a network host (vs. a URI scheme word).
+
+    A real ``host:port`` input (``example.com:8080``, ``localhost:3000``,
+    ``127.0.0.1:9``) is mis-parsed by urlparse as ``scheme:path`` — the host
+    becomes the "scheme".  A non-network URI (``tel:80``, ``gopher:1234``,
+    ``mailto:443``) has a bare alphabetic-word scheme.  We distinguish by SHAPE
+    rather than a denylist of every URI scheme: a hostname contains a ``.`` or a
+    digit, or is exactly ``localhost``; a bare scheme word never does.  This is
+    what stops a non-network scheme + numeric payload from yielding a phantom
+    host without having to enumerate ``tel``/``gopher``/``sms``/… (CR-284272012).
+    """
+    t = token.lower()
+    return t == "localhost" or "." in t or any(c.isdigit() for c in t)
+
+
 def _url_host(url: str) -> str:
     """Extract the host from a URL for the ``host`` matcher (no network I/O).
 
-    Returns ``""`` for a URL that carries no network host (e.g. ``file:///…``),
-    so a hostless URL is NOT mis-classified as egress to a phantom host (the
-    ``//``-prefix retry only fires for a genuinely scheme-less ``host/path``
-    form, never for a scheme whose authority is legitimately empty).
+    Returns ``""`` for a URL that carries no network host, so a hostless URL is
+    NOT mis-classified as egress to a phantom host the fetch would never contact.
+    The cases, by shape of the input:
+
+    * ``scheme://authority/…`` — a host only when ``scheme`` is a known NETWORK
+      scheme (``http``/``https``/``ws``/``wss``/``ftp``/``ftps``).  ``file:///…``
+      and any other scheme with an authority return ``""``.
+    * no scheme (``host/path`` or ``//host/path``) — recover the authority via a
+      ``//`` retry.
+    * ``scheme:rest`` with NO ``://`` — EITHER a non-network URI
+      (``mailto:``/``tel:``/``data:`` → no host) OR the scheme-less ``host:port``
+      form that urlparse mis-reads as ``scheme:path`` (``example.com:8080`` →
+      scheme ``example.com``, path ``8080``).  We retry as an authority ONLY when
+      ``rest`` begins with a bare numeric port AND the parsed "scheme" looks like
+      a host (``_looks_like_host``).  ``example.com:8080`` / ``localhost:3000`` →
+      host; ``tel:80`` / ``mailto:443`` / ``gopher:1234`` → ``""`` (a bare-word
+      URI scheme is never a hostname), so they cannot yield a phantom host
+      (CR-284272012).
     """
     from urllib.parse import urlparse
 
     try:
-        parsed = urlparse(url.strip())
+        s = url.strip()
+        parsed = urlparse(s)
         netloc = parsed.netloc
-        # A scheme-less ``host/path`` (e.g. "example.com/x") parses with empty
-        # netloc; retry with a ``//`` authority marker so the host is recovered.
-        # Do NOT retry when a scheme was present (``file:///…`` has no host).
-        # The scheme-less ``host:port`` form (e.g. "example.com:8080") is the
-        # exception: urlparse reads "example.com" as the SCHEME, so retry with
-        # ``//`` when the "scheme" is non-empty but there is no netloc and no
-        # ``://`` separator in the original (a true scheme always uses ``://``
-        # for a network URL).
-        scheme_less = not parsed.scheme or "://" not in url
-        if not netloc and scheme_less:
-            netloc = urlparse("//" + url.strip()).netloc
+        scheme = parsed.scheme.lower()
+        if "://" in s:
+            # Real scheme + authority: only a network scheme contacts a host.
+            netloc = netloc if scheme in _NETWORK_SCHEMES else ""
+        elif not scheme:
+            # Scheme-less ``host/path`` (netloc empty → recover via ``//`` retry)
+            # or protocol-relative ``//host/path`` (netloc already parsed → keep).
+            netloc = netloc or urlparse("//" + s).netloc
+        elif not netloc:
+            # ``scheme:rest`` with no ``://``: the ``host:port`` form ONLY when
+            # ``rest`` is a bare numeric port AND the parsed "scheme" looks like a
+            # hostname.  ``tel:80``/``mailto:443``/``gopher:1234`` have a bare-word
+            # scheme (not a host) so they stay hostless; ``example.com:8080`` /
+            # ``localhost:3000`` have a host-shaped token and resolve.
+            first_seg = parsed.path.split("/", 1)[0]
+            host_port_form = first_seg.isdigit() and _looks_like_host(scheme)
+            netloc = urlparse("//" + s).netloc if host_port_form else ""
     except Exception:
         return ""
     # Strip userinfo + port: ``user:pass@host:443`` → ``host``.

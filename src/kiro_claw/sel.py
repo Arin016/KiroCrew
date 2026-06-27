@@ -398,6 +398,49 @@ class SecurityEventLog:
             )
         )
 
+    def log_governance_degraded(
+        self,
+        *,
+        session_key: str,
+        chokepoint: str,
+        scope: str = "",
+        app: str = "",
+        reason: str = "",
+    ) -> None:
+        """Record that a governance chokepoint FAILED OPEN (degraded to permit).
+
+        A governance evaluation raised an unexpected (non-PlatformCompositionError)
+        error, so the chokepoint degraded to "no opinion" / permit and the
+        operator's narrowing for that surface is silently NOT applied. This is a
+        security-relevant event — without it a fail-open is invisible until an
+        incident reconstructs it — so it is logged at WARNING by the caller AND
+        persisted to the file-backed SEL here (safe even from a stdio MCP server,
+        which must not write to stdout). ``app`` (when the degraded chokepoint
+        resolved a per-app profile) is recorded so an investigator can tell WHICH
+        app's narrowing was bypassed. ``reason`` is redacted before persistence.
+        """
+        from kiro_claw.platform.context import redact_via_context
+
+        safe_reason = redact_via_context(reason) if reason else ""
+        self.log(
+            SecurityEvent(
+                event_id=uuid.uuid4().hex[:16],
+                timestamp=datetime.now(tz=timezone.utc).isoformat(),
+                event_type="governance_degraded",
+                caller_identity=session_key,
+                agent="kiroclaw",
+                source=_infer_source(session_key),
+                operation=chokepoint[:_MAX_ARG_LEN],
+                outcome="degraded",
+                resources="",
+                metadata={
+                    "scope": scope,
+                    "app": app,
+                    "reason": safe_reason[:_MAX_ARG_LEN],
+                },
+            )
+        )
+
     def log_api_access(
         self,
         *,
@@ -509,7 +552,23 @@ class SecurityEventLog:
 
 
 def _infer_source(session_key: str) -> str:
-    """Infer the source interface from a session key."""
+    """Infer the source interface from a session key.
+
+    An EMPTY key carries no surface signal — a real Slack key is always a
+    non-empty channel/thread timestamp — so it maps to ``"unknown"`` rather than
+    being misattributed to ``"slack"`` (e.g. an app-activation governance degrade
+    that passes no session_key; see governance ``audit_governance_degraded``).
+
+    The ``_host`` sentinel is the explicit HOST-process surface: an in-process
+    governance check that is not driven by any user-facing surface (app
+    activation, Slack workspace admission).  It gives operators a stable,
+    honest bind target (``bind: {type: surface, id: host}``) instead of the
+    accidental ``slack`` an empty key used to classify to (CR-284272012).
+    """
+    if not session_key:
+        return "unknown"
+    if session_key == "_host":
+        return "host"
     if session_key.startswith("dashboard:"):
         return "dashboard"
     if session_key.startswith("cron:"):

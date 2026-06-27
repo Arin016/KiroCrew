@@ -169,9 +169,15 @@ _READ_CMDS = r"(?:cat|head|tail|less|more|strings|xxd|base64|cp|scp|open|vi|vim|
 # list is defense-in-depth; the verb-independent catch-all below is the real
 # backstop, so a write verb we forgot is still caught when it names a
 # sensitive path as an argument.
+# NOTE: ``git`` is narrowed to the verbs that actually MATERIALISE a file —
+# a bare ``git`` would over-block read-only inspection (``git log/status/diff/
+# show/blame/grep -- <sensitive path>``) that operators run during incident
+# triage. The verb-independent catch-all still flags a sensitive-path token
+# regardless of git verb, so this only trims false positives (CR-284272012).
 _WRITE_CMDS = (
     r"(?:tee|mv|dd|truncate|ln|install|sed|chmod|chown|rm|rmdir|touch|mkdir|rsync"
-    r"|tar|unzip|gunzip|gzip|cpio|git|patch)\s"
+    r"|tar|unzip|gunzip|gzip|cpio|patch"
+    r"|git\s+(?:checkout|restore|reset|apply|clean|rm|mv|stash))\s"
 )
 
 # Matches python/ruby/perl one-liners that open sensitive paths
@@ -207,10 +213,15 @@ def _build_sensitive_regex() -> re.Pattern[str]:
     sensitive_path = rf"{home_alts}/(?:{dirs_pattern})(?:/|\s|$|['\"])"
     return re.compile(
         # (1) verb/redirect-anchored, OR (2) verb-independent: the sensitive path
-        # appears anywhere as a token (preceded by start, whitespace, or a quote).
+        # appears anywhere as a token.  The token anchor accepts start-of-string
+        # plus the separators that precede a path argument: whitespace, quote,
+        # ``=`` (VAR=path), AND ``:``/``,``/``;`` (option:path, PATH-style
+        # colon lists, comma/semicolon-joined args) — without the latter a
+        # ``FOO=bar:~/.aws/credentials`` or ``PATH=/x:~/.ssh/id_rsa`` token slips
+        # past the backstop while no verb branch fires either (CR-284272012).
         rf"(?:(?:{_READ_CMDS}.*|{_WRITE_CMDS}.*|{_SCRIPT_OPEN}.*|.*[<>|]\s*)"
         rf"{sensitive_path}"
-        rf"|(?:^|.*[\s'\"=]){sensitive_path})",
+        rf"|(?:^|.*[\s'\"=:,;]){sensitive_path})",
         re.IGNORECASE,
     )
 
@@ -267,7 +278,7 @@ def is_sensitive_path(path_str: str) -> bool:
 _EXTRACT_INTO_TRUST_ROOT_RE = re.compile(
     r"-(?:C|d)\s+(?:~|\$HOME|/home/[^/\s]+|/Users/[^/\s]+|"
     + re.escape(str(Path.home()))
-    + r")/\.kiroclaw(?:/profiles)?/?(?:\s|$|['\"])",
+    + r")/\.kiroclaw(?:/[^\s]*)?(?:\s|$|['\"])",
     re.IGNORECASE,
 )
 

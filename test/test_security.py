@@ -1029,6 +1029,39 @@ class TestIsSensitiveBashCommand:
         result = is_sensitive_bash_command("base64 ~/.gnupg/secring.gpg")
         assert "blocked" in result.lower()
 
+    def test_colon_separated_sensitive_path_blocked(self) -> None:
+        # CR-284272012 H-p5: a sensitive path after ':' / VAR=val:path / a
+        # PATH-style colon list must be caught by the verb-independent catch-all.
+        assert is_sensitive_bash_command("FOO=bar:~/.aws/credentials echo done") is not None
+        assert is_sensitive_bash_command("PATH=/foo:~/.ssh/id_rsa:/bar") is not None
+        assert is_sensitive_bash_command("LD_PRELOAD=:~/.aws/credentials whoami") is not None
+
+    def test_git_write_verbs_on_sensitive_path_blocked(self) -> None:
+        # CR-284272012 H-p9: file-materialising git verbs still blocked.
+        assert is_sensitive_bash_command("git checkout -- ~/.aws/credentials") is not None
+        assert is_sensitive_bash_command("git restore ~/.ssh/id_rsa") is not None
+        assert is_sensitive_bash_command("git mv x ~/.kiroclaw/profiles/p.json") is not None
+
+    def test_readonly_git_non_sensitive_path_allowed(self) -> None:
+        # CR-284272012 H-p9: bare `git` was over-blocking read-only inspection.
+        # A read verb naming a NON-sensitive path must not be treated as a write.
+        assert is_sensitive_bash_command("git log -- src/app.py") is None
+        assert is_sensitive_bash_command("git diff HEAD~1 README.md") is None
+        assert is_sensitive_bash_command("git show HEAD") is None
+
+    def test_extract_into_trust_root_subdir_blocked(self) -> None:
+        # CR-284272012 H-p6: extraction into ANY ~/.kiroclaw descendant (not just
+        # the root or /profiles) can drop files downstream tooling reads.
+        assert is_sensitive_bash_command("tar -xf evil.tar -C ~/.kiroclaw/foo/") is not None
+        assert is_sensitive_bash_command("unzip -d ~/.kiroclaw/foo/ evil.zip") is not None
+        assert is_sensitive_bash_command("tar -xf e.tar -C ~/.kiroclaw") is not None
+
+    def test_normal_kiroclaw_access_not_overblocked(self) -> None:
+        # Regression guard: the broadened rules must not block routine
+        # non-sensitive ~/.kiroclaw access (config.json, sessions.db).
+        assert is_sensitive_bash_command("cat ~/.kiroclaw/config.json") is None
+        assert is_sensitive_bash_command("sqlite3 ~/.kiroclaw/sessions.db .tables") is None
+
 
 class TestAuditBashCommand:
     """Tests for audit_bash_command()."""

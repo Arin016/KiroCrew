@@ -146,16 +146,22 @@ def _vet_cron_capability_governance() -> str | None:
     """
     from kiro_claw.platform.context import PlatformCompositionError
 
+    # Resolve the session key BEFORE the try so it is bound in the except branch.
+    # Fall back to a ``cron:``-prefixed key so an empty session key still
+    # classifies to the CRON surface (a bare "mcp_cron" misclassifies to the
+    # attended "slack" surface via sel._infer_source, skipping a cron-bound
+    # profile) — matching _vet_command_governance's "cron:_vet".
+    sk = _resolve_session_key() or "cron:_vet"
     try:
         from kiro_claw.platform.governance_profiles import governance_permits
 
         # item="" → the CapabilityGate's ``enabled`` flag is what is queried.
-        # Fall back to a ``cron:``-prefixed key so an empty session key still
-        # classifies to the CRON surface (a bare "mcp_cron" misclassifies to the
-        # attended "slack" surface via sel._infer_source, skipping a cron-bound
-        # profile) — matching _vet_command_governance's "cron:_vet".
-        sk = _resolve_session_key() or "cron:_vet"
-        decision = governance_permits("capabilities.cron", "", session_key=sk)
+        # log_warning=False: this runs inside the kiroclaw-cron stdio MCP server,
+        # whose stray stderr would corrupt the JSON-RPC stream — the degrade
+        # WARNING is suppressed (the file-backed SEL is still written).  The inner
+        # call carries the flag too because governance_permits catches the common
+        # resolution error itself and never re-raises to the outer except below.
+        decision = governance_permits("capabilities.cron", "", session_key=sk, log_warning=False)
         if not getattr(decision, "permitted", True):
             _audit_governance_deny(sk, "cron_add", "capabilities.cron", decision)
             return "Error: cron scheduling blocked by governance policy: " + redact(
@@ -164,7 +170,16 @@ def _vet_cron_capability_governance() -> str | None:
     except PlatformCompositionError:
         raise
     except Exception:
-        logger.debug("cron capability governance check failed; no opinion", exc_info=True)
+        # Wrapped: a late-import failure must not raise out of this except-branch
+        # and hard-fail the stdio kiroclaw-cron tool call (CR-284272012).
+        try:
+            from kiro_claw.platform.governance_profiles import audit_governance_degraded
+
+            audit_governance_degraded(
+                "cron_add", session_key=sk, scope="capabilities.cron", log_warning=False
+            )
+        except Exception:
+            pass
     return None
 
 
@@ -182,7 +197,11 @@ def _vet_command_governance(command: str) -> str | None:
     try:
         from kiro_claw.platform.governance_profiles import governance_permits
 
-        decision = governance_permits("commands", command, session_key="cron:_vet")
+        # log_warning=False: stdio kiroclaw-cron server (see _vet_cron_capability_
+        # governance) — suppress the degrade WARNING, keep the file-backed SEL.
+        decision = governance_permits(
+            "commands", command, session_key="cron:_vet", log_warning=False
+        )
         if not getattr(decision, "permitted", True):
             return "Error: cron command blocked by governance policy: " + redact(
                 getattr(decision, "reason", "")
@@ -192,7 +211,15 @@ def _vet_command_governance(command: str) -> str | None:
         # must abort, never silently fall open. Always propagate.
         raise
     except Exception:
-        logger.debug("cron command governance check failed; no opinion", exc_info=True)
+        # Wrapped: a late-import failure must not hard-fail the stdio cron tool call.
+        try:
+            from kiro_claw.platform.governance_profiles import audit_governance_degraded
+
+            audit_governance_degraded(
+                "cron_command", session_key="cron:_vet", scope="commands", log_warning=False
+            )
+        except Exception:
+            pass
     return None
 
 

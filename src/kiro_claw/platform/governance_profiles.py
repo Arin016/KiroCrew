@@ -46,11 +46,84 @@ logger = logging.getLogger(__name__)
 
 _PROFILES_DIR = Path.home() / ".kiroclaw" / "profiles"
 
+
+def audit_governance_degraded(
+    chokepoint: str,
+    *,
+    session_key: str = "",
+    scope: str = "",
+    app: str = "",
+    log_warning: bool = True,
+) -> None:
+    """Surface a governance fail-OPEN (a chokepoint degraded to permit/None).
+
+    Every governance chokepoint catches an unexpected
+    (non-``PlatformCompositionError``) error and degrades to "no opinion" so a
+    latent regression cannot wedge the surface — but that silently drops the
+    operator's narrowing for a security-critical control.  Logging only at
+    ``debug`` (invisible at prod level) makes the fail-open undetectable until an
+    incident.  This helper makes it observable: a WARNING log AND a file-backed
+    ``governance_degraded`` SEL record.
+
+    ``app`` records which per-app profile was being resolved (the messaging /
+    memory-writes / channels chokepoints pass ``app=_governance_app()`` into
+    ``governance_permits``); without it the SEL cannot say WHICH sandboxed app's
+    narrowing was bypassed — the exact per-app threat those gates exist for.
+
+    The SEL write goes only to the on-disk audit file (never stdout), so it is
+    safe inside the stdio ``kiroclaw-core`` MCP server whose stray stdout/stderr
+    would corrupt the JSON-RPC stream.  Those stdio call sites pass
+    ``log_warning=False`` to suppress the logger call too (its stderr is shared
+    with the protocol stream) while still getting the durable SEL signal.
+    Best-effort: the SEL emit is guarded so the degrade path can never raise out
+    of an except-branch.
+    """
+    if log_warning:
+        logger.warning(
+            "governance chokepoint %r FAILED OPEN (degraded to no-opinion); operator "
+            "narrowing not applied for scope=%r session=%r app=%r",
+            chokepoint,
+            scope,
+            session_key,
+            app,
+            exc_info=True,
+        )
+    try:
+        from kiro_claw.sel import sel
+
+        sel().log_governance_degraded(
+            session_key=session_key, chokepoint=chokepoint, scope=scope, app=app
+        )
+    except Exception:
+        # Escalate to WARNING even when log_warning=False: if the SEL write
+        # ITSELF fails (disk full, read-only FS, SEL singleton crash) and we
+        # also suppressed the logger, the fail-open would be COMPLETELY invisible
+        # at prod log level — defeating the observability invariant this helper
+        # exists to establish.  The stdio JSON-RPC concern that motivates
+        # log_warning=False is the lesser risk vs. an unrecorded governance
+        # fail-open, and this path only fires when auditing is already broken.
+        logger.warning(
+            "governance_degraded SEL emit FAILED for chokepoint=%r scope=%r app=%r — "
+            "the fail-open is otherwise UNRECORDED",
+            chokepoint,
+            scope,
+            app,
+            exc_info=True,
+        )
+
+
 # Surfaces that run UNATTENDED with no interactive operator in the loop.  When
 # such a surface has no explicitly-bound profile AND its identity is unproven,
 # it resolves to deny-all rather than the (permissive) no-profile path — these
 # are the high-blast-radius surfaces the profile layer exists to contain.
 _UNATTENDED_SURFACES = frozenset({"cron", "subagent", "background", "heartbeat", "taskrunner"})
+
+# Session-key sentinel for an in-process HOST action that is not driven by any
+# user-facing surface (app activation, Slack workspace admission).  Classifies to
+# surface ``host`` (sel._infer_source), giving operators a stable bind target
+# (``bind: {type: surface, id: host}``) for host-side governance.  Used instead
+# of an empty key, which classifies to ``unknown`` and matches no profile.
+HOST_SESSION_KEY = "_host"
 
 
 def _profiles_dir() -> Path:
@@ -168,16 +241,39 @@ class ProfileStore:
                     fallback = replace(fallback, bind=salvaged)
                 by_name[stem] = fallback
         # Pass 2: resolve ``extends`` (monotonic narrowing) now that all are parsed.
+        # The "non-trivial chain" guard must read each parent's ORIGINAL ``extends``,
+        # not the live dict: ``compose_profiles`` resets a composed profile's
+        # ``extends`` to "", so reading ``by_name[parent].extends`` after composing
+        # makes the deny-vs-compose decision depend on the (alphabetical) order
+        # files happen to be processed — a 2-deep chain ``c→b→a`` would compose
+        # (fail-OPEN) when ``b`` sorts before ``c`` but deny-all when it sorts
+        # after.  Snapshotting the original chain depth makes the verdict
+        # deterministic and order-independent (CR-284272012).
+        _orig_extends = {name: prof.extends for name, prof in by_name.items()}
         for name, profile in list(by_name.items()):
             if profile.extends:
                 parent = by_name.get(profile.extends)
-                if parent is None or parent.extends:  # missing or non-trivial chain
+                # Non-trivial chain = the parent itself extends something (judged
+                # from the snapshot, so a mid-parent already composed in this pass
+                # is still recognised as a chain link).
+                parent_is_chain = bool(_orig_extends.get(profile.extends))
+                if parent is None or parent_is_chain:  # missing or non-trivial chain
                     logger.warning(
                         "profile %r extends %r which is missing/chained; deny-all",
                         name,
                         profile.extends,
                     )
-                    by_name[name] = deny_all_profile(name)
+                    # Preserve the original bind so the BOUND surface still
+                    # resolves to deny-all (fail-CLOSED), not None.  Without this,
+                    # Pass 3 would drop the profile from ``_by_bind`` (deny-all has
+                    # bind=None), ``resolve_active_scope`` would return None, and
+                    # the gate would fall through to the policy ceiling ALONE —
+                    # bypassing the operator's narrowing (fail-OPEN).  Mirrors the
+                    # Pass-1 parse-error branch's ``_salvage_bind`` invariant.
+                    fallback = deny_all_profile(name)
+                    if profile.bind is not None:
+                        fallback = replace(fallback, bind=profile.bind)
+                    by_name[name] = fallback
                 else:
                     by_name[name] = compose_profiles(parent, profile)
         # Build the bind index.  Last writer wins on a duplicate bind, logged.
@@ -253,6 +349,7 @@ def governance_permits(
     session_key: str = "",
     agent: str = "",
     app: str = "",
+    log_warning: bool = True,
 ) -> "object":
     """One-call chokepoint helper: is *item* permitted in *scope* right now?
 
@@ -276,6 +373,11 @@ def governance_permits(
     Fail-closed discipline matches the gate: a ``PlatformCompositionError``
     propagates; any other unexpected error returns a permissive Decision (the
     chokepoint's own always-on checks still run) rather than wedging the surface.
+    That unexpected error is caught HERE (not re-raised), so a stdio-MCP caller's
+    own outer ``log_warning=False`` would never run — pass ``log_warning=False``
+    *into this call* from a stdio site so the degrade WARNING (whose stderr is
+    shared with the JSON-RPC stream) is suppressed at the point it is emitted; the
+    file-backed ``governance_degraded`` SEL is still written either way.
     """
     from kiro_claw.platform.context import (
         PlatformCompositionError,
@@ -292,7 +394,9 @@ def governance_permits(
     except PlatformCompositionError:
         raise
     except Exception:
-        logger.debug("governance_permits failed; permissive", exc_info=True)
+        audit_governance_degraded(
+            "governance_permits", session_key=session_key, scope=scope, log_warning=log_warning
+        )
         from kiro_claw.platform.governance import Decision as _D
 
         return _D(True, "governance error; no opinion", rule="default")
@@ -304,12 +408,15 @@ def governance_floor_ordinal(
     session_key: str = "",
     agent: str = "",
     app: str = "",
+    log_warning: bool = True,
 ) -> Optional[str]:
     """Return the effective ordinal floor value for *scope*, or ``None``.
 
     Used by the sandbox / approval chokepoints to clamp a requested tier up to
     at least the governed strictness (e.g. ``sandbox.min_level``).  ``None`` means
-    no governance opinion (caller keeps its own default).
+    no governance opinion (caller keeps its own default).  ``log_warning=False``
+    suppresses the degrade WARNING for a stdio-MCP caller (same rationale as
+    :func:`governance_permits`); the ``governance_degraded`` SEL is still written.
     """
     from kiro_claw.platform.context import (
         PlatformCompositionError,
@@ -325,7 +432,12 @@ def governance_floor_ordinal(
     except PlatformCompositionError:
         raise
     except Exception:
-        logger.debug("governance_floor_ordinal failed; no opinion", exc_info=True)
+        audit_governance_degraded(
+            "governance_floor_ordinal",
+            session_key=session_key,
+            scope=scope,
+            log_warning=log_warning,
+        )
         return None
 
 

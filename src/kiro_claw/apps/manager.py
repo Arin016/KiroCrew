@@ -499,24 +499,31 @@ def _app_activation_denied(name: str) -> str | None:
     allowlist: an enterprise policy may restrict which apps may run at all (e.g.
     ``apps: {mode: allow, allow: ["auto-research", "file-explorer"]}``).  Enabling
     is the activation chokepoint — a disabled app contributes no agents, skills,
-    crons, or routes — so the gate lives here.  Resolution is policy-only
-    (``session_key=""``): app activation is an operator/host action, not bound to
-    a calling surface.  Best-effort beyond the always-on checks: a
-    ``PlatformCompositionError`` propagates (fail-closed CPP); any other error
-    degrades to "no opinion" (None).
+    crons, or routes — so the gate lives here.  Resolution uses the ``_host``
+    session key (surface ``host``): app activation is an operator/host action, so
+    it is governed by the policy ceiling AND any ``bind: {type: surface, id:
+    host}`` profile — an honest, stable bind target.  (It must NOT use an empty
+    key, which would classify to surface ``unknown`` and silently match nothing;
+    an empty key previously mis-classified to ``slack`` and accidentally picked up
+    slack-bound profiles — CR-284272012.)  Best-effort beyond the always-on
+    checks: a ``PlatformCompositionError`` propagates (fail-closed CPP); any other
+    error degrades to "no opinion" (None).
     """
     from kiro_claw.platform.context import PlatformCompositionError
 
     try:
-        from kiro_claw.platform.governance_profiles import governance_permits
+        from kiro_claw.platform.governance_profiles import (
+            HOST_SESSION_KEY,
+            governance_permits,
+        )
 
-        decision = governance_permits("apps", name)
+        decision = governance_permits("apps", name, session_key=HOST_SESSION_KEY)
         if not getattr(decision, "permitted", True):
             try:
                 from kiro_claw.sel import sel
 
                 sel().log_governance_decision(
-                    session_key="", tool_name=f"enable_app:{name}", scope="apps",
+                    session_key=HOST_SESSION_KEY, tool_name=f"enable_app:{name}", scope="apps",
                     item=name, outcome="denied",
                     rule=getattr(decision, "rule", ""), layer=getattr(decision, "layer", ""),
                     reason=getattr(decision, "reason", ""),
@@ -528,7 +535,22 @@ def _app_activation_denied(name: str) -> str | None:
     except PlatformCompositionError:
         raise
     except Exception:
-        logger.debug("app activation governance check failed; no opinion", exc_info=True)
+        # scope="apps" + app=name so the SEL records WHICH app's activation gate
+        # degraded; session_key=_host so the SEL source is the honest "host"
+        # surface (not "unknown"/"slack").  Wrapped so a late-import failure cannot
+        # raise out of this except-branch and convert the soft fail-open into a
+        # hard fail (CR-284272012).
+        try:
+            from kiro_claw.platform.governance_profiles import (
+                HOST_SESSION_KEY,
+                audit_governance_degraded,
+            )
+
+            audit_governance_degraded(
+                "app_activation", session_key=HOST_SESSION_KEY, scope="apps", app=name
+            )
+        except Exception:
+            logger.debug("governance degrade audit unavailable", exc_info=True)
         return None
 
 
@@ -957,9 +979,10 @@ def _edition_builtin_apps() -> list[dict[str, Any]]:
     # Fail-closed via safe_context_call: a non-standalone host that cannot compose
     # re-raises PlatformCompositionError (never silently degrades to the OSS builtin
     # set); any other lookup failure falls back to no edition sources.
+    _no_sources: list[Path] = []
     sources = safe_context_call(
         lambda: current_context().apps_loader.manifest_sources(),
-        fallback=[],
+        fallback=_no_sources,
         log_message="apps_loader.manifest_sources lookup failed; using none",
     )
 
@@ -986,10 +1009,11 @@ def _edition_bundled_app_names() -> list[str]:
     mis-orphaned even if its manifest dir is momentarily unavailable.
     """
     # Fail-closed via safe_context_call (see _edition_builtin_apps above).
+    _no_names: list[str] = []
     return list(
         safe_context_call(
             lambda: current_context().apps_loader.bundled_app_names(),
-            fallback=[],
+            fallback=_no_names,
             log_message="apps_loader.bundled_app_names lookup failed; using none",
         )
     )

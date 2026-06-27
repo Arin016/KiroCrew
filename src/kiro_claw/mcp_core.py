@@ -1056,8 +1056,9 @@ def _vet_messaging_governance(caller_session: str) -> str | None:
     ``kiroclaw-core`` stdio subprocess, which DOES boot the platform via
     ``cli.main`` — so ``current_context()`` carries the ceiling.  Best-effort:
     a ``PlatformCompositionError`` propagates; any other error returns None.
-    Emits no stray stdout (would corrupt the JSON-RPC stream); the debug log
-    goes to stderr/logging only.
+    Emits no stray stdout/stderr (either would corrupt the JSON-RPC stream); a
+    fail-open degrade is audited via the file-backed ``governance_degraded`` SEL
+    only (``log_warning=False`` suppresses the logger here).
     """
     from kiro_claw.platform.context import PlatformCompositionError
 
@@ -1065,7 +1066,11 @@ def _vet_messaging_governance(caller_session: str) -> str | None:
         from kiro_claw.platform.governance_profiles import governance_permits
 
         decision = governance_permits(
-            "capabilities.messaging", "", session_key=caller_session
+            "capabilities.messaging",
+            "",
+            session_key=caller_session,
+            app=_governance_app(),
+            log_warning=False,
         )
         if not getattr(decision, "permitted", True):
             _audit_governance_deny(caller_session, "send_message", "capabilities.messaging", decision)
@@ -1074,9 +1079,24 @@ def _vet_messaging_governance(caller_session: str) -> str | None:
     except PlatformCompositionError:
         raise
     except Exception:
-        # No logging here: this runs inside the kiroclaw-core stdio MCP server,
+        # No logger here: this runs inside the kiroclaw-core stdio MCP server,
         # whose stray stdout/stderr would corrupt the JSON-RPC stream (same
-        # constraint as redact_via_context). Degrade silently to "no opinion".
+        # constraint as redact_via_context). Still emit the file-backed
+        # governance_degraded SEL (no stdout) so the fail-open is auditable.
+        # Wrapped so a late-import failure cannot raise ImportError out of this
+        # except-branch and hard-fail the stdio tool call (CR-284272012).
+        try:
+            from kiro_claw.platform.governance_profiles import audit_governance_degraded
+
+            audit_governance_degraded(
+                "send_message",
+                session_key=caller_session,
+                scope="capabilities.messaging",
+                app=_governance_app(),
+                log_warning=False,
+            )
+        except Exception:
+            pass
         return None
 
 
@@ -1100,7 +1120,11 @@ def _vet_channel_governance(caller_session: str, transport: str) -> str | None:
 
         # A bare member id queries the ScopedMap ``members`` ruleset.
         decision = governance_permits(
-            "channels", transport, session_key=caller_session, app=_governance_app()
+            "channels",
+            transport,
+            session_key=caller_session,
+            app=_governance_app(),
+            log_warning=False,
         )
         if not getattr(decision, "permitted", True):
             _audit_governance_deny(caller_session, f"send_message:{transport}", "channels", decision)
@@ -1109,6 +1133,19 @@ def _vet_channel_governance(caller_session: str, transport: str) -> str | None:
     except PlatformCompositionError:
         raise
     except Exception:
+        # Wrapped: a late-import failure must not hard-fail the stdio tool call.
+        try:
+            from kiro_claw.platform.governance_profiles import audit_governance_degraded
+
+            audit_governance_degraded(
+                f"send_message:{transport}",
+                session_key=caller_session,
+                scope="channels",
+                app=_governance_app(),
+                log_warning=False,
+            )
+        except Exception:
+            pass
         return None
 
 
@@ -1165,7 +1202,11 @@ def _vet_memory_writes_governance(caller_session: str) -> str | None:
         from kiro_claw.platform.governance_profiles import governance_permits
 
         decision = governance_permits(
-            "capabilities.memory_writes", "", session_key=caller_session, app=_governance_app()
+            "capabilities.memory_writes",
+            "",
+            session_key=caller_session,
+            app=_governance_app(),
+            log_warning=False,
         )
         if not getattr(decision, "permitted", True):
             _audit_governance_deny(
@@ -1176,6 +1217,19 @@ def _vet_memory_writes_governance(caller_session: str) -> str | None:
     except PlatformCompositionError:
         raise
     except Exception:
+        # Wrapped: a late-import failure must not hard-fail the stdio tool call.
+        try:
+            from kiro_claw.platform.governance_profiles import audit_governance_degraded
+
+            audit_governance_degraded(
+                "learn_add",
+                session_key=caller_session,
+                scope="capabilities.memory_writes",
+                app=_governance_app(),
+                log_warning=False,
+            )
+        except Exception:
+            pass
         return None
 
 

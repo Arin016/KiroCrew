@@ -42,6 +42,7 @@ import importlib.metadata as _md
 import json
 import logging
 import os
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
@@ -84,11 +85,14 @@ def _coerce_str_list(value: object) -> List[str]:
 def _normalize_name(name: str) -> str:
     """Canonical form for kill-switch / allowlist membership comparisons.
 
-    Case-folds and strips so a ban on ``"amazon-evil"`` is not evaded by an
-    entry-point name of ``"Amazon-Evil"`` or ``"amazon-evil "`` (trailing
-    whitespace from hand-edited JSON).
+    NFKC-normalizes, then casefolds and strips, so a ban on ``"amazon-evil"`` is
+    not evaded by an entry-point name of ``"Amazon-Evil"``, ``"amazon-evil "``
+    (trailing whitespace from hand-edited JSON), OR a Unicode-equivalent form —
+    e.g. an NFD-decomposed accent (``é`` as ``e`` + U+0301) or a compatibility
+    ligature. A publisher controls its package's Unicode form, so without
+    canonicalization an NFD plugin name slips past an NFC-form ban (CR-284272012).
     """
-    return name.strip().casefold()
+    return unicodedata.normalize("NFKC", name).strip().casefold()
 
 
 @dataclass(frozen=True)

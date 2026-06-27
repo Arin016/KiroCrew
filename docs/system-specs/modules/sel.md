@@ -16,13 +16,13 @@ Each entry records:
 |-------|-------------|
 | `event_id` | Unique 16-char hex identifier |
 | `timestamp` | ISO 8601 UTC |
-| `event_type` | `tool_invocation`, `api_access` |
+| `event_type` | `tool_invocation`, `api_access`, `governance_decision`, `governance_degraded` |
 | `caller_identity` | Session key (e.g. `dashboard:abc`, `cron:xyz`, `subagent:123`) |
 | `agent` | Agent name (`kiroclaw`, custom agent name) |
-| `source` | Interface: `slack`, `dashboard`, `cli`, `cron`, `subagent`, `taskrunner`, `mcp`, `background` |
+| `source` | Interface: `slack`, `dashboard`, `cli`, `cron`, `subagent`, `taskrunner`, `mcp`, `background`, `host` (the `_host` sentinel — an in-process host action like app activation / workspace admission), `unknown` (empty/unrecognized session key, which must NOT be mis-tagged `slack`) |
 | `operation` | Tool name or `METHOD /api/path` |
 | `tool_kind` | Tool category (`execute_bash`, `fs_write`, `mcp_core`, `mcp_cron`, etc.) |
-| `outcome` | `invoked`, `auto_approved`, `approved`, `rejected`, `denied`, `completed`, `failed` |
+| `outcome` | `invoked`, `auto_approved`, `approved`, `rejected`, `denied`, `completed`, `failed`, `degraded` (a governance chokepoint failed OPEN) |
 | `resources` | Affected resources summary (truncated to 500 chars) |
 | `downstream_service` | MCP server name if applicable (`kiroclaw-core`, `kiroclaw-cron`, `builder-mcp`) |
 | `request_id` | ACP permission request ID |
