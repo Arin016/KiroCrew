@@ -69,8 +69,10 @@ generic core infrastructure — it survives the MeshClaw sync. See
 - **CPP:** the core defines extension-point Protocols (`interfaces.py`) and ships
   a `Default*` adapter for each; `PlatformContext` (`context.py`) is the frozen
   bundle, read via `current_context()`. The core **never** imports a companion or
-  branches on edition. `CONTRACT_VERSION` is **2** — bump it on any
-  `PlatformContext` field/interface change (forces a companion rebuild).
+  branches on edition. `CONTRACT_VERSION` is **pinned at 1 pre-launch** (the
+  companion rebuilds in lockstep, so the mismatch guard always sees `1 == 1`;
+  pre-release field/interface additions land under v1 with no bump). Start
+  incrementing only after the first public release.
 - **Governance:** `governance.py` (archetypes + evaluator + policy loader) +
   `governance_profiles.py` (profile store + resolution). `effective = POLICY ∩
   PROFILE`, tightest-wins; the PreToolUse gate denies a tool/MCP call even if the

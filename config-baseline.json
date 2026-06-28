@@ -20,6 +20,8 @@
         "provider": "acp",
         "default_agent": "",
         "sandbox": "auto",
+        "sandbox_allow_no_isolation": false,
+        "jail": "auto",
         "yolo": false,
         "bot_name": "",
         "conductor_skill": false,
@@ -133,6 +135,38 @@
       "hasChildren": false,
       "enumValues": [
         "auto",
+        "off"
+      ],
+      "defaultValue": "auto"
+    },
+    {
+      "path": "agent.sandbox_allow_no_isolation",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Allow No-Isolation Fallback",
+      "help": "Acknowledge running the agent subprocess WITHOUT OS-level credential isolation when no sandbox backend is available (e.g. macOS >= 26, or Linux without user namespaces). When false (default), that fallback is logged as a loud SECURITY warning. When true, the operator has accepted the risk and it is logged at info level.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
+    },
+    {
+      "path": "agent.jail",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Jail",
+      "help": "Process-isolation jail mode for agent-bearing commands. 'auto' uses a jail when the active edition supplies a working backend (the public edition has none, so 'auto' and 'on' are no-ops there); 'off' disables it. Disable per-invocation with --no-jail or KIROCLAW_NO_JAIL=1.",
+      "hasChildren": false,
+      "enumValues": [
+        "auto",
+        "on",
         "off"
       ],
       "defaultValue": "auto"
@@ -2034,7 +2068,7 @@
         "auto_open_browser": true,
         "quick_send": false,
         "terminal": {
-          "enabled": false
+          "enabled": true
         },
         "default_project": ""
       }
@@ -2191,11 +2225,11 @@
       "sensitive": false,
       "tags": [],
       "label": "Terminal",
-      "help": "Terminal panel configuration. Set enabled=true to show CLI panel in dashboard.",
+      "help": "Terminal panel configuration. Set enabled=false to hide the CLI panel in the dashboard.",
       "hasChildren": true,
       "enumValues": null,
       "defaultValue": {
-        "enabled": false
+        "enabled": true
       }
     },
     {

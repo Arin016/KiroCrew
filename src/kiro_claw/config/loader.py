@@ -324,6 +324,15 @@ def _archive_retention_days(session_data: dict) -> int:
     return val if val >= 0 else -1
 
 
+# Process-isolation jail modes (``agent.jail``).  Single source of truth shared by
+# ``_normalize_jail``, the ``AgentConfig.jail`` field metadata enum, and tests —
+# a new mode added in one place can't silently normalize back to the default.
+JAIL_MODE_AUTO = "auto"
+JAIL_MODE_ON = "on"
+JAIL_MODE_OFF = "off"
+_VALID_JAIL_MODES = (JAIL_MODE_AUTO, JAIL_MODE_ON, JAIL_MODE_OFF)
+
+
 @dataclass
 class AgentConfig:
     approval_mode: str = field(
@@ -359,6 +368,17 @@ class AgentConfig:
             "Linux without user namespaces). When false (default), that fallback is "
             "logged as a loud SECURITY warning. When true, the operator has accepted "
             "the risk and it is logged at info level.",
+        ),
+    )
+    jail: str = field(
+        default=JAIL_MODE_AUTO,
+        metadata=_meta(
+            "Jail",
+            "Process-isolation jail mode for agent-bearing commands. 'auto' uses a "
+            "jail when the active edition supplies a working backend (the public "
+            "edition has none, so 'auto' and 'on' are no-ops there); 'off' disables "
+            "it. Disable per-invocation with --no-jail or KIROCLAW_NO_JAIL=1.",
+            enum=list(_VALID_JAIL_MODES),
         ),
     )
     yolo: bool = field(
@@ -1155,6 +1175,20 @@ def _validated_completion_keep(value: object) -> str:
     )
 
 
+def _normalize_jail(value: object) -> str:
+    """Coerce a persisted ``agent.jail`` value to a valid mode, deny-by-default.
+
+    Valid persisted modes are ``auto`` / ``on`` / ``off``.  An unknown or
+    non-string value normalizes to ``auto`` (the safe default — let the active
+    edition decide; the public edition's jail provider is a no-op regardless).
+    ``off`` per-invocation is expressed via ``--no-jail`` / ``KIROCLAW_NO_JAIL``,
+    not persisted config.
+    """
+    if isinstance(value, str) and value in _VALID_JAIL_MODES:
+        return value
+    return JAIL_MODE_AUTO
+
+
 def _validate_activation(value: str) -> str:
     """Return *value* if it is a valid activation mode, else ``mention`` (deny-by-default)."""
     return value if value in _VALID_ACTIVATIONS else ACTIVATION_MENTION
@@ -1848,6 +1882,7 @@ class KiroClawConfig:
                 sandbox_allow_no_isolation=bool(
                     agent_data.get("sandbox_allow_no_isolation", False)
                 ),
+                jail=_normalize_jail(agent_data.get("jail", "auto")),
                 yolo=agent_data.get("yolo", False),
                 conductor_skill=agent_data.get("conductor_skill", False),
                 max_subagents=agent_data.get("max_subagents", 3),
@@ -2333,6 +2368,42 @@ class KiroClawConfig:
             )
 
         return _acp
+
+
+def build_provider_factory(cfg: "KiroClawConfig") -> Callable:
+    """Return the LLM-provider factory for *cfg*, via the platform seam.
+
+    Routes through ``current_context().providers.create_factory(cfg)`` (the CPP
+    ``ProviderRegistry`` extension point) instead of calling
+    ``cfg.create_provider_factory()`` directly, so an edition can supply an
+    alternate provider factory (e.g. re-registering an extra ACP backend through
+    the dormant ``ACP_BACKEND_*`` seam).  The ``Default`` ProviderRegistry returns
+    exactly ``cfg.create_provider_factory()``, so the public edition is
+    behaviorally identical to calling it directly.
+
+    Fail-closed: a :class:`PlatformCompositionError` (a non-standalone host that
+    could not compose its companion) propagates.  Any other transient lookup
+    failure degrades to ``cfg.create_provider_factory()`` so an unbooted /
+    standalone call site never breaks — it just gets the public factory.
+
+    The fallback is passed as ``fallback_factory`` (a lazy thunk), NOT eagerly:
+    ``cfg.create_provider_factory()`` is built ONLY on the degrade path, so the
+    standalone happy path builds the factory exactly once (the Default
+    ``ProviderRegistry`` already returns ``cfg.create_provider_factory()``, so an
+    eager fallback would build it a second time on every session/reload).  A
+    failure INSIDE ``cfg.create_provider_factory()`` itself is handled by
+    ``safe_context_call`` (which guards the factory call) rather than escaping
+    uncaught; with no eager ``fallback`` here there is no usable factory, so a
+    composition error propagates (fail-closed) and any other error re-raises —
+    a corrupt-config failure surfaces at the factory site, it is not swallowed.
+    """
+    from kiro_claw.platform.context import current_context, safe_context_call
+
+    return safe_context_call(
+        lambda: current_context().providers.create_factory(cfg),
+        fallback_factory=lambda: cfg.create_provider_factory(),
+        log_message="providers.create_factory failed; using cfg.create_provider_factory()",
+    )
 
 
 # ---------------------------------------------------------------------------

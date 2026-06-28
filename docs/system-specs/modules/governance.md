@@ -95,9 +95,10 @@ degrades to ungoverned.
 
 `build_default_context` (the single chokepoint backing both a real boot and the
 lazy `current_context` default) calls `load_security_policy()` and stores the
-result in the frozen `PlatformContext.governance` field. This bumps
-`CONTRACT_VERSION` to **2** (a v1 companion must rebuild). Every enforcement
-chokepoint reads `current_context().governance`.
+result in the frozen `PlatformContext.governance` field. `CONTRACT_VERSION`
+stays **1** (pinned pre-launch — the companion rebuilds in lockstep, so the
+mismatch guard always compares `1 == 1`; see `platform-context.md`). Every
+enforcement chokepoint reads `current_context().governance`.
 
 ## Self-protection (the keystone)
 
@@ -302,7 +303,7 @@ governance internals that the agent (the governed subject) should not enumerate.
 The `amazon` companion contributes the restrictive posture as its
 **bundled `security_policy.json`** (precedence step 2) rather than as code;
 capability providers (Midway/SigV4/tunnels) and the SharePoint redaction
-carve-out stay as code. It expects `CONTRACT_VERSION == 2`.
+carve-out stay as code. It expects `CONTRACT_VERSION == 1` (pinned pre-launch).
 
 ## Files
 

@@ -1205,6 +1205,30 @@ def setup_knowledge_routes(app: web.Application) -> None:
         # Local folder connector (always available)
         connectors["local_folder"] = LocalFolderConnector()
         connectors["obsidian_vault"] = LocalFolderConnector()
+        # Edition-contributed connectors (CPP KnowledgeProvider seam). Built-ins
+        # are set FIRST so an edition can both ADD a new source_type and, if it
+        # ever needs to, override a built-in. The Default returns {} → standalone
+        # keeps exactly {local_folder, obsidian_vault}. Fail-closed: a
+        # non-standalone host that cannot compose raises (via safe_context_call);
+        # a transient adapter error degrades to built-ins only.
+        from kiro_claw.platform.context import current_context, safe_context_call
+
+        _no_extra: dict[str, "BaseConnector"] = {}
+
+        def _extra_connectors() -> "dict[str, BaseConnector]":
+            # Bind the context ONCE so the KnowledgeProvider adapter and the cfg it
+            # receives come from the SAME PlatformContext (a context swap between
+            # two lookups could otherwise pair an adapter with a foreign cfg).
+            ctx = current_context()
+            return ctx.knowledge.extra_connectors(ctx.cfg)
+
+        connectors.update(
+            safe_context_call(
+                _extra_connectors,
+                fallback=_no_extra,
+                log_message="knowledge.extra_connectors failed; built-in connectors only",
+            )
+        )
         app["knowledge_pipeline"] = pipeline
         app["knowledge_sync"] = SyncScheduler(store=store, pipeline=pipeline,
                                               connectors=connectors)

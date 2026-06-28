@@ -13,7 +13,7 @@ from pathlib import Path
 
 from kiro_claw.acp.client import AcpError, AcpTimeoutError
 from kiro_claw.config import KiroClawConfig
-from kiro_claw.config.loader import config_dir, config_path
+from kiro_claw.config.loader import build_provider_factory, config_dir, config_path
 from kiro_claw.constants import DATA_WARNING
 from kiro_claw.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK, LLMProvider
 
@@ -108,7 +108,7 @@ async def _chat(message: str | None, model: str | None, agent: str | None = None
         cfg.agent.model = model
     channel_id = os.environ.get("KIROCLAW_CHANNEL_ID") or None
     agent_name = agent or cfg.agent.default_agent or None
-    provider: LLMProvider = cfg.create_provider_factory()(
+    provider: LLMProvider = build_provider_factory(cfg)(
         "cli_chat", agent=agent_name, channel_id=channel_id
     )
     await provider.start()

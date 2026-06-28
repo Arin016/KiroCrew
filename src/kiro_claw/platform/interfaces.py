@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Protocol
 
 if TYPE_CHECKING:
+    from aiohttp import web
+
     from kiro_claw.config.loader import KiroClawConfig
 
 
@@ -32,11 +34,15 @@ class ProviderRegistry(Protocol):
     """
 
     def create_factory(self, cfg: "KiroClawConfig") -> Callable[..., Any]:
-        """Return the provider factory (today: cfg.create_provider_factory()).
+        """Return the provider factory (Default: ``cfg.create_provider_factory()``).
 
-        NOT YET WIRED: the core still calls ``cfg.create_provider_factory()``
-        directly at every factory site; this seam is staged for a future
-        migration. Overriding it has no effect yet.
+        WIRED: every factory build site routes through
+        ``config.loader.build_provider_factory`` →
+        ``current_context().providers.create_factory(cfg)``. The Default returns
+        exactly ``cfg.create_provider_factory()`` (identity), so the public
+        edition is unchanged; a companion can return an alternate factory (e.g.
+        re-registering the Claude Code / Bedrock ACP backend) — but kiro-cli stays
+        the default for both editions unless the companion is explicitly opted in.
         """
         ...
 
@@ -202,6 +208,26 @@ class AppsLoader(Protocol):
         ...
 
 
+class KnowledgeProvider(Protocol):
+    """Extra knowledge-base connectors the edition contributes.
+
+    The knowledge sync engine keys connectors by ``source_type`` (the public
+    core ships ``local_folder`` / ``obsidian_vault``).  Public default = none;
+    the companion contributes internal connectors (e.g. a Quip connector) that
+    the sync scheduler merges into its connector map.
+    """
+
+    def extra_connectors(self, cfg: "KiroClawConfig") -> Dict[str, Any]:
+        """Return ``{source_type: BaseConnector}`` to merge into the sync map.
+
+        The values are ``kiro_claw.knowledge.connectors.base.BaseConnector``
+        instances (typed ``Any`` here to avoid importing the knowledge package
+        into the platform contract).  Returning ``{}`` (the Default) leaves the
+        public connector set unchanged.
+        """
+        ...
+
+
 class PackageManager(Protocol):
     """Install strategy for external tools (ollama, etc.).
 
@@ -256,6 +282,102 @@ class TelemetryProvider(Protocol):
         ...
 
     def frontend_rum_config(self) -> Optional[dict]:
+        ...
+
+
+class DashboardContributor(Protocol):
+    """Edition-contributed dashboard routes + background services + login handler.
+
+    Public default = no-op: contributes no routes, runs no services, and supplies
+    no SSO login handler (the public ``/api/mwinit`` stays the core stub).  The
+    companion mounts internal gateway routes (e.g. the secretary / taskkeeper
+    services) and the real SSO PTY login handler.
+
+    The methods are called once, during ``dashboard.server.start_dashboard``,
+    against the live aiohttp application — ``contribute_routes`` BEFORE the SPA
+    static catch-all and ``AppRunner.setup()`` freezes the route table, and the
+    ``start_services`` / ``stop_services`` pair via ``app.on_startup`` /
+    ``app.on_cleanup`` so edition services share the gateway lifecycle.
+    """
+
+    def contribute_routes(self, app: "web.Application") -> None:
+        """Mount edition routes on the application (Default: no routes)."""
+        ...
+
+    async def start_services(self, app: "web.Application") -> None:
+        """Start edition background services (Default: no-op)."""
+        ...
+
+    async def stop_services(self, app: "web.Application") -> None:
+        """Stop edition background services on gateway shutdown (Default: no-op).
+
+        Receives the same ``app`` handle as ``start_services`` (symmetric), so a
+        companion can retrieve services/tasks it stashed on the app at startup
+        without resorting to process-global state (which would break with more
+        than one dashboard app in a process).
+        """
+        ...
+
+    def mwinit_handler(self) -> Optional[Callable]:
+        """Return the SSO-login WS handler, or ``None`` to keep the core stub."""
+        ...
+
+
+class JailProvider(Protocol):
+    """Process-isolation (jail) lifecycle for agent-bearing commands.
+
+    Public default = no-op: ``available()`` is ``False`` and
+    ``maybe_reexec_into_jail`` returns ``None`` (no isolation; the command runs
+    in-process exactly as today).  The companion supplies the internal jail
+    orchestration that re-execs the process into an isolated namespace before any
+    agent work starts, mirroring the ``TunnelProvider`` lifecycle shape.
+
+    **Re-entry contract.** Before a successful re-exec the core gate sets the
+    ``KIROCLAW_JAILED`` env marker; the jailed CHILD re-runs the gate, sees the
+    marker, and short-circuits, so the backend is NOT asked to re-jail an
+    already-jailed process.  A companion that spawns the child with a fresh
+    environment MUST set this marker to ANY non-empty value (re-entry is detected
+    by PRESENCE, not truthiness — ``"1"``, ``"jailed"``, a namespace id all work)
+    so the child does not deadlock: under ``mode == "on"`` the child would
+    otherwise probe again, get an "already jailed" ``None``, and be refused by the
+    on-mode floor.
+    """
+
+    def available(self) -> bool:
+        """Whether a working jail backend is present on this host.
+
+        SHOULD NOT raise — push any probing ``try/except`` into the adapter and
+        return ``False`` on a probe failure.  (The core gate is defensive: it
+        treats a raised probe as "availability unknown" and fails closed under
+        ``mode == "on"``, but a clean ``bool`` keeps the two consumers — the gate
+        and ``doctor`` — in agreement.)
+        """
+        ...
+
+    def status_detail(self) -> str:
+        """One-line human status for ``doctor`` output."""
+        ...
+
+    def maybe_reexec_into_jail(self, argv: List[str], mode: str) -> Optional[int]:
+        """Re-exec the process into the jail; return the child exit code.
+
+        Returns ``None`` when no re-exec happens (disabled, unavailable, or
+        already jailed) — the caller then falls through and runs in-process.
+        A non-``None`` int is the jailed child's exit status; the caller exits
+        with it.  The Default always returns ``None``.
+
+        **mode contract:** ``"off"`` / already-jailed / disabled → ``None``.
+        ``"auto"`` → re-exec if a backend is available, else degrade to ``None``.
+        ``"on"`` → the operator demanded isolation: the implementation MUST either
+        re-exec (returning the child rc) or fail closed (raise / exit non-zero);
+        it MUST NOT return ``None`` when isolation could not be established.  The
+        core gate additionally treats a ``None`` return (or a swallowed error)
+        under ``mode == "on"`` as fail-closed, so a defensive backend cannot
+        accidentally downgrade an on-mode host to an un-jailed run.  (The
+        "already jailed → ``None``" case does not deadlock the child because the
+        gate's ``KIROCLAW_JAILED`` re-entry guard short-circuits before this is
+        called a second time — see the class docstring's re-entry contract.)
+        """
         ...
 
 

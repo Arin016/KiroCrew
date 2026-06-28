@@ -35,6 +35,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
+from kiro_claw.constants import env_flag_enabled
 from kiro_claw.platform.context import PROFILE_AMAZON, PROFILE_STANDALONE
 
 if TYPE_CHECKING:
@@ -49,7 +50,6 @@ _VALID_PROFILES = frozenset({PROFILE_STANDALONE, PROFILE_AMAZON})
 # amazon profile (which has no companion to compose and would fail-closed at
 # boot).  The companion's managed launcher sets this truthy.
 _MIDWAY_PROBE_ENV = "KIROCLAW_MIDWAY_PROFILE_PROBE"
-_TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
 def resolve_profile(cfg: "KiroClawConfig", *, entry_points: "Sequence[object]") -> str:
@@ -70,7 +70,7 @@ def resolve_profile(cfg: "KiroClawConfig", *, entry_points: "Sequence[object]") 
     #    behind an explicit opt-in so the public edition is never forced into
     #    the amazon profile by a leftover ~/.midway.  Flags an Amazon host
     #    without the companion so discovery fails closed.
-    if os.environ.get(_MIDWAY_PROBE_ENV, "").strip().lower() in _TRUTHY:
+    if env_flag_enabled(_MIDWAY_PROBE_ENV):
         try:
             if (Path.home() / ".midway").exists():
                 return PROFILE_AMAZON

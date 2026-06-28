@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Optional, Tuple, TypeVar
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional, Tuple, TypeVar
 
 if TYPE_CHECKING:  # avoid import cycles — config.loader imports heavy modules
     from kiro_claw.config.loader import KiroClawConfig
@@ -29,9 +29,12 @@ if TYPE_CHECKING:  # avoid import cycles — config.loader imports heavy modules
         AppRegistryPolicy,
         AppsLoader,
         CredentialPolicy,
+        DashboardContributor,
         EmbeddingSource,
         FeatureApp,
         IdentityProvider,
+        JailProvider,
+        KnowledgeProvider,
         McpToolingProvider,
         PackageManager,
         ProviderRegistry,
@@ -46,9 +49,15 @@ if TYPE_CHECKING:  # avoid import cycles — config.loader imports heavy modules
 # built against a different CONTRACT_VERSION refuses to compose (see
 # bootstrap._assert_contract).
 #
-# v2: added the ``governance`` carrier (the enterprise security ceiling — see
-# ``kiro_claw.platform.governance``).  A companion built against v1 must rebuild.
-CONTRACT_VERSION = 2
+# PINNED AT 1 PRE-LAUNCH: there is no shipped release yet, and the companion is
+# always rebuilt in lockstep with the core from the same source, so the
+# composition-time mismatch guard always compares 1 == 1.  Bumping per-field
+# would only churn the seam without protecting any deployed companion.  Start
+# incrementing this only after the first public release, when a separately-built
+# companion can pin against a frozen contract.  (Every seam added pre-launch —
+# the ``governance`` carrier, then the ``knowledge``/``dashboard``/``jail``
+# extension points — landed under this same v1, no bump.)
+CONTRACT_VERSION = 1
 
 # Valid profiles.  ``standalone`` is the public default; ``amazon`` loads the
 # internal companion.  ``enterprise`` is reserved for a future third edition.
@@ -95,10 +104,13 @@ class PlatformContext:
     registry: "AppRegistryPolicy"
     apps_loader: "AppsLoader"
     package_manager: "PackageManager"
+    knowledge: "KnowledgeProvider"
 
     # ── runtime-service / frontend extension points ──
     tunnel: "TunnelProvider"
     telemetry: "TelemetryProvider"
+    dashboard: "DashboardContributor"
+    jail: "JailProvider"
 
     # ── bundled feature apps ──
     feature_apps: "Tuple[FeatureApp, ...]"
@@ -194,36 +206,126 @@ _T = TypeVar("_T")
 _logger = logging.getLogger(__name__)
 
 
+_UNSET: Any = object()
+
+
+def _require_fallback(
+    fallback: Any,
+    fallback_factory: "Optional[Callable[[], Any]]",
+    *,
+    where: str = "safe_context_call",
+) -> None:
+    """Fail loudly at the call site if NEITHER fallback form was supplied.
+
+    Without this guard a caller that forgot both would, on the first transient
+    adapter error, silently return the ``_UNSET`` sentinel object — surfacing as
+    a confusing ``AttributeError``/``TypeError`` far from the seam.  Checked
+    BEFORE running ``fn`` so it raises regardless of whether ``fn`` would error.
+    ``where`` names the calling helper so the error points at the function the
+    developer actually called (sync vs async sibling).
+    """
+    if fallback is _UNSET and fallback_factory is None:
+        raise TypeError(f"{where} requires either fallback= or fallback_factory=")
+
+
+def _context_degrade(
+    fallback: "_T",
+    fallback_factory: "Optional[Callable[[], _T]]",
+    log_message: "str | None",
+) -> "_T":
+    """Shared degrade-path policy for both safe_context_call variants.
+
+    Centralized so a future change (log level, lazy-vs-eager handling) cannot
+    diverge between the sync and async siblings.  Called only from inside their
+    ``except Exception`` blocks, after ``PlatformCompositionError`` has already
+    been re-raised.
+
+    Because this runs INSIDE the caller's ``except`` handler, a raise from
+    ``fallback_factory()`` would otherwise escape ``safe_context_call`` uncaught.
+    So the factory call is guarded here, keeping the SAME fail-closed discipline
+    as the primary thunk: a :class:`PlatformCompositionError` from the factory
+    still propagates; any other factory error degrades to the eager ``fallback``
+    when one was also supplied, else re-raises (there is no usable value).
+    """
+    if log_message is not None:
+        _logger.debug(log_message, exc_info=True)
+    if fallback_factory is not None:
+        try:
+            return fallback_factory()
+        except PlatformCompositionError:
+            raise
+        except Exception:
+            _logger.debug("fallback_factory itself failed", exc_info=True)
+            if fallback is _UNSET:
+                raise
+            return fallback
+    return fallback
+
+
 def safe_context_call(
     fn: "Callable[[], _T]",
     *,
-    fallback: _T,
+    fallback: _T = _UNSET,
+    fallback_factory: "Optional[Callable[[], _T]]" = None,
     log_message: "str | None" = None,
 ) -> _T:
-    """Run a context-reading thunk fail-closed, degrading to *fallback*.
+    """Run a context-reading thunk fail-closed, degrading to a fallback.
 
     The CPP fail-closed invariant: a :class:`PlatformCompositionError` (a
     non-standalone host that could not compose its companion) MUST abort rather
     than silently degrade to open-source defaults — so it is always re-raised.
-    Any *other* exception (a transient adapter failure) degrades to *fallback*
+    Any *other* exception (a transient adapter failure) degrades to the fallback
     so a best-effort lookup never breaks the caller.
 
     Centralizing the idiom here means a call site cannot accidentally swallow
     ``PlatformCompositionError`` by writing a bare ``except Exception`` (the bug
     that previously recurred in several hand-written shims).
 
+    The fallback is supplied EITHER eagerly via ``fallback`` OR lazily via
+    ``fallback_factory`` (at least one is REQUIRED — passing neither raises
+    ``TypeError`` at the call site rather than leaking the ``_UNSET`` sentinel).
+    Prefer ``fallback_factory`` when building the fallback is itself expensive or
+    fallible: it is invoked ONLY on the degrade path and INSIDE the ``except``
+    block, so (a) a happy-path call never pays to build a fallback it discards,
+    and (b) an exception raised while building the fallback is still handled here
+    rather than escaping the helper uncaught.
+
     ``log_message`` is logged at debug on the degrade path; pass ``None`` for
     callers that must not log (e.g. a stdio MCP server whose stray writes would
     corrupt the JSON-RPC stream).
     """
+    _require_fallback(fallback, fallback_factory)
     try:
         return fn()
     except PlatformCompositionError:
         raise
     except Exception:
-        if log_message is not None:
-            _logger.debug(log_message, exc_info=True)
-        return fallback
+        return _context_degrade(fallback, fallback_factory, log_message)
+
+
+async def async_safe_context_call(
+    fn: "Callable[[], Awaitable[_T]]",
+    *,
+    fallback: _T = _UNSET,
+    fallback_factory: "Optional[Callable[[], _T]]" = None,
+    log_message: "str | None" = None,
+) -> _T:
+    """Async sibling of :func:`safe_context_call` (same fail-closed contract).
+
+    For coroutine context calls (e.g. an aiohttp ``on_startup`` / ``on_cleanup``
+    hook).  ``fn`` returns an awaitable; everything else — the required-fallback
+    guard, re-raise ``PlatformCompositionError``, degrade any other error via the
+    shared :func:`_context_degrade` (lazy-vs-eager fallback + debug-log) — is the
+    same as the sync version, so a fail-closed policy change is made in one place
+    for both.
+    """
+    _require_fallback(fallback, fallback_factory, where="async_safe_context_call")
+    try:
+        return await fn()
+    except PlatformCompositionError:
+        raise
+    except Exception:
+        return _context_degrade(fallback, fallback_factory, log_message)
 
 
 def redact_via_context(text: str) -> str:

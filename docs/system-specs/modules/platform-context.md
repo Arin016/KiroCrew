@@ -44,11 +44,14 @@ boot holding the chosen adapter for every extension point, plus three carriers:
 | `embeddings` | adapter | `DefaultEmbeddingSource` (Ollama, unsigned) | internal source + SigV4 |
 | `mcp_tooling` | adapter | `DefaultMcpToolingProvider` (empty) | builder-mcp + AIM skills |
 | `registry` | adapter | `DefaultAppRegistryPolicy` (public-forge baseline) | internal git hosts |
-| `apps_loader` | adapter | `DefaultAppsLoader` (OSS builtins) | internal app sources |
+| `apps_loader` | adapter | `DefaultAppsLoader` (OSS builtins) | internal app sources (code-reviewer; team_manager/mimir follow-on) |
 | `package_manager` | adapter | `DefaultPackageManager` (brew/pip) | toolbox installer |
+| `knowledge` | adapter | `DefaultKnowledgeProvider` (no extra connectors) | Quip connector (`extra_connectors`) |
 | `tunnel` | adapter | `DefaultTunnelProvider` (no-op) | internal tunnel supervisor |
 | `telemetry` | adapter | `DefaultTelemetryProvider` (no-op, RUM off) | RUM/Cognito config |
-| `feature_apps` | tuple | `()` | mimir, code_reviewer, team_manager, secretary, taskkeeper, quip |
+| `dashboard` | adapter | `DefaultDashboardContributor` (no routes/services, no login handler) | secretary/taskkeeper routes + mwinit PTY login |
+| `jail` | adapter | `DefaultJailProvider` (no-op, never jails) | MCS-Jail process isolation |
+| `feature_apps` | tuple | `()` | (provenance map only — not consumed; apps register via `apps_loader`) |
 
 > `registry` note — the public `DefaultAppRegistryPolicy` encodes the
 > public-forge baseline and ships no internal-host set. The Amazon companion
@@ -186,12 +189,27 @@ Policy shape (`admission_policy.json`):
 
 ## Contract versioning
 
-`CONTRACT_VERSION` (currently `1`) bumps on any field add/rename or interface-
-semantics change. A companion built against a different version refuses to
-compose. Because the companion's `build_amazon_context` starts from
-`build_default_context` and only `dataclasses.replace`s the fields it overrides,
-any extension point the core later adds is inherited at its default until the
-companion writes an override.
+`CONTRACT_VERSION` bumps on any field add/rename or interface-semantics change.
+A companion built against a different version refuses to compose. Because the
+companion's `build_amazon_context` starts from `build_default_context` and only
+`dataclasses.replace`s the fields it overrides, any extension point the core
+later adds is inherited at its default until the companion writes an override.
+
+**Pinned at `1` pre-launch.** There is no shipped release yet and the companion
+is rebuilt in lockstep with the core from the same source, so the
+composition-time mismatch guard always compares `1 == 1`. Bumping per-field
+would only churn the seam without protecting any deployed companion. Every seam
+added pre-launch landed under this same `1`, with no bump:
+
+- the `governance` carrier (the enterprise security ceiling);
+- the `knowledge` (connector registry), `dashboard` (route/service/login-handler
+  contributor), and `jail` (process-isolation) extension points;
+- wiring an *existing* but previously-unconsumed Protocol method into a call site
+  (e.g. `ProviderRegistry.create_factory` going live, `AppsLoader` bundling
+  feature apps) — no shape change, so no bump regardless.
+
+Start incrementing only after the first public release, when a separately-built
+companion can pin against a frozen contract.
 
 ## Companion packaging
 
@@ -242,9 +260,64 @@ delegates to that same global. Wired sites:
   `current_context().embeddings` (explicit caller args win); BOTH the async
   `EmbeddingClient` and the sync `make_sync_embed_fn` vector-memory path.
 - `dashboard/server.py` — telemetry `record_event` at boot; tunnel enable-gate
-  ORs in `current_context().tunnel.enabled()`.
+  ORs in `current_context().tunnel.enabled()`. **Dashboard contributor (wave 3):**
+  in `start_dashboard` only, the `/api/mwinit` route binds
+  `dashboard.mwinit_handler()` (or the built-in stub when `None`),
+  `dashboard.contribute_routes(app)` mounts edition routes before the SPA
+  catch-all + `AppRunner.setup()`, and `dashboard.start_services(app)` /
+  `stop_services(app)` ride `app.on_startup` / `app.on_cleanup` — appended BEFORE
+  `runner.setup()` freezes the signal lists. The sync calls fail-closed via
+  `safe_context_call`; the two async lifecycle hooks via `async_safe_context_call`
+  (the async sibling — same re-raise-`PlatformCompositionError` / degrade-other
+  contract, centralized so the fail-closed policy cannot diverge). `stop_services`
+  takes the same `app` handle as `start_services` (symmetric) so a companion need
+  not stash services in process-global state.
 - `dashboard/handlers_system.py` — `frontend_rum_config()` added to the status
   payload only when non-None.
+- `config/loader.py` `build_provider_factory(cfg)` (wave 3 wiring) — the
+  LLM-provider factory build sites (`cli_chat`, `cli_server`,
+  `session.reload_provider_factory`, `slack/gateway`, `cli`, `cli_commands`) route
+  through `current_context().providers.create_factory(cfg)` instead of
+  `cfg.create_provider_factory()` directly. The Default returns exactly
+  `cfg.create_provider_factory()` (identity), so the public edition is unchanged;
+  the companion selects the Claude-Code-on-Bedrock backend only when opted in. The
+  fallback is passed as a lazy `fallback_factory` so the happy path builds the
+  factory exactly once (no eager double-build) and a failure inside the fallback
+  is still caught by the shim.
+- `dashboard/handlers/knowledge.py` — the `SyncScheduler` connector map merges
+  `current_context().knowledge.extra_connectors(cfg)` after the built-ins
+  (`local_folder`/`obsidian_vault`); Default returns `{}` so standalone is
+  unchanged.
+- `cli.py` `main` (wave 3 jail gate, factored into `_jail_reexec_gate`) +
+  `cli_doctor.py` — for `_JAILED_COMMANDS`
+  (`chat`/`tui`/`run`/`consolidate`/`eval` — the rule is "every command that
+  builds a provider factory / runs in-process agent work"; `gateway` is excluded
+  so its execv self-update path is never nested in a jail). Order: (0) **re-entry
+  guard** — if the `KIROCLAW_JAILED` marker is PRESENT (any non-empty value) we
+  are already the jailed child, so return immediately (no re-probe / re-jail).
+  The gate sets this marker right before invoking the backend so the re-exec'd
+  child inherits it; a `try/finally` restores the prior value on the no-re-exec
+  paths so it never leaks into an in-process run. A companion that re-execs with
+  a fresh environment MUST set the marker to any non-empty value (detection is by
+  presence, not truthiness) or the on-mode child would re-probe, get an "already
+  jailed" `None`, and deadlock on the fail-closed floor. (1) if `off` this
+  invocation (`--no-jail` OR `KIROCLAW_NO_JAIL` truthy — `1`/`true`/`yes`/`on`
+  via the shared `env_flag_enabled`, so a `=0`/`=false` typo does NOT bypass
+  isolation), or the re-normalized `agent.jail` mode is `off`, return and run
+  in-process (no probe). (2) Probe `current_context().jail.available()`: a clean
+  `False` (the public Default) is a pure no-op even under `mode == "on"` (exactly
+  as the help text promises) and `_child_argv()` is not even built; a
+  `PlatformCompositionError` always propagates; a *transient probe error* degrades
+  to no-op under `auto` but FAILS CLOSED (`exit 2`) under `on` (availability
+  unknown ≠ absent — an on-mode host must not run un-jailed on a flaky probe).
+  (3) With a backend present, `jail.maybe_reexec_into_jail(_child_argv(), mode)`
+  runs; a non-`None` return is the jailed child's exit code (propagated via
+  `sys.exit`). Single fail-closed floor: under `mode == "on"`, anything other than
+  a real re-exec (`None` return OR a swallowed backend error) refuses to run
+  un-jailed (`exit 2`). The mode is re-normalized at the gate via `_normalize_jail`
+  (so a programmatically-set off-spec value is handled like the load-time path);
+  `--no-jail` is accepted on every jailed subparser. `cli_doctor` reports
+  `jail.available()` / `status_detail()`.
 
 ### Deferred / non-mapping sites
 

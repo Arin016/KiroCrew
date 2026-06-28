@@ -52,6 +52,7 @@ from kiro_claw.config.loader import (
     CRED_SLACK_APP_TOKEN,
     CRED_SLACK_BOT_TOKEN,
     _session_work_dir,
+    build_provider_factory,
     config_dir,
 )
 from kiro_claw.constants import CHAT_TURN_TIMEOUT, DATA_WARNING
@@ -930,7 +931,7 @@ class GatewayOrchestrator:
             logger.warning("Agent config install failed", exc_info=True)
 
         self.slack = RealSlackClient(self._bot_token) if self._slack_enabled else None
-        factory = self._cfg.create_provider_factory()
+        factory = build_provider_factory(self._cfg)
 
         # Memory, skills, hooks, lessons
         memory = MemoryStore()

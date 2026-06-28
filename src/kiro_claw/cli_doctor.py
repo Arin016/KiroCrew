@@ -27,7 +27,11 @@ from kiro_claw.dashboard.origin import (
 )
 from kiro_claw.mcp_cleanup import KIROCLAW_BIN_MCP_SERVERS as _MANAGED_MCPS
 from kiro_claw.mcp_discovery import McpServerInfo, probe_server
-from kiro_claw.platform import current_context
+from kiro_claw.platform import (
+    PlatformCompositionError,
+    current_context,
+    safe_context_call,
+)
 from kiro_claw.transcribe import _find_whisper, ensure_ffmpeg_in_path
 
 _MIN_NODE_VERSION = 16
@@ -229,13 +233,43 @@ def _doctor(platform_boot_error: "Exception | None" = None) -> None:
         print(f"  edition:     ❌ composition failed: {platform_boot_error}")
         issues.append(f"platform composition failed: {platform_boot_error}")
     else:
+        print("Platform")
+        # Bind the context ONCE for the whole block so the edition line and the
+        # jail line describe the same PlatformContext.  A late
+        # PlatformCompositionError (boot succeeded, but a lazily-composing adapter
+        # or a context swap fails now) is REPORTED as a blocking issue — never
+        # swallowed (which would hide it) and never re-raised (which would crash
+        # the one command meant to survive a broken setup).  This keeps the
+        # edition report and the jail probe consistent on what a composition error
+        # means.
         try:
-            profile = current_context().profile
-            print("Platform")
-            print(f"  edition:     ✅ {profile}")
+            ctx = current_context()
+        except PlatformCompositionError as exc:
+            print(f"  edition:     ❌ composition failed: {exc}")
+            issues.append(f"platform composition failed: {exc}")
+            ctx = None
         except Exception:
             # Never let edition reporting itself break the doctor.
-            pass
+            ctx = None
+        if ctx is not None:
+            print(f"  edition:     ✅ {ctx.profile}")
+            # Process-isolation jail (CPP JailProvider seam).  The public Default
+            # has no backend; a companion reports its real status.  Each probe
+            # fails OPEN to a safe placeholder so a transient adapter error keeps
+            # the doctor non-fatal.  ``safe_context_call`` re-raises a
+            # PlatformCompositionError (its fail-closed contract), so wrap the
+            # block to REPORT a late composition error as an issue rather than
+            # crash the triage command — consistent with the ctx probe above.
+            try:
+                _jail = ctx.jail
+                _jail_status = safe_context_call(
+                    lambda: _jail.status_detail(), fallback="status unavailable"
+                )
+                _jail_on = safe_context_call(lambda: _jail.available(), fallback=False)
+                print(f"  jail:        {'✅' if _jail_on else '⏭ '} {_jail_status}")
+            except PlatformCompositionError as exc:
+                print(f"  jail:        ❌ composition failed: {exc}")
+                issues.append(f"jail provider composition failed: {exc}")
 
     # ── Dependencies ──
     print("Dependencies")

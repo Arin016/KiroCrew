@@ -260,8 +260,9 @@ trust root for the security ceiling. Full spec:
 **CPP seam** (one core, two editions; the core NEVER imports a companion):
 - `interfaces.py` — extension-point Protocols. `context.py` — the frozen
   `PlatformContext` (one chosen adapter per interface) + `current_context()`
-  (fail-closed lazy default) + `CONTRACT_VERSION` (**now 2** — a companion built
-  against a different version refuses to compose). `defaults.py` — the `Default*`
+  (fail-closed lazy default) + `CONTRACT_VERSION` (**pinned at 1 pre-launch** — a
+  companion built against a different version refuses to compose, but the
+  companion rebuilds in lockstep so it always sees `1 == 1`). `defaults.py` — the `Default*`
   adapters that reproduce today's open-source behavior. `bootstrap.py` —
   `boot_platform`/`bootstrap_context` compose the context, assert the floors,
   install it. `discovery.py` / `profile.py` — companion discovery + edition
@@ -292,9 +293,10 @@ change, never an evaluator edit.
 This single mechanism is what makes the ceiling un-disableable — do not weaken it.
 
 **If you change `platform/`:** read the two spec docs first and update them in
-the same commit; bump `CONTRACT_VERSION` on any `PlatformContext` field/interface
-change (lockstep companion rebuild); keep the evaluator scope-name-agnostic; keep
-the governance trust-root files on the sensitive-path floor.
+the same commit; leave `CONTRACT_VERSION` at **1** pre-launch (the companion
+rebuilds in lockstep — no field/interface change bumps it until the first public
+release); keep the evaluator scope-name-agnostic; keep the governance trust-root
+files on the sensitive-path floor.
 
 ### Frontend Architecture
 

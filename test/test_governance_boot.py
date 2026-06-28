@@ -2,7 +2,7 @@
 
 Confirms: ``build_default_context`` carries the loaded ceiling on every path
 (boot + lazy default); a present env policy flows through; an unreadable policy
-aborts; absent → ``governance=None``; CONTRACT_VERSION is bumped to 2.
+aborts; absent → ``governance=None``; CONTRACT_VERSION is pinned at 1 pre-launch.
 """
 
 from __future__ import annotations
@@ -16,8 +16,12 @@ from kiro_claw.platform.bootstrap import build_default_context
 from kiro_claw.platform.context import CONTRACT_VERSION, PlatformCompositionError
 
 
-def test_contract_version_is_two():
-    assert CONTRACT_VERSION == 2
+def test_contract_version_current():
+    # The carrier the companion's _assert_contract pins against. PINNED AT 1
+    # pre-launch: the seam is rebuilt in lockstep, so every pre-release field/
+    # interface addition (governance carrier, knowledge/dashboard/jail seams)
+    # landed under v1 with no bump. Start incrementing only post-launch.
+    assert CONTRACT_VERSION == 1
 
 
 def test_standalone_no_policy_is_none(monkeypatch, tmp_path):
@@ -25,7 +29,7 @@ def test_standalone_no_policy_is_none(monkeypatch, tmp_path):
     monkeypatch.setattr("kiro_claw.platform.governance._POLICY_HOME_PATH", tmp_path / "nope.json")
     ctx = build_default_context(KiroClawConfig.load())
     assert ctx.governance is None
-    assert ctx.contract_version == 2
+    assert ctx.contract_version == CONTRACT_VERSION
 
 
 def test_env_policy_composes_onto_context(monkeypatch, tmp_path):
@@ -121,7 +125,11 @@ def test_lazy_default_carries_ceiling(monkeypatch, tmp_path):
     p = tmp_path / "policy.json"
     p.write_text(json.dumps({"version": 1, "boot": {"fail_closed": True}}))
     monkeypatch.setenv("KIROCLAW_SECURITY_POLICY", str(p))
-    monkeypatch.delenv("KIROCLAW_PROFILE", raising=False)
+    # Pin standalone: this exercises the standalone lazy-default path. With the
+    # companion co-installed in the same venv (the combined-build test setup), an
+    # unset profile would auto-resolve ``amazon`` via the entry-point signal and
+    # fail closed — unrelated to what this test covers.
+    monkeypatch.setenv("KIROCLAW_PROFILE", "standalone")
     ctx_mod.reset_context()
     try:
         ctx = ctx_mod.current_context()

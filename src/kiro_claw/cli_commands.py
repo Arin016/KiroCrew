@@ -42,6 +42,7 @@ from kiro_claw.config.loader import (
     KiroClawAgentConfig,
     KiroClawConfig,
     WorkspaceConfig,
+    build_provider_factory,
 )
 from kiro_claw.cron import CronSchedule, CronService, format_schedule
 from kiro_claw.cron_trigger import trigger_cron_job
@@ -1090,7 +1091,7 @@ async def _run_eval(args: argparse.Namespace) -> None:
     print(f"Running: {names} ({total_turns} turns)\n")
 
     config = KiroClawConfig.load()
-    provider_factory = config.create_provider_factory()
+    provider_factory = build_provider_factory(config)
 
     runner = EvalRunner(
         provider_factory=provider_factory, judge_enabled=getattr(args, "judge", False)

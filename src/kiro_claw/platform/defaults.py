@@ -213,3 +213,41 @@ class DefaultTelemetryProvider:
 
     def frontend_rum_config(self) -> Optional[dict]:
         return None
+
+
+class DefaultKnowledgeProvider:
+    """No extra connectors — the public edition ships only the built-in set."""
+
+    def extra_connectors(self, cfg: Any) -> Dict[str, Any]:
+        return {}
+
+
+class DefaultDashboardContributor:
+    """No-op dashboard contributor — no edition routes, services, or login handler."""
+
+    def contribute_routes(self, app: Any) -> None:
+        return None
+
+    async def start_services(self, app: Any) -> None:
+        return None
+
+    async def stop_services(self, app: Any) -> None:
+        return None
+
+    def mwinit_handler(self) -> Optional[Callable[..., Any]]:
+        # None → the dashboard keeps its built-in /api/mwinit stub handler.
+        return None
+
+
+class DefaultJailProvider:
+    """No jail — the public edition never re-execs into a process isolation jail."""
+
+    def available(self) -> bool:
+        return False
+
+    def status_detail(self) -> str:
+        return "no jail provider (public edition)"
+
+    def maybe_reexec_into_jail(self, argv: List[str], mode: str) -> Optional[int]:
+        # None → no re-exec; the command runs in-process exactly as today.
+        return None

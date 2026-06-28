@@ -28,6 +28,7 @@ from kiro_claw.browser.setup import (
 )
 from kiro_claw.config import config_dir
 from kiro_claw.config.loader import KiroClawConfig
+from kiro_claw.constants import env_flag_enabled
 from kiro_claw.dashboard import (
     chat,
     handlers,
@@ -61,7 +62,11 @@ from kiro_claw.dashboard.token_auth import token_auth_middleware
 from kiro_claw.hooks import ScriptHookStore, set_global_hook_store
 from kiro_claw.instances.registry import InstancesRegistry
 from kiro_claw.instances.ssh_tunnel_manager import SshTunnelManager
-from kiro_claw.platform import current_context
+from kiro_claw.platform import (
+    async_safe_context_call,
+    current_context,
+    safe_context_call,
+)
 from kiro_claw.safety_override import safety_override
 from kiro_claw.sel import sel
 from kiro_claw.suggestions import api_suggestions
@@ -726,7 +731,18 @@ async def start_dashboard(
     app.router.add_post("/api/portability/import", handlers.api_portability_import)
     app.router.add_post("/api/portability/preview", handlers.api_portability_preview)
 
-    app.router.add_get("/api/mwinit", handlers.api_mwinit_ws)
+    # SSO login WS: an edition may supply the real login handler (CPP
+    # DashboardContributor.mwinit_handler); the public Default returns None so the
+    # built-in stub stays bound. Fail-closed via the canonical safe_context_call.
+    _mwinit_handler = (
+        safe_context_call(
+            lambda: current_context().dashboard.mwinit_handler(),
+            fallback=None,
+            log_message="dashboard.mwinit_handler lookup failed; using built-in stub",
+        )
+        or handlers.api_mwinit_ws
+    )
+    app.router.add_get("/api/mwinit", _mwinit_handler)
     # Terminal (CLI panel)
     app.router.add_get("/api/ws/terminal/{session_id}", handlers.api_terminal_ws)
     app.router.add_post("/api/terminal/sessions", handlers.api_terminal_create)
@@ -807,11 +823,8 @@ async def start_dashboard(
     app.router.add_post("/api/update/auto", handlers.api_update_auto)
     app.router.add_post("/api/update/cancel", handlers.api_update_cancel)
     # Only expose the simulation endpoint in dev/debug environments
-    _truthy = {"1", "true", "yes", "on"}
-    if (
-        os.environ.get("KIROCLAW_HOME", "").endswith("-dev")
-        or os.environ.get("KIROCLAW_DEV_MODE", "").lower() in _truthy
-    ):
+    _is_dev_env = os.environ.get("KIROCLAW_HOME", "").endswith("-dev")
+    if _is_dev_env or env_flag_enabled("KIROCLAW_DEV_MODE"):
         app.router.add_post("/api/update/simulate", handlers.api_update_simulate)
     app.router.add_get("/api/sessions", handlers.api_sessions)
     app.router.add_delete("/api/sessions", handlers.api_sessions_clear)
@@ -914,6 +927,41 @@ async def start_dashboard(
         await on_gateway_shutdown()
 
     app.on_cleanup.append(_hooks_shutdown)
+
+    # Edition-contributed dashboard routes + background services (CPP
+    # DashboardContributor seam). The Default contributes nothing, so the public
+    # dashboard is unchanged. Routes are mounted HERE — before the SPA static
+    # catch-all below and well before ``runner.setup()`` freezes the route table
+    # and the on_startup/on_cleanup signal lists (see _register_instances_hooks).
+    # Fail-closed: a non-standalone host that cannot compose its companion raises.
+    safe_context_call(
+        lambda: current_context().dashboard.contribute_routes(app),
+        fallback=None,
+        log_message="dashboard.contribute_routes failed; no edition routes mounted",
+    )
+
+    # The service lifecycle hooks are async; they route through
+    # ``async_safe_context_call`` so they share the SAME fail-closed discipline as
+    # every sync seam call (re-raise ``PlatformCompositionError`` from a host that
+    # could not compose its companion; degrade any other transient service error,
+    # logged, rather than bricking the gateway start/stop) — kept in one place so
+    # a future fail-closed policy change cannot diverge per hand-written copy.
+    async def _contrib_startup(app_: web.Application) -> None:
+        await async_safe_context_call(
+            lambda: current_context().dashboard.start_services(app_),
+            fallback=None,
+            log_message="dashboard.start_services failed; no edition services",
+        )
+
+    async def _contrib_shutdown(app_: web.Application) -> None:
+        await async_safe_context_call(
+            lambda: current_context().dashboard.stop_services(app_),
+            fallback=None,
+            log_message="dashboard.stop_services failed",
+        )
+
+    app.on_startup.append(_contrib_startup)
+    app.on_cleanup.append(_contrib_shutdown)
 
     # Static files — prefer React dist/ build, fall back to legacy static/
     if _DIST_DIR.is_dir():

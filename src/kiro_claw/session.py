@@ -80,7 +80,7 @@ from typing import Any, Literal, Protocol
 from kiro_claw import model_registry, shutdown_event
 from kiro_claw.agent import _enforce_denied_commands
 from kiro_claw.config import KiroClawConfig
-from kiro_claw.config.loader import default_project_dir
+from kiro_claw.config.loader import build_provider_factory, default_project_dir
 from kiro_claw.providers.base import CancelOutcome, LLMProvider
 from kiro_claw.sel import sel
 from kiro_claw.session_map import _KIRO_SESSIONS_DIR  # noqa: F401
@@ -379,7 +379,7 @@ class SessionManager:
         async with self._pool_fill_lock:
             async with self._lock:
                 self._cfg = cfg
-                self._provider_factory = cfg.create_provider_factory()
+                self._provider_factory = build_provider_factory(cfg)
                 self._pool_size = min(_MAX_POOL, max(0, cfg.session.pool_size))
                 self._pool_agent = cfg.session.pool_agent or getattr(cfg.agent, "default_agent", "")
                 self._pool_cwd = default_project_dir()

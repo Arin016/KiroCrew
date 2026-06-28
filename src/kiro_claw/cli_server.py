@@ -17,7 +17,13 @@ from pathlib import Path
 
 from kiro_claw import __version__
 from kiro_claw.config import KiroClawConfig
-from kiro_claw.config.loader import _DEFAULT_PORT, _session_work_dir, config_dir, config_path
+from kiro_claw.config.loader import (
+    _DEFAULT_PORT,
+    _session_work_dir,
+    build_provider_factory,
+    config_dir,
+    config_path,
+)
 from kiro_claw.constants import DATA_WARNING
 from kiro_claw.context import ContextBuilder
 from kiro_claw.dashboard.origin import dashboard_origin, parse_dashboard_url
@@ -635,7 +641,7 @@ async def _run_task(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     cfg = KiroClawConfig.load()
-    factory = cfg.create_provider_factory()
+    factory = build_provider_factory(cfg)
     sessions = SessionManager(cfg, provider_factory=factory)  # type: ignore[arg-type]
 
     auto_test = not getattr(args, "no_test", False)

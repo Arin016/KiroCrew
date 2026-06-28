@@ -1,9 +1,23 @@
 """Shared constants used across cli and gateway modules."""
 
+import os
+
 # Retained for backward compatibility; intentionally empty in the public build
 # (no Amazon-internal registry/toolbox package). Callers treat empty as "skip".
 ARCC_REGISTRY = ""
 ARCC_TOOLBOX_PACKAGE = ""
+
+# Canonical truthy set for boolean environment variables (KIROCLAW_NO_JAIL,
+# KIROCLAW_DEV_MODE, …).  Use ``env_flag_enabled`` rather than ``bool(os.environ
+# .get(...))`` — a bare bool() treats ``"0"``/``"false"`` as truthy, which for a
+# security toggle (e.g. KIROCLAW_NO_JAIL) is a silent-bypass footgun.
+ENV_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def env_flag_enabled(name: str) -> bool:
+    """Return True iff env var *name* is set to a truthy value (case/space-insensitive)."""
+    return os.environ.get(name, "").strip().lower() in ENV_TRUTHY
+
 
 DATA_WARNING = (
     "⚠️  Do not enter sensitive, secret, or regulated data into KiroClaw.\n"
