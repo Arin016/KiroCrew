@@ -81,11 +81,11 @@ When all five are true, agent posts the DoD checklist with ticks, calls \`autonu
 # 1. Get a local user token (loopback only; requires X-Local-Secret header).
 SECRET=\$(cat ~/.kiroclaw/.local_secret)
 TOKEN=\$(curl -sf -H "X-Local-Secret: \$SECRET" \\
-  "http://127.0.0.1:8765/api/token/local?ttl=1h" \\
+  "http://127.0.0.1:5476/api/token/local?ttl=1h" \\
   | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
 
 # 2. Arm the loop — ?token= query param (NOT Authorization: Bearer).
-curl -X POST "http://127.0.0.1:8765/api/autonudge?token=\$TOKEN" \\
+curl -X POST "http://127.0.0.1:5476/api/autonudge?token=\$TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{
     "slot_key": "<slot>",

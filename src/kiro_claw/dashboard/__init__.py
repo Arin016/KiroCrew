@@ -1,4 +1,4 @@
-"""Lightweight web dashboard — status page at ``localhost:8765``.
+"""Lightweight web dashboard — status page at ``localhost:5476``.
 
 Uses ``aiohttp`` for HTTP serving and native ``EventSource`` (SSE) for live
 updates.  Serves static assets from the ``static/`` directory.

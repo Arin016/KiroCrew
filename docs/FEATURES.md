@@ -23,7 +23,7 @@ cp -r website/dist src/kiro_claw/static/dist
 pip install .
 
 kiroclaw setup                # interactive wizard
-kiroclaw gateway              # open http://localhost:8765
+kiroclaw gateway              # open http://localhost:5476
 ```
 
 > **Windows is not currently supported.** The OS-level sandbox relies on Linux namespaces or macOS Seatbelt, so KiroClaw runs on macOS and Linux. Use a macOS machine or a Linux host for full features.
@@ -139,7 +139,7 @@ DM KiroClaw in Slack. Each thread gets its own AI session with full tool access.
 
 ### Web Dashboard
 
-Full-featured React SPA at `localhost:8765` (or `http://kiroclaw.localhost:8765`) with real-time updates.
+Full-featured React SPA at `localhost:5476` (or `http://kiroclaw.localhost:5476`) with real-time updates.
 
 - **React + TypeScript + Tailwind** — Vite 5-built SPA with Redux Toolkit state management and React Router
 - **Multi-slot chat** — multiple concurrent conversations with pagination and auto-generated session titles
@@ -241,7 +241,7 @@ Manage and switch between several **remote** KiroClaw instances (dev hosts, EC2,
 
 ### Desktop App (Electron)
 
-Native desktop app (macOS DMG / Linux AppImage) wrapping the web dashboard. Bundles a PyInstaller backend so end users need no Python, pip, or npm; auto-starts the gateway and connects to `localhost:8765`.
+Native desktop app (macOS DMG / Linux AppImage) wrapping the web dashboard. Bundles a PyInstaller backend so end users need no Python, pip, or npm; auto-starts the gateway and connects to `localhost:5476`.
 
 - **Multi-tab gateways** — connect to multiple KiroClaw gateways simultaneously in separate tabs
 - **WebContentsView architecture** — modern tab/window management replacing legacy BrowserView
@@ -309,7 +309,7 @@ Defense-in-depth security controls enforced at multiple layers.
 - **Built-in tool deny list** — `security.py` blocks tool names matching credential/destructive patterns at the Python hook layer
 - **System prompt rules** — explicit negative instructions (no git push, no credential file reads, no destructive commands)
 - **Owner lock** — Slack gateway locked to `KIROCLAW_OWNER_ID`; dashboard bound to localhost only
-- **Localhost-only default** — when `dashboard.url` is empty, the dashboard binds to `127.0.0.1` regardless of Slack configuration. To expose the dashboard on the network, explicitly set `dashboard.url` to your hostname in `~/.kiroclaw/config.json`. When network-exposed, token authentication is enforced — access the dashboard via SSH tunnel (`ssh -L 8765:localhost:8765 your-host`) for defense-in-depth
+- **Localhost-only default** — when `dashboard.url` is empty, the dashboard binds to `127.0.0.1` regardless of Slack configuration. To expose the dashboard on the network, explicitly set `dashboard.url` to your hostname in `~/.kiroclaw/config.json`. When network-exposed, token authentication is enforced — access the dashboard via SSH tunnel (`ssh -L 5476:localhost:5476 your-host`) for defense-in-depth
 - **CLI commands** — `kiroclaw security deny-list` shows active patterns; `kiroclaw security audit` scans history for suspicious activity
 - **Auto-propagation** — deny list updates ship with package updates; `kiroclaw update` automatically refreshes agent config
 - **XSS sanitization** — rehypeSanitize in markdown renderer + CSP headers prevent stored XSS via chat content
@@ -387,7 +387,7 @@ Markdown skill files teach the LLM which CLI commands exist. Two-tier loading:
 
 Edit skills in `skills/` without rebuilding. See `skills/README.md`.
 
-**Dashboard CRUD**: create, edit, and delete skills from `localhost:8765` → Overview → Skills tab.
+**Dashboard CRUD**: create, edit, and delete skills from `localhost:5476` → Overview → Skills tab.
 
 **Built-in skills** (ship with the package):
 - `kiroclaw-commands` — Slack commands, dashboard access, setup reference
@@ -643,7 +643,7 @@ Config: `~/.kiroclaw/config.json`
 ```
 
 > **Dashboard port** is **not** a config key — set it with the `KIROCLAW_PORT`
-> environment variable (default `8765`), or per-invocation with
+> environment variable (default `5476`), or per-invocation with
 > `kiroclaw gateway --port <n>`. The `dashboard.url` config key is for the
 > externally-advertised URL only (remote access / CORS origin).
 

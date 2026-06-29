@@ -14,7 +14,7 @@ class TestConfiguredPort:
         monkeypatch.delenv("KIROCLAW_PORT", raising=False)
         with patch("kiro_claw.cli_server.KiroClawConfig") as mock_cfg:
             mock_cfg.load.return_value.dashboard.url = ""
-            assert _configured_port() == 8765
+            assert _configured_port() == 5476
 
     def test_respects_env_var(self, monkeypatch):
         monkeypatch.setenv("KIROCLAW_PORT", "9999")

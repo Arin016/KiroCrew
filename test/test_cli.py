@@ -1142,7 +1142,7 @@ class TestLogout:
         mock_resp.__exit__ = MagicMock(return_value=False)
 
         with patch("urllib.request.urlopen", return_value=mock_resp):
-            _logout(8765)  # Should not raise
+            _logout(5476)  # Should not raise
 
     def test_logout_gateway_not_running(self, tmp_path, monkeypatch):
         """Missing secret file means gateway not running."""
@@ -1151,7 +1151,7 @@ class TestLogout:
         from kiro_claw.cli_server import _logout
 
         try:
-            _logout(8765)
+            _logout(5476)
             assert False, "should have exited"
         except SystemExit as e:
             assert e.code == 1
@@ -1169,7 +1169,7 @@ class TestLogout:
             side_effect=urllib.error.HTTPError(None, 403, "Forbidden", {}, None),
         ):
             try:
-                _logout(8765)
+                _logout(5476)
                 assert False, "should have exited"
             except SystemExit as e:
                 assert e.code == 1
@@ -1188,7 +1188,7 @@ class TestLogout:
             side_effect=urllib.error.URLError("Connection refused"),
         ):
             try:
-                _logout(8765)
+                _logout(5476)
                 assert False, "should have exited"
             except SystemExit as e:
                 assert e.code == 1
@@ -1209,7 +1209,7 @@ class TestLogout:
 
         with patch("urllib.request.urlopen", return_value=mock_resp):
             try:
-                _logout(8765)
+                _logout(5476)
                 assert False, "should have exited"
             except SystemExit as e:
                 assert e.code == 1
@@ -1218,7 +1218,7 @@ class TestLogout:
 class TestStatus:
     """Tests for _status() HTTP error handling."""
 
-    def _make_args(self, port=8765):
+    def _make_args(self, port=5476):
         return argparse.Namespace(port=port)
 
     def test_status_auth_required(self, capsys):
@@ -1228,7 +1228,7 @@ class TestStatus:
         with patch(
             "urllib.request.urlopen",
             side_effect=urllib.error.HTTPError(
-                "http://127.0.0.1:8765/api/status", 403, "Forbidden", {}, None
+                "http://127.0.0.1:5476/api/status", 403, "Forbidden", {}, None
             ),
         ):
             _status(self._make_args())
@@ -1243,7 +1243,7 @@ class TestStatus:
         with patch(
             "urllib.request.urlopen",
             side_effect=urllib.error.HTTPError(
-                "http://127.0.0.1:8765/api/status", 500, "Internal Server Error", {}, None
+                "http://127.0.0.1:5476/api/status", 500, "Internal Server Error", {}, None
             ),
         ):
             _status(self._make_args())
@@ -1359,7 +1359,7 @@ class TestStop:
             "subprocess.check_output", side_effect=FileNotFoundError
         ):
             with pytest.raises(SystemExit) as exc:
-                _stop(8765)
+                _stop(5476)
             assert exc.value.code == 1
         assert "lsof" in capsys.readouterr().out
 
@@ -1370,7 +1370,7 @@ class TestStop:
             "subprocess.check_output", side_effect=subprocess.CalledProcessError(1, "lsof")
         ):
             with pytest.raises(SystemExit) as exc:
-                _stop(8765)
+                _stop(5476)
             assert exc.value.code == 1
         assert "No KiroClaw gateway" in capsys.readouterr().out
 
@@ -1384,7 +1384,7 @@ class TestStop:
             ]
         ):
             with pytest.raises(SystemExit) as exc:
-                _stop(8765)
+                _stop(5476)
             assert exc.value.code == 1
         assert "No KiroClaw gateway" in capsys.readouterr().out
 
@@ -1398,7 +1398,7 @@ class TestStop:
             ]
         ):
             with pytest.raises(SystemExit) as exc:
-                _stop(8765)
+                _stop(5476)
             assert exc.value.code == 1
         assert "ps" in capsys.readouterr().out
 
@@ -1411,7 +1411,7 @@ class TestStop:
                 "python3 -m kiro_claw.dashboard\n",  # ps
             ]
         ), patch("os.kill"), patch("time.sleep"):
-            _stop(8765)
+            _stop(5476)
         assert "SIGTERM" in capsys.readouterr().out
 
     def test_permission_denied(self, capsys):
@@ -1424,7 +1424,7 @@ class TestStop:
             ]
         ), patch("os.kill", side_effect=PermissionError):
             with pytest.raises(SystemExit) as exc:
-                _stop(8765)
+                _stop(5476)
             assert exc.value.code == 1
         assert "No permission" in capsys.readouterr().out
 
@@ -1438,7 +1438,7 @@ class TestStop:
             ]
         ), patch("os.kill", side_effect=ProcessLookupError):
             with pytest.raises(SystemExit) as exc:
-                _stop(8765)
+                _stop(5476)
             assert exc.value.code == 1
         assert "already exited" in capsys.readouterr().out
 
@@ -1458,7 +1458,7 @@ class TestStop:
             ]
         ), patch("os.kill", side_effect=kill_side_effect), patch("time.sleep"):
             with pytest.raises(SystemExit) as exc:
-                _stop(8765)
+                _stop(5476)
             assert exc.value.code == 1
         out = capsys.readouterr().out
         assert "SIGTERM" in out
@@ -1474,7 +1474,7 @@ class TestStop:
                 "python3 -m kiro_claw.dashboard\n",
             ]
         ), patch("os.kill"), patch("time.sleep"):
-            _stop(8765)
+            _stop(5476)
         assert "SIGTERM" in capsys.readouterr().out
 
     def test_explicit_port_bypasses_service_short_circuit(self, capsys):
@@ -1676,7 +1676,7 @@ class TestResolveClientPort:
       1. explicit --port CLI arg (cli_port != None)
       2. KIROCLAW_PORT env var
       3. port parsed from dashboard.url in config
-      4. default 8765
+      4. default 5476
     """
 
     def test_cli_flag_wins(self, monkeypatch, tmp_path):
@@ -1720,7 +1720,7 @@ class TestResolveClientPort:
             assert resolve_client_port(None) == 7778
 
     def test_config_url_hostname_only_falls_through_to_default(self, monkeypatch):
-        """A dashboard.url without an explicit port must fall through to 8765."""
+        """A dashboard.url without an explicit port must fall through to 5476."""
         from kiro_claw.cli_server import resolve_client_port
 
         monkeypatch.delenv("KIROCLAW_PORT", raising=False)
@@ -1728,18 +1728,18 @@ class TestResolveClientPort:
         mock_cfg.dashboard.url = "http://my.host.example"
         with patch("kiro_claw.cli_server.KiroClawConfig.load", return_value=mock_cfg):
             # parse_dashboard_url returns _DEFAULT_PORT when no port in URL,
-            # which is the same as the final fallback — either way we land on 8765.
-            assert resolve_client_port(None) == 8765
+            # which is the same as the final fallback — either way we land on 5476.
+            assert resolve_client_port(None) == 5476
 
     def test_empty_config_falls_through_to_default(self, monkeypatch):
-        """No env, empty dashboard.url → 8765."""
+        """No env, empty dashboard.url → 5476."""
         from kiro_claw.cli_server import resolve_client_port
 
         monkeypatch.delenv("KIROCLAW_PORT", raising=False)
         mock_cfg = MagicMock()
         mock_cfg.dashboard.url = ""
         with patch("kiro_claw.cli_server.KiroClawConfig.load", return_value=mock_cfg):
-            assert resolve_client_port(None) == 8765
+            assert resolve_client_port(None) == 5476
 
     def test_config_load_failure_falls_through_to_default(self, monkeypatch):
         """If config loading raises, the helper must still return a usable port."""
@@ -1747,7 +1747,7 @@ class TestResolveClientPort:
 
         monkeypatch.delenv("KIROCLAW_PORT", raising=False)
         with patch("kiro_claw.cli_server.KiroClawConfig.load", side_effect=RuntimeError("boom")):
-            assert resolve_client_port(None) == 8765
+            assert resolve_client_port(None) == 5476
 
     def test_cli_flag_zero_is_respected(self, monkeypatch):
         """Port 0 is weird but valid; it must not be coerced to None/default."""
@@ -2324,7 +2324,7 @@ class TestConfigDirOverride:
         mock_resp.__exit__ = MagicMock(return_value=False)
 
         with patch("urllib.request.urlopen", return_value=mock_resp):
-            _logout(8765)
+            _logout(5476)
 
     def test_setup_slack_tokens_writes_to_config_dir(self, tmp_path, monkeypatch):
         """_setup_slack_tokens writes .env to config_dir(), not ~/.kiroclaw."""
@@ -2385,12 +2385,12 @@ class TestSpawnCliAuth:
 
         from kiro_claw.cli_commands import _spawn
 
-        args = argparse.Namespace(spawn_action="list", port=8765)
+        args = argparse.Namespace(spawn_action="list", port=5476)
         _spawn(args)
 
         assert len(captured) == 1
         req = captured[0]
-        assert req.full_url == "http://localhost:8765/api/spawn"
+        assert req.full_url == "http://localhost:5476/api/spawn"
         headers_lower = {k.lower(): v for k, v in dict(req.headers).items()}
         assert headers_lower["x-internal-secret"] == "test-secret-xyz"
 
@@ -2412,12 +2412,12 @@ class TestSpawnCliAuth:
 
         from kiro_claw.cli_commands import _spawn_run
 
-        args = argparse.Namespace(task="do thing", fire_and_forget=True, port=8765)
-        _spawn_run(args, "http://localhost:8765")
+        args = argparse.Namespace(task="do thing", fire_and_forget=True, port=5476)
+        _spawn_run(args, "http://localhost:5476")
 
         assert len(captured) == 1
         req = captured[0]
-        assert req.full_url == "http://localhost:8765/api/spawn"
+        assert req.full_url == "http://localhost:5476/api/spawn"
         assert req.data == b'{"task": "do thing"}'
         headers_lower = {k.lower(): v for k, v in dict(req.headers).items()}
         assert headers_lower["x-internal-secret"] == "run-secret-abc"
@@ -2430,7 +2430,7 @@ class TestSpawnCliAuth:
 
         def fake_urlopen(*_args: object, **_kwargs: object) -> None:
             raise urllib.error.HTTPError(
-                "http://localhost:8765/api/spawn",
+                "http://localhost:5476/api/spawn",
                 403,
                 "Forbidden",
                 hdrs=None,  # type: ignore[arg-type]
@@ -2441,7 +2441,7 @@ class TestSpawnCliAuth:
 
         from kiro_claw.cli_commands import _spawn
 
-        args = argparse.Namespace(spawn_action="list", port=8765)
+        args = argparse.Namespace(spawn_action="list", port=5476)
         with pytest.raises(SystemExit) as excinfo:
             _spawn(args)
         assert excinfo.value.code == 1

@@ -1032,7 +1032,7 @@ Examples:
 Examples:
   kiroclaw config get                   # Show all config
   kiroclaw config get agent.provider    # Get a specific value
-  kiroclaw config set dashboard.url http://localhost:8765
+  kiroclaw config set dashboard.url http://localhost:5476
   kiroclaw config edit                  # Open in $EDITOR
 
 The dashboard port is set with the KIROCLAW_PORT env var, not a config key.

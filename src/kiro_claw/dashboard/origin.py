@@ -22,7 +22,7 @@ from aiohttp import web
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_PORT = 8765
+_DEFAULT_PORT = 5476
 
 _BIND_LOCAL = "127.0.0.1"
 _BIND_ALL = "0.0.0.0"

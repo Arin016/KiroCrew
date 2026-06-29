@@ -322,7 +322,7 @@ From this single URL, KiroClaw derives:
 - **Allowed origins** for CSRF/WebSocket protection
 - **Dashboard link hostname** for `!dashboard` and `/kiroclaw dashboard`
 
-When omitted, defaults to `localhost:8765` (loopback only, no token required).
+When omitted, defaults to `localhost:5476` (loopback only, no token required).
 
 ## Dashboard ↔ Slack Sync
 

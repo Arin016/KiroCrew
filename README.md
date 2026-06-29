@@ -79,7 +79,7 @@ lifecycle automatically; you can also run your own server.
 ```bash
 kiroclaw setup                # interactive wizard: data dir, agent, credentials
 kiroclaw doctor               # verify everything is wired up
-kiroclaw gateway              # start server → open http://localhost:8765
+kiroclaw gateway              # start server → open http://localhost:5476
 ```
 
 **Dashboard-only mode**: skip Slack tokens during `kiroclaw setup` to run
@@ -99,7 +99,7 @@ gateway straight from `src/`:
 
 ```bash
 make build                                   # npm build + venv editable install
-PYTHONPATH=src python -m kiro_claw gateway   # → http://localhost:8765
+PYTHONPATH=src python -m kiro_claw gateway   # → http://localhost:5476
 ```
 
 ### b. Self-contained pip wheel
@@ -110,7 +110,7 @@ with Python:
 ```bash
 make wheel                # → dist/kiroclaw-0.1.0-*.whl (dashboard bundled)
 pip install dist/*.whl    # installs the kiroclaw / kiroclaw-browse commands
-kiroclaw gateway          # → http://localhost:8765
+kiroclaw gateway          # → http://localhost:5476
 ```
 
 ### c. Bundled desktop app
@@ -143,7 +143,7 @@ the app locates and launches the bundled backend.
 | Surface | Description |
 |---------|-------------|
 | **Slack DM** | Chat with your agent in Slack. Each thread = isolated AI session with full tool access |
-| **Web Dashboard** | React SPA at localhost:8765 — multi-session chat, memory explorer, cron manager, app store |
+| **Web Dashboard** | React SPA at localhost:5476 — multi-session chat, memory explorer, cron manager, app store |
 | **Desktop App** | Electron wrapper with multi-tab gateway connections and native macOS tabs |
 | **CLI** | `kiroclaw chat`, `kiroclaw run TASK.md`, `kiroclaw cron`, `kiroclaw spawn` |
 
@@ -188,7 +188,7 @@ Config: `~/.kiroclaw/config.json` — manage via `kiroclaw config get/set/edit`
 }
 ```
 
-> The dashboard port is set via the `KIROCLAW_PORT` env var (default `8765`) or
+> The dashboard port is set via the `KIROCLAW_PORT` env var (default `5476`) or
 > `kiroclaw gateway --port <n>`, not in config. `dashboard.url` is the
 > externally-advertised URL only.
 

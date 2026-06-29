@@ -193,7 +193,7 @@ Caller sites:
 
 ### CLI: `kiroclaw spawn "task"`
 
-POSTs to `http://localhost:8765/api/spawn` (dashboard API). Returns immediately with subagent ID. Gateway runs the task async and posts result to Slack when done.
+POSTs to `http://localhost:5476/api/spawn` (dashboard API). Returns immediately with subagent ID. Gateway runs the task async and posts result to Slack when done.
 
 ### MCP Tool: `spawn_run`
 

@@ -22,12 +22,12 @@ See [Getting Started](getting-started.md) for details.
 cd my-app/ui && npm install && npm run build && cd ..
 
 # Install via REST API
-curl -X POST http://localhost:8765/api/apps/install \
+curl -X POST http://localhost:5476/api/apps/install \
   -H 'Content-Type: application/json' \
   -d '{"source": "./my-app"}'
 
 # Enable it
-curl -X POST http://localhost:8765/api/apps/my-app/enable
+curl -X POST http://localhost:5476/api/apps/my-app/enable
 ```
 
 Or use the App Store UI in the dashboard to install from a local path.
@@ -44,10 +44,10 @@ Or use the App Store UI in the dashboard to install from a local path.
 
 ```bash
 # Check app is registered (via REST API)
-curl http://localhost:8765/api/apps | python3 -m json.tool
+curl http://localhost:5476/api/apps | python3 -m json.tool
 
 # Check app manifest is valid
-curl http://localhost:8765/api/apps/my-app/manifest | python3 -m json.tool
+curl http://localhost:5476/api/apps/my-app/manifest | python3 -m json.tool
 
 # Check Gateway logs for errors
 # Look for "app" or your app name in the log output
@@ -63,7 +63,7 @@ vim ui/src/App.tsx
 cd ui && npm run build && cd ..
 
 # Update installed app (re-copies files)
-curl -X POST http://localhost:8765/api/apps/my-app/update
+curl -X POST http://localhost:5476/api/apps/my-app/update
 
 # Refresh dashboard — changes are live
 ```
@@ -181,7 +181,7 @@ After your pull request merges, users can install your app:
 ### From CLI
 
 ```bash
-curl -X POST http://localhost:8765/api/apps/registry/install \
+curl -X POST http://localhost:5476/api/apps/registry/install \
   -H 'Content-Type: application/json' \
   -d '{"name": "my-app"}'
 ```
@@ -207,7 +207,7 @@ curl -X POST http://localhost:8765/api/apps/registry/install \
 Users can update from the App Store UI (refresh button) or REST API:
 
 ```bash
-curl -X POST http://localhost:8765/api/apps/my-app/update
+curl -X POST http://localhost:5476/api/apps/my-app/update
 ```
 
 This re-clones, re-runs install script, and re-registers resources.

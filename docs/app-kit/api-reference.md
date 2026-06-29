@@ -246,7 +246,7 @@ async with KiroClawClient(app_name="my-app") as mc:
 
 ```python
 KiroClawClient(
-    base_url="",              # default: http://localhost:{KIROCLAW_PORT or 8765}
+    base_url="",              # default: http://localhost:{KIROCLAW_PORT or 5476}
     token="",                 # optional for localhost
     app_name="",              # for app-scoped storage & auto-auth
     timeout=30,               # request timeout seconds
@@ -361,7 +361,7 @@ Manage the KiroClaw Gateway process (start, stop, health check).
 ```python
 from kiroclaw_client import GatewayManager
 
-gm = GatewayManager(port=8765)
+gm = GatewayManager(port=5476)
 await gm.start()
 healthy = await gm.is_healthy()
 await gm.stop()

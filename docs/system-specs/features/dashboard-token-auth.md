@@ -33,7 +33,7 @@ sequenceDiagram
     MW->>App: forward request
     App-->>Browser: dashboard page + Set-Cookie
 
-    Browser->>MW: GET /api/status (cookie: mc_token_8765=abc123)
+    Browser->>MW: GET /api/status (cookie: mc_token_5476=abc123)
     MW->>TokenGen: validate_token("abc123", use_session_exp=True)
     TokenGen-->>MW: valid
     MW->>MW: check IP binding
@@ -252,7 +252,7 @@ Note: Loopback access (127.0.0.1) is always trusted for both token auth and CSRF
 
 ## Cookie
 
-- Name: `mc_token_{port}` (e.g. `mc_token_8765`)
+- Name: `mc_token_{port}` (e.g. `mc_token_5476`)
 - Value: the full token string
 - Attributes: `HttpOnly`, `SameSite=Strict`, `Path=/`
 - `max_age`: remaining seconds from `session_exp` (capped at 6 hours)

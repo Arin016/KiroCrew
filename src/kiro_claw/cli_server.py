@@ -50,7 +50,7 @@ def resolve_client_port(cli_port: int | None) -> int:
     2. ``KIROCLAW_PORT`` env var if set to a valid integer.
     3. Port parsed from ``dashboard.url`` in the config file (``~/.kiroclaw/config.json``)
        if present and parseable.
-    4. ``_DEFAULT_PORT`` (8765) as the final fallback.
+    4. ``_DEFAULT_PORT`` (5476) as the final fallback.
 
     This matches the server-side ``parse_dashboard_url()`` logic so that
     ``kiroclaw token`` / ``status`` / ``logout`` / ``stop`` all hit the same

@@ -231,7 +231,7 @@ Returns the effective config for a channel:
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `KIROCLAW_HOME` | Override config/data directory | `~/.kiroclaw` |
-| `KIROCLAW_PORT` | Override dashboard port (dev mode — run dev + prod side by side) | `8765` |
+| `KIROCLAW_PORT` | Override dashboard port (dev mode — run dev + prod side by side) | `5476` |
 | `KIROCLAW_WORKSPACE` | Override workspace root directory | Platform-dependent |
 | `KIROCLAW_PROJECT_DIR` | Override agent config/skills directory | Auto-detected |
 ```
@@ -274,7 +274,7 @@ Returns the effective config for a channel:
 }
 ```
 
-The `dashboard.url` field controls where the dashboard is reachable. From it, the system derives the port to bind on, the bind address (`0.0.0.0` for non-loopback hosts, `127.0.0.1` otherwise), and the allowed origins for CSRF/WebSocket checks. When omitted, defaults to `localhost:8765`.
+The `dashboard.url` field controls where the dashboard is reachable. From it, the system derives the port to bind on, the bind address (`0.0.0.0` for non-loopback hosts, `127.0.0.1` otherwise), and the allowed origins for CSRF/WebSocket checks. When omitted, defaults to `localhost:5476`.
 
 ## Model Resolution Chain
 

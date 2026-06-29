@@ -93,15 +93,15 @@ class TestSendChannelChallenge:
         with patch("kiro_claw.slack.allowlist.KiroClawConfig") as mock_cfg, patch(
             "kiro_claw.slack.allowlist.get_tunnel_url", return_value=None
         ), patch(
-            "kiro_claw.slack.allowlist.dashboard_origin", return_value="http://localhost:8765"
+            "kiro_claw.slack.allowlist.dashboard_origin", return_value="http://localhost:5476"
         ), patch(
-            "kiro_claw.slack.allowlist.parse_dashboard_url", return_value=("localhost", 8765)
+            "kiro_claw.slack.allowlist.parse_dashboard_url", return_value=("localhost", 5476)
         ), patch(
             "kiro_claw.slack.allowlist.is_local_only", return_value=True
         ), patch(
             "kiro_claw.slack.allowlist.resolve_dashboard_host", return_value="localhost"
         ):
-            mock_cfg.load.return_value.dashboard.url = "http://localhost:8765"
+            mock_cfg.load.return_value.dashboard.url = "http://localhost:5476"
             mock_cfg.load.return_value.slack.use_tunnel_url = False
 
             url = await send_channel_challenge(slack, "C123", "U456", "hello bot")
@@ -133,13 +133,13 @@ class TestSendChannelChallenge:
         with patch("kiro_claw.slack.allowlist.KiroClawConfig") as mock_cfg, patch(
             "kiro_claw.slack.allowlist.get_tunnel_url", return_value=tunnel
         ), patch(
-            "kiro_claw.slack.allowlist.parse_dashboard_url", return_value=("localhost", 8765)
+            "kiro_claw.slack.allowlist.parse_dashboard_url", return_value=("localhost", 5476)
         ), patch(
             "kiro_claw.slack.allowlist.is_local_only", return_value=True
         ), patch(
             "kiro_claw.slack.allowlist.resolve_dashboard_host", return_value="localhost"
         ):
-            mock_cfg.load.return_value.dashboard.url = "http://localhost:8765"
+            mock_cfg.load.return_value.dashboard.url = "http://localhost:5476"
             mock_cfg.load.return_value.slack.use_tunnel_url = True
 
             url = await send_channel_challenge(slack, "C123", "U456", "test")
@@ -159,21 +159,21 @@ class TestSendChannelChallenge:
         with patch("kiro_claw.slack.allowlist.KiroClawConfig") as mock_cfg, patch(
             "kiro_claw.slack.allowlist.get_tunnel_url", return_value=tunnel
         ), patch(
-            "kiro_claw.slack.allowlist.dashboard_origin", return_value="http://localhost:8765"
+            "kiro_claw.slack.allowlist.dashboard_origin", return_value="http://localhost:5476"
         ), patch(
-            "kiro_claw.slack.allowlist.parse_dashboard_url", return_value=("localhost", 8765)
+            "kiro_claw.slack.allowlist.parse_dashboard_url", return_value=("localhost", 5476)
         ), patch(
             "kiro_claw.slack.allowlist.is_local_only", return_value=True
         ), patch(
             "kiro_claw.slack.allowlist.resolve_dashboard_host", return_value="localhost"
         ):
-            mock_cfg.load.return_value.dashboard.url = "http://localhost:8765"
+            mock_cfg.load.return_value.dashboard.url = "http://localhost:5476"
             mock_cfg.load.return_value.slack.use_tunnel_url = False
 
             url = await send_channel_challenge(slack, "C123", "U456", "test")
 
         assert not url.startswith(tunnel)
-        assert "localhost:8765" in url
+        assert "localhost:5476" in url
 
     @pytest.mark.asyncio
     async def test_falls_back_to_localhost_without_tunnel(self):
@@ -185,20 +185,20 @@ class TestSendChannelChallenge:
         with patch("kiro_claw.slack.allowlist.KiroClawConfig") as mock_cfg, patch(
             "kiro_claw.slack.allowlist.get_tunnel_url", return_value=None
         ), patch(
-            "kiro_claw.slack.allowlist.dashboard_origin", return_value="http://localhost:8765"
+            "kiro_claw.slack.allowlist.dashboard_origin", return_value="http://localhost:5476"
         ), patch(
-            "kiro_claw.slack.allowlist.parse_dashboard_url", return_value=("localhost", 8765)
+            "kiro_claw.slack.allowlist.parse_dashboard_url", return_value=("localhost", 5476)
         ), patch(
             "kiro_claw.slack.allowlist.is_local_only", return_value=True
         ), patch(
             "kiro_claw.slack.allowlist.resolve_dashboard_host", return_value="localhost"
         ):
-            mock_cfg.load.return_value.dashboard.url = "http://localhost:8765"
+            mock_cfg.load.return_value.dashboard.url = "http://localhost:5476"
             mock_cfg.load.return_value.slack.use_tunnel_url = False
 
             url = await send_channel_challenge(slack, "C123", "U456", "test")
 
-        assert "localhost:8765" in url
+        assert "localhost:5476" in url
 
     @pytest.mark.asyncio
     async def test_prompt_only_in_token_not_url(self):
@@ -210,15 +210,15 @@ class TestSendChannelChallenge:
         with patch("kiro_claw.slack.allowlist.KiroClawConfig") as mock_cfg, patch(
             "kiro_claw.slack.allowlist.get_tunnel_url", return_value=None
         ), patch(
-            "kiro_claw.slack.allowlist.dashboard_origin", return_value="http://localhost:8765"
+            "kiro_claw.slack.allowlist.dashboard_origin", return_value="http://localhost:5476"
         ), patch(
-            "kiro_claw.slack.allowlist.parse_dashboard_url", return_value=("localhost", 8765)
+            "kiro_claw.slack.allowlist.parse_dashboard_url", return_value=("localhost", 5476)
         ), patch(
             "kiro_claw.slack.allowlist.is_local_only", return_value=True
         ), patch(
             "kiro_claw.slack.allowlist.resolve_dashboard_host", return_value="localhost"
         ):
-            mock_cfg.load.return_value.dashboard.url = "http://localhost:8765"
+            mock_cfg.load.return_value.dashboard.url = "http://localhost:5476"
             mock_cfg.load.return_value.slack.use_tunnel_url = False
 
             url = await send_channel_challenge(slack, "C123", "U456", "what's the status?")
@@ -251,15 +251,15 @@ class TestSendChannelChallenge:
         with patch("kiro_claw.slack.allowlist.KiroClawConfig") as mock_cfg, patch(
             "kiro_claw.slack.allowlist.get_tunnel_url", return_value=None
         ), patch(
-            "kiro_claw.slack.allowlist.dashboard_origin", return_value="http://localhost:8765"
+            "kiro_claw.slack.allowlist.dashboard_origin", return_value="http://localhost:5476"
         ), patch(
-            "kiro_claw.slack.allowlist.parse_dashboard_url", return_value=("localhost", 8765)
+            "kiro_claw.slack.allowlist.parse_dashboard_url", return_value=("localhost", 5476)
         ), patch(
             "kiro_claw.slack.allowlist.is_local_only", return_value=True
         ), patch(
             "kiro_claw.slack.allowlist.resolve_dashboard_host", return_value="localhost"
         ):
-            mock_cfg.load.return_value.dashboard.url = "http://localhost:8765"
+            mock_cfg.load.return_value.dashboard.url = "http://localhost:5476"
             mock_cfg.load.return_value.slack.use_tunnel_url = False
 
             url = await send_channel_challenge(slack, "C123", "U456", "hello?")
@@ -321,15 +321,15 @@ class TestChallengeThreadRouting:
         with patch("kiro_claw.slack.allowlist.KiroClawConfig") as mock_cfg, patch(
             "kiro_claw.slack.allowlist.get_tunnel_url", return_value=None
         ), patch(
-            "kiro_claw.slack.allowlist.dashboard_origin", return_value="http://localhost:8765"
+            "kiro_claw.slack.allowlist.dashboard_origin", return_value="http://localhost:5476"
         ), patch(
-            "kiro_claw.slack.allowlist.parse_dashboard_url", return_value=("localhost", 8765)
+            "kiro_claw.slack.allowlist.parse_dashboard_url", return_value=("localhost", 5476)
         ), patch(
             "kiro_claw.slack.allowlist.is_local_only", return_value=True
         ), patch(
             "kiro_claw.slack.allowlist.resolve_dashboard_host", return_value="localhost"
         ):
-            mock_cfg.load.return_value.dashboard.url = "http://localhost:8765"
+            mock_cfg.load.return_value.dashboard.url = "http://localhost:5476"
             mock_cfg.load.return_value.slack.use_tunnel_url = False
             yield
 

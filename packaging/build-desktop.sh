@@ -71,6 +71,10 @@ if ! "$PY" -c "import PyInstaller" 2>/dev/null; then
   echo "PyInstaller not installed — installing into the active environment…"
   "$PY" -m pip install pyinstaller
 fi
+# Ad-hoc re-sign native libs (numpy, etc.) so macOS does not SIGKILL the
+# PyInstaller isolated subprocesses with a code-signature "Invalid Page" fault.
+# No-op on non-macOS. See packaging/resign-macos-libs.sh for the full rationale.
+bash "$ROOT/packaging/resign-macos-libs.sh" "$PY"
 # Make the build hermetic: point PYTHONPATH at THIS repo's src only, so a
 # polluted ambient PYTHONPATH (e.g. a sibling checkout) can't leak modules
 # into the frozen bundle. The spec's own pathex=[SRC] reinforces this.

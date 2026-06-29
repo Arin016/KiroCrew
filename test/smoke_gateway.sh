@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Gateway end-to-end security smoke test
-# Prerequisites: kiroclaw gateway running on localhost:8765
+# Prerequisites: kiroclaw gateway running on localhost:5476
 # Usage: bash test/smoke_gateway.sh [account_id]
 
 set -uo pipefail
 
-BASE="http://localhost:8765"
+BASE="http://localhost:5476"
 ACCOUNT="${1:-373229397057}"
 PROFILE="smoke"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'

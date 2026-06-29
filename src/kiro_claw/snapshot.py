@@ -21,7 +21,7 @@ except ImportError:
 try:
     from kiro_claw.config.loader import DASHBOARD_PORT as _DASHBOARD_PORT
 except Exception:  # pragma: no cover - optional during early/standalone import
-    _DASHBOARD_PORT = int(os.environ.get("KIROCLAW_PORT", 8765))
+    _DASHBOARD_PORT = int(os.environ.get("KIROCLAW_PORT", 5476))
 
 VALID_COMPONENTS = ("memory", "crons", "config", "skills", "workspace", "notifications", "security")
 

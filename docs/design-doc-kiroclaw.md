@@ -117,7 +117,7 @@ The gateway is agent-agnostic; the coordination behavior comes from the agent co
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐                              │
 │  │ Slack    │  │Dashboard │  │   CLI    │   ← User Interfaces           │
 │  │ Socket   │  │ aiohttp  │  │ argparse │                               │
-│  │ Mode     │  │ :8765    │  │          │                               │
+│  │ Mode     │  │ :5476    │  │          │                               │
 │  └────┬─────┘  └────┬─────┘  └────┬─────┘                              │
 │       └──────────────┼─────────────┘                                    │
 │                      ▼                                                  │

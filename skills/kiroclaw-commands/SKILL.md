@@ -203,7 +203,7 @@ LLM-generated UI components (widgets, HTML, markdown, SVG, JSON, text).
 |---------|-------------|
 | `kiroclaw config get` | Show all config |
 | `kiroclaw config get agent.provider` | Get specific value (dot-separated key) |
-| `kiroclaw config set dashboard.url http://localhost:8765` | Set a config value (port is the KIROCLAW_PORT env var, not a config key) |
+| `kiroclaw config set dashboard.url http://localhost:5476` | Set a config value (port is the KIROCLAW_PORT env var, not a config key) |
 | `kiroclaw config set --file config.json` | Load full config from JSON file |
 | `kiroclaw config edit` | Open config in $EDITOR |
 
@@ -270,5 +270,5 @@ LLM-generated UI components (widgets, HTML, markdown, SVG, JSON, text).
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `KIROCLAW_HOME` | Override config/data directory | `~/.kiroclaw` |
-| `KIROCLAW_PORT` | Override dashboard port | `8765` |
+| `KIROCLAW_PORT` | Override dashboard port | `5476` |
 | `KIROCLAW_PROJECT_DIR` | Override agent config/skills directory | Auto-detected |

@@ -1589,7 +1589,7 @@ def _resolve_app_backend_url(name: str) -> str | None:
                     continue
                 port_num = parsed.port or (443 if parsed.scheme == "https" else 80)
                 # Reject self-referential URLs (gateway's own port) to prevent SSRF
-                gateway_port = int(os.environ.get("KIROCLAW_PORT", "8765"))
+                gateway_port = int(os.environ.get("KIROCLAW_PORT", "5476"))
                 if port_num == gateway_port:
                     logger.warning("Refusing self-referential backend URL for app %s", name)
                     continue

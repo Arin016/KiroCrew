@@ -23,7 +23,7 @@ from kiroclaw_client.errors import KiroClawError, ErrorCode, http_error
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_BASE_URL = "http://localhost:8765"
+_DEFAULT_BASE_URL = "http://localhost:5476"
 _DEFAULT_TIMEOUT = 30
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_RETRY_BASE_DELAY = 1.0  # seconds
@@ -104,7 +104,7 @@ class KiroClawClient:
         message_length_limit: int = _DEFAULT_MESSAGE_LIMIT,
         on_auth_expired: Callable[[], Awaitable[str]] | None = None,
     ):
-        port = os.environ.get("KIROCLAW_PORT", "8765")
+        port = os.environ.get("KIROCLAW_PORT", "5476")
         self.base_url = (base_url or f"http://localhost:{port}").rstrip("/")
         self.token = token
         self.app_name = app_name

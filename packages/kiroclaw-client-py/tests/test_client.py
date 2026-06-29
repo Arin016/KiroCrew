@@ -42,18 +42,18 @@ class TestErrors:
 
 class TestAuthCheck:
     def test_localhost_no_token_ok(self):
-        mc = KiroClawClient(base_url="http://localhost:8765")
+        mc = KiroClawClient(base_url="http://localhost:5476")
         # Should not raise on construction
-        assert mc.base_url == "http://localhost:8765"
+        assert mc.base_url == "http://localhost:5476"
 
     def test_remote_no_token_raises(self):
-        mc = KiroClawClient(base_url="http://example.com:8765")
+        mc = KiroClawClient(base_url="http://example.com:5476")
         with pytest.raises(KiroClawError) as exc_info:
             mc._check_auth()
         assert exc_info.value.code == ErrorCode.AUTH_REQUIRED
 
     def test_remote_with_token_ok(self):
-        mc = KiroClawClient(base_url="http://example.com:8765", token="test")
+        mc = KiroClawClient(base_url="http://example.com:5476", token="test")
         mc._check_auth()  # should not raise
 
 

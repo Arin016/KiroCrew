@@ -6,7 +6,7 @@ import { readFileSync } from 'fs'
 import http from 'http'
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf-8'))
-const backendPort = process.env.KIROCLAW_PORT || 8765
+const backendPort = process.env.KIROCLAW_PORT || 5476
 
 /**
  * Dev-only plugin: when the browser hits `/?token=xxx`, proxy that request

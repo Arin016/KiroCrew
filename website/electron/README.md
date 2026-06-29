@@ -1,6 +1,6 @@
 # KiroClaw Desktop (Electron)
 
-Native macOS app wrapping the KiroClaw web dashboard. Automatically starts `kiroclaw gateway` and connects to `localhost:8765`.
+Native macOS app wrapping the KiroClaw web dashboard. Automatically starts `kiroclaw gateway` and connects to `localhost:5476`.
 
 ## Quick Start
 
@@ -74,9 +74,9 @@ via SSH instead of reading the local `.local_secret`.
 
 ### Prerequisites
 
-1. An SSH tunnel forwarding port 8765 from the remote host:
+1. An SSH tunnel forwarding port 5476 from the remote host:
    ```bash
-   ssh -L 8765:localhost:8765 YOUR_HOST.corp.amazon.com
+   ssh -L 5476:localhost:5476 YOUR_HOST.corp.amazon.com
    ```
    Or use a macOS LaunchAgent (see `docs/persistent-sessions/`).
 

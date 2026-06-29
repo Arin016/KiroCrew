@@ -15,7 +15,7 @@
         <string>-o</string>
         <string>ExitOnForwardFailure=yes</string>
         <string>-L</string>
-        <string>8765:localhost:8765</string>
+        <string>5476:localhost:5476</string>
         <string>ALIAS@DEV_DESKTOP_HOSTNAME</string>
     </array>
     <key>KeepAlive</key>

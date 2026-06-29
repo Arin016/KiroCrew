@@ -8,7 +8,7 @@ cron execution latency (scheduler polls every 30s + agent LLM processing time).
 1. Stop production: `systemctl --user stop kiroclaw.service`
 2. Build frontend: `cd ../KiroClawWebsite && npm run build`
 3. Start gateway: `cd ../KiroClaw && kiroclaw gateway`
-4. Open dashboard at localhost:8765
+4. Open dashboard at localhost:5476
 
 ## Test 1: One-Shot Cron → "View last result"
 

@@ -20,7 +20,7 @@ highlight.js, Monaco, Vite 5.
 ```bash
 npm install
 npm run build        # tsc -b + vite build → website/dist   (this is the real typecheck)
-npm run dev          # Vite dev server on :3000, proxies /api to backend :8765
+npm run dev          # Vite dev server on :3000, proxies /api to backend :5476
 npm run check        # typecheck + lint + tests
 npm run test         # vitest (website + electron)
 npm run lint         # eslint src

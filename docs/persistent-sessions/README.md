@@ -84,14 +84,14 @@ sed -i '' 's|ALIAS@DEV_DESKTOP_HOSTNAME|USER@HOST|g' ~/Library/LaunchAgents/com.
 launchctl load ~/Library/LaunchAgents/com.kiroclaw.tunnel.plist
 ```
 
-Verify: `curl -s http://localhost:8765/api/status`
+Verify: `curl -s http://localhost:5476/api/status`
 
-Dashboard: http://localhost:8765
+Dashboard: http://localhost:5476
 
 ## Gotchas
 
 - **sudo broken?** `/etc/sudo.conf` may have wrong ownership on some dev desktops. Run sudo commands from a fresh SSH session, not from kiro-cli or KiroClaw.
-- **Kill tmux first** — can't have two gateways on port 8765. Run `tmux kill-session -t kiroclaw` before Phase 2.
+- **Kill tmux first** — can't have two gateways on port 5476. Run `tmux kill-session -t kiroclaw` before Phase 2.
 - **D-Bus connection error?** Run `export XDG_RUNTIME_DIR=/run/user/$(id -u)` then retry.
 - **Laptop sleep** — the LaunchAgent tunnel includes `ServerAliveInterval=30` and `KeepAlive=true`. macOS auto-restarts it after sleep/network change. Reconnect takes ~30 seconds.
 

@@ -32,11 +32,11 @@ const store = new Store({
 
 function resolvePort() {
   const raw = process.env.KIROCLAW_PORT;
-  if (!raw) return 8765;
+  if (!raw) return 5476;
   const n = parseInt(raw, 10);
   if (isNaN(n) || n < 1 || n > 65535) {
-    console.warn(`Invalid KIROCLAW_PORT="${raw}", falling back to 8765`);
-    return 8765;
+    console.warn(`Invalid KIROCLAW_PORT="${raw}", falling back to 5476`);
+    return 5476;
   }
   return n;
 }

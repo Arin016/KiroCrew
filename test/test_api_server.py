@@ -43,7 +43,7 @@ def _make_api_app(state: DashboardState) -> web.Application:
     """Minimal app using only _register_mcp_routes (same as start_api_server)."""
     app = web.Application()
     app["state"] = state
-    app["port"] = 8765
+    app["port"] = 5476
     _register_mcp_routes(app)
     return app
 

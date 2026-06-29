@@ -81,7 +81,7 @@ DEFAULT_MODEL = "auto"
 DEFAULT_SESSION_TIMEOUT = 3600  # 60 min
 DEFAULT_MAX_PARALLEL_STEPS = 2
 
-_DEFAULT_PORT = 8765
+_DEFAULT_PORT = 5476
 
 # KIROCLAW_PORT is validated at CLI entry (cli.py main()).
 # By the time loader.py is imported the env var is a valid int or absent.

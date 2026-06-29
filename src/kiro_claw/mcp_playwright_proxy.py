@@ -137,7 +137,7 @@ def _write_screenshot(img_bytes: bytes, ext: str) -> str:
 
 def _gateway_frame_url() -> str:
     """Loopback gateway endpoint that rebroadcasts a browse frame to the dashboard."""
-    port = os.environ.get("KIROCLAW_PORT", "8765")
+    port = os.environ.get("KIROCLAW_PORT", "5476")
     return f"http://127.0.0.1:{port}/api/browser/frame"
 
 

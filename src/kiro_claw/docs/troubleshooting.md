@@ -41,8 +41,8 @@ kiroclaw setup --agent-only
 ### Dashboard not loading
 
 - Check if gateway is running: `kiroclaw status`
-- Check the port: `curl http://localhost:8765/api/status`
-- Check for port conflicts: `lsof -i :8765`
+- Check the port: `curl http://localhost:5476/api/status`
+- Check for port conflicts: `lsof -i :5476`
 
 ### Slack not responding
 

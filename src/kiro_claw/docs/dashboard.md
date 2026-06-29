@@ -1,24 +1,24 @@
 # Web Dashboard
 
-The dashboard is a React SPA at `http://localhost:8765` (or your configured
+The dashboard is a React SPA at `http://localhost:5476` (or your configured
 URL). It provides chat, memory management, cron jobs, skills, agents, and
 system monitoring.
 
 ## Accessing the Dashboard
 
-- **Local**: open `http://localhost:8765` directly (no auth needed on loopback)
-- **SSH tunnel**: `ssh -NL 8765:localhost:8765 <host>` then open localhost:8765
+- **Local**: open `http://localhost:5476` directly (no auth needed on loopback)
+- **SSH tunnel**: `ssh -NL 5476:localhost:5476 <host>` then open localhost:5476
 - **Remote**: type `!dashboard` in Slack to get a presigned link (HMAC-SHA256
   signed, IP-pinned, single-use token — valid for 5 minutes, session up to 6h)
-- **Custom domain**: after `kiroclaw setup`, optionally use `http://kiroclaw.localhost:8765`
+- **Custom domain**: after `kiroclaw setup`, optionally use `http://kiroclaw.localhost:5476`
 - **Custom URL**: set `dashboard.url` in config.json for non-localhost access
 
 ### Remote Access Troubleshooting
 
 If the dashboard doesn't load after setup:
 1. Confirm the gateway is running: `kiroclaw status`
-2. Test the API: `curl http://localhost:8765/api/status`
-3. Check for port conflicts: `lsof -i :8765`
+2. Test the API: `curl http://localhost:5476/api/status`
+3. Check for port conflicts: `lsof -i :5476`
 4. On remote dev desktops, you must use an SSH tunnel — the dashboard binds to
    localhost by default
 5. Run `kiroclaw gateway -vv` for debug output

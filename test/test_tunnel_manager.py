@@ -13,7 +13,7 @@ from kiro_claw.tunnel.manager import TunnelManager, TunnelState, TunnelStatus
 @pytest.fixture
 def manager():
     """Create a TunnelManager with test defaults."""
-    return TunnelManager(port=8765, name_mode="username", name_override=None)
+    return TunnelManager(port=5476, name_mode="username", name_override=None)
 
 
 class TestTunnelName:
@@ -21,13 +21,13 @@ class TestTunnelName:
         assert manager._tunnel_name() == "kiroclaw"
 
     def test_hash_mode(self):
-        mgr = TunnelManager(port=8765, name_mode="hash")
+        mgr = TunnelManager(port=5476, name_mode="hash")
         name = mgr._tunnel_name()
         assert name.startswith("kiroclaw-")
         assert len(name) == len("kiroclaw-") + 8  # 8-char hash
 
     def test_override(self):
-        mgr = TunnelManager(port=8765, name_override="my-custom-tunnel")
+        mgr = TunnelManager(port=5476, name_override="my-custom-tunnel")
         assert mgr._tunnel_name() == "my-custom-tunnel"
 
 
@@ -159,7 +159,7 @@ class TestSetupTunnel:
             allowed_origins=set(),
             tunnel_name_mode="username",
             tunnel_name_override="",
-            port=8765,
+            port=5476,
             log_api_access=mock_log,
         )
         assert result is None
@@ -181,7 +181,7 @@ class TestSetupTunnel:
                 allowed_origins=set(),
                 tunnel_name_mode="username",
                 tunnel_name_override="",
-                port=8765,
+                port=5476,
                 log_api_access=MagicMock(),
             )
 
@@ -213,7 +213,7 @@ class TestSetupTunnel:
                 allowed_origins=allowed_origins,
                 tunnel_name_mode="username",
                 tunnel_name_override="",
-                port=8765,
+                port=5476,
                 log_api_access=MagicMock(),
             )
 
@@ -249,7 +249,7 @@ class TestSetupTunnel:
                 allowed_origins=allowed_origins,
                 tunnel_name_mode="username",
                 tunnel_name_override="",
-                port=8765,
+                port=5476,
                 log_api_access=MagicMock(),
             )
 

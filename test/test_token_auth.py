@@ -236,7 +236,7 @@ async def test_middleware_accepts_valid_token(via: str) -> None:
         # Pre-bind IP and mark consumed so cookie path works
         bind_token_ip(token, "127.0.0.1")
         mark_consumed(token)
-        req = _make_request(cookies={"mc_token_8765": token})
+        req = _make_request(cookies={"mc_token_5476": token})
     else:
         req = _make_request(query={"token": token})
 
@@ -257,7 +257,7 @@ async def test_cookie_set_on_query_param_auth() -> None:
     resp = await mw(req, _ok_handler)
     assert resp.status == 200
 
-    cookie_header = resp.cookies.get("mc_token_8765")
+    cookie_header = resp.cookies.get("mc_token_5476")
     assert cookie_header is not None
     assert cookie_header.value == token
     assert cookie_header["httponly"] is True or "httponly" in str(cookie_header).lower()
@@ -276,11 +276,11 @@ async def test_cookie_not_reset_when_present() -> None:
     bind_token_ip(token, "127.0.0.1")
     mark_consumed(token)
 
-    req = _make_request(cookies={"mc_token_8765": token})
+    req = _make_request(cookies={"mc_token_5476": token})
     resp = await mw(req, _ok_handler)
     assert resp.status == 200
     # Cookie should NOT be re-set on cookie-based auth
-    assert "mc_token_8765" not in resp.cookies
+    assert "mc_token_5476" not in resp.cookies
 
 
 # -- Cookie keyed by browser-facing (Host) port for tunneled multi-instance --
@@ -288,10 +288,10 @@ async def test_cookie_not_reset_when_present() -> None:
 
 @pytest.mark.asyncio
 async def test_cookie_named_by_host_port_under_tunnel() -> None:
-    """Server on 8765 reached via tunneled localhost:7778 -> cookie is
-    mc_token_7778 (Host port), not mc_token_8765 (server port). Lets two
+    """Server on 5476 reached via tunneled localhost:7778 -> cookie is
+    mc_token_7778 (Host port), not mc_token_5476 (server port). Lets two
     same-server-port instances coexist without colliding in the localhost jar."""
-    mw = token_auth_middleware()  # default server port 8765
+    mw = token_auth_middleware()  # default server port 5476
     token = generate_token("tunneluser", ttl_seconds=300)
     req = _make_request(
         query={"token": token}, remote="10.0.0.1", headers={"Host": "localhost:7778"}
@@ -300,13 +300,13 @@ async def test_cookie_named_by_host_port_under_tunnel() -> None:
     resp = await mw(req, _ok_handler)
     assert resp.status == 200
     assert resp.cookies.get("mc_token_7778") is not None  # keyed by Host port
-    assert resp.cookies.get("mc_token_8765") is None  # not the server port
+    assert resp.cookies.get("mc_token_5476") is None  # not the server port
 
 
 @pytest.mark.asyncio
 async def test_cookie_read_uses_host_port() -> None:
     """A cookie named by the Host port authenticates the matching dashboard."""
-    mw = token_auth_middleware()  # server port 8765
+    mw = token_auth_middleware()  # server port 5476
     token = generate_token("readuser", ttl_seconds=300)
     bind_token_ip(token, "127.0.0.1")
     mark_consumed(token)
@@ -322,13 +322,13 @@ async def test_cookie_read_uses_host_port() -> None:
 async def test_cookie_server_port_name_denied_when_host_differs() -> None:
     """A server-port-named cookie does NOT authenticate a different Host port,
     so a sibling instance's cookie can't be mistaken for this one."""
-    mw = token_auth_middleware()  # server port 8765
+    mw = token_auth_middleware()  # server port 5476
     token = generate_token("wrongport", ttl_seconds=300)
     bind_token_ip(token, "127.0.0.1")
     mark_consumed(token)
 
     req = _make_request(
-        cookies={"mc_token_8765": token}, headers={"Host": "localhost:7778"}
+        cookies={"mc_token_5476": token}, headers={"Host": "localhost:7778"}
     )
     resp = await mw(req, _ok_handler)
     assert resp.status != 200
@@ -491,7 +491,7 @@ async def test_internal_path_non_loopback_cookie_auth_when_not_local_only() -> N
     mw = token_auth_middleware(
         internal_paths=frozenset({"/api/spawn"}), internal_secret="s", local_only=False
     )
-    req = _make_request(path="/api/spawn", remote="10.0.0.1", cookies={"mc_token_8765": token})
+    req = _make_request(path="/api/spawn", remote="10.0.0.1", cookies={"mc_token_5476": token})
     resp = await mw(req, _ok_handler)
     assert resp.status == 200
 
@@ -518,7 +518,7 @@ async def test_internal_path_non_loopback_wrong_secret_denied() -> None:
         path="/api/spawn",
         remote="10.0.0.1",
         headers={"X-Internal-Secret": "wrong"},
-        cookies={"mc_token_8765": token},
+        cookies={"mc_token_5476": token},
     )
     resp = await mw(req, _ok_handler)
     assert resp.status == 403
@@ -535,7 +535,7 @@ async def test_internal_path_non_loopback_valid_secret_and_cookie_granted() -> N
         path="/api/spawn",
         remote="10.0.0.1",
         headers={"X-Internal-Secret": "real"},
-        cookies={"mc_token_8765": token},
+        cookies={"mc_token_5476": token},
     )
     resp = await mw(req, _ok_handler)
     assert resp.status == 200
@@ -608,7 +608,7 @@ async def test_mixed_path_non_loopback_with_valid_cookie_granted() -> None:
     token = generate_token("dcvuser", ttl_seconds=300)
     bind_token_ip(token, "10.0.0.1")
     mark_consumed(token)
-    req = _make_request(path="/api/spawn", remote="10.0.0.1", cookies={"mc_token_8765": token})
+    req = _make_request(path="/api/spawn", remote="10.0.0.1", cookies={"mc_token_5476": token})
     resp = await mw(req, _ok_handler)
     assert resp.status == 200
 
@@ -631,7 +631,7 @@ async def test_strict_path_non_loopback_still_hard_denied() -> None:
     bind_token_ip(token, "10.0.0.1")
     mark_consumed(token)
     req = _make_request(
-        path="/api/send-message", remote="10.0.0.1", cookies={"mc_token_8765": token}
+        path="/api/send-message", remote="10.0.0.1", cookies={"mc_token_5476": token}
     )
     resp = await mw(req, _ok_handler)
     assert resp.status == 403
@@ -877,7 +877,7 @@ async def test_dashboard_url_host_selection(dashboard_url: str, expected_host: s
     mock_cfg = MagicMock()
     mock_cfg.dashboard.url = dashboard_url
 
-    expected_port = 8080 if dashboard_url else 8765
+    expected_port = 8080 if dashboard_url else 5476
 
     # Unset KIROCLAW_PORT so parse_dashboard_url (which reads os.environ at
     # call time) uses the port from the URL or the hard-coded default.
@@ -1046,16 +1046,16 @@ async def test_dashboard_sel_log(duration_arg: str, expected_ttl: int) -> None:
 @pytest.mark.asyncio
 async def test_different_ports_use_different_cookie_names() -> None:
     """Two servers on different ports must not share cookies (RFC 6265 §8.5)."""
-    mw_a = token_auth_middleware(port=8765)
+    mw_a = token_auth_middleware(port=5476)
     mw_b = token_auth_middleware(port=6777)
     token_a = generate_token("user_a", ttl_seconds=300)
     token_b = generate_token("user_b", ttl_seconds=300)
 
-    # Server A sets mc_token_8765
+    # Server A sets mc_token_5476
     req_a = _make_request(query={"token": token_a}, remote="127.0.0.1")
     resp_a = await mw_a(req_a, _ok_handler)
     assert resp_a.status == 200
-    assert "mc_token_8765" in resp_a.cookies
+    assert "mc_token_5476" in resp_a.cookies
     assert "mc_token_6777" not in resp_a.cookies
     # Verify legacy mc_token cookie is expired on upgrade
     legacy = resp_a.cookies.get("mc_token")
@@ -1067,13 +1067,13 @@ async def test_different_ports_use_different_cookie_names() -> None:
     resp_b = await mw_b(req_b, _ok_handler)
     assert resp_b.status == 200
     assert "mc_token_6777" in resp_b.cookies
-    assert "mc_token_8765" not in resp_b.cookies
+    assert "mc_token_5476" not in resp_b.cookies
 
 
 @pytest.mark.asyncio
 async def test_wrong_port_cookie_rejected() -> None:
     """Server A must reject a cookie set by server B (different port suffix)."""
-    mw_a = token_auth_middleware(port=8765)
+    mw_a = token_auth_middleware(port=5476)
     token_b = generate_token("user_b", ttl_seconds=300)
     bind_token_ip(token_b, "127.0.0.1")
     mark_consumed(token_b)

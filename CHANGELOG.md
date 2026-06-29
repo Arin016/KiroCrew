@@ -6,6 +6,7 @@ All notable changes to KiroClaw are documented in this file.
 
 ### Changes
 
+- **Default dashboard port is now 5476** (was 8765) — `5476` spells "KIRO" on a phone keypad (K=5, I=4, R=7, O=6) and is far less commonly grabbed than the `8765` descending-sequence port. The gateway, CLI, dashboard, Electron app, and frontend dev proxy now default to `5476`. If you relied on the old port, set `KIROCLAW_PORT=8765` (or pass `--port 8765`) to keep it, and update any bookmarks, SSH tunnels (`ssh -NL 5476:localhost:5476 <host>`), and `dashboard.url` config entries. The auth cookie name follows the port (`mc_token_5476`), so existing sessions on the old port are re-issued automatically on first load.
 - **Default dashboard port is now 8765** (was 7777) — The gateway, CLI, dashboard, and frontend dev proxy now default to port `8765`, avoiding clashes with other tools that commonly grab 7777. If you relied on the old port, set `KIROCLAW_PORT=7777` (or pass `--port 7777`) to keep it, and update any bookmarks, SSH tunnels (`ssh -NL 8765:localhost:8765 <host>`), and `dashboard.url` config entries. The auth cookie name follows the port, so existing sessions on the old port are re-issued automatically on first load.
 
 ## [2.6.0] — 2026-05-31

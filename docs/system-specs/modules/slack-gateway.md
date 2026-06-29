@@ -78,7 +78,7 @@ Phase-aware Slack reaction manager with stall detection. Manages emoji lifecycle
 
 The LLM executes cron and spawn operations via bash using the `kiroclaw` CLI:
 - `kiroclaw cron add "name" "message" --every 300` — writes to crons.json, gateway auto-detects via mtime sync
-- `kiroclaw spawn "task"` — POSTs to dashboard API at localhost:8765, gateway spawns subagent
+- `kiroclaw spawn "task"` — POSTs to dashboard API at localhost:5476, gateway spawns subagent
 
 ### `handle_interaction(channel, msg_ts, action_id) -> None`
 Routes Block Kit button clicks to pending tool approvals:

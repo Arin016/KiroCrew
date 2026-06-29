@@ -35,7 +35,7 @@ class TestIsSafeOAuthUrl:
         assert _is_safe_oauth_url("https://mcp.linear.app/authorize?x=1")
 
     def test_http_allowed(self):
-        assert _is_safe_oauth_url("http://localhost:8765/callback")
+        assert _is_safe_oauth_url("http://localhost:5476/callback")
 
     def test_javascript_rejected(self):
         assert not _is_safe_oauth_url("javascript:alert(1)")
