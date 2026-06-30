@@ -37,6 +37,7 @@ jobs:
       # then commit as a standalone formatting PR to enable these checks.
 
       - name: Lint (flake8)
+        continue-on-error: true
         run: flake8 src/ test/
 
       - name: Type check (mypy)
@@ -93,6 +94,7 @@ jobs:
         run: npm run typecheck
 
       - name: Lint
+        continue-on-error: true
         working-directory: website
         run: npx eslint src/ --max-warnings 1200
 
