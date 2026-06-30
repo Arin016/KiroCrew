@@ -26,6 +26,8 @@ import {
 } from 'lucide-react'
 import { api, ApiError, type InstanceView, type InstanceTunnelStatus } from '../../api/client'
 import { Card, Btn } from '../../components/ui'
+import { useAppDispatch } from '../../store'
+import { removeWarm } from '../../store/instancesSlice'
 
 const STATE_DOT: Record<InstanceTunnelStatus['state'], string> = {
   connected: 'bg-success',
@@ -216,6 +218,7 @@ function InstanceRow({
 
 export function InstancesPanel() {
   const queryClient = useQueryClient()
+  const dispatch = useAppDispatch()
   const [actionErr, setActionErr] = useState<string | null>(null)
   const [diagNote, setDiagNote] = useState<{ kind: 'ok' | 'info' | 'warn'; text: string } | null>(null)
   const [connectedNote, setConnectedNote] = useState<string | null>(null)
@@ -272,6 +275,10 @@ export function InstancesPanel() {
   const disconnectMutation = useMutation({
     mutationFn: (id: string) => api.disconnectInstance(id),
     onMutate: clearNotices,
+    // Explicit disconnect is the ONLY action that removes a tab: dropping the
+    // warm iframe here, together with the backend clearing was_connected, makes
+    // the header tab disappear (the tab strip keys on was_connected || warm).
+    onSuccess: (_r, id) => dispatch(removeWarm(id)),
     onError: (e, id) => setActionErr(`Disconnect of ${id} failed: ${errMsg(e, 'unknown error')}`),
     onSettled: () => reload(),
   })
@@ -281,6 +288,7 @@ export function InstancesPanel() {
       await api.removeInstance(id)
     },
     onMutate: clearNotices,
+    onSuccess: (_r, id) => dispatch(removeWarm(id)),
     onError: (e, id) => setActionErr(`Remove of ${id} failed: ${errMsg(e, 'unknown error')}`),
     onSettled: () => reload(),
   })

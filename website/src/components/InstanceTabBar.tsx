@@ -57,32 +57,43 @@ export default function InstanceTabBar() {
   const instancesQuery = useQuery({ queryKey: ['instances'], queryFn: () => api.listInstances(), enabled: !embedded })
   const disabled = instancesQuery.error instanceof ApiError && instancesQuery.error.status === 403
   const instances = instancesQuery.data?.instances ?? []
-  const connected = instances.filter(i => i.status.state === 'connected')
+  // A tab exists for every instance the user *intends* to be connected — i.e.
+  // `was_connected` (sticky intent, cleared only on an explicit disconnect) or
+  // one that is currently warm/live. Live `status.state` only drives the
+  // per-tab visual state, NOT whether the tab exists, so a tab survives a
+  // gateway restart or a failed auto-reconnect (rendered with an error dot)
+  // instead of vanishing and forcing the user back to Settings → Instances.
+  const tabInstances = instances.filter(
+    i => i.was_connected || i.status?.state === 'connected' || !!warm[i.id],
+  )
 
   const connectMutation = useMutation({
     mutationFn: (id: string) => api.connectInstance(id),
     onSuccess: (st, id) => {
       if (st.state === 'connected' && st.local_port && st.token) {
         dispatch(setWarm({ id, conn: { port: st.local_port, token: st.token } }))
-        dispatch(setActiveId(id))
       }
-      // On failure leave the active tab unchanged; Settings -> Instances surfaces
-      // the detailed error/diagnosis.
+      // The tab was already activated on click; on failure the active pane shows
+      // the in-pane error/reconnect panel (see InstancesViewport).
     },
   })
 
   const onSelectInstance = useCallback(
     (id: string) => {
-      if (warm[id]) dispatch(setActiveId(id))
-      else connectMutation.mutate(id)
+      // Always activate the clicked tab so its pane shows immediately — the warm
+      // iframe if connected, otherwise the in-pane connecting/error panel. If it
+      // isn't warm yet, kick off a (re)connect: success warms it, failure leaves
+      // the error pane up. A failed connect never removes the tab.
+      dispatch(setActiveId(id))
+      if (!warm[id]) connectMutation.mutate(id)
     },
     [warm, dispatch, connectMutation],
   )
   const onLocal = useCallback(() => dispatch(setActiveId(null)), [dispatch])
 
-  // Single-instance experience is unchanged: no bar until a remote is connected.
-  // Embedded panes never render the switcher (single-level by design).
-  if (embedded || disabled || connected.length === 0) return null
+  // Single-instance experience is unchanged: no bar until a remote instance is
+  // connected or remembered. Embedded panes never render the switcher.
+  if (embedded || disabled || tabInstances.length === 0) return null
 
   const tabCls = (active: boolean) =>
     'flex items-center gap-1.5 h-6 px-2.5 rounded-md text-[12px] font-medium whitespace-nowrap transition-colors border shrink-0 ' +
@@ -139,10 +150,32 @@ export default function InstanceTabBar() {
         >
           <Home size={13} /> Local
         </button>
-        {connected.map(inst => {
+        {tabInstances.map(inst => {
           const isActive = activeId === inst.id
-          const isConnecting = connectMutation.isPending && connectMutation.variables === inst.id
+          const st = inst.status?.state
+          const isConnecting =
+            (connectMutation.isPending && connectMutation.variables === inst.id) ||
+            st === 'connecting'
           const badge = unread[inst.id] || 0
+          // Per-tab state dot — green connected, amber connecting, red error,
+          // muted disconnected — so a restored-but-down tab reads as broken
+          // without having to open it.
+          const dotCls =
+            st === 'connected'
+              ? 'bg-[var(--ok)]'
+              : st === 'error'
+                ? 'bg-[var(--danger)]'
+                : st === 'connecting'
+                  ? 'bg-[var(--warn)]'
+                  : 'bg-[var(--muted)]'
+          const stateLabel =
+            st === 'connected'
+              ? 'connected'
+              : st === 'error'
+                ? 'error'
+                : st === 'connecting'
+                  ? 'connecting'
+                  : 'disconnected'
           return (
             <button
               key={inst.id}
@@ -151,8 +184,9 @@ export default function InstanceTabBar() {
               aria-selected={isActive}
               className={tabCls(isActive)}
               onClick={() => onSelectInstance(inst.id)}
-              title={`${inst.name} (${inst.ssh_host})`}
+              title={`${inst.name} (${inst.ssh_host}) — ${stateLabel}`}
             >
+              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotCls}`} aria-hidden />
               {isConnecting ? <Loader2 size={13} className="animate-spin" /> : <Server size={13} />}
               <span className="max-w-[160px] truncate">{inst.name}</span>
               {badge > 0 && (

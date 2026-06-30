@@ -105,8 +105,12 @@ class Instance:
     local_port: int = _UNALLOCATED_PORT
     ttl: str = _DEFAULT_TTL
     remote_bin: str = ""
-    # Lazy-reconnect hint: set True while a tunnel is open, cleared on
-    # disconnect. Persisted so startup can render prior state.
+    # Sticky "connection intent" — the source of truth for whether a tab should
+    # exist for this instance. Set True when a tunnel is opened and cleared ONLY
+    # on an explicit user disconnect; deliberately LEFT TRUE across gateway
+    # shutdown and across a failed auto-revive, so the frontend keeps the tab
+    # (showing an error / click-to-reconnect state) instead of dropping it.
+    # Startup uses it to decide which instances to auto-reconnect.
     was_connected: bool = False
 
     def validate(self) -> None:

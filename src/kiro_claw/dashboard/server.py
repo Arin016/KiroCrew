@@ -61,7 +61,7 @@ from kiro_claw.dashboard.state import _DEFAULT_PORT, DashboardState
 from kiro_claw.dashboard.token_auth import token_auth_middleware
 from kiro_claw.hooks import ScriptHookStore, set_global_hook_store
 from kiro_claw.instances.registry import InstancesRegistry
-from kiro_claw.instances.ssh_tunnel_manager import SshTunnelManager
+from kiro_claw.instances.ssh_tunnel_manager import SshTunnelManager, TunnelState
 from kiro_claw.platform import (
     async_safe_context_call,
     current_context,
@@ -315,6 +315,51 @@ def _apply_startup_yolo(state: DashboardState, cfg: Any) -> None:
     )
 
 
+async def _revive_intended_instances(
+    registry: InstancesRegistry, manager: SshTunnelManager
+) -> None:
+    """Auto-reconnect every instance the operator left connected.
+
+    ``was_connected`` is the sticky "connection intent" (set on connect, cleared
+    only on explicit disconnect) — so on startup it names exactly the instances
+    that had open tunnels when the gateway last stopped. We revive all of them
+    so their tabs come back live, rather than reviving only the single
+    last-active one (which left every other tab dead until a manual reconnect).
+
+    Instances are revived one at a time so they don't race to bind their
+    (mirrored) ports, and each attempt is wrapped so one unreachable host can
+    neither abort the rest nor crash startup. A failed revive leaves
+    ``was_connected`` true (the connect path never clears it on failure) and
+    records a retained error, so its tab persists showing *why* it is down — the
+    user re-authenticates in their own environment (SSH agent / kerberos /
+    whatever the host needs) and clicks Retry from the instance page. We do NOT
+    pre-gate on any credential-staleness check: a failed connect simply surfaces
+    its error, which is exactly the recovery affordance we want.
+
+    Extracted to module level (rather than an inline closure) so the revive
+    policy — which instances are picked and the per-instance failure isolation —
+    is unit-testable without standing up the whole app.
+    """
+    intended = [inst for inst in registry.list() if inst.was_connected]
+    if not intended:
+        return
+    logger.info("Auto-reconnecting %d instance(s) on startup", len(intended))
+    for inst in intended:
+        try:
+            st = await manager.connect(inst.id)
+            if st.state == TunnelState.CONNECTED:
+                logger.info("Auto-reconnected instance %s", inst.id)
+            else:
+                logger.warning(
+                    "Startup auto-reconnect of %s did not connect (%s): %s",
+                    inst.id,
+                    st.state.value,
+                    st.error,
+                )
+        except Exception:
+            logger.warning("Startup auto-reconnect of %s failed", inst.id, exc_info=True)
+
+
 def _register_instances_hooks(
     app: web.Application, state: DashboardState, port: int
 ) -> None:
@@ -327,9 +372,11 @@ def _register_instances_hooks(
 
     The registry + SSH tunnel manager are created lazily inside the startup
     hook (which fires during ``runner.setup()``), gated on ``instances.enabled``
-    (default off). We then revive ONLY the last-active instance so an unattended
-    restart with stale credentials doesn't spawn an ssh failure herd; other
-    instances render "disconnected — click to reconnect".
+    (default off). We then auto-reconnect every instance the operator left
+    connected (``was_connected``) via :func:`_revive_intended_instances`, which
+    isolates per-instance failures so a down host's tab persists in an error
+    state instead of vanishing; the user re-authenticates and retries from the
+    instance page.
     """
 
     async def _instances_startup(app_: web.Application) -> None:
@@ -355,14 +402,7 @@ def _register_instances_hooks(
             "embedded instances to share first-party cookies.",
             port,
         )
-        last = registry.get_last_active()
-        if last is None or not last.was_connected:
-            return
-        try:
-            logger.info("Lazy-reviving last-active instance %s", last.id)
-            await manager.connect(last.id)
-        except Exception:
-            logger.warning("Lazy reconnect of %s failed", last.id, exc_info=True)
+        await _revive_intended_instances(registry, manager)
 
     async def _instances_shutdown(app_: web.Application) -> None:
         manager = getattr(state, "instances_manager", None)

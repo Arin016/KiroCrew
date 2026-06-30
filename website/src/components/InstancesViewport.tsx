@@ -11,15 +11,20 @@
  *   `display` toggles. Unmounting would reload the remote + re-run the token
  *   handshake and lose scroll/session state. This now holds across Local<->remote
  *   switches too (the stack is display:none on Local, not unmounted).
- * - **Warm-set cap** (instances.warm_set_cap): keep at most K warm; connecting
- *   beyond the cap evicts (disconnects) the least-recently-used non-active one.
+ * - **Warm-set cap** (instances.warm_set_cap): keep at most K warm iframes;
+ *   exceeding the cap evicts (unmounts) the least-recently-used non-active
+ *   iframe. Eviction does NOT disconnect the tunnel — the tab persists and
+ *   re-warms on next click. Tabs are removed only by an explicit disconnect.
  * - **Origin-validated unread relay** (§5.4): trust postMessage counts only
  *   from a known loopback tunnel origin.
  *
- * Renders nothing only when there are no warm instances at all.
+ * For an active instance with no warm iframe (down / reconnecting after a
+ * restart) it renders an in-pane error/reconnect panel; otherwise it renders
+ * nothing only when nothing is warm.
  */
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react'
 import { api } from '../api/client'
 import { useAppDispatch, useAppSelector } from '../store'
 import { removeWarm, setUnread, setWarm } from '../store/instancesSlice'
@@ -97,6 +102,24 @@ export default function InstancesViewport() {
     [dispatch],
   )
 
+  // Pre-mint + warm one connected instance without surfacing it. Cheap when the
+  // backend already auto-reconnected the tunnel (connect() returns the cached
+  // token without re-minting). Failures are swallowed: the sticky tab + in-pane
+  // error/Retry panel handle an instance that can't be warmed.
+  const autoWarm = useCallback(
+    async (id: string) => {
+      try {
+        const st = await api.connectInstance(id)
+        if (st.state === 'connected' && st.local_port && st.token) {
+          dispatch(setWarm({ id, conn: { port: st.local_port, token: st.token } }))
+        }
+      } catch {
+        /* leave it — clicking the tab will surface the error panel */
+      }
+    },
+    [dispatch],
+  )
+
   // Origin→id map for the relay listener, kept current without re-subscribing.
   const portToIdRef = useRef<Map<number, string>>(new Map())
   useEffect(() => {
@@ -146,22 +169,49 @@ export default function InstancesViewport() {
     }
   }, [instancesQuery.data, warm, activeId, refreshToken])
 
-  // K-cap eviction: disconnect the least-recently-used non-active warm instance.
-  const disconnectMutation = useMutation({
-    mutationFn: (id: string) => api.disconnectInstance(id),
-    onSettled: (_d, _e, id) => {
-      dispatch(removeWarm(id))
+  // Retry connect from the in-pane error panel: re-mint a token and warm the
+  // iframe. Idempotent on the backend (the tunnel is often already live after a
+  // startup auto-reconnect), so this mainly restores the browser-side token.
+  const connectMutation = useMutation({
+    mutationFn: (id: string) => api.connectInstance(id),
+    onSuccess: (st, id) => {
+      if (st.state === 'connected' && st.local_port && st.token) {
+        dispatch(setWarm({ id, conn: { port: st.local_port, token: st.token } }))
+      }
       void queryClient.invalidateQueries({ queryKey: ['instances'] })
     },
   })
-  const evictRef = useRef<(id: string) => void>(() => {})
-  evictRef.current = (id: string) => disconnectMutation.mutate(id)
+
+  // K-cap eviction drops only the least-recently-used non-active *warm iframe*
+  // to free memory — it does NOT disconnect the tunnel or clear was_connected,
+  // so the tab persists and re-warms instantly on next click. Tabs are removed
+  // only by an explicit disconnect (InstancesPanel), never by eviction.
   useEffect(() => {
     const ids = Object.keys(warm)
     if (ids.length <= warmCap) return
     const victim = [...mru].reverse().find(id => id !== activeId && warm[id])
-    if (victim) evictRef.current(victim)
-  }, [warm, warmCap, mru, activeId])
+    if (victim) dispatch(removeWarm(victim))
+  }, [warm, warmCap, mru, activeId, dispatch])
+
+  // Auto-warm on load: after the first instances poll, pre-mount every
+  // currently-connected instance's iframe (up to the warm cap) so panes are
+  // instantly usable after a gateway restart + page reload — the user never has
+  // to click to re-establish a connection. We deliberately do NOT change
+  // activeId: the dashboard always lands on the Local tab and the warmed iframes
+  // sit hidden and ready. Down instances are skipped (they stay sticky error
+  // tabs); this runs once per mount. warmRef avoids re-firing on warm changes.
+  const didAutoWarmRef = useRef(false)
+  useEffect(() => {
+    const data = instancesQuery.data
+    if (!data || didAutoWarmRef.current) return
+    didAutoWarmRef.current = true
+    const room = Math.max(0, warmCap - Object.keys(warmRef.current).length)
+    if (room <= 0) return
+    const candidates = data.instances
+      .filter(i => i.status?.state === 'connected' && !warmRef.current[i.id])
+      .slice(0, room)
+    for (const inst of candidates) void autoWarm(inst.id)
+  }, [instancesQuery.data, warmCap, autoWarm])
 
   const warmIds = useMemo(() => Object.keys(warm), [warm])
   const srcFor = useCallback(
@@ -177,13 +227,22 @@ export default function InstancesViewport() {
     [warm],
   )
 
-  // Keep warm iframes mounted across Local<->remote switches (hide-not-unmount);
-  // only bail when there is nothing warm at all — or when embedded (a pane never
-  // hosts its own nested panes).
-  if (embedded || warmIds.length === 0) return null
+  // Keep warm iframes mounted across Local<->remote switches (hide-not-unmount).
+  // Also render when the active tab is a remote instance with no warm iframe
+  // ((re)connecting or down) so we can show the in-pane panel instead of a blank
+  // pane. Bail only when there is nothing to show, or when embedded.
+  const activeInst = activeId ? instancesQuery.data?.instances.find(i => i.id === activeId) : undefined
+  const showPanel = activeId !== null && !warm[activeId]
+  if (embedded || (warmIds.length === 0 && !showPanel)) return null
 
   const nameFor = (id: string) =>
     instancesQuery.data?.instances.find(i => i.id === id)?.name || id
+
+  const panelState = activeInst?.status?.state
+  const panelConnecting =
+    (connectMutation.isPending && connectMutation.variables === activeId) ||
+    panelState === 'connecting'
+  const panelError = activeInst?.status?.error || activeInst?.status?.diagnosis?.reason || ''
 
   return (
     <div
@@ -199,6 +258,41 @@ export default function InstancesViewport() {
           style={{ display: id === activeId ? 'block' : 'none' }}
         />
       ))}
+      {showPanel && activeId && (
+        <div className="absolute inset-0 flex items-center justify-center bg-bg p-6">
+          <div className="max-w-md w-full flex flex-col items-center gap-3 text-center">
+            {panelConnecting ? (
+              <Loader2 size={28} className="animate-spin text-muted" />
+            ) : (
+              <AlertTriangle size={28} className="text-[var(--danger)]" />
+            )}
+            <div className="text-sm font-medium text-text">{nameFor(activeId)}</div>
+            <div className="text-xs text-muted">
+              {panelConnecting
+                ? 'Connecting…'
+                : panelState === 'error'
+                  ? 'Connection error'
+                  : 'Disconnected'}
+            </div>
+            {!panelConnecting && panelError && (
+              <div className="w-full max-h-32 overflow-auto rounded-md border border-border bg-bg-hover px-3 py-2 text-left text-xs text-muted whitespace-pre-wrap break-words">
+                {panelError}
+              </div>
+            )}
+            <button
+              type="button"
+              disabled={panelConnecting}
+              onClick={() => connectMutation.mutate(activeId)}
+              className="mt-1 inline-flex items-center gap-1.5 text-xs py-1.5 px-3.5 rounded-md bg-accent text-accent-fg disabled:opacity-60"
+            >
+              <RefreshCw size={13} className={panelConnecting ? 'animate-spin' : ''} /> Retry
+            </button>
+            <div className="text-[11px] text-muted">
+              This tab stays until you disconnect the instance in Settings → Instances.
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

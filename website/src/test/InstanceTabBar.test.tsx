@@ -105,4 +105,49 @@ describe('InstanceTabBar', () => {
     expect(await screen.findByText(/connected · refresh/i)).toBeInTheDocument()
     expect(screen.getByTitle(/Tunnel connected.*auto-refresh in/i)).toBeInTheDocument()
   })
+
+  it('keeps a sticky tab for a was_connected instance whose tunnel is down', async () => {
+    // Core fix: a tab exists for an instance the user intends to be connected
+    // (was_connected) even when its live tunnel is down after a restart.
+    const down = conn({
+      status: { instance_id: 'cd-1', state: 'error', error: 'ssh unreachable', remote_port: 7777 },
+      was_connected: true,
+    })
+    ;(api.listInstances as any).mockResolvedValue({ instances: [down], warm_set_cap: 5, midway: okMidway })
+    renderWithProviders(<InstanceTabBar />)
+    expect(await screen.findByRole('tab', { name: /Cloud One/i })).toBeInTheDocument()
+    // The error state is surfaced in the tab tooltip.
+    expect(screen.getByTitle(/— error/i)).toBeInTheDocument()
+  })
+
+  it('shows no tab for an instance that was never connected and is down', async () => {
+    const never = conn({
+      status: { instance_id: 'cd-1', state: 'disconnected', remote_port: 7777 },
+      was_connected: false,
+    })
+    ;(api.listInstances as any).mockResolvedValue({ instances: [never], warm_set_cap: 5, midway: okMidway })
+    const { container } = renderWithProviders(<InstanceTabBar />)
+    await waitFor(() => expect(api.listInstances).toHaveBeenCalled())
+    expect(container.querySelector('[role="tablist"]')).toBeNull()
+  })
+
+  it('keeps the tab and activates it when a reconnect attempt fails', async () => {
+    const down = conn({
+      status: { instance_id: 'cd-1', state: 'error', error: 'ssh unreachable', remote_port: 7777 },
+      was_connected: true,
+    })
+    ;(api.listInstances as any).mockResolvedValue({ instances: [down], warm_set_cap: 5, midway: okMidway })
+    ;(api.connectInstance as any).mockRejectedValue(new Error('still unreachable'))
+    const u = userEvent.setup()
+    const { store } = renderWithProviders(<InstanceTabBar />)
+
+    await u.click(await screen.findByRole('tab', { name: /Cloud One/i }))
+    // Activated immediately (so the in-pane error panel shows) and a reconnect
+    // was attempted...
+    await waitFor(() => expect(store.getState().instances.activeId).toBe('cd-1'))
+    await waitFor(() => expect(api.connectInstance).toHaveBeenCalledWith('cd-1'))
+    // ...but the failed connect neither warms it nor removes the tab.
+    expect(store.getState().instances.warm['cd-1']).toBeUndefined()
+    expect(screen.getByRole('tab', { name: /Cloud One/i })).toBeInTheDocument()
+  })
 })

@@ -755,6 +755,9 @@ class TestHandlers:
             def token_ttl_remaining(self, iid):
                 return None
 
+            def last_error(self, iid):
+                return None  # no retained connect failure for this instance
+
         r = asyncio.run(
             handlers.api_instances_status(
                 _FakeReq(_State(reg, FakeMgr()), match={"id": "cd-1"}, query={"diagnose": "1"})
@@ -1601,3 +1604,247 @@ class TestPortMirror:
         assert "distinct remote port" in (status.error or "")
         # We fail before opening the tunnel — factory never invoked.
         assert "called" not in captured
+
+
+class TestLastError:
+    """Retained last-error: a failed connect remembers *why* so a sticky tab
+    whose tunnel is down can show its error instead of a bare "disconnected"."""
+
+    @pytest.fixture(autouse=True)
+    def _free_ports(self, monkeypatch):
+        import kiro_claw.instances.ssh_tunnel_manager as stm
+
+        monkeypatch.setattr(stm, "_is_port_free", lambda port, host="127.0.0.1": True)
+
+    def _mgr(self, tmp_path, *, mint=None, factory=_FakeTunnel):
+        from kiro_claw.instances.registry import InstancesRegistry
+        from kiro_claw.instances.ssh_tunnel_manager import SshTunnelManager
+
+        reg = InstancesRegistry(path=tmp_path / "instances.json")
+
+        async def ok_mint(host, *, remote_bin="", ttl="20h", remote_port=None):
+            return "SECRET_TOK"
+
+        return reg, SshTunnelManager(
+            reg, base_port=53400, mint_token=mint or ok_mint, tunnel_factory=factory
+        )
+
+    @pytest.mark.asyncio
+    async def test_retained_on_validation_failure(self, tmp_path):
+        reg, mgr = self._mgr(tmp_path)
+        reg.add(name="Bad", ssh_host="-obadhost", instance_id="bad")
+        await mgr.connect("bad")
+        assert mgr.status("bad") is None  # no live tunnel was created
+        assert "invalid ssh settings" in (mgr.last_error("bad") or "")
+
+    @pytest.mark.asyncio
+    async def test_retained_on_tunnel_start_failure(self, tmp_path):
+        def failing(*a, **k):
+            t = _FakeTunnel(*a, **k)
+            t.start_result = False
+            return t
+
+        reg, mgr = self._mgr(tmp_path, factory=failing)
+        reg.add(name="CD", ssh_host="cd-1", instance_id="cd-1")
+        await mgr.connect("cd-1")
+        # _FakeTunnel.start sets status.error="boom" on failure.
+        assert mgr.status("cd-1") is None  # failed tunnel popped, not left lingering
+        assert mgr.last_error("cd-1") == "boom"
+
+    @pytest.mark.asyncio
+    async def test_retained_on_mint_failure_after_teardown(self, tmp_path):
+        from kiro_claw.instances.token_mint import TokenMintError
+
+        async def bad_mint(host, *, remote_bin="", ttl="20h", remote_port=None):
+            raise TokenMintError("nope")
+
+        reg, mgr = self._mgr(tmp_path, mint=bad_mint)
+        reg.add(name="CD", ssh_host="cd-1", instance_id="cd-1")
+        await mgr.connect("cd-1")
+        assert mgr.status("cd-1") is None  # tunnel popped on mint failure
+        assert "token mint failed" in (mgr.last_error("cd-1") or "")
+
+    @pytest.mark.asyncio
+    async def test_cleared_on_successful_connect(self, tmp_path):
+        from kiro_claw.instances.ssh_tunnel_manager import TunnelState
+        from kiro_claw.instances.token_mint import TokenMintError
+
+        calls = {"n": 0}
+
+        async def flaky_mint(host, *, remote_bin="", ttl="20h", remote_port=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TokenMintError("first attempt fails")
+            return "SECRET_TOK"
+
+        reg, mgr = self._mgr(tmp_path, mint=flaky_mint)
+        reg.add(name="CD", ssh_host="cd-1", instance_id="cd-1")
+        await mgr.connect("cd-1")
+        assert mgr.last_error("cd-1")  # set after the first failure
+        assert (await mgr.connect("cd-1")).state == TunnelState.CONNECTED
+        assert mgr.last_error("cd-1") is None  # cleared on the clean connect
+        await mgr.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_cleared_on_explicit_disconnect(self, tmp_path):
+        from kiro_claw.instances.token_mint import TokenMintError
+
+        async def bad_mint(host, *, remote_bin="", ttl="20h", remote_port=None):
+            raise TokenMintError("nope")
+
+        reg, mgr = self._mgr(tmp_path, mint=bad_mint)
+        reg.add(name="CD", ssh_host="cd-1", instance_id="cd-1")
+        await mgr.connect("cd-1")
+        assert mgr.last_error("cd-1")
+        await mgr.disconnect("cd-1")
+        assert mgr.last_error("cd-1") is None
+
+
+class TestStatusForRetainedError:
+    """_status_for must surface a retained error (state="error") when no live
+    tunnel exists, and fall back to "disconnected" only when there is none."""
+
+    @pytest.fixture(autouse=True)
+    def _free_ports(self, monkeypatch):
+        import kiro_claw.instances.ssh_tunnel_manager as stm
+
+        monkeypatch.setattr(stm, "_is_port_free", lambda port, host="127.0.0.1": True)
+
+    def _mgr(self, tmp_path, *, mint=None, factory=_FakeTunnel):
+        from kiro_claw.instances.registry import InstancesRegistry
+        from kiro_claw.instances.ssh_tunnel_manager import SshTunnelManager
+
+        reg = InstancesRegistry(path=tmp_path / "instances.json")
+
+        async def ok_mint(host, *, remote_bin="", ttl="20h", remote_port=None):
+            return "SECRET_TOK"
+
+        return reg, SshTunnelManager(
+            reg, base_port=53400, mint_token=mint or ok_mint, tunnel_factory=factory
+        )
+
+    @pytest.mark.asyncio
+    async def test_surfaces_error_when_no_live_tunnel(self, tmp_path):
+        import types
+
+        from kiro_claw.dashboard.handlers_instances import _status_for
+        from kiro_claw.instances.token_mint import TokenMintError
+
+        async def bad_mint(host, *, remote_bin="", ttl="20h", remote_port=None):
+            raise TokenMintError("nope")
+
+        reg, mgr = self._mgr(tmp_path, mint=bad_mint)
+        reg.add(name="CD", ssh_host="cd-1", instance_id="cd-1")
+        await mgr.connect("cd-1")  # fails -> no live tunnel, last_error retained
+
+        state = types.SimpleNamespace(instances_manager=mgr)
+        d = _status_for(state, "cd-1")
+        assert d["state"] == "error"
+        assert "token mint failed" in d["error"]
+
+    @pytest.mark.asyncio
+    async def test_disconnected_when_no_tunnel_and_no_error(self, tmp_path):
+        import types
+
+        from kiro_claw.dashboard.handlers_instances import _status_for
+
+        reg, mgr = self._mgr(tmp_path)
+        reg.add(name="CD", ssh_host="cd-1", instance_id="cd-1")
+        state = types.SimpleNamespace(instances_manager=mgr)
+        d = _status_for(state, "cd-1")
+        assert d == {"instance_id": "cd-1", "state": "disconnected"}
+
+    @pytest.mark.asyncio
+    async def test_live_tunnel_status_wins(self, tmp_path):
+        import types
+
+        from kiro_claw.dashboard.handlers_instances import _status_for
+
+        reg, mgr = self._mgr(tmp_path)
+        reg.add(name="CD", ssh_host="cd-1", instance_id="cd-1")
+        await mgr.connect("cd-1")
+        state = types.SimpleNamespace(instances_manager=mgr)
+        d = _status_for(state, "cd-1")
+        assert d["state"] == "connected"
+        await mgr.shutdown()
+
+
+class TestStartupRevive:
+    """_revive_intended_instances: reconnect every was_connected instance on
+    startup and isolate per-instance failures. No credential-staleness gate —
+    a failed reconnect simply leaves a sticky error tab to retry."""
+
+    @pytest.fixture(autouse=True)
+    def _free_ports(self, monkeypatch):
+        import kiro_claw.instances.ssh_tunnel_manager as stm
+
+        monkeypatch.setattr(stm, "_is_port_free", lambda port, host="127.0.0.1": True)
+
+    def _mgr(self, tmp_path, *, mint=None, factory=_FakeTunnel):
+        from kiro_claw.instances.registry import InstancesRegistry
+        from kiro_claw.instances.ssh_tunnel_manager import SshTunnelManager
+
+        reg = InstancesRegistry(path=tmp_path / "instances.json")
+
+        async def ok_mint(host, *, remote_bin="", ttl="20h", remote_port=None):
+            return "SECRET_TOK"
+
+        return reg, SshTunnelManager(
+            reg, base_port=53400, mint_token=mint or ok_mint, tunnel_factory=factory
+        )
+
+    @pytest.mark.asyncio
+    async def test_revives_all_was_connected(self, tmp_path):
+        import kiro_claw.dashboard.server as server
+        from kiro_claw.instances.ssh_tunnel_manager import TunnelState
+
+        reg, mgr = self._mgr(tmp_path)
+        reg.add(name="A", ssh_host="host-a", instance_id="a", remote_port=7777)
+        reg.add(name="B", ssh_host="host-b", instance_id="b", remote_port=7778)
+        reg.add(name="C", ssh_host="host-c", instance_id="c", remote_port=7779)
+        reg.update("a", was_connected=True)
+        reg.update("b", was_connected=True)  # c was never connected
+
+        await server._revive_intended_instances(reg, mgr)
+
+        assert mgr.status("a").state == TunnelState.CONNECTED
+        assert mgr.status("b").state == TunnelState.CONNECTED
+        assert mgr.status("c") is None  # not intended -> not revived
+        await mgr.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_some_fail_isolated_and_intent_preserved(self, tmp_path):
+        import kiro_claw.dashboard.server as server
+        from kiro_claw.instances.ssh_tunnel_manager import TunnelState
+        from kiro_claw.instances.token_mint import TokenMintError
+
+        async def mint(host, *, remote_bin="", ttl="20h", remote_port=None):
+            if "bad" in host:
+                raise TokenMintError("unreachable")
+            return "SECRET_TOK"
+
+        reg, mgr = self._mgr(tmp_path, mint=mint)
+        reg.add(name="Good", ssh_host="host-good", instance_id="good", remote_port=7777)
+        reg.add(name="Bad", ssh_host="host-bad", instance_id="bad", remote_port=7778)
+        reg.update("good", was_connected=True)
+        reg.update("bad", was_connected=True)
+
+        # One unreachable host must NOT abort the rest or raise.
+        await server._revive_intended_instances(reg, mgr)
+
+        assert mgr.status("good").state == TunnelState.CONNECTED
+        assert mgr.status("bad") is None  # mint failed -> no live tunnel
+        # Intent preserved so the tab persists; retained error explains why.
+        assert reg.get("bad").was_connected is True
+        assert "token mint failed" in (mgr.last_error("bad") or "")
+        await mgr.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_noop_when_none_intended(self, tmp_path):
+        import kiro_claw.dashboard.server as server
+
+        reg, mgr = self._mgr(tmp_path)
+        reg.add(name="A", ssh_host="host-a", instance_id="a")  # was_connected False
+
+        await server._revive_intended_instances(reg, mgr)  # returns early, no raise
+        assert mgr.status("a") is None

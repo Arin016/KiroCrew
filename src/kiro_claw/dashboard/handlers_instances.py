@@ -99,7 +99,13 @@ def _registry(state: "DashboardState"):
 
 
 def _status_for(state: "DashboardState", instance_id: str) -> dict:
-    """Live tunnel status dict for an instance, or a disconnected default."""
+    """Live tunnel status dict for an instance, or a disconnected default.
+
+    When there is no live tunnel but the manager retained a failure reason from
+    a failed connect/reconnect (e.g. a startup auto-revive that couldn't reach
+    the host), report an ``error`` state carrying that reason so a sticky tab
+    can show *why* it is down rather than a bare "disconnected".
+    """
     mgr = getattr(state, "instances_manager", None)
     if mgr is not None:
         st = mgr.status(instance_id)
@@ -110,6 +116,9 @@ def _status_for(state: "DashboardState", instance_id: str) -> dict:
             if ttl is not None:
                 d["token_ttl_remaining"] = ttl
             return d
+        last_err = mgr.last_error(instance_id)
+        if last_err:
+            return {"instance_id": instance_id, "state": "error", "error": last_err}
     return {"instance_id": instance_id, "state": "disconnected"}
 
 

@@ -472,6 +472,11 @@ class SshTunnelManager:
         self._reaps_orphans = tunnel_factory is None
         self._tunnels: dict[str, _SshTunnel] = {}
         self._tokens: dict[str, str] = {}
+        # Last connect/reconnect failure reason per instance, retained after the
+        # failed tunnel is popped so a sticky tab whose tunnel is down can still
+        # report *why* (e.g. a startup auto-revive that couldn't reach the host).
+        # Cleared on a successful connect or an explicit disconnect.
+        self._last_error: dict[str, str] = {}
         self._lock = asyncio.Lock()
         # Self-heal: consecutive recovery attempts per instance (reset on a
         # successful rebuild) + live recovery task refs (stored so they aren't
@@ -625,6 +630,13 @@ class SshTunnelManager:
             self._tunnels[instance_id] = tunnel
             ok = await tunnel.start()
             if not ok:
+                self._last_error[instance_id] = tunnel.status.error or "tunnel failed to start"
+                # Drop the failed tunnel (matching the mint-failure path below) so
+                # status() returns None and _status_for surfaces the error via the
+                # last_error() fallback, rather than leaving a stale ERROR tunnel
+                # lingering in _tunnels (its process never started, so _on_tunnel_exit
+                # never fires to clean it up).
+                self._tunnels.pop(instance_id, None)
                 return tunnel.status
 
             # Mint a per-instance token over SSH (never logged).
@@ -646,6 +658,9 @@ class SshTunnelManager:
             with contextlib.suppress(Exception):
                 self._registry.update(instance_id, local_port=local_port, was_connected=True)
                 self._registry.set_last_active(instance_id)
+            # Connected cleanly — drop any retained failure reason from a prior
+            # attempt so status() no longer reports a stale error.
+            self._last_error.pop(instance_id, None)
             return tunnel.status
 
     async def disconnect(self, instance_id: str) -> bool:
@@ -654,6 +669,7 @@ class SshTunnelManager:
             tunnel = self._tunnels.pop(instance_id, None)
             self._tokens.pop(instance_id, None)
             self._recover_attempts.pop(instance_id, None)
+            self._last_error.pop(instance_id, None)
             self._cancel_token_refresh(instance_id)
             if tunnel is None:
                 return False
@@ -818,6 +834,17 @@ class SshTunnelManager:
         """Return the live tunnel status for *instance_id*, or None if not live."""
         tunnel = self._tunnels.get(instance_id)
         return tunnel.status if tunnel is not None else None
+
+    def last_error(self, instance_id: str) -> str | None:
+        """Return the retained connect/reconnect failure reason, or None.
+
+        Set by the connect path when an attempt fails (validation, port
+        conflict, tunnel spawn, or token mint) and the failed tunnel is not
+        retained as a live ERROR status; cleared on a successful connect or an
+        explicit disconnect. Lets a sticky tab whose tunnel is down report *why*
+        even though there is no live tunnel object to query.
+        """
+        return self._last_error.get(instance_id)
 
     def status_all(self) -> dict[str, TunnelStatus]:
         """Return live tunnel statuses keyed by instance id."""
@@ -1042,8 +1069,15 @@ class SshTunnelManager:
         return self.get_token(instance_id) or None
 
     def _error_status(self, inst: Instance, message: str) -> TunnelStatus:
-        """Build (and remember) an ERROR status for *inst* without a live tunnel."""
+        """Build (and remember) an ERROR status for *inst* without a live tunnel.
+
+        The message is retained in ``_last_error`` so a later :meth:`status`
+        lookup — after the failed-connect tunnel has been popped — can still
+        report *why* the instance is down. This is what lets a sticky tab whose
+        tunnel never came up show its error instead of a bare "disconnected".
+        """
         logger.warning("Instance %s connect error: %s", inst.id, message)
+        self._last_error[inst.id] = message
         return TunnelStatus(
             instance_id=inst.id,
             state=TunnelState.ERROR,

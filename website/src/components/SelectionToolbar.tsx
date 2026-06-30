@@ -36,6 +36,10 @@ export default function SelectionToolbar({ containerRef, actions, externalSelect
   // would fire the effect a second, redundant time on every reposition).
   const clampedRef = useRef({ x: 0, y: 0 })
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  // Tracks the "copied!" reset timer so it can be cancelled on unmount — a late
+  // setCopiedId firing after the host/jsdom is torn down would touch `window`
+  // via React DOM and throw (an uncaught post-teardown ReferenceError).
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const selectedTextRef = useRef('')
   const toolbarRef = useRef<HTMLDivElement>(null)
   const sourceRef = useRef<'dom' | 'external' | null>(null)
@@ -171,11 +175,21 @@ export default function SelectionToolbar({ containerRef, actions, externalSelect
     action.onClick(text, rect)
     if (action.id === 'copy') {
       setCopiedId('copy')
-      setTimeout(() => setCopiedId(null), 1500)
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+      copyTimerRef.current = setTimeout(() => {
+        copyTimerRef.current = null
+        setCopiedId(null)
+      }, 1500)
     } else {
       setVisible(false)
       window.getSelection()?.removeAllRanges()
     }
+  }, [])
+
+  // Cancel a pending "copied!" reset timer on unmount so it can never fire
+  // after the component (or a test's jsdom environment) is torn down.
+  useEffect(() => () => {
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
   }, [])
 
   return createPortal(
