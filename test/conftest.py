@@ -110,18 +110,6 @@ def _ensure_event_loop():
 
 
 @pytest.fixture(autouse=True)
-def _disable_challenge_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin challenge-redirect OFF in tests so messages reach the agent.
-
-    Challenge-redirect is permanently enabled in production. Tests that need
-    messages to reach the agent without redirect must disable the constant.
-    """
-    import kiro_claw.slack.events as _events_mod
-
-    monkeypatch.setattr(_events_mod, "_CHALLENGE_REDIRECT_ENABLED", False)
-
-
-@pytest.fixture(autouse=True)
 def _git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure git commits succeed in environments without a global git identity."""
     monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")

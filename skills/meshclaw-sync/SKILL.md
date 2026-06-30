@@ -137,10 +137,16 @@ matching), token auth, model handling. These are the daily bread of a sync.
 
 **PARTIAL** — a commit that mixes both. Port only the generic hunks; drop the
 internal ones. Examples:
-- The upstream `send_channel_challenge` change that also flipped tunnel
-  delivery from opt-in to unconditional — **port the signature/token-claims
-  logic, but KEEP the fork's `get_tunnel_url() if cfg.slack.use_tunnel_url
-  else ""` gate** (tunnel is deliberately opt-in here).
+- The upstream `send_channel_challenge` / challenge-and-redirect flow is
+  **DELIBERATELY REMOVED in this fork** (Amazon-internal-only posture; external
+  Slack messages reach the agent inline). **DROP any upstream hunk that adds or
+  modifies `send_channel_challenge`, a `_CHALLENGE_REDIRECT_ENABLED` gate, or
+  the per-message challenge block in `slack/events.py::_route_message`.** Do NOT
+  port it back. The generic token-claims helpers in `token_auth.py`
+  (`generate_token(prompt=..., extra=...)`, `extract_claims_from_token`) are
+  retained and may still receive upstream fixes — port those. Also KEEP the
+  fork's `get_tunnel_url() if cfg.slack.use_tunnel_url else ""` gate in
+  `send_dashboard_link` (tunnel is deliberately opt-in here).
 - A new `_install_<x>_agent()` that pulls `builder-mcp` into a dedicated agent
   JSON — **de-Amazon it to `kiroclaw-core`-only**, matching how the fork already
   rewrote `_install_research_agent` / `_install_knowledge_agent` (see

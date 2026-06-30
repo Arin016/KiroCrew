@@ -156,12 +156,6 @@ logging.getLogger("slack_sdk.socket_mode.websockets").setLevel(logging.WARNING)
 
 _MAX_SEEN = 5000
 
-# Challenge-and-redirect is permanently enabled. All Slack messages that would
-# reach the agent are redirected to a posture-verified dashboard session.
-# Deterministic commands bypass this. The config field was removed — this is
-# no longer configurable.
-_CHALLENGE_REDIRECT_ENABLED = True
-
 
 # prevent GC of fire-and-forget tasks (Python event loop holds weak refs)
 _background_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
@@ -2089,78 +2083,19 @@ async def _route_message(
     # Per-channel agent override
     agent_override = ch_cfg.agent or None
 
-    # ── Security: challenge-and-redirect ──
-    # ALL messages that would reach the agent require dashboard session
-    # verification first. Deterministic commands (!dashboard, !stop, status,
-    # etc.) are handled earlier in the flow and never reach this point.
-    if _CHALLENGE_REDIRECT_ENABLED:
-        from kiro_claw.slack.allowlist import (
-            send_channel_challenge,  # circular import: allowlist imports handler.is_allowed_user
-        )
-
-        # Resolve the thread this challenge should bind to. If the message is
-        # already in a thread, use that; otherwise root a new thread at the
-        # triggering message itself (its ts) so a fresh @mention becomes the
-        # thread the dashboard session mirrors into. This is what lets dashboard
-        # turns (user + agent) flow back into the originating Slack thread.
-        challenge_thread_ts = thread_ts or msg_ts or ""
-
-        # If that thread is already linked to a dashboard session, carry its
-        # session key so the challenge reopens the SAME session instead of
-        # spawning a disconnected one. Otherwise the dashboard auto-links the
-        # new session to challenge_thread_ts.
-        linked_session_key = ""
-        if challenge_thread_ts and orch.sessions:
-            linked_session_key = orch.sessions.get_session_for_thread(challenge_thread_ts) or ""
-
-        url = await send_channel_challenge(
-            orch.slack,  # type: ignore[arg-type]
-            channel,
-            sender_id,
-            clean_text,
-            thread_ts=challenge_thread_ts,
-            session_key=linked_session_key,
-        )
-        if url:
-            # Ack the message with a lock emoji so the user knows it was received
-            if not channel.startswith("D") and orch.slack:
-                try:
-                    await orch.slack.add_reaction(channel, msg_ts, "lock")
-                except Exception:
-                    pass
-            sel().log_api_access(
-                caller=sender_id,
-                operation="slack.channel_challenge",
-                outcome="redirected",
-                source="slack",
-                resources=f"channel={channel}",
-            )
-        else:
-            # Deny-by-default: do NOT fall through to inline processing.
-            # This is a security control — silently processing inline on
-            # failure would bypass dashboard auth enforcement.
-            sel().log_api_access(
-                caller=sender_id,
-                operation="slack.channel_challenge",
-                outcome="challenge_failed",
-                source="slack",
-                resources=f"channel={channel}",
-            )
-            if orch.slack:
-                try:
-                    fallback = (
-                        "⚠️ Couldn't open a dashboard session right now. "
-                        "Please try again later or open the dashboard directly."
-                    )
-                    if channel.startswith("D"):
-                        await orch.slack.post_message(channel, fallback)
-                    else:
-                        await orch.slack.post_ephemeral(channel, sender_id, fallback)
-                except Exception:
-                    pass
-        _cleanup_image_temps()
-        return
-
+    # ── NOTE: NO challenge-and-redirect here (intentional) ──────────────────
+    # Slack messages are processed INLINE — they fall straight through to the
+    # queue/handle_message path below and reach the agent directly. They are
+    # gated only by the user allowlist (is_allowed_user, checked earlier).
+    #
+    # The "challenge-and-redirect" flow (every message intercepted and turned
+    # into a presigned dashboard-session link via send_channel_challenge) was
+    # an Amazon-internal-only security posture and has been DELIBERATELY REMOVED
+    # for external/open-source usage.
+    #
+    # DO NOT re-introduce it during an upstream (MeshClaw) sync. If a sync
+    # surfaces a `_CHALLENGE_REDIRECT_ENABLED` gate or a `send_channel_challenge`
+    # call here, DROP that hunk — see skills/meshclaw-sync/SKILL.md.
     logger.info(
         "Message from %s in %s (activation=%s): %s", sender_id, channel, activation, text[:80]
     )

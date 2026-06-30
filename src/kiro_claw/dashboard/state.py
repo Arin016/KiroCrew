@@ -968,6 +968,9 @@ class DashboardState:
             "subagents": self.subagents.count if self.subagents else 0,
             "update_available": update_available,
             "no_crons": self.no_crons,
+            # True when the gateway has wired up a live Slack client (Socket Mode
+            # connected). None in pure-dashboard mode or when Slack is disabled.
+            "slack_connected": self.slack_client is not None,
         }
 
     _APPROVAL_TIMEOUT = 7200  # 2 hours — triggers pause (not skip/fail) via deny path

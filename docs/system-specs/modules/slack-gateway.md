@@ -1,6 +1,6 @@
 # Slack Gateway Module
 
-Last Updated: 2026-06-04 (`slack.challenge_redirect_enabled` config gate for challenge-redirect — default false, opt-in)
+Last Updated: 2026-06-29 (challenge-and-redirect REMOVED — Slack messages are processed inline; was an Amazon-internal-only posture)
 
 ## Overview
 
@@ -432,42 +432,15 @@ Single `dashboard.url` field on `KiroClawConfig` (default: `""`), loaded from `c
 `SlackConfig.use_tunnel_url` (bool, default `False`) gates whether the AEA
 tunnel URL is used when building dashboard links posted to Slack:
 
-- `false` (default) — `send_dashboard_link()` and `send_channel_challenge()`
-  ignore any active tunnel and build links from `dashboard.url` (if set) or
-  the resolved host:port. Disabled by default until the tunnel mechanism is
-  scaled for general use.
-- `true` — both link builders prefer `get_tunnel_url()` when a tunnel is
+- `false` (default) — `send_dashboard_link()` ignores any active tunnel and
+  builds links from `dashboard.url` (if set) or the resolved host:port.
+  Disabled by default until the tunnel mechanism is scaled for general use.
+- `true` — `send_dashboard_link()` prefers `get_tunnel_url()` when a tunnel is
   active, falling back to `dashboard.url`/host:port when the tunnel is down.
 
 The setting is independent of `tunnel.enabled` (which controls whether the
 tunnel itself runs). A user may run a tunnel for direct browser access while
 keeping Slack links pointed at the local origin.
-
-### Challenge-Redirect (`slack.challenge_redirect_enabled`)
-
-`SlackConfig.challenge_redirect_enabled` (bool, default `False`) gates the
-challenge-and-redirect flow in `_route_message`. The setting is read at message
-time via `_is_challenge_redirect_enabled()`; a config load failure falls back to
-the dataclass default (currently `False`), so a corrupt config never silently
-flips the gate on.
-
-When enabled, ALL Slack messages that would reach the LLM agent are redirected
-to a posture-verified dashboard session first. Only deterministic commands
-(`!dashboard`, `!stop`, `status`, `ping`) bypass the gate.
-
-Rollout phases:
-- **Opt-in** (default `false`): users set `true` to enable
-- **Opt-out** (default `true`): users set `false` to disable
-- **Forced** (field removed): hardcoded, non-configurable
-
-Config example (remote access via URL):
-```json
-{
-  "dashboard": {
-    "url": "http://my-host.corp.amazon.com:8080"
-  }
-}
-```
 
 ## Security
 

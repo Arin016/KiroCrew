@@ -59,6 +59,7 @@ export default function SystemPage({ embedded }: { embedded?: boolean } = {}) {
             <SysCard title="Network"><Info k="IP Address" v={d?.ip} /><Info k="Download" v={d?.net_rx_kbs != null ? fmtSpeed(d.net_rx_kbs) : '—'} /><Info k="Upload" v={d?.net_tx_kbs != null ? fmtSpeed(d.net_tx_kbs) : '—'} /></SysCard>
             <SysCard title="Storage"><Info k="Total" v={d?.disk_total_gb ? d.disk_total_gb + ' GB' : '—'} /><Info k="Free" v={d?.disk_free_gb ? d.disk_free_gb + ' GB' : '—'} /></SysCard>
             <SysCard title="Ollama"><Info k="Status" v={d?.ollama_running ? (d?.ollama_remote ? <><span className="inline-block w-2.5 h-2.5 rounded-full bg-[var(--ok)]" /> Remote</> : <><span className="inline-block w-2.5 h-2.5 rounded-full bg-[var(--ok)]" /> Running</>) : <><span className="inline-block w-2.5 h-2.5 rounded-full bg-[var(--muted)]" /> Stopped</>} />{d?.ollama_running && <><Info k="PID" v={d?.ollama_pid} /><Info k="Memory (RSS)" v={d?.ollama_mem_mb ? d.ollama_mem_mb + ' MB' : '—'} /></>}</SysCard>
+            <SysCard title="Slack"><Info k="Status" v={<span style={{ color: status?.slack_connected ? 'var(--ok)' : 'var(--muted)' }}>{status?.slack_connected ? 'Connected' : 'Not connected'}</span>} /></SysCard>
           </div>
         </div>
       </div>

@@ -217,19 +217,20 @@ All string fields redacted via `redact()` before forwarding to centralized log i
 7. Fleet governance: `/api/status` reports `yolo_active`/`yolo_expires_at`; `/api/admin/compliance/yolo-status` provides full override status
 8. SEL audit on every lifecycle event: `safety_override:activate`, `safety_override:renew`, `safety_override:expired`, `safety_override:deactivate`
 
-### Challenge-and-Redirect (Slack Security Enforcement)
+### Challenge-and-Redirect (Slack) — REMOVED
 
-All Slack messages that would reach the agent now require dashboard session verification first. This is a deny-by-default security control:
+Earlier builds gated inbound Slack messages behind a "challenge-and-redirect"
+flow: every message that would reach the agent was intercepted and turned into
+a presigned dashboard-session link, denying inline processing by default. This
+was an **Amazon-internal-only** security posture and has been **removed** for
+external/open-source usage.
 
-1. User sends message in Slack (channel, DM, or thread)
-2. KiroClaw generates a presigned dashboard URL with the prompt HMAC-signed inside the token payload
-3. Ephemeral message (channels) or DM sent with link + lock emoji acknowledgment
-4. Dashboard frontend extracts prompt from validated token, pre-fills chat (no auto-send)
-5. If challenge fails: message is NOT processed inline; user receives fallback message
-
-The prompt is embedded in the signed token payload (not as a separate URL parameter) to prevent tampering. Token TTL uses `LINK_WINDOW_SECS` as single source of truth. `window.history.replaceState` strips `?token=` after consumption.
-
-Configuration: OFF by default (the redirect flow is not yet ready for general use); enabled exclusively via the `KIROCLAW_ENABLE_CHALLENGE=1` environment variable (not configurable via config.json). When disabled, Slack messages are processed inline. The legacy `KIROCLAW_DISABLE_CHALLENGE` variable is no longer consulted.
+Slack messages are now processed **inline** and reach the agent directly, gated
+by the user allowlist (`is_allowed_user`) and the Enterprise Grid origin check.
+The `send_channel_challenge()` helper and the `_CHALLENGE_REDIRECT_ENABLED` gate
+no longer exist. The generic signed-token helpers in `token_auth.py`
+(`generate_token`, `extract_claims_from_token`) remain and back the explicit
+`/kiroclaw dashboard` link command.
 
 ### 3-Tier Interactive Trust Escalation
 

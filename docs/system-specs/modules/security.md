@@ -1,6 +1,6 @@
 # Security Module
 
-Last Updated: 2026-05-28 (time-limited safety override replacing permanent YOLO, per-segment deny pattern evaluation, challenge-and-redirect for Slack, 3-tier interactive trust escalation, SSH tunnel -N flag fix)
+Last Updated: 2026-06-29 (challenge-and-redirect for Slack REMOVED — messages processed inline; prior: time-limited safety override replacing permanent YOLO, per-segment deny pattern evaluation, 3-tier interactive trust escalation, SSH tunnel -N flag fix)
 
 ## Overview
 
@@ -238,25 +238,16 @@ Fleet governance endpoints:
 
 Expiry notifications are delivered via Dashboard WebSocket and Slack DM to inform the user before and at override expiration.
 
-**Challenge-and-redirect for Slack direct requests** (`slack/events.py`, `slack/allowlist.py`):
+**Challenge-and-redirect for Slack direct requests** — **REMOVED**
+(`slack/events.py`, `slack/allowlist.py`):
 
-> **Status: OFF by default.** The redirect flow is not yet ready for general
-> use, so by default Slack messages are processed inline (as before) without a
-> dashboard-session gate. Operators opt in during the rollout with
-> `KIROCLAW_ENABLE_CHALLENGE=1`. The rest of this section describes the behavior
-> when the gate is enabled.
-
-When enabled, all Slack messages that would reach the agent require dashboard session verification first (deny-by-default). When a user sends a message:
-
-1. KiroClaw generates a presigned dashboard URL with the user's prompt HMAC-signed inside the token payload (prevents tampering — prompt is NOT a separate query parameter).
-2. In channels: an ephemeral message with the link is sent (visible only to the sender) + a lock emoji reaction acknowledges receipt. In DMs: a regular message is sent (ephemeral rendering issues in DMs).
-3. The dashboard frontend extracts the prompt from the validated token and pre-fills the chat input (user must press Enter to submit — no auto-send).
-4. Token TTL uses `LINK_WINDOW_SECS` as single source of truth.
-5. `window.history.replaceState` strips the `?token=` from the URL after consumption.
-
-If the challenge fails (token generation or delivery error), the message is NOT processed inline (deny-by-default). The user receives a fallback message suggesting they try again or open the dashboard directly.
-
-Configuration: OFF by default; enabled exclusively via the `KIROCLAW_ENABLE_CHALLENGE=1` environment variable (not configurable via config.json). The legacy `KIROCLAW_DISABLE_CHALLENGE` variable is no longer consulted.
+> The redirect flow intercepted every inbound Slack message and turned it into
+> a presigned dashboard-session link (deny-by-default), an Amazon-internal-only
+> posture. It has been removed for external/open-source usage: Slack messages
+> are processed **inline** and reach the agent directly, gated by the user
+> allowlist and the Enterprise Grid origin check. `send_channel_challenge()`
+> and the `_CHALLENGE_REDIRECT_ENABLED` gate no longer exist; do not restore
+> them on an upstream sync (see `skills/meshclaw-sync/SKILL.md`).
 
 **3-tier interactive trust escalation** (`dashboard/chat_runner.py`, `dashboard/chat_handlers.py`):
 

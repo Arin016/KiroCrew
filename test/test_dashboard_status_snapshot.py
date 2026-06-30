@@ -45,13 +45,21 @@ class TestStatusSnapshot:
         state.subagents = None
         assert state.status_snapshot()["subagents"] == 0
 
+    def test_slack_connected_reflects_client(self, state: DashboardState) -> None:
+        # No Slack client wired up (pure-dashboard / Slack disabled).
+        assert state.slack_client is None
+        assert state.status_snapshot()["slack_connected"] is False
+        # Gateway wires up a live Slack client once Socket Mode connects.
+        state.slack_client = MagicMock()
+        assert state.status_snapshot()["slack_connected"] is True
+
     def test_new_fields_propagate_to_all_callers(self, state: DashboardState) -> None:
         """Any field added to status_snapshot is automatically in SSE/WS/API."""
         snap = state.status_snapshot()
         # These keys must exist — if one is missing, a caller will lose it
         required = {"uptime", "start_time", "sessions", "messages",
                     "cron_jobs", "lessons", "subagents", "update_available",
-                    "no_crons"}
+                    "no_crons", "slack_connected"}
         assert required.issubset(snap.keys())
 
     def test_cached_overrides_skip_expensive_calls(self, state: DashboardState) -> None:

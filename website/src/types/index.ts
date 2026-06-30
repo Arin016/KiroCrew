@@ -12,6 +12,8 @@ export interface StatusData {
   platform?: string
   yolo?: boolean
   no_crons?: boolean
+  /** True when the gateway has a live Slack (Socket Mode) connection. */
+  slack_connected?: boolean
 }
 
 export interface SystemData {

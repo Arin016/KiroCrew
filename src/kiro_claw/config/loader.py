@@ -808,7 +808,7 @@ class SlackConfig:
         default=False,
         metadata=_meta(
             "Use Tunnel URL in Slack",
-            "When true, dashboard links posted to Slack (DM and channel challenge) "
+            "When true, dashboard links posted to Slack (e.g. via /kiroclaw dashboard) "
             "use the tunnel URL if one is active. When false (default), "
             "Slack links always use the configured dashboard origin or host:port. "
             "Disabled by default until the tunnel mechanism is scaled for general use.",
