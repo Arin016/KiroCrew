@@ -1,0 +1,102 @@
+name: Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  autosde-rules:
+    name: AutoSDE Rule Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: changed
+        run: |
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          git diff --name-only ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Check frontend blocking rules
+        if: contains(steps.changed.outputs.files, 'website/src/')
+        working-directory: website
+        run: |
+          echo "::group::Checking for inline SVGs (use lucide-react)"
+          if git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} -- 'src/**/*.tsx' | grep -n '^\+.*<svg[^>]*viewBox'; then
+            echo "::error::Use lucide-react icons instead of inline SVGs"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Checking for non-accessible clickables"
+          if git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} -- 'src/**/*.tsx' | grep -nP '^\+.*<(div|span)(?![^>]*role=)[^>]*onClick'; then
+            echo "::error::Use <Clickable> component instead of <div onClick>"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Checking for hardcoded color classes"
+          if git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} -- 'src/**/*.tsx' 'src/**/*.ts' | grep -nP '^\+.*(?:bg|text|border)-(?:gray|slate|zinc|neutral|stone)-\d'; then
+            echo "::warning::Prefer CSS custom property design tokens over hardcoded Tailwind colors"
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Checking for CSS @keyframes (use Framer Motion)"
+          if git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} -- 'src/**/*.tsx' 'src/**/*.ts' | grep -n '^\+.*@keyframes'; then
+            echo "::warning::Prefer Framer Motion over CSS @keyframes for component animations"
+          fi
+          echo "::endgroup::"
+
+      - name: Check backend security rules
+        if: contains(steps.changed.outputs.files, 'src/')
+        run: |
+          echo "::group::Checking for innerHTML usage"
+          if git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} -- 'src/**/*.py' | grep -n '^\+.*\.innerHTML'; then
+            echo "::error::Never use innerHTML — use safe DOM APIs"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Checking for sensitive path reads"
+          SENSITIVE_PATHS='\.aws/|\.ssh/|\.gnupg/|\.docker/|\.kube/|\.npmrc|\.pypirc|\.netrc|\.git-credentials'
+          if git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} -- 'src/**/*.py' | grep -nP "^\+.*open\(.*($SENSITIVE_PATHS)"; then
+            echo "::error::Sensitive credential paths must go through hooks.py is_sensitive_path()"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+  # AI-powered code review (choose one of these options and uncomment):
+
+  # Option A: GitHub Copilot Code Review (free for public repos)
+  # Automatically enabled if your org has Copilot — no workflow needed.
+  # Just go to repo Settings > Code review > enable Copilot reviews.
+
+  # Option B: CodeRabbit (free for open-source)
+  # coderabbit:
+  #   name: CodeRabbit AI Review
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: coderabbitai/ai-pr-reviewer@latest
+  #       with:
+  #         openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+
+  # Option C: Custom LLM review using the AUTOSDE rules
+  # custom-ai-review:
+  #   name: AI Code Review
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         fetch-depth: 0
+  #     - name: Run AI review with AUTOSDE rules
+  #       uses: your-org/ai-review-action@v1
+  #       with:
+  #         rules-file: website/AUTOSDE.yaml
+  #         github-token: ${{ secrets.GITHUB_TOKEN }}
