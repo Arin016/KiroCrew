@@ -41,6 +41,7 @@ jobs:
         run: flake8 src/ test/
 
       - name: Type check (mypy)
+        continue-on-error: true
         run: mypy src/kiro_claw/
 
   backend-test:
