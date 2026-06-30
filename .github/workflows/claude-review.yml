@@ -1,0 +1,60 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+
+jobs:
+  claude-review:
+    # Run on PR events, or on PR comments that mention @claude
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       contains(github.event.comment.body, '@claude'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BEDROCK_ROLE_ARN }}
+          aws-region: us-west-2
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          # Use Bedrock as the inference backend
+          use_bedrock: "true"
+          aws_region: us-west-2
+
+          # Model to use for reviews
+          model: us.anthropic.claude-opus-4-20250514-v1:0
+
+          # The action reads CLAUDE.md and AGENTS.md automatically for context
+          # Additional review instructions:
+          custom_instructions: |
+            You are reviewing a PR for KiroClaw, an open-source AI agent platform.
+            Focus on:
+            - Security: credential handling, path traversal, injection, XSS
+            - Accessibility: WCAG 2.1 AA compliance, keyboard nav, screen readers
+            - Performance: blocking calls on event loops, unbounded allocations
+            - Design tokens: use CSS custom properties, not hardcoded colors
+            - Icons: use lucide-react, not inline SVGs or emoji
+            - Interactive elements: use <Clickable>, not bare <div onClick>
+            - Data fetching: use React Query, not manual useState+useEffect
+            - Animations: use Framer Motion, not CSS @keyframes
+
+          # Only review when triggered (not every push)
+          trigger_phrase: "@claude"
+
+          # Allow the bot to post comments
+          github_token: ${{ secrets.GITHUB_TOKEN }}
