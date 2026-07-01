@@ -2135,9 +2135,15 @@ class TestDoctorStt:
         mock_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
         cfg = KiroClawConfig.load()
         cfg.stt = SttConfig(enabled=True, provider="transcribe", transcribe_region="us-west-2")
+        # boto3 is an OPTIONAL dep (moved to the [voice] extra; modern
+        # amazon-transcribe no longer pulls the full boto3). It is not
+        # ambiently importable in a clean env / CI, so fake it here to keep
+        # this test hermetic — otherwise the "boto3: ✅" assertion depends on
+        # the host happening to have boto3 installed.
         fake_modules = {
             "amazon_transcribe": MagicMock(),
             "amazon_transcribe.client": MagicMock(),
+            "boto3": MagicMock(),
         }
         with (
             patch("kiro_claw.cli_doctor.shutil.which", side_effect=lambda b: f"/usr/local/bin/{b}"),

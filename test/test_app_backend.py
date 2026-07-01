@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import time
 
 import pytest
@@ -15,6 +18,44 @@ from kiro_claw.apps.backend import (
     stop_app_backend,
 )
 from kiro_claw.apps.manager import APP_MANIFEST_FILENAME, install_app
+
+
+def _sandbox_can_spawn() -> bool:
+    """True if the OS sandbox can launch a surviving child on this host.
+
+    start_app_backend() fail-closes to None when the sandbox launcher can't
+    start — e.g. GitHub hosted runners allow unshare(NEWUSER) but deny the
+    launcher's separate unshare(NEWNS) (errno 1). sandbox._probe_unshare() gives
+    a false positive there (it does NEWUSER|NEWNS in a SINGLE unshare call), so
+    gate the real-spawn tests on the production path itself: wrap a trivial
+    command exactly as the backend does and confirm it exits 0. Reusing
+    wrap_argv() means this probe can never drift from start_app_backend().
+    """
+    try:
+        from kiro_claw import sandbox as _sb
+
+        argv, cleanup = _sb.wrap_argv([sys.executable, "-c", "pass"], mode="standard")
+    except Exception:  # noqa: BLE001 — any probe failure => treat as "can't spawn"
+        return False
+    try:
+        return subprocess.run(argv, capture_output=True, timeout=15).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        if cleanup:
+            try:
+                os.unlink(cleanup)
+            except OSError:
+                pass
+
+
+# Evaluated once per worker at collection; the two lifecycle tests below need a
+# real sandboxed backend to come up and stay up.
+_needs_sandbox_spawn = pytest.mark.skipif(
+    not _sandbox_can_spawn(),
+    reason="OS sandbox cannot spawn a surviving child here (e.g. GitHub hosted "
+    "runners deny unshare(NEWNS)); start_app_backend() correctly fail-closes to None",
+)
 
 
 def _make_app_with_backend(tmp_path, name="backend-app"):
@@ -135,6 +176,7 @@ class TestBackendLifecycle:
         result = start_app_backend("no-backend")
         assert result is None
 
+    @_needs_sandbox_spawn
     def test_start_and_stop(self, tmp_path, app_env):
         src = _make_app_with_backend(tmp_path)
         install_app(src)
@@ -154,6 +196,7 @@ class TestBackendLifecycle:
     def test_stop_not_running(self, app_env):
         assert stop_app_backend("nonexistent") is False
 
+    @_needs_sandbox_spawn
     def test_get_process(self, tmp_path, app_env):
         src = _make_app_with_backend(tmp_path)
         install_app(src)
