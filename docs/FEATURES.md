@@ -14,7 +14,7 @@ KiroClaw installs as a Python backend (`pip`) plus a React dashboard (`npm`).
 See the [README](../README.md#quick-start) for the full walkthrough.
 
 ```bash
-git clone https://github.com/YOUR_ORG/kiroclaw.git
+git clone https://github.com/kirodotdev-labs/kiroclaw.git
 cd kiroclaw
 
 # Build the dashboard, then install the backend (bundles it)

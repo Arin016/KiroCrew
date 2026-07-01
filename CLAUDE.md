@@ -155,6 +155,11 @@ both macOS and Linux.
 
 ## Git conventions
 
+- **GitHub is the home of this repo; `main` is the default branch.** Land work
+  via a Pull Request against `main` (branch → PR → CI checks → review → merge) —
+  the standard GitHub flow. Full steps in
+  [CONTRIBUTING.md](CONTRIBUTING.md) → "Pull Request Workflow". There is no
+  Brazil/GitFarm/`cr` path for this repo.
 - Do **not** `git commit` or `git push` unless the user explicitly asks.
   Pushing requires separate explicit approval even after a commit.
 - Commit format: `<type>: <summary>` (≤72 chars, imperative, lowercase, no

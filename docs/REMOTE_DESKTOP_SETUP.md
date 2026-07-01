@@ -63,7 +63,7 @@ for the full walkthrough:
 
 ```bash
 # 1. Clone and install the backend
-git clone https://github.com/YOUR_ORG/kiroclaw.git
+git clone https://github.com/kirodotdev-labs/kiroclaw.git
 cd kiroclaw
 
 # 2. Build the frontend bundle

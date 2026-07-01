@@ -113,7 +113,7 @@ See `website/package.json` for the complete, version-pinned list.
 ## Install Order
 
 ```
-1. git clone https://github.com/YOUR_ORG/kiroclaw.git
+1. git clone https://github.com/kirodotdev-labs/kiroclaw.git
 2. cd website && npm install && npm run build         # build frontend
 3. cp -r website/dist src/kiro_claw/static/dist        # bundle into package
 4. pip install -e ".[voice]"                           # install backend + scripts

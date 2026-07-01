@@ -77,10 +77,10 @@ agent backend and Slack credentials.
 
 - See `CONTRIBUTING.md` in the repository root for contribution guidelines
 - File issues and feature requests on the project's GitHub repository
-  (https://github.com/YOUR_ORG/kiroclaw)
+  (https://github.com/kirodotdev-labs/kiroclaw)
 
 ## Links
 
-- [Repository](https://github.com/YOUR_ORG/kiroclaw)
+- [Repository](https://github.com/kirodotdev-labs/kiroclaw)
 - [Getting Started](getting-started.md)
 - [Configuration](configuration.md)

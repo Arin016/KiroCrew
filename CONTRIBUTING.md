@@ -16,7 +16,7 @@ we welcome issues and pull requests.
 
 ```bash
 # 1. Fork the repo on GitHub, then clone your fork
-git clone https://github.com/YOUR_ORG/kiroclaw.git
+git clone https://github.com/kirodotdev-labs/kiroclaw.git
 cd kiroclaw
 
 # 2. Build the frontend and bundle it into the package
@@ -254,7 +254,7 @@ Rules: imperative mood, lowercase summary, no trailing period, wrap body at 72 c
 
 ## Questions?
 
-Open a [GitHub issue](https://github.com/YOUR_ORG/kiroclaw/issues) or start a
+Open a [GitHub issue](https://github.com/kirodotdev-labs/kiroclaw/issues) or start a
 discussion in the repository.
 
 ## Security Issues

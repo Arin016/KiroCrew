@@ -27,7 +27,7 @@ dashboard (built with `npm`). Memory and the knowledge library use a local
 
 ```bash
 # From a clone of this repo
-git clone https://github.com/YOUR_ORG/kiroclaw.git
+git clone https://github.com/kirodotdev-labs/kiroclaw.git
 cd kiroclaw
 
 # Build the frontend (see step 2) BEFORE installing so the dashboard is bundled

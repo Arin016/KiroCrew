@@ -103,6 +103,7 @@ All integration tests MUST pass before committing frontend changes.
 
 ## Git Conventions
 
+- **This repo lives on GitHub; `main` is the default branch.** Changes land through the standard GitHub Pull Request flow — branch off `main`, push, open a PR, let CI + review pass, then merge. See [CONTRIBUTING.md](CONTRIBUTING.md) → "Pull Request Workflow" for the full steps. This is a public OSS project — there is no Brazil/GitFarm or `cr` review path.
 - Do NOT proactively `git commit` or `git push` — only when explicitly requested by the user
 - Do NOT run `git push` unless the user explicitly says to push. Committing is OK when asked, but pushing requires separate explicit approval.
 
