@@ -93,7 +93,7 @@ export default function TreeNode({ node, depth, expanded, toggleExpand, selected
         onContextMenu={(e) => { if (onContextMenu) { e.preventDefault(); onContextMenu(e, node) } }}
         role="button"
         tabIndex={0}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); isDir ? toggleExpand(node) : onSelect(node) } }}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (isDir) toggleExpand(node); else onSelect(node) } }}
       >
         {isDir
           ? (isOpen ? <ChevronDown size={12} style={{ marginRight: 2, opacity: 0.55 }} /> : <ChevronRight size={12} style={{ marginRight: 2, opacity: 0.55 }} />)

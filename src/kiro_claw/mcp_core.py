@@ -51,8 +51,6 @@ from kiro_claw.mcp_shared import call_tool_with_logging, run_mcp_stdio_loop
 from kiro_claw.platform import redact_via_context as redact
 from kiro_claw.security import (
     BINARY_MIME_ALLOWLIST,
-)
-from kiro_claw.security import (
     redact_credentials,
     redact_exfiltration_urls,
 )

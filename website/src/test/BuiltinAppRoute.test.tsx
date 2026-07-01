@@ -5,8 +5,11 @@ import BuiltinAppRoute from '../apps/BuiltinAppRoute'
 
 
 // Mock the registry to avoid loading real page components
-vi.mock('../apps/builtinRegistry', () => {
-  const { lazy } = require('react')
+vi.mock('../apps/builtinRegistry', async () => {
+  // Dynamic import (not require, not a top-level import): vi.mock is hoisted
+  // above static imports, so a module-scope `import { lazy }` would risk a TDZ
+  // error inside this factory. await import() resolves lazily when the mock runs.
+  const { lazy } = await import('react')
   return {
     getBuiltinComponent: (path: string) => {
       if (path === '/test-app') {

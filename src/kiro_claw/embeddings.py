@@ -260,9 +260,14 @@ class EmbeddingClient:
             resolved_model = src.registry_model() if model is None else model
             return resolved_model, src.endpoint_url()
 
+        # Widen the fallback's declared type to a supertype of _resolve's
+        # (str, str | None) return so safe_context_call's TypeVar binds to it and
+        # accepts _resolve as a subtype. The bare literal (model, None) would
+        # otherwise infer tuple[str | None, None] and clash with _resolve.
+        fallback: tuple[str | None, str | None] = (model, None)
         resolved_model, endpoint = safe_context_call(
             _resolve,
-            fallback=(model, None),
+            fallback=fallback,
             log_message="embeddings source lookup failed; using local defaults",
         )
         if resolved_model is None:

@@ -213,7 +213,7 @@ export function useVoiceInput(onText: (text: string) => void, opts: Opts = {}) {
   }, [streamEnabled, streamStop])
 
   const isRecording = streamEnabled ? streamRecording : recording
-  const toggle = useCallback(() => { isRecording ? stop() : start() }, [isRecording, start, stop])
+  const toggle = useCallback(() => { if (isRecording) stop(); else start() }, [isRecording, start, stop])
 
   return { recording: isRecording, transcribing, toggle, prewarm, error, level, deviceLabel, clearError }
 }

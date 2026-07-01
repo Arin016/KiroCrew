@@ -22,7 +22,7 @@ export default function GrillTree({ tree, dispatch, onExpand }: Props) {
   const childrenOf = (id: string | null) => live.filter(n => n.parent === id)
 
   const toggleCollapse = (id: string) =>
-    setCollapsed(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+    setCollapsed(s => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n })
 
   async function expand(id: string) {
     setExpandingIds(s => new Set(s).add(id))

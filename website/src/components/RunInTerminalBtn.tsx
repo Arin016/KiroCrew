@@ -35,7 +35,7 @@ export default function RunInTerminalBtn({ code }: { code: string }) {
       readyTimeoutRef.current = setTimeout(() => { unsubRef.current?.(); flash('error') }, 5000)
       unsubRef.current = onTerminalReady(() => {
         clearTimeout(readyTimeoutRef.current)
-        sendToTerminal(pendingCodeRef.current) ? flash('sent') : flash('error')
+        if (sendToTerminal(pendingCodeRef.current)) flash('sent'); else flash('error')
       })
       return
     }

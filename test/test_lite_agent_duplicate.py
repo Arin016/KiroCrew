@@ -9,8 +9,8 @@ from unittest.mock import patch
 import pytest
 
 from kiro_claw.agent import (
-    _LITE_AGENT_FILENAME,
     _KIROCLAW_AIM_PACKAGE,
+    _LITE_AGENT_FILENAME,
     _install_lite_agent_fallback,
     _remove_bare_lite_if_aim_installed,
 )

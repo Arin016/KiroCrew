@@ -41,11 +41,11 @@ from kiro_claw import __version__
 from kiro_claw.apps.builtins import BUILTIN_NAMES as _BUILTIN_NAMES
 from kiro_claw.browser.cli import run_browse
 from kiro_claw.config import KiroClawConfig, config_dir
-from kiro_claw.constants import env_flag_enabled
 from kiro_claw.config.loader import (
     DASHBOARD_PORT,
     build_provider_factory,
 )
+from kiro_claw.constants import env_flag_enabled
 from kiro_claw.history import ConversationLog, HistoryConsolidator
 from kiro_claw.memory import MemoryStore
 from kiro_claw.platform import (

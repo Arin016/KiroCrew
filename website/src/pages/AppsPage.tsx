@@ -340,7 +340,7 @@ export default function AppsPage() {
                                   checked={keepSpecific.has(d.id)}
                                   onChange={e => {
                                     const next = new Set(keepSpecific)
-                                    e.target.checked ? next.add(d.id) : next.delete(d.id)
+                                    if (e.target.checked) next.add(d.id); else next.delete(d.id)
                                     setKeepSpecific(next)
                                   }}
                                   className="rounded"

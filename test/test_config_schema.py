@@ -18,10 +18,10 @@ from kiro_claw.config import schema as _schema_module
 from kiro_claw.config.loader import (
     AgentConfig,
     DashboardConfig,
-    MemoryConfig,
-    MemoryStoreConfig,
     KiroClawAgentConfig,
     KiroClawConfig,
+    MemoryConfig,
+    MemoryStoreConfig,
     SessionConfig,
     SlackConfig,
     WorkspaceConfig,

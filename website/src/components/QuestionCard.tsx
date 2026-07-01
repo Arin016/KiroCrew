@@ -27,7 +27,7 @@ function QuestionCard({ questions, onSubmit }: QuestionCardProps) {
       const current = prev[qIdx] || new Set<string>()
       const next = new Set(current)
       if (multi) {
-        next.has(label) ? next.delete(label) : next.add(label)
+        if (next.has(label)) next.delete(label); else next.add(label)
       } else {
         next.clear()
         if (!current.has(label)) next.add(label)

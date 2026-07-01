@@ -42,10 +42,6 @@ from kiro_claw.config.paths import (  # noqa: F401
     config_dir,
     config_package_dir,
 )
-from kiro_claw.effort import is_valid_effort, model_supports_effort
-from kiro_claw.instances.constants import DEFAULT_SSH_COMPRESSION as _DEFAULT_SSH_COMPRESSION
-from kiro_claw.instances.constants import DEFAULT_TUNNEL_BASE_PORT as _DEFAULT_TUNNEL_BASE_PORT
-from kiro_claw.instances.constants import DEFAULT_WARM_SET_CAP as _DEFAULT_WARM_SET_CAP
 
 # Schema validation + the validated-data cache live in ``config.validation``.
 # Re-exported here for backward compatibility — callers and tests still
@@ -68,6 +64,10 @@ from kiro_claw.config.validation import (  # noqa: F401
     _mask_value,
 )
 from kiro_claw.config.validation import validate_config_data as _validate_config_data  # noqa: F401
+from kiro_claw.effort import is_valid_effort, model_supports_effort
+from kiro_claw.instances.constants import DEFAULT_SSH_COMPRESSION as _DEFAULT_SSH_COMPRESSION
+from kiro_claw.instances.constants import DEFAULT_TUNNEL_BASE_PORT as _DEFAULT_TUNNEL_BASE_PORT
+from kiro_claw.instances.constants import DEFAULT_WARM_SET_CAP as _DEFAULT_WARM_SET_CAP
 
 logger = logging.getLogger(__name__)
 
@@ -2315,7 +2315,9 @@ class KiroClawConfig:
         the kiro-cli backend. The factory accepts an optional ``session_key`` to
         create a per-session subdirectory under ``workspace_root()``.
         """
-        from kiro_claw.providers.acp import AcpProvider  # circular: acp -> client -> session -> config.loader
+        from kiro_claw.providers.acp import (
+            AcpProvider,  # circular: acp -> client -> session -> config.loader
+        )
 
         model = self.agent.model
         if model == DEFAULT_MODEL:

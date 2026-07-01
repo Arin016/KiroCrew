@@ -43,8 +43,9 @@ from kiro_claw.aim_agents import installed_kiro_packages_missing_from_cc
 from kiro_claw.config import KiroClawConfig
 from kiro_claw.config import config_path as _mc_config_path
 from kiro_claw.mcp_utils import mcp_server_alias
-from kiro_claw.platform import current_context, safe_context_call
+from kiro_claw.platform import current_context
 from kiro_claw.platform import redact_via_context as redact
+from kiro_claw.platform import safe_context_call
 from kiro_claw.security import is_sensitive_path
 from kiro_claw.sel import (  # circular import: sel imports config which imports agent
     SecurityEvent,
@@ -294,7 +295,10 @@ def _extra_mcp_servers() -> dict[str, dict]:
     # Fail-closed via safe_context_call: a non-standalone host that cannot
     # compose its context re-raises PlatformCompositionError (never silently
     # degrades to the empty OSS server set); any other lookup failure -> none.
-    extra = safe_context_call(
+    # Annotate the target so safe_context_call's TypeVar binds from here, not
+    # from the empty ``fallback={}`` literal (which would infer dict[Never, Never]
+    # and clash with extra_mcp_servers()'s dict[str, dict] return).
+    extra: dict[str, dict] = safe_context_call(
         lambda: current_context().mcp_tooling.extra_mcp_servers(),
         fallback={},
         log_message="extra_mcp_servers lookup failed; using none",

@@ -280,7 +280,7 @@ export default function FileExplorerPage() {
     const onKey = (e: KeyboardEvent) => {
       if (isShortcut(e) && e.key.toLowerCase() === 'f') { e.preventDefault(); toggleSearch() }
       else if (isShortcut(e) && e.key.toLowerCase() === 't') { e.preventDefault(); newFolderTabAction() }
-      else if (isShortcut(e) && e.key.toLowerCase() === 'w') { e.preventDefault(); activeFile ? closeFileTab(activeFile.id) : activeFolder && closeFolderTab(activeFolder.id) }
+      else if (isShortcut(e) && e.key.toLowerCase() === 'w') { e.preventDefault(); if (activeFile) closeFileTab(activeFile.id); else if (activeFolder) closeFolderTab(activeFolder.id) }
       else if (e.key === 'Escape' && activeFolder?.showSearch) { e.preventDefault(); toggleSearch() }
     }
     window.addEventListener('keydown', onKey)

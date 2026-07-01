@@ -778,9 +778,7 @@ class TestPermissionEventCarriesRawParams:
 
     def test_permission_event_recovers_cached_params(self):
         from kiro_claw.acp.client import AcpClient
-        from kiro_claw.acp.types import EVENT_PERMISSION_REQUEST
-
-        from kiro_claw.acp.types import JsonRpcMessage
+        from kiro_claw.acp.types import EVENT_PERMISSION_REQUEST, JsonRpcMessage
 
         client = AcpClient.__new__(AcpClient)  # avoid spawning a real process
         client._tool_call_inputs = {}
