@@ -43,9 +43,16 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           # Automation mode: presence of `prompt` makes the action run on the
           # triggering event without waiting for a `@claude` trigger phrase.
+          # Allow the gh commands the review uses to post its findings. The
+          # action runs Bash deny-by-default; in headless CI a denied `gh pr
+          # comment` silently drops the review's summary (and its [BLOCK-MERGE]
+          # marker), so the gate can never fire. `gh pr comment` is the
+          # single-operation form — `gh pr review --comment` trips the
+          # "multiple operations require approval" guard.
           claude_args: |
-            --model us.anthropic.claude-opus-4-20250514-v1:0
-            --max-turns 15
+            --model us.anthropic.claude-opus-4-8
+            --max-turns 30
+            --allowedTools "Bash(gh pr comment:*),Bash(gh pr view:*),Bash(gh api:*)"
           prompt: |
             You are reviewing pull request #${{ github.event.pull_request.number }}
             of ${{ github.repository }} (HEAD ${{ github.event.pull_request.head.sha }}).
