@@ -30,17 +30,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[voice]" --group dev
 
-      # black + isort checks disabled until bulk format pass is done.
-      # The de-Amazonification sync lost formatting. Run:
-      #   black --target-version py310 src/ test/ && isort src/ test/
-      # then commit as a standalone formatting PR to enable these checks.
+      # black --check is still disabled: a bulk format pass (~406 files) has not
+      # been run yet. Do it as a standalone formatting PR, then re-enable:
+      #   black --target-version py310 src/ test/ && git commit
+      #   - name: Check formatting (black)
+      #     run: black --check --target-version py310 src/ test/
+      # isort/flake8/mypy below are BLOCKING (config in pyproject.toml + setup.cfg).
+
+      - name: Check imports (isort)
+        run: isort --check-only src/kiro_claw test
 
       - name: Lint (flake8)
-        continue-on-error: true
-        run: flake8 src/ test/
+        run: flake8 src/kiro_claw test
 
       - name: Type check (mypy)
-        continue-on-error: true
         run: mypy src/kiro_claw/
 
   backend-test:
@@ -99,12 +102,18 @@ jobs:
 
       - name: Type check
         working-directory: website
-        run: npm run typecheck
+        # `tsc -b`, NOT `npm run typecheck`: the root tsconfig has `files: []`
+        # + project references, so `tsc --noEmit` (what `typecheck` runs) checks
+        # ZERO files and always passes. `tsc -b` actually type-checks the project.
+        run: npx tsc -b
 
       - name: Lint
-        continue-on-error: true
         working-directory: website
-        run: npx eslint src/ --max-warnings 1200
+        # Blocking: fails on any eslint error and on any NEW warning above the
+        # current baseline. Ratchet --max-warnings down toward 0 as the ~1066
+        # pre-existing warnings (no-explicit-any, jsx-a11y, no-console) are burned
+        # down; do not raise it.
+        run: npx eslint src/ --max-warnings 1066
 
       - name: Copy/paste detection
         working-directory: website

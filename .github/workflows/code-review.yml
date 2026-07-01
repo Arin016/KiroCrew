@@ -24,79 +24,93 @@ jobs:
           git diff --name-only ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
+      # Deterministic replication of the blocking AutoSDE rules from
+      # website/AUTOSDE.yaml. These catch the unambiguous cases; the semantic
+      # half (aria-label on icon-only buttons, no-emoji, template-literal HTML)
+      # is covered by the auto-running Claude review in claude-review.yml.
       - name: Check frontend blocking rules
         if: contains(steps.changed.outputs.files, 'website/src/')
         working-directory: website
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          echo "::group::Checking for inline SVGs (use lucide-react)"
-          if git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} -- 'src/**/*.tsx' | grep -n '^\+.*<svg[^>]*viewBox'; then
+          echo "::group::use-lucide-icons — no inline SVGs"
+          if git diff "$BASE".."$HEAD" -- 'src/**/*.tsx' | grep -n '^\+.*<svg[^>]*viewBox'; then
             echo "::error::Use lucide-react icons instead of inline SVGs"
             exit 1
           fi
           echo "::endgroup::"
 
-          echo "::group::Checking for non-accessible clickables"
-          if git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} -- 'src/**/*.tsx' | grep -nP '^\+.*<(div|span)(?![^>]*role=)[^>]*onClick'; then
+          echo "::group::accessible-interactive-elements — no <div/span onClick> without role"
+          if git diff "$BASE".."$HEAD" -- 'src/**/*.tsx' | grep -nP '^\+.*<(div|span)(?![^>]*role=)[^>]*onClick'; then
             echo "::error::Use <Clickable> component instead of <div onClick>"
             exit 1
           fi
           echo "::endgroup::"
 
-          echo "::group::Checking for hardcoded color classes"
-          if git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} -- 'src/**/*.tsx' 'src/**/*.ts' | grep -nP '^\+.*(?:bg|text|border)-(?:gray|slate|zinc|neutral|stone)-\d'; then
+          echo "::group::frontend-security — no .innerHTML"
+          if git diff "$BASE".."$HEAD" -- 'src/**/*.tsx' 'src/**/*.ts' | grep -nP '^\+.*\.innerHTML\s*='; then
+            echo "::error::Never assign .innerHTML — use textContent, createElement, or React elements"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+          echo "::group::frontend-security — Mermaid securityLevel must be 'strict'"
+          if git diff "$BASE".."$HEAD" -- 'src/**/*.tsx' 'src/**/*.ts' | grep -nP "^\+.*securityLevel:\s*['\"]loose['\"]"; then
+            echo "::error::Mermaid securityLevel must be 'strict' (never 'loose' — it allows JS execution from diagrams)"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+          echo "::group::page-layout-pattern — no custom max-w wrapper on pages"
+          if git diff "$BASE".."$HEAD" -- 'src/pages/*.tsx' | grep -nP '^\+.*max-w-\[(?:9[0-9]{2}|[1-9][0-9]{3,})px\]'; then
+            echo "::error::Dashboard pages must use PageHeader + px-6 pb-8 overflow-y-auto flex-1 min-h-0, not a custom max-w-[>=900px] wrapper"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+          echo "::group::frontend-security (advisory) — dangerouslySetInnerHTML without sanitize/md/DOMPurify"
+          if git diff "$BASE".."$HEAD" -- 'src/**/*.tsx' 'src/**/*.ts' | grep -nP '^\+.*dangerouslySetInnerHTML' | grep -vP 'sanitize\(|\bmd\(|DOMPurify'; then
+            echo "::warning::dangerouslySetInnerHTML must go through sanitize()/md() (DOMPurify). The Claude review will block if unsanitized."
+          fi
+          echo "::endgroup::"
+
+          echo "::group::use-design-tokens (advisory) — no hardcoded Tailwind colors"
+          if git diff "$BASE".."$HEAD" -- 'src/**/*.tsx' 'src/**/*.ts' | grep -nP '^\+.*(?:bg|text|border)-(?:gray|slate|zinc|neutral|stone)-\d'; then
             echo "::warning::Prefer CSS custom property design tokens over hardcoded Tailwind colors"
           fi
           echo "::endgroup::"
 
-          echo "::group::Checking for CSS @keyframes (use Framer Motion)"
-          if git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} -- 'src/**/*.tsx' 'src/**/*.ts' | grep -n '^\+.*@keyframes'; then
+          echo "::group::use-framer-motion (advisory) — no new CSS @keyframes"
+          if git diff "$BASE".."$HEAD" -- 'src/**/*.tsx' 'src/**/*.ts' | grep -n '^\+.*@keyframes'; then
             echo "::warning::Prefer Framer Motion over CSS @keyframes for component animations"
           fi
           echo "::endgroup::"
 
+          echo "::group::no-text-below-minimum (advisory) — no text-[0-9px]"
+          if git diff "$BASE".."$HEAD" -- 'src/**/*.tsx' 'src/**/*.ts' | grep -nP '^\+.*text-\[[0-9]px\]'; then
+            echo "::warning::Minimum usable text size is 10px; text-[0px]..text-[9px] is not accessible"
+          fi
+          echo "::endgroup::"
+
       - name: Check backend security rules
-        if: contains(steps.changed.outputs.files, 'src/')
+        if: contains(steps.changed.outputs.files, 'src/kiro_claw/')
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          echo "::group::Checking for innerHTML usage"
-          if git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} -- 'src/**/*.py' | grep -n '^\+.*\.innerHTML'; then
-            echo "::error::Never use innerHTML — use safe DOM APIs"
+          echo "::group::sensitive-path reads must go through is_sensitive_path()"
+          SENSITIVE_PATHS='\.aws/|\.ssh/|\.gnupg/|\.docker/|\.kube/|\.npmrc|\.pypirc|\.netrc|\.git-credentials|\.kiroclaw/security_policy|\.kiroclaw/admission_policy'
+          # Best-effort: covers open()/Path.open()/read_text()/os.open()/aiofiles.
+          # The authoritative control is security.py/hooks.py + their unit tests;
+          # this grep is a fast pre-filter, not the guarantee.
+          if git diff "$BASE".."$HEAD" -- 'src/**/*.py' | grep -nP "^\+.*(open\(|\.open\(|read_text\(|read_bytes\(|os\.open\().*($SENSITIVE_PATHS)"; then
+            echo "::error::Sensitive credential/keystone paths must go through hooks.py is_sensitive_path()"
             exit 1
           fi
           echo "::endgroup::"
 
-          echo "::group::Checking for sensitive path reads"
-          SENSITIVE_PATHS='\.aws/|\.ssh/|\.gnupg/|\.docker/|\.kube/|\.npmrc|\.pypirc|\.netrc|\.git-credentials'
-          if git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} -- 'src/**/*.py' | grep -nP "^\+.*open\(.*($SENSITIVE_PATHS)"; then
-            echo "::error::Sensitive credential paths must go through hooks.py is_sensitive_path()"
-            exit 1
-          fi
-          echo "::endgroup::"
-
-  # AI-powered code review (choose one of these options and uncomment):
-
-  # Option A: GitHub Copilot Code Review (free for public repos)
-  # Automatically enabled if your org has Copilot — no workflow needed.
-  # Just go to repo Settings > Code review > enable Copilot reviews.
-
-  # Option B: CodeRabbit (free for open-source)
-  # coderabbit:
-  #   name: CodeRabbit AI Review
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: coderabbitai/ai-pr-reviewer@latest
-  #       with:
-  #         openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-
-  # Option C: Custom LLM review using the AUTOSDE rules
-  # custom-ai-review:
-  #   name: AI Code Review
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #       with:
-  #         fetch-depth: 0
-  #     - name: Run AI review with AUTOSDE rules
-  #       uses: your-org/ai-review-action@v1
-  #       with:
-  #         rules-file: website/AUTOSDE.yaml
-  #         github-token: ${{ secrets.GITHUB_TOKEN }}
+  # The semantic AI layer of code review (the AutoSDE rules that cannot be
+  # expressed as a grep) lives in claude-review.yml, which auto-runs on every
+  # PR and fails the check on high-severity findings.

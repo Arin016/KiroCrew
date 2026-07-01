@@ -1,24 +1,28 @@
 name: Claude Code Review
 
+# Semantic AI review layer. Replicates the AutoSDE rules that CANNOT be
+# expressed as a grep (aria-label on icon-only buttons, no-emoji-as-icons,
+# template-literal HTML injection, React Query usage, WCAG semantics). Runs
+# automatically on every PR (automation mode — no @claude mention needed) and
+# fails the check on high-severity findings so it can gate merge via branch
+# protection.
+
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  issue_comment:
-    types: [created]
 
 permissions:
   contents: read
   pull-requests: write
-  issues: read
+  id-token: write   # required for AWS OIDC (configure-aws-credentials)
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   claude-review:
-    # Run on PR events, or on PR comments that mention @claude
-    if: |
-      github.event_name == 'pull_request' ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request &&
-       contains(github.event.comment.body, '@claude'))
+    name: Claude Review
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,31 +34,68 @@ jobs:
           role-to-assume: ${{ secrets.AWS_BEDROCK_ROLE_ARN }}
           aws-region: us-west-2
 
-      - uses: anthropics/claude-code-action@v1
+      - name: Claude review
+        id: review
+        uses: anthropics/claude-code-action@v1
         with:
-          # Use Bedrock as the inference backend
+          # Inference via Amazon Bedrock (region from the AWS creds step above).
           use_bedrock: "true"
-          aws_region: us-west-2
-
-          # Model to use for reviews
-          model: us.anthropic.claude-opus-4-20250514-v1:0
-
-          # The action reads CLAUDE.md and AGENTS.md automatically for context
-          # Additional review instructions:
-          custom_instructions: |
-            You are reviewing a PR for KiroClaw, an open-source AI agent platform.
-            Focus on:
-            - Security: credential handling, path traversal, injection, XSS
-            - Accessibility: WCAG 2.1 AA compliance, keyboard nav, screen readers
-            - Performance: blocking calls on event loops, unbounded allocations
-            - Design tokens: use CSS custom properties, not hardcoded colors
-            - Icons: use lucide-react, not inline SVGs or emoji
-            - Interactive elements: use <Clickable>, not bare <div onClick>
-            - Data fetching: use React Query, not manual useState+useEffect
-            - Animations: use Framer Motion, not CSS @keyframes
-
-          # Only review when triggered (not every push)
-          trigger_phrase: "@claude"
-
-          # Allow the bot to post comments
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Automation mode: presence of `prompt` makes the action run on the
+          # triggering event without waiting for a `@claude` trigger phrase.
+          claude_args: |
+            --model us.anthropic.claude-opus-4-20250514-v1:0
+            --max-turns 15
+          prompt: |
+            You are reviewing pull request #${{ github.event.pull_request.number }}
+            of ${{ github.repository }} (HEAD ${{ github.event.pull_request.head.sha }}).
+
+            KiroClaw is an open-source AI agent platform (Python backend + React/TS
+            dashboard). CLAUDE.md and AGENTS.md (root and website/) are read
+            automatically — follow the conventions there. This repo is a de-Amazoned
+            public fork: do NOT flag the absence of Brazil/AUTOSDE tooling.
+
+            Review ONLY the PR diff. Post specific, actionable inline comments.
+            Focus on these blocking concerns (they mirror the AutoSDE rules that a
+            grep cannot catch):
+            - Security: credential handling, path traversal, command/SQL injection,
+              XSS. In the frontend, dangerouslySetInnerHTML MUST go through
+              sanitize()/md() (DOMPurify); no HTML built from template literals with
+              user/LLM content. In the backend, sensitive-path reads MUST go through
+              hooks.py is_sensitive_path(); never weaken the ~/.kiroclaw keystone.
+            - Accessibility (WCAG 2.1 AA): icon-only buttons need aria-label;
+              interactive elements need keyboard handling; no emoji used as UI icons
+              (use lucide-react).
+            - Correctness: blocking calls on the asyncio event loop, unbounded
+              allocations, resource leaks, race conditions.
+            - Conventions: React Query (not manual useState+useEffect) for server
+              state; design tokens over hardcoded colors; Framer Motion over new CSS
+              @keyframes.
+
+            Severity policy — after reviewing, post ONE summary comment. If and only
+            if you found at least one CRITICAL or HIGH severity issue (a real
+            security hole, a broken keystone/sensitive-path control, or a crash),
+            include this exact marker on its own line in that summary comment:
+              [BLOCK-MERGE] ${{ github.event.pull_request.head.sha }}
+            Do not include the marker for MEDIUM/LOW/style findings.
+
+      # The action posts comments but cannot fail the check itself, so gate on
+      # the marker. Scoped to the head SHA: a stale marker from an earlier commit
+      # cannot block a fixed one, and a clean re-review drops the marker.
+      - name: Gate on high-severity findings
+        if: always() && steps.review.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          marker="[BLOCK-MERGE] $HEAD"
+          # Search both issue comments and review comments for the SHA-scoped marker.
+          bodies="$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq '.[].body'; \
+                    gh api "repos/$REPO/pulls/$PR/comments" --paginate --jq '.[].body')"
+          if printf '%s' "$bodies" | grep -Fq "$marker"; then
+            echo "::error::Claude review flagged CRITICAL/HIGH issue(s) on this commit — see PR comments."
+            exit 1
+          fi
+          echo "No high-severity findings for $HEAD."
