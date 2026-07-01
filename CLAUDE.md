@@ -3,8 +3,10 @@
 Guidance for Claude Code working in this repository. This file is the
 high-signal quick reference; **`AGENTS.md` holds the exhaustive conventions**
 (MCP-first rule, injected-message protocols, skill loading, widget protocol,
-full module map). Read `AGENTS.md` before non-trivial changes. The frontend has
-its own `website/CLAUDE.md`.
+full module map). It is imported below so it is always in context — read it
+before non-trivial changes. The frontend has its own `website/CLAUDE.md`.
+
+@AGENTS.md
 
 ## What this is
 

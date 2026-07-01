@@ -49,10 +49,13 @@ jobs:
           # marker), so the gate can never fire. `gh pr comment` is the
           # single-operation form — `gh pr review --comment` trips the
           # "multiple operations require approval" guard.
+          # Read/Grep let the review load the authoritative website/AUTOSDE.yaml
+          # rule set (and any file it needs for context); the gh commands let it
+          # post findings.
           claude_args: |
             --model us.anthropic.claude-opus-4-8
             --max-turns 30
-            --allowedTools "Bash(gh pr comment:*),Bash(gh pr view:*),Bash(gh api:*)"
+            --allowedTools "Read,Grep,Glob,Bash(gh pr comment:*),Bash(gh pr view:*),Bash(gh api:*)"
           prompt: |
             You are reviewing pull request #${{ github.event.pull_request.number }}
             of ${{ github.repository }} (HEAD ${{ github.event.pull_request.head.sha }}).
@@ -63,7 +66,15 @@ jobs:
             public fork: do NOT flag the absence of Brazil/AUTOSDE tooling.
 
             Review ONLY the PR diff. Post specific, actionable inline comments.
-            Focus on these blocking concerns (they mirror the AutoSDE rules that a
+
+            AUTHORITATIVE RULE SET: read website/AUTOSDE.yaml. It is the single
+            source of truth for this repo's review rules, built up over months.
+            Enforce every rule with `blocking: true` whose `file-patterns` match
+            the changed files — treat a violation as a CRITICAL/HIGH finding.
+            The concerns listed below are a non-exhaustive reminder of the
+            judgement-based rules; AUTOSDE.yaml is what governs.
+
+            Additional blocking concerns (they mirror the AutoSDE rules that a
             grep cannot catch):
             - Security: credential handling, path traversal, command/SQL injection,
               XSS. In the frontend, dangerouslySetInnerHTML MUST go through
