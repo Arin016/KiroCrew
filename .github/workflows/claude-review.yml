@@ -90,30 +90,53 @@ jobs:
               state; design tokens over hardcoded colors; Framer Motion over new CSS
               @keyframes.
 
-            Severity policy — after reviewing, post ONE summary comment. If and only
-            if you found at least one CRITICAL or HIGH severity issue (a real
-            security hole, a broken keystone/sensitive-path control, or a crash),
-            include this exact marker on its own line in that summary comment:
+            Severity policy — after reviewing you MUST post ONE summary comment,
+            even when the diff is clean. That comment MUST end with this exact
+            marker on its own line (it is how CI confirms the review actually
+            ran and posted for this commit):
+              [CLAUDE-REVIEWED] ${{ github.event.pull_request.head.sha }}
+            ADDITIONALLY, if and only if you found at least one CRITICAL or HIGH
+            severity issue (a real security hole, a broken keystone/sensitive-path
+            control, a crash, or a violation of a `blocking: true` AUTOSDE.yaml
+            rule), include this second marker on its own line in the same comment:
               [BLOCK-MERGE] ${{ github.event.pull_request.head.sha }}
-            Do not include the marker for MEDIUM/LOW/style findings.
+            Do not include the BLOCK-MERGE marker for MEDIUM/LOW/style findings.
+            Always post the summary comment — never end the review without it.
 
-      # The action posts comments but cannot fail the check itself, so gate on
-      # the marker. Scoped to the head SHA: a stale marker from an earlier commit
-      # cannot block a fixed one, and a clean re-review drops the marker.
-      - name: Gate on high-severity findings
-        if: always() && steps.review.outcome == 'success'
+      # Fail-CLOSED gate. The action posts comments but cannot fail the check
+      # itself, so we gate on markers the review posts. Runs on always() (even
+      # when the review step errored) and requires POSITIVE confirmation that the
+      # review ran and posted for THIS commit:
+      #   - [CLAUDE-REVIEWED] <sha>  — the review completed and posted (always).
+      #   - [BLOCK-MERGE]     <sha>  — it additionally found a CRITICAL/HIGH issue.
+      # Both markers are SHA-scoped so a stale marker from an earlier commit
+      # cannot satisfy (or block) a different one. If the reviewed-marker is
+      # absent — the review errored (Bedrock failure), ran out of turns, or was
+      # denied its comment-posting path — we fail rather than silently pass, so a
+      # broken review can never look clean.
+      - name: Gate on Claude review
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
           HEAD: ${{ github.event.pull_request.head.sha }}
           REPO: ${{ github.repository }}
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
         run: |
-          marker="[BLOCK-MERGE] $HEAD"
-          # Search both issue comments and review comments for the SHA-scoped marker.
+          reviewed="[CLAUDE-REVIEWED] $HEAD"
+          blocked="[BLOCK-MERGE] $HEAD"
+          # Search both issue comments and review comments for the SHA-scoped markers.
           bodies="$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq '.[].body'; \
                     gh api "repos/$REPO/pulls/$PR/comments" --paginate --jq '.[].body')"
-          if printf '%s' "$bodies" | grep -Fq "$marker"; then
+
+          if printf '%s' "$bodies" | grep -Fq "$blocked"; then
             echo "::error::Claude review flagged CRITICAL/HIGH issue(s) on this commit — see PR comments."
             exit 1
           fi
-          echo "No high-severity findings for $HEAD."
+
+          if ! printf '%s' "$bodies" | grep -Fq "$reviewed"; then
+            echo "::error::Claude review did not complete for $HEAD (review step outcome: ${REVIEW_OUTCOME:-unknown}; no [CLAUDE-REVIEWED] marker posted). Failing closed — re-run the workflow or inspect the Claude review step logs."
+            exit 1
+          fi
+
+          echo "Claude review completed for $HEAD with no high-severity findings."
