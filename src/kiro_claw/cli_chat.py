@@ -18,10 +18,10 @@ from kiro_claw.constants import DATA_WARNING
 from kiro_claw.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK, LLMProvider
 
 BANNER = r"""
-   __  __         _    ___ _
-  |  \/  |___ ___| |_ / __| |__ ___ __ __
-  | |\/| / -_|_-<| ' \ (__| / _` \ V  V /
-  |_|  |_\___/__/|_||_\___|_\__,_|\_/\_/
+   _  ___          ___ _
+  | |/ (_)_ _ ___ / __| |__ ___ __ __
+  | ' <| | '_/ _ \ (__| / _` \ V  V /
+  |_|\_\_|_| \___/\___|_\__,_|\_/\_/
 
   🐾 Your personal AI agent
 """
