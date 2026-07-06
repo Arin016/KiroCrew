@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -57,6 +58,12 @@ from kiro_claw.dashboard.handlers.auth_refresh import (
 from kiro_claw.dashboard.handlers.knowledge import setup_knowledge_routes
 from kiro_claw.dashboard.handlers.tunnel import api_tunnel_status
 from kiro_claw.dashboard.origin import bind_address_for, build_allowed_origins, check_origin
+from kiro_claw.dashboard.port_reclaim import (
+    FOREIGN_HOLDER,
+    HEALTHY_PEER,
+    RECLAIMED,
+    reclaim_stale_gateway_port,
+)
 from kiro_claw.dashboard.state import _DEFAULT_PORT, DashboardState
 from kiro_claw.dashboard.token_auth import token_auth_middleware
 from kiro_claw.hooks import ScriptHookStore, set_global_hook_store
@@ -259,19 +266,71 @@ def _register_mcp_routes(app: web.Application) -> None:
     app.router.add_post("/api/artifacts/{slug}/events", api_artifact_record_event)
 
 
-async def _start_site(site: web.TCPSite, port: int) -> None:
-    """Start *site*, translating EADDRINUSE into an actionable message."""
-    try:
-        await site.start()
-    except OSError as exc:
-        if exc.errno == errno.EADDRINUSE:
-            hint = (
-                f"Port {port} already in use — is another KiroClaw gateway running?\n"
-                f"Stop it with: kiroclaw stop  or  sudo systemctl stop kiroclaw"
-            )
-            logger.error(hint)
-            raise SystemExit(1) from exc
-        raise
+async def _start_site(
+    site: web.TCPSite,
+    port: int,
+    *,
+    retries: int = 30,
+    delay: float = 0.5,
+    reclaim: Callable[[int], Awaitable[str]] | None = None,
+) -> None:
+    """Start *site*, reclaiming a stale holder / retrying on EADDRINUSE.
+
+    On the first EADDRINUSE we probe *who* holds the port. A previous gateway
+    that died uncleanly (force-exit or ``kill -9``) can leave a process holding
+    the LISTEN socket that will never release it, so plain waiting cannot
+    recover — :func:`reclaim_stale_gateway_port` terminates such a stale holder
+    so the subsequent retry rebinds cleanly. A live, responsive gateway or a
+    non-KiroClaw process is never touched; those (and any case where the holder
+    can't be identified) fall back to a wait-up-to-*retries*×*delay* loop before
+    giving up with ``SystemExit(1)``. Non-EADDRINUSE OSErrors are re-raised.
+    """
+    _reclaim = reclaim if reclaim is not None else reclaim_stale_gateway_port
+    last_exc: OSError | None = None
+    for attempt in range(retries):
+        try:
+            await site.start()
+            return
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+            last_exc = exc
+            # release the partially-started site before retrying
+            await site.stop()
+            if attempt == 0:
+                try:
+                    outcome = await _reclaim(port)
+                except Exception:  # never let a reclaim bug block startup
+                    logger.exception(
+                        "Port %d reclaim probe failed — falling back to wait/retry.",
+                        port,
+                    )
+                    outcome = ""
+                if outcome == RECLAIMED:
+                    logger.warning(
+                        "Reclaimed port %d from a stale KiroClaw gateway — rebinding.",
+                        port,
+                    )
+                elif outcome not in (HEALTHY_PEER, FOREIGN_HOLDER):
+                    # NO_HOLDER / UNAVAILABLE / RECLAIM_FAILED / reclaim error:
+                    # nothing safely reclaimable, so wait for a possible graceful
+                    # handover. (A healthy peer / foreign holder won't release, so
+                    # we skip this misleading "waiting" message for those.)
+                    logger.warning(
+                        "Port %d in use — waiting up to %.0fs for the previous"
+                        " gateway to release it…",
+                        port,
+                        retries * delay,
+                    )
+            if attempt < retries - 1:
+                await asyncio.sleep(delay)
+    logger.error(
+        "Port %d still in use after %.0fs — is another KiroClaw gateway running?\n"
+        "Stop it with: kiroclaw stop  or  sudo systemctl stop kiroclaw",
+        port,
+        retries * delay,
+    )
+    raise SystemExit(1) from last_exc
 
 
 def _write_secret_file(secret_path: Path, secret: str) -> None:
