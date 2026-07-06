@@ -111,7 +111,7 @@ export default function RegistryManager() {
               </div>
               <Clickable
                 className="text-muted hover:text-accent transition-colors opacity-0 group-hover:opacity-100"
-                onClick={() => window.open(`https://github.com/YOUR_ORG/${reg.repo}`, '_blank')}
+                onClick={() => window.open(`https://github.com/kirodotdev-labs/${reg.repo}`, '_blank')}
                 aria-label={`Open ${reg.repo} repository`}
               >
                 <ExternalLink size={14} />

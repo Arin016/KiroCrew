@@ -5,7 +5,7 @@
 # no internal tooling required. Uses python3/pip (backend) + npm/vite (frontend).
 #
 # Usage (from a local clone):
-#   git clone https://github.com/YOUR_ORG/kiroclaw.git
+#   git clone https://github.com/kirodotdev-labs/kiroclaw.git
 #   cd kiroclaw
 #   bash install.sh
 #
@@ -119,7 +119,7 @@ echo ""
 
 if [ ! -f "$KIROCLAW_APP_DIR/pyproject.toml" ]; then
     die "Run this from inside a KiroClaw clone (pyproject.toml not found in $KIROCLAW_APP_DIR).
-     git clone https://github.com/YOUR_ORG/kiroclaw.git && cd kiroclaw && bash install.sh"
+     git clone https://github.com/kirodotdev-labs/kiroclaw.git && cd kiroclaw && bash install.sh"
 fi
 
 # ══════════════════════════════════════════════════════════════════════

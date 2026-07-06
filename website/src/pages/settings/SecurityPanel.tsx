@@ -29,7 +29,7 @@ const FEATURES: SecurityFeature[] = [
   { icon: <EyeOff size={14} />, label: 'Observe Mode Isolation', description: 'Only owner/allowlisted messages recorded in shared channels — prevents context poisoning', layer: 'Auth' },
 ]
 
-const CODE_BASE = 'https://github.com/YOUR_ORG/kiroclaw/blob/main'
+const CODE_BASE = 'https://github.com/kirodotdev-labs/kiroclaw/blob/main'
 
 /* ── Layer color mapping ── */
 function layerColor(layer: string): 'ok' | 'aim' | 'warn' {

@@ -15,7 +15,7 @@ requires-python = ">=3.9"
 dynamic = ["dependencies"]
 
 [project.urls]
-Homepage = "https://github.com/YOUR_ORG/kiroclaw"
+Homepage = "https://github.com/kirodotdev-labs/kiroclaw"
 
 [project.scripts]
 kiroclaw = "kiro_claw.cli:main"

@@ -23,7 +23,7 @@ import { recordSessionStart, recordEvent } from './rum'
 import { ZoomProvider } from './hooks/ZoomProvider'
 import { api, isAuthBannerShown } from './api/client'
 import { safeSetItem } from './utils/safeStorage'
-import { Rocket, Menu, Bell, Users, BookOpen, BookOpenText, MessageSquareDot, Settings, Code, RefreshCw, Palette, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, Sparkles, X, Inbox, Gamepad2, KanbanSquare, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain, FolderTree, ChevronUp, MoreHorizontal, Coins } from 'lucide-react'
+import { Rocket, Menu, Bell, Users, BookOpen, BookOpenText, MessageSquareDot, Settings, Code, RefreshCw, Palette, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, X, Inbox, Gamepad2, KanbanSquare, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain, FolderTree, ChevronUp, MoreHorizontal, Coins } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ChatPage from './pages/ChatPage'
 import OrchestratedChatPage from './pages/OrchestratedChatPage'
@@ -1399,8 +1399,7 @@ export default function App() {
         {/* Watermark */}
         <div {...(effectiveCollapsed ? { inert: '' } : {})} className={`overflow-hidden transition-all duration-200 ${effectiveCollapsed ? 'max-h-0 opacity-0 mt-0' : 'max-h-40 opacity-100 mt-2'}`}>
               <div className="border-t pt-2 pb-2 px-1 whitespace-nowrap" style={{ borderColor: 'var(--muted)' }}>
-                <div className="text-[13px] font-medium text-muted tracking-wide italic"><Sparkles className="lucide-inline" /> Vibed with passion!</div>
-                <a href="https://github.com/YOUR_ORG/kiroclaw" target="_blank" rel="noopener noreferrer" className="text-[13px] text-muted/60 hover:text-accent transition-colors mt-1 inline-block">GitHub</a>
+                <a href="https://github.com/kirodotdev-labs/kiroclaw" target="_blank" rel="noopener noreferrer" className="text-[13px] text-muted/60 hover:text-accent transition-colors inline-block">GitHub</a>
               </div>
         </div>
         </div>

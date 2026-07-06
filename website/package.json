@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "license": "Apache-2.0",
-  "repository": "https://github.com/YOUR_ORG/kiroclaw",
-  "homepage": "https://github.com/YOUR_ORG/kiroclaw",
+  "repository": "https://github.com/kirodotdev-labs/kiroclaw",
+  "homepage": "https://github.com/kirodotdev-labs/kiroclaw",
   "type": "module",
   "scripts": {
     "clean": "rm -rf dist && rm -rf node_modules",

@@ -7,7 +7,7 @@
 # No Brazil, no Builder Toolbox, no internal registries.
 #
 # Run from inside a cloned repo:
-#   git clone https://github.com/YOUR_ORG/kiroclaw.git
+#   git clone https://github.com/kirodotdev-labs/kiroclaw.git
 #   cd kiroclaw
 #   bash minimal_install.sh
 #
