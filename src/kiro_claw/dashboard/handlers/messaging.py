@@ -14,7 +14,7 @@ from typing import Any
 from aiohttp import web
 
 from kiro_claw.browser.auth import ensure as browser_auth_ensure
-from kiro_claw.browser.screencast import build_frame_payload
+from kiro_claw.browser.screencast import BROWSER_FRAME_EVENT, build_frame_payload
 from kiro_claw.browser.setup import (
     get_extension_token,
     has_playwright_extension,
@@ -1085,12 +1085,50 @@ async def api_browser_frame(request: web.Request) -> web.Response:
             resources="no-frame-data",
         )
         return web.json_response({"error": "no frame data"}, status=400)
-    state.broadcast_ws("browser_frame", payload)
+    state.broadcast_ws(BROWSER_FRAME_EVENT, payload)
+    # Label the audit event by frame origin so the proxy's active pump frames are
+    # distinguishable from agent-initiated screenshots. Bounded to a known set so
+    # the SEL field can't carry arbitrary caller-supplied text.
+    frame_source = body.get("source") if isinstance(body, dict) else None
     _sel().log_tool_invocation(
         session_key="dashboard",
         tool_name="browser_frame",
         outcome="completed",
         downstream_service="browser",
+        source=frame_source if frame_source in ("agent", "pump") else "agent",
+    )
+    # Report the live WS-client count so the proxy's active pump can back off
+    # (stop self-issuing screenshots) when no dashboard is actually watching.
+    return web.json_response({"ok": True, "subscribers": state.ws_client_count()})
+
+
+async def api_browser_pump_audit(request: web.Request) -> web.Response:
+    """POST /api/browser/pump-audit — audit a proxy active-pump screenshot injection.
+
+    The active pump (``mcp_playwright_proxy``) injects its own
+    ``browser_take_screenshot`` into the Playwright subprocess to keep the live
+    mirror current between agent screenshots. That proxy is a stdlib-only stdio
+    subprocess and cannot reach ``sel.py``, so it reports each injection here and
+    the gateway emits the SEL tool-invocation event on its behalf — keeping
+    proxy-internal tool calls auditable. Loopback-gated; the ``X-Internal-Secret``
+    is enforced by the token_auth middleware (this path is in ``internal_paths``).
+    """
+    if not is_loopback(request.remote or ""):
+        _sel().log_tool_invocation(
+            session_key="dashboard",
+            tool_name="browser_take_screenshot",
+            outcome="denied",
+            downstream_service="browser",
+            source="pump",
+            resources="non-loopback",
+        )
+        return web.json_response({"error": "loopback only"}, status=403)
+    _sel().log_tool_invocation(
+        session_key="dashboard",
+        tool_name="browser_take_screenshot",
+        outcome="injected",
+        downstream_service="browser",
+        source="pump",
     )
     return web.json_response({"ok": True})
 

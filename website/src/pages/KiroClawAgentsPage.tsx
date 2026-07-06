@@ -1,13 +1,28 @@
 import { useState, useEffect, useCallback } from 'react'
+import Clickable from '../components/Clickable'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { useAppSelector } from '../store'
 import { api } from '../api/client'
 import { useProvider } from '../providers'
 import { Card, CardTitle, Btn, SendBtn, Input, Badge, SearchInput, StatCard, PageHeader } from '../components/ui'
 import InfoTip from '../components/InfoTip'
+import ScanProjectsModal from '../components/ScanProjectsModal'
 import StyledSelect from '../components/StyledSelect'
 import type { KiroClawAgent } from '../components/AgentSelector'
 import { SourceBadge } from '../components/SourceBadge'
+
+/** Common shape returned by the agent/workspace mutation endpoints. */
+interface AgentMutationResult {
+  error?: string
+  name?: string
+}
+
+/** Editable fields sent when updating an existing agent binding. */
+interface AgentUpdatePayload {
+  kiro_agent: string
+  workspace: string
+  memory_store: string
+}
 
 /* ── Workspace Creation Modal ── */
 function WorkspaceModal({
@@ -49,40 +64,44 @@ function WorkspaceModal({
     try {
       const body: Record<string, string> = { name: n, dir: wsDir }
       if (copyFrom) body.copy_from = copyFrom
-      const r = await api.createWorkspace(body)
+      const r: AgentMutationResult = await api.createWorkspace(body)
       if (r.error) { setWsError(r.error); setSubmitting(false); return }
       onCreated(r.name || n)
-    } catch (e: any) {
-      setWsError(e?.message || 'Failed to create workspace')
+    } catch (e) {
+      setWsError(e instanceof Error ? e.message : 'Failed to create workspace')
     } finally {
       setSubmitting(false)
     }
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
-      <div className="absolute inset-0 bg-black/50" />
-      <div className="relative z-10 w-full max-w-md" onClick={(e: React.MouseEvent) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[100] flex items-center justify-center">
+      <Clickable aria-label="Close dialog" className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div role="dialog" aria-modal="true" aria-label="Create Workspace" className="relative z-10 w-full max-w-md">
         <Card className="!mb-0">
           <CardTitle>Create Workspace</CardTitle>
         <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-1">
             <div className="flex items-center gap-1">
-              <label className="text-[11px] text-muted uppercase tracking-wider font-medium">Name</label>
+              {/* Native input associated via htmlFor+id; label-has-for's nesting requirement is a false positive. */}
+              {/* eslint-disable-next-line jsx-a11y/label-has-for */}
+              <label htmlFor="ws-name" className="text-[11px] text-muted uppercase tracking-wider font-medium">Name</label>
               <InfoTip text="A unique identifier for this workspace. Agents reference workspaces by name." />
             </div>
-            <Input placeholder="e.g. oncall" value={wsName} onChange={e => handleNameChange(e.target.value)} autoFocus />
+            <Input id="ws-name" placeholder="e.g. oncall" value={wsName} onChange={e => handleNameChange(e.target.value)} autoFocus />
           </div>
           <div className="flex flex-col gap-1">
             <div className="flex items-center gap-1">
-              <label className="text-[11px] text-muted uppercase tracking-wider font-medium">Directory</label>
+              {/* Native input associated via htmlFor+id; label-has-for's nesting requirement is a false positive. */}
+              {/* eslint-disable-next-line jsx-a11y/label-has-for */}
+              <label htmlFor="ws-dir" className="text-[11px] text-muted uppercase tracking-wider font-medium">Directory</label>
               <InfoTip text="Subdirectory inside ~/.kiroclaw where this workspace stores its data (chat history, lessons, projects). Each workspace gets its own isolated directory." />
             </div>
-            <Input placeholder="workspace" value={wsDir} onChange={e => { setDirTouched(true); setWsDir(e.target.value) }} />
+            <Input id="ws-dir" placeholder="workspace" value={wsDir} onChange={e => { setDirTouched(true); setWsDir(e.target.value) }} />
           </div>
           <div className="flex flex-col gap-1">
             <div className="flex items-center gap-1">
-              <label className="text-[11px] text-muted uppercase tracking-wider font-medium">Copy from (optional)</label>
+              <span className="text-[11px] text-muted uppercase tracking-wider font-medium">Copy from (optional)</span>
               <InfoTip text="Copy the contents of an existing workspace into the new one. Leave as '— none —' to start fresh." />
             </div>
             <StyledSelect
@@ -119,13 +138,13 @@ export default function KiroClawAgentsPage() {
     queryKey: ['agents-installed', refreshTrigger],
     queryFn: () => api.agentsInstalled(),
   })
-  const kiroAgentOptions = Array.isArray(installedAgents) ? installedAgents.map((x: any) => x.name).filter(Boolean) : ['kiroclaw']
+  const kiroAgentOptions = Array.isArray(installedAgents) ? installedAgents.map((x: { name: string }) => x.name).filter(Boolean) : ['kiroclaw']
 
   const { data: workspacesData, refetch: refetchWorkspaces } = useQuery({
     queryKey: ['workspaces', refreshTrigger],
     queryFn: () => api.workspaces(),
   })
-  const workspaceOptions = workspacesData?.workspaces?.map((w: any) => w.name) || ['default']
+  const workspaceOptions = workspacesData?.workspaces?.map((w: { name: string }) => w.name) || ['default']
 
   const { data: kiroclawCfg } = useQuery({
     queryKey: ['kiroclawConfig', refreshTrigger],
@@ -145,6 +164,8 @@ export default function KiroClawAgentsPage() {
   const [editMs, setEditMs] = useState('')
   const [wsModalTarget, setWsModalTarget] = useState<'create' | 'edit' | null>(null)
 
+  const [scanOpen, setScanOpen] = useState(false)
+
   const handleWsCreated = useCallback((newName: string) => {
     const target = wsModalTarget
     setWsModalTarget(null)
@@ -156,17 +177,17 @@ export default function KiroClawAgentsPage() {
 
   const createMut = useMutation({
     mutationFn: (data: { name: string; kiro_agent: string; workspace: string; memory_store: string }) => api.createKiroclawAgent(data),
-    onSuccess: (r: any) => { if (r.error) { setError(r.error); return }; setName(''); setKiroAgent('kiroclaw'); setWorkspace('default'); setMemoryStore('default'); refetchAgents() },
+    onSuccess: (r: AgentMutationResult) => { if (r.error) { setError(r.error); return }; setName(''); setKiroAgent('kiroclaw'); setWorkspace('default'); setMemoryStore('default'); refetchAgents() },
     onError: (e: Error) => setError(e.message || 'Failed to create agent'),
   })
   const updateMut = useMutation({
-    mutationFn: ({ name, data }: { name: string; data: any }) => api.updateKiroclawAgent(name, data),
-    onSuccess: (r: any) => { if (r.error) { setError(r.error); return }; setEditing(null); refetchAgents() },
+    mutationFn: ({ name, data }: { name: string; data: AgentUpdatePayload }) => api.updateKiroclawAgent(name, data),
+    onSuccess: (r: AgentMutationResult) => { if (r.error) { setError(r.error); return }; setEditing(null); refetchAgents() },
     onError: (e: Error) => setError(e.message || 'Failed to update agent'),
   })
   const deleteMut = useMutation({
     mutationFn: (n: string) => api.deleteKiroclawAgent(n),
-    onSuccess: (r: any) => { if (r.error) { setError(r.error); return }; refetchAgents() },
+    onSuccess: (r: AgentMutationResult) => { if (r.error) { setError(r.error); return }; refetchAgents() },
     onError: (e: Error) => setError(e.message || 'Failed to delete agent'),
   })
 
@@ -209,15 +230,17 @@ export default function KiroClawAgentsPage() {
           <CardTitle>Create Agent <InfoTip text={`Create a new agent binding. Each agent maps a name to a ${provider.labels.agentTemplateField.toLowerCase()}, workspace, and memory store.`} /></CardTitle>
           <div className="flex gap-2 items-end flex-wrap">
             <div className="flex flex-col gap-1">
-              <label className="text-[11px] text-muted uppercase tracking-wider font-medium">Name</label>
-              <Input placeholder="e.g. oncall" value={name} onChange={e => setName(e.target.value)} style={{ width: 140 }} />
+              {/* Native input associated via htmlFor+id; label-has-for's nesting requirement is a false positive. */}
+              {/* eslint-disable-next-line jsx-a11y/label-has-for */}
+              <label htmlFor="agent-name" className="text-[11px] text-muted uppercase tracking-wider font-medium">Name</label>
+              <Input id="agent-name" placeholder="e.g. oncall" value={name} onChange={e => setName(e.target.value)} style={{ width: 140 }} />
             </div>
             <div className="flex flex-col gap-1">
-              <label className="text-[11px] text-muted uppercase tracking-wider font-medium">{provider.labels.agentTemplateField}</label>
+              <span className="text-[11px] text-muted uppercase tracking-wider font-medium">{provider.labels.agentTemplateField}</span>
               <StyledSelect options={kiroAgentOptions} value={kiroAgent} onChange={setKiroAgent} style={{ width: 160 }} />
             </div>
             <div className="flex flex-col gap-1">
-              <label className="text-[11px] text-muted uppercase tracking-wider font-medium">Workspace</label>
+              <span className="text-[11px] text-muted uppercase tracking-wider font-medium">Workspace</span>
               <StyledSelect
                 options={workspaceOptions}
                 value={workspace}
@@ -227,7 +250,7 @@ export default function KiroClawAgentsPage() {
               />
             </div>
             <div className="flex flex-col gap-1">
-              <label className="text-[11px] text-muted uppercase tracking-wider font-medium">Memory Store</label>
+              <span className="text-[11px] text-muted uppercase tracking-wider font-medium">Memory Store</span>
               <StyledSelect options={memoryStoreOptions} value={memoryStore} onChange={setMemoryStore} style={{ width: 160 }} />
             </div>
             <SendBtn onClick={create}>Create</SendBtn>
@@ -236,7 +259,10 @@ export default function KiroClawAgentsPage() {
         </Card>
 
         <Card>
-          <CardTitle>Agents</CardTitle>
+          <div className="flex items-center gap-2 mb-2">
+            <CardTitle>Agents</CardTitle>
+            <Btn primary onClick={() => setScanOpen(true)} className="ml-auto text-[11px]">Scan Projects</Btn>
+          </div>
           <div className="mb-3"><SearchInput placeholder="Filter agents…" value={filter} onChange={e => setFilter(e.target.value)} /></div>
           <div className="overflow-x-auto">
             <table className="w-full border-collapse table-striped">
@@ -250,11 +276,12 @@ export default function KiroClawAgentsPage() {
               <tbody>
                 {filtered.length === 0 ? (
                   <tr><td colSpan={6} className="text-muted italic px-2.5 py-3.5 text-sm">No agents</td></tr>
-                ) : filtered.map(a => (
-                  <tr key={a.name} className="hover:bg-bg-hover transition-colors">
+                ) : filtered.map((a) => (
+                  <tr key={`${a.name}-${a.project_path || 'global'}`} className="hover:bg-bg-hover transition-colors">
                     <td className="px-2.5 py-2 border-b border-border text-sm font-mono font-semibold">
                       {a.name}
                       {a.name === defaultAgent && <> <Badge variant="ok">default</Badge></>}
+                      {a.project_path && <div className="text-[11px] text-muted font-normal truncate max-w-[200px]" title={a.project_path}>{a.project_path}</div>}
                     </td>
                     {editing === a.name ? (
                       <>
@@ -298,6 +325,7 @@ export default function KiroClawAgentsPage() {
           </div>
         </Card>
       </div>
+      <ScanProjectsModal open={scanOpen} onClose={() => setScanOpen(false)} onSuccess={refetchAgents} />
       {wsModalTarget && (
         <WorkspaceModal
           workspaceOptions={workspaceOptions}

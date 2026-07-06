@@ -8,7 +8,7 @@
  * which transitively loads highlight.js + mermaid (5s timeout in vitest).
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -18,7 +18,7 @@ globalThis.ResizeObserver = class {
   observe() {}
   unobserve() {}
   disconnect() {}
-} as any
+} as unknown as typeof ResizeObserver
 
 vi.mock('../apps/file-explorer/api', () => ({
   fileExplorerApi: {

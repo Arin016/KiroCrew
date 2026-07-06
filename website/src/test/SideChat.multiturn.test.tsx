@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { screen } from '@testing-library/react'
 import reducer, { sseSideResult } from '../store/chatSlice'
+import type { RootState } from '../store'
 import { renderWithProviders, createTestStore } from './helpers'
 
 vi.mock('../api/client', () => ({
@@ -87,7 +88,7 @@ describe('Side multi-turn conversation', () => {
           },
           slotHistory: [SLOT],
           stopPressedAt: {},
-        } as any,
+        } as unknown as RootState['chat'],
       })
       renderWithProviders(<SideChat slot={SLOT} />, { store })
       expect(screen.getByText('Turn 1 q')).toBeInTheDocument()

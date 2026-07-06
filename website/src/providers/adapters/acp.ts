@@ -17,6 +17,35 @@ const MODEL_TOKENS: Record<string, number> = Object.fromEntries(
 )
 const DEFAULT_CONTEXT = 200_000
 
+/** Raw daily-usage entry from /api/usage/kiro. */
+interface RawDailyHistory {
+  date: string
+  sessions: number
+  messages: number
+  tool_calls: number
+}
+
+/** Raw provider-hook entry from /api/kiro-hooks. */
+interface RawHookEntry {
+  command: string
+  matcher?: string
+  source?: string
+}
+
+/** Raw plugin (agent/skill/mcp) entry from /api/aim/*. */
+interface RawAimPlugin {
+  name: string
+  package?: string
+  server_id?: string
+  version?: string
+}
+
+/** Raw model entry from /api/models. */
+interface RawModel {
+  model_name: string
+  description?: string
+}
+
 export class AcpAdapter implements ProviderAdapter {
   readonly id = 'acp' as const
   readonly displayName = 'ACP'
@@ -77,7 +106,7 @@ export class AcpAdapter implements ProviderAdapter {
         thisWeek: { sessions: s.this_week.sessions, messages: s.this_week.messages, toolCalls: s.this_week.tool_calls },
         thisMonth: { sessions: s.this_month.sessions, messages: s.this_month.messages, toolCalls: s.this_month.tool_calls },
         avgMsgsPerSession: s.avg_msgs_per_session,
-        dailyHistory: (s.daily_history || []).map((d: any) => ({
+        dailyHistory: (s.daily_history || []).map((d: RawDailyHistory) => ({
           date: d.date,
           sessions: d.sessions,
           messages: d.messages,
@@ -100,7 +129,7 @@ export class AcpAdapter implements ProviderAdapter {
     const hooks = data.hooks || {}
     const result: Record<string, NormalizedProviderHook[]> = {}
     for (const [event, entries] of Object.entries(hooks)) {
-      result[event] = (entries as any[]).map(e => ({
+      result[event] = (entries as RawHookEntry[]).map(e => ({
         event,
         command: e.command,
         matcher: e.matcher,
@@ -117,13 +146,13 @@ export class AcpAdapter implements ProviderAdapter {
       api.aimMcpList().catch(() => []),
     ])
     const plugins: NormalizedPlugin[] = []
-    for (const a of agents as any[]) {
+    for (const a of agents as RawAimPlugin[]) {
       plugins.push({ id: a.package || a.name, name: a.name, type: 'agent', source: 'aim', version: a.version })
     }
-    for (const s of skills as any[]) {
+    for (const s of skills as RawAimPlugin[]) {
       plugins.push({ id: s.package || s.name, name: s.name, type: 'skill', source: 'aim', version: s.version })
     }
-    for (const m of mcp as any[]) {
+    for (const m of mcp as RawAimPlugin[]) {
       plugins.push({ id: m.server_id || m.name, name: m.name, type: 'mcp', source: 'aim', version: m.version })
     }
     return plugins
@@ -148,7 +177,7 @@ export class AcpAdapter implements ProviderAdapter {
   async fetchAvailableModels(): Promise<ModelInfo[]> {
     const models = await api.models()
     if (!Array.isArray(models)) return []
-    return models.map((m: any) => ({
+    return models.map((m: RawModel) => ({
       name: m.model_name,
       description: m.description || '',
       contextWindow: MODEL_TOKENS[m.model_name] ?? DEFAULT_CONTEXT,

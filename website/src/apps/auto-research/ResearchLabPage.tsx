@@ -101,7 +101,7 @@ function SetupWizard({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
     try {
       const r: Validation = await api.researchValidate({ question, sub_questions: buildSubs(), sources, max_cycles: maxCycles })
       setValidation(r)
-    } catch (e) {
+    } catch {
       setError('Validation failed — check your connection and try again.')
     }
   }
@@ -113,7 +113,7 @@ function SetupWizard({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
     try {
       const c = await api.researchCreate({ question, sub_questions: buildSubs(), scope_constraints: scopeConstraints, sources, max_cycles: maxCycles, idle_secs: idleSecs, success_criteria: successCriteria, auto_approve: autoApprove, parallel_workers: parallelWorkers })
       if (c?.id) { await api.researchAction(c.id, 'start'); onDone() }
-    } catch (e) {
+    } catch {
       setError('Failed to start campaign — please try again.')
     } finally {
       setSubmitting(false)
@@ -133,50 +133,51 @@ function SetupWizard({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
 
       {step === 0 && <div className="space-y-4">
         <div>
-          <label className="text-sm font-medium">What do you want to research?</label>
-          <textarea className="w-full mt-1 p-2 rounded-md text-sm bg-bg border border-border" rows={3} value={question} onChange={e => setQuestion(e.target.value)} placeholder="How do other teams handle API rate limiting?" />
+          <label htmlFor="research-question" className="text-sm font-medium">What do you want to research?
+            <textarea id="research-question" aria-label="What do you want to research?" className="w-full mt-1 p-2 rounded-md text-sm bg-bg border border-border" rows={3} value={question} onChange={e => setQuestion(e.target.value)} placeholder="How do other teams handle API rate limiting?" />
+          </label>
           <div className="text-xs text-muted">Min 20 characters.</div>
         </div>
         <div>
           <div className="flex items-center justify-between">
-            <label className="text-sm font-medium">Sub-questions</label>
+            <span className="text-sm font-medium">Sub-questions</span>
             <button className="text-xs text-accent flex items-center gap-1 disabled:opacity-50" onClick={grillMe} disabled={question.length < 20 || grilling}><Sparkles size={12} /> {grilling ? 'Grilling…' : 'Grill me →'}</button>
           </div>
           {tree.some(n => n.status !== 'pruned') && <div className="text-xs text-muted mt-1">Answer clarifiers to refine, or just pick sub-questions and go.</div>}
           <div className="mt-2"><GrillTree tree={tree} dispatch={dispatchTree} onExpand={onExpand} /></div>
           {grillUnavailable && <div className="text-xs text-warn mt-2">Grill unavailable — add sub-questions manually below.</div>}
-          {subQs.map((sq, i) => <div key={i} className="flex items-center gap-2 mt-1"><input className="flex-1 text-sm p-1.5 rounded bg-bg border border-border" value={sq} onChange={e => { const n = [...subQs]; n[i] = e.target.value; setSubQs(n) }} /><button className="text-xs text-danger" onClick={() => setSubQs(subQs.filter((_, j) => j !== i))} aria-label="Remove sub-question"><X size={12} /></button></div>)}
-          <input className="w-full text-sm p-1.5 rounded bg-bg border border-border mt-2" placeholder="Add sub-question manually (Enter)" value={newSub} onChange={e => setNewSub(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && newSub) { setSubQs([...subQs, newSub]); setNewSub('') } }} />
+          {subQs.map((sq, i) => <div key={i} className="flex items-center gap-2 mt-1"><input aria-label={`Sub-question ${i + 1}`} className="flex-1 text-sm p-1.5 rounded bg-bg border border-border" value={sq} onChange={e => { const n = [...subQs]; n[i] = e.target.value; setSubQs(n) }} /><button className="text-xs text-danger" onClick={() => setSubQs(subQs.filter((_, j) => j !== i))} aria-label="Remove sub-question"><X size={12} /></button></div>)}
+          <input aria-label="Add sub-question manually" className="w-full text-sm p-1.5 rounded bg-bg border border-border mt-2" placeholder="Add sub-question manually (Enter)" value={newSub} onChange={e => setNewSub(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && newSub) { setSubQs([...subQs, newSub]); setNewSub('') } }} />
         </div>
       </div>}
 
       {step === 1 && <div className="space-y-3">
-        <label className="text-sm font-medium">Where should the agent look?</label>
+        <span className="text-sm font-medium block">Where should the agent look?</span>
         <div className="text-xs text-muted">Soft steering — the agent treats the selected sources as its primary tools, but isn't hard-restricted to them (it may use others if needed).</div>
         {[{ id: 'web', label: 'Web search' }, { id: 'internal', label: 'Internal search' }, { id: 'code', label: 'Local codebase' }, { id: 'knowledge', label: 'Knowledge Library' }].map(s => (
-          <label key={s.id} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={sources.includes(s.id)} onChange={e => setSources(e.target.checked ? [...sources, s.id] : sources.filter(x => x !== s.id))} />{s.label}</label>
+          <label key={s.id} htmlFor={`source-${s.id}`} className="flex items-center gap-2 text-sm"><input id={`source-${s.id}`} type="checkbox" aria-label={s.label} checked={sources.includes(s.id)} onChange={e => setSources(e.target.checked ? [...sources, s.id] : sources.filter(x => x !== s.id))} />{s.label}</label>
         ))}
       </div>}
 
       {step === 2 && <div className="space-y-4">
-        <label className="text-sm font-medium">When should the agent stop?</label>
+        <span className="text-sm font-medium block">When should the agent stop?</span>
         <div className="text-xs text-muted">Stops at the cycle cap, when the Definition of Done is met, on stagnation, or when you Stop it.</div>
-        <div className="flex items-center gap-2"><span className="text-sm">Max cycles:</span><input type="number" min={5} max={100} value={maxCycles} className="w-20 text-sm p-1 rounded bg-bg border border-border" onChange={e => { setMaxCyclesTouched(true); setMaxCycles(Number(e.target.value)) }} />{subCount > 0 && !maxCyclesTouched && <span className="text-xs text-muted">suggested from {subCount} sub-questions</span>}</div>
-        <div className="flex items-center gap-2"><span className="text-sm">Idle between cycles:</span><select value={idleSecs} onChange={e => setIdleSecs(Number(e.target.value))} className="text-sm p-1 rounded bg-bg border border-border"><option value={30}>30s</option><option value={60}>60s</option><option value={120}>120s</option></select></div>
+        <div className="flex items-center gap-2"><span className="text-sm">Max cycles:</span><input type="number" aria-label="Max cycles" min={5} max={100} value={maxCycles} className="w-20 text-sm p-1 rounded bg-bg border border-border" onChange={e => { setMaxCyclesTouched(true); setMaxCycles(Number(e.target.value)) }} />{subCount > 0 && !maxCyclesTouched && <span className="text-xs text-muted">suggested from {subCount} sub-questions</span>}</div>
+        <div className="flex items-center gap-2"><span className="text-sm">Idle between cycles:</span><select aria-label="Idle between cycles" value={idleSecs} onChange={e => setIdleSecs(Number(e.target.value))} className="text-sm p-1 rounded bg-bg border border-border"><option value={30}>30s</option><option value={60}>60s</option><option value={120}>120s</option></select></div>
         <div>
-          <label className="text-sm font-medium">Definition of Done (optional)</label>
-          <textarea className="w-full text-sm p-1.5 rounded bg-bg border border-border mt-1" rows={2} placeholder="e.g. AI code review finds no blocking issues and the test build passes" value={successCriteria} onChange={e => setSuccessCriteria(e.target.value)} />
+          <span className="text-sm font-medium block">Definition of Done (optional)</span>
+          <textarea aria-label="Definition of Done (optional)" className="w-full text-sm p-1.5 rounded bg-bg border border-border mt-1" rows={2} placeholder="e.g. AI code review finds no blocking issues and the test build passes" value={successCriteria} onChange={e => setSuccessCriteria(e.target.value)} />
           <div className="text-xs text-muted mt-1">If set, the agent verifies against this each cycle and completes when met.</div>
         </div>
-        <label className="flex items-center gap-2 text-sm">
-          <input type="checkbox" checked={autoApprove} onChange={e => setAutoApprove(e.target.checked)} />
+        <label htmlFor="auto-approve" className="flex items-center gap-2 text-sm">
+          <input id="auto-approve" type="checkbox" aria-label="Run unattended (skip clarification questions)" checked={autoApprove} onChange={e => setAutoApprove(e.target.checked)} />
           Run unattended (skip clarification questions)
         </label>
-        <div className="flex items-center gap-2"><span className="text-sm">Parallel workers:</span><input type="number" min={1} max={5} value={parallelWorkers} className="w-16 text-sm p-1 rounded bg-bg border border-border" onChange={e => setParallelWorkers(Math.min(5, Math.max(1, Number(e.target.value))))} /><span className="text-xs text-muted">{parallelWorkers > 1 ? `${parallelWorkers} sub-questions investigated in parallel each cycle` : 'sequential (default)'}</span></div>
+        <div className="flex items-center gap-2"><span className="text-sm">Parallel workers:</span><input type="number" aria-label="Parallel workers" min={1} max={5} value={parallelWorkers} className="w-16 text-sm p-1 rounded bg-bg border border-border" onChange={e => setParallelWorkers(Math.min(5, Math.max(1, Number(e.target.value))))} /><span className="text-xs text-muted">{parallelWorkers > 1 ? `${parallelWorkers} sub-questions investigated in parallel each cycle` : 'sequential (default)'}</span></div>
       </div>}
 
       {step === 3 && <div className="space-y-3">
-        <label className="text-sm font-medium">Pre-flight Check:</label>
+        <span className="text-sm font-medium block">Pre-flight Check:</span>
         {validation ? <>
           {validation.errors.map((e, i) => <div key={i} className="text-sm flex items-center gap-1"><XCircle size={14} className="text-danger" /> {e}</div>)}
           {validation.errors.length === 0 && <div className="text-sm text-ok flex items-center gap-1"><CheckCircle size={14} /> All checks passed</div>}
@@ -309,8 +310,8 @@ function ForkFlow({ parentId, onCancel, onDone }: { parentId: string; onCancel: 
         <div className="text-xs text-muted">Answer challenges to refine, or just pick sub-questions and fork.</div>
         <GrillTree tree={tree} dispatch={dispatchTree} onExpand={onExpand} />
         <div className="mt-3">
-          {manualSubs.map((sq, i) => <div key={i} className="flex items-center gap-2 mt-1"><input className="flex-1 text-sm p-1.5 rounded bg-bg border border-border" value={sq} onChange={e => { const n = [...manualSubs]; n[i] = e.target.value; setManualSubs(n) }} /><button className="text-xs text-danger" onClick={() => setManualSubs(manualSubs.filter((_, j) => j !== i))} aria-label="Remove sub-question"><X size={12} /></button></div>)}
-          <input className="w-full text-sm p-1.5 rounded bg-bg border border-border mt-1" placeholder="Add your own sub-question or guidance (Enter)" value={newSub} onChange={e => setNewSub(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && newSub.trim()) { setManualSubs([...manualSubs, newSub.trim()]); setNewSub('') } }} />
+          {manualSubs.map((sq, i) => <div key={i} className="flex items-center gap-2 mt-1"><input aria-label={`Sub-question ${i + 1}`} className="flex-1 text-sm p-1.5 rounded bg-bg border border-border" value={sq} onChange={e => { const n = [...manualSubs]; n[i] = e.target.value; setManualSubs(n) }} /><button className="text-xs text-danger" onClick={() => setManualSubs(manualSubs.filter((_, j) => j !== i))} aria-label="Remove sub-question"><X size={12} /></button></div>)}
+          <input aria-label="Add your own sub-question or guidance" className="w-full text-sm p-1.5 rounded bg-bg border border-border mt-1" placeholder="Add your own sub-question or guidance (Enter)" value={newSub} onChange={e => setNewSub(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && newSub.trim()) { setManualSubs([...manualSubs, newSub.trim()]); setNewSub('') } }} />
         </div>
         <div className="flex justify-between mt-4">
           <button className="text-sm text-muted" onClick={() => { clearPersisted(); onCancel() }}>Cancel</button>
@@ -368,9 +369,10 @@ function AddToKnowledgeButton({ id }: { id: string }) {
       await api.researchToKnowledge(id)
       setStatus('done')
       qc.invalidateQueries({ queryKey: ['research-knowledge-status', id] })
-    } catch (e: any) {
-      if (e?.status === 409) setStatus('exists')
-      else { setStatus('idle'); alert(e?.message || 'Failed to add to Knowledge Library') }
+    } catch (e: unknown) {
+      const err = e as { status?: number; message?: string } | null
+      if (err?.status === 409) setStatus('exists')
+      else { setStatus('idle'); alert(err?.message || 'Failed to add to Knowledge Library') }
     }
   }
   if (status === 'done') return <span className="text-xs text-ok flex items-center gap-1"><CheckCircle size={12} /> Added to Knowledge</span>
@@ -441,7 +443,7 @@ function SubQuestionAdder({ id, campaign }: { id: string; campaign: Campaign }) 
       </div>)}
       {ACTIVE_STATUSES.includes(campaign.status) && <div className="mt-2">
         <div className="flex items-center gap-2">
-          <input className="flex-1 text-xs p-1.5 rounded bg-bg border border-border" placeholder="Add guidance or a sub-question…" value={text} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && text.trim()) addMut.mutate(text.trim()) }} />
+          <input aria-label="Add guidance or a sub-question" className="flex-1 text-xs p-1.5 rounded bg-bg border border-border" placeholder="Add guidance or a sub-question…" value={text} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && text.trim()) addMut.mutate(text.trim()) }} />
           <button className="text-xs px-2 py-1 rounded bg-accent text-white disabled:opacity-50" disabled={!text.trim() || addMut.isPending} onClick={() => addMut.mutate(text.trim())}>{addMut.isPending ? '…' : 'Add'}</button>
         </div>
         <div className="text-[10px] text-muted mt-1">Free-form — a sub-question or an instruction the agent should follow next cycle.</div>
@@ -515,7 +517,7 @@ function CampaignDetail({ id, onBack, onFork, onOpen }: { id: string; onBack: ()
     {campaign.status === 'needs_input' && <div className="p-3 rounded-md mb-4 border border-info bg-info/10">
       <div className="text-sm font-medium text-info flex items-center gap-1"><MessageCircle size={14} /> Agent needs input</div>
       <div className="text-sm mt-1">{campaign.pending_question || 'The agent is waiting for your direction.'}</div>
-      <textarea className="w-full p-2 mt-2 rounded text-sm bg-bg border border-border" rows={2} value={answerText} onChange={e => setAnswerText(e.target.value)} placeholder="Your answer..." />
+      <textarea aria-label="Your answer" className="w-full p-2 mt-2 rounded text-sm bg-bg border border-border" rows={2} value={answerText} onChange={e => setAnswerText(e.target.value)} placeholder="Your answer..." />
       <div className="flex gap-2 mt-2 justify-end">
         <button className="text-xs px-2 py-1 rounded bg-accent text-white disabled:opacity-50" onClick={() => nudgeMut.mutate(answerText)} disabled={!answerText || nudgeMut.isPending}>{nudgeMut.isPending ? 'Sending…' : 'Answer & resume'}</button>
       </div>
@@ -540,7 +542,7 @@ function CampaignDetail({ id, onBack, onFork, onOpen }: { id: string; onBack: ()
     <SubQuestionAdder id={id} campaign={campaign} />
     {showNudge && <div className="p-3 rounded-md mb-4 border border-border bg-card">
       <div className="text-sm font-medium mb-2 flex items-center gap-1"><MessageCircle size={14} /> Nudge Direction</div>
-      <textarea className="w-full p-2 rounded text-sm bg-bg border border-border" rows={3} value={nudgeText} onChange={e => setNudgeText(e.target.value)} placeholder="Focus on..." />
+      <textarea aria-label="Nudge direction" className="w-full p-2 rounded text-sm bg-bg border border-border" rows={3} value={nudgeText} onChange={e => setNudgeText(e.target.value)} placeholder="Focus on..." />
       <div className="flex gap-2 mt-2 justify-end">
         <button className="text-xs text-muted" onClick={() => setShowNudge(false)}>Cancel</button>
         <button className="text-xs px-2 py-1 rounded bg-accent text-white disabled:opacity-50" onClick={() => nudgeMut.mutate(nudgeText)} disabled={!nudgeText || nudgeMut.isPending}>{nudgeMut.isPending ? 'Sending…' : 'Send'}</button>

@@ -38,7 +38,6 @@ describe('useTouchedFiles', () => {
   it('promotes tool→history on re-touch with source=history', () => {
     const { result } = renderHook(() => useTouchedFiles('test-session'))
     act(() => result.current.addFile('/tmp/a.ts', 'tool'))
-    const first = result.current.files[0].lastWrite
     act(() => result.current.addFile('/tmp/a.ts', 'history'))
     expect(result.current.files[0].source).toBe('history')
     expect(result.current.files).toHaveLength(1)

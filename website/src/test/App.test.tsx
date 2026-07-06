@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, screen, act, fireEvent, waitFor } from '@testing-library/react'
 import { renderWithProviders, createTestStore } from './helpers'
 import App from '../App'
+import { sseConnected, sseDisconnected } from '../store/dashboardSlice'
 import SegmentedControl from '../components/SegmentedControl'
 
 // Mock all page components to isolate routing
@@ -57,7 +58,11 @@ Object.defineProperty(window, 'matchMedia', {
 })
 
 // ResizeObserver stub for jsdom (used by SegmentedControl)
-globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} } as any
+globalThis.ResizeObserver = class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+} as typeof ResizeObserver
 
 describe('App routing', () => {
   it('renders chat page at /chat', () => {
@@ -186,6 +191,92 @@ describe('App routing', () => {
     localStorage.setItem('mc-apps-expanded', '1')
     renderWithProviders(<App />, { route: '/chat' })
     expect(await screen.findByTitle(/show fewer apps/i)).toBeInTheDocument()
+  })
+
+  it('refetches the Apps nav when the gateway reconnects (post-update recovery)', async () => {
+    // Regression for the empty-rail-after-update bug: the dashboard fetches
+    // /api/apps once on mount, and right after a `kiroclaw update` restart that
+    // first fetch can come back empty while the gateway is still warming. When
+    // the WebSocket reconnects, the Apps nav must refetch and self-heal —
+    // previously it stayed empty until a manual reload (Browse, lazy-fetched,
+    // kept working, which is why apps still showed in the App Store).
+    const { api } = await import('../api/client')
+    const lateApp = {
+      name: 'late', displayName: 'Late App', enabled: true, origin: 'installed',
+      manifest: { ui: { pages: [{ route: '/apps/late', icon: 'Package', label: 'Late App' }] } },
+    }
+    ;(api.listApps as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce([])        // mount: gateway not ready, empty list
+      .mockResolvedValueOnce([lateApp]) // after reconnect: app is now listed
+    const store = createTestStore()
+    renderWithProviders(<App />, { route: '/chat', store })
+    // Let the (empty) mount fetch settle; the app is absent.
+    await waitFor(() => expect(screen.getByText('Chat')).toBeInTheDocument())
+    expect(screen.queryByText('Late App')).not.toBeInTheDocument()
+    // Simulate a `kiroclaw update` restart: the WS connects, drops, reconnects.
+    // Only the reconnect (after a drop) refetches the Apps nav — the rail
+    // self-heals without a manual reload.
+    act(() => { store.dispatch(sseConnected()) })
+    act(() => { store.dispatch(sseDisconnected()) })
+    act(() => { store.dispatch(sseConnected()) })
+    expect(await screen.findByText('Late App')).toBeInTheDocument()
+  })
+
+  it('retries the initial Apps-nav fetch after a transient failure', async () => {
+    // The mount fetch can reject while the gateway is mid-restart; the failure
+    // used to be swallowed (empty rail). refreshAppNav now retries with bounded
+    // backoff so the apps appear without a manual reload.
+    vi.useFakeTimers()
+    try {
+      const { api } = await import('../api/client')
+      const retryApp = {
+        name: 'retryapp', displayName: 'Retry App', enabled: true, origin: 'installed',
+        manifest: { ui: { pages: [{ route: '/apps/retryapp', icon: 'Package', label: 'Retry App' }] } },
+      }
+      ;(api.listApps as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new Error('gateway cold start'))
+        .mockResolvedValueOnce([retryApp])
+      renderWithProviders(<App />, { route: '/chat' })
+      // Flush the rejected mount fetch, then advance past the first backoff
+      // (500ms base) so the retry fires and resolves with the app.
+      await act(async () => { await vi.advanceTimersByTimeAsync(600) })
+      expect(screen.getByText('Retry App')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('cancels a pending retry when refreshAppNav is re-triggered (no overlapping chains)', async () => {
+    // Regression for the overlapping-retry-chains race: if a trigger
+    // (mc:apps-changed / reconnect) fires while a backoff retry from a failed
+    // mount fetch is still pending, the pending retry must be cancelled so only
+    // one fetch chain runs — otherwise the orphaned retry fires a stale fetch
+    // that can overwrite the freshly-loaded nav with an empty list.
+    vi.useFakeTimers()
+    try {
+      const { api } = await import('../api/client')
+      const listApps = api.listApps as ReturnType<typeof vi.fn>
+      const evApp = {
+        name: 'evapp', displayName: 'Event App', enabled: true, origin: 'installed',
+        manifest: { ui: { pages: [{ route: '/apps/evapp', icon: 'Package', label: 'Event App' }] } },
+      }
+      listApps.mockReset()
+      listApps.mockResolvedValue([])                 // default for any stray call
+      listApps.mockRejectedValueOnce(new Error('cold start')) // mount fetch fails → schedules retry
+      listApps.mockResolvedValueOnce([evApp])        // the re-trigger resolves with the app
+      renderWithProviders(<App />, { route: '/chat' })
+      // Before the 500ms retry fires, re-trigger refreshAppNav.
+      await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+      act(() => { window.dispatchEvent(new Event('mc:apps-changed')) })
+      // Advance well past the original retry's deadline; it must NOT fire.
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+      expect(screen.getByText('Event App')).toBeInTheDocument()
+      // Exactly two fetches: the failed mount + the re-trigger. The orphaned
+      // retry was cancelled, so no third (empty) fetch overwrote the nav.
+      expect(listApps).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('shows a portaled hover label for a collapsed (icon-only) nav item', async () => {

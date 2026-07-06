@@ -162,6 +162,7 @@ class AcpEvent:
     cache_creation_tokens: int = 0
     cache_read_tokens: int = 0
     cost_usd: float = 0.0
+    credits: float = 0.0
     num_turns: int = 0
     duration_ms: int = 0
     raw_tool_params: dict | None = None  # original tool params before diff conversion (for file-chip snapshots)
@@ -173,6 +174,13 @@ class AcpEvent:
     # Owning sub-agent session id (EVENT_SUBAGENT_ACTIVITY) — ties a tool call
     # to a specific native sub-agent card.
     sub_session_id: str = ""
+    # Provider-set canonical signal: True when this tool call is a shell/exec
+    # command. Each provider maps its own vocabulary (ACP kind=="execute", CC
+    # tool name "Bash") onto this one flag, so the dashboard validation layer
+    # exempts shell commands from the tool-name length cap without hardcoding
+    # provider-specific tool_kind literals (which silently re-break on every
+    # engine migration / tool rename).
+    is_shell: bool = False
 
 
 @dataclass
@@ -190,3 +198,6 @@ class AcpPromptStats:
     # actually divided by, inflating the displayed "X / Y tokens". 0 = unknown.
     context_used_tokens: int = 0
     context_window_tokens: int = 0
+    # Per-turn billing credits summed from kiro's _kiro.dev/metadata
+    # meteringUsage (unit="credit"). 0 for providers that bill in tokens.
+    credits: float = 0.0

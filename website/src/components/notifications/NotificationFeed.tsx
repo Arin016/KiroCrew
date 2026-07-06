@@ -1,3 +1,4 @@
+import { safeSetItem } from '../../utils/safeStorage'
 import { useState, useMemo, useCallback, useEffect } from 'react'
 import { Bell, Check, X } from 'lucide-react'
 import { useAppSelector, useAppDispatch } from '../../store'
@@ -34,7 +35,7 @@ export default function NotificationFeed({ selectedTs, onSelect }: {
 
   // Persist filter selection across reloads
   useEffect(() => {
-    try { localStorage.setItem(KINDS_STORAGE_KEY, JSON.stringify(Array.from(activeKinds))) } catch { /* ignore quota errors */ }
+    try { safeSetItem(KINDS_STORAGE_KEY, JSON.stringify(Array.from(activeKinds))) } catch { /* ignore quota errors */ }
   }, [activeKinds])
 
   const toggleCategory = useCallback((key: Category) => {
@@ -96,9 +97,12 @@ export default function NotificationFeed({ selectedTs, onSelect }: {
         })}
       </div>
 
-      {/* Search + actions */}
+      {/* Search + actions. This row sits ABOVE the scroll list (the list is its
+          own overflow container below), so nothing scrolls behind it — it needs
+          no occluding background. Keep it transparent and make the input
+          translucent so the glass surface shows through instead of a white block. */}
       <div className="flex gap-2 mb-2 items-center shrink-0">
-        <div className="flex-1"><SearchInput placeholder="Search…" value={filter} onChange={e => setFilter(e.target.value)} /></div>
+        <div className="flex-1"><SearchInput className="[&>input]:!bg-bg-elevated/40 [&>input]:!border-border/60" placeholder="Search…" value={filter} onChange={e => setFilter(e.target.value)} /></div>
         {unread > 0 && <button className="px-2 py-1 rounded-md border border-ok/40 bg-ok/10 text-ok text-[12px] font-semibold cursor-pointer hover:bg-ok/20 transition-all font-body whitespace-nowrap" onClick={() => dispatch(ackAllNotifications())}><Check className="lucide-inline" /> All</button>}
         {items.length > 0 && <button className="px-2 py-1 rounded-md border border-danger/40 bg-transparent text-danger text-[12px] font-medium cursor-pointer hover:bg-danger/10 transition-all font-body whitespace-nowrap" onClick={() => { if (confirm('Clear all notifications?')) dispatch(clearNotifications()) }}><X className="lucide-inline" /> Clear</button>}
       </div>

@@ -348,3 +348,106 @@ class TestCronReaper:
         assert "cleanup1" not in svc._executing
         assert "cleanup1" not in svc._running_tasks
         mock_task.cancel.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_reaper_respects_custom_timeout_secs(self) -> None:
+        """Reaper does not kill a job still within its custom timeout_secs."""
+        svc = CronService(base_dir=None, on_job=AsyncMock())
+        svc._sessions = _mock_sessions()
+
+        job = _make_job("custom1")
+        job.timeout_secs = 5400  # 90 min
+        svc._jobs = [job]
+        # Running for 2000s — past default 1800 but within custom 5400
+        svc._job_start_times["custom1"] = time.time() - 2000
+        svc._running_tasks["custom1"] = MagicMock(done=MagicMock(return_value=False))
+
+        with patch("asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])):
+            with pytest.raises(asyncio.CancelledError):
+                await svc._reaper_loop()
+
+        assert "custom1" not in svc._reaped_jobs
+
+    @pytest.mark.asyncio
+    async def test_reaper_kills_job_exceeding_custom_timeout(self, tmp_path: object) -> None:
+        """Reaper kills a job that exceeds its custom timeout_secs."""
+        svc = CronService(base_dir=None, on_job=AsyncMock())
+        svc._history = CronHistoryStore(base_dir=tmp_path)
+        svc._sessions = _mock_sessions()
+
+        job = _make_job("custom2")
+        job.timeout_secs = 5400
+        svc._jobs = [job]
+        svc._job_start_times["custom2"] = time.time() - 5500
+        svc._running_tasks["custom2"] = MagicMock(done=MagicMock(return_value=False))
+
+        with patch("kiro_claw.sel.sel"), patch.object(svc, "_save"), patch(
+            "asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await svc._reaper_loop()
+
+        assert "custom2" in svc._reaped_jobs
+        assert job.last_status == "error"
+        assert "exceeded 5400s deadline" in (job.last_error or "")
+
+    @pytest.mark.asyncio
+    async def test_reaper_enforces_floor_for_low_timeout(self) -> None:
+        """Reaper uses _JOB_TIMEOUT_SECS as floor even if job.timeout_secs is lower."""
+        svc = CronService(base_dir=None, on_job=AsyncMock())
+        svc._sessions = _mock_sessions()
+
+        job = _make_job("floor1")
+        job.timeout_secs = 600  # below 1800 floor
+        svc._jobs = [job]
+        # Running for 1000s — past job.timeout_secs but within floor
+        svc._job_start_times["floor1"] = time.time() - 1000
+        svc._running_tasks["floor1"] = MagicMock(done=MagicMock(return_value=False))
+
+        with patch("asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])):
+            with pytest.raises(asyncio.CancelledError):
+                await svc._reaper_loop()
+
+        assert "floor1" not in svc._reaped_jobs
+
+    @pytest.mark.asyncio
+    async def test_reaper_caps_at_86400(self, tmp_path: object) -> None:
+        """Reaper caps deadline at 86400 even if job.timeout_secs exceeds it."""
+        svc = CronService(base_dir=None, on_job=AsyncMock())
+        svc._history = CronHistoryStore(base_dir=tmp_path)
+        svc._sessions = _mock_sessions()
+
+        job = _make_job("cap1")
+        job.timeout_secs = 100000  # exceeds 86400 cap
+        svc._jobs = [job]
+        svc._job_start_times["cap1"] = time.time() - 86500
+        svc._running_tasks["cap1"] = MagicMock(done=MagicMock(return_value=False))
+
+        with patch("kiro_claw.sel.sel"), patch.object(svc, "_save"), patch(
+            "asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await svc._reaper_loop()
+
+        assert "cap1" in svc._reaped_jobs
+        assert "exceeded 86400s deadline" in (job.last_error or "")
+
+    @pytest.mark.asyncio
+    async def test_reaper_falls_back_for_deleted_job(self, tmp_path: object) -> None:
+        """Reaper uses default deadline when job is no longer in self._jobs."""
+        svc = CronService(base_dir=None, on_job=AsyncMock())
+        svc._history = CronHistoryStore(base_dir=tmp_path)
+        svc._sessions = _mock_sessions()
+
+        # No job in self._jobs, but start time still tracked (race: job removed while running)
+        svc._jobs = []
+        svc._job_start_times["ghost1"] = time.time() - _JOB_TIMEOUT_SECS - 60
+        svc._running_tasks["ghost1"] = MagicMock(done=MagicMock(return_value=False))
+
+        with patch("kiro_claw.sel.sel"), patch.object(svc, "_save"), patch(
+            "asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await svc._reaper_loop()
+
+        assert "ghost1" in svc._reaped_jobs

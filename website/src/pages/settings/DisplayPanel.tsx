@@ -5,6 +5,7 @@ import type { ColorTheme } from '../../hooks/useTheme'
 import { useUIMode } from '../../hooks/useUIMode'
 import { SettingsSection, SettingsCard, SettingsSelect, SettingsStepper, SettingsButtonGroup } from '../../components/settings'
 import { useThemeEditor, ThemeEditorPanel } from '../../components/themeEditor'
+import Clickable from '../../components/Clickable'
 import { useAppSelector, useAppDispatch } from '../../store'
 import { setSessionDefaultColor, setSessionColorsMode, setSessionColorsPalette, setSessionColorsIntensity } from '../../store/dashboardSlice'
 import { useSessionPalette } from '../../hooks/useSessionPalette'
@@ -78,16 +79,15 @@ export function DisplayPanel() {
       </SettingsSection>
 
       {editor.editorOpen && (
-        <div className="fixed inset-0 z-[49] flex items-center justify-center" onClick={editor.closeEditor}>
-          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
-          <div className="relative z-10 w-full max-w-2xl max-h-[85vh] overflow-y-auto mx-4 bg-card border border-border rounded-xl p-6 shadow-xl animate-rise" onClick={e => e.stopPropagation()}>
+        <Clickable className="fixed inset-0 z-[49] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={e => { if (!e || e.target === e.currentTarget) editor.closeEditor() }}>
+          <div role="dialog" aria-modal="true" aria-label={editor.isEditing ? 'Edit Theme' : 'Create Theme'} className="relative z-10 w-full max-w-2xl max-h-[85vh] overflow-y-auto mx-4 bg-card border border-border rounded-xl p-6 shadow-xl animate-rise">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-sm font-bold text-text-strong">{editor.isEditing ? 'Edit Theme' : 'Create Theme'}</h3>
               <button className="text-muted text-[13px] cursor-pointer hover:text-text bg-transparent border-none" onClick={editor.closeEditor}><X className="lucide-inline" /></button>
             </div>
             <ThemeEditorPanel editor={editor} />
           </div>
-        </div>
+        </Clickable>
       )}
 
       {/* Sidebar Colors */}

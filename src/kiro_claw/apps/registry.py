@@ -521,6 +521,19 @@ def _merge_manifest(entry: dict[str, Any], manifest: dict[str, Any]) -> dict[str
     if screenshots and repo:
         result["screenshots"] = [f"/api/apps/blob?repo={repo}&path={p}" for p in screenshots]
 
+    # Screenshots dark — convert repo-relative paths to blob proxy URLs
+    screenshots_dark = manifest.get("screenshotsDark", [])
+    if screenshots_dark and repo:
+        result["screenshotsDark"] = [f"/api/apps/blob?repo={repo}&path={p}" for p in screenshots_dark]
+
+    # Hero images — convert repo-relative paths to blob proxy URLs
+    hero = manifest.get("heroImage", "")
+    if hero and repo:
+        result["heroImage"] = f"/api/apps/blob?repo={repo}&path={hero}"
+    hero_dark = manifest.get("heroImageDark", "")
+    if hero_dark and repo:
+        result["heroImageDark"] = f"/api/apps/blob?repo={repo}&path={hero_dark}"
+
     return result
 
 
@@ -960,9 +973,39 @@ def registry_name_from_source(source: str) -> str:
     return source[len(SOURCE_REGISTRY_PREFIX) :]
 
 
+def _external_registry_repos() -> set[str]:
+    """Repo names of apps in the user's configured external (federated) registries.
+
+    Reads each registry index from the local sync cache only (``ignore_ttl`` so a
+    stale index still resolves) — never fetches, so it is safe to call from the
+    per-request blob-proxy worker thread. Fails open to an empty set; the caller
+    treats these as additive to the bundled allowlist.
+    """
+    repos: set[str] = set()
+    try:
+        from kiro_claw.config.loader import (
+            KiroClawConfig,  # circular import: loader.py imports from apps/ at module level; deferring avoids ImportError
+        )
+
+        for reg in KiroClawConfig.load().registries:
+            cached = _read_external_registry_cache(reg.name or reg.repo, ignore_ttl=True)
+            for entry in cached or []:
+                if isinstance(entry, dict) and entry.get("repo"):
+                    repos.add(entry["repo"])
+    except Exception:  # fail open: the allowlist must never break blob serving
+        logger.debug("_external_registry_repos: read failed", exc_info=True)
+    return repos
+
+
 def known_registry_repos() -> set[str]:
-    """Return the set of repo names listed in the registry (for access control)."""
-    return {e["repo"] for e in _load_registry_file() if e.get("repo")}
+    """Repo names trusted by the ``/api/apps/blob`` SSRF gate.
+
+    Union of the bundled registry and the user's external (federated)
+    registries — external-registry apps resolve an ``/api/apps/blob`` iconUrl,
+    so their repos must be allowlisted here or the App Store icon 403s.
+    """
+    bundled = {e["repo"] for e in _load_registry_file() if e.get("repo")}
+    return bundled | _external_registry_repos()
 
 
 # ---------------------------------------------------------------------------

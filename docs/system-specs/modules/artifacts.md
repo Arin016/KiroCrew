@@ -40,7 +40,7 @@ The dashboard provides a `/artifacts` library page for browse/search and a
 |---|---|---|
 | `slug` | string | URL-safe handle, derived from `name` if not given |
 | `name` | string | Human-readable display name |
-| `kind` | enum | `widget` (default), `html`, `markdown`, `svg`, `json`, `text` |
+| `kind` | enum | `widget`, `html`, `markdown`, `svg`, `json`, `text` — inferred on save when the caller omits it (see [Kind inference](#kind-inference)) |
 | `source` | enum | `chat` (default), `cron`, `subagent`, `manual`, `import` |
 | `description` | string | Optional, ≤ 2,000 chars |
 | `tags` | string[] | ≤ 16 tags, alphanumeric / `_`, `:`, `.`, `-` |
@@ -66,6 +66,28 @@ store.delete(art.slug)
 The store is thread-safe. A module-level singleton is available via
 `get_default_store()`; pass an explicit `root` to `ArtifactStore(root=...)`
 for isolated test instances.
+
+### Kind inference
+
+`store.create()` (and every path that funnels through it — the HTTP create
+route, the `artifact_save` MCP tool, the `kiroclaw artifact save` CLI) infers
+`kind` when the caller omits it (`kind=None`), via `_infer_kind(content,
+source_path, explicit)`:
+
+1. **Explicit wins** — a non-empty `kind` argument is used as-is (back-compat).
+2. **Extension** — for file-backed artifacts (`source_path` set): `.md` /
+   `.markdown` → `markdown`, `.html` / `.htm` → `html`, `.svg` → `svg`,
+   `.json` → `json`, `.txt` → `text`, any other extension → `text`.
+3. **Content sniff** — for inline content with no `source_path`: HTML-ish
+   markup (`<div`, `<span`, `<style`, `<table`, `<mcwidget`, `<html`,
+   `<!doctype html`) → `widget`; a leading markdown heading (`#`…`######`) or
+   content with **no** `<` at all → `markdown`; otherwise the legacy `widget`
+   default (ambiguous blobs keep prior behavior).
+
+Only `widget` and `markdown` are inferred from inline content; the richer
+kinds need the extension signal. This is the safety prerequisite that lets
+agents save markdown deliverables without the mis-save footgun (a markdown
+doc stored as `widget` renders as raw inner HTML).
 
 ### MCP tools (`@kiroclaw-core/*`)
 
@@ -169,6 +191,71 @@ via a follow-up `update()`.
 `get(slug, version=N)` reads a specific version. After pruning, lower-numbered
 versions may be unavailable; callers must handle `ArtifactNotFoundError` for
 out-of-range versions.
+
+## Knowledge Library Auto-Ingest
+
+Content-bearing local artifacts (markdown/text documents) are automatically
+ingested into the Knowledge Library so they become searchable, stay in sync as
+the artifact changes, and are removed when the artifact is deleted. On by
+default via `knowledge.auto_ingest_artifacts`; the eligible kinds are
+`knowledge.auto_ingest_artifact_kinds` (default `["markdown", "text", "html",
+"json"]`). `widget` is excluded (widgets/dashboards are UI, not documents — and
+a remote widget round-trips back to `kind="widget"` on clone) and `svg` is
+excluded (the file reader has no `.svg` support).
+
+The feature plugs into the existing Knowledge **source framework** rather than
+adding a parallel watcher (see `kiro_claw.knowledge.artifact_ingest`):
+
+- **One aggregate "Artifacts" source.** A single `sources` row of
+  `source_type="artifact"` (uri `artifact://`) appears in the dashboard Sources
+  UI alongside the user's folder/upload sources. Items are grouped per-artifact
+  in a dedicated `artifact_item_state` table (keyed by `source_id` + `slug`,
+  with the artifact's display `name` stored as the group label) — the same
+  item-group pattern a folder source uses per file, so one artifact's items can
+  be replaced on edit or removed on delete without touching the rest. A per-slug
+  `content_hash` makes an unchanged artifact a cheap no-op. The dashboard
+  sub-groups this source per-artifact (one row per artifact, labelled by name)
+  the same way folder sources sub-group per file: `_attach_file_paths` supplies
+  the label and the frontend gates sub-grouping on `source_type` in
+  (`local_folder`, `obsidian_vault`, `artifact`).
+- **One ingestion path (via the file reader).** Ingestion routes through the
+  same `IngestionPipeline.ingest_file` → `FileReader` path as folders/uploads,
+  not a parallel raw-text path: the (redacted) artifact content is written to a
+  temp file with the kind's real extension (`markdown→.md`, `text→.txt`,
+  `html→.html`, `json→.json`) and read back through the reader, so `html`
+  artifacts get `_read_html` prose extraction instead of raw markup.
+- **Event-driven, no polling.** The gateway is the only process that writes the
+  artifact store (the agent's MCP tools, the CLI, the dashboard, and bookmarks
+  all HTTP-proxy to the gateway's `/api/artifacts` routes; Artifactory
+  pull/clone also funnel through the store). So a single in-process
+  change-listener registered via `ArtifactStore.set_change_listener` observes
+  every write path. `ArtifactKnowledgeSync.on_change` schedules the work on the
+  gateway loop: `upsert` → ingest/replace the artifact's item group; `delete` →
+  remove it. The store stays dependency-free — it knows nothing about the
+  Knowledge package; it only fires `(action, slug)` after a
+  content-affecting mutation (create, content-changing update, delete). A
+  metadata-only rename fires a separate `rename` signal that refreshes the
+  stored group label without re-ingesting (no chunk churn).
+- **First-enable backfill tied to source-row creation.** Because the feature is
+  on by default, the store may already hold artifacts created before the
+  listener existed. The one-time pass that ingests them is tied to the
+  *creation of the aggregate source row*: when `ensure_artifact_source` actually
+  inserts the row (its existence is the idempotency marker — no separate flag),
+  a background backfill runs once. On every later boot the row already exists,
+  so nothing re-runs. (Nothing writes the store while the gateway is down, and
+  there is no out-of-process writer, so no recurring reconcile is needed.)
+- **Security.** Ingested text *and* the LLM-originated artifact name (used as
+  the source/item title) are passed through `redact_credentials()` and
+  `redact_exfiltration_urls()` before landing in the Knowledge store (ARCC Bsc4
+  — never persist secrets), consistent with the chat-ingest path. File-backed
+  artifacts whose `source_path` resolves to a sensitive path are refused (with a
+  SEL audit event), mirroring the folder-watcher file-read guard.
+- **Dedup tie-in.** A file-backed artifact whose `source_path` is also inside a
+  synced folder source is the same document under two sources (the aggregate
+  `artifact` source and the folder's `local_file` source). The live Knowledge
+  dedup sweep collapses the pair once both copies share a `content_hash` (the
+  persistent folder copy wins over the artifact copy), so the overlap
+  self-resolves rather than needing special-casing here.
 
 ## Roadmap
 

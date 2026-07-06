@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     return () => ipcRenderer.removeListener("boot-ready", handler);
   },
   bootComplete: () => ipcRenderer.send("boot-complete"),
+  // Dev mode IPC: renderer signals main process to show/hide DevTools menu item.
+  setDevMode: (enabled) => ipcRenderer.send("dev-mode-changed", !!enabled),
 });
 
 // Desktop auto-update bridge. Drives the in-app UpdateModal + Settings > About.

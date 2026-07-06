@@ -5,7 +5,7 @@ import Clickable from '../../components/Clickable'
 import { fileExplorerApi } from './api'
 import { basename, parentChain } from './utils'
 import { useDebouncedValue } from './hooks'
-import type { GitInfo } from './types'
+import type { GitInfo, TreeEntry } from './types'
 
 interface PathBarProps {
   rootPath: string
@@ -47,7 +47,7 @@ export default function PathBar({ rootPath, gitInfo, onChangeRoot, onNavigate }:
     return () => document.removeEventListener('mousedown', onDocClick)
   }, [editing])
 
-  const accept = (entry: any) => {
+  const accept = (entry: TreeEntry) => {
     setDraft(entry.path); setOpen(false); setEditing(false)
     onChangeRoot(entry.path.replace(/\/$/, ''))
   }
@@ -79,6 +79,7 @@ export default function PathBar({ rootPath, gitInfo, onChangeRoot, onNavigate }:
               ref={inputRef}
               className="mc-fe-pathbar-input"
               type="text"
+              aria-label="Folder path"
               value={draft}
               onChange={(e) => { setDraft(e.target.value); setOpen(true) }}
               onFocus={() => setOpen(true)}
@@ -96,6 +97,7 @@ export default function PathBar({ rootPath, gitInfo, onChangeRoot, onNavigate }:
                     onMouseDown={(e) => { e.preventDefault(); accept(s) }}
                     onMouseEnter={() => setActiveIdx(i)}
                     role="option"
+                    tabIndex={-1}
                     aria-selected={i === activeIdx}
                   >
                     {s.type === 'dir' ? <Folder size={12} style={{ marginRight: 6, color: 'var(--accent)', opacity: 0.85 }} /> : <File size={12} style={{ marginRight: 6, color: 'var(--accent)', opacity: 0.85 }} />}

@@ -1,8 +1,31 @@
 import { copyToClipboard } from '../utils/clipboard'
 import { resizeImageForModel, type ResizeInfo } from '../utils/resizeImage'
 import type { McpApplyChange } from '../types'
+import { refreshOnce, __resetRefreshOnceForTests } from './refreshOnce'
+import { queryClient } from './queryClient'
 
 export const SEARCH_MIN_CHARS = 2  // backend session search threshold (must match kiro_claw.history.SEARCH_MIN_CHARS)
+
+/**
+ * A single task-runner plan step as sent to the server. Known fields are
+ * typed; the payload is forwarded verbatim, so extra fields are permitted via
+ * the index signature.
+ */
+export interface PlanStepInput {
+  title?: string
+  description?: string
+  depends_on?: number[]
+  requires_approval?: boolean
+  [key: string]: unknown
+}
+
+/** Final payload resolved by installFromRegistryStream's SSE `done` event. */
+export interface InstallStreamResult {
+  ok?: boolean
+  error?: string
+  needsClientInstall?: boolean
+  clientInstall?: { shell?: string; postInstall?: string }
+}
 
 let _sessionExpiredShown = false
 
@@ -35,7 +58,10 @@ function _emitAuthEvent(kind: 'mc-auth-required' | 'mc-auth-cleared'): void {
  *
  * Idempotent: safe to call on every response.
  */
-function removeAuthBanner(): void {
+export function removeAuthBanner(): void {
+  // A 2xx means auth works again — clear the terminal-refresh latch so a later
+  // lapse retries silently instead of going straight to the banner.
+  _silentRefreshExhausted = false
   if (!_sessionExpiredShown) return
   _sessionExpiredShown = false
   const el = document.getElementById('mc-session-expired')
@@ -43,7 +69,82 @@ function removeAuthBanner(): void {
   _emitAuthEvent('mc-auth-cleared')
 }
 
-function checkSessionExpired(r: Response): Response {
+// Reactive warm-path recovery: background-poll 403s funnel here, through the
+// shared single-flight refreshOnce(). True if the 30-day cookie rotated.
+let _silentRefreshExhausted = false
+
+export function attemptSilentRefresh(): Promise<boolean> {
+  return refreshOnce().then((res) => {
+    if (res.ok) {
+      // Keep the scheduler's ['auth-me'] cache from holding a stale
+      // pre-rotation session_exp after a warm-path recovery.
+      void queryClient.invalidateQueries({ queryKey: ['auth-me'] })
+      return true
+    }
+    // 401 = terminal (chain revoked / no cookie) → latch to banner; 5xx is transient.
+    if (res.status === 401) _silentRefreshExhausted = true
+    return false
+  })
+}
+
+/** Test-only: reset module auth-recovery state between cases. */
+export function __resetAuthRecoveryStateForTests(): void {
+  _silentRefreshExhausted = false
+  _sessionExpiredShown = false
+  __resetRefreshOnceForTests()
+  if (typeof document !== 'undefined') {
+    document.getElementById('mc-session-expired')?.remove()
+  }
+}
+
+function showSessionExpiredBanner(): void {
+  if (_sessionExpiredShown) return
+  _sessionExpiredShown = true
+  _emitAuthEvent('mc-auth-required')
+  const el = document.createElement('div')
+  el.id = 'mc-session-expired'
+  el.style.cssText =
+    'position:fixed;top:0;left:0;right:0;z-index:99999;background:#b91c1c;color:#fff;' +
+    'padding:12px 20px;text-align:center;font:14px/1.5 system-ui;'
+  const b = document.createElement('b')
+  b.textContent = 'Session expired.'
+  const code = document.createElement('code')
+  code.textContent = 'kiroclaw token'
+  code.style.cssText = 'background:#7f1d1d;padding:2px 6px;border-radius:4px'
+  const input = document.createElement('input')
+  input.type = 'text'
+  input.placeholder = 'Paste token URL or raw token…'
+  input.style.cssText =
+    'margin-left:12px;padding:4px 8px;border-radius:4px;border:1px solid #fca5a5;' +
+    'background:#7f1d1d;color:#fff;font-size:13px;width:280px;cursor:text;caret-color:#fff;' +
+    'outline:2px solid transparent;outline-offset:2px;transition:border-color 0.2s,box-shadow 0.2s;'
+  input.addEventListener('focus', () => { input.style.borderColor = '#fff'; input.style.boxShadow = '0 0 0 3px rgba(255,255,255,0.25),0 0 20px rgba(255,255,255,0.1)' })
+  input.addEventListener('blur', () => { input.style.borderColor = '#fca5a5'; input.style.boxShadow = 'none' })
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const v = input.value.trim()
+      if (!v) return
+      let t: string | null = null
+      try { t = new URL(v).searchParams.get('token') } catch { t = v }
+      if (t) window.location.href = `${window.location.protocol}//${window.location.host}?token=${encodeURIComponent(t)}`
+    }
+  })
+  el.append(b, ' Run ', code, ' then paste URL: ', input)
+  const dismiss = document.createElement('button')
+  dismiss.textContent = '✕'
+  dismiss.style.cssText =
+    'margin-left:12px;background:none;border:none;color:#fca5a5;cursor:pointer;font-size:18px;vertical-align:middle;'
+  dismiss.addEventListener('click', () => {
+    el.remove()
+    _sessionExpiredShown = false
+    _emitAuthEvent('mc-auth-cleared')
+  })
+  el.append(dismiss)
+  document.body.prepend(el)
+  requestAnimationFrame(() => input.focus())
+}
+
+export function checkSessionExpired(r: Response): Response {
   if (r.status === 403 && r.headers.get('X-Auth-Required') === 'true' && !_sessionExpiredShown) {
     // When this dashboard is running embedded in the Instances pane stack
     // (an <iframe> inside the hub), don't show the paste-token banner here —
@@ -60,49 +161,20 @@ function checkSessionExpired(r: Response): Response {
       }
       return r
     }
-    _sessionExpiredShown = true
-    _emitAuthEvent('mc-auth-required')
-    const el = document.createElement('div')
-    el.id = 'mc-session-expired'
-    el.style.cssText =
-      'position:fixed;top:0;left:0;right:0;z-index:99999;background:#b91c1c;color:#fff;' +
-      'padding:12px 20px;text-align:center;font:14px/1.5 system-ui;'
-    const b = document.createElement('b')
-    b.textContent = 'Session expired.'
-    const code = document.createElement('code')
-    code.textContent = 'kiroclaw token'
-    code.style.cssText = 'background:#7f1d1d;padding:2px 6px;border-radius:4px'
-    const input = document.createElement('input')
-    input.type = 'text'
-    input.placeholder = 'Paste token URL or raw token…'
-    input.style.cssText =
-      'margin-left:12px;padding:4px 8px;border-radius:4px;border:1px solid #fca5a5;' +
-      'background:#7f1d1d;color:#fff;font-size:13px;width:280px;cursor:text;caret-color:#fff;' +
-      'outline:2px solid transparent;outline-offset:2px;transition:border-color 0.2s,box-shadow 0.2s;'
-    input.addEventListener('focus', () => { input.style.borderColor = '#fff'; input.style.boxShadow = '0 0 0 3px rgba(255,255,255,0.25),0 0 20px rgba(255,255,255,0.1)' })
-    input.addEventListener('blur', () => { input.style.borderColor = '#fca5a5'; input.style.boxShadow = 'none' })
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        const v = input.value.trim()
-        if (!v) return
-        let t: string | null = null
-        try { t = new URL(v).searchParams.get('token') } catch { t = v }
-        if (t) window.location.href = `${window.location.protocol}//${window.location.host}?token=${encodeURIComponent(t)}`
-      }
-    })
-    el.append(b, ' Run ', code, ' then paste URL: ', input)
-    const dismiss = document.createElement('button')
-    dismiss.textContent = '✕'
-    dismiss.style.cssText =
-      'margin-left:12px;background:none;border:none;color:#fca5a5;cursor:pointer;font-size:18px;vertical-align:middle;'
-    dismiss.addEventListener('click', () => {
-      el.remove()
-      _sessionExpiredShown = false
-      _emitAuthEvent('mc-auth-cleared')
-    })
-    el.append(dismiss)
-    document.body.prepend(el)
-    requestAnimationFrame(() => input.focus())
+    // Mid-session the access cookie can lapse (20h TTL, or laptop sleep
+    // pausing the proactive refresh timer) while the tab stays open. The
+    // background polls then 403 in a burst. Before showing the re-auth banner,
+    // try a single-flight silent refresh with the still-valid 30-day cookie —
+    // this recovers without ever showing the banner. Only banner if the
+    // refresh can't recover (chain revoked / no refresh cookie).
+    if (!_silentRefreshExhausted) {
+      void attemptSilentRefresh().then((ok) => {
+        if (ok) removeAuthBanner()
+        else if (_silentRefreshExhausted) showSessionExpiredBanner()
+      })
+      return r
+    }
+    showSessionExpiredBanner()
   }
   return r
 }
@@ -260,7 +332,8 @@ export const api = {
   mcpProbeCache: () => fetch('/api/mcp/probe').then(j),
   // Agents
   agentsInstalled: () => fetch('/api/agents/installed').then(j),
-  agentDetail: (name: string) => fetch('/api/agents/detail/' + encodeURIComponent(name)).then(j),
+  agentDetail: (name: string, projectPath?: string) => fetch('/api/agents/detail/' + encodeURIComponent(name) + (projectPath ? '?project_path=' + encodeURIComponent(projectPath) : '')).then(j),
+  agentsRescan: (paths?: string[]) => post('/api/agents/rescan', paths ? { paths } : {}).then(j) as Promise<{ discovered: number; agents: unknown[] }>,
   agentPatch: (name: string, body: object) => fetch('/api/agents/detail/' + encodeURIComponent(name), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j),
   agentDelete: (name: string) => fetch('/api/agents/detail/' + encodeURIComponent(name), { method: 'DELETE' }).then(j),
   agentMetadata: (name: string) => fetch('/api/agent-metadata/' + encodeURIComponent(name)).then(j),
@@ -277,8 +350,8 @@ export const api = {
   effortLevels: (slot?: string) =>
     fetch('/api/effort-levels' + (slot ? '?slot=' + encodeURIComponent(slot) : '')).then(j) as Promise<string[]>,
   slashCommands: () => fetch('/api/slash-commands').then(j),
-  chatSlotAgent: (slot: string, agent: string) =>
-    post('/api/chat/slots/' + encodeURIComponent(slot) + '/agent', { agent }).then(j),
+  chatSlotAgent: (slot: string, agent: string, projectPath?: string) =>
+    post('/api/chat/slots/' + encodeURIComponent(slot) + '/agent', { agent, ...(projectPath ? { project_path: projectPath } : {}) }).then(j),
   chatSlotModel: (slot: string, model: string) =>
     post('/api/chat/slots/' + encodeURIComponent(slot) + '/model', { model }).then(j),
   chatSlotReasoningEffort: (slot: string, reasoning_effort: string) =>
@@ -289,7 +362,7 @@ export const api = {
     post('/api/chat/slots/' + encodeURIComponent(slot) + '/project', { project }).then(j),
   recentProjects: () => fetch('/api/recent-projects').then(j) as Promise<{ dirs: string[] }>,
   browseDirs: (path?: string) => fetch('/api/browse-dirs' + (path ? '?path=' + encodeURIComponent(path) : '')).then(j) as Promise<{ path: string; parent: string; dirs: { name: string; path: string }[] }>,
-  browseFiles: (path?: string) => fetch('/api/browse-files' + (path ? '?path=' + encodeURIComponent(path) : '')).then(j) as Promise<{ path: string; parent: string; dirs: { name: string; path: string }[]; files: { name: string; path: string }[] }>,
+  browseFiles: (path?: string) => fetch('/api/browse-files' + (path ? '?path=' + encodeURIComponent(path) : '')).then(j) as Promise<{ path: string; parent: string; dirs: { name: string; path: string; mtime: number }[]; files: { name: string; path: string; mtime: number }[] }>,
   workspaces: () => fetch('/api/workspaces').then(j),
   createWorkspace: (body: object) => post('/api/workspaces', body).then(j),
   updateWorkspace: (name: string, body: object) =>
@@ -416,7 +489,7 @@ export const api = {
   stopChatSlot: (slot: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/stop').then(j),
   stopChatSlotForce: (slot: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/stop?force=true').then(j),
   cancelQueuedMessage: (slot: string, queueId: string) => del('/api/chat/slots/' + encodeURIComponent(slot) + '/queue/' + encodeURIComponent(queueId)).then(j),
-  reorderQueue: (slot: string, order: string[]) => put('/api/chat/slots/' + encodeURIComponent(slot) + '/queue/order', { order }).then(j),
+  editQueuedMessage: (slot: string, queueId: string, content: string) => patch('/api/chat/slots/' + encodeURIComponent(slot) + '/queue/' + encodeURIComponent(queueId), { content }).then(j),
   interruptSlot: (slot: string, queueId?: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/interrupt', queueId ? { queue_id: queueId } : {}).then(j),
   approveChatSlot: (slot: string, action: string, extra?: Record<string, string>) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/approve', { action, ...extra }).then(j),
   planAction: (slot: string, action: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/plan-action', { action }).then(j),
@@ -500,7 +573,7 @@ export const api = {
   renameTaskRun: (taskId: string, name: string) => fetch('/api/taskrunner/' + encodeURIComponent(taskId) + '/name', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }).then(j),
   updateTask: (taskId: string, index: number, updates: { title?: string; description?: string; depends_on?: number[]; requires_approval?: boolean; force_approval?: boolean }) => fetch('/api/taskrunner/' + encodeURIComponent(taskId) + '/tasks/' + index, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates) }).then(j),
   taskRunToChat: (taskId: string) => post('/api/taskrunner/' + encodeURIComponent(taskId) + '/to-chat').then(j),
-  revealPath: (path: string) => post('/api/reveal', { path }).then(j).then((r: any) => {
+  revealPath: (path: string) => post('/api/reveal', { path }).then(j).then((r: { copy?: string }) => {
     if (r.copy) copyToClipboard(r.copy)
     return r
   }),
@@ -510,11 +583,11 @@ export const api = {
   planTask: (input: string, source: string, spec?: string, agent?: string) =>
     post('/api/taskrunner/plan', { input, source, spec: spec || '', agent: agent || '' }).then(j),
   cancelPlan: () => post('/api/taskrunner/plan/cancel').then(j),
-  updatePlan: (taskId: string, steps: any[]) =>
+  updatePlan: (taskId: string, steps: PlanStepInput[]) =>
     put('/api/taskrunner/' + encodeURIComponent(taskId) + '/plan', { steps }).then(j),
   executePlan: (taskId: string, agent?: string) =>
     post('/api/taskrunner/' + encodeURIComponent(taskId) + '/execute', { agent: agent || '' }).then(j),
-  planFromChat: (steps: any[], taskId?: string, originalInput?: string) =>
+  planFromChat: (steps: PlanStepInput[], taskId?: string, originalInput?: string) =>
     post('/api/taskrunner/from-chat', { steps, task_id: taskId || '', original_input: originalInput || '' }).then(j),
   planContext: (taskId: string) =>
     fetch('/api/taskrunner/' + encodeURIComponent(taskId) + '/plan-context').then(j),
@@ -543,7 +616,7 @@ export const api = {
     prepared.forEach(p => fd.append('file', p.file))
     const res = await fetch('/api/upload/file', { method: 'POST', body: fd })
     checkSessionExpired(res)
-    let body: any
+    let body: { paths?: unknown; error?: string }
     try { body = await res.json() } catch { body = {} }
     if (!res.ok) return { paths: [] as string[], error: body.error || res.statusText, resized }
     if (!Array.isArray(body.paths)) return { paths: [] as string[], error: 'Unexpected server response', resized }
@@ -606,6 +679,10 @@ export const api = {
     }>,
   updateApp: (name: string, source?: string) => post('/api/apps/' + encodeURIComponent(name) + '/update', source ? { source } : {}).then(j),
   migrateCleanup: (name: string) => del('/api/apps/' + encodeURIComponent(name) + '/migrate-cleanup').then(j),
+  // apps is intentionally `any[]`: each page (AppsPage/MigrationPage/AppDetailPage)
+  // narrows it to its own local RegistryApp shape at the call site. Typing it as
+  // unknown[] here would break those structural assignments across files.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   listRegistry: () => fetch('/api/apps/registry').then(j) as Promise<{ apps: any[]; serverPlatform: { os: string; arch: string } }>,
   listRegistries: () => fetch('/api/apps/registries').then(j) as Promise<{ registries: { name: string; repo: string; branch: string }[] }>,
   updateRegistries: (registries: { name: string; repo: string; branch: string }[]) => put('/api/apps/registries', { registries }).then(j),
@@ -618,7 +695,7 @@ export const api = {
     name: string,
     onLog: (line: string) => void,
     signal?: AbortSignal,
-  ): Promise<any> => {
+  ): Promise<InstallStreamResult> => {
     const res = await fetch('/api/apps/registry/install-stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ..._sk },

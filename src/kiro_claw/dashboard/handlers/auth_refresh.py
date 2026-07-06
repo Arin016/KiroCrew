@@ -20,7 +20,7 @@ from typing import Any
 
 from aiohttp import web
 
-from kiro_claw.dashboard.origin import check_origin
+from kiro_claw.dashboard.origin import check_origin, is_https_request
 from kiro_claw.dashboard.refresh_tokens import (
     MAX_REFRESH_TTL_SECS,
     REFRESH_COOKIE_PATH,
@@ -34,6 +34,7 @@ from kiro_claw.dashboard.token_auth import (
     _cookie_port_from_host,
     extract_claims_from_token,
     generate_token,
+    revoke_access_cookie,
 )
 from kiro_claw.sel import sel as _sel_fn
 
@@ -126,13 +127,12 @@ def _set_access_cookie(
         token,
         httponly=True,
         samesite="Lax",
-        # Secure flag set only when request was over HTTPS. Localhost
-        # HTTP (the dev-desk + SSH-tunnel default) MUST NOT set it
-        # because the browser would refuse to send the cookie back.
-        # Forward-compatible for KiroClaw OSS behind a real HTTPS
-        # reverse proxy (request.scheme reads X-Forwarded-Proto when
-        # aiohttp is configured to trust upstream proxies).
-        secure=(request.scheme == "https"),
+        # Secure flag set when the browser reached us over HTTPS — including
+        # via a TLS-terminating tunnel/proxy that forwards plain HTTP to the
+        # loopback gateway (X-Forwarded-Proto). Without this the wss://
+        # dashboard WebSocket is denied the cookie and flaps online/offline.
+        # Localhost plain HTTP still omits it so the browser will send it back.
+        secure=is_https_request(request),
         path="/",
         max_age=max_age,
     )
@@ -165,7 +165,7 @@ def _set_refresh_cookie(
         httponly=True,
         samesite="Lax",
         # See _set_access_cookie for the conditional-Secure rationale.
-        secure=(request.scheme == "https"),
+        secure=is_https_request(request),
         path=REFRESH_COOKIE_PATH,
         max_age=max_age,
     )
@@ -387,18 +387,23 @@ async def api_auth_refresh(request: web.Request) -> web.Response:
 
 
 async def api_auth_logout(request: web.Request) -> web.Response:
-    """Revoke the caller's refresh chain and clear both cookies.
+    """Revoke the caller's session (access + refresh) and clear both cookies.
 
-    Why this endpoint exists: the existing access cookie can be cleared
-    by setting `mc_token_<port>` to "" with max_age=0, but that does NOT
-    invalidate the paired refresh chain. A stolen refresh cookie would
-    therefore remain valid for up to 30 days after the legit user
-    "logged out". This endpoint closes that gap by calling
-    `revoke_chain` on the chain_id encoded in the refresh cookie.
+    Two independent revocations happen here:
 
-    The endpoint bypasses the standard `token_auth_middleware` (see
-    `token_auth.py`) so it is callable even when the access cookie has
-    just expired — same design as `/api/auth/refresh`.
+    1. Refresh chain: ``revoke_chain`` on the chain_id in the refresh cookie,
+       so a stolen refresh cookie cannot be replayed (up to 30 days otherwise).
+    2. Access cookie: ``revoke_access_cookie`` adds the access cookie's nonce
+       to a persisted server-side denylist (CWE-613). Without this the access
+       cookie — a self-contained signed token — stays a valid bearer credential
+       for the rest of its ~20h TTL even after the Set-Cookie max_age=0 below,
+       because clearing the browser copy does nothing to a saved/stolen copy.
+       This revokes ONLY the caller's session, unlike the global
+       ``revoke_all_sessions`` (kiroclaw logout) which kills every session.
+
+    The endpoint bypasses the standard ``token_auth_middleware`` (see
+    ``token_auth.py``) so it is callable even when the access cookie has
+    just expired — same design as ``/api/auth/refresh``.
     """
     # CSRF defense — same pattern as /api/auth/refresh.
     if not check_origin(request, require=False):
@@ -431,6 +436,18 @@ async def api_auth_logout(request: web.Request) -> web.Response:
             _audit(user_id or "", "refresh_token_logout", "invalid_refresh")
     else:
         _audit("", "refresh_token_logout", "no_cookie")
+
+    # Per-session access-cookie revocation (CWE-613). The access cookie is a
+    # self-contained signed token, so the Set-Cookie max_age=0 below only
+    # clears the BROWSER's copy — a saved/stolen copy stays valid for the rest
+    # of its ~20h TTL. Add this specific cookie's nonce to the persisted
+    # server-side denylist so validate_token rejects it on the very next
+    # request, terminating only this session (not all of them). Wrapped in
+    # to_thread because revoke writes the denylist file (atomic-rename, 0600).
+    access_cookie = request.cookies.get(f"mc_token_{cookie_port}", "")
+    if access_cookie:
+        revoked = await asyncio.to_thread(revoke_access_cookie, access_cookie)
+        _audit(user_id or "", "access_cookie_revoked", "ok" if revoked else "noop")
 
     # Always clear both cookies on the response, even when no refresh
     # cookie was present — the caller's intent is "log me out", and

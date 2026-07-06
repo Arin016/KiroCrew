@@ -316,6 +316,55 @@ class TestSafeReadFile:
         f.write_text('{"key": "value"}')
         assert safe_read_file(str(f)) == '{"key": "value"}'
 
+    def test_blocks_symlink_to_sensitive_path(self, tmp_path, monkeypatch):
+        """A workspace symlink into ~/.aws must be refused through the link."""
+        from kiro_claw.hooks import safe_read_file_bytes
+
+        home = tmp_path / "home"
+        (home / ".aws").mkdir(parents=True)
+        cred = home / ".aws" / "credentials"
+        cred.write_text("[default]\nsecret\n")
+        monkeypatch.setenv("HOME", str(home))
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        link = ws / "cfg.ini"
+        link.symlink_to(cred)
+        with pytest.raises(PermissionError, match="sensitive path"):
+            safe_read_file(str(link))
+        # bytes variant returns None (rejected) rather than leaking content
+        assert safe_read_file_bytes(str(link)) is None
+
+    def test_allows_benign_symlink(self, tmp_path):
+        """A symlink to a non-sensitive file is still readable via its target."""
+        from kiro_claw.hooks import safe_read_file_bytes
+
+        real = tmp_path / "real.txt"
+        real.write_text("hello")
+        link = tmp_path / "link.txt"
+        link.symlink_to(real)
+        assert safe_read_file(str(link)) == "hello"
+        assert safe_read_file_bytes(str(link)) == b"hello"
+
+    def test_blocks_symlinked_ancestor_dir_into_sensitive(self, tmp_path, monkeypatch):
+        """A symlinked ANCESTOR directory pointing into ~/.aws is caught, not
+        just a symlinked final file."""
+        home = tmp_path / "home"
+        (home / ".aws").mkdir(parents=True)
+        (home / ".aws" / "credentials").write_text("[default]\n")
+        monkeypatch.setenv("HOME", str(home))
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        # workspace/awslink -> ~/.aws ; read awslink/credentials
+        (ws / "awslink").symlink_to(home / ".aws")
+        with pytest.raises(PermissionError, match="sensitive path"):
+            safe_read_file(str(ws / "awslink" / "credentials"))
+
+    def test_missing_file_raises_natural_error(self, tmp_path):
+        """A missing (non-sensitive) file raises FileNotFoundError, not a
+        security PermissionError — accurate error messages for callers."""
+        with pytest.raises(FileNotFoundError):
+            safe_read_file(str(tmp_path / "does-not-exist.txt"))
+
 
 class TestShouldAutoApproveSpawn:
     """Test _should_auto_approve_spawn helper from handler.py."""

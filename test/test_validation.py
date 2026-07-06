@@ -9,6 +9,8 @@ from kiro_claw.validation import (
     CRON_ADD_SCHEMA,
     LEARN_ADD_SCHEMA,
     SEND_MESSAGE_SCHEMA,
+    SET_PROJECT_SCHEMA,
+    SLACK_THREAD_TS_RE,
     SPAWN_RUN_SCHEMA,
     TASK_RUN_SCHEMA,
     FieldSpec,
@@ -421,6 +423,28 @@ def test_channel_id_re(channel_id, valid):
     assert bool(CHANNEL_ID_RE.match(channel_id)) == valid
 
 
+# ── Slack thread_ts Regex (gates an authorization decision) ──
+
+
+@pytest.mark.parametrize("session_key,valid", [
+    ("1781215864.487849", True),       # canonical Slack thread_ts
+    ("1712793600.123456", True),       # 10-digit epoch + 6-digit subsecond
+    ("17812158640.4878490", True),     # 11 digits / 7 subsecond digits OK
+    ("123.45", False),                 # too few digits on both sides
+    ("1781215864", False),             # no subsecond component
+    ("1781215864.4878", False),        # subsecond < 6 digits
+    ("dashboard:chat-1", False),       # prefixed dashboard key
+    ("١٧٨١٢١٥٨٦٤.٤٨٧٨٤٩", False),       # Arabic-Indic digits: \d would match, [0-9] must not
+    ("१७८१२१५८६४.४८७८४९", False),       # Devanagari digits rejected
+    ("", False),                       # empty
+])
+def test_slack_thread_ts_re_ascii_only(session_key, valid):
+    """The pattern must accept ASCII-digit Slack timestamps and reject
+    everything else — including Unicode-digit lookalikes, since the match
+    gates slack_namespace authorization in api_lessons_create."""
+    assert bool(SLACK_THREAD_TS_RE.match(session_key)) == valid
+
+
 class TestSendMessageSchema:
     def test_thread_ts_valid(self):
         result = validate_tool_args(
@@ -446,3 +470,43 @@ class TestSendMessageSchema:
             validate_tool_args(
                 {"text": "hi", "reply_broadcast": "yes"}, SEND_MESSAGE_SCHEMA
             )
+
+
+class TestSetProjectSchema:
+    def test_absolute_path_accepted(self):
+        result = validate_tool_args({"path": "/home/me/work"}, SET_PROJECT_SCHEMA)
+        assert result["path"] == "/home/me/work"
+
+    def test_clear_with_empty_path(self):
+        result = validate_tool_args({"path": "", "clear": True}, SET_PROJECT_SCHEMA)
+        assert result["path"] == ""
+        assert result["clear"] is True
+
+    def test_empty_path_without_clear_rejected(self):
+        with pytest.raises(ValidationError, match="required.*clear=true"):
+            validate_tool_args({"path": ""}, SET_PROJECT_SCHEMA)
+
+    def test_missing_path_rejected(self):
+        with pytest.raises(ValidationError, match="required.*clear=true"):
+            validate_tool_args({}, SET_PROJECT_SCHEMA)
+
+    def test_clear_with_non_empty_path_rejected(self):
+        with pytest.raises(ValidationError, match="path must be empty when clear=true"):
+            validate_tool_args({"path": "/foo", "clear": True}, SET_PROJECT_SCHEMA)
+
+    def test_relative_path_rejected(self):
+        with pytest.raises(ValidationError, match="invalid format"):
+            validate_tool_args({"path": "relative/path"}, SET_PROJECT_SCHEMA)
+
+    def test_non_string_rejected(self):
+        with pytest.raises(ValidationError, match="expected str"):
+            validate_tool_args({"path": 42}, SET_PROJECT_SCHEMA)
+
+    def test_oversized_rejected(self):
+        too_long = "/" + "a" * 4096
+        with pytest.raises(ValidationError, match="max length"):
+            validate_tool_args({"path": too_long}, SET_PROJECT_SCHEMA)
+
+    def test_strips_hidden_unicode(self):
+        result = validate_tool_args({"path": "/home/me\x00/x"}, SET_PROJECT_SCHEMA)
+        assert "\x00" not in result["path"]

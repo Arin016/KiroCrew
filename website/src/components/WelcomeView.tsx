@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { Droplet, EyeOff, Ghost, RefreshCw, Undo2, VenetianMask } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { KiroGhost } from './KiroGhost'
 import { useBranding } from '../hooks/useBranding'
 import { api } from '../api/client'
 
@@ -102,8 +103,12 @@ export default function WelcomeView({
     <div className="flex flex-col items-center w-full gap-6 px-8">
       {mode === 'orchestrator' && <img src={avatar} alt={botName} className="w-16 h-16 rounded-xl object-cover" />}
       <div className="text-center">
-        <h2 className="text-5xl font-light text-text-strong mb-1 tracking-tight">{mode === 'orchestrator' ? 'Autopilot' : 'What can I do for you?'}</h2>
-        {mode === 'orchestrator' && <p className="text-[13px] text-muted">Simple tasks run instantly. Complex ones get a plan you approve first.</p>}
+        <div className="flex items-center justify-center gap-4">
+          {mode !== 'orchestrator' && <KiroGhost size={64} className="drop-shadow-lg shrink-0 animate-float" />}
+          <h2 className="text-5xl font-light text-text-strong tracking-tight">{mode === 'orchestrator' ? 'Autopilot' : 'What can I do for you?'}</h2>
+          {mode !== 'orchestrator' && <div className="w-[64px] shrink-0" />}
+        </div>
+        {mode === 'orchestrator' && <p className="text-[13px] text-muted mt-1">Simple tasks run instantly. Complex ones get a plan you approve first.</p>}
       </div>
       {mode === 'orchestrator' && (
         <button

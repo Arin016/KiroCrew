@@ -10,6 +10,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import chatReducer from '../store/chatSlice'
 import dashboardReducer from '../store/dashboardSlice'
 import notificationsReducer from '../store/notificationsSlice'
+import type { RootState } from '../store'
 
 vi.mock('../hooks/useVoiceInput', () => ({ useVoiceInput: () => ({ recording: false, transcribing: false, toggle: vi.fn() }), voiceInputSupported: false }))
 
@@ -21,7 +22,7 @@ beforeEach(() => { vi.clearAllMocks() })
 function renderInput(props: Partial<Parameters<typeof ChatInput>[0]> = {}) {
   const store = configureStore({
     reducer: { dashboard: dashboardReducer, chat: chatReducer, notifications: notificationsReducer },
-    preloadedState: { dashboard: { slots: [], unreadSlots: [], refreshTrigger: 0, subagentRunning: {}, subagentDetails: {}, subagentText: {} } as any, chat: { activeSlot: null, messages: [], slotRunning: false, toolLog: [], activityOpen: false } as any, notifications: { items: [] } as any },
+    preloadedState: { dashboard: { slots: [], unreadSlots: [], refreshTrigger: 0, subagentRunning: {}, subagentDetails: {}, subagentText: {} } as RootState['dashboard'], chat: { activeSlot: null, messages: [], slotRunning: false, toolLog: [], activityOpen: false } as RootState['chat'], notifications: { items: [] } as RootState['notifications'] },
   })
   const defaults = {
     value: '',

@@ -114,3 +114,93 @@ class TestResolveContradictions:
         candidates = [{"key": "lesson.err", "rule": "Some rule", "similarity": 0.5}]
         result = await _resolve_contradictions(state, "New rule", candidates)
         assert result == []
+
+
+@pytest.mark.asyncio
+class TestResolveAndSupersede:
+    """Tests for the backgrounded _resolve_and_supersede helper."""
+
+    async def test_deletes_contradicted_keys(self):
+        from kiro_claw.dashboard.handlers.cron import _resolve_and_supersede
+
+        state = MagicMock()
+        vs = MagicMock()
+        candidates = [{"key": "lesson.old", "rule": "Use X", "similarity": 0.6}]
+        with patch(
+            "kiro_claw.dashboard.handlers.cron._resolve_contradictions",
+            new=AsyncMock(return_value=["lesson.old"]),
+        ), patch("kiro_claw.dashboard.handlers.cron._sel"):
+            await _resolve_and_supersede(state, "dashboard:ui", "Do NOT use X", candidates, vs)
+        vs.delete_semantic.assert_called_once_with("lesson.old", "contradiction_superseded")
+
+    async def test_swallows_exceptions(self):
+        """A failed sweep must not propagate — the lesson is already persisted."""
+        from kiro_claw.dashboard.handlers.cron import _resolve_and_supersede
+
+        state = MagicMock()
+        vs = MagicMock()
+        candidates = [{"key": "lesson.x", "rule": "r", "similarity": 0.5}]
+        with patch(
+            "kiro_claw.dashboard.handlers.cron._resolve_contradictions",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            # Must not raise.
+            await _resolve_and_supersede(state, "dashboard:ui", "new", candidates, vs)
+        vs.delete_semantic.assert_not_called()
+
+    async def test_one_bad_key_does_not_abort_batch(self):
+        """A failure on one key still drains the remaining contradicted keys."""
+        from kiro_claw.dashboard.handlers.cron import _resolve_and_supersede
+
+        state = MagicMock()
+        vs = MagicMock()
+        vs.delete_semantic.side_effect = [RuntimeError("already deleted"), None]
+        candidates = [{"key": "lesson.a", "rule": "r", "similarity": 0.6}]
+        with patch(
+            "kiro_claw.dashboard.handlers.cron._resolve_contradictions",
+            new=AsyncMock(return_value=["lesson.a", "lesson.b"]),
+        ), patch("kiro_claw.dashboard.handlers.cron._sel"):
+            await _resolve_and_supersede(state, "dashboard:ui", "new", candidates, vs)
+        # Both keys attempted despite the first raising.
+        assert vs.delete_semantic.call_count == 2
+
+
+@pytest.mark.asyncio
+class TestApiLessonsCreateSchedulesSweep:
+    """The handler seam: api_lessons_create registers a background task iff
+    the contradiction scan finds candidates (locks the fire-and-forget wiring)."""
+
+    def _request(self, state):
+        request = MagicMock()
+        request.app = {"state": state}
+        request.headers = {"X-Session-Key": "dashboard:ui"}
+        request.json = AsyncMock(return_value={"rule": "a real rule", "category": "knowledge"})
+        return request
+
+    async def _run(self, candidates):
+        from kiro_claw.dashboard.handlers import cron
+
+        state = MagicMock()
+        state._background_tasks = set()
+        vs = MagicMock()
+        vs.embed_lesson.return_value = [0.1] * 384
+        vs.find_contradiction_candidates.return_value = candidates
+        with patch.object(cron, "_get_memory", return_value=MagicMock(vector_store=vs)), \
+             patch.object(cron, "_is_restricted_session", return_value=False), \
+             patch.object(cron, "_sel"), \
+             patch.object(cron, "_resolve_and_supersede", new=AsyncMock()):
+            resp = await cron.api_lessons_create(self._request(state))
+        assert resp.status == 200
+        # Let any scheduled task settle so it doesn't leak a warning.
+        tasks = list(state._background_tasks)
+        for t in tasks:
+            await t
+        return tasks
+
+    async def test_schedules_when_candidates_found(self):
+        tasks = await self._run([{"key": "lesson.old", "rule": "r", "similarity": 0.6}])
+        assert len(tasks) == 1
+
+    async def test_no_task_when_no_candidates(self):
+        tasks = await self._run([])
+        assert tasks == []

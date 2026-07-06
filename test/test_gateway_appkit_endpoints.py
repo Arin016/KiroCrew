@@ -625,6 +625,42 @@ class TestReverseProxy:
         assert "invalid path" in data["error"]
 
     @pytest.mark.asyncio
+    async def test_cross_app_token_rejected(self):
+        """An APP token (request['app']) may only proxy into its OWN backend.
+        A token for app 'other-app' hitting /apps/proxy-app/api/... is 403
+        (CWE-269 cross-app guard). Called directly with a crafted request."""
+        from unittest.mock import MagicMock
+
+        from kiro_claw.apps.routes import handle_app_api_proxy
+
+        request = MagicMock()
+        request.match_info = {"name": "proxy-app", "path": "health"}
+        # Simulate token_auth_middleware having set a DIFFERENT app identity.
+        request.get = lambda key, default="": "other-app" if key == "app" else default
+        resp = await handle_app_api_proxy(request)
+        assert resp.status == 403
+        data = json.loads(resp.body)
+        assert "another app" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_same_app_token_not_rejected_by_cross_app_guard(self, monkeypatch):
+        """A token whose app matches the target app passes the cross-app guard.
+        We stop at backend resolution (return no backend → 502) to prove we got
+        PAST the 403 guard without exercising the header-forwarding path."""
+        from unittest.mock import MagicMock
+
+        import kiro_claw.apps.routes as rmod
+        from kiro_claw.apps.routes import handle_app_api_proxy
+
+        monkeypatch.setattr(rmod, "_resolve_app_backend_url", lambda name: "")
+        request = MagicMock()
+        request.match_info = {"name": "proxy-app", "path": "health"}
+        request.get = lambda key, default="": "proxy-app" if key == "app" else default
+        resp = await handle_app_api_proxy(request)
+        # 502 (no backend), NOT 403 — the cross-app guard let a same-app token through.
+        assert resp.status == 502
+
+    @pytest.mark.asyncio
     async def test_missing_app_secret_returns_502(self, tmp_path: Path, monkeypatch):
         """App without .app_secret returns 502."""
         # Create an app without a secret

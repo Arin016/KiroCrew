@@ -45,6 +45,12 @@ _ALLOWED_FORMATS = {"jpeg", "png", "webp"}
 # far better than running text credential/URL redactors on opaque image bytes.
 _B64_RE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
 
+# Slot key the frame belongs to (from the proxy's KIROCLAW_SESSION_KEY). Opaque
+# id used only as a lookup key client-side — the dashboard renders the resolved
+# session *title* from its own slot store, never this raw value — but bound it to
+# a safe charset/length anyway so the WS payload can't carry arbitrary text.
+_SESSION_KEY_RE = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+
 
 def build_frame_payload(body: dict[str, Any]) -> dict[str, Any] | None:
     """Normalize a POSTed frame body into the ``browser_frame`` WS payload.
@@ -72,4 +78,9 @@ def build_frame_payload(body: dict[str, Any]) -> dict[str, Any] | None:
         val = body.get(dim)
         if isinstance(val, int):
             payload[dim] = val
+    # Pass the session key through (bounded) so the panel can label which session
+    # it mirrors. The dashboard resolves it to a title from its own slot store.
+    sk = body.get("session_key")
+    if isinstance(sk, str) and _SESSION_KEY_RE.fullmatch(sk):
+        payload["session_key"] = sk
     return payload

@@ -179,11 +179,24 @@ class SecurityEventLog:
             if self._pending == 0:
                 self._pending_cond.notify_all()
 
-    def _flush_batch(self, events: list[SecurityEvent]) -> None:
-        """Append a batch of events under the chain lock, then forward them."""
+    def _flush_batch(self, events: list[SecurityEvent], *, raise_on_error: bool = False) -> None:
+        """Append a batch of events under the chain lock, then forward them.
+
+        When ``raise_on_error=True`` a filesystem failure (unwritable SEL file,
+        full disk, un-creatable dir) is re-raised after rolling the chain tip
+        back, so a fail-closed caller (critical audit) can refuse the action it
+        was about to audit. The default (async writer / best-effort) swallows
+        the error and keeps the writer thread alive.
+        """
         callback: Callable[[dict], None] | None
         with self._lock:
-            self._dir.mkdir(parents=True, exist_ok=True)
+            try:
+                self._dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                if raise_on_error:
+                    raise
+                logger.warning("SEL dir create failed for %d events", len(events), exc_info=True)
+                return
             # Remember the chain tip so we can roll back if the append fails:
             # we advance _last_hash per event below, but nothing is persisted
             # until the write() succeeds. Without the rollback, a failed write
@@ -202,6 +215,8 @@ class SecurityEventLog:
                     f.write("".join(lines))
             except OSError:
                 self._last_hash = prev_last_hash  # nothing persisted — roll back
+                if raise_on_error:
+                    raise
                 logger.warning("SEL append failed for %d events", len(events), exc_info=True)
             callback = self._forward_callback
         if callback:
@@ -288,16 +303,31 @@ class SecurityEventLog:
         payload = json.dumps(d, sort_keys=True).encode()
         return hmac.new(self._hmac_key, payload, hashlib.sha256).hexdigest()
 
-    def log(self, event: SecurityEvent) -> None:
+    def log(self, event: SecurityEvent, *, critical: bool = False) -> None:
         """Enqueue an event for the background writer (non-blocking).
 
         The HMAC chain (prev_hash/entry_hash) is computed in the writer thread
         in enqueue order, so callers never pay the hash + file-append cost on
         the hot path. If the writer can't be started (unexpected), fall back to
         a synchronous write so an event is never silently dropped.
+
+        When ``critical=True`` the event is written SYNCHRONOUSLY and a
+        filesystem failure is re-raised, so a fail-closed caller (e.g. safety
+        override activation, unattended tool auto-approval) can refuse the
+        action it was about to audit rather than proceed unaudited. Any events
+        already queued are drained first so the on-disk HMAC chain keeps
+        enqueue order. This is the crux of the "audit-or-deny" invariant: the
+        async queue's swallow-and-warn behaviour must NOT apply to a critical
+        audit, or the caller's fail-closed branch becomes unreachable.
         """
         if self._sync:
-            self._flush_batch([event])
+            self._flush_batch([event], raise_on_error=critical)
+            return
+        if critical:
+            # Preserve chain order: drain the async backlog, then write this
+            # event inline so PermissionError/OSError propagates to the caller.
+            self.flush()
+            self._flush_batch([event], raise_on_error=True)
             return
         try:
             self._ensure_writer()
@@ -323,8 +353,15 @@ class SecurityEventLog:
         resources: str = "",
         error: str = "",
         metadata: dict | None = None,
+        critical: bool = False,
     ) -> None:
-        """Convenience: log a tool invocation event."""
+        """Convenience: log a tool invocation event.
+
+        Pass ``critical=True`` when the caller enforces "audit-or-deny" (e.g.
+        an unattended heartbeat auto-approve): the event is written
+        synchronously and a filesystem failure is re-raised so the caller can
+        deny the tool rather than run it unaudited.
+        """
         self.log(
             SecurityEvent(
                 event_id=uuid.uuid4().hex[:16],
@@ -341,7 +378,8 @@ class SecurityEventLog:
                 resources=resources[:_MAX_ARG_LEN] if resources else "",
                 error=error[:_MAX_ARG_LEN] if error else "",
                 metadata=metadata or {},
-            )
+            ),
+            critical=critical,
         )
 
     def log_governance_decision(
@@ -450,8 +488,14 @@ class SecurityEventLog:
         source: str = "dashboard",
         resources: str = "",
         error: str = "",
+        critical: bool = False,
     ) -> None:
-        """Convenience: log a dashboard/API access event."""
+        """Convenience: log a dashboard/API access event.
+
+        Pass ``critical=True`` for fail-closed audits (e.g. safety-override
+        activation): the event is written synchronously and a filesystem
+        failure is re-raised so the caller can refuse the audited action.
+        """
         self.log(
             SecurityEvent(
                 event_id=uuid.uuid4().hex[:16],
@@ -464,7 +508,8 @@ class SecurityEventLog:
                 outcome=outcome,
                 resources=resources[:_MAX_ARG_LEN] if resources else "",
                 error=error[:_MAX_ARG_LEN] if error else "",
-            )
+            ),
+            critical=critical,
         )
 
     def verify_integrity(self) -> tuple[int, int]:

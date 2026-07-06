@@ -29,10 +29,16 @@ class TestToolNameValidation:
         with pytest.raises(ValueError, match="exceeds max length"):
             _validate_tool_name(long_name)
 
-    def test_execute_skips_length_check(self):
-        """Execute tool titles can be arbitrarily long (bash commands)."""
+    def test_shell_skips_length_check(self):
+        """Shell tool titles can be arbitrarily long (bash command lines)."""
         long_cmd = "Running: " + "x" * 1000
-        assert _validate_tool_name(long_cmd, "execute") == long_cmd
+        assert _validate_tool_name(long_cmd, is_shell=True) == long_cmd
+
+    def test_long_non_shell_name_still_rejected(self):
+        """A long title that is NOT a shell command is still capped."""
+        long_name = "Reading " + "a" * (MAX_TOOL_NAME_LEN + 1)
+        with pytest.raises(ValueError, match="exceeds max length"):
+            _validate_tool_name(long_name, is_shell=False)
 
     def test_display_titles_accepted(self):
         """Display titles with shell-like characters are accepted (used for hook matching only)."""

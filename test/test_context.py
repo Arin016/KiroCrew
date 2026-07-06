@@ -86,6 +86,9 @@ class TestContextBuilder:
         assert "diff" in ctx
         # ACP agents get the OPTIONS-button UI contract too
         assert "[OPTIONS:" in ctx
+        # ...and the standalone-final-message rule (decision context must not
+        # live only in a now-collapsed step)
+        assert "collapses earlier steps" in ctx
 
     def test_cc_provider_has_full_parity_with_kiro(self, tmp_path):
         """Full parity: anything injected for kiro ACP must also be injected for
@@ -107,6 +110,7 @@ class TestContextBuilder:
         assert "[OPTIONS:" in cc_ctx, "CC missing OPTIONS-button instruction"
         assert "diff" in cc_ctx, "CC missing diff-block instruction"
         assert "absolute path" in cc_ctx, "CC missing absolute-path file-link rule"
+        assert "collapses earlier steps" in cc_ctx, "CC missing standalone-final-message rule"
         # Parity: both providers carry the critical-rules block.
         assert ("[CRITICAL RULES" in cc_ctx) == ("[CRITICAL RULES" in acp_ctx)
 

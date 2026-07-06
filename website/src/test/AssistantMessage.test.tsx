@@ -187,6 +187,35 @@ describe('parseOptions', () => {
     expect(text).toBe('Pick')
   })
 
+  // Regression: the model often appends a closing line after the marker (a
+  // follow-up question, a note, an auto-inserted comment). The old end-anchored
+  // regex failed to match these, so the raw "[OPTION: …]" text rendered with no
+  // buttons. Parsing must tolerate trailing content and still surface options.
+  it('parses options when a trailing note follows the marker', () => {
+    const content = '📋 Plan for: foo\n\nStage 1: do thing\n\n[OPTION: Go | Go All | Cancel]\n\nTwo things I\'d like your call on: (a) clearance? (b) scope?'
+    const { options, isPlan, text } = parseOptions(content)
+    expect(options).toEqual(['Go', 'Go All', 'Cancel'])
+    expect(isPlan).toBe(true)
+    expect(text).not.toContain('[OPTION:')
+    expect(text).toContain('Two things')
+  })
+
+  it('parses options when a diff block follows the marker', () => {
+    const content = 'Stage 1\n\n[OPTION: Go | Cancel]\n\n```diff\n--- a\n+++ b\n```'
+    const { options, text } = parseOptions(content)
+    expect(options).toEqual(['Go', 'Cancel'])
+    expect(text).not.toContain('[OPTION:')
+    expect(text).toContain('```diff')
+  })
+
+  it('takes the last marker for options and strips ALL markers from text', () => {
+    const { options, text } = parseOptions('[OPTION: A | B]\nlater\n[OPTION: Go | Go All | Cancel]')
+    expect(options).toEqual(['Go', 'Go All', 'Cancel'])
+    // earlier markers must NOT leak as raw syntax; surrounding prose is preserved
+    expect(text).not.toContain('[OPTION:')
+    expect(text).toContain('later')
+  })
+
   it('shows "Copy link to message" button when messageTs and slotKey are provided', () => {
     render(<AssistantMessage content="Hello" isStreaming={false} slotRunning={false} messageTs="2025-05-13T14:00:00.000Z" slotKey="chat-1" slotTitle="My Chat" />)
     expect(screen.getByTitle('Copy link to message')).toBeInTheDocument()

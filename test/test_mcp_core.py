@@ -232,3 +232,43 @@ class TestKnowledgeSearchCache:
         # the failed build) — a query succeeds rather than raising ProgrammingError.
         assert store1.db.execute("SELECT 1").fetchone()[0] == 1
         self._reset()
+
+
+class TestSessionKeyHeaderError:
+    """The header-safety guard for session keys (Mesh-2241)."""
+
+    def test_ascii_key_is_header_safe(self):
+        from kiro_claw.mcp_core import _session_key_header_error
+
+        assert _session_key_header_error("dashboard:Plain ASCII Title") is None
+        assert _session_key_header_error("") is None
+
+    def test_non_latin1_key_returns_actionable_error(self):
+        from kiro_claw.mcp_core import _session_key_header_error
+
+        # Em-dash (U+2014) and emoji are non-latin-1 and crash http.client.
+        for sk in ("dashboard:A — B", "dashboard:done \U0001f680"):
+            err = _session_key_header_error(sk)
+            assert err is not None
+            assert "rename" in err.lower()
+
+    def test_latin1_supplement_is_allowed(self):
+        from kiro_claw.mcp_core import _session_key_header_error
+
+        # Chars in latin-1 range (e.g. é, U+00E9) encode fine — not flagged.
+        assert _session_key_header_error("dashboard:café") is None
+
+    def test_post_short_circuits_on_non_latin1_key(self):
+        from kiro_claw import mcp_core
+
+        # The actual user-facing fix path: a non-latin-1 resolved key makes
+        # _post early-return the error dict WITHOUT issuing the HTTP request.
+        with (
+            patch.object(mcp_core, "_resolve_session_key", return_value="dashboard:A — B"),
+            patch.object(mcp_core, "_internal_secret", return_value="secret"),
+            patch("urllib.request.urlopen") as mock_urlopen,
+        ):
+            result = mcp_core._post("/api/lessons", {"text": "x"})
+        assert "error" in result
+        assert "rename" in result["error"].lower()
+        mock_urlopen.assert_not_called()

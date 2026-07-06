@@ -82,6 +82,9 @@ class UIPage:
     label: str = ""  # sidebar display text
     icon: str = ""  # lucide icon name or emoji
     iconUrl: str = ""  # custom icon image path relative to ui/ dir  # noqa: N815
+    # Optional INACTIVE-state variant of iconUrl (a muted/dark rendering shown when
+    # the nav row is not the active route — matches how lucide nav icons gray out).
+    iconInactiveUrl: str = ""  # noqa: N815
     entryPoint: str = ""  # path to JS bundle relative to app root  # noqa: N815
     mountFunction: str = "mount"  # exported function name  # noqa: N815
 
@@ -94,6 +97,8 @@ class UIPage:
             d["icon"] = self.icon
         if self.iconUrl:
             d["iconUrl"] = self.iconUrl
+        if self.iconInactiveUrl:
+            d["iconInactiveUrl"] = self.iconInactiveUrl
         if self.entryPoint:
             d["entryPoint"] = self.entryPoint
         if self.mountFunction != "mount":
@@ -107,6 +112,7 @@ class UIPage:
             label=str(data.get("label", "")),
             icon=str(data.get("icon", "")),
             iconUrl=str(data.get("iconUrl", "")),  # noqa: N815
+            iconInactiveUrl=str(data.get("iconInactiveUrl", "")),  # noqa: N815
             entryPoint=str(data.get("entryPoint", "")),  # noqa: N815
             mountFunction=str(data.get("mountFunction", "mount")),  # noqa: N815
         )

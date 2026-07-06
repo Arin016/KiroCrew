@@ -75,6 +75,30 @@ def _compress_to_outline(text: str) -> str:
 _SCREENSHOT_DIR = os.path.join(os.environ.get("TMPDIR", "/tmp"), "kiroclaw-screenshots")
 
 
+def _env_int(name: str, default: int) -> int:
+    """Parse a non-negative int env override, falling back to ``default``."""
+    try:
+        val = int(os.environ.get(name, "") or default)
+        return val if val >= 0 else default
+    except ValueError:
+        return default
+
+
+# Max width (px) for relayed/saved frames. Raised from the old hard 1200 so a
+# resized mirror panel shows real pixels instead of an upscaled blur; set
+# KIROCLAW_BROWSE_MAX_WIDTH=0 to disable downscaling entirely (send native
+# resolution). JPEG quality is likewise tunable. Both apply to the on-disk
+# screenshot and the live mirror frame, which share one encode.
+_MAX_FRAME_WIDTH = _env_int("KIROCLAW_BROWSE_MAX_WIDTH", 1920)
+_FRAME_JPEG_QUALITY = _env_int("KIROCLAW_BROWSE_JPEG_QUALITY", 70)
+
+# The browse session this proxy serves. kiro-cli freezes KIROCLAW_SESSION_KEY in
+# the MCP subprocess env at spawn, so it identifies the session whose browse is
+# being mirrored. Sent with each frame so the dashboard panel can label which
+# session it's showing; empty when unknown (e.g. warm-pool processes).
+_SESSION_KEY = os.environ.get("KIROCLAW_SESSION_KEY", "")
+
+
 def _encode_frame(data: str, media_type: str) -> tuple[bytes, str]:
     """Decode a base64 image; downscale + JPEG-encode if PIL is available.
 
@@ -85,14 +109,13 @@ def _encode_frame(data: str, media_type: str) -> tuple[bytes, str]:
     ext = "jpeg" if ("jpeg" in media_type or "jpg" in media_type) else "png"
     if _HAS_PIL:
         try:
-            img = Image.open(io.BytesIO(img_bytes))
-            max_width = 1200
-            if img.width > max_width:
-                ratio = max_width / img.width
+            img: Image.Image = Image.open(io.BytesIO(img_bytes))
+            if _MAX_FRAME_WIDTH and img.width > _MAX_FRAME_WIDTH:
+                ratio = _MAX_FRAME_WIDTH / img.width
                 resample = getattr(Image, "LANCZOS", getattr(Image, "ANTIALIAS", None))
-                img = img.resize((max_width, int(img.height * ratio)), resample)
+                img = img.resize((_MAX_FRAME_WIDTH, int(img.height * ratio)), resample)
             buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=70)
+            img.save(buf, format="JPEG", quality=_FRAME_JPEG_QUALITY)
             return buf.getvalue(), "jpeg"
         except Exception:
             pass
@@ -164,8 +187,29 @@ def _internal_secret() -> str:
 # disk for the agent's Read tool; only the dashboard mirror is skipped).
 _EXTENSION_MODE = "--extension" in sys.argv
 
+# Shared lock around writes to the Playwright subprocess stdin. Both the client→
+# subprocess forwarder and the active-pump thread (below) write JSON-RPC there;
+# an unlocked interleave could split a message on the pipe.
+_proc_stdin_lock = threading.Lock()
 
-def _post_frame_to_gateway(img_bytes: bytes, fmt: str) -> None:
+# Live dashboard subscriber count, learned from the gateway's frame-POST response
+# ({"ok": true, "subscribers": N}). The active pump uses it to stop screenshotting
+# when nobody is watching. Optimistic (1) until the first response arrives.
+_last_subscriber_count = 1
+
+
+def _record_subscriber_count(body: bytes) -> None:
+    """Update the cached subscriber count from a frame-POST response body."""
+    global _last_subscriber_count
+    try:
+        parsed = json.loads(body.decode("utf-8"))
+        if isinstance(parsed, dict) and isinstance(parsed.get("subscribers"), int):
+            _last_subscriber_count = parsed["subscribers"]
+    except (ValueError, UnicodeDecodeError):
+        pass
+
+
+def _post_frame_to_gateway(img_bytes: bytes, fmt: str, source: str = "agent") -> None:
     """Best-effort POST of a browse frame to the gateway for the live dashboard mirror.
 
     Runs on a daemon thread so it never blocks the JSON-RPC relay (a synchronous
@@ -174,7 +218,7 @@ def _post_frame_to_gateway(img_bytes: bytes, fmt: str) -> None:
     on a different port, or unreachable — the agent's screenshot must not depend
     on the mirror succeeding. The ``/api/browser/frame`` ingress is a loopback +
     internal-secret path, so we send the same ``X-Internal-Secret`` header the
-    other MCP-side callers use.
+    other MCP-side callers use, and read back the live subscriber count.
 
     No-op in extension mode: the user is watching their own Chrome, so mirroring a
     sparse, downscaled copy to the dashboard adds load with no benefit.
@@ -185,7 +229,9 @@ def _post_frame_to_gateway(img_bytes: bytes, fmt: str) -> None:
     def _send() -> None:
         try:
             b64 = base64.b64encode(img_bytes).decode("ascii")
-            body = json.dumps({"data": b64, "format": fmt}).encode("utf-8")
+            body = json.dumps(
+                {"data": b64, "format": fmt, "source": source, "session_key": _SESSION_KEY}
+            ).encode("utf-8")
             headers = {"Content-Type": "application/json"}
             secret = _internal_secret()
             if secret:
@@ -196,11 +242,62 @@ def _post_frame_to_gateway(img_bytes: bytes, fmt: str) -> None:
                 headers=headers,
                 method="POST",
             )
-            urllib.request.urlopen(req, timeout=2).close()
+            resp = urllib.request.urlopen(req, timeout=2)
+            try:
+                _record_subscriber_count(resp.read())
+            finally:
+                resp.close()
         except Exception:
             pass
 
     threading.Thread(target=_send, daemon=True).start()
+
+
+def _gateway_pump_audit_url() -> str:
+    """Loopback gateway endpoint that records a pump-injected tool invocation."""
+    port = os.environ.get("KIROCLAW_PORT", "5476")
+    return f"http://127.0.0.1:{port}/api/browser/pump-audit"
+
+
+def _post_pump_audit() -> bool:
+    """Synchronously record a pump screenshot injection with the gateway.
+
+    This proxy is stdlib-only and cannot reach ``sel.py``, so the gateway emits
+    the SEL audit event for the injected ``browser_take_screenshot`` tool call on
+    our behalf. Returns ``True`` only when the gateway acknowledged the audit
+    (HTTP 2xx); the caller MUST gate the injection on this result so an
+    unacknowledged audit skips the injection rather than executing an unaudited
+    tool call. Returns ``False`` in extension mode (the pump is disabled there;
+    the user already sees their own Chrome).
+    """
+    if _EXTENSION_MODE:
+        return False
+    try:
+        headers = {"Content-Type": "application/json"}
+        secret = _internal_secret()
+        if secret:
+            headers["X-Internal-Secret"] = secret
+        req = urllib.request.Request(
+            _gateway_pump_audit_url(),
+            data=b"{}",
+            headers=headers,
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=2)
+        try:
+            status = resp.getcode()
+        finally:
+            resp.close()
+        return status is not None and 200 <= status < 300
+    except Exception as exc:
+        # Audit delivery failed, so the caller skips this injection rather than
+        # run an unaudited browser_take_screenshot. Log the failure type to stderr
+        # (stdlib-only subprocess — captured in the proxy log) so audit gaps are
+        # discoverable; the next pump cycle retries naturally.
+        sys.stderr.write(
+            f"kiroclaw: pump-audit POST failed ({type(exc).__name__}); skipping pump injection\n"
+        )
+        return False
 
 
 def _save_screenshot(data: str, media_type: str) -> str:
@@ -213,6 +310,131 @@ def _save_screenshot(data: str, media_type: str) -> str:
     filepath = _write_screenshot(img_bytes, ext)
     _post_frame_to_gateway(img_bytes, ext)
     return filepath
+
+
+# ── Active pump (B′): keep the mirror current between agent screenshots ──
+#
+# In B-minus the dashboard only updates when the agent itself calls
+# browser_take_screenshot. The active pump fills the gaps: a background thread
+# injects its OWN browser_take_screenshot tools/call into the Playwright server
+# during idle windows, demuxes the proxy-namespaced response (never forwarded to
+# kiro-cli), and relays the frame. It cannot match a CDP push stream (that needs
+# the debug port we deliberately do not open); idle-gating bounds it to ~1-3 fps.
+#
+# All gates must hold to inject (see _should_pump):
+#   * pump enabled (not extension mode — the user already sees their own Chrome);
+#   * no agent request in flight (_PENDING_REQUESTS empty) — zero contention;
+#   * no pump frame already in flight (single-in-flight), with a timeout so a
+#     hung browser cannot wedge the pump forever;
+#   * recent real browse activity (a browser_* tool ran lately) — do not pump
+#     when no page is open / the session is idle-cold;
+#   * a dashboard is actually watching (subscribers > 0).
+_PUMP_INTERVAL = float(os.environ.get("KIROCLAW_BROWSE_PUMP_INTERVAL", "") or 1.5)
+_PUMP_ACTIVE_WINDOW = 20.0  # seconds since the last real browser_* tool response
+_PUMP_TIMEOUT = 10.0  # seconds before a stuck in-flight pump is abandoned
+_PUMP_ID_PREFIX = "__mc_pump_"
+_BROWSE_TOOL_PREFIX = "browser_"
+
+_pump_enabled = "--extension" not in sys.argv
+_pump_seq = 0
+_pump_inflight_id: str | None = None
+_pump_sent_at = 0.0
+_last_browse_activity = 0.0
+
+
+def _note_browse_activity(original: dict[str, Any] | None) -> None:
+    """Mark browse activity when a completed request was a ``browser_*`` tool call."""
+    global _last_browse_activity
+    if not isinstance(original, dict) or original.get("method") != "tools/call":
+        return
+    name = (original.get("params") or {}).get("name", "")
+    if isinstance(name, str) and name.startswith(_BROWSE_TOOL_PREFIX):
+        _last_browse_activity = time.time()
+
+
+def _is_pump_id(req_id: Any) -> bool:
+    """True if a response id belongs to a proxy-injected active-pump screenshot."""
+    return isinstance(req_id, str) and req_id.startswith(_PUMP_ID_PREFIX)
+
+
+def _clear_pump_inflight(req_id: Any) -> None:
+    """Release the single-in-flight pump slot when its response arrives."""
+    global _pump_inflight_id
+    if req_id == _pump_inflight_id:
+        _pump_inflight_id = None
+
+
+def _should_pump(now: float) -> bool:
+    """Whether to inject an active-pump screenshot now (pure; all gates)."""
+    if not _pump_enabled:
+        return False
+    if _PENDING_REQUESTS:
+        return False
+    if _pump_inflight_id is not None and (now - _pump_sent_at) < _PUMP_TIMEOUT:
+        return False
+    if (now - _last_browse_activity) > _PUMP_ACTIVE_WINDOW:
+        return False
+    if _last_subscriber_count <= 0:
+        return False
+    return True
+
+
+def _relay_pump_frame(msg: dict[str, Any]) -> None:
+    """Extract the image from a pump screenshot response and relay it (ephemeral).
+
+    Unlike agent screenshots, pump frames are never written to disk — they exist
+    only to refresh the live dashboard mirror. Best-effort: a malformed pump
+    response (e.g. bad base64 from a corrupted screenshot) must never crash the
+    main relay loop, so all errors are swallowed — the frame is just skipped.
+    """
+    try:
+        result = msg.get("result")
+        if not isinstance(result, dict):
+            return
+        for item in result.get("content") or []:
+            if isinstance(item, dict) and item.get("type") == "image" and item.get("data"):
+                img_bytes, ext = _encode_frame(item["data"], item.get("mimeType", "image/png"))
+                _post_frame_to_gateway(img_bytes, ext, source="pump")
+                return
+    except Exception:
+        pass
+
+
+def _pump_loop(proc_stdin) -> None:
+    """Background thread: inject idle-gated ``browser_take_screenshot`` calls."""
+    global _pump_seq, _pump_inflight_id, _pump_sent_at
+    while True:
+        time.sleep(_PUMP_INTERVAL)
+        now = time.time()
+        # Abandon a stuck in-flight pump so a hung browser can't wedge us.
+        if _pump_inflight_id is not None and (now - _pump_sent_at) >= _PUMP_TIMEOUT:
+            _pump_inflight_id = None
+        if not _should_pump(now):
+            continue
+        # Audit BEFORE injecting: the gateway emits the SEL tool-invocation event
+        # on our behalf (the proxy can't reach sel.py). If the audit can't be
+        # delivered we skip this cycle rather than run an unaudited
+        # browser_take_screenshot; the next tick (~_PUMP_INTERVAL later) retries.
+        # The pump only fires while a dashboard is subscribed, which needs the
+        # same loopback gateway up — so a failed audit reliably coincides with
+        # "nothing is watching anyway."
+        if not _post_pump_audit():
+            continue
+        _pump_seq += 1
+        pid = f"{_PUMP_ID_PREFIX}{_pump_seq}"
+        _pump_inflight_id = pid
+        _pump_sent_at = time.time()
+        req = {
+            "jsonrpc": "2.0",
+            "id": pid,
+            "method": "tools/call",
+            "params": {"name": "browser_take_screenshot", "arguments": {"type": "jpeg"}},
+        }
+        try:
+            with _proc_stdin_lock:
+                _write_message_to_subprocess(proc_stdin, req)
+        except Exception:
+            _pump_inflight_id = None
 
 
 def _maybe_compress_response(msg: dict[str, Any]) -> dict[str, Any]:
@@ -345,7 +567,8 @@ def _forward_stdin_to_subprocess_tracked(client_stdin, proc_stdin) -> None:
         req_id = msg.get("id")
         if req_id is not None:
             _PENDING_REQUESTS[req_id] = msg
-        _write_message_to_subprocess(proc_stdin, msg)
+        with _proc_stdin_lock:
+            _write_message_to_subprocess(proc_stdin, msg)
 
 
 def _drain_pending_with_error() -> None:
@@ -443,15 +666,30 @@ def run_proxy(args: list[str]) -> None:
     )
     stdin_thread.start()
 
+    # Active pump: keep the dashboard mirror current during idle gaps. Disabled
+    # in extension mode and a no-op until a browse session is active + watched.
+    if _pump_enabled:
+        threading.Thread(
+            target=_pump_loop, args=(proc.stdin,), daemon=True
+        ).start()
+
     while True:
         msg = _read_message(proc.stdout)
         if msg is None:
             break
         req_id = msg.get("id")
+        if _is_pump_id(req_id):
+            # Proxy-injected active-pump screenshot: relay it, never forward it
+            # to kiro-cli, and don't touch _PENDING_REQUESTS (pump ids aren't
+            # tracked there).
+            _clear_pump_inflight(req_id)
+            _relay_pump_frame(msg)
+            continue
         if req_id is None and "error" in msg:
             continue
         if req_id is not None:
-            _PENDING_REQUESTS.pop(req_id, None)
+            original = _PENDING_REQUESTS.pop(req_id, None)
+            _note_browse_activity(original)
         msg = _maybe_compress_response(msg)
         _write_message(sys.stdout.buffer, msg)
 

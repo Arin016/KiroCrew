@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 
 export type TokenBucket = {
   input: number
@@ -80,10 +80,12 @@ function FilterSelect({
   onChange: (v: string) => void
   options: string[]
 }) {
+  const selectId = useId()
   return (
-    <label className="flex items-center gap-2 text-[12px] text-muted">
+    <label htmlFor={selectId} className="flex items-center gap-2 text-[12px] text-muted">
       <span>{label}</span>
       <select
+        id={selectId}
         value={value}
         onChange={e => onChange(e.target.value)}
         className="bg-bg-elevated border border-border rounded-md px-2 py-1 text-text text-[12px] font-body outline-none cursor-pointer transition-colors focus-ring"

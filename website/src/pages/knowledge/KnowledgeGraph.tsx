@@ -1,16 +1,25 @@
 import { useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Network, RotateCcw } from 'lucide-react'
+import type { Simulation, SimulationNodeDatum, SimulationLinkDatum } from 'd3'
 import { EmptyState } from '../../components/ui'
 import { knowledgeApi } from './api'
 import type { GraphData } from './types'
 
 const TYPE_COLORS: Record<string, string> = { service: '#3b82f6', technology: '#22c55e', concept: '#a855f7', org: '#f97316' }
 
+/** A graph node augmented with the position/velocity fields d3 mutates in. */
+type SimNode = GraphData['nodes'][number] & SimulationNodeDatum
+/** A graph edge; d3 resolves source/target from id strings to SimNode objects
+ *  during ForceLink init, so they are SimNode after the simulation runs. */
+type SimEdge = SimulationLinkDatum<SimNode> & { type: string; weight?: number }
+/** After ForceLink init, source/target are resolved node objects. */
+const endpoint = (v: SimEdge['source'] | SimEdge['target']): SimNode => v as SimNode
+
 export default function KnowledgeGraph({ onSelectEntity, highlightEntity }: { onSelectEntity?: (name: string) => void; highlightEntity?: string | null }) {
   const svgRef = useRef<SVGSVGElement>(null)
   const zoomRef = useRef<{ reset: () => void; zoomToNode?: (name: string) => void } | null>(null)
-  const simRef = useRef<any>(null)
+  const simRef = useRef<Simulation<SimNode, SimEdge> | null>(null)
   const renderedKeyRef = useRef<string>('')
   const onSelectRef = useRef(onSelectEntity)
   onSelectRef.current = onSelectEntity
@@ -90,15 +99,15 @@ export default function KnowledgeGraph({ onSelectEntity, highlightEntity }: { on
       const g = s.append('g')
 
       const zoom = d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.3, 4]).on('zoom', (e) => g.attr('transform', e.transform))
-      s.call(zoom as any)
+      s.call(zoom)
 
       // Deep-clone to avoid mutating React Query cache
-      const simNodes = graph.nodes.map(n => ({ ...n }))
-      const simEdges = graph.edges.map(e => ({ ...e }))
+      const simNodes: SimNode[] = graph.nodes.map(n => ({ ...n }))
+      const simEdges: SimEdge[] = graph.edges.map(e => ({ ...e }))
 
       simRef.current?.stop()
-      const sim = d3.forceSimulation(simNodes as any)
-        .force('link', d3.forceLink(simEdges).id((d: any) => d.id).distance(80))
+      const sim = d3.forceSimulation<SimNode, SimEdge>(simNodes)
+        .force('link', d3.forceLink<SimNode, SimEdge>(simEdges).id((d) => d.id).distance(80))
         .force('charge', d3.forceManyBody().strength(-200))
         .force('collision', d3.forceCollide(25))
         .alphaDecay(0.08)
@@ -109,8 +118,8 @@ export default function KnowledgeGraph({ onSelectEntity, highlightEntity }: { on
 
       const width = svg.clientWidth || 800
       const height = svg.clientHeight || 500
-      const xs = simNodes.map((d: any) => d.x as number)
-      const ys = simNodes.map((d: any) => d.y as number)
+      const xs = simNodes.map((d) => d.x ?? 0)
+      const ys = simNodes.map((d) => d.y ?? 0)
       const x0 = Math.min(...xs), x1 = Math.max(...xs)
       const y0 = Math.min(...ys), y1 = Math.max(...ys)
       const pad = 60
@@ -118,59 +127,59 @@ export default function KnowledgeGraph({ onSelectEntity, highlightEntity }: { on
       const scale = Math.min((width - pad * 2) / bw, (height - pad * 2) / bh, 1.5)
       const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2
       const fitTransform = d3.zoomIdentity.translate(width / 2 - cx * scale, height / 2 - cy * scale).scale(scale)
-      s.call(zoom.transform as any, fitTransform)
+      s.call(zoom.transform, fitTransform)
       zoomRef.current = {
-        reset: () => s.transition().duration(300).call(zoom.transform as any, fitTransform),
+        reset: () => s.transition().duration(300).call(zoom.transform, fitTransform),
         zoomToNode: (name: string) => {
-          const target = (simNodes as any[]).find((n: any) => n.name === name)
+          const target = simNodes.find((n) => n.name === name)
           if (!target) return
           const w = svg.clientWidth || 800, h = svg.clientHeight || 500
-          const t = d3.zoomIdentity.translate(w / 2 - target.x * 2, h / 2 - target.y * 2).scale(2)
-          s.transition().duration(500).call(zoom.transform as any, t)
+          const t = d3.zoomIdentity.translate(w / 2 - (target.x ?? 0) * 2, h / 2 - (target.y ?? 0) * 2).scale(2)
+          s.transition().duration(500).call(zoom.transform, t)
         },
       }
 
       const link = g.append('g').attr('stroke', mutedColor).attr('stroke-opacity', 1)
-        .selectAll('line').data(simEdges).join('line').attr('stroke-width', (d: any) => Math.max(1.5, (d.weight || 1) * 1.5))
-        .attr('x1', (d: any) => d.source.x).attr('y1', (d: any) => d.source.y)
-        .attr('x2', (d: any) => d.target.x).attr('y2', (d: any) => d.target.y)
+        .selectAll<SVGLineElement, SimEdge>('line').data(simEdges).join('line').attr('stroke-width', (d) => Math.max(1.5, (d.weight || 1) * 1.5))
+        .attr('x1', (d) => endpoint(d.source).x ?? 0).attr('y1', (d) => endpoint(d.source).y ?? 0)
+        .attr('x2', (d) => endpoint(d.target).x ?? 0).attr('y2', (d) => endpoint(d.target).y ?? 0)
 
-      const node = g.append('g').selectAll('g').data(simNodes).join('g').attr('cursor', 'pointer')
-        .attr('transform', (d: any) => `translate(${d.x},${d.y})`)
-        .attr('data-entity', (d: any) => d.name)
-        .call(d3.drag<any, any>().clickDistance(8).on('start', (e, d: any) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y })
-          .on('drag', (e, d: any) => { d.fx = e.x; d.fy = e.y })
-          .on('end', (e, d: any) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null }) as any)
+      const node = g.append('g').selectAll<SVGGElement, SimNode>('g').data(simNodes).join('g').attr('cursor', 'pointer')
+        .attr('transform', (d) => `translate(${d.x},${d.y})`)
+        .attr('data-entity', (d) => d.name)
+        .call(d3.drag<SVGGElement, SimNode>().clickDistance(8).on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y })
+          .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y })
+          .on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null }))
 
-      node.append('circle').attr('r', (d: any) => highlightRef.current === d.name ? 12 : 8)
-        .attr('fill', (d: any) => TYPE_COLORS[d.type] || '#6b7280')
-        .attr('stroke', (d: any) => highlightRef.current === d.name ? accentColor : textColor)
-        .attr('stroke-width', (d: any) => highlightRef.current === d.name ? 4 : 1.5)
+      node.append('circle').attr('r', (d) => highlightRef.current === d.name ? 12 : 8)
+        .attr('fill', (d) => TYPE_COLORS[d.type] || '#6b7280')
+        .attr('stroke', (d) => highlightRef.current === d.name ? accentColor : textColor)
+        .attr('stroke-width', (d) => highlightRef.current === d.name ? 4 : 1.5)
         .style('pointer-events', 'all')
 
-      node.append('text').text((d: any) => d.name).attr('x', 12).attr('y', 4)
+      node.append('text').text((d) => d.name).attr('x', 12).attr('y', 4)
         .attr('font-size', '10px').attr('fill', textColor).attr('pointer-events', 'none')
 
-      node.on('click', (_e: any, d: any) => { onSelectRef.current?.(d.name) })
+      node.on('click', (_e, d) => { onSelectRef.current?.(d.name) })
 
       node.on('mouseenter', function() { d3.select(this).select('circle').attr('stroke', accentColor).attr('stroke-width', 3) })
-        .on('mouseleave', function(this: any, _e: any, d: any) {
+        .on('mouseleave', function(this: SVGGElement, _e, d) {
           const isHighlighted = highlightRef.current === d.name
           d3.select(this).select('circle')
             .attr('stroke', isHighlighted ? accentColor : textColor)
             .attr('stroke-width', isHighlighted ? 4 : 1.5)
         })
 
-      const edgeLabel = g.append('g').selectAll('text').data(simEdges).join('text')
+      const edgeLabel = g.append('g').selectAll<SVGTextElement, SimEdge>('text').data(simEdges).join('text')
         .attr('font-size', '8px').attr('fill', mutedColor).attr('text-anchor', 'middle')
-        .text((d: any) => d.type)
-        .attr('x', (d: any) => (d.source.x + d.target.x) / 2).attr('y', (d: any) => (d.source.y + d.target.y) / 2)
+        .text((d) => d.type)
+        .attr('x', (d) => ((endpoint(d.source).x ?? 0) + (endpoint(d.target).x ?? 0)) / 2).attr('y', (d) => ((endpoint(d.source).y ?? 0) + (endpoint(d.target).y ?? 0)) / 2)
 
       sim.on('tick', () => {
-        link.attr('x1', (d: any) => d.source.x).attr('y1', (d: any) => d.source.y)
-          .attr('x2', (d: any) => d.target.x).attr('y2', (d: any) => d.target.y)
-        node.attr('transform', (d: any) => `translate(${d.x},${d.y})`)
-        edgeLabel.attr('x', (d: any) => (d.source.x + d.target.x) / 2).attr('y', (d: any) => (d.source.y + d.target.y) / 2)
+        link.attr('x1', (d) => endpoint(d.source).x ?? 0).attr('y1', (d) => endpoint(d.source).y ?? 0)
+          .attr('x2', (d) => endpoint(d.target).x ?? 0).attr('y2', (d) => endpoint(d.target).y ?? 0)
+        node.attr('transform', (d) => `translate(${d.x},${d.y})`)
+        edgeLabel.attr('x', (d) => ((endpoint(d.source).x ?? 0) + (endpoint(d.target).x ?? 0)) / 2).attr('y', (d) => ((endpoint(d.source).y ?? 0) + (endpoint(d.target).y ?? 0)) / 2)
       })
 
       // If a node was pre-selected (e.g. from search), zoom to it now

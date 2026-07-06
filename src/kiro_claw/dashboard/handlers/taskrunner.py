@@ -40,6 +40,13 @@ async def api_taskrunner_status(request: web.Request) -> web.Response:
                 if step.get(field):
                     step[field] = redact_exfiltration_urls(step[field])[0]
                     step[field] = redact_credentials(step[field])[0]
+        if run.get("lessons_learned"):
+            # lessons_learned is list[str] of LLM-generated text — redact each
+            # element (same untrusted-string class as the fields above).
+            run["lessons_learned"] = [
+                redact_credentials(redact_exfiltration_urls(lesson)[0])[0]
+                for lesson in run["lessons_learned"]
+            ]
     data["available"] = True
     return web.json_response(data)
 

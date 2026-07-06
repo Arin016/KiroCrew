@@ -32,10 +32,10 @@ beforeEach(() => vi.clearAllMocks())
 
 describe('InstancesPanel', () => {
   it('shows an Enable toggle when the feature is disabled (403) and calls patchConfig', async () => {
-    ;(api.listInstances as any).mockRejectedValue(
+    ;vi.mocked(api.listInstances).mockRejectedValue(
       new ApiError(403, 'instances feature is disabled (set instances.enabled=true)'),
     )
-    ;(api.patchConfig as any).mockResolvedValue({})
+    ;vi.mocked(api.patchConfig).mockResolvedValue({})
     const u = userEvent.setup()
     renderWithProviders(<InstancesPanel />)
     expect(await screen.findByText(/Multi-instance management is off/i)).toBeInTheDocument()
@@ -44,7 +44,7 @@ describe('InstancesPanel', () => {
   })
 
   it('shows a restart-required banner + Disable toggle when enabled but not active', async () => {
-    ;(api.listInstances as any).mockResolvedValue({ active: false, instances: [], warm_set_cap: 5 })
+    ;vi.mocked(api.listInstances).mockResolvedValue({ active: false, instances: [], warm_set_cap: 5 })
     renderWithProviders(<InstancesPanel />)
     expect(await screen.findByText(/not active yet/i)).toBeInTheDocument()
     expect(screen.getByText(/kiroclaw restart/i)).toBeInTheDocument()
@@ -52,15 +52,15 @@ describe('InstancesPanel', () => {
   })
 
   it('renders the empty state + Add form when no instances configured', async () => {
-    ;(api.listInstances as any).mockResolvedValue({ active: true, instances: [], warm_set_cap: 5 })
+    ;vi.mocked(api.listInstances).mockResolvedValue({ active: true, instances: [], warm_set_cap: 5 })
     renderWithProviders(<InstancesPanel />)
     expect(await screen.findByText(/No instances configured yet/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add instance' })).toBeInTheDocument()
   })
 
   it('passes the optional remote_bin path through the Add form', async () => {
-    ;(api.listInstances as any).mockResolvedValue({ active: true, instances: [], warm_set_cap: 5 })
-    ;(api.addInstance as any).mockResolvedValue({})
+    ;vi.mocked(api.listInstances).mockResolvedValue({ active: true, instances: [], warm_set_cap: 5 })
+    ;vi.mocked(api.addInstance).mockResolvedValue({})
     const u = userEvent.setup()
     renderWithProviders(<InstancesPanel />)
 
@@ -85,7 +85,7 @@ describe('InstancesPanel', () => {
   })
 
   it('blocks adding an instance whose remote port duplicates another (SEC-016 mirror)', async () => {
-    ;(api.listInstances as any).mockResolvedValue({
+    ;vi.mocked(api.listInstances).mockResolvedValue({
       active: true,
       warm_set_cap: 5,
       instances: [

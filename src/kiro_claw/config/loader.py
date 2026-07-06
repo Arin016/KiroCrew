@@ -65,9 +65,16 @@ from kiro_claw.config.validation import (  # noqa: F401
 )
 from kiro_claw.config.validation import validate_config_data as _validate_config_data  # noqa: F401
 from kiro_claw.effort import is_valid_effort, model_supports_effort
+from kiro_claw.instances.constants import DEFAULT_MAX_RECOVERY_ATTEMPTS as _DEFAULT_MAX_RECOVERY
+from kiro_claw.instances.constants import DEFAULT_PROBE_FAILURE_THRESHOLD as _DEFAULT_PROBE_FAILS
+from kiro_claw.instances.constants import DEFAULT_RECOVER_BACKOFF_MAX_SECS as _DEFAULT_BACKOFF_MAX
 from kiro_claw.instances.constants import DEFAULT_SSH_COMPRESSION as _DEFAULT_SSH_COMPRESSION
 from kiro_claw.instances.constants import DEFAULT_TUNNEL_BASE_PORT as _DEFAULT_TUNNEL_BASE_PORT
 from kiro_claw.instances.constants import DEFAULT_WARM_SET_CAP as _DEFAULT_WARM_SET_CAP
+from kiro_claw.instances.constants import MAX_RECOVERY_ATTEMPTS_CEILING as _MAX_RECOVERY_CEILING
+from kiro_claw.instances.constants import (
+    RECOVER_BACKOFF_MAX_CEILING_SECS as _RECOVER_BACKOFF_CEILING,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +107,25 @@ def _workspace_dir_file() -> Path:
     return config_dir() / "workspace_dir"
 
 
+def _resolve_workspace_root(root: Path) -> Path:
+    """Realpath-normalize a workspace root after ensuring it exists.
+
+    On hosts with a symlinked ``$HOME``/workspace path (e.g. ``/home/<u> ->
+    /local/home/<u>``, ``/home/<u>/workplace -> /workplace/<u>``) the symlink-form
+    root and its resolved form name the same directory via different strings. The
+    per-session work_dir built from this root is passed as the spawn cwd and
+    persisted as ``cwd`` in session_map.json. If the stored cwd is the symlink form
+    while the transcript is written under the resolved form, cold resume misses and
+    silently falls back to a fresh session.
+
+    Normalizing here, at the single source, makes the SAME resolved path flow into
+    spawn cwd and the persisted session_map cwd so write and resume always agree.
+    This mirrors the existing ``os.path.realpath`` in ``default_project_dir``.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    return Path(os.path.realpath(str(root)))
+
+
 def workspace_root() -> Path:
     """Return the top-level workspace root for LLM sessions and tasks.
 
@@ -107,25 +133,22 @@ def workspace_root() -> Path:
     1. ``KIROCLAW_WORKSPACE`` env var (used as-is, no subdirectory appended)
     2. Saved path in ``config_dir()/workspace_dir`` (written by ``kiroclaw setup``)
     3. Platform default with ``kiroclaw-workspace`` subdirectory
+
+    The chosen root is realpath-normalized (see ``_resolve_workspace_root``) so
+    sessions resume correctly on hosts with a symlinked home/workspace path.
     """
     override = os.environ.get("KIROCLAW_WORKSPACE")
     if override:
-        root = Path(override)
-        root.mkdir(parents=True, exist_ok=True)
-        return root
+        return _resolve_workspace_root(Path(override))
     if _workspace_dir_file().is_file():
         try:
             saved = _workspace_dir_file().read_text(encoding="utf-8").strip()
             if saved:
-                root = Path(saved)
-                root.mkdir(parents=True, exist_ok=True)
-                return root
+                return _resolve_workspace_root(Path(saved))
         except OSError:
             pass
     base = _default_workspace_base()
-    root = base / _WORKSPACE_DIR_NAME
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    return _resolve_workspace_root(base / _WORKSPACE_DIR_NAME)
 
 
 def _safe_int(value: object, default: int) -> int:
@@ -385,6 +408,14 @@ class AgentConfig:
         default=False,
         metadata=_meta("YOLO Mode", "Skip tool approval confirmations."),
     )
+    notify_override_expiry: bool = field(
+        default=True,
+        metadata=_meta(
+            "Notify on Override Expiry",
+            "DM the Slack owner when the time-limited safety override (YOLO) expires. "
+            "Disable to silence the recurring expiry DM; the dashboard banner still shows.",
+        ),
+    )
     bot_name: str = field(
         default="",
         metadata=_meta(
@@ -397,6 +428,18 @@ class AgentConfig:
         metadata=_meta(
             "Conductor Skill",
             "Enable agent delegation — loads conductor skill with agent roster.",
+        ),
+    )
+    tool_search: bool = field(
+        default=True,
+        metadata=_meta(
+            "MCP Tool Search",
+            "Load MCP tool specs on demand (search-and-call) instead of sending "
+            "every tool definition each turn, keeping the context window clear "
+            "when many MCP servers are configured. kiro-cli backend only. When "
+            "enabled, KiroClaw forces deferral always-on (minPct=0/minTokens=0) "
+            "via the per-session kiro settings overlay; disabling reverts to "
+            "sending full tool specs. No effect on the Claude Code backend.",
         ),
     )
     max_subagents: int = field(
@@ -724,6 +767,48 @@ class MemoryConfig:
     migrated: bool = field(
         default=False,
         metadata=_meta("Migrated", "Whether memory has been migrated to vector store."),
+    )
+
+
+#: Default artifact kinds eligible for Knowledge Library auto-ingest. These are
+#: the substantial-document kinds whose content the KB file reader can extract
+#: (routed through the same reader as folders/uploads): markdown/text/json read
+#: as text, and html goes through HTML prose extraction. ``widget`` is excluded
+#: -- widgets/dashboards are UI, not documents (and a remote widget round-trips
+#: back to kind="widget" via the publish/clone unwrap, so this also skips cloned
+#: widgets). ``svg`` is excluded because ``.svg`` is not in
+#: ``FileReader.SUPPORTED``.
+DEFAULT_AUTO_INGEST_ARTIFACT_KINDS = ["markdown", "text", "html", "json"]
+
+
+@dataclass
+class KnowledgeConfig:
+    """Knowledge Library ingestion settings.
+
+    Embedding/retrieval settings live under :class:`MemoryConfig` (shared with
+    the memory subsystem via ``create_embedder_from_config``); this section
+    holds Knowledge-Library-specific ingestion toggles.
+    """
+
+    auto_ingest_artifacts: bool = field(
+        default=True,
+        metadata=_meta(
+            "Auto-Ingest Artifacts",
+            "Automatically ingest content-bearing local artifacts (markdown/text "
+            "documents you save and iterate) into the Knowledge Library so they "
+            "become searchable, keep them in sync as the artifact changes, and "
+            "remove them from the Library when the artifact is deleted. They "
+            "appear as a single aggregate 'Artifacts' source. On by default.",
+        ),
+    )
+    auto_ingest_artifact_kinds: list[str] = field(
+        default_factory=lambda: list(DEFAULT_AUTO_INGEST_ARTIFACT_KINDS),
+        metadata=_meta(
+            "Auto-Ingest Artifact Kinds",
+            "Artifact kinds eligible for auto-ingest. Defaults to substantial "
+            "document kinds (markdown, text, html, json); widget is excluded "
+            "(UI/dashboards, not documents) and svg has no reader support.",
+        ),
     )
 
 
@@ -1131,6 +1216,13 @@ class ChannelConfig:
         default="",
         metadata=_meta("Agent", "Agent override for this channel (empty = default)."),
     )
+    project_path: str = field(
+        default="",
+        metadata=_meta(
+            "Project Path",
+            "Project directory for project-scoped agent (empty = global agent).",
+        ),
+    )
     thread_follow: bool = field(
         default=True,
         metadata=_meta(
@@ -1147,6 +1239,7 @@ class ChannelConfig:
         return cls(
             activation=activation,
             agent=data.get("agent", ""),
+            project_path=data.get("project_path", ""),
             thread_follow=data.get("thread_follow", True),
         )
 
@@ -1433,6 +1526,14 @@ class SecretaryConfig:
         default_factory=list,
         metadata=_meta("Keyword Hooks", "Keyword-triggered workflow dispatchers."),
     )
+    auto_dismiss_on_reply: bool = field(
+        default=False,
+        metadata=_meta(
+            "Auto-dismiss on direct reply",
+            "Opt-in: when you reply directly in Slack, mark the matching inbox "
+            "item as handled automatically.",
+        ),
+    )
 
 
 @dataclass
@@ -1514,6 +1615,33 @@ class InstancesConfig:
             "on a fast/local link where compression CPU outweighs the bandwidth win.",
         ),
     )
+    max_recovery_attempts: int = field(
+        default=_DEFAULT_MAX_RECOVERY,
+        metadata=_meta(
+            "Max Recovery Attempts",
+            "Consecutive self-heal attempts before a dropped tunnel is left "
+            "disconnected. With the capped-exponential backoff, the default 8 spans a "
+            "~2 min recovery window, enough to outlast a transient drop (screen lock, "
+            "proxy warmup) before giving up.",
+        ),
+    )
+    recover_backoff_max_secs: float = field(
+        default=_DEFAULT_BACKOFF_MAX,
+        metadata=_meta(
+            "Recover Backoff Cap (secs)",
+            "Cap on the per-attempt backoff between self-heal attempts. The wait grows "
+            "1, 2, 4, 8, 16 then holds at this cap; raising it spaces retries further "
+            "across a slow reconnect.",
+        ),
+    )
+    probe_failure_threshold: int = field(
+        default=_DEFAULT_PROBE_FAILS,
+        metadata=_meta(
+            "Probe Failure Threshold",
+            "Consecutive health-probe failures before a connected-but-not-forwarding "
+            "(zombie) tunnel is torn down to trigger self-heal.",
+        ),
+    )
 
     def __post_init__(self) -> None:
         if self.warm_set_cap < 1:
@@ -1526,6 +1654,47 @@ class InstancesConfig:
                 _DEFAULT_TUNNEL_BASE_PORT,
             )
             object.__setattr__(self, "tunnel_base_port", _DEFAULT_TUNNEL_BASE_PORT)
+        if self.max_recovery_attempts < 1:
+            logger.warning(
+                "instances.max_recovery_attempts %d < 1, using %d",
+                self.max_recovery_attempts,
+                _DEFAULT_MAX_RECOVERY,
+            )
+            object.__setattr__(self, "max_recovery_attempts", _DEFAULT_MAX_RECOVERY)
+        elif self.max_recovery_attempts > _MAX_RECOVERY_CEILING:
+            logger.warning(
+                "instances.max_recovery_attempts %d > %d, clamping to %d "
+                "(guards against a near-infinite self-heal loop on a dead connection)",
+                self.max_recovery_attempts,
+                _MAX_RECOVERY_CEILING,
+                _MAX_RECOVERY_CEILING,
+            )
+            object.__setattr__(
+                self, "max_recovery_attempts", _MAX_RECOVERY_CEILING
+            )
+        if self.recover_backoff_max_secs <= 0:
+            logger.warning(
+                "instances.recover_backoff_max_secs %s <= 0, using %s",
+                self.recover_backoff_max_secs,
+                _DEFAULT_BACKOFF_MAX,
+            )
+            object.__setattr__(self, "recover_backoff_max_secs", _DEFAULT_BACKOFF_MAX)
+        elif self.recover_backoff_max_secs > _RECOVER_BACKOFF_CEILING:
+            logger.warning(
+                "instances.recover_backoff_max_secs %s > %s, clamping to %s "
+                "(guards against a multi-day self-heal window on a dead connection)",
+                self.recover_backoff_max_secs,
+                _RECOVER_BACKOFF_CEILING,
+                _RECOVER_BACKOFF_CEILING,
+            )
+            object.__setattr__(self, "recover_backoff_max_secs", _RECOVER_BACKOFF_CEILING)
+        if self.probe_failure_threshold < 1:
+            logger.warning(
+                "instances.probe_failure_threshold %d < 1, using %d",
+                self.probe_failure_threshold,
+                _DEFAULT_PROBE_FAILS,
+            )
+            object.__setattr__(self, "probe_failure_threshold", _DEFAULT_PROBE_FAILS)
 
 
 @dataclass
@@ -1578,6 +1747,10 @@ class KiroClawConfig:
     memory: MemoryConfig = field(
         default_factory=MemoryConfig,
         metadata=_meta("Memory", "Memory and embedding configuration."),
+    )
+    knowledge: KnowledgeConfig = field(
+        default_factory=KnowledgeConfig,
+        metadata=_meta("Knowledge", "Knowledge Library ingestion settings."),
     )
     skills: SkillsConfig = field(
         default_factory=SkillsConfig,
@@ -1805,6 +1978,9 @@ class KiroClawConfig:
         memory_data = data.get("memory", {})
         if not isinstance(memory_data, dict):
             memory_data = {}
+        knowledge_data = data.get("knowledge", {})
+        if not isinstance(knowledge_data, dict):
+            knowledge_data = {}
         slack_data = data.get("slack", {})
         if not isinstance(slack_data, dict):
             slack_data = {}
@@ -1884,7 +2060,9 @@ class KiroClawConfig:
                 ),
                 jail=_normalize_jail(agent_data.get("jail", "auto")),
                 yolo=agent_data.get("yolo", False),
+                notify_override_expiry=agent_data.get("notify_override_expiry", True),
                 conductor_skill=agent_data.get("conductor_skill", False),
+                tool_search=bool(agent_data.get("tool_search", True)),
                 max_subagents=agent_data.get("max_subagents", 3),
                 subagent_mem_buffer_pct=int(agent_data.get("subagent_mem_buffer_pct", 20)),
                 subagent_cost_gb=float(agent_data.get("subagent_cost_gb", 0.5)),
@@ -1955,6 +2133,19 @@ class KiroClawConfig:
                 history_idle_hours=memory_data.get("history_idle_hours", 3.0),
                 history_max_days=memory_data.get("history_max_days", 365),
                 migrated=memory_data.get("migrated", False),
+            ),
+            knowledge=KnowledgeConfig(
+                auto_ingest_artifacts=bool(
+                    knowledge_data.get("auto_ingest_artifacts", True)
+                ),
+                auto_ingest_artifact_kinds=[
+                    k
+                    for k in knowledge_data.get(
+                        "auto_ingest_artifact_kinds",
+                        DEFAULT_AUTO_INGEST_ARTIFACT_KINDS,
+                    )
+                    if isinstance(k, str)
+                ],
             ),
             slack=SlackConfig(
                 allowed_users=[
@@ -2069,6 +2260,9 @@ class KiroClawConfig:
                     1, int(secretary_data.get("channel_retention_days", 365))
                 ),
                 keyword_hooks=secretary_data.get("keyword_hooks") or [],
+                auto_dismiss_on_reply=bool(
+                    secretary_data.get("auto_dismiss_on_reply", False)
+                ),
             ),
             taskkeeper=TaskKeeperConfig(
                 enabled=bool(taskkeeper_data.get("enabled", False)),
@@ -2087,6 +2281,15 @@ class KiroClawConfig:
                 ),
                 ssh_compression=bool(
                     instances_data.get("ssh_compression", _DEFAULT_SSH_COMPRESSION)
+                ),
+                max_recovery_attempts=int(
+                    instances_data.get("max_recovery_attempts", _DEFAULT_MAX_RECOVERY)
+                ),
+                recover_backoff_max_secs=float(
+                    instances_data.get("recover_backoff_max_secs", _DEFAULT_BACKOFF_MAX)
+                ),
+                probe_failure_threshold=int(
+                    instances_data.get("probe_failure_threshold", _DEFAULT_PROBE_FAILS)
                 ),
             ),
             skills=SkillsConfig(
@@ -2324,6 +2527,7 @@ class KiroClawConfig:
             model = self._resolve_agent_model()
 
         sandbox = self.agent.sandbox
+        tool_search = self.agent.tool_search
 
         def _acp(
             session_key: str | None = None,
@@ -2367,6 +2571,7 @@ class KiroClawConfig:
                 channel_id=channel_id,
                 extra_env=extra_env,
                 effort_per_model=_eff_per_model,
+                tool_search=tool_search,
             )
 
         return _acp

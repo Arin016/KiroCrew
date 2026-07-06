@@ -43,9 +43,29 @@ DEFAULT_PROBE_FAILURE_THRESHOLD: int = 3
 
 # Max consecutive self-heal attempts before giving up on an unhealthy tunnel
 # (2-tier recovery). Reset to 0 once a rebuild succeeds, so a tunnel that
-# flaps-then-recovers isn't permanently capped. Bounds the probe->teardown->
-# recover->probe loop so a persistently-broken host can't churn forever.
-DEFAULT_MAX_RECOVERY_ATTEMPTS: int = 3
+# flaps-then-recovers isn't permanently capped. With the capped-exponential
+# backoff below, this many attempts span the total recovery window (~2 min at
+# the default 8 attempts / 30s cap) before the tunnel is left disconnected.
+DEFAULT_MAX_RECOVERY_ATTEMPTS: int = 8
+
+# Upper bound on a user-configured instances.max_recovery_attempts. A value above
+# this is clamped down to it (with a warning) so a pathological setting can't turn
+# the bounded self-heal into a near-infinite retry loop on a dead connection. Kept
+# generous (~47 min recovery window at the 30s backoff cap) so only extreme values
+# trip it.
+MAX_RECOVERY_ATTEMPTS_CEILING: int = 100
+
+# Cap (secs) on the per-attempt backoff between self-heal attempts. The backoff
+# is min(base * 2**(attempt-1), this), so the inter-attempt wait grows 1, 2, 4,
+# 8, 16 then holds at this cap for the remaining attempts.
+DEFAULT_RECOVER_BACKOFF_MAX_SECS: float = 30.0
+
+# Upper bound (secs) on a user-configured instances.recover_backoff_max_secs. A
+# larger value is clamped down to it (with a warning) so a pathological pacing
+# (e.g. a 1-day backoff) can't stretch the bounded self-heal into a multi-day
+# wall-clock window even with the attempt count capped. At this ceiling the worst
+# case is ~MAX_RECOVERY_ATTEMPTS_CEILING * this (~8h).
+RECOVER_BACKOFF_MAX_CEILING_SECS: float = 300.0
 
 # Proactively re-mint each instance's dashboard token at this fraction of its
 # TTL, before the 20h cap. 0.8 = refresh at 80% elapsed.

@@ -520,6 +520,8 @@ def test_tr_u_25_secure_flag_only_on_https():
     http_req.app = {"port": 7777}
     http_req.scheme = "http"
     http_req.host = "localhost:7777"
+    http_req.headers = {}
+    http_req.remote = "127.0.0.1"
     ar._set_access_cookie(http_resp, http_req, "tok", time.time() + 3600)
     ar._set_refresh_cookie(http_resp, http_req, "rt", time.time() + 86400)
     # SimpleCookie morsel: 'secure' attr is "" (empty string) when unset, truthy when set
@@ -532,10 +534,50 @@ def test_tr_u_25_secure_flag_only_on_https():
     https_req.app = {"port": 443}
     https_req.scheme = "https"
     https_req.host = "kiroclaw.example.com"
+    https_req.headers = {}
+    https_req.remote = "127.0.0.1"
     ar._set_access_cookie(https_resp, https_req, "tok", time.time() + 3600)
     ar._set_refresh_cookie(https_resp, https_req, "rt", time.time() + 86400)
     assert https_resp.cookies["mc_token_443"]["secure"]
     assert https_resp.cookies["mc_refresh_443"]["secure"]
+
+
+def test_tr_u_25b_secure_flag_via_forwarded_proto_over_tunnel():
+    """Behind a TLS-terminating tunnel/proxy the gateway sees plain HTTP on
+    loopback but the browser connection is HTTPS. X-Forwarded-Proto=https from
+    a loopback peer MUST cause Secure=True — otherwise the wss:// dashboard
+    WebSocket is denied the cookie and the dashboard flaps online/offline. A
+    spoofed header from a NON-loopback peer must NOT flip Secure on.
+    """
+    from unittest.mock import MagicMock
+
+    from aiohttp import web
+
+    from kiro_claw.dashboard.handlers import auth_refresh as ar
+
+    # Tunnel: scheme=http on loopback, XFP=https -> Secure MUST be set
+    tun_resp = web.Response()
+    tun_req = MagicMock(spec=web.Request)
+    tun_req.app = {"port": 7777}
+    tun_req.scheme = "http"
+    tun_req.host = "kiroclaw.example.com"
+    tun_req.headers = {"X-Forwarded-Proto": "https"}
+    tun_req.remote = "127.0.0.1"
+    ar._set_access_cookie(tun_resp, tun_req, "tok", time.time() + 3600)
+    ar._set_refresh_cookie(tun_resp, tun_req, "rt", time.time() + 86400)
+    assert tun_resp.cookies["mc_token_7777"]["secure"]
+    assert tun_resp.cookies["mc_refresh_7777"]["secure"]
+
+    # Spoofed XFP from a non-loopback peer -> Secure MUST NOT be set
+    spoof_resp = web.Response()
+    spoof_req = MagicMock(spec=web.Request)
+    spoof_req.app = {"port": 7777}
+    spoof_req.scheme = "http"
+    spoof_req.host = "localhost:7777"
+    spoof_req.headers = {"X-Forwarded-Proto": "https"}
+    spoof_req.remote = "10.0.0.5"
+    ar._set_access_cookie(spoof_resp, spoof_req, "tok", time.time() + 3600)
+    assert not spoof_resp.cookies["mc_token_7777"]["secure"]
 
 
 # -- Cookie path scope (TR-U-26) ---------------------------------------------
@@ -605,3 +647,61 @@ def test_tr_u_26_refresh_cookie_path_covers_logout():
         assert not is_match, (
             f"Cookie path {cookie_path!r} unexpectedly leaks to {request_path!r}"
         )
+
+
+# -- Per-session access-cookie revocation on logout (CWE-613) ----------------
+
+
+def test_tr_u_27_logout_revokes_access_cookie(tmp_path, monkeypatch):
+    """Reproduces the pentest finding: after POST /api/auth/logout, replaying
+    the saved access cookie must be REJECTED (was 200 = still valid before the
+    fix). Closes CWE-613 for the self-contained access token.
+    """
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from aiohttp import web
+
+    import kiro_claw.dashboard.token_auth as ta
+    from kiro_claw.dashboard.handlers import auth_refresh as ar
+    from kiro_claw.dashboard.token_auth import generate_token, validate_token
+
+    # Isolate BOTH the refresh store and the token_auth revoked-nonce store to
+    # tmp dirs so nothing touches the real ~/.kiroclaw.
+    monkeypatch.setattr("kiro_claw.config.loader.config_dir", lambda: tmp_path)
+    monkeypatch.setattr(ta, "_REVOCATION_GEN", 0)
+    monkeypatch.setattr(ta, "_revoked_store_singleton", None)
+    refresh_state = RefreshStateManager(state_path=tmp_path / "refresh_chains.json")
+
+    # Establish a session: a real access cookie + a real refresh cookie.
+    access_token = generate_token("alice", ttl_seconds=MAX_REFRESH_TTL_SECS)
+    refresh_token, chain_id, _jti, _exp = generate_refresh_token("alice")
+
+    # Cookie is valid BEFORE logout (the pentest "confirm valid" step).
+    assert validate_token(access_token, use_session_exp=True)[0] is True
+
+    request = MagicMock(spec=web.Request)
+    request.app = {"port": 7777, "allowed_origins": set()}
+    request.cookies = {
+        "mc_token_7777": access_token,
+        refresh_cookie_name(7777): refresh_token,
+    }
+    request.headers = {"Origin": "http://localhost:7777", "Host": "localhost:7777"}
+    request.scheme = "http"
+    request.host = "localhost:7777"
+    request.remote = "127.0.0.1"
+
+    with patch(
+        "kiro_claw.dashboard.refresh_tokens._state_singleton", refresh_state
+    ), patch(
+        "kiro_claw.dashboard.handlers.auth_refresh.check_origin", return_value=True
+    ):
+        resp = asyncio.run(ar.api_auth_logout(request))
+
+    assert resp.status == 200
+    # Refresh chain revoked (pre-existing behaviour) ...
+    assert refresh_state.is_chain_revoked(chain_id) is True
+    # ... AND the access cookie is now rejected on replay (the fix).
+    ok, _uid, reason = validate_token(access_token, use_session_exp=True)
+    assert ok is False
+    assert reason == "session revoked"

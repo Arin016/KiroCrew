@@ -16,7 +16,15 @@ const Clickable = forwardRef<HTMLDivElement, ClickableProps>(
       onClick={disabled ? undefined : onClick}
       onKeyDown={e => {
         onKeyDown?.(e)
-        if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onClick(e) }
+        // Only self-activate on keydowns targeting THIS element, not ones
+        // bubbling up from focusable descendants (nested <button>/<input>/
+        // <textarea>). Without this guard the container's Enter/Space handler
+        // hijacks a nested control's native activation (and preventDefault()
+        // would swallow typing spaces in a nested input).
+        if (!disabled && e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+          e.preventDefault()
+          onClick(e)
+        }
       }}
       aria-disabled={disabled || undefined}
       className={className}

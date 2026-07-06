@@ -642,11 +642,16 @@ def _maybe_setup_dashboard_url() -> None:
 
 
 def _maybe_setup_custom_domain() -> None:
-    """Inform user about kiroclaw.localhost and clean up legacy mesh.claw from /etc/hosts."""
+    """Inform user of the dashboard URL and clean up legacy mesh.claw from /etc/hosts."""
     port = _configured_port()
-    print("\n── Custom Domain ──\n")
-    print(f"  Dashboard available at http://{_CUSTOM_DOMAIN}:{port}")
-    print("  (*.localhost resolves to 127.0.0.1 per RFC 6761 — no /etc/hosts edit needed)\n")
+    print("\n── Dashboard URL ──\n")
+    print(f"  Dashboard available at http://localhost:{port}")
+    print(f"  Optional friendlier alias: http://{_CUSTOM_DOMAIN}:{port}")
+    print(
+        "  (the alias needs no /etc/hosts edit only on browsers that honor RFC 6761\n"
+        "   *.localhost — Chrome/Firefox/Linux. Safari and the macOS resolver do NOT\n"
+        "   map *.localhost, so prefer plain localhost, especially when tunneling in.)\n"
+    )
 
     # Advise removal of legacy "mesh.claw" entry from /etc/hosts if present
     try:

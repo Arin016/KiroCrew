@@ -110,6 +110,9 @@ export function playPreset(preset: SoundPreset, volume: number): void {
   if (ctx.state === 'closed') {
     ctxSingleton = null
     if (++closedRecoveryCount >= MAX_CLOSED_RECOVERIES) {
+      // Intentional diagnostic: warns once when sound is disabled after repeated
+      // AudioContext closures so the user can correlate silence with resource pressure.
+      // eslint-disable-next-line no-console
       console.warn(`AudioContext closed ${closedRecoveryCount} times consecutively; disabling sound until page reload`)
     }
     return

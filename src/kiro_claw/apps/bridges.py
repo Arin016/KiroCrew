@@ -478,6 +478,23 @@ def _resolve_live_mcp_url(app_name: str, url: str, live_port: int | None = None)
         return url
 
 
+def _live_port_for(app_name: str, live_port: int | None) -> int | None:
+    """The backend's actually-allocated port, or None if it isn't running yet.
+
+    ``live_port`` (passed by the boot/enable path that just spawned the backend) wins;
+    otherwise fall back to the health-gated tracked-port lookup. Never raises — a failure
+    to resolve is treated as "not live" so registration can fail safe."""
+    if live_port:
+        return live_port
+    try:
+        # circular import: backend.py imports from bridges in its boot path — defer.
+        from kiro_claw.apps.backend import get_app_backend_port
+
+        return get_app_backend_port(app_name)
+    except Exception:  # noqa: BLE001 — registration must never crash on a port lookup
+        return None
+
+
 def _register_mcp_servers(app_name: str, manifest: AppManifest, live_port: int | None = None) -> list[str]:
     """Register app-provided MCP servers into global mcp.json.
 
@@ -486,22 +503,57 @@ def _register_mcp_servers(app_name: str, manifest: AppManifest, live_port: int |
     :func:`_resolve_live_mcp_url`) so a ``backend.port:"auto"`` app whose backend landed
     on a non-default port is still reachable by agents. ``live_port`` lets the boot/enable
     path pass the just-allocated port directly (health not yet confirmed).
+
+    FAIL-SAFE for ``backend.port:"auto"`` HTTP servers (regression: CR-281976055 /
+    revert CR-284300496): a manifest's ``mcpServers.<name>.url`` carries an ILLUSTRATIVE
+    fixed port (e.g. ``:9100``). If we wrote that verbatim while the backend is NOT
+    running (app disabled / down / registered before the port is known), the entry is a
+    reachable-LOOKING but dead URL. kiro-cli merges global mcp.json into EVERY session and
+    tries to connect to it on every request; a connect failure surfaces as a "transient
+    HTTP 5xx / backend hiccup", gets retried 3× by the transient-retry path, then shown as
+    a hard error — breaking ALL kiro requests, not just this app's. (Claude Code reads a
+    different config file, so it was unaffected — the kiro-vs-CC asymmetry in the report.)
+    So: an HTTP server with NO resolvable LIVE port is NOT written at all (and any stale
+    entry for it is scrubbed) — never a dead URL the kiro binary might still dial whether
+    or not it honours a ``disabled`` flag. The boot/enable path calls
+    :func:`reregister_app_mcp_servers` with the real ``live_port`` once the backend is up,
+    which writes the entry with the correct, reachable port. stdio/command servers (no
+    ``url``) are always registered — they have no port to be dead.
     """
     if not manifest.mcpServers:
         return []
+    resolved_port = _live_port_for(app_name, live_port)
     registered: list[str] = []
+    skipped: list[str] = []
     with _mcp_lock():
         mcp_data = _read_mcp_json_unlocked()
         servers = mcp_data.setdefault("mcpServers", {})
         for server_name, server_config in manifest.mcpServers.items():
             namespaced = f"{app_name}:{server_name}"
             cfg = dict(server_config) if isinstance(server_config, dict) else server_config
-            if isinstance(cfg, dict) and cfg.get("url"):
-                cfg["url"] = _resolve_live_mcp_url(app_name, cfg["url"], live_port=live_port)
+            is_http = isinstance(cfg, dict) and bool(cfg.get("url"))
+            if is_http and not resolved_port:
+                # No live backend → registering the manifest's dead default-port URL would
+                # break every kiro session. Skip it AND scrub any stale entry so a prior
+                # (now-dead) registration can't keep poisoning the provider path.
+                servers.pop(namespaced, None)
+                skipped.append(namespaced)
+                continue
+            if is_http:
+                cfg["url"] = _resolve_live_mcp_url(app_name, cfg["url"], live_port=resolved_port)
+                cfg.pop("disabled", None)  # backend is live — ensure enabled
             servers[namespaced] = cfg
             registered.append(namespaced)
         _write_mcp_json_unlocked(mcp_data)
-    logger.info("Registered %d MCP server(s) for app %s", len(registered), app_name)
+    logger.info(
+        "Registered %d MCP server(s) for app %s (live_port=%s); skipped %d HTTP server(s) "
+        "with no live backend: %s",
+        len(registered),
+        app_name,
+        resolved_port,
+        len(skipped),
+        skipped or "none",
+    )
     return registered
 
 

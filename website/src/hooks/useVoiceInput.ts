@@ -179,9 +179,16 @@ export function useVoiceInput(onText: (text: string) => void, opts: Opts = {}) {
         setTranscribing(true)
         try {
           const res = await api.sttTranscribe(blob, ext)
-          if (res.error) { console.error('[voice] STT error:', res.error); setError(`Transcription failed: ${res.error}`) }
-          else if (res.text) onText(res.text)
-        } catch (err) { console.error('[voice] transcription failed:', err); setError('Transcription request failed.') }
+          if (res.error) {
+            // eslint-disable-next-line no-console -- surface STT failures for debugging
+            console.error('[voice] STT error:', res.error)
+            setError(`Transcription failed: ${res.error}`)
+          } else if (res.text) onText(res.text)
+        } catch (err) {
+          // eslint-disable-next-line no-console -- surface transcription failures for debugging
+          console.error('[voice] transcription failed:', err)
+          setError('Transcription request failed.')
+        }
         setTranscribing(false)
       }
       mr.start()

@@ -16,6 +16,15 @@ interface Hook {
   last_run: number; last_status: string; run_count: number
 }
 
+/** Result payload from POST /api/hooks/:id/test. */
+interface HookTestResult {
+  exit_code?: number
+  duration_ms?: number
+  error?: string
+  stdout?: string
+  stderr?: string
+}
+
 const EVENTS = ['AgentSpawn', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop']
 
 const sel = 'bg-bg-elevated border border-border rounded-md px-3 py-2 text-text text-sm font-body outline-none cursor-pointer transition-colors focus-ring'
@@ -84,7 +93,7 @@ export default function HooksPage({ embedded }: { embedded?: boolean } = {}) {
   const provider = useProvider()
   const { data: hooks = [], isLoading: loading, error: hooksErr, refetch: refresh } = useQuery<Hook[]>({
     queryKey: ['hooks'],
-    queryFn: () => api.hooks().then((r: any) => r.hooks || []),
+    queryFn: () => api.hooks().then((r: { hooks?: Hook[] }) => r.hooks || []),
   })
   const error = hooksErr ? `Failed to load hooks: ${hooksErr instanceof Error ? hooksErr.message : String(hooksErr)}` : null
   const { data: providerHooks = {}, error: providerHookErr } = useQuery({
@@ -95,7 +104,7 @@ export default function HooksPage({ embedded }: { embedded?: boolean } = {}) {
   const providerHookError = providerHookErr ? `Failed to load ${provider.labels.hooksSection.toLowerCase()}` : null
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
-  const [testResult, setTestResult] = useState<{ id: string; data: any } | null>(null)
+  const [testResult, setTestResult] = useState<{ id: string; data: HookTestResult } | null>(null)
   const [filter, setFilter] = useState('')
 
   const mutOpts = { onSuccess: () => refresh(), onError: (e: Error) => e }
@@ -103,7 +112,7 @@ export default function HooksPage({ embedded }: { embedded?: boolean } = {}) {
   const updateMut = useMutation({ mutationFn: ({ id, data }: { id: string; data: Partial<Hook> }) => api.updateHook(id, data), ...mutOpts, onSuccess: () => { setEditing(null); refresh() } })
   const deleteMut = useMutation({ mutationFn: (id: string) => api.deleteHook(id), ...mutOpts })
   const toggleMut = useMutation({ mutationFn: (id: string) => api.toggleHook(id), ...mutOpts })
-  const testMut = useMutation({ mutationFn: (id: string) => api.testHook(id), onSuccess: (r: any, id: string) => { setTestResult({ id, data: r.result }); refresh() } })
+  const testMut = useMutation({ mutationFn: (id: string) => api.testHook(id), onSuccess: (r: { result: HookTestResult }, id: string) => { setTestResult({ id, data: r.result }); refresh() } })
 
   const mutError = createMut.error?.message || updateMut.error?.message || deleteMut.error?.message || toggleMut.error?.message || testMut.error?.message || null
   const handleCreate = (data: Partial<Hook>) => createMut.mutate(data)
@@ -178,7 +187,7 @@ export default function HooksPage({ embedded }: { embedded?: boolean } = {}) {
               <table className="w-full border-collapse table-striped">
                 <thead>
                   <tr>
-                    <th className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium w-[52px]"></th>
+                    <th aria-label="Enabled" className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium w-[52px]"></th>
                     <SortableHeader label="Name" sortKey="name" sort={hookSort} onToggle={toggleHookSort} className="w-[120px]" />
                     <SortableHeader label="Event" sortKey="event" sort={hookSort} onToggle={toggleHookSort} className="w-[130px]" />
                     <th className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium min-w-[200px]">Command</th>
@@ -215,7 +224,7 @@ export default function HooksPage({ embedded }: { embedded?: boolean } = {}) {
                           : <Badge variant="warn">{h.last_status}</Badge>}
                       </td>
                       <td className="px-2.5 py-2 border-b border-border text-sm text-muted">{timeAgo(h.last_run)}</td>
-                      <td className="px-2.5 py-2 border-b border-border text-sm">
+                      <td aria-label="Actions" className="px-2.5 py-2 border-b border-border text-sm">
                         <div className="flex gap-1.5">
                           <Btn onClick={() => handleTest(h.id)} className="bg-accent/10 text-accent border-accent/30 hover:bg-accent/20">Test</Btn>
                           <Btn onClick={() => { setEditing(h.id); setCreating(false) }}>Edit</Btn>

@@ -378,7 +378,7 @@ When the 165K char (~55k token) context cap is approached, each layer has its ow
 | Thread history (fallback)   | 35,000 chars | Raw truncation when compression unavailable             |
 | Recent history   | 26,600 chars | Older entries dropped first (multi-tier decay)   |
 | Projects         | 6,400 chars  | Truncated                                        |
-| Lessons          | 37,250 chars | Truncated with `…[lessons truncated]` marker     |
+| Lessons          | 37,250 chars | Over-cap injects a `[CRITICAL ERROR — LESSONS FILE TOO LARGE]` block (model must tell the user the file is over the cap and help shrink it via `learn_remove`; shown lessons stay in effect, only over-cap content is dropped), logs at ERROR, then appends truncated lessons with `…[lessons truncated]` as fallback |
 | Semantic memory  | 12,000 chars | Lower-confidence entries dropped                 |
 | Preferences      | 4,250 chars  | Truncated                                        |
 | Episodic memory  | 12,000 chars | Top-8 results only, relevance-scored             |
@@ -461,7 +461,7 @@ The Knowledge Library is a curated document store (separate from episodic/semant
 ### Folder Watch (`folder_watcher.py`)
 
 Recursive directory scanning with:
-- Ignore patterns and file cap
+- Default ignores for OS temp/lock/junk files (`._*` AppleDouble, `~$*` Office locks, `.DS_Store`, `*.tmp`, `*.swp`, `*~`, `*.crdownload`, …) via `DEFAULT_IGNORE_GLOBS` (basename, case-insensitive) — keeps these from being discovered, failing ingestion, and permanently stalling a source — plus per-source `ignore_patterns` and a file cap
 - Per-source locks, TOCTOU protection, crash recovery
 - Pause/resume/retry/skip flow control
 - Confirmation flow (always-on for folders) with inline progress view

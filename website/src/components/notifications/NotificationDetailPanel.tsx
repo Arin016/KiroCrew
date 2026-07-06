@@ -11,6 +11,12 @@ import { api } from '../../api/client'
 import type { Notification } from '../../types'
 import { KIND_META, DEFAULT_META, fmtFull } from './notifMeta'
 
+/** Intentional failure diagnostic for the navigation/approval actions below. */
+function logError(msg: string, err: unknown): void {
+  // eslint-disable-next-line no-console -- intentional failure diagnostic
+  console.error(msg, err)
+}
+
 /**
  * Notification detail view. Extracted verbatim from NotificationsPage's
  * DetailPanel; dispatch/navigate now come from hooks (instead of props) so it
@@ -77,13 +83,13 @@ export default function NotificationDetailPanel({ n, onClose }: { n: Notificatio
           <button className="px-3 py-1.5 rounded-md bg-accent text-accent-fg text-[13px] font-medium cursor-pointer border-none hover:brightness-110 transition-all" onClick={() => { dispatch(switchSlot(n.slot!)); navigate('/chat') }}><MessageSquare className="lucide-inline" /> Continue session</button>
         )}
         {n.kind === 'cron' && n.job_id && !n.slot && (
-          <button className="px-3 py-1.5 rounded-md bg-accent text-accent-fg text-[13px] font-medium cursor-pointer border-none hover:brightness-110 transition-all" onClick={async () => { try { const res = await api.cronToChat(n.job_id!); if (res.error) { console.error('cronToChat error', res.error); return }; if (res.slot) { dispatch(switchSlot(res.slot)); navigate('/chat') } } catch (e) { console.error('cronToChat failed', e) } }}><MessageSquare className="lucide-inline" /> View last result</button>
+          <button className="px-3 py-1.5 rounded-md bg-accent text-accent-fg text-[13px] font-medium cursor-pointer border-none hover:brightness-110 transition-all" onClick={async () => { try { const res = await api.cronToChat(n.job_id!); if (res.error) { logError('cronToChat error', res.error); return }; if (res.slot) { dispatch(switchSlot(res.slot)); navigate('/chat') } } catch (e) { logError('cronToChat failed', e) } }}><MessageSquare className="lucide-inline" /> View last result</button>
         )}
         {directSlot && !(n.kind === 'cron' && n.job_id && n.slot) && (
           <button className="px-3 py-1.5 rounded-md bg-accent text-accent-fg text-[13px] font-medium cursor-pointer border-none hover:brightness-110 transition-all" onClick={() => { dispatch(switchSlot(directSlot.key)); navigate('/chat') }}><MessageSquare className="lucide-inline" /> Go to Chat</button>
         )}
         {!directSlot && n.slot && !(n.kind === 'cron' && n.job_id && n.slot) && (
-          <button className="px-3 py-1.5 rounded-md bg-accent text-accent-fg text-[13px] font-medium cursor-pointer border-none hover:brightness-110 transition-all" onClick={async () => { try { await dispatch(resumeFromHistory({ key: n.slot!, title: n.title })); navigate('/chat') } catch (e) { console.error('Resume failed', e) } }}><MessageSquare className="lucide-inline" /> Resume Chat</button>
+          <button className="px-3 py-1.5 rounded-md bg-accent text-accent-fg text-[13px] font-medium cursor-pointer border-none hover:brightness-110 transition-all" onClick={async () => { try { await dispatch(resumeFromHistory({ key: n.slot!, title: n.title })); navigate('/chat') } catch (e) { logError('Resume failed', e) } }}><MessageSquare className="lucide-inline" /> Resume Chat</button>
         )}
         {!directSlot && !n.slot && relatedSlot && (
           <button className="px-3 py-1.5 rounded-md bg-accent text-accent-fg text-[13px] font-medium cursor-pointer border-none hover:brightness-110 transition-all" onClick={() => { dispatch(switchSlot(relatedSlot.key)); navigate('/chat') }}><MessageSquare className="lucide-inline" /> Go to Chat</button>
@@ -102,8 +108,8 @@ export default function NotificationDetailPanel({ n, onClose }: { n: Notificatio
         {/* Kind-specific actions */}
         {n.kind === 'approval' && (
           <div className="flex gap-3 mt-4">
-            <button className="px-4 py-2 rounded-lg bg-ok text-ok-fg text-[13px] font-semibold cursor-pointer border-none hover:brightness-110 transition-all" onClick={async () => { try { await api.resolveApproval(n.approval_id || n.ts, 'approve'); dispatch(deleteNotification(n.ts)); onClose() } catch (e) { console.error('Approve failed', e) } }}><CheckCircle className="lucide-inline" /> Approve</button>
-            <button className="px-4 py-2 rounded-lg bg-danger text-danger-fg text-[13px] font-semibold cursor-pointer border-none hover:brightness-110 transition-all" onClick={async () => { try { await api.resolveApproval(n.approval_id || n.ts, 'reject'); dispatch(deleteNotification(n.ts)); onClose() } catch (e) { console.error('Reject failed', e) } }}><Ban className="lucide-inline" /> Reject</button>
+            <button className="px-4 py-2 rounded-lg bg-ok text-ok-fg text-[13px] font-semibold cursor-pointer border-none hover:brightness-110 transition-all" onClick={async () => { try { await api.resolveApproval(n.approval_id || n.ts, 'approve'); dispatch(deleteNotification(n.ts)); onClose() } catch (e) { logError('Approve failed', e) } }}><CheckCircle className="lucide-inline" /> Approve</button>
+            <button className="px-4 py-2 rounded-lg bg-danger text-danger-fg text-[13px] font-semibold cursor-pointer border-none hover:brightness-110 transition-all" onClick={async () => { try { await api.resolveApproval(n.approval_id || n.ts, 'reject'); dispatch(deleteNotification(n.ts)); onClose() } catch (e) { logError('Reject failed', e) } }}><Ban className="lucide-inline" /> Reject</button>
           </div>
         )}
         {n.kind === 'cron' && n.job_id && (
@@ -112,7 +118,7 @@ export default function NotificationDetailPanel({ n, onClose }: { n: Notificatio
         {n.kind === 'taskrunner' && n.task_id && (
           <div className="flex gap-3 mt-4">
             <button className="px-4 py-2 rounded-lg bg-accent text-accent-fg text-[13px] font-semibold cursor-pointer border-none hover:brightness-110 transition-all" onClick={async () => {
-              try { const res = await api.taskRunToChat(n.task_id!); if (res.slot) { dispatch(switchSlot(res.slot)); navigate('/chat') } } catch (e) { console.error('Task nav failed', e) }
+              try { const res = await api.taskRunToChat(n.task_id!); if (res.slot) { dispatch(switchSlot(res.slot)); navigate('/chat') } } catch (e) { logError('Task nav failed', e) }
             }}><MessageSquare className="lucide-inline" /> Continue in Chat</button>
             <button className="px-3 py-1.5 rounded-md border border-border text-[13px] font-medium cursor-pointer bg-transparent text-muted hover:text-text hover:border-border-strong transition-all font-body" onClick={() => navigate('/projects')}><ClipboardList className="lucide-inline" /> View Project</button>
           </div>

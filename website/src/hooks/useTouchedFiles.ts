@@ -1,3 +1,4 @@
+import { safeSetItem } from '../utils/safeStorage'
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 
 export interface TouchedFile {
@@ -56,12 +57,12 @@ export function useTouchedFiles(sessionKey: string | undefined) {
 
   const persist = useCallback((next: TouchedFile[]) => {
     if (!keyRef.current) return
-    try { localStorage.setItem(STORAGE_PREFIX + keyRef.current, JSON.stringify(next)) } catch { /* quota */ }
+    try { safeSetItem(STORAGE_PREFIX + keyRef.current, JSON.stringify(next)) } catch { /* quota */ }
   }, [])
 
   const persistWatermark = useCallback((ts: number) => {
     if (!keyRef.current) return
-    try { localStorage.setItem(STORAGE_PREFIX + keyRef.current + WATERMARK_SUFFIX, String(ts)) } catch { /* quota */ }
+    try { safeSetItem(STORAGE_PREFIX + keyRef.current + WATERMARK_SUFFIX, String(ts)) } catch { /* quota */ }
   }, [])
 
   const addFile = useCallback((path: string, source: 'history' | 'tool' = 'history') => {

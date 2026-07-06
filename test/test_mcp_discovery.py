@@ -156,6 +156,36 @@ class TestListServers:
         assert len(shared) == 1
         assert shared[0].command == "agent-cmd"
 
+    def test_list_canonicalizes_slash_key_and_alias(self, tmp_path, monkeypatch) -> None:
+        """A server present under both its raw slash key and its slash-free alias
+        is reported once, under the canonical alias. Slash-free names unaffected."""
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        cfg = {
+            "mcpServers": {
+                "npm:@playwright/mcp": {
+                    "command": "kiroclaw",
+                    "args": ["mcp-playwright-proxy"],
+                },
+                "playwright-mcp": {
+                    "command": "kiroclaw",
+                    "args": ["mcp-playwright-proxy"],
+                },
+                "plain-srv": {"command": "p"},
+            }
+        }
+        (agent_dir / "defaults.json").write_text(json.dumps(cfg))
+        monkeypatch.setenv("KIROCLAW_PROJECT_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            "kiro_claw.mcp_discovery._MCP_JSON_PATHS", (tmp_path / "nope.json",)
+        )
+        monkeypatch.setattr("kiro_claw.mcp_discovery.Path.home", lambda: tmp_path)
+        servers = list_servers()
+        names = [s.name for s in servers]
+        assert names.count("playwright-mcp") == 1
+        assert "npm:@playwright/mcp" not in names
+        assert "plain-srv" in names
+
     def test_list_skips_disabled_servers(self, tmp_path, monkeypatch) -> None:
         """Servers with disabled=true are excluded from listing."""
         agent_dir = tmp_path / "agents"
@@ -481,6 +511,66 @@ class TestDiscoverNew:
         result = discover_servers_to_sync()
         assert result == []
 
+    def test_discover_skips_disabled_servers(self, tmp_path, monkeypatch) -> None:
+        """Disabled servers are never included in sync results."""
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        cfg = {"mcpServers": {}}
+        (agent_dir / "defaults.json").write_text(json.dumps(cfg))
+        monkeypatch.setenv("KIROCLAW_PROJECT_DIR", str(tmp_path))
+        mcp_json = tmp_path / "mcp.json"
+        mcp_json.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "disabled-srv": {"command": "x", "disabled": True},
+                        "enabled-srv": {"command": "y"},
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr("kiro_claw.mcp_discovery._MCP_JSON_PATHS", (mcp_json,))
+        result = discover_servers_to_sync()
+        assert len(result) == 1
+        assert result[0].name == "enabled-srv"
+
+    def test_discover_skips_resolved_path_match(self, tmp_path, monkeypatch) -> None:
+        """Short command name matching the basename of the agent's resolved path is not flagged."""
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        cfg = {"mcpServers": {"srv": {"command": "/usr/local/bin/my-server"}}}
+        (agent_dir / "defaults.json").write_text(json.dumps(cfg))
+        monkeypatch.setenv("KIROCLAW_PROJECT_DIR", str(tmp_path))
+        mcp_json = tmp_path / "mcp.json"
+        mcp_json.write_text(
+            json.dumps({"mcpServers": {"srv": {"command": "my-server"}}})
+        )
+        monkeypatch.setattr("kiro_claw.mcp_discovery._MCP_JSON_PATHS", (mcp_json,))
+        result = discover_servers_to_sync()
+        assert result == []
+
+
+class TestCommandsDiverged:
+    def test_identical_commands(self) -> None:
+        from kiro_claw.mcp_discovery import _commands_diverged
+
+        assert _commands_diverged("foo", "foo") is False
+
+    def test_short_vs_resolved_path(self) -> None:
+        from kiro_claw.mcp_discovery import _commands_diverged
+
+        assert _commands_diverged("deep-research", "/home/user/.toolbox/bin/deep-research") is False
+
+    def test_resolved_vs_short(self) -> None:
+        from kiro_claw.mcp_discovery import _commands_diverged
+
+        assert _commands_diverged("/usr/bin/server", "server") is False
+
+    def test_genuinely_different_commands(self) -> None:
+        from kiro_claw.mcp_discovery import _commands_diverged
+
+        assert _commands_diverged("old-server", "new-server") is True
+
 
 class TestSyncToAgentConfig:
     def test_sync_uses_kiro_cli(self, tmp_path, monkeypatch) -> None:
@@ -763,6 +853,52 @@ class TestSyncToAgentConfig:
         result = sync_to_agent_config([srv])
         assert result is True
         assert install_called, "install_agent() should be called to re-merge config"
+
+    def test_sync_skips_disabled_server_in_kiro_cli_add(self, tmp_path, monkeypatch) -> None:
+        """Defense-in-depth: disabled servers are not registered via kiro-cli mcp add."""
+        calls: list[list[str]] = []
+
+        def mock_which(x: str, **kw: object) -> str | None:
+            return "/usr/bin/kiro-cli" if x == "kiro-cli" else None
+
+        class MockPopen:
+            returncode = 0
+
+            def __init__(self, cmd: list[str], **kwargs: object) -> None:
+                calls.append(list(cmd))
+
+            def communicate(self, **kwargs: object) -> tuple[bytes, bytes]:
+                return b"", b""
+
+        monkeypatch.setattr("shutil.which", mock_which)
+        monkeypatch.setattr("subprocess.Popen", MockPopen)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        kiro_dir = tmp_path / ".kiro" / "agents"
+        kiro_dir.mkdir(parents=True)
+        config_path = kiro_dir / "kiroclaw.json"
+        config_path.write_text(json.dumps({"mcpServers": {}, "tools": [], "allowedTools": []}))
+
+        monkeypatch.setattr(
+            "kiro_claw.agent.install_agent",
+            lambda **kw: config_path,
+        )
+
+        # Source mcp.json marks this server as disabled
+        mcp_json = tmp_path / "mcp.json"
+        mcp_json.write_text(
+            json.dumps({"mcpServers": {"disabled-srv": {"command": "x", "disabled": True}}})
+        )
+        monkeypatch.setattr("kiro_claw.mcp_discovery._MCP_JSON_PATHS", (mcp_json,))
+
+        disabled_srv = McpServerInfo(name="disabled-srv", command="x")
+        sync_to_agent_config([disabled_srv])
+
+        # kiro-cli mcp add should NOT have been called for the disabled server
+        for call in calls:
+            assert "disabled-srv" not in call, (
+                f"disabled server should not be registered via kiro-cli: {call}"
+            )
 
 
 class TestProbeCache:

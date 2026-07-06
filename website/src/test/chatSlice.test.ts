@@ -1,4 +1,5 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect } from 'vitest'
+import type { ChatMessage, SubagentActivity, ToolActivity } from '../types'
 import reducer, {
   setActiveSlot,
   setPendingInput,
@@ -16,6 +17,7 @@ import reducer, {
   sseChatMessage,
   sseThinkingChunk,
   refreshSlot,
+  warmSlotCache,
   sseSubagentPending,
   sseSubagentSpawn,
   sseSubagentChunk,
@@ -30,6 +32,9 @@ import reducer, {
   resolveByApprovalId,
   sseSideResult,
   sideClose,
+  appendQueuedMessage,
+  editQueuedMessage,
+  cancelQueuedMessage,
 } from '../store/chatSlice'
 import './mockApiClient'
 
@@ -735,33 +740,33 @@ describe('approval_resolved and toolLog mutations', () => {
   })
 
   it('sseChatMessageUpdate patches matching tool message content+meta', () => {
-    let state = reducer(withSlot, appendMessage({ role: 'tool', content: '🔧 Terminal', cls: '', meta: { tool_call_id: 'tc-bash-1' } } as any))
+    let state = reducer(withSlot, appendMessage({ role: 'tool', content: '🔧 Terminal', cls: '', meta: { tool_call_id: 'tc-bash-1' } }))
     state = reducer(state, sseChatMessageUpdate({ slot: 'slot-1', tool_call_id: 'tc-bash-1', content: '🔧 ls /tmp', meta: { input: '{"command":"ls /tmp"}' } }))
     expect(state.messages).toHaveLength(1)
     expect(state.messages[0].content).toBe('🔧 ls /tmp')
-    expect((state.messages[0].meta as any)?.input).toBe('{"command":"ls /tmp"}')
-    expect((state.messages[0].meta as any)?.tool_call_id).toBe('tc-bash-1')
+    expect(state.messages[0].meta?.input).toBe('{"command":"ls /tmp"}')
+    expect(state.messages[0].meta?.tool_call_id).toBe('tc-bash-1')
   })
 
   it('sseChatMessageUpdate walks reverse and stops at most-recent match', () => {
     // Two tool messages can share a tool_call_id (auto-approved tools emit
     // 🔧 + ✅). The reducer should patch the most recent (the ✅).
-    let state = reducer(withSlot, appendMessage({ role: 'tool', content: '🔧 Terminal', cls: '', meta: { tool_call_id: 'tc-bash-1' } } as any))
-    state = reducer(state, appendMessage({ role: 'tool', content: '✅ Terminal', cls: '', meta: { tool_call_id: 'tc-bash-1' } } as any))
+    let state = reducer(withSlot, appendMessage({ role: 'tool', content: '🔧 Terminal', cls: '', meta: { tool_call_id: 'tc-bash-1' } }))
+    state = reducer(state, appendMessage({ role: 'tool', content: '✅ Terminal', cls: '', meta: { tool_call_id: 'tc-bash-1' } }))
     state = reducer(state, sseChatMessageUpdate({ slot: 'slot-1', tool_call_id: 'tc-bash-1', content: '✅ ls /tmp' }))
     expect(state.messages[0].content).toBe('🔧 Terminal')
     expect(state.messages[1].content).toBe('✅ ls /tmp')
   })
 
   it('sseChatMessageUpdate is no-op when slot mismatches active', () => {
-    let state = reducer(withSlot, appendMessage({ role: 'tool', content: '🔧 Terminal', cls: '', meta: { tool_call_id: 'tc-bash-1' } } as any))
+    let state = reducer(withSlot, appendMessage({ role: 'tool', content: '🔧 Terminal', cls: '', meta: { tool_call_id: 'tc-bash-1' } }))
     state = reducer(state, sseChatMessageUpdate({ slot: 'other', tool_call_id: 'tc-bash-1', content: '🔧 ls /tmp' }))
     expect(state.messages[0].content).toBe('🔧 Terminal')
   })
 
   it('sseChatMessageUpdate is no-op when tool_call_id is missing', () => {
-    let state = reducer(withSlot, appendMessage({ role: 'tool', content: '🔧 Terminal', cls: '', meta: { tool_call_id: 'tc-bash-1' } } as any))
-    state = reducer(state, sseChatMessageUpdate({ slot: 'slot-1', tool_call_id: '', content: '🔧 changed' } as any))
+    let state = reducer(withSlot, appendMessage({ role: 'tool', content: '🔧 Terminal', cls: '', meta: { tool_call_id: 'tc-bash-1' } }))
+    state = reducer(state, sseChatMessageUpdate({ slot: 'slot-1', tool_call_id: '', content: '🔧 changed' }))
     expect(state.messages[0].content).toBe('🔧 Terminal')
   })
 })
@@ -1007,9 +1012,9 @@ describe('slotHistory — session navigation stack', () => {
     let state = {
       ...initial,
       activeSlot: 'A',
-      messages: [{ role: 'user', content: 'hi' }] as any,
-      toolLog: [{ id: '1' }] as any,
-      subagents: { s1: {} } as any,
+      messages: [{ role: 'user', content: 'hi', cls: '' }] as ChatMessage[],
+      toolLog: [{ id: '1' }] as unknown as ToolActivity[],
+      subagents: { s1: {} } as unknown as Record<string, SubagentActivity>,
       slotRunning: true,
       slotStopping: true,
       slotState: 'streaming' as const,
@@ -1018,7 +1023,7 @@ describe('slotHistory — session navigation stack', () => {
       loadingOlder: true,
       lastChunkSeq: 99,
       _wsChunkedDuringFetch: true,
-      slotStatusDetail: { x: { kind: 'tool', text: 'hi', ts: 1 } } as any,
+      slotStatusDetail: { x: { kind: 'tool', text: 'hi', ts: 1 } },
       voicePlaying: true,
       voiceAudio: 'base64data',
     }
@@ -1055,8 +1060,8 @@ describe('slotHistory — session navigation stack', () => {
     let state = {
       ...initial,
       activeSlot: null as string | null,
-      messages: [{ role: 'user', content: 'stale' }] as any,
-      toolLog: [{ id: '1' }] as any,
+      messages: [{ role: 'user', content: 'stale', cls: '' }] as ChatMessage[],
+      toolLog: [{ id: '1' }] as unknown as ToolActivity[],
       slotRunning: true,
     }
     state = reducer(state, { type: 'chat/clearSlotState' })
@@ -1101,8 +1106,8 @@ describe('sseChatMessagePatchByTs', () => {
       state: {
         ...initial,
         activeSlot,
-        messages: activeSlot === 'slot-1' ? [banner] as any : [],
-        slotMessages: { 'slot-1': [banner] as any },
+        messages: activeSlot === 'slot-1' ? [banner] as ChatMessage[] : [],
+        slotMessages: { 'slot-1': [banner] as ChatMessage[] },
       },
       ts,
     }
@@ -1362,5 +1367,93 @@ describe('thinking survives refreshSlot (client-only reasoning)', () => {
     state = reducer(state, refreshSlot.fulfilled(payload, 'r1', 'chat-1'))
     state = reducer(state, refreshSlot.fulfilled(payload, 'r2', 'chat-1'))
     expect(state.messages.filter(m => m.role === 'thinking')).toHaveLength(1)
+  })
+})
+
+describe('streaming chunk coalescing (batched flag)', () => {
+  const initial = reducer(undefined, { type: '@@INIT' })
+  const active = reducer(initial, setActiveSlot('chat-1'))
+
+  it('batched chunk appends content without inserting a missed-chunk marker on a seq jump', () => {
+    // The useWebSocket flush buffer owns gap detection across the chunks it
+    // merges, so the reducer must NOT re-derive a gap from the batch seq.
+    let state = reducer(active, sseChatMessage({ slot: 'chat-1', role: 'chunk', content: 'Hello ', seq: 1, batched: true }))
+    state = reducer(state, sseChatMessage({ slot: 'chat-1', role: 'chunk', content: 'world', seq: 5, batched: true }))
+    const streaming = state.messages.find(m => m.role === 'streaming')
+    expect(streaming?.content).toBe('Hello world')
+    expect(streaming?.content).not.toContain('chunk(s) missed')
+    expect(state.lastChunkSeq).toBe(5)
+  })
+
+  it('non-batched chunk still inserts a missed-chunk marker on a seq jump (behavior unchanged)', () => {
+    let state = reducer(active, sseChatMessage({ slot: 'chat-1', role: 'chunk', content: 'Hello ', seq: 1 }))
+    state = reducer(state, sseChatMessage({ slot: 'chat-1', role: 'chunk', content: 'world', seq: 5 }))
+    const streaming = state.messages.find(m => m.role === 'streaming')
+    expect(streaming?.content).toContain('chunk(s) missed')
+  })
+})
+
+describe('warmSlotCache (background cache warm)', () => {
+  const initial = reducer(undefined, { type: '@@INIT' })
+  const warmPayload = (key: string, messages: unknown[]) => ({
+    key, messages, running: false, stopping: false, hasMore: false, total: messages.length, queue: [],
+  })
+
+  it('writes only slotMessages[key] for a background slot and leaves the active view untouched', () => {
+    const state0 = reducer(initial, setActiveSlot('chat-1'))
+    const msgs = [{ role: 'assistant', content: 'background answer', cls: 'msg msg-a' }]
+    const state = reducer(state0, warmSlotCache.fulfilled(warmPayload('chat-2', msgs), 'w1', 'chat-2'))
+    expect(state.slotMessages['chat-2']).toEqual(msgs)
+    expect(state.messages).toEqual(state0.messages)
+  })
+
+  it('skips the cache write if the slot became active before fulfilment', () => {
+    const state0 = reducer(initial, setActiveSlot('chat-2'))
+    const state = reducer(state0, warmSlotCache.fulfilled(warmPayload('chat-2', [{ role: 'assistant', content: 'x', cls: '' }]), 'w1', 'chat-2'))
+    expect(state.slotMessages['chat-2']).toBeUndefined()
+  })
+
+  it('ignores a null payload (slot was already active at dispatch time)', () => {
+    const state0 = reducer(initial, setActiveSlot('chat-1'))
+    const state = reducer(state0, warmSlotCache.fulfilled(null, 'w1', 'chat-1'))
+    expect(state.slotMessages).toEqual(state0.slotMessages)
+  })
+})
+
+describe('queue edit reducers', () => {
+  const initial = reducer(undefined, { type: '@@INIT' })
+  const withQueued = () => {
+    let state = reducer(initial, setActiveSlot('chat-1'))
+    state = reducer(state, appendQueuedMessage({ slot: 'chat-1', content: 'first', ts: 't1', queue_id: 'q1' }))
+    state = reducer(state, appendQueuedMessage({ slot: 'chat-1', content: 'second', ts: 't2', queue_id: 'q2' }))
+    return state
+  }
+
+  it('editQueuedMessage updates the matching queued message in place', () => {
+    let state = withQueued()
+    state = reducer(state, editQueuedMessage({ slot: 'chat-1', queue_id: 'q2', content: 'second edited' }))
+    const queued = state.messages.filter(m => m.role === 'queued')
+    expect(queued.map(m => m.content)).toEqual(['first', 'second edited'])
+    // Order and ids preserved
+    expect(queued.map(m => m.meta?.queueId)).toEqual(['q1', 'q2'])
+  })
+
+  it('editQueuedMessage is a no-op for an unknown queue_id', () => {
+    let state = withQueued()
+    state = reducer(state, editQueuedMessage({ slot: 'chat-1', queue_id: 'nope', content: 'x' }))
+    expect(state.messages.filter(m => m.role === 'queued').map(m => m.content)).toEqual(['first', 'second'])
+  })
+
+  it('editQueuedMessage ignores events for a non-active slot', () => {
+    let state = withQueued()
+    state = reducer(state, editQueuedMessage({ slot: 'other-slot', queue_id: 'q1', content: 'hijack' }))
+    expect(state.messages.filter(m => m.role === 'queued').map(m => m.content)).toEqual(['first', 'second'])
+  })
+
+  it('editQueuedMessage does not touch a cancelled message', () => {
+    let state = withQueued()
+    state = reducer(state, cancelQueuedMessage({ slot: 'chat-1', queue_id: 'q1' }))
+    state = reducer(state, editQueuedMessage({ slot: 'chat-1', queue_id: 'q1', content: 'ghost' }))
+    expect(state.messages.filter(m => m.role === 'queued').map(m => m.content)).toEqual(['second'])
   })
 })

@@ -28,7 +28,7 @@ These MCP tools are provided by KiroClaw (use directly, never via bash):
 **Subagent results are automatically injected back into your conversation as `[Subagent completion event]` messages.** You don't need to poll or check — just wait for them to arrive.
 
 The pattern:
-1. Call `spawn_run` with `tasks` array (parallel) or `task` (single) and `wait=false`
+1. Call `spawn_run` with `tasks` array (parallel) or `task` (single)
 2. Tell the user you've spawned N agents and are waiting for results
 3. When each agent finishes, you'll receive a `[Subagent completion event]` message with the full result
 4. After ALL completion events arrive, synthesize them into your final response
@@ -42,7 +42,7 @@ Then immediately: execute_bash("cat README.md")  ← WRONG! Duplicates the subag
 
 **Correct pattern:**
 ```
-spawn_run(tasks=["read specs", "read code"], wait=false)
+spawn_run(tasks=["read specs", "read code"])
 Reply: "Spawned 2 agents, waiting for results..."
 [Subagent completion event] Agent X completed ✅ ...  ← arrives automatically
 [Subagent completion event] Agent Y completed ✅ ...  ← arrives automatically

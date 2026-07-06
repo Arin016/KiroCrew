@@ -5,7 +5,7 @@ const os = require("os");
 const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
-const { postShutdown, stopGatewayGracefully } = require("../gateway-stop");
+const { postShutdown, stopGatewayGracefully, forceStopPort } = require("../gateway-stop");
 
 // Helper: temp KIROCLAW_HOME containing a .local_secret file.
 function tmpHomeWithSecret(secret) {
@@ -129,4 +129,92 @@ test("stopGatewayGracefully: no-op on already-dead process", async () => {
   // Should resolve immediately without throwing.
   await stopGatewayGracefully(proc, { backendUrl: "http://127.0.0.1:1", kiroclawHome: "/nope", timeoutMs: 500 });
   assert.ok(true);
+});
+
+// ── forceStopPort ──
+// Injectable deps so we exercise the verify-the-kill-worked logic without a
+// real OS process. `listenSeq` is a queue of lsof results returned on each
+// successive call, letting a test model "killed then gone" vs "never gone".
+function fakeDeps({ listenSeq, command = "python -m kiro_claw gateway", onKill = () => {} }) {
+  let i = 0;
+  const killed = [];
+  return {
+    killed,
+    getListenPids: async () => listenSeq[Math.min(i++, listenSeq.length - 1)],
+    getCommand: async () => command,
+    kill: (pid, sig) => { killed.push([pid, sig]); onKill(pid, sig); },
+    sleep: async () => {}, // instant — no real waiting in tests
+    verifyTimeoutMs: 1000,
+    pollIntervalMs: 250,
+  };
+}
+
+test("forceStopPort: no owner on the port reports freed, kills nothing", async () => {
+  const deps = fakeDeps({ listenSeq: [[]] });
+  const r = await forceStopPort(7788, deps);
+  assert.deepStrictEqual(r, { killed: 0, freed: true, survivors: [], foreignHolder: false });
+  assert.strictEqual(deps.killed.length, 0);
+});
+
+test("forceStopPort: killable owner frees the port (freed=true)", async () => {
+  // First lsof: pid 4242 holds it. After the kill, the verify poll sees it gone.
+  const deps = fakeDeps({ listenSeq: [[4242], []] });
+  const r = await forceStopPort(7788, deps);
+  assert.strictEqual(r.killed, 1);
+  assert.strictEqual(r.freed, true);
+  assert.deepStrictEqual(r.survivors, []);
+  assert.deepStrictEqual(deps.killed, [[4242, "SIGKILL"]]);
+});
+
+test("forceStopPort: UNKILLABLE owner still holds port -> freed=false, survivors listed", async () => {
+  // The regression case: SIGKILL is accepted but the process is in
+  // uninterruptible sleep, so every subsequent lsof still shows it. We must
+  // report freed=false so the caller does NOT respawn into a doomed bind.
+  const deps = fakeDeps({ listenSeq: [[4242]] }); // always [4242]
+  const r = await forceStopPort(7788, deps);
+  assert.strictEqual(r.killed, 1);
+  assert.strictEqual(r.freed, false);
+  assert.deepStrictEqual(r.survivors, [4242]);
+});
+
+test("forceStopPort: never signals a non-KiroClaw owner", async () => {
+  const deps = fakeDeps({ listenSeq: [[999], [999]], command: "nginx: worker process" });
+  const r = await forceStopPort(7788, deps);
+  assert.strictEqual(r.killed, 0);
+  assert.strictEqual(deps.killed.length, 0);
+  // We won't kill a foreign process, but it STILL holds the port: freed must be
+  // false (a respawn would fail to bind) and foreignHolder true so the caller
+  // routes to a restart/port-conflict path instead of a doomed respawn.
+  assert.strictEqual(r.freed, false);
+  assert.strictEqual(r.foreignHolder, true);
+  assert.deepStrictEqual(r.survivors, []);
+});
+
+test("forceStopPort: foreign owner that vanishes during verify reports freed", async () => {
+  // A non-KiroClaw owner we skip, but the port frees on its own before we finish
+  // (the other app exited). freed must reflect the real port state, not our kills.
+  const deps = fakeDeps({ listenSeq: [[999], []], command: "nginx: worker process" });
+  const r = await forceStopPort(7788, deps);
+  assert.strictEqual(r.killed, 0);
+  assert.strictEqual(r.freed, true);
+  assert.strictEqual(r.foreignHolder, false);
+});
+
+test("forceStopPort: freed reflects real port state even after killing our target", async () => {
+  // We kill our target, but a DIFFERENT (foreign) pid is now listening — the
+  // port is not actually free, so don't claim freed just because our target died.
+  let i = 0;
+  const seq = [[4242], [777]]; // ours dies, foreign 777 appears
+  const deps = {
+    getListenPids: async () => seq[Math.min(i++, seq.length - 1)],
+    getCommand: async () => "python -m kiro_claw gateway",
+    kill: () => {},
+    sleep: async () => {},
+    verifyTimeoutMs: 1000,
+    pollIntervalMs: 250,
+  };
+  const r = await forceStopPort(7788, deps);
+  assert.strictEqual(r.killed, 1);
+  assert.deepStrictEqual(r.survivors, []); // OUR pid is gone
+  assert.strictEqual(r.freed, false); // but the port is still held by 777
 });

@@ -4,8 +4,15 @@ import { useMutation } from '@tanstack/react-query'
 import { useAppSelector, useAppDispatch } from '../store'
 import { createSlot } from '../store/chatSlice'
 import { X, Plus } from 'lucide-react'
+import type { ChatSlot } from '../types'
 
 interface Tab { slug: string }
+
+/** Tab state injected by the host embedding plugin onto `window`. */
+interface EmbedTabsWindow extends Window {
+  __kiroclawTabs?: string[]
+  __kiroclawActiveTabIndex?: number
+}
 
 const STORAGE_KEY = 'kiroclaw-embed-tabs'
 const STORAGE_INDEX_KEY = 'kiroclaw-embed-active-index'
@@ -20,8 +27,9 @@ function loadTabs(activeSlot: string | null): { tabs: Tab[]; index: number } {
       if (parsed.length) return { tabs: parsed.map(s => ({ slug: s })), index: Number(storedIndex) || 0 }
     }
   } catch {}
-  const injected = (window as any).__kiroclawTabs as string[] | undefined
-  if (injected?.length) return { tabs: injected.map(s => ({ slug: s })), index: (window as any).__kiroclawActiveTabIndex ?? 0 }
+  const w = window as EmbedTabsWindow
+  const injected = w.__kiroclawTabs
+  if (injected?.length) return { tabs: injected.map(s => ({ slug: s })), index: w.__kiroclawActiveTabIndex ?? 0 }
   if (activeSlot) return { tabs: [{ slug: activeSlot }], index: 0 }
   return { tabs: [{ slug: '' }], index: 0 }
 }
@@ -53,7 +61,7 @@ export default function EmbedTabStrip() {
 
   const createSlotMutation = useMutation({
     mutationFn: () => dispatch(createSlot(undefined)).unwrap(),
-    onSuccess: (slot: any) => {
+    onSuccess: (slot: ChatSlot) => {
       const key = slot?.key
       if (!key) return
       const newTabs = [...tabsRef.current, { slug: key }]
@@ -92,7 +100,7 @@ export default function EmbedTabStrip() {
     }
     window.addEventListener('kiroclaw-tab-state', handler)
     return () => window.removeEventListener('kiroclaw-tab-state', handler)
-  }, [persist])
+  }, [persist, navigate])
 
   // When activeSlot changes (user picked a session in a new/empty tab)
   const didHydrate = useRef(false)
@@ -125,7 +133,7 @@ export default function EmbedTabStrip() {
       navigate(`/embed/chat/${activeSlot}?sid=${activeSlot}`)
       persist(newTabs, idx)
     }
-  }, [activeSlot, persist])
+  }, [activeSlot, persist, navigate])
 
   // Remove tabs whose slots were deleted (skip if slots not yet hydrated)
   useEffect(() => {
@@ -341,8 +349,12 @@ export default function EmbedTabStrip() {
             <div
               key={tab.slug || `new-${i}`}
               ref={el => { tabRefs.current[i] = el }}
+              role="tab"
+              tabIndex={0}
+              aria-selected={active}
               onPointerDown={e => onPointerDown(e, i)}
               onClick={() => { if (!dragRef.current?.active) selectTab(i) }}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectTab(i) } }}
               className={`group/tab flex items-center gap-2 pl-2 pr-2 py-1.5 rounded-md cursor-pointer select-none shrink-0 text-xs ${
                 active
                   ? 'bg-bg-elevated text-text border border-border'

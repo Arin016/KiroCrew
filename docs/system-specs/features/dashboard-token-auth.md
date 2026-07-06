@@ -1,12 +1,14 @@
 # Dashboard Token Authentication — Design Document
 
-Last Updated: 2026-04-04
+Last Updated: 2026-06-27
 
 ## Overview
 
 Slack-gated token authentication for the KiroClaw dashboard. The owner generates a time-limited, HMAC-SHA256 signed URL via the `!dashboard` Slack command. An aiohttp middleware validates the token on every request (query param or cookie fallback), sets a session cookie on first use, and pins the token to the client's IP. Static assets bypass checks. Loopback access (127.0.0.1) is always trusted regardless of mode — this ensures local processes (mcp-core, doctor, SSH tunnels) work without tokens. All generation and validation events are logged to SEL.
 
 Up to 5 tokens can be valid concurrently (FIFO eviction via `OrderedDict` when limit exceeded), allowing multiple browser tabs and CLI sessions without invalidating each other. All token state is managed by a thread-safe `TokenStateManager` and is entirely in-memory — cleared on process restart along with the per-process HMAC secret. Users can explicitly revoke all sessions via `kiroclaw logout`.
+
+The dashboard also issues a paired **refresh cookie** (`mc_refresh_{port}`, HttpOnly, path-restricted to `/api/auth`, up to 30-day TTL) alongside the access cookie on initial token-URL use. The SPA calls `POST /api/auth/refresh` shortly before the access cookie expires to silently rotate both cookies (rotation-on-use), so users only re-run `!dashboard` / `kiroclaw token` roughly once per 30 idle days instead of every ~20h. Refresh tokens are HMAC-signed with the same persistent `token_signing.key` and enforce RFC 6819 §5.2.2.3 reuse detection: a consumed `jti` replayed outside a 60s same-IP multi-tab grace window auto-revokes the entire chain.
 
 ## Architecture
 
@@ -29,16 +31,27 @@ sequenceDiagram
     Browser->>MW: GET /?token=abc123
     MW->>TokenGen: validate_token("abc123")
     TokenGen-->>MW: valid (user_id)
-    MW->>MW: bind IP, mark consumed, set mc_token_{port} cookie (max_age from session_exp)
+    MW->>TokenGen: generate_token(user_id, remaining_ttl)  [session exchange]
+    TokenGen-->>MW: fresh session token "xyz789" (distinct nonce)
+    MW->>MW: bind IP to xyz789, set mc_token_{port}=xyz789 (max_age from session_exp)
     MW->>App: forward request
-    App-->>Browser: dashboard page + Set-Cookie
+    App-->>Browser: dashboard page + Set-Cookie (xyz789, NOT the URL token)
 
-    Browser->>MW: GET /api/status (cookie: mc_token_5476=abc123)
-    MW->>TokenGen: validate_token("abc123", use_session_exp=True)
+    Browser->>MW: GET /api/status (cookie: mc_token_5476=xyz789)
+    MW->>TokenGen: validate_token("xyz789", use_session_exp=True)
     TokenGen-->>MW: valid
     MW->>MW: check IP binding
     MW->>App: forward request
 ```
+
+> **Token→session exchange (CWE-613).** The one-time link token that appears in
+> URLs / Slack DMs / terminal history / access logs is NEVER reused as the
+> long-lived session cookie. On first (query-param) auth the middleware mints a
+> **separate** session token (fresh nonce, same identity, same remaining
+> lifetime) and sets *that* as the cookie. Leaking the link therefore exposes
+> only its 5-minute click window, not the 20-hour session credential. Combined
+> with per-session revocation (`revoke_access_cookie`), an individual leaked
+> session can be killed without the global generation bump.
 
 Middleware chain (explicit ordering in `server.py`):
 
@@ -67,7 +80,7 @@ Location: `src/kiro_claw/dashboard/token_auth.py`
 
 Two expiry times:
 - `exp`: link click window — 5 minutes (`LINK_WINDOW_SECS = 300`). The URL must be opened within this time.
-- `session_exp`: cookie session TTL — capped at 6 hours (`MAX_SESSION_TTL_SECS = 21600`). Once the cookie is set, the session lasts this long.
+- `session_exp`: cookie session TTL — capped at 20 hours (`MAX_SESSION_TTL_SECS = 20 * 3600`). Once the cookie is set, the access session lasts this long; the refresh cookie (see Cookies) lets the SPA rotate it silently before expiry.
 
 #### Public API
 
@@ -87,10 +100,21 @@ def try_consume(token: str) -> bool: ...
     # Atomically check-and-consume (prevents TOCTOU race)
 
 def revoke_all_sessions() -> None: ...
-    # Clears all nonces, IP bindings, and consumed tokens. Used by `kiroclaw logout`.
+    # Clears all nonces, IP bindings, and consumed tokens AND bumps the
+    # persisted revocation-generation counter, so EVERY outstanding cookie
+    # (for all users) is rejected. The nuclear option, used by `kiroclaw logout`.
+
+def revoke_access_cookie(token: str) -> bool: ...
+    # Per-session revocation (CWE-613). Validates the token, then adds ITS nonce
+    # to a persisted server-side denylist (token_revoked_nonces.json, mode 0600).
+    # validate_token(use_session_exp=True) rejects any nonce on the denylist with
+    # reason "session revoked". Called by POST /api/auth/logout so the caller's
+    # own access cookie dies immediately — without the global generation bump
+    # that revoke_all_sessions() applies. Returns False (no-op) for a malformed,
+    # already-expired, or nonce-less token. Entries auto-evict at session_exp.
 
 def parse_duration(s: str) -> int | None: ...
-    # Parses '<int>h' or '<int>m', caps at MAX_SESSION_TTL_SECS (6h)
+    # Parses '<int>h' or '<int>m', caps at MAX_SESSION_TTL_SECS (20h)
 ```
 
 #### Middleware Factory
@@ -110,7 +134,48 @@ Request flow:
 6. Check consumption state — if consumed token re-clicked and browser has valid cookie, redirect to strip token from URL
 7. On first query-param use: bind IP, mark consumed, set cookie with `max_age` derived from `session_exp`
 8. Log to SEL
-9. Return 403 with JSON for `/api/*`, HTML for pages
+9. Return 403 with JSON for `/api/*`, HTML for pages — **except** non-API `GET`/`HEAD` navigations, which are served the public SPA shell (see below)
+
+#### SPA Shell Bypass (cold-start recovery)
+
+The dashboard is a single-page application (SPA): the browser loads one static
+HTML shell (`index.html`) once, then client-side JavaScript handles all
+navigation.
+
+**Summary:** after the access token expires (e.g. the laptop was off all
+weekend), the browser requests `GET /` with no token. Instead of a dead-end
+403, the middleware serves the static, secret-free SPA shell so the React app
+can boot and silently refresh its own session. Only the shell HTML goes out
+unauthenticated — all data stays gated.
+
+**How it works:** any `GET`/`HEAD` request **outside** the excluded data
+prefixes (`SPA_FALLBACK_EXCLUDED_PREFIXES`, below) is treated as a client-side
+SPA navigation, and the middleware serves the shell **directly** (an injected
+`spa_shell_handler`, i.e. `handlers.index`) — it does **not** fall through to
+the matched route handler. The booted app then runs its cold-start
+`GET /api/auth/me` → `POST /api/auth/refresh` recovery using the 30-day refresh
+cookie. Without this, the refresh JS never loads and the app can never recover.
+
+**One exclusion list, no drift:** `SPA_FALLBACK_EXCLUDED_PREFIXES` in
+`token_auth.py` is the single source of truth for "paths that are never the SPA
+shell" — `/api/`, `/apps/`, `/v1/` (OpenAI-compat data API), and the static
+mounts. Both the auth middleware (this bypass) and `server.py`'s SPA fallback
+read the same list, so they cannot diverge. `/apps/` and `/v1/` are matched
+routes that never reach the fallback anyway; listing them just makes the auth
+gate explicit. `test_no_get_route_outside_shell_exclusions` fails CI if a new
+data `GET` route is ever added outside this list.
+
+Security invariants:
+- **GET/HEAD only** — no state-changing method ever bypasses auth.
+- **Default-deny** — the bypass fires only when a `spa_shell_handler` is wired
+  AND the path is a shell navigation; it serves the shell **directly**, so an
+  unauthenticated request never reaches any registered route's handler. If the
+  handler is not configured, shell requests are denied like any other.
+- **Shell only, never data** — `/api/*`, the `/apps/{name}/api/*` reverse
+  proxy, and `/v1/*` (OpenAI-compat data API) still require a valid token; the
+  shell carries no secrets.
+- **Mint preserved** — a valid `?token=` is *not* short-circuited; it flows
+  through the normal validate-and-mint exchange (steps 4–7).
 
 #### In-Memory State
 
@@ -250,13 +315,21 @@ Note: Loopback access (127.0.0.1) is always trusted for both token auth and CSRF
 
 `KIROCLAW_PORT` env var overrides the port (dev mode).
 
-## Cookie
+## Cookies
 
+### Access cookie
 - Name: `mc_token_{port}` (e.g. `mc_token_5476`)
-- Value: the full token string
-- Attributes: `HttpOnly`, `SameSite=Strict`, `Path=/`
-- `max_age`: remaining seconds from `session_exp` (capped at 6 hours)
-- No `Secure` flag (HTTP, not HTTPS)
+- Value: the full access token string
+- Attributes: `HttpOnly`, `SameSite=Lax`, `Path=/`
+- `Secure`: set only when the request arrived over HTTPS (`request.scheme == "https"`) — localhost HTTP must NOT set it or the browser refuses to send it back
+- `max_age`: remaining seconds from `session_exp` (capped at `MAX_SESSION_TTL_SECS`, 20 hours)
+
+### Refresh cookie
+- Name: `mc_refresh_{port}` (e.g. `mc_refresh_5476`)
+- Value: the refresh token string
+- Attributes: `HttpOnly`, `SameSite=Lax`, `Path=/api/auth` (sent to both `/api/auth/refresh` and `/api/auth/logout`)
+- `Secure`: conditional on HTTPS, same rule as the access cookie
+- `max_age`: remaining seconds from the refresh `session_exp` (capped at `MAX_REFRESH_TTL_SECS`, 30 days)
 
 ## Error Handling
 
@@ -273,6 +346,8 @@ Note: Loopback access (127.0.0.1) is always trusted for both token auth and CSRF
 
 HTML 403 page includes instructions to run `!dashboard` in Slack. The middleware never raises unhandled exceptions.
 
+> **Note:** the *No token* / *Expired token* / *Invalid HMAC signature* rows above apply to `/api/*`, `/apps/*`, and non-`GET`/`HEAD` requests. A non-API `GET`/`HEAD` navigation in those same states is instead served the public SPA shell (200) so the app can cold-start its refresh flow — see *SPA Shell Bypass (cold-start recovery)*. `IP mismatch` is **not** relaxed: it remains a hard 403 (theft signal).
+
 ## SEL Audit Events
 
 | Event | Operation | Outcome | Metadata |
@@ -280,11 +355,12 @@ HTML 403 page includes instructions to run `!dashboard` in Slack. The middleware
 | Token generated | `slack.dashboard_token` | `ok` | `ttl=<seconds>` |
 | Request accepted | `dashboard.token_auth` | `ok` | request path |
 | Request denied | `dashboard.token_auth` | `denied` | rejection reason |
+| SPA shell served on cold-start nav | `dashboard.token_auth` | `shell_unauth` (no token) / `shell_unauth_invalid_token` (expired/forged token) | request path. **These replace `denied`/403 for non-API `GET`/`HEAD` navigations** — any volume-based scanning/brute-force alert keyed on `denied` or 403 counts for nav paths MUST also watch these two outcomes, or credential-less probing of a remote-exposed dashboard goes invisible. A forged token on a nav serves the secret-free shell but keeps the distinct `shell_unauth_invalid_token` signal (not `ok`). |
 
 ## Security Properties
 
 1. Per-process HMAC secret (`os.urandom(32)`) — process restart invalidates all tokens
-2. Dual expiry: 5-minute link click window + configurable session TTL (max 6h)
+2. Dual expiry: 5-minute link click window + configurable session TTL (max 20h)
 3. IP pinning on first use — prevents token theft across networks
 4. Single-use URL consumption — re-click from different client rejected; same client redirected to strip token
 5. Dashboard link sent via DM only — never posted in channels

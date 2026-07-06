@@ -20,9 +20,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import chatReducer from '../store/chatSlice'
 import dashboardReducer from '../store/dashboardSlice'
 import notificationsReducer from '../store/notificationsSlice'
+import type { RootState } from '../store'
 import { ThemeProvider } from '../hooks/useTheme'
 
-vi.mock('react-virtuoso', () => ({ Virtuoso: ({ data, itemContent }: any) => <div data-testid="virtuoso">{data?.map((d: any, i: number) => <div key={i}>{itemContent(i, d)}</div>)}</div> }))
+vi.mock('react-virtuoso', () => ({ Virtuoso: ({ data, itemContent }: { data?: unknown[]; itemContent: (i: number, d: unknown) => React.ReactNode }) => <div data-testid="virtuoso">{data?.map((d: unknown, i: number) => <div key={i}>{itemContent(i, d)}</div>)}</div> }))
 vi.mock('../api/client', () => ({
   api: {
     chatSlots: vi.fn().mockResolvedValue([]),
@@ -40,7 +41,7 @@ vi.mock('../api/client', () => ({
 vi.mock('../hooks/useVoiceInput', () => ({ useVoiceInput: () => ({ recording: false, transcribing: false, toggle: vi.fn() }), voiceInputSupported: false }))
 vi.mock('../hooks/useBranding', () => ({ useBranding: () => ({ botName: 'Test', avatar: '' }) }))
 vi.mock('../hooks/useAgents', () => ({ useAgents: () => ({ agents: [], defaultAgent: 'default' }) }))
-vi.mock('../components/MarkdownRenderer', () => ({ default: ({ content }: any) => <span>{content}</span> }))
+vi.mock('../components/MarkdownRenderer', () => ({ default: ({ content }: { content: string }) => <span>{content}</span> }))
 vi.mock('../components/WelcomeView', () => ({ default: () => null }))
 vi.mock('../components/MarkdownPanel', () => ({ default: () => null }))
 vi.mock('../pages/chat/ActivityViewer', () => ({ default: () => null }))
@@ -68,7 +69,7 @@ function makeStore(activeSlot: string) {
         ],
         unreadSlots: [], refreshTrigger: 0, approvalMode: 'normal',
         subagentRunning: {}, subagentDetails: {}, subagentText: {},
-      } as any,
+      } as unknown as RootState['dashboard'],
       chat: {
         activeSlot, messages: MSG,
         slotRunning: false, slotStopping: false, slotState: 'idle',
@@ -78,8 +79,8 @@ function makeStore(activeSlot: string) {
         slotStatusDetail: {}, slotContextPct: {}, slotActivity: {}, slotHistory: [],
         historyOffset: 0, _wsChunkedDuringFetch: false,
         slotMessages: {}, slotLoading: false,
-      } as any,
-      notifications: { items: [] } as any,
+      } as unknown as RootState['chat'],
+      notifications: { items: [] } as unknown as RootState['notifications'],
     },
   })
 }

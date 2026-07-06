@@ -3,10 +3,13 @@
 //
 // SECURITY MODEL
 // ==============
-// The iframe uses sandbox="allow-scripts" with srcdoc, giving it a null
-// origin. The LLM content runs in a fully isolated context — it cannot
-// access parent DOM, cookies, localStorage, or navigate the parent page.
-// This is the same security model used by Claude's artifacts (Anthropic).
+// The iframe uses sandbox="allow-scripts allow-popups
+// allow-popups-to-escape-sandbox" with srcdoc, giving it a null origin. The
+// LLM content runs in an isolated context — it cannot access parent DOM,
+// cookies, localStorage, or navigate the parent page. allow-popups (+escape)
+// lets target="_blank" links open in a real new tab (Mesh-1678); reverse-
+// tabnabbing stays blocked by the mandated rel="noopener noreferrer" on
+// widget links. Same security model as Claude's artifacts (Anthropic).
 //
 // DOMPurify is NOT applied because it strips <script> tags, which are
 // required for widget interactivity (Chart.js, D3, Tailwind CDN, etc.).

@@ -48,18 +48,6 @@ export default function FilePickerMenu({ query, anchorRef, open, onSelect, onClo
   const resultsRef = useRef<FileResult[]>([])
   const onFileOpenRef = useRef(onFileOpen)
   onFileOpenRef.current = onFileOpen
-  useEffect(() => {
-    if (!open || query.length < 2) { setResults([]); resultsRef.current = []; setLoading(false); return }
-    setLoading(true)
-    const controller = new AbortController()
-    const timer = setTimeout(() => {
-      api.fileSearch(query, project, controller.signal)
-        .then(d => { setResults(d.results || []); resultsRef.current = d.results || []; rootRef.current = d.root || ''; setSelected(0) })
-        .catch(() => { if (!controller.signal.aborted) { setResults([]); resultsRef.current = [] } })
-        .finally(() => { if (!controller.signal.aborted) setLoading(false) })
-    }, 200)
-    return () => { clearTimeout(timer); controller.abort() }
-  }, [query, open, project])
 
   const choose = useCallback((idx: number) => {
     const r = resultsRef.current
@@ -83,6 +71,19 @@ export default function FilePickerMenu({ query, anchorRef, open, onSelect, onClo
     onClose,
     onAltEnter: altEnter,
   })
+
+  useEffect(() => {
+    if (!open || query.length < 2) { setResults([]); resultsRef.current = []; setLoading(false); return }
+    setLoading(true)
+    const controller = new AbortController()
+    const timer = setTimeout(() => {
+      api.fileSearch(query, project, controller.signal)
+        .then(d => { setResults(d.results || []); resultsRef.current = d.results || []; rootRef.current = d.root || ''; setSelected(0) })
+        .catch(() => { if (!controller.signal.aborted) { setResults([]); resultsRef.current = [] } })
+        .finally(() => { if (!controller.signal.aborted) setLoading(false) })
+    }, 200)
+    return () => { clearTimeout(timer); controller.abort() }
+  }, [query, open, project, setSelected])
 
   if (!open || !anchorRef.current) return null
 

@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from aiohttp import web
 
 from kiro_claw.config.loader import config_path
+from kiro_claw.executors import subprocess_executor
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 
 if TYPE_CHECKING:
@@ -95,13 +96,31 @@ _enabled_cache: list = [True, 0.0]  # [value, timestamp]
 
 async def _kill_session(sess: _TerminalSession) -> None:
     """Kill PTY process and close FDs for a session."""
-    # Close master_fd first — unblocks reader_task's os.read() in executor
+    # Close master_fd first — unblocks reader_task's os.read() in executor.
+    #
+    # os.close() on a PTY master fd can BLOCK in the kernel: when the far-end
+    # shell is wedged (uninterruptible sleep), the tty teardown waits on it.
+    # Run it on the dedicated subprocess pool, never the event loop — a wedged
+    # close then costs at most one pool thread instead of freezing the whole
+    # gateway, and shares no workers with the orphan-reaping maintenance sweep.
+    # Captured 2026-06-28 as a 25s loop-stall wedge here (reap_orphaned_terminals
+    # -> _kill_session); same family as the _get_start_time and
+    # _cleanup_orphaned_mcp_servers off-loop offloads.
     if sess.master_fd >= 0:
-        try:
-            os.close(sess.master_fd)
-        except OSError:
-            pass
+        fd = sess.master_fd
+        # Clear the handle BEFORE the await: if this coroutine is cancelled while
+        # suspended on the executor (e.g. aiohttp cancels the request handler on
+        # client disconnect), the fd must not be left referenced on the session.
         sess.master_fd = -1
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                subprocess_executor(), os.close, fd,
+            )
+        except (OSError, RuntimeError):
+            # OSError: close failed. RuntimeError: the subprocess pool was
+            # already torn down (shutdown races interpreter exit) — submit
+            # raises rather than returning a future; the fd is reaped on exit.
+            pass
     if sess.reader_task is not None:
         sess.reader_task.cancel()
         try:

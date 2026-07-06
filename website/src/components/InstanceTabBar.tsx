@@ -15,7 +15,7 @@
  * ACTIVE remote pane's tunnel connection state + token auto-refresh countdown
  * (host SSH expiry lives in the title bar, not duplicated here).
  */
-import { useCallback } from 'react'
+import { useCallback, useMemo } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Home, Server, Loader2 } from 'lucide-react'
 import { api, ApiError } from '../api/client'
@@ -56,7 +56,9 @@ export default function InstanceTabBar() {
   // Shared with InstancesViewport / InstancesPanel via the React Query cache.
   const instancesQuery = useQuery({ queryKey: ['instances'], queryFn: () => api.listInstances(), enabled: !embedded })
   const disabled = instancesQuery.error instanceof ApiError && instancesQuery.error.status === 403
-  const instances = instancesQuery.data?.instances ?? []
+  // Memoize so the `[] ` fallback doesn't produce a fresh array identity on every
+  // render, which would otherwise churn the `onSelectInstance` useCallback deps.
+  const instances = useMemo(() => instancesQuery.data?.instances ?? [], [instancesQuery.data?.instances])
   // A tab exists for every instance the user *intends* to be connected — i.e.
   // `was_connected` (sticky intent, cleared only on an explicit disconnect) or
   // one that is currently warm/live. Live `status.state` only drives the
@@ -85,9 +87,16 @@ export default function InstanceTabBar() {
       // isn't warm yet, kick off a (re)connect: success warms it, failure leaves
       // the error pane up. A failed connect never removes the tab.
       dispatch(setActiveId(id))
-      if (!warm[id]) connectMutation.mutate(id)
+      // Reconnect when the tab has no warm iframe yet OR when its live tunnel is
+      // no longer connected. The status check matters: a mid-session tunnel drop
+      // flips status to error/disconnected but does NOT clear the stale `warm`
+      // entry, so gating only on `!warm[id]` would skip the reconnect AND hide
+      // the error panel — clicking the (red) tab would do nothing visible.
+      const inst = instances.find(i => i.id === id)
+      const live = !inst || inst.status?.state === 'connected'
+      if (!warm[id] || !live) connectMutation.mutate(id)
     },
-    [warm, dispatch, connectMutation],
+    [warm, instances, dispatch, connectMutation],
   )
   const onLocal = useCallback(() => dispatch(setActiveId(null)), [dispatch])
 

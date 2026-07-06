@@ -34,7 +34,8 @@ The app identity system (App Kit §6) provides authentication but not authorizat
 | Resource | Enforcement | Status |
 |----------|------------|--------|
 | Slots | App can only send/delete/inject into slots it created | ✅ Done (beta) |
-| All others | No enforcement — any app token can access anything | ⚠️ Current state |
+| API surface | App token confined to its own namespace (`/apps/<name>/*`, `/api/apps/<name>/*`) + its manifest `permissions.api` allowlist; everything else denied (CWE-269). Enforced centrally in `token_auth_middleware` at every grant point (main flow + loopback/mixed internal branches) so app tokens can't escalate via mixed-internal paths. Reverse proxy re-checks `token.app == <name>`. | ✅ Done |
+| All others | No enforcement — any app token can access anything | ⚠️ Partial (api-path done; resource-ownership below still open) |
 | Audit | `request["app"]` logged in SEL for all API calls | ✅ Done (beta) |
 
 ### Phase 2 — Resource Ownership

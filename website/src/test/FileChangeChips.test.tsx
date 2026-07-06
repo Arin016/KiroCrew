@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
-import FileChangeChips from '../components/FileChangeChips'
+import FileChangeChips, { type FileChangeEntry } from '../components/FileChangeChips'
 
 const change = (path: string, before: string, after: string) => ({ path, before, after })
 
@@ -13,7 +13,7 @@ describe('FileChangeChips', () => {
   it('renders nothing when fileChanges is undefined', () => {
     // Component guards against undefined too — keeps consumers from needing
     // their own falsy guard.
-    const { container } = render(<FileChangeChips fileChanges={undefined as any} />)
+    const { container } = render(<FileChangeChips fileChanges={undefined as unknown as FileChangeEntry[]} />)
     expect(container.firstChild).toBeNull()
   })
 

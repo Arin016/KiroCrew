@@ -126,4 +126,73 @@ describe('useVirtualChat integration: follow / pin wiring', () => {
 
     expect(el.scrollTop).toBe(1600)
   })
+
+  it('pins to the bottom when items first arrive after a slot switch (async fetch lands)', () => {
+    // Mount with sessionId 'A' but NO items yet — the slot switched but the
+    // messages fetch hasn't resolved. forcePin runs against empty content
+    // (scrollHeight === 0, target === 0), so scrollTop stays at 0.
+    const { el, state, view } = render(
+      { scrollTop: 0, scrollHeight: 0, clientHeight: 400 },
+      [],
+      'async-fetch',
+    )
+    expect(el.scrollTop).toBe(0)
+
+    // Now the HTTP fetch resolves: items first appear, and (in real DOM)
+    // scrollHeight grows past clientHeight. The slot-entry effect must
+    // re-fire because itemCount transitioned 0 → 8 for the same sessionId.
+    act(() => {
+      state.scrollHeight = 1200
+      view.rerender({ items: mkItems(8), sessionId: 'async-fetch', getKey, externalScrollerRef: { current: el } })
+    })
+
+    // forcePin landed at the new bottom instantly (1200 - 400 = 800) — no
+    // smooth-scroll animation, no land-short on late widget settle.
+    expect(el.scrollTop).toBe(800)
+  })
+
+  it('does NOT re-pin on later appends after the first content-arrival pin (streaming follow stays smooth)', () => {
+    // Mount empty (slot just switched), then content arrives (initial pin),
+    // then more items append (streaming). The slot-entry layout effect MUST
+    // NOT fire forcePin on every subsequent append — otherwise the user
+    // would be yanked back to the bottom on every streamed token. Appends
+    // are pinAuto's responsibility (smooth follow + scroll-up release).
+    const { el, state, view } = render(
+      { scrollTop: 0, scrollHeight: 0, clientHeight: 400 },
+      [],
+      'no-repin-on-stream',
+    )
+
+    // Initial content arrival: slot-entry effect re-fires once, pins to 800.
+    // (Append-effect pinAuto also fires and sets smoothPinActiveRef=true.)
+    act(() => {
+      state.scrollHeight = 1200
+      view.rerender({ items: mkItems(8), sessionId: 'no-repin-on-stream', getKey, externalScrollerRef: { current: el } })
+    })
+    expect(el.scrollTop).toBe(800)
+
+    // Drain smoothPinActiveRef: dispatch a scroll event while we're at the
+    // bottom (atBottom=true) so the smooth-pin branch in the scroll handler
+    // transitions back to !smoothPinActive. In a real browser this happens
+    // when the smooth-scroll animation finishes; jsdom's scrollTo stub
+    // completes instantly but doesn't fire that final scroll event.
+    act(() => { el.dispatchEvent(new Event('scroll')) })
+
+    // Now the user scrolls up partway. With smoothPinActive cleared, the
+    // scroll handler takes the normal-user-scroll path, sees the move is
+    // not a self-scroll (400 ≠ lastWriteTop=800), and releases stick.
+    act(() => { state.scrollTop = 400; el.dispatchEvent(new Event('scroll')) })
+    expect(el.scrollTop).toBe(400)
+
+    // Streaming-style append arrives. The append-effect's pinAuto checks
+    // stickRef (released → no-op). The slot-entry effect's slotPinDoneRef
+    // gate matches the current sessionId → no-op. Both paths preserve the
+    // user's scroll position.
+    act(() => {
+      state.scrollHeight = 1400
+      view.rerender({ items: mkItems(10), sessionId: 'no-repin-on-stream', getKey, externalScrollerRef: { current: el } })
+    })
+
+    expect(el.scrollTop).toBe(400)
+  })
 })

@@ -392,3 +392,39 @@ class TestTaskRunnerStatusMcpFilter:
         assert "cron1" not in task_ids
         assert "dash1" in task_ids
         assert "mcp1" in task_ids
+
+    @pytest.mark.asyncio
+    async def test_taskrunner_status_redacts_lessons_learned(self):
+        # lessons_learned is LLM-generated text surfaced to the dashboard JSON;
+        # it must be scrubbed of credentials like the sibling error / task_details
+        # fields the handler already redacts (build_status emits it raw).
+        from kiro_claw.task_reporter import build_status
+
+        runner = MagicMock()
+        run = Project(
+            spec_path="/tmp/spec.md",
+            spec_content="",
+            task_id="dash1",
+            name="Dashboard Task",
+            status="completed",
+            started_at=100.0,
+            source="dashboard",
+        )
+        run.lessons_learned = [
+            "Use token AKIAIOSFODNN7EXAMPLE for the build",
+            "A second, clean lesson with no secrets",
+        ]
+        runner._runs = {"dash1": run}
+        runner._tasks = {}
+        runner._agent = ""
+        runner.status.return_value = build_status(runner._runs, runner._tasks, runner._agent)
+
+        app = _make_app(runner=runner)
+        req = _make_request(app, path="/api/taskrunner")
+        resp = await api_taskrunner_status(req)
+        data = json.loads(resp.body)
+        lessons = data["runs"][0]["lessons_learned"]
+        joined = " ".join(lessons)
+        assert "AKIAIOSFODNN7EXAMPLE" not in joined  # secret scrubbed
+        assert "[REDACTED" in lessons[0]  # redaction marker present
+        assert lessons[1] == "A second, clean lesson with no secrets"  # clean text intact, list shape preserved

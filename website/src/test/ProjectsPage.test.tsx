@@ -8,7 +8,7 @@ import type { ProjectRun, TaskDetail } from '../types'
 
 // Mock child components for ProjectsPage isolation
 vi.mock('../pages/ProjectDetailPage', () => ({ default: () => <div data-testid="project-detail">Detail</div> }))
-vi.mock('../components/AgentSelector', () => ({ default: ({ value, onChange }: any) => <select data-testid="agent-select" value={value} onChange={(e: any) => onChange(e.target.value)}><option value="">default</option></select> }))
+vi.mock('../components/AgentSelector', () => ({ default: ({ value, onChange }: { value: string; onChange: (name: string) => void }) => <select data-testid="agent-select" value={value} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onChange(e.target.value)}><option value="">default</option></select> }))
 
 vi.mock('../api/client', () => ({
   api: {

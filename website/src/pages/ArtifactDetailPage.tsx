@@ -238,7 +238,7 @@ const ArtifactBodyIframe = memo(function ArtifactBodyIframe({ artifact, slug, pr
       {blobUrl ? (
         <iframe
           src={blobUrl}
-          sandbox="allow-scripts"
+          sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
           className="w-full border-none bg-card"
           style={{ height: 'calc(100vh - 240px)', minHeight: 480 }}
           title={`Artifact: ${slug}`}
@@ -635,7 +635,7 @@ export default function ArtifactDetailPage() {
       doc.body.style.margin = '0'
       doc.body.style.height = '100vh'
       const iframe = doc.createElement('iframe')
-      iframe.setAttribute('sandbox', 'allow-scripts')
+      iframe.setAttribute('sandbox', 'allow-scripts allow-popups allow-popups-to-escape-sandbox')
       iframe.setAttribute('srcdoc', exportSrcdoc)
       iframe.style.width = '100%'
       iframe.style.height = '100%'
@@ -941,6 +941,10 @@ export default function ArtifactDetailPage() {
         {usesIframe ? (
           <ArtifactBodyIframe artifact={artifact} slug={slug} previewStyle={mdPreviewStyle} />
         ) : (
+          // Selection-tracking container: onMouseDown/Up detect a text selection
+          // to anchor the comment popover. This is an inherently pointer-only
+          // gesture (highlighting text), so there is no keyboard equivalent.
+          // eslint-disable-next-line jsx-a11y/no-static-element-interactions
           <div
             ref={bodyRef}
             className="relative"

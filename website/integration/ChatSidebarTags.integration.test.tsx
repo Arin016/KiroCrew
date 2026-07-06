@@ -321,8 +321,7 @@ describe('ChatSidebar tag/column UI', () => {
     await user.click(screen.getByTestId('column-edit-c1'))
     await waitFor(() => expect(screen.getByTestId('tag-name-todo')).toBeInTheDocument())
     const input = screen.getByTestId('tag-name-todo') as HTMLInputElement
-    await user.clear(input)
-    await user.type(input, 'In Progress')
+    fireEvent.change(input, { target: { value: 'In Progress' } })
     fireEvent.blur(input)
     await waitFor(() => expect(backend.state.tags.find(t => t.id === 'todo')!.name).toBe('In Progress'))
   })
@@ -336,8 +335,8 @@ describe('ChatSidebar tag/column UI', () => {
     await waitFor(() => expect(screen.getByTestId('tag-create-c1')).toBeInTheDocument())
     const before = backend.state.tags.length
     const input = screen.getByTestId('tag-create-c1') as HTMLInputElement
-    await user.click(input)
-    await user.keyboard('blocked{Enter}')
+    fireEvent.change(input, { target: { value: 'blocked' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
     await waitFor(() => expect(backend.state.tags.length).toBe(before + 1))
     expect(backend.state.tags.at(-1)!.name).toBe('blocked')
   })
@@ -390,15 +389,14 @@ describe('ChatSidebar tag/column UI', () => {
   })
 
   it('column-level "+ folder" button creates a folder', async () => {
-    const user = userEvent.setup()
     backend.state.columns = [{ id: 'c1', name: '', tag_ids: ['todo'], mode: 'any', order: 0, include_untagged: false }]
     renderWithProviders(<ChatSidebar {...defaultProps} />)
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
-    await user.click(screen.getByTestId('column-new-folder-c1'))
-    // An inline input should appear scoped to this column; type and Enter
-    const input = await screen.findByPlaceholderText(/folder name/i)
-    await user.click(input)
-    await user.keyboard('Backlog{Enter}')
+    fireEvent.click(screen.getByTestId('column-new-folder-c1'))
+    // An inline input appears scoped to this column; set value and submit with Enter
+    const input = screen.getByPlaceholderText(/folder name/i)
+    fireEvent.change(input, { target: { value: 'Backlog' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
     await waitFor(() => expect(backend.state.folders.length).toBe(1))
     expect(backend.state.folders[0].name).toBe('Backlog')
   })

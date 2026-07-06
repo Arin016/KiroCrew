@@ -738,6 +738,33 @@ class TestSearchSessions:
         assert "new-weak-1" in result_keys
         assert "new-weak-2" in result_keys
 
+    def test_substring_scan_reads_through_msg_cache(self, tmp_path):
+        """search_sessions sources content via _read_messages (the mtime
+        cache), not a second raw file parse.
+
+        Regression lock for the double-parse fix: previously the scan opened
+        and re-parsed each file inline, so _read_messages was never consulted
+        by the search path (the snippet path then parsed the same file a
+        second time). After the fix the scan goes through the cache, so a
+        matched session is counted via _read_messages and its parse is
+        memoized for the snippet read.
+        """
+        log = ConversationLog(base_dir=tmp_path)
+        log.append("a", "user", "apollo deployment rollback notes")
+        calls: list[str] = []
+        real = log._read_messages
+
+        def counting(key: str) -> list[dict]:
+            calls.append(key)
+            return real(key)
+
+        log._read_messages = counting  # type: ignore[assignment]
+        assert [s["key"] for s in log.search_sessions("apollo")] == ["a"]
+        # The scan consulted the cache entry point for the matched session...
+        assert "a" in calls
+        # ...and the parse is now memoized, so the snippet read is a cache hit.
+        assert "a" in log._msg_cache
+
 
 class TestArchive:
     def test_rotate_archives_dropped_lines(self, tmp_path, monkeypatch):

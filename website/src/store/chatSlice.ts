@@ -2,6 +2,7 @@ import { createSlice, createAsyncThunk, type PayloadAction } from '@reduxjs/tool
 import { api } from '../api/client'
 import { addSlotOptimistic, removeSlotOptimistic, markSlotRead, fetchSlots, slotSurfaceKey } from './dashboardSlice'
 import { resolveDefaultColor } from '../utils/sessionColors'
+import { gcSessionStorage } from '../utils/storageGc'
 import type { RootState } from './index'
 import type { ChatMessage, SessionInfo, SubagentActivity, ToolActivity } from '../types'
 import { SOFT_STOP_DEBOUNCE_MS } from '../pages/chat/types'
@@ -9,6 +10,15 @@ import { mergePreservedPastes } from '../utils/pasteTokens'
 
 const SKIP_ROLES = new Set(['chunk', 'done'])
 const filterMessages = (msgs: ChatMessage[]) => msgs.filter(m => !SKIP_ROLES.has(m.role))
+
+/** Single-sourced "N chunk(s) missed" degradation marker. Shared by the reducer's
+ *  defensive non-batched path and the useWebSocket flush buffer (the live path)
+ *  so the marker text and gap arithmetic cannot drift between the two copies.
+ *  Returns '' when the seqs are adjacent (no gap). */
+export const missedChunkMarker = (prevSeq: number, curSeq: number): string => {
+  const missed = curSeq - prevSeq - 1
+  return missed > 0 ? `\n[${missed} chunk(s) missed]\n` : ''
+}
 
 type SlotState = 'idle' | 'streaming' | 'tool_running' | 'stopping' | 'compacting'
 
@@ -128,7 +138,8 @@ export const fetchHistory = createAsyncThunk(
 async function fetchSlotDetail(key: string) {
   // No limit → backend returns all chained history (across gateway restarts).
   const d = await api.chatSlotDetail(key)
-  return { key, messages: filterMessages(d.messages || []), running: d.running || false, stopping: d.stopping || false, hasMore: d.has_more || false, total: d.total || 0, queue: ((d.queue || []) as any[]).map((q: any) => typeof q === 'string' ? { content: q, queueId: crypto.randomUUID(), ts: new Date().toISOString() } : { content: q.content, queueId: q.id, ts: new Date().toISOString() }) }
+  type QueueItem = string | { content: string; id: string }
+  return { key, messages: filterMessages(d.messages || []), running: d.running || false, stopping: d.stopping || false, hasMore: d.has_more || false, total: d.total || 0, queue: ((d.queue || []) as QueueItem[]).map((q: QueueItem) => typeof q === 'string' ? { content: q, queueId: crypto.randomUUID(), ts: new Date().toISOString() } : { content: q.content, queueId: q.id, ts: new Date().toISOString() }) }
 }
 
 export const switchSlot = createAsyncThunk(
@@ -190,6 +201,21 @@ export const refreshSlot = createAsyncThunk(
   async (key: string, { getState }) => {
     const state = (getState() as { chat: ChatState }).chat
     if (state.activeSlot !== key) return null
+    return fetchSlotDetail(key)
+  },
+)
+
+/** Warm the per-slot message cache for a *background* slot once its turn
+ *  finishes, so switching to it renders the completed answer instantly from
+ *  cache instead of waiting for the on-switch fetch round-trip. Guarded to
+ *  non-active slots; the fulfilled reducer writes only slotMessages[key] and
+ *  never touches the active `messages`, so a background completion can't churn
+ *  the view the user is currently looking at. */
+export const warmSlotCache = createAsyncThunk(
+  'chat/warmSlotCache',
+  async (key: string, { getState }) => {
+    const state = (getState() as { chat: ChatState }).chat
+    if (state.activeSlot === key) return null
     return fetchSlotDetail(key)
   },
 )
@@ -259,6 +285,7 @@ export const deleteSlot = createAsyncThunk(
     dispatch(removeSlotOptimistic(key))
     try {
       await api.deleteChatSlot(key)
+      gcSessionStorage(key)
     } catch {
       dispatch(fetchSlots())
       throw new Error('save failed')
@@ -687,8 +714,8 @@ const chatSlice = createSlice({
       }
       state.messages.push({ role: 'thinking', content, cls: '' })
     },
-    sseChatMessage(state, action: PayloadAction<{ slot: string; role: string; content: string; ts?: string; seq?: number; cls?: string; meta?: Record<string, unknown>; kind?: string }>) {
-      const { slot, role, content, ts, seq, cls, meta, kind } = action.payload
+    sseChatMessage(state, action: PayloadAction<{ slot: string; role: string; content: string; ts?: string; seq?: number; cls?: string; meta?: Record<string, unknown>; kind?: string; batched?: boolean }>) {
+      const { slot, role, content, ts, seq, cls, meta, kind, batched } = action.payload
       if (slot !== state.activeSlot) return
       // stop_event — replace in place by id, or insert new
       const effectiveKind = kind ?? (meta?.kind as string | undefined)
@@ -733,9 +760,13 @@ const chatSlice = createSlice({
         }
         if (streamIdx >= 0) {
           const msg = state.messages[streamIdx]
-          // Detect missed chunks via sequence gap
-          if (seq !== undefined && state.lastChunkSeq !== undefined && seq > state.lastChunkSeq + 1) {
-            msg.content += `\n[⚠ ${seq - state.lastChunkSeq - 1} chunk(s) missed]\n`
+          // Defensive non-batched gap detection. The live WS path always sets
+          // `batched` — the useWebSocket flush buffer owns gap detection across
+          // the chunks it merges and inlines the marker itself — so this branch
+          // only runs for a direct (test/legacy) non-batched chunk dispatch. It
+          // shares missedChunkMarker with the buffer so the two cannot drift.
+          if (!batched && seq !== undefined && state.lastChunkSeq !== undefined) {
+            msg.content += missedChunkMarker(state.lastChunkSeq, seq)
           }
           msg.content += content
           msg.rawText = msg.content
@@ -865,17 +896,11 @@ const chatSlice = createSlice({
       const idx = state.messages.findIndex(m => m.role === 'queued' && (m.meta?.queueId as string) === action.payload.queue_id)
       if (idx >= 0) state.messages.splice(idx, 1)
     },
-    /** Reorder queued messages to match the given id sequence (from backend queue_reorder WS event). */
-    reorderQueuedMessages(state, action: PayloadAction<{ slot: string; order: string[] }>) {
+    /** Edit a queued message in place (from backend queue_edit WS event or optimistic local update). */
+    editQueuedMessage(state, action: PayloadAction<{ slot: string; queue_id: string; content: string }>) {
       if (action.payload.slot !== state.activeSlot) return
-      const order = action.payload.order
-      const queued = state.messages.filter(m => m.role === 'queued')
-      const rest = state.messages.filter(m => m.role !== 'queued')
-      const getId = (m: typeof queued[number]) => (m.meta?.queueId as string) ?? m.ts ?? ''
-      const byId = new Map(queued.map(m => [getId(m), m]))
-      const sorted = order.map(id => byId.get(id)).filter(Boolean) as typeof queued
-      const remaining = queued.filter(m => !order.includes(getId(m)))
-      state.messages = [...rest, ...sorted, ...remaining]
+      const idx = state.messages.findIndex(m => m.role === 'queued' && (m.meta?.queueId as string) === action.payload.queue_id)
+      if (idx >= 0) state.messages[idx].content = action.payload.content
     },
     /** Add a queued message (from backend queue_push WS event). */
     appendQueuedMessage: {
@@ -1017,6 +1042,15 @@ const chatSlice = createSlice({
         state.slotHasMore = hasMore
         state.slotOldestIndex = hasMore ? total - messages.length : 0
       })
+      .addCase(warmSlotCache.fulfilled, (state, action) => {
+        if (!action.payload) return
+        const { key, messages } = action.payload
+        // Slot became active between dispatch and fulfilment — switchSlot now
+        // owns its messages, so leave the cache for it to manage.
+        if (state.activeSlot === key) return
+        if (!state.slotMessages) state.slotMessages = {}
+        state.slotMessages[key] = messages
+      })
       .addCase(createSlot.fulfilled, (state, action) => {
         if (state.activeSlot) {
           state.slotActivity[state.activeSlot] = { toolLog: state.toolLog, subagents: state.subagents, activityTab: state.activityTab }
@@ -1094,7 +1128,7 @@ const chatSlice = createSlice({
 
 export const {
   setActiveSlot, clearSlotState, setPendingInput, setQuestionCard, clearQuestionCard, appendMessage, updateStreamingMessage, finalizeAssistant,
-  removeThinking, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, startLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, reorderQueuedMessages,
+  removeThinking, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, startLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage,
   sseContextUsage, setVoicePlaying, setVoiceAudio,
   toggleActivity, openActivityToTab, openActivityToTool, clearFocusToolCallId, sseSubagentPending, markSubagentApproving, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentDone,
   sseSubagentSnapshot, sseToolActivity, sseToolResult, sseActivityEvent,

@@ -58,13 +58,20 @@ class TestExtractBashCommand:
 
 
 class TestNormalizeModel:
+    # _normalize_model is deprecation-migration only: it must round-trip user
+    # selections verbatim (only deprecated ids change) so persistence works.
     def test_deprecated_mapped(self):
         assert _normalize_model("claude-opus-4.6-1m") == "claude-opus-4.6"
         assert _normalize_model("claude-sonnet-4.6-1m") == "claude-sonnet-4.6"
 
     def test_non_deprecated_passthrough(self):
+        # opus/sonnet versions preserved verbatim (NOT remapped here)
+        assert _normalize_model("claude-opus-4.7") == "claude-opus-4.7"
+        assert _normalize_model("claude-opus-4.8") == "claude-opus-4.8"
         assert _normalize_model("claude-sonnet-4.6") == "claude-sonnet-4.6"
+        assert _normalize_model("opus") == "opus"
         assert _normalize_model("custom-model") == "custom-model"
+        assert _normalize_model("") == ""
 
     def test_is_deprecated(self):
         assert is_deprecated_model("claude-opus-4.6-1m") is True
@@ -79,9 +86,9 @@ class TestValidateToolName:
         with pytest.raises(ValueError, match="empty"):
             _validate_tool_name("")
 
-    def test_execute_kind_skips_length(self):
+    def test_shell_flag_skips_length(self):
         long_name = "x" * 500
-        result = _validate_tool_name(long_name, tool_kind="execute")
+        result = _validate_tool_name(long_name, is_shell=True)
         assert len(result) == 500
 
 

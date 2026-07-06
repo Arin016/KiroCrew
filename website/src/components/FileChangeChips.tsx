@@ -70,7 +70,7 @@ function ExpandedChip({ fc, onClick }: { fc: FileChangeEntry; onClick: () => voi
   const { added, removed } = countLines(fc.before, fc.after)
   const Icon = fileIcon(fc.path)
   return (
-    <button onClick={onClick} className="glass-surface glass-refract inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-[11.5px] font-medium cursor-pointer text-text" aria-label={fc.path}>
+    <button onClick={onClick} className="glass-surface file-chip inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-[11.5px] font-medium cursor-pointer text-text" aria-label={fc.path}>
       <Icon size={12} className={colorForExt(fc.path)} />
       <span className="truncate max-w-[180px]">{basename(fc.path)}</span>
       <Stats added={added} removed={removed} />
@@ -86,7 +86,7 @@ function MinimalChip({ fc, onClick }: { fc: FileChangeEntry; onClick: () => void
       <span className="glass-surface absolute bottom-full left-0 mb-1 px-2 py-0.5 rounded-md text-[11px] font-medium text-text whitespace-nowrap font-mono z-10 pointer-events-none opacity-0 translate-y-1 group-hover/tip:opacity-100 group-hover/tip:translate-y-0 transition-all duration-150">
         {basename(fc.path)}
       </span>
-      <button onClick={onClick} className="glass-surface glass-refract inline-flex items-center gap-1 h-[22px] px-2.5 rounded-full text-[11px] font-medium cursor-pointer" aria-label={fc.path}>
+      <button onClick={onClick} className="glass-surface file-chip inline-flex items-center gap-1 h-[22px] px-2.5 rounded-full text-[11px] font-medium cursor-pointer" aria-label={fc.path}>
         <Stats added={added} removed={removed} />
       </button>
     </span>

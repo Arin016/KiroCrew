@@ -383,3 +383,50 @@ class TestSandboxNoWarningWhenExpected:
         ]
         assert not warning_msgs, f"Expected no WARNING but got: {warning_msgs}"
         assert info_msgs, "Expected INFO about running without isolation"
+
+
+class TestCleanupStaleSandboxProfiles:
+    """Tests for cleanup_stale_sandbox_profiles()."""
+
+    def test_removes_dead_pid_profile(self, tmp_path):
+        """Profile file whose PID is dead gets removed."""
+        from kiro_claw.sandbox import cleanup_stale_sandbox_profiles
+
+        run_dir = tmp_path / ".kiroclaw" / "run"
+        run_dir.mkdir(parents=True)
+        stale_file = run_dir / "kiroclaw_sandbox_99999_abc123.sb"
+        stale_file.write_text("(version 1)")
+
+        with patch("kiro_claw.sandbox.os.path.expanduser", return_value=str(tmp_path)):
+            with patch("kiro_claw.sandbox.os.kill", side_effect=OSError("No such process")):
+                cleanup_stale_sandbox_profiles()
+
+        assert not stale_file.exists()
+
+    def test_preserves_live_pid_profile(self, tmp_path):
+        """Profile file whose PID is alive (current process) is preserved."""
+        from kiro_claw.sandbox import cleanup_stale_sandbox_profiles
+
+        run_dir = tmp_path / ".kiroclaw" / "run"
+        run_dir.mkdir(parents=True)
+        live_file = run_dir / f"kiroclaw_sandbox_{os.getpid()}_xyz789.sb"
+        live_file.write_text("(version 1)")
+
+        with patch("kiro_claw.sandbox.os.path.expanduser", return_value=str(tmp_path)):
+            cleanup_stale_sandbox_profiles()
+
+        assert live_file.exists()
+
+    def test_ignores_non_sandbox_files(self, tmp_path):
+        """Files not matching kiroclaw_sandbox_*.sb pattern are left alone."""
+        from kiro_claw.sandbox import cleanup_stale_sandbox_profiles
+
+        run_dir = tmp_path / ".kiroclaw" / "run"
+        run_dir.mkdir(parents=True)
+        other_file = run_dir / "something_else.txt"
+        other_file.write_text("keep me")
+
+        with patch("kiro_claw.sandbox.os.path.expanduser", return_value=str(tmp_path)):
+            cleanup_stale_sandbox_profiles()
+
+        assert other_file.exists()

@@ -100,7 +100,7 @@ Then:
 2. Open `<anchor>/GOAL.md` — confirm issue-discovery sources (defaults: tree
    grep, kanban backlog). Add/remove.
 3. `ls <anchor>/STOP` must say "No such file".
-4. Arm via UI 🔁 or REST (see `LOOP.md §"Start the loop (REST)"`).
+4. Arm via UI 🎯 "Set a goal" or REST (see `LOOP.md §"Start the loop (REST)"`).
 
 ## The goal-loop cycle (what the agent does)
 

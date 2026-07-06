@@ -6,9 +6,11 @@ import { parseDiffLines, DIFF_BG, DIFF_FG, type DiffLine } from '../utils/diffUt
 
 const SIGN: Record<string, string> = { add: '+', del: '-', hunk: '', meta: '', context: ' ' }
 
+type DiffSegment = { kind: 'context'; lines: DiffLine[] } | { kind: 'line'; line: DiffLine }
+
 /** Group consecutive context lines for collapsing. Returns segments: either a context group or individual change lines. */
-function groupContextRuns(lines: DiffLine[]): { kind: 'context'; lines: DiffLine[] }[] | { kind: 'line'; line: DiffLine }[] {
-  const segments: ({ kind: 'context'; lines: DiffLine[] } | { kind: 'line'; line: DiffLine })[] = []
+function groupContextRuns(lines: DiffLine[]): DiffSegment[] {
+  const segments: DiffSegment[] = []
   let ctxBuf: DiffLine[] = []
   const flushCtx = () => {
     if (ctxBuf.length > 0) { segments.push({ kind: 'context', lines: [...ctxBuf] }); ctxBuf = [] }
@@ -18,7 +20,7 @@ function groupContextRuns(lines: DiffLine[]): { kind: 'context'; lines: DiffLine
     else { flushCtx(); segments.push({ kind: 'line', line: l }) }
   }
   flushCtx()
-  return segments as any
+  return segments
 }
 
 /** Build side-by-side pairs from parsed diff lines. */

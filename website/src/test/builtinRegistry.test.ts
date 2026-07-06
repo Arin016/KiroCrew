@@ -41,7 +41,7 @@ describe('builtinRegistry', () => {
     })
 
     it('all values are lazy components', () => {
-      for (const [route, component] of Object.entries(BUILTIN_COMPONENT_REGISTRY)) {
+      for (const component of Object.values(BUILTIN_COMPONENT_REGISTRY)) {
         expect(component).toHaveProperty('$$typeof', Symbol.for('react.lazy'))
       }
     })

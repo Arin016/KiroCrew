@@ -1,3 +1,4 @@
+import { safeSetItem } from '../utils/safeStorage'
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { X } from 'lucide-react'
@@ -91,7 +92,7 @@ export default function DetailPanel({ title, onClose, footer, headerActions, sec
       // so widthRef.current still holds the dragged value; this keeps the
       // preferred width in localStorage for restore (re-clamped) on a larger
       // screen rather than saving a resize-clamped value.
-      if (storageKey) localStorage.setItem(storageKey, String(widthRef.current))
+      if (storageKey) safeSetItem(storageKey, String(widthRef.current))
       // Re-clamp the live render once to the current viewport, in case a resize
       // arrived mid-drag, so the panel can't stay wider than the screen.
       setWidth((w) => clampPanelWidth(w, minWidth))
@@ -99,7 +100,7 @@ export default function DetailPanel({ title, onClose, footer, headerActions, sec
     moveRef.current = onMove; upRef.current = onUp
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
-  }, [minWidth])
+  }, [minWidth, storageKey])
 
   return (
     <motion.div
@@ -110,7 +111,11 @@ export default function DetailPanel({ title, onClose, footer, headerActions, sec
       className="shrink-0 overflow-hidden h-full"
     >
       <div className="shrink-0 border-l border-border bg-bg flex flex-col h-full overflow-hidden relative" style={{ width, minWidth }}>
-        <div className="absolute left-0 top-0 bottom-0 w-[6px] cursor-col-resize z-20 group/drag" onMouseDown={onDragStart}>
+        {/* Drag-to-resize splitter: pointer-only affordance (no meaningful
+            keyboard gesture for a 6px handle); role="separator" is the correct
+            ARIA role. */}
+        {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+        <div role="separator" aria-orientation="vertical" aria-label="Resize panel" className="absolute left-0 top-0 bottom-0 w-[6px] cursor-col-resize z-20 group/drag" onMouseDown={onDragStart}>
           <div className="absolute left-0 top-0 bottom-0 w-[2px] transition-colors duration-200 bg-transparent group-hover/drag:bg-accent" />
         </div>
         <div className={`flex items-center justify-between px-3 h-12 shrink-0 border-b ${headerClassName ?? 'border-border'}`}>

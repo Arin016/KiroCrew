@@ -9,7 +9,7 @@ import { useConnected } from '../hooks/useConnected'
 import {
   switchSlot, createSlot, deleteSlot, fetchHistory,
   appendMessage, resumeFromHistory, forkSlot,
-  setSlotRunning, startLocalTurn, syncSlotRunningFromServer, setPendingInput, resolveByApprovalId, clearPendingPermissions, cancelQueuedMessage, reorderQueuedMessages,
+  setSlotRunning, startLocalTurn, syncSlotRunningFromServer, setPendingInput, resolveByApprovalId, clearPendingPermissions, cancelQueuedMessage, editQueuedMessage,
   setVoiceAudio,
   toggleActivity, openActivityToTab,
   setActiveSlot, truncateAfterIndex, replaceMessages,
@@ -20,6 +20,7 @@ import { interceptSlashCommand } from './chat/ChatInput'
 import { updateSlot, changeApprovalMode, sseSlotTitle, sseSlotColor, updateSlotFolder } from '../store/dashboardSlice'
 import { filterSlotsBySurface, filterUnreadKeysBySurface } from '../surfaces/registry'
 import { api } from '../api/client'
+import type { PlanStepInput } from '../api/client'
 import { useProvider } from '../providers'
 import AutoNudgePopover, { type AutoNudgeLoop } from '../components/AutoNudgePopover'
 import { fileReadUrl } from '../utils/fileReadUrl'
@@ -52,7 +53,6 @@ const SCROLL_AFTER_RENDER_MS = 100
 export const PREFILL_STORAGE_KEY = 'kiroclaw_prefill'
 import WelcomeView from '../components/WelcomeView'
 import { usePanelState, useDiffPanel } from '../hooks/usePanelState'
-import { useBranding } from '../hooks/useBranding'
 import { useFilteredDropdown } from '../hooks/useFilteredDropdown'
 import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { useAgents } from '../hooks/useAgents'
@@ -92,7 +92,8 @@ import { loadChatConfig, CONTENT_WIDTH, type ChatConfig } from './chat/ChatSetti
 import { useKnowledgeFetch, extractKnowledgeQuery, expandKnowledgeBlock } from './chat/useKnowledgeFetch'
 import { KnowledgePicker } from './chat/KnowledgePicker'
 import { useSessionPalette } from '../hooks/useSessionPalette'
-import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, PanelLeftOpen, PanelLeftClose, Pen, MessageSquareShare, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Locate, Link2, Link2Off, Hash, Undo2, Check, Folder } from 'lucide-react'
+import { colorName } from '../utils/sessionColors'
+import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, PanelLeftOpen, PanelLeftClose, Pen, MessageSquareShare, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Locate, Link2, Link2Off, Hash, Undo2, Check, Folder, X } from 'lucide-react'
 
 import InfoTip from '../components/InfoTip'
 import { FileCard } from '../components/FileCard'
@@ -106,7 +107,7 @@ const APPROVAL_SEGMENTS = [
 import { AnimatePresence, motion } from 'framer-motion'
 import DetailPanel from '../components/DetailPanel'
 
-import type { ChatMessage, ChatFolder } from '../types'
+import type { ChatMessage, ChatFolder, ChatSlot } from '../types'
 
 import ToolCallLine from './chat/ToolCallLine'
 import { renderMcpOAuthMessage } from './chat/McpOAuthBanner'
@@ -121,7 +122,7 @@ const IDLE_DEFAULT = { kind: 'idle', text: 'Ready', ts: 0 } as const
 
 /** Live session status badge — shows current phase with elapsed timer. */
 export function ChatHeaderMenu({ activeSlot, currentSlot, slackChannels, onSlackLink, slotKey, colorIndex, agent, onReveal, mode }: {
-  activeSlot: string | null; currentSlot: any; slackChannels: { id: string; name: string }[] | null | undefined
+  activeSlot: string | null; currentSlot: ChatSlot | undefined; slackChannels: { id: string; name: string }[] | null | undefined
   onSlackLink: (channelId?: string) => void; slotKey?: string; colorIndex?: number | null; agent?: string; onReveal?: () => void; mode?: string
 }) {
   const [open, setOpen] = useState(false)
@@ -173,14 +174,14 @@ export function ChatHeaderMenu({ activeSlot, currentSlot, slackChannels, onSlack
       </button>
       {open && (
         <div className="absolute left-0 top-full mt-1 z-50 rounded-lg bg-bg-elevated border border-border shadow-lg py-1 min-w-[180px]">
-          <div className="relative" onMouseEnter={() => { if (mcpTimer.current) clearTimeout(mcpTimer.current); setMcpHover(true) }} onMouseLeave={() => { mcpTimer.current = setTimeout(() => setMcpHover(false), 200) }}>
+          <div role="menuitem" tabIndex={-1} aria-haspopup="menu" aria-expanded={mcpHover} className="relative" onMouseEnter={() => { if (mcpTimer.current) clearTimeout(mcpTimer.current); setMcpHover(true) }} onMouseLeave={() => { mcpTimer.current = setTimeout(() => setMcpHover(false), 200) }}>
             <div className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text hover:bg-bg-hover cursor-default">
               <Plug size={13} className="shrink-0 text-muted" />
               <span className="flex-1">MCP servers</span>
               <ChevronRight size={12} className="text-muted" />
             </div>
             {mcpHover && (
-              <div className="absolute left-full top-0 ml-1 z-50 rounded-lg bg-bg-elevated border border-border shadow-lg py-2 px-3 min-w-[220px] max-w-[280px] max-h-[300px] overflow-y-auto" onMouseEnter={() => { if (mcpTimer.current) clearTimeout(mcpTimer.current) }} onMouseLeave={() => { mcpTimer.current = setTimeout(() => setMcpHover(false), 200) }}>
+              <div role="menu" aria-label="MCP servers" tabIndex={-1} className="absolute left-full top-0 ml-1 z-50 rounded-lg bg-bg-elevated border border-border shadow-lg py-2 px-3 min-w-[220px] max-w-[280px] max-h-[300px] overflow-y-auto" onMouseEnter={() => { if (mcpTimer.current) clearTimeout(mcpTimer.current) }} onMouseLeave={() => { mcpTimer.current = setTimeout(() => setMcpHover(false), 200) }}>
                 <div className="text-[11px] uppercase tracking-wider text-muted font-semibold mb-1.5">MCP Servers {servers.length > 0 && `(${servers.filter((s: {enabled?: boolean}) => s.enabled !== false).length}/${servers.length})`}</div>
                 {servers.length === 0 ? <div className="text-muted text-[12px] italic">Loading…</div> : servers.map((s: {name: string; enabled?: boolean}) => (
                   <div key={s.name} className={`flex items-center gap-2 py-0.5 text-[12px] ${s.enabled === false ? 'opacity-40' : ''}`}>
@@ -198,7 +199,7 @@ export function ChatHeaderMenu({ activeSlot, currentSlot, slackChannels, onSlack
                 <Locate size={13} className="shrink-0 text-muted" /> Reveal in sidebar
               </button>
               {folders.length > 0 && (
-                <div className="relative" onMouseEnter={() => { if (folderTimer.current) clearTimeout(folderTimer.current); setFolderHover(true) }} onMouseLeave={() => { folderTimer.current = setTimeout(() => setFolderHover(false), 200) }}>
+                <div role="menuitem" tabIndex={-1} aria-haspopup="menu" aria-expanded={folderHover} className="relative" onMouseEnter={() => { if (folderTimer.current) clearTimeout(folderTimer.current); setFolderHover(true) }} onMouseLeave={() => { folderTimer.current = setTimeout(() => setFolderHover(false), 200) }}>
                   <div className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text hover:bg-bg-hover cursor-default">
                     <Folder size={13} className="shrink-0 text-muted" />
                     <span className="flex-1">Move to folder</span>
@@ -248,18 +249,35 @@ export function ChatHeaderMenu({ activeSlot, currentSlot, slackChannels, onSlack
               <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-ok cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={async () => { try { await api.slackLink(activeSlot) } catch {} setOpen(false) }}>
                 <MessageSquareShare size={13} /> Post reminder in Slack
               </button>
-              <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-danger cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={async () => { try { await api.unlinkSlack(activeSlot); dispatch(updateSlot({ key: activeSlot, slack_linked: false, slack_channel: undefined, slack_thread_ts: undefined })) } catch (e) { console.warn('unlinkSlack failed; session stays linked', e) } setOpen(false) }}>
+              <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-danger cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={async () => {
+                try {
+                  await api.unlinkSlack(activeSlot)
+                  dispatch(updateSlot({ key: activeSlot, slack_linked: false, slack_channel: undefined, slack_thread_ts: undefined }))
+                } catch (e) {
+                  // eslint-disable-next-line no-console -- surface unlink failures for debugging
+                  console.warn('unlinkSlack failed; session stays linked', e)
+                }
+                setOpen(false)
+              }}>
                 <Link2Off size={13} /> Unlink from Slack
               </button>
             </>
           )}
           <div className="mx-2 my-0.5 border-b border-border" />
           <div className="flex items-center gap-1.5 px-3 py-1.5">
-              <button type="button" className={`w-4 h-4 rounded-full border-[1.5px] cursor-pointer transition-transform hover:scale-125 ${colorIndex == null ? 'border-text-strong scale-110' : 'border-transparent'}`} style={{ background: 'var(--bg-accent)', backgroundImage: 'linear-gradient(135deg, transparent 45%, var(--danger) 45%, var(--danger) 55%, transparent 55%)' }} onClick={() => pickColor(null)} title="No color" />
+              <button type="button" aria-label="No color" className={`w-4 h-4 rounded-full border-[1.5px] cursor-pointer transition-transform hover:scale-125 ${colorIndex == null ? 'border-text-strong scale-110' : 'border-transparent'}`} style={{ background: 'var(--bg-accent)', backgroundImage: 'linear-gradient(135deg, transparent 45%, var(--danger) 45%, var(--danger) 55%, transparent 55%)' }} onClick={() => pickColor(null)} title="No color" />
               {paletteColors.map((c, i) => (
-                <button type="button" key={i} className={`w-4 h-4 rounded-full border-[1.5px] cursor-pointer transition-transform hover:scale-125 ${colorIndex === i ? 'border-text-strong scale-110' : 'border-transparent'}`} style={{ background: c }} onClick={() => pickColor(i)} title={`Color ${i + 1}`} />
+                <button type="button" key={i} aria-label={colorName(c)} className={`w-4 h-4 rounded-full border-[1.5px] cursor-pointer transition-transform hover:scale-125 ${colorIndex === i ? 'border-text-strong scale-110' : 'border-transparent'}`} style={{ background: c }} onClick={() => pickColor(i)} title={colorName(c)} />
               ))}
           </div>
+          {activeSlot && (
+            <>
+              <div className="mx-2 my-1 border-b border-border" />
+              <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-danger cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { setOpen(false); if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(activeSlot)) }}>
+                <X size={13} /> Close session
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -462,7 +480,6 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const location = useLocation()
   const queryClient = useQueryClient()
   const provider = useProvider()
-  const { botName, avatar } = useBranding()
   const [searchParams, setSearchParams] = useSearchParams()
   const slots = useAppSelector(s => s.dashboard.slots)
   // Filter to slots belonging to this page's surface. Each ChatPage instance
@@ -537,7 +554,6 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const slotLoading = useAppSelector(s => s.chat.slotLoading)
   const pendingQuestion = useAppSelector(s => s.chat.pendingQuestion)
   const slotState = useAppSelector(s => s.chat.slotState)
-  const pendingApproval = useAppSelector(s => { const slot = s.dashboard.slots.find(sl => sl.key === s.chat.activeSlot); return slot?.pending_approval ?? false })
   const contextPct = useAppSelector(s => s.chat.slotContextPct[s.chat.activeSlot ?? ''] ?? 0)
   const contextTokens = useAppSelector(s => s.chat.slotContextTokens?.[s.chat.activeSlot ?? ''])
   const subagents = useAppSelector(s => s.chat.subagents)
@@ -621,7 +637,15 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   }, [])
 
   const { agents: installedAgents, defaultAgent } = useAgents(refreshTrigger)
-  const { open: agentDropdown, setOpen: setAgentDropdown, filter: agentFilter, setFilter: setAgentFilter, dropdownRef: agentDropdownRef, inputRef: agentInputRef, filtered: filteredAgents } = useFilteredDropdown(installedAgents)
+  const { open: agentDropdown, setOpen: setAgentDropdown, filter: agentFilter, setFilter: setAgentFilter, dropdownRef: agentDropdownRef, inputRef: agentInputRef, filtered: filteredAgentsByName } = useFilteredDropdown(installedAgents)
+  // Also match project folder name in filter
+  const filteredAgents = agentFilter
+    ? installedAgents.filter(a => {
+        const lf = agentFilter.toLowerCase()
+        const folderName = (a.project_name || a.project_path?.split('/').pop() || '').toLowerCase()
+        return a.name.toLowerCase().includes(lf) || folderName.includes(lf)
+      })
+    : filteredAgentsByName
   const { data: availableModels = [{ name: 'auto', description: 'Default' }] } = useQuery({
     queryKey: ['available-models', provider.id],
     queryFn: async () => {
@@ -637,7 +661,12 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     inputRef: agentInputRef,
     hasFilterInput: true,
     filteredCount: filteredAgents.length,
-    onEnterSingleMatch: () => { switchAgent(filteredAgents[0].name); setAgentDropdown(false) },
+    onEnterSingleMatch: () => {
+      const a = filteredAgents[0]
+      const isNotFound = a.project_state === 'not_found'
+      const isOtherProject = a.source === 'project' && a.project_path !== (currentSlot?.project || undefined)
+      if (!isNotFound && !isOtherProject) { switchAgent(a.name, a.project_path); setAgentDropdown(false) }
+    },
     closeToTrigger: () => setAgentDropdown(false),
   })
   const { onListKeyDown: onModelListKeyDown } = useListboxKeyboard({
@@ -719,7 +748,10 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
-  }, [approvalDropdown])
+    // approvalBtnRect is read inside the handler; include it so the
+    // click-outside test uses the current button rect (re-subscribes only when
+    // the rect changes, which happens once when the dropdown opens).
+  }, [approvalDropdown, approvalBtnRect])
 
   // ── Reasoning effort dropdown click-outside ──
   useEffect(() => {
@@ -814,16 +846,21 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
         setPrefillHint(true)
       }
     }
-  }, [pendingInput, activeSlot, dispatch, searchParams, setSearchParams, saveDraftsDebounced])
+  }, [pendingInput, activeSlot, dispatch, searchParams, setSearchParams, saveDraftsDebounced, embedded])
 
   // Consume chat launch intent from app-sdk (useChatLauncher writes to window.__mc_chat_launch)
   useEffect(() => {
-    const intent = (window as any).__mc_chat_launch
+    const launchWindow = window as Window & {
+      __mc_chat_launch?: { ts?: number; agent?: string; message?: string }
+    }
+    const intent = launchWindow.__mc_chat_launch
     if (!intent || Date.now() - (intent.ts ?? 0) > 10_000) return
-    delete (window as any).__mc_chat_launch
+    delete launchWindow.__mc_chat_launch
     if (intent.agent) setPendingAgent(intent.agent)
     if (intent.message) { autoSendRef.current = intent.message; newSessionRef.current = true }
-  }, [])
+    // setPendingAgent is a stable useState setter, so including it keeps this a
+    // mount-only "consume the one-shot window global" effect.
+  }, [setPendingAgent])
 
   // Consume prompt from token payload (channel challenge-and-redirect flow).
   // The prompt is HMAC-signed in the token — server validates the signature
@@ -873,7 +910,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
         // No targetSlot (or reconnect failed): create the session HERE and,
         // for a fresh thread, slack-link it so responses mirror to Slack.
         try {
-          const slot: any = await dispatch(createSlot({ mode })).unwrap()
+          const slot = await dispatch(createSlot({ mode })).unwrap()
           slotKey = slot?.key ?? null
         } catch {
           // ignore — fall back to prefilling the current slot
@@ -1000,8 +1037,10 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       setFileDraft(fileDrafts.current, activeSlot, pendingFiles)
       saveDraftsDebounced()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- activeSlot
-    // intentionally omitted; slot-change effect handles that transition
+    // `activeSlot` is intentionally omitted; the slot-change effect handles the
+    // draft transition when the slot changes, so re-running here on activeSlot
+    // would double-write / clobber the freshly loaded draft.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingFiles, saveDraftsDebounced])
   // Collapsed paste blocks backing the `[ Paste #N · M lines ]` tokens in
   // `input`. Persisted per-slot via chatPasteDrafts (localStorage, 30-day TTL)
@@ -1089,6 +1128,10 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       frozenInputRef.current = null
     }
     voice.toggle()
+    // Depend on the individual stable members actually read, not the whole
+    // `voice` object — `[voice]` would recreate this callback every render and
+    // re-render every child that receives `toggleVoice` (see comment above).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voice.recording, voice.toggle, sttEnabled, sttConfigLoaded])
   // Stop any in-flight recording and drop the frozen prefix when the user
   // switches slots so a late-arriving transcript can't leak into the wrong
@@ -1106,6 +1149,11 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
 
   const panel = usePanelState()
   const diffPanel = useDiffPanel()
+  // Find/search pane state. Declared above handleFileOpen / handleOpenDiff so
+  // those handlers can call search.close() directly when opening a dock panel
+  // (the right-hand dock is a single slot and the file/diff panes are
+  // render-gated behind !search.isOpen).
+  const search = useMessageSearch(messages, activeSlot)
   const [diffLineNumbers, setDiffLineNumbers] = useState(false)
   const touchedFiles = useTouchedFiles(activeSlot ?? undefined)
 
@@ -1138,6 +1186,11 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
         }
       } catch { /* ignore parse errors */ }
     }
+    // Keyed on toolLog.length (the log is append-only; lastToolLen slices just
+    // the new entries) and on the specific touchedFiles methods used. Depending
+    // on the whole `toolLog`/`touchedFiles` objects would reprocess on unrelated
+    // identity changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [toolLog.length, touchedFiles.addFile, touchedFiles.shouldScanAdd])
 
   const { colorTheme } = useTheme()
@@ -1184,11 +1237,22 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       ])
       panel.openPanel(filePath, text, activeSlotRef.current ?? null)
       diffPanel.closeDiff()
+      // The right-hand dock is a single slot; the file viewer is render-gated
+      // behind !search.isOpen. Close the find pane so the opened file actually
+      // shows instead of being silently suppressed.
+      search.close()
       if (ok) touchedFiles.addFile(filePath, 'history')
     } catch {
       panel.openPanel(filePath, '_Error reading file_', activeSlotRef.current ?? null)
+      diffPanel.closeDiff()
+      search.close()
     }
-  }, [queryClient, panel, diffPanel, touchedFiles])
+    // Depend on the stable `search.close` (useCallback([]) in useMessageSearch),
+    // not the whole `search` object — the latter changes identity on every
+    // search-state change (isOpen/term/matches) and would needlessly recreate
+    // this callback and re-render its consumers.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryClient, panel, diffPanel, search.close, touchedFiles])
 
   // Open the Monaco diff panel from a file-change chip click. Closes the
   // markdown viewer and the activity panel so panels stay mutually exclusive.
@@ -1206,7 +1270,14 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     panel.closePanel()
     if (activityOpen) dispatch(toggleActivity())
     diffPanel.openDiff(filePath, modified, original)
-  }, [panel, activityOpen, dispatch, diffPanel])
+    // Diff pane is render-gated behind !search.isOpen (single right-dock slot);
+    // close the find pane so the diff shows instead of opening underneath it.
+    search.close()
+    // Depend on the stable `search.close`, not the whole `search` object (see
+    // handleFileOpen above) — avoids recreating this callback on search-state
+    // changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panel, activityOpen, dispatch, diffPanel, search.close])
 
   // Auto-surface files modified by the agent (carried in m.meta.file_changes)
   // into the activity Files tab so the user sees a unified list. Skip files
@@ -1487,7 +1558,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   // Embed ?new=1: create a new chat slot and navigate to it
   const embedNewSlotMutation = useMutation({
     mutationFn: () => dispatch(createSlot({ mode })).unwrap(),
-    onSuccess: (slot: any) => {
+    onSuccess: (slot) => {
       if (slot?.key) navigate(`/embed/chat/${slot.key}`, { replace: true })
     },
   })
@@ -1513,7 +1584,9 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       dispatch(switchSlot(urlSlot))
     }
     // Don't error immediately — slot may arrive via SSE shortly
-  }, [filteredSlots, activeSlot, dispatch, connected])
+    // embedded/embedMode are read in the guard above; they are stable for the
+    // session, so listing them satisfies the linter without changing behavior.
+  }, [filteredSlots, activeSlot, dispatch, connected, embedded, embedMode])
   // React to ?sid= changes AFTER mount — required for plugin tab switching
   // where the URL is updated via react-router navigate() (soft nav). The
   // mount-only initialSidRef approach above misses these updates because
@@ -1783,7 +1856,14 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     if (bubblePastes.length) saveStoredPaste(llmTxt, displayTxt, bubblePastes, filePaths)
 
     setPrefillHint(false)
-    if (!optionText) { setInput(''); setPendingFiles([]); setPasteBlocks([]); if (activeSlot) { delete drafts.current[activeSlot]; delete fileDrafts.current[activeSlot]; delete pasteDrafts.current[activeSlot]; saveDrafts() } }
+    if (!optionText) {
+      setInput(''); setPendingFiles([]); setPasteBlocks([]); if (activeSlot) { delete drafts.current[activeSlot]; delete fileDrafts.current[activeSlot]; delete pasteDrafts.current[activeSlot]; saveDrafts() }
+      // The challenge-handoff prompt is seeded into PREFILL_STORAGE_KEY and the
+      // slot-restore effect re-applies it on slot changes. Once that prompt is
+      // sent, clear the seed so a later slot-restore can't re-fill the (now
+      // empty) composer with the already-sent text.
+      try { sessionStorage.removeItem(PREFILL_STORAGE_KEY) } catch { /* sessionStorage unavailable */ }
+    }
     let slot = targetSlot ?? activeSlot
     // Only a normal (non-targeted) send consumes the one-shot "new session"
     // intent. A targeted send — e.g. submitting document comments to the
@@ -1797,7 +1877,12 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       sendingRef.current = true;
       const result = await dispatch(createSlot({ agent: pendingAgentRef.current || defaultAgent || undefined, model: pendingModelRef.current || undefined, mode: modeRef.current })).unwrap();
       slot = result.key;
-      if (pendingProjectRef.current) { await api.chatSlotProject(result.key, pendingProjectRef.current).catch(e => console.error('chatSlotProject failed', e)) }
+      if (pendingProjectRef.current) {
+        await api.chatSlotProject(result.key, pendingProjectRef.current).catch(e => {
+          // eslint-disable-next-line no-console -- surface project-assign failures for debugging
+          console.error('chatSlotProject failed', e)
+        })
+      }
     }
     setPendingAgent(''); setPendingModel(''); setPendingProject('')
     // Build meta for persistence (knowledge, files, pastes)
@@ -1854,6 +1939,14 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
         }
       }
     }
+    // `send` is deliberately kept stable: it reads volatile values (agent,
+    // model, project, mode, colorTheme, activeSlot) through refs so it does not
+    // re-create on every keystroke/theme/agent change (it is passed to children
+    // and consumed by the auto-send effect). setPending*/saveDrafts/scrollBottom
+    // are stable, and defaultAgent is only a creation-time fallback — pulling
+    // them into the dep array would defeat that stability without changing
+    // outcomes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSlot, dispatch, connected])
 
   // Submit inline document comments to the session the file was opened from,
@@ -1869,7 +1962,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   }, [panel.slot, activeSlot, dispatch, send])
 
   // Auto-send when navigated with ?autoSend=1 or ?token= with prompt
-  useEffect(() => { if (connected && autoSendRef.current) { const txt = autoSendRef.current; autoSendRef.current = null; send(txt) } }, [send, connected, autoSendTick]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (connected && autoSendRef.current) { const txt = autoSendRef.current; autoSendRef.current = null; send(txt) } }, [send, connected, autoSendTick])  
 
   // Widget interactivity: when a mcwidget iframe fires an action, PRE-FILL the
   // composer instead of auto-submitting (P454989291). Auto-send was a
@@ -1901,29 +1994,42 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     const n = store.getState().notifications.items.find(x => x.approval_id === aid)
     if (n) dispatch(removeNotificationByTs(n.ts))
   }, [dispatch])
-  const switchAgent = useCallback(async (agentName: string) => {
+  const switchAgent = useCallback(async (agentName: string, projectPath?: string) => {
     if (!activeSlot) {
       setPendingAgent(agentName)
+      // Preserve project context so it's applied via chatSlotProject after slot creation.
+      // Always set (even empty) so switching to a global agent clears stale project state.
+      setPendingProject(projectPath || '')
       const mc = installedAgents.find(a => a.name === agentName)
       const templateName = provider.resolveAgentTemplate(mc || { name: agentName })
       queryClient.fetchQuery({ queryKey: ['resolved-model', templateName, provider.id], queryFn: () => provider.resolveModel(templateName) })
         .then(m => setPendingModel(m)).catch(() => setPendingModel(''))
       return
     }
-    await api.chatSlotAgent(activeSlot, agentName)
+    await api.chatSlotAgent(activeSlot, agentName, projectPath)
     setAgentDropdown(false)
-  }, [activeSlot, installedAgents, provider])
+    // queryClient, setAgentDropdown, and the setPending* setters are all stable
+    // (react-query client / useState setters / useCallback([])), so listing them
+    // satisfies the linter without re-creating this callback.
+  }, [activeSlot, installedAgents, provider, queryClient, setAgentDropdown, setPendingAgent, setPendingModel, setPendingProject])
   const switchModel = useCallback(async (modelName: string) => {
     const val = modelName === 'auto' ? '' : modelName
     if (!activeSlot) { setPendingModel(val); return }
     await api.chatSlotModel(activeSlot, val)
     // Keep the dropdown open after selecting — the user may switch models again
     // or drill into the reasoning-effort panel. Dismiss is via outside-click/Escape.
-  }, [activeSlot])
+    // setPendingModel is a stable useState setter.
+  }, [activeSlot, setPendingModel])
   const setProject = useCallback(async (path: string) => {
     if (!activeSlot) { setPendingProject(path); return }
-    try { await api.chatSlotProject(activeSlot, path) } catch (e) { console.error('setProject failed', e) }
-  }, [activeSlot])
+    try {
+      await api.chatSlotProject(activeSlot, path)
+    } catch (e) {
+      // eslint-disable-next-line no-console -- surface setProject failures for debugging
+      console.error('setProject failed', e)
+    }
+    // setPendingProject is a stable ref-backed setter.
+  }, [activeSlot, setPendingProject])
 
   const currentSlot = slots.find(s => s.key === activeSlot)
   const title = currentSlot?.title && currentSlot.title !== currentSlot.key ? currentSlot.title : activeSlot || ''
@@ -1973,6 +2079,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     dispatch(truncateAfterIndex(uIdx + 1))
     setRegenerating(true)
     api.regenerateSlot(activeSlot).catch((e: unknown) => {
+      // eslint-disable-next-line no-console -- surface regenerate failures for debugging
       console.warn('regenerate failed', e)
       dispatch(replaceMessages(snapshot))
       setRegenerating(false)
@@ -2009,8 +2116,6 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       setRegenerating(false)
     })
   }, [activeSlot, slotRunning, messages, dispatch])
-
-  const search = useMessageSearch(messages, activeSlot)
 
   const searchCtxValue = useMemo(() => ({
     term: search.term,
@@ -2183,11 +2288,15 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     api.interruptSlot(activeSlot, queueId).catch(() => {})
   }, [activeSlot])
 
-  const handleReorderQueued = useCallback((order: string[]) => {
+  const handleEditQueued = useCallback((queueId: string, content: string) => {
     if (!activeSlot) return
-    dispatch(reorderQueuedMessages({ slot: activeSlot, order }))
-    api.reorderQueue(activeSlot, order).catch(() => {})
+    const trimmed = content.trim()
+    if (!trimmed) return
+    // Optimistically update the card; WS event reconciles other clients
+    dispatch(editQueuedMessage({ slot: activeSlot, queue_id: queueId, content: trimmed }))
+    api.editQueuedMessage(activeSlot, queueId, trimmed).catch(() => {})
   }, [activeSlot, dispatch])
+
 
   // Search: map message index → displayItems index for scroll-to-match
   const messageToDisplayIdx = useMemo(() => {
@@ -2403,7 +2512,10 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                 }
                 // End of messages — show footer only if agent is done
                 return !slotRunning
-              })()} onSpeak={() => { const playing = store.getState().chat.voicePlaying; if (playing) { window.dispatchEvent(new Event('voice-stop')); dispatch(setVoiceAudio(null)); return }; dispatch(setVoiceAudio(null)); api.voiceSynthesize(activeSlot || '', m.content).catch(() => {}) }} onRegenerate={i === lastTextIdx && !slotRunning && !regenerating && activeSlot ? handleRegenerate : undefined} variants={m.variants} variantIdx={m.variant_idx} onSwitchVariant={i === lastTextIdx && m.variants && m.variants.length > 1 && activeSlot ? (idx: number) => { api.switchVariant(activeSlot, idx).catch((e: unknown) => console.warn('switch-variant failed', e)) } : undefined} onFork={handleFork} onPlanFromHere={handlePlanFromHere} forkIndex={forkIndex} onApplyPlan={async (steps: any[]) => {
+              })()} onSpeak={() => { const playing = store.getState().chat.voicePlaying; if (playing) { window.dispatchEvent(new Event('voice-stop')); dispatch(setVoiceAudio(null)); return }; dispatch(setVoiceAudio(null)); api.voiceSynthesize(activeSlot || '', m.content).catch(() => {}) }} onRegenerate={i === lastTextIdx && !slotRunning && !regenerating && activeSlot ? handleRegenerate : undefined} variants={m.variants} variantIdx={m.variant_idx} onSwitchVariant={i === lastTextIdx && m.variants && m.variants.length > 1 && activeSlot ? (idx: number) => { api.switchVariant(activeSlot, idx).catch((e: unknown) => {
+                // eslint-disable-next-line no-console -- surface switch-variant failures for debugging
+                console.warn('switch-variant failed', e)
+              }) } : undefined} onFork={handleFork} onPlanFromHere={handlePlanFromHere} forkIndex={forkIndex} onApplyPlan={async (steps: PlanStepInput[]) => {
                 try {
                   const r = await api.planFromChat(steps, planTaskId)
                   if (r.ok) { navigate('/projects?applied=' + (r.task_id || planTaskId)); return true }
@@ -2417,7 +2529,12 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       </div>
       </MessageSearchScope>
     )
-  }, [messages, visibleIndexMap, pendingApproval, slotRunning, slotState, lastTextIdx, approve, send, handleFileOpen, handleFork, handleQuote, chatConfig, avatar, botName, activeSlot, dismissApproval, regenerating, handleRegenerate, handleEditResend, slotHasMore, renderUserContentCb, highlightTs, activeSlotTitle, mode])
+    // dispatch/navigate are stable; handleOpenDiff/handlePlanFromHere are
+    // memoized callbacks; planTaskId is read when rendering the plan footer /
+    // apply-plan handler, so it belongs here for correctness. approve/send/
+    // dismissApproval are NOT referenced in this renderer (user/approval rows go
+    // through renderUserContentCb), so they are omitted to keep it stable.
+  }, [messages, visibleIndexMap, slotRunning, slotState, lastTextIdx, handleFileOpen, handleFork, handleQuote, chatConfig, activeSlot, regenerating, handleRegenerate, handleEditResend, slotHasMore, renderUserContentCb, highlightTs, activeSlotTitle, mode, dispatch, handleOpenDiff, handlePlanFromHere, navigate, planTaskId])
 
   const [mobileSessions, setMobileSessions] = useState(false)
   // Close mobile sessions panel when a session is selected
@@ -2522,7 +2639,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
           />
         </div>
       ) : (
-      <OverlayDrawer open={sidebarOpen} width={sidebarWidth} dragging={sidebarDragging} morph={!isMobile} className={isMobile ? 'mobile-sessions-overlay fixed top-[52px] bottom-0 left-0 z-50 bg-bg-elevated !py-0 rounded-r-xl shadow-lg max-w-[calc(100vw-2.5rem)] [&>*]:!rounded-none [&>*]:!border-0 [&>*]:!m-0' : ''}>
+      <OverlayDrawer open={sidebarOpen} width={isMobile ? window.innerWidth : sidebarWidth} dragging={sidebarDragging} morph={!isMobile} className={isMobile ? 'mobile-sessions-overlay fixed top-[52px] bottom-0 left-0 z-50 bg-bg-elevated !py-0 rounded-r-xl shadow-lg max-w-[calc(100vw-2.5rem)] [&>*]:!rounded-none [&>*]:!border-0 [&>*]:!m-0' : ''}>
         <ChatSidebar
           slots={filteredSlots}
           activeSlot={activeSlot}
@@ -2618,7 +2735,10 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                     <TypewriterText text={title} className="text-sm font-semibold text-muted font-mono truncate max-w-[40vw]" />
                     <Pen size={13} className="shrink-0 text-muted opacity-0 group-hover/header:opacity-60 transition-opacity" />
                   </Clickable>
-                  {activeSlot && (generatingTitleSlots.has(activeSlot) ? <Loader size={16} className="shrink-0 text-accent animate-spin" /> : <Btn aria-label="Regenerate title with LLM" className="shrink-0 text-muted opacity-0 group-hover/header:opacity-40 hover:!opacity-100 hover:text-accent transition-all cursor-pointer bg-transparent border-none p-0" title="Regenerate title with LLM" onClick={e => { e.stopPropagation(); if (!activeSlot || generatingTitleSlots.has(activeSlot)) return; const slot = activeSlot; setGeneratingTitleSlots(prev => new Set(prev).add(slot)); api.generateTitle(slot).then(r => { /* title is redacted server-side via redact_exfiltration_urls + redact_credentials */ if (r.title) dispatch(sseSlotTitle({ key: slot, title: r.title })) }).catch(e => console.warn('Failed to generate title:', e)).finally(() => setGeneratingTitleSlots(prev => { const next = new Set(prev); next.delete(slot); return next })) }}><Sparkles size={16} /></Btn>)}
+                  {activeSlot && (generatingTitleSlots.has(activeSlot) ? <Loader size={16} className="shrink-0 text-accent animate-spin" /> : <Btn aria-label="Regenerate title with LLM" className="shrink-0 text-muted opacity-0 group-hover/header:opacity-40 hover:!opacity-100 hover:text-accent transition-all cursor-pointer bg-transparent border-none p-0" title="Regenerate title with LLM" onClick={e => { e.stopPropagation(); if (!activeSlot || generatingTitleSlots.has(activeSlot)) return; const slot = activeSlot; setGeneratingTitleSlots(prev => new Set(prev).add(slot)); api.generateTitle(slot).then(r => { /* title is redacted server-side via redact_exfiltration_urls + redact_credentials */ if (r.title) dispatch(sseSlotTitle({ key: slot, title: r.title })) }).catch(e => {
+                    // eslint-disable-next-line no-console -- surface title-generation failures for debugging
+                    console.warn('Failed to generate title:', e)
+                  }).finally(() => setGeneratingTitleSlots(prev => { const next = new Set(prev); next.delete(slot); return next })) }}><Sparkles size={16} /></Btn>)}
                 </div>
               )}
                 </div>
@@ -2836,7 +2956,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                 </div>
               )}
               {!activityOpen && <SubagentProgressBar slot={activeSlot} />}
-              <QueueStack messages={queuedMessages} onCancel={handleCancelQueued} onInterrupt={handleInterruptQueued} onReorder={handleReorderQueued} />
+              <QueueStack messages={queuedMessages} onCancel={handleCancelQueued} onInterrupt={handleInterruptQueued} onEdit={handleEditQueued} />
               {flyingQuote && <FlyingQuote text={flyingQuote.text} from={flyingQuote.from} targetRef={inputAreaRef} onComplete={() => setFlyingQuote(null)} />}
               <div ref={inputAreaRef} className="relative z-10">
               {showHistorySuggestions && (
@@ -3032,12 +3152,16 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
             />
             {/* Agent dropdown portal — triggered from input bar */}
             {agentDropdown && agentBtnRect && createPortal(
-              <div ref={agentDropdownRef} tabIndex={-1} onKeyDown={onAgentListKeyDown} className="fixed z-[9999] bg-bg-elevated border border-border rounded-xl shadow-xl min-w-[260px] max-w-[340px] flex flex-col p-1 gap-0.5 animate-slide-up" style={(() => { const left = Math.max(8, Math.min(agentBtnRect.left, window.innerWidth - 348)); return { bottom: window.innerHeight - agentBtnRect.top + 4, left } })()}>
+              // The keydown handler routes arrow/Enter navigation to the inner
+              // role="listbox"; the dialog is a focus container (tabIndex={-1}),
+              // not an interactive widget itself, so this delegation is intentional.
+              // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
+              <div ref={agentDropdownRef} role="dialog" aria-label="Agent selector" tabIndex={-1} onKeyDown={onAgentListKeyDown} className="fixed z-[9999] bg-bg-elevated border border-border rounded-xl shadow-xl min-w-[260px] max-w-[340px] flex flex-col p-1 gap-0.5 animate-slide-up" style={(() => { const left = Math.max(8, Math.min(agentBtnRect.left, window.innerWidth - 348)); return { bottom: window.innerHeight - agentBtnRect.top + 4, left } })()}>
                 <div className="px-1.5 pt-1.5 pb-1">
                   <Input ref={agentInputRef} type="text" aria-label="Filter agents" placeholder="Type to filter…" value={agentFilter} onChange={e => setAgentFilter(e.target.value)} className="w-full px-2 py-1 text-[13px] font-mono" />
                 </div>
                 <div role="listbox" aria-label="Agent list" className="overflow-y-auto max-h-[280px]">
-                <AgentDropdownList agents={filteredAgents} activeAgent={currentSlot?.agent || 'default'} defaultAgent={defaultAgent} onSelect={name => { switchAgent(name); setAgentDropdown(false) }} />
+                <AgentDropdownList agents={filteredAgents} activeAgent={currentSlot?.agent || 'default'} activeProjectPath={currentSlot?.project || undefined} defaultAgent={defaultAgent} onSelect={(name, projectPath) => { switchAgent(name, projectPath); setAgentDropdown(false) }} filter={agentFilter} />
                 </div>
               </div>,
               document.body
@@ -3120,8 +3244,12 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                         dispatch(changeApprovalMode({ mode: 'yolo', slot: activeSlot || '' })); setYoloConfirm(0); setApprovalDropdown(false)
                       }}>Enable</Btn>
                       <Btn className="px-2.5 py-1 rounded-md text-muted hover:text-text hover:bg-bg-hover cursor-pointer" onClick={e => { e.stopPropagation(); setYoloConfirm(0) }}>Cancel</Btn>
-                      <label className="flex items-center gap-1 text-[11px] text-muted cursor-pointer ml-auto">
-                        <Input type="checkbox" className="rounded" onChange={e => { if ((e.target as HTMLInputElement).checked) safeSetItem('mc-yolo-ack', '1'); else localStorage.removeItem('mc-yolo-ack') }} />
+                      {/* The label is associated both by nesting and htmlFor/id;
+                          label-has-for can't see the id because <Input> is a
+                          custom wrapper around the native <input>. */}
+                      {/* eslint-disable-next-line jsx-a11y/label-has-for */}
+                      <label htmlFor="yolo-dont-show-again" className="flex items-center gap-1 text-[11px] text-muted cursor-pointer ml-auto">
+                        <Input id="yolo-dont-show-again" type="checkbox" className="rounded" onChange={e => { if ((e.target as HTMLInputElement).checked) safeSetItem('mc-yolo-ack', '1'); else localStorage.removeItem('mc-yolo-ack') }} />
                         Don't show again
                       </label>
                     </div>

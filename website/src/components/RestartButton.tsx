@@ -13,9 +13,9 @@ export default function RestartButton() {
       await api.restartSessions()
       setIsError(false)
       setMsg('Sessions restarted — config applied.')
-    } catch (e: any) {
+    } catch (e: unknown) {
       setIsError(true)
-      setMsg(e.message || 'Restart failed')
+      setMsg(e instanceof Error ? e.message : 'Restart failed')
     } finally {
       setRestarting(false)
       setTimeout(() => setMsg(''), 5000)

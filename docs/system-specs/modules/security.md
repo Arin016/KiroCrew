@@ -1,6 +1,6 @@
 # Security Module
 
-Last Updated: 2026-06-29 (challenge-and-redirect for Slack REMOVED — messages processed inline; prior: time-limited safety override replacing permanent YOLO, per-segment deny pattern evaluation, 3-tier interactive trust escalation, SSH tunnel -N flag fix)
+Last Updated: 2026-06-29 (challenge-and-redirect for Slack REMOVED — messages processed inline; SEC-009 loud no-isolation fallback + `agent.sandbox_allow_no_isolation`; time-limited safety override replacing permanent YOLO, per-segment deny pattern evaluation, 3-tier interactive trust escalation, SSH tunnel -N flag fix)
 
 ## Overview
 
@@ -49,6 +49,8 @@ Hides credential paths from kiro-cli subprocess tree using platform-native isola
 | **Off** | `"off"` | Nothing | Everything | Nothing |
 
 **Standard mode** (new default) enables git-over-SSH, AWS CLI via `credential_process`, and kubectl while maintaining OS-level isolation on non-workflow credential stores. Env vars are scrubbed in ALL modes — `credential_process` reads from `~/.aws/config`, not env vars.
+
+**No-isolation fallback is loud (SEC-009)**: when no sandbox backend is available (e.g. macOS >= 26, or Linux without user namespaces), `wrap_argv()` still runs the agent (graceful — the host is not bricked) but no longer degrades silently. It emits a one-shot loud `SECURITY` warning unless the operator acknowledges the risk via `agent.sandbox_allow_no_isolation=true` (config-modal editable), which demotes the message to info level.
 
 **Why standard is safe**: The hook layer (`is_sensitive_path()`) still blocks direct file reads of `~/.aws/*` and `~/.ssh/*`. Denied commands block `cat`/`head`/`tail`/`python open()` on those paths. `redact_credentials()` catches any credential patterns that leak through tool output. Three independent layers must all be bypassed simultaneously.
 
@@ -180,6 +182,12 @@ Centralized validation for all 12 MCP tool handlers (SDO-183):
 - `parse_duration()` caps at 20 hours max (MAX_SESSION_TTL_SECS = 72000)
 - Loopback access trusted only in local-only mode (SSH tunnel); on all-interfaces mode, all requests require a token
 - `token_auth_middleware(local_only)` — single boolean controls all auth behavior
+
+**Response security headers** (`server.py:_apply_security_headers`):
+- All dashboard responses receive `Cache-Control: no-store`, `Content-Security-Policy` (default-src 'self' plus curated exceptions for tailwind/jsdelivr/WebSocket loopback), and `Permissions-Policy: clipboard-write=(self), clipboard-read=(self)`
+- The Permissions-Policy grant is required by Chrome 143+, which changed the default policy to DENY `clipboard-write` even on secure contexts (crbug.com/414348233). Without it, `navigator.clipboard.writeText` throws a permissions-policy violation and the Copy-link button on published artifacts fails
+- When the instances feature is enabled, `frame-src` is extended with `http://127.0.0.1:*`, `http://localhost:*`, and `http://*.localhost:*` so dynamically-connected tunnel ports can be framed
+- Applied via `no_cache_middleware` using `setdefault` so per-handler overrides are preserved
 
 **CSRF protection** (`server.py` + `origin.py`):
 - Validates `Origin` (with `Referer` fallback) on POST/PUT/DELETE

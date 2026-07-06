@@ -1,3 +1,4 @@
+import { safeSetItem } from './safeStorage'
 /**
  * Per-slot chat draft persistence. Drafts survive tab close, refresh, and
  * browser crashes via localStorage (previously sessionStorage which cleared on
@@ -56,6 +57,7 @@ export function loadDrafts(): Drafts {
     if (pruned || stamped) persistNow(fresh)
     return fresh
   } catch (e) {
+    // eslint-disable-next-line no-console -- intentional dev-only diagnostic
     if (import.meta.env.DEV) console.warn('chatDrafts: load failed', e)
     return {}
   }
@@ -116,9 +118,10 @@ export function saveDrafts(drafts: Drafts): void {
  *  loadDrafts iterates draft keys, not timestamp keys. */
 function persistNow(drafts: Drafts): void {
   try {
-    localStorage.setItem(DRAFTS_TS_KEY, JSON.stringify(timestamps))
-    localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts))
+    safeSetItem(DRAFTS_TS_KEY, JSON.stringify(timestamps))
+    safeSetItem(DRAFTS_KEY, JSON.stringify(drafts))
   } catch (e) {
+    // eslint-disable-next-line no-console -- intentional dev-only diagnostic
     if (import.meta.env.DEV) console.warn('chatDrafts: save failed', e)
   }
 }

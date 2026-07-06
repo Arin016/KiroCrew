@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
+from kiro_claw.knowledge import readers
 from kiro_claw.knowledge.chunker import HeadingAwareChunker
 from kiro_claw.knowledge.extractor import EntityExtractor
 from kiro_claw.knowledge.readers import FileReader
@@ -215,6 +216,86 @@ class TestFileReader:
             assert ext in reader.SUPPORTED, f"{ext} missing from SUPPORTED"
 
 
+def _make_pdf(text: str = "Hello PDF regression") -> bytes:
+    """Build a structurally valid single-page PDF with a text object.
+
+    Kept minimal but complete (xref table + trailer) so pdfminer/pdfplumber
+    parse it deterministically -- no external PDF writer needed.
+    """
+    import io
+
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+    ]
+    stream = ("BT /F1 24 Tf 72 700 Td (%s) Tj ET" % text).encode()
+    objs.append(b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream))
+    objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+
+    out = io.BytesIO()
+    out.write(b"%PDF-1.4\n")
+    offsets = []
+    for i, body in enumerate(objs, 1):
+        offsets.append(out.tell())
+        out.write(b"%d 0 obj\n%s\nendobj\n" % (i, body))
+    xref_pos = out.tell()
+    out.write(b"xref\n0 %d\n" % (len(objs) + 1))
+    out.write(b"0000000000 65535 f \n")
+    for off in offsets:
+        out.write(b"%010d 00000 n \n" % off)
+    out.write(
+        b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF"
+        % (len(objs) + 1, xref_pos)
+    )
+    return out.getvalue()
+
+
+class TestFileReaderPdf:
+    """PDF ingestion regression coverage.
+
+    Guards Mesh-3a362384: PDF folder ingestion was shipped (readers.py routes
+    ``.pdf`` -> ``_read_pdf`` -> ``pdfplumber``) but ``pdfplumber`` was never
+    declared as a runtime dependency, so the built env couldn't import it and
+    every PDF degraded to the missing-dep sentinel. These tests fail loudly if
+    the runtime dependency goes missing again.
+    """
+
+    def test_pdf_extension_supported_and_dispatched(self):
+        reader = FileReader()
+        assert '.pdf' in reader.SUPPORTED
+        assert reader._DISPATCH.get('.pdf') == '_read_pdf'
+
+    def test_pdfplumber_runtime_dep_present(self):
+        # The optional import in readers.py must succeed in the built env.
+        # If this fails, 'pdfplumber' is missing from setup.cfg install_requires.
+        assert readers.pdfplumber is not None, (
+            "pdfplumber import failed -- declare 'pdfplumber' in setup.cfg "
+            "install_requires"
+        )
+
+    def test_read_pdf_extracts_text(self, tmp_path):
+        p = tmp_path / "doc.pdf"
+        p.write_bytes(_make_pdf("Hello PDF regression"))
+        reader = FileReader()
+        text, meta = reader.read(str(p))
+        assert "Hello PDF regression" in text
+        assert meta["format"] == "pdf"
+        assert meta["page_count"] == 1
+
+    def test_read_pdf_does_not_hit_missing_dep_guard(self, tmp_path):
+        # A malformed PDF must surface a real parse error, never the
+        # 'PDF support requires pdfplumber' sentinel (which only fires when
+        # the runtime dependency is absent).
+        p = tmp_path / "bad.pdf"
+        p.write_bytes(b"%PDF-1.0\nnot a real pdf\n%%EOF")
+        reader = FileReader()
+        text, meta = reader.read(str(p))
+        assert "PDF support requires pdfplumber" not in text
+        assert meta.get("error") != "PDF support requires pdfplumber"
+
+
 # ---------------------------------------------------------------------------
 # 4. EntityExtractor
 # ---------------------------------------------------------------------------
@@ -269,6 +350,113 @@ class TestHybridRetriever:
         assert ids[0] == "item2"
         # All 4 items should be present
         assert set(ids) == {"item1", "item2", "item3", "item4"}
+
+    # --- Recall for natural-language queries (Mesh-1676) ---
+
+    def test_sanitize_strips_stopwords_and_or_joins(self):
+        out = HybridRetriever._sanitize_fts5_query("VoC related to Budget Planning")
+        assert " OR " in out
+        # connective stopwords dropped...
+        assert '"related"' not in out and '"to"' not in out
+        # ...content tokens retained and individually quoted
+        assert '"VoC"' in out and '"Budget"' in out and '"Planning"' in out
+
+    def test_sanitize_all_stopwords_falls_back(self):
+        # A query of only stopwords must not collapse to an empty match.
+        out = HybridRetriever._sanitize_fts5_query("the and of")
+        assert out != ""
+
+    def test_sanitize_is_injection_safe(self):
+        # Each token stays double-quoted with internal quotes doubled, so user
+        # input cannot inject FTS5 operators (BSC1 Input Validation invariant).
+        out = HybridRetriever._sanitize_fts5_query('foo" bar')
+        assert '"foo"""' in out
+        assert '"bar"' in out
+
+    def test_keyword_search_or_recall(self, store):
+        # Natural-language query whose connective tokens ("related","to") the
+        # target doc lacks. Old implicit-AND required every literal token -> 0
+        # hits; the OR-match recovers the relevant item.
+        store.add_item("Budget Planning VoC", "voice of customer budget planning notes", "doc")
+        store.add_item("Unrelated", "something entirely about widgets", "doc")
+        retriever = HybridRetriever(store)
+        results = retriever.search("VoC related to Budget Planning")
+        assert "Budget Planning VoC" in [r["title"] for r in results]
+
+    def test_rrf_fuse_vector_weight(self):
+        # A vector-only hit and a keyword-only hit at the same rank: the
+        # weighted vector leg must score higher.
+        kw = [("kw_item", 1)]
+        vec = [("vec_item", 1)]
+        fused = HybridRetriever._rrf_fuse(kw, [], vec, weights=(1.0, 1.0, 2.0))
+        ranked = dict(fused)
+        assert ranked["vec_item"] > ranked["kw_item"]
+
+    # --- Citation metadata surfacing (Mesh-2494) ---
+
+    def test_search_attaches_source_location(self, store):
+        # A result for an item that has a source_locations row carries the
+        # section + line range so callers can cite it.
+        sid = store.add_source("auth.md", "local_file", "/docs/auth.md")
+        item_id = store.add_item(
+            "Auth Design", "JWT tokens with refresh flow", "design_doc", source_id=sid
+        )
+        store.add_source_location(
+            item_id, sid, chunk_range="10-25", section_title="Token Lifecycle"
+        )
+        retriever = HybridRetriever(store)
+        results = retriever.search("JWT")
+        top = next(r for r in results if r["id"] == item_id)
+        assert top["section_title"] == "Token Lifecycle"
+        assert top["chunk_range"] == "10-25"
+
+    def test_search_omits_location_when_absent(self, store):
+        # An item with no source_locations row degrades cleanly -- the citation
+        # keys are simply absent, not None placeholders.
+        store.add_item("DB Schema", "DynamoDB table layout", "design_doc")
+        retriever = HybridRetriever(store)
+        results = retriever.search("DynamoDB")
+        assert results
+        assert "section_title" not in results[0]
+        assert "chunk_range" not in results[0]
+
+    def test_search_attaches_folder_file_path(self, store):
+        # A folder/vault result carries source_type/source_name and the specific
+        # file path (from folder_file_state), not just the folder-root uri.
+        sid = store.add_source("Opportunity Planner", "local_folder", "/home/nrb/op/src/")
+        item_id = store.add_item(
+            "Auth Design", "JWT tokens with refresh flow", "design_doc", source_id=sid
+        )
+        store.db.execute(
+            "INSERT INTO folder_file_state (source_id, file_path, item_ids, last_seen, status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (sid, "/home/nrb/op/src/auth.md", json.dumps([item_id]), "now", "done"),
+        )
+        retriever = HybridRetriever(store)
+        results = retriever.search("JWT")
+        top = next(r for r in results if r["id"] == item_id)
+        assert top["source_type"] == "local_folder"
+        assert top["source_name"] == "Opportunity Planner"
+        assert top["file_path"] == "/home/nrb/op/src/auth.md"
+
+    def test_search_attaches_artifact_slug(self, store):
+        # An artifact result carries the artifact slug + name (from
+        # artifact_item_state) for a /artifacts/<slug> citation.
+        sid = store.add_source("Artifacts", "artifact", "artifact://aggregate")
+        item_id = store.add_item(
+            "OP Vision", "vision content goes here", "document", source_id=sid
+        )
+        store.db.execute(
+            "INSERT INTO artifact_item_state (source_id, slug, item_ids, updated_at, name) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (sid, "op-vision", json.dumps([item_id]), "now", "OP Vision Plan"),
+        )
+        retriever = HybridRetriever(store)
+        results = retriever.search("vision")
+        top = next(r for r in results if r["id"] == item_id)
+        assert top["source_type"] == "artifact"
+        assert top["artifact_slug"] == "op-vision"
+        assert top["artifact_name"] == "OP Vision Plan"
 
 
 # ---------------------------------------------------------------------------

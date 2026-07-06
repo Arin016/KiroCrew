@@ -59,7 +59,9 @@ export default function MigrationPage() {
   const appInfo = migrationData?.appInfo || null
   const targetName = migrationData?.targetName || ''
   const state: MigrationState = isLoading ? 'loading' : (queryError ? 'error' : (migrationData?.state || 'loading'))
-  const displayError = queryError ? (queryError as any)?.message || 'Failed to load app info' : error
+  const displayError = queryError
+    ? (queryError instanceof Error ? queryError.message : '') || 'Failed to load app info'
+    : error
 
   // Cleanup mutation
   const cleanupMutation = useMutation({
@@ -69,8 +71,8 @@ export default function MigrationPage() {
       window.dispatchEvent(new Event('mc:apps-changed'))
       queryClient.invalidateQueries({ queryKey: ['apps'] })
     },
-    onError: (e: any) => {
-      setError(e.message || 'Cleanup failed')
+    onError: (e: unknown) => {
+      setError((e instanceof Error && e.message) || 'Cleanup failed')
     },
   })
 

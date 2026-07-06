@@ -1,3 +1,4 @@
+import { safeSetItem } from '../utils/safeStorage'
 import { createSlice, PayloadAction } from '@reduxjs/toolkit'
 
 export interface TerminalSession {
@@ -32,7 +33,7 @@ export function loadLabels(): Record<string, string> {
 }
 
 export function saveLabels(labels: Record<string, string>) {
-  try { localStorage.setItem(LABELS_KEY, JSON.stringify(labels)) } catch { /* ignore */ }
+  try { safeSetItem(LABELS_KEY, JSON.stringify(labels)) } catch { /* ignore */ }
 }
 
 export function removeLabel(id: string) {
@@ -96,7 +97,7 @@ const terminalSlice = createSlice({
 
 function persist(state: TerminalState) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    safeSetItem(STORAGE_KEY, JSON.stringify({
       open: state.open,
       position: state.position,
     }))

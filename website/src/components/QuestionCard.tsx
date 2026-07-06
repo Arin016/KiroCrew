@@ -82,6 +82,7 @@ function QuestionCard({ questions, onSubmit }: QuestionCardProps) {
           </div>
           <input
             type="text"
+            aria-label="Custom answer"
             placeholder="Or type a custom answer..."
             value={customInputs[qIdx] || ''}
             onChange={e => {

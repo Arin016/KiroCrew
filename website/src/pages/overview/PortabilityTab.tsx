@@ -122,13 +122,15 @@ export default function PortabilityTab() {
           Existing data will be merged by default (duplicates are skipped).
         </p>
         <div className="flex items-center gap-3 flex-wrap">
-          <label className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-[13px] font-semibold font-body cursor-pointer bg-bg-elevated border border-border hover:border-accent transition-colors">
+          <label htmlFor="portability-import-file" className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-[13px] font-semibold font-body cursor-pointer bg-bg-elevated border border-border hover:border-accent transition-colors">
             <Upload size={14} />
             Choose file
             <input
+              id="portability-import-file"
               ref={fileRef}
               type="file"
               accept=".zip"
+              aria-label="Choose import file"
               onChange={handleFileChange}
               className="hidden"
             />

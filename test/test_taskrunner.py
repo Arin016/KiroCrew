@@ -749,7 +749,16 @@ class TestResourceManagement:
 
         await started.wait()
         runner.cancel("shield1")
-        await asyncio.sleep(1.5)
+        # Wait for the cancel to actually settle (status reaches 'cancelled' and the
+        # shielded resets finish) instead of guessing a fixed sleep. The old
+        # `await asyncio.sleep(1.5)` was a timing guess that the slower aarch64
+        # CPython 3.10 build worker exceeded under parallel xdist load, leaving the
+        # state at 'cancelling' when asserted -- a flaky, worker-speed-dependent
+        # failure. Polling the observable end-state is order/speed-independent.
+        for _ in range(200):  # up to ~10s
+            if run.status == "cancelled" and len(reset_completed) >= 3:
+                break
+            await asyncio.sleep(0.05)
 
         assert run.status == "cancelled"
         # Without shield, slow_reset would be interrupted and reset_completed would be empty

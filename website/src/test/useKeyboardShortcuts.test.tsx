@@ -3,6 +3,7 @@ import { fireEvent, screen, act } from '@testing-library/react'
 import { DEFAULT_SHORTCUTS, formatShortcut, SHORTCUTS_ENABLED_KEY, SHORTCUTS_ENABLED_EVENT, useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import { renderHookWithProviders, createTestStore, renderWithProviders } from './helpers'
 import ShortcutsModal from '../components/ShortcutsModal'
+import type { RootState } from '../store'
 
 beforeEach(() => localStorage.clear())
 
@@ -56,8 +57,8 @@ describe('useKeyboardShortcuts — toggle behavior', () => {
   function setup(opts: { enabled?: boolean; disabled?: boolean } = {}) {
     if (opts.enabled === false) localStorage.setItem(SHORTCUTS_ENABLED_KEY, '0')
     const store = createTestStore({
-      dashboard: { slots: [{ key: 'slot-1', title: 'Chat 1', messages: 1, running: false }] } as any,
-      chat: { activeSlot: null, slotHistory: [] } as any,
+      dashboard: { slots: [{ key: 'slot-1', title: 'Chat 1', messages: 1, running: false }] } as unknown as RootState['dashboard'],
+      chat: { activeSlot: null, slotHistory: [] } as unknown as RootState['chat'],
     })
     renderHookWithProviders(
       () => useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, disabled: opts.disabled }),
@@ -92,12 +93,41 @@ describe('useKeyboardShortcuts — toggle behavior', () => {
     expect(onNewChat).not.toHaveBeenCalled()
   })
 
+  it('Alt+Shift+W closes the active session (handler matches, preventDefault called)', () => {
+    const store = createTestStore({
+      dashboard: { slots: [{ key: 'slot-1', title: 'Chat 1', messages: 1, running: false }] } as unknown as RootState['dashboard'],
+      chat: { activeSlot: 'slot-1', slotHistory: [] } as unknown as RootState['chat'],
+    })
+    renderHookWithProviders(
+      () => useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat }),
+      { store },
+    )
+    const event = new KeyboardEvent('keydown', { code: 'KeyW', altKey: true, shiftKey: true, cancelable: true, bubbles: true })
+    const prevented = !document.dispatchEvent(event)
+    expect(prevented).toBe(true)
+  })
+
+  it('Alt+Shift+W is suppressed when shortcuts are disabled', () => {
+    const store = createTestStore({
+      dashboard: { slots: [{ key: 'slot-1', title: 'Chat 1', messages: 1, running: false }] } as unknown as RootState['dashboard'],
+      chat: { activeSlot: 'slot-1', slotHistory: [] } as unknown as RootState['chat'],
+    })
+    localStorage.setItem(SHORTCUTS_ENABLED_KEY, '0')
+    renderHookWithProviders(
+      () => useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat }),
+      { store },
+    )
+    const event = new KeyboardEvent('keydown', { code: 'KeyW', altKey: true, shiftKey: true, cancelable: true, bubbles: true })
+    const prevented = !document.dispatchEvent(event)
+    expect(prevented).toBe(false)
+  })
+
   it('Ctrl+number does NOT switch chats when IS_MAC is false (non-Mac env)', () => {
     // Verifies that the Ctrl+digit handler is gated by IS_MAC/ctrlDigits.
     // In jsdom IS_MAC=false, so Ctrl+digit should be ignored.
     const store = createTestStore({
-      dashboard: { slots: [{ key: 'slot-1', title: 'Chat 1', messages: 1, running: false }, { key: 'slot-2', title: 'Chat 2', messages: 0, running: false }, { key: 'slot-3', title: 'Chat 3', messages: 0, running: false }] } as any,
-      chat: { activeSlot: 'slot-1', slotHistory: [] } as any,
+      dashboard: { slots: [{ key: 'slot-1', title: 'Chat 1', messages: 1, running: false }, { key: 'slot-2', title: 'Chat 2', messages: 0, running: false }, { key: 'slot-3', title: 'Chat 3', messages: 0, running: false }] } as unknown as RootState['dashboard'],
+      chat: { activeSlot: 'slot-1', slotHistory: [] } as unknown as RootState['chat'],
     })
     renderHookWithProviders(
       () => useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat }),
@@ -109,8 +139,8 @@ describe('useKeyboardShortcuts — toggle behavior', () => {
 
   it('Alt+number dispatches chat switch on Windows/Linux', () => {
     const store = createTestStore({
-      dashboard: { slots: [{ key: 'slot-1', title: 'Chat 1', messages: 1, running: false }, { key: 'slot-2', title: 'Chat 2', messages: 0, running: false }, { key: 'slot-3', title: 'Chat 3', messages: 0, running: false }] } as any,
-      chat: { activeSlot: 'slot-1', slotHistory: [] } as any,
+      dashboard: { slots: [{ key: 'slot-1', title: 'Chat 1', messages: 1, running: false }, { key: 'slot-2', title: 'Chat 2', messages: 0, running: false }, { key: 'slot-3', title: 'Chat 3', messages: 0, running: false }] } as unknown as RootState['dashboard'],
+      chat: { activeSlot: 'slot-1', slotHistory: [] } as unknown as RootState['chat'],
     })
     renderHookWithProviders(
       () => useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat }),
@@ -120,6 +150,25 @@ describe('useKeyboardShortcuts — toggle behavior', () => {
     const event = new KeyboardEvent('keydown', { code: 'Digit3', altKey: true, cancelable: true, bubbles: true })
     const prevented = !document.dispatchEvent(event)
     expect(prevented).toBe(true)
+  })
+
+  it('Alt+` arms a one-shot beforeinput guard that cancels the macOS dead-key char', () => {
+    const store = createTestStore({
+      dashboard: { slots: [{ key: 'slot-1', title: 'Chat 1', messages: 0, running: false }, { key: 'slot-2', title: 'Chat 2', messages: 0, running: false }] } as unknown as RootState['dashboard'],
+      chat: { activeSlot: 'slot-2', slotHistory: ['slot-1'] } as unknown as RootState['chat'],
+    })
+    renderHookWithProviders(
+      () => useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat }),
+      { store },
+    )
+    // Alt+` (MRU toggle) fires while a text field is focused. On macOS Option+`
+    // is a dead key whose grave-accent char still arrives via beforeinput, which
+    // keydown.preventDefault() cannot cancel — the handler arms a one-shot guard.
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'Backquote', altKey: true, cancelable: true, bubbles: true }))
+    // The stray composed character arrives via beforeinput → must be cancelled.
+    expect(!document.dispatchEvent(new Event('beforeinput', { cancelable: true, bubbles: true }))).toBe(true)
+    // One-shot: the next beforeinput is NOT cancelled.
+    expect(!document.dispatchEvent(new Event('beforeinput', { cancelable: true, bubbles: true }))).toBe(false)
   })
 
   it('responds to SHORTCUTS_ENABLED_EVENT to re-enable', () => {

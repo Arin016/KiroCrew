@@ -133,7 +133,6 @@ describe('MarkdownPanel comment/copy flow', () => {
 
   it('adds comment and shows pending list after submitting comment text', async () => {
     vi.useRealTimers()
-    const user = userEvent.setup()
     render(<Providers><MarkdownPanel {...defaultProps} /></Providers>)
     const preview = document.querySelector('.msg-content')!
     mockSelectionInContainer(preview as HTMLElement, 'test paragraph')
@@ -148,7 +147,8 @@ describe('MarkdownPanel comment/copy flow', () => {
       expect(screen.getByPlaceholderText('Write a comment…')).toBeInTheDocument()
     })
 
-    await user.type(screen.getByPlaceholderText('Write a comment…'), 'Fix this section{enter}')
+    fireEvent.change(screen.getByPlaceholderText('Write a comment…'), { target: { value: 'Fix this section' } })
+    fireEvent.keyDown(screen.getByPlaceholderText('Write a comment…'), { key: 'Enter' })
     await waitFor(() => {
       expect(screen.getByText('1 comment pending')).toBeInTheDocument()
     })
@@ -171,7 +171,8 @@ describe('MarkdownPanel comment/copy flow', () => {
       expect(screen.getByPlaceholderText('Write a comment…')).toBeInTheDocument()
     })
 
-    await user.type(screen.getByPlaceholderText('Write a comment…'), 'Needs revision{enter}')
+    fireEvent.change(screen.getByPlaceholderText('Write a comment…'), { target: { value: 'Needs revision' } })
+    fireEvent.keyDown(screen.getByPlaceholderText('Write a comment…'), { key: 'Enter' })
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /submit all/i })).toBeInTheDocument()
     })

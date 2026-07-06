@@ -119,7 +119,7 @@ describe('MarkdownPanel OverflowMenu', () => {
   // ── Coverage push for new hook paths ────────────────────────────────────
   it('Add to Knowledge entry shows when format is supported', async () => {
     // Hits the knowledgeFormats path in useFileKnowledgeState.
-    globalThis.fetch = vi.fn().mockImplementation((url: any) => {
+    globalThis.fetch = vi.fn().mockImplementation((url: RequestInfo | URL) => {
       if (typeof url === 'string' && url.startsWith('/api/knowledge/config')) {
         return Promise.resolve(new Response(JSON.stringify({
           enabled: true,
@@ -130,14 +130,14 @@ describe('MarkdownPanel OverflowMenu', () => {
         return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }))
       }
       return Promise.resolve(new Response('null', { status: 200 }))
-    }) as any
+    })
     openMenu()
     await waitFor(() => expect(screen.getByText('Add to Knowledge')).toBeInTheDocument())
   })
 
   it('Add to Knowledge button posts on click', async () => {
-    let postedBody: any = null
-    globalThis.fetch = vi.fn().mockImplementation((url: any, init?: any) => {
+    let postedBody: { uri?: string; source_type?: string } | null = null
+    globalThis.fetch = vi.fn().mockImplementation((url: RequestInfo | URL, init?: RequestInit) => {
       if (typeof url === 'string' && url.startsWith('/api/knowledge/config')) {
         return Promise.resolve(new Response(JSON.stringify({
           enabled: true,
@@ -148,11 +148,11 @@ describe('MarkdownPanel OverflowMenu', () => {
         return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }))
       }
       if (typeof url === 'string' && url.startsWith('/api/knowledge/sources') && init?.method === 'POST') {
-        postedBody = JSON.parse(init.body)
+        postedBody = JSON.parse(init.body as string)
         return Promise.resolve(new Response('{"id":"k1"}', { status: 201, headers: { 'Content-Type': 'application/json' } }))
       }
       return Promise.resolve(new Response('null', { status: 200 }))
-    }) as any
+    })
     openMenu()
     await waitFor(() => expect(screen.getByText('Add to Knowledge')).toBeInTheDocument())
     fireEvent.click(screen.getByText('Add to Knowledge'))

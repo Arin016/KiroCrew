@@ -20,9 +20,9 @@ function TextInputPanel({ text, setText, rows, placeholder, accept, onUpload, on
   return (
     <div className="space-y-3">
       {banner}
-      <textarea className="w-full bg-bg-elevated border border-border rounded-md px-3 py-2.5 text-text text-sm font-mono outline-none transition-colors focus-ring resize-y min-h-[120px]" rows={rows} placeholder={placeholder} value={text} onChange={e => setText(e.target.value)} disabled={disabled} />
+      <textarea aria-label={placeholder} className="w-full bg-bg-elevated border border-border rounded-md px-3 py-2.5 text-text text-sm font-mono outline-none transition-colors focus-ring resize-y min-h-[120px]" rows={rows} placeholder={placeholder} value={text} onChange={e => setText(e.target.value)} disabled={disabled} />
       <div className="flex gap-2 items-center flex-wrap">
-        <input type="file" accept={accept} onChange={onUpload} disabled={disabled} className="text-sm text-muted file:mr-2 file:py-1 file:px-3 file:rounded-md file:border file:border-border file:bg-bg-elevated file:text-text file:text-sm file:cursor-pointer" />
+        <input type="file" aria-label="Upload a file" accept={accept} onChange={onUpload} disabled={disabled} className="text-sm text-muted file:mr-2 file:py-1 file:px-3 file:rounded-md file:border file:border-border file:bg-bg-elevated file:text-text file:text-sm file:cursor-pointer" />
         <SendBtn onClick={onRun} disabled={!text.trim() || disabled}>▶ Run</SendBtn>
         <Btn onClick={onPlan} disabled={!text.trim() || disabled}>{disabled ? <Hourglass className="lucide-inline" /> : <ClipboardList className="lucide-inline" />} Plan</Btn>
       </div>
@@ -107,7 +107,7 @@ export default function ProjectsPage() {
     }
     poll()
     return () => { cancelled = true }
-  }, [isPlanning]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isPlanning])  
 
   // Handle ?applied=TASK_ID from "Use as Plan" in chat
   useEffect(() => {
@@ -146,7 +146,7 @@ export default function ProjectsPage() {
         const planned = d.runs?.find((run: ProjectRun) => run.task_id === r.task_id)
         if (planned) setSelectedRun(planned)
       } else setPlanError(r.error || 'Failed to generate plan')
-    } catch (e: any) { setPlanError(e?.message || 'Planning request failed')
+    } catch (e) { setPlanError(e instanceof Error ? e.message : 'Planning request failed')
     } finally { sessionStorage.removeItem('tr-planning'); activePlanRef.current = false; if (mountedRef.current) setIsPlanning(false) }
   }
 
@@ -213,7 +213,15 @@ export default function ProjectsPage() {
         const pct = r.steps > 0 ? Math.round((r.completed / r.steps) * 100) : 0
         const isActive = selectedRun?.task_id === r.task_id
         return (
-          <div key={r.task_id} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-all ${isActive ? 'bg-accent/15 border border-accent/40' : 'hover:bg-bg-elevated border border-transparent'}`} onClick={() => { setSelectedRun(r); setEditingName(false) }}>
+          <div
+            key={r.task_id}
+            role="button"
+            tabIndex={0}
+            aria-label={`Open project ${name}`}
+            className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-all ${isActive ? 'bg-accent/15 border border-accent/40' : 'hover:bg-bg-elevated border border-transparent'}`}
+            onClick={() => { setSelectedRun(r); setEditingName(false) }}
+            onKeyDown={e => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setSelectedRun(r); setEditingName(false) } }}
+          >
             <span className="text-[14px]">{icon}</span>
             <div className="flex-1 min-w-0">
               <div className="text-[13px] font-semibold text-text-strong truncate">{name}</div>
@@ -238,11 +246,11 @@ export default function ProjectsPage() {
       </div>
       <div className="flex gap-2 items-center mb-3">
         <span className="text-[13px] text-muted font-medium">Agent:</span>
-        <AgentSelector agents={agents} defaultAgent={defaultAgentName} value={agent} onChange={setAgent} />
+        <AgentSelector agents={agents} defaultAgent={defaultAgentName} value={agent} onChange={(name) => setAgent(name)} />
       </div>
       {mode === 'compose' ? (
         <div className="space-y-3">
-          <textarea className="w-full bg-bg-elevated border border-border rounded-md px-3 py-2.5 text-text text-sm font-body outline-none transition-colors focus-ring resize-y min-h-[80px]" rows={3} placeholder="Describe your task..." value={userInput} onChange={e => setUserInput(e.target.value)} disabled={isRefining || anyPlanning} />
+          <textarea aria-label="Describe your task" className="w-full bg-bg-elevated border border-border rounded-md px-3 py-2.5 text-text text-sm font-body outline-none transition-colors focus-ring resize-y min-h-[80px]" rows={3} placeholder="Describe your task..." value={userInput} onChange={e => setUserInput(e.target.value)} disabled={isRefining || anyPlanning} />
           <div className="flex gap-2 items-center">
             {!isRefining && <button className={`btn-sweep bg-accent text-accent-fg border-none rounded-lg px-4 h-9 text-sm font-semibold cursor-pointer hover:bg-accent-hover transition-all font-body ${anyPlanning ? 'opacity-50 cursor-not-allowed' : ''}`} onClick={refine} disabled={!userInput.trim() || anyPlanning}><Sparkles className="lucide-inline" /> Refine into Spec</button>}
             {!isRefining && <button className={`px-4 h-9 rounded-md border border-accent bg-transparent text-accent text-sm font-semibold cursor-pointer font-body hover:bg-accent hover:text-accent-fg transition-all ${anyPlanning ? 'opacity-50 cursor-not-allowed' : ''}`} onClick={() => generatePlan(userInput, 'text')} disabled={!userInput.trim() || anyPlanning}>{anyPlanning ? <Hourglass className="lucide-inline" /> : <ClipboardList className="lucide-inline" />} Plan</button>}
@@ -256,7 +264,7 @@ export default function ProjectsPage() {
           {planError && <div className="rounded-lg border border-danger/50 bg-danger/10 px-4 py-2.5 mt-2 text-danger text-[13px]">{planError}</div>}
           {(refined || isRefining) && (
             <div>
-              <textarea className="w-full bg-bg-elevated border border-border rounded-md px-3 py-2.5 text-text text-sm font-mono outline-none transition-colors focus-ring resize-y min-h-[120px]" rows={8} value={refined} onChange={e => setRefined(e.target.value)} readOnly={isRefining} />
+              <textarea aria-label="Refined spec" className="w-full bg-bg-elevated border border-border rounded-md px-3 py-2.5 text-text text-sm font-mono outline-none transition-colors focus-ring resize-y min-h-[120px]" rows={8} value={refined} onChange={e => setRefined(e.target.value)} readOnly={isRefining} />
               {refineError && <div className="text-danger mt-1 text-[13px]">Error: {refineError}</div>}
               {!isRefining && refined && (
                 <div className="flex gap-2 mt-2">
@@ -292,11 +300,26 @@ export default function ProjectsPage() {
           <div className="flex-1 min-h-0 min-w-0 flex flex-col">
             <div className="px-4 py-2 flex items-center gap-2 border-b border-border shrink-0">
               {editingName ? (
-                <input className="text-[13px] font-semibold bg-transparent border border-accent rounded px-1 py-0 text-text-strong outline-none min-w-[120px]" autoFocus maxLength={200} value={editNameValue} onChange={e => setEditNameValue(e.target.value)} onBlur={() => { const v = editNameValue.trim(); if (v && v !== (selectedRun.name || selectedRun.spec_name || '')) { api.renameTaskRun(selectedRun.task_id, v).then(load).catch(() => {}) }; setEditingName(false) }} onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); else if (e.key === 'Escape') setEditingName(false) }} />
+                <input aria-label="Project name" className="text-[13px] font-semibold bg-transparent border border-accent rounded px-1 py-0 text-text-strong outline-none min-w-[120px]" autoFocus maxLength={200} value={editNameValue} onChange={e => setEditNameValue(e.target.value)} onBlur={() => { const v = editNameValue.trim(); if (v && v !== (selectedRun.name || selectedRun.spec_name || '')) { api.renameTaskRun(selectedRun.task_id, v).then(load).catch(() => {}) }; setEditingName(false) }} onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); else if (e.key === 'Escape') setEditingName(false) }} />
               ) : (
-                <span className="text-[13px] font-semibold text-text-strong truncate cursor-pointer hover:text-accent transition-all" onClick={() => { setEditingName(true); setEditNameValue(selectedRun.name || selectedRun.spec_name || 'Project') }}>{selectedRun.name || selectedRun.spec_name || 'Project'}</span>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  aria-label="Rename project"
+                  className="text-[13px] font-semibold text-text-strong truncate cursor-pointer hover:text-accent transition-all"
+                  onClick={() => { setEditingName(true); setEditNameValue(selectedRun.name || selectedRun.spec_name || 'Project') }}
+                  onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditingName(true); setEditNameValue(selectedRun.name || selectedRun.spec_name || 'Project') } }}
+                >{selectedRun.name || selectedRun.spec_name || 'Project'}</span>
               )}
-              {!editingName && <span className="text-[11px] text-muted cursor-pointer opacity-40 hover:opacity-100 hover:text-accent transition-all" title="Rename project" onClick={() => { setEditingName(true); setEditNameValue(selectedRun.name || selectedRun.spec_name || 'Project') }}><Pencil className="lucide-inline" /></span>}
+              {!editingName && <span
+                role="button"
+                tabIndex={0}
+                className="text-[11px] text-muted cursor-pointer opacity-40 hover:opacity-100 hover:text-accent transition-all"
+                title="Rename project"
+                aria-label="Rename project"
+                onClick={() => { setEditingName(true); setEditNameValue(selectedRun.name || selectedRun.spec_name || 'Project') }}
+                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditingName(true); setEditNameValue(selectedRun.name || selectedRun.spec_name || 'Project') } }}
+              ><Pencil className="lucide-inline" /></span>}
               <span className="text-[12px] text-muted">{selectedRun.status === 'planning' ? <><Hourglass className="lucide-inline" /> Planning…</> : selectedRun.running ? <><RefreshCw className="lucide-inline" /> Running</> : selectedRun.status}</span>
               <div className="flex-1" />
               {selectedRun.status === 'planned' && <>

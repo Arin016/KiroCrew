@@ -19,6 +19,9 @@ export async function rewindWithRollback(
   try {
     await api.rewind(slot, ts, content)
   } catch (e) {
+    // Intentional diagnostic: a rewind failure is silent to the user (the
+    // optimistic edit is rolled back), so surface it in the console.
+    // eslint-disable-next-line no-console
     console.warn('rewind failed', e)
     rollback()
   }

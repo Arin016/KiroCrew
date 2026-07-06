@@ -4,7 +4,7 @@ import { useSwipeEdge } from '../hooks/useSwipeEdge'
 
 function createTouchEvent(type: string, clientX: number, clientY = 0): TouchEvent {
   const touch = { clientX, clientY } as Touch
-  const init: any = { bubbles: true }
+  const init: TouchEventInit = { bubbles: true }
   if (type === 'touchstart') init.touches = [touch]
   if (type === 'touchend' || type === 'touchcancel') init.changedTouches = [touch]
   return new TouchEvent(type, init)

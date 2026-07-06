@@ -1,3 +1,4 @@
+import { safeSetItem } from '../../utils/safeStorage'
 import { useState } from 'react'
 import { SettingsSection, SettingsCard, SettingsToggle } from '../../components/settings'
 
@@ -8,9 +9,11 @@ export function GeneralPanel() {
   const [devMode, setDevMode] = useState(() => localStorage.getItem(DEV_MODE_KEY) === '1')
 
   const toggleDevMode = (v: boolean) => {
-    localStorage.setItem(DEV_MODE_KEY, v ? '1' : '0')
+    safeSetItem(DEV_MODE_KEY, v ? '1' : '0')
     setDevMode(v)
     window.dispatchEvent(new CustomEvent(DEV_MODE_EVENT, { detail: v }))
+    // Notify Electron main process to show/hide DevTools menu item
+    ;(window as Window & { electronAPI?: { setDevMode?: (v: boolean) => void } }).electronAPI?.setDevMode?.(v)
   }
 
   return (

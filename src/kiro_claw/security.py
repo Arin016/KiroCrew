@@ -7,12 +7,17 @@ import json
 import logging
 import os
 import re
+import string
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs
 
 from kiro_claw.sel import SecurityEvent, SecurityEventLog
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -236,23 +241,78 @@ def _get_sensitive_re() -> re.Pattern[str]:
     return _SENSITIVE_RE
 
 
-def is_sensitive_path(path_str: str) -> bool:
+def is_sensitive_path(path_str: str, base_dir: str | None = None) -> bool:
     """Return True if the path points to a sensitive location.
 
-    Works for both absolute paths and ~/relative paths.
-    Used by hooks to block fs_read/ReadFile of credential files.
+    Works for both absolute paths and ``~``/relative paths.  Used across every
+    file-access surface (hooks.on_tool_call, validate_file_path, artifacts,
+    dashboard file I/O, knowledge indexing) to block reads/writes of credential
+    files and the governance trust-root.
+
+    ── Symlink robustness (pentest AWS-345 / AWS-62) ──
+    A workspace symlink pointing at ``~/.aws/credentials`` (absolute OR relative
+    ``../../.aws/credentials`` traversal) must NOT be readable through the link.
+    We therefore check MULTIPLE candidate forms of the input and return True if
+    ANY of them lands in a sensitive location:
+
+      1. the fully symlink-RESOLVED canonical target (``realpath`` /
+         ``Path.resolve`` — follows every symlink in the chain, including
+         intermediate directories and the final component).  This is what
+         defeats the symlink bypass: the resolved target of the link is
+         ``~/.aws/credentials`` even though the link's own name is benign.
+      2. the LEXICALLY-normalized path (no symlink following) and the raw
+         expanded string — so a path that *textually* names a sensitive dir is
+         still caught when resolution fails (dangling link, permission error).
+
+    ``base_dir`` anchors a *relative* input against the caller's known working
+    directory (e.g. the agent's workspace cwd) so a relative title like
+    ``sub/cfg.ini`` resolves against the real directory rather than whatever CWD
+    the gateway process happens to have.  Absolute inputs are unaffected;
+    ``base_dir=None`` preserves the historical CWD-relative behavior.
     """
+    if not path_str:
+        return False
+
     # Expand ~ and $HOME
     expanded = os.path.expanduser(os.path.expandvars(path_str))
+
+    # Anchor a relative input against the supplied workspace dir so it resolves
+    # to the real file rather than the gateway's CWD.
+    if base_dir and not os.path.isabs(expanded):
+        expanded = os.path.join(base_dir, expanded)
+
+    # Build the candidate forms.  Symlink-resolved forms defeat a link bypass;
+    # the lexical forms are the fail-safe fallback when resolution cannot
+    # complete (over-matching a sensitive-looking path is the safe direction).
+    candidates: set[str] = set()
     try:
-        resolved = str(Path(expanded).resolve())
+        candidates.add(os.path.realpath(expanded))
     except (OSError, ValueError):
-        resolved = expanded
+        pass
+    try:
+        candidates.add(str(Path(expanded).resolve()))
+    except (OSError, ValueError, RuntimeError):
+        pass
+    candidates.add(os.path.normpath(expanded))
+    candidates.add(expanded)
 
     try:
         home = str(Path.home().resolve())
     except (OSError, ValueError):
         home = str(Path.home())
+    # Compare against the sensitive dirs anchored at BOTH the logical home and
+    # its realpath.  On macOS the per-user temp/home prefix can itself be
+    # reached via OS symlinks (``/var`` → ``/private/var``); folding both roots
+    # in means a resolved candidate under either spelling is still matched.
+    sensitive_targets: set[str] = {
+        os.path.join(home, d).casefold() for d in _SENSITIVE_HOME_DIRS
+    }
+    home_real = os.path.realpath(home)
+    if home_real.casefold() != home.casefold():
+        sensitive_targets |= {
+            os.path.join(home_real, d).casefold() for d in _SENSITIVE_HOME_DIRS
+        }
+
     # Case-fold both sides for the membership test.  On a case-insensitive
     # filesystem (macOS APFS/HFS+ default — a supported platform) the OS opens
     # ``~/.kiroclaw/Security_Policy.json`` and ``~/.kiroclaw/security_policy.json``
@@ -261,11 +321,11 @@ def is_sensitive_path(path_str: str) -> bool:
     # protective (it can only ever over-match an alternate-case variant of an
     # already-sensitive path, which is itself suspicious), so it is safe on
     # case-sensitive Linux too — matching the IGNORECASE bash-read matcher.
-    resolved_cf = resolved.casefold()
-    for sensitive_dir in _SENSITIVE_HOME_DIRS:
-        sensitive_path = os.path.join(home, sensitive_dir).casefold()
-        if resolved_cf == sensitive_path or resolved_cf.startswith(sensitive_path + os.sep):
-            return True
+    for cand in candidates:
+        cand_cf = cand.casefold()
+        for sensitive_path in sensitive_targets:
+            if cand_cf == sensitive_path or cand_cf.startswith(sensitive_path + os.sep):
+                return True
     return False
 
 
@@ -282,6 +342,27 @@ _EXTRACT_INTO_TRUST_ROOT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ── Symlink-staging to a sensitive target via RELATIVE traversal ──
+# The home-anchored ~/$HOME/absolute forms of ``ln -sf ~/.aws/credentials link``
+# are already caught by _build_sensitive_regex (the sensitive path appears as an
+# argument token).  What that matcher CANNOT see is a sensitive dir named through
+# pure relative traversal — ``ln -sf ../../../.aws/credentials link`` — because
+# it has no home anchor.  Creating such a symlink is the staging step of the
+# pentest attack chain (AWS-345 / AWS-62, recommendation item 3): a pre-existing
+# link to a credential file lets a later in-workspace read follow it.  We block
+# the CREATION verbs (``ln``, ``cp -s``/``--symbolic-link``) when any token
+# names a sensitive dir via dot-slash traversal.
+_SENSITIVE_SEGMENT_ALT = "|".join(re.escape(d) for d in _SENSITIVE_HOME_DIRS)
+_RELATIVE_SENSITIVE_RE = re.compile(
+    rf"(?:^|[\s'\"=:,;])(?:\.\.?/)+(?:{_SENSITIVE_SEGMENT_ALT})(?:/|\s|$|['\"])",
+    re.IGNORECASE,
+)
+# Segment-anchored symlink-creation verbs: ``ln`` (any flags) or ``cp`` (the
+# ``-s``/``--symbolic-link`` form is what makes cp create a link; we accept any
+# ``cp`` here since it is paired with the relative-sensitive match, so a plain
+# ``cp`` of an unrelated file never trips this).
+_SYMLINK_CREATE_VERB_RE = re.compile(r"(?:^|[;&|`\n]|\$\()\s*(?:ln|cp)(?:\s|$)", re.IGNORECASE)
+
 
 def is_sensitive_bash_command(command: str) -> str | None:
     """Check if a bash command reads OR writes sensitive paths.
@@ -292,6 +373,10 @@ def is_sensitive_bash_command(command: str) -> str | None:
         return "Blocked: command accesses sensitive credential path"
     if _EXTRACT_INTO_TRUST_ROOT_RE.search(command):
         return "Blocked: command extracts into the governance trust-root directory"
+    # Staging a symlink to a credential file via relative traversal (the
+    # home-anchored/absolute forms are already blocked by the matcher above).
+    if _SYMLINK_CREATE_VERB_RE.search(command) and _RELATIVE_SENSITIVE_RE.search(command):
+        return "Blocked: command stages a symlink to a sensitive credential path"
     return None
 
 
@@ -451,6 +536,7 @@ def redact_exfiltration_urls(text: str) -> tuple[str, list[str]]:
 
 _CREDENTIAL_PATTERNS = re.compile(
     r"(?:"
+    # ── AWS ──
     r"(?:AKIA|ASIA)[A-Z0-9]{16}"  # AWS access key ID
     # key-value forms: tolerate an optional closing quote after the key name and an
     # optional opening quote before the value so JSON (`"aws_secret_access_key": "v"`)
@@ -467,6 +553,27 @@ _CREDENTIAL_PATTERNS = re.compile(
     r'|(?:AccessKeyId|aws_access_key_id)["\']?\s*[:=]\s*["\']?[^\s"\',}]+'
     r"|BEGIN[\s](?:RSA|DSA|EC|OPENSSH)[\s]PRIVATE[\s]KEY"
     r"|xox[bpas]-[0-9a-zA-Z-]{10,}"  # Slack token
+    # ── Third-party developer credentials (AWS-345 / AWS-59) ──
+    # Distinctive, fixed-case prefixes → very low false-positive risk.  Minimum
+    # lengths are kept slightly below the real token lengths so shortened test /
+    # rotated variants are still redacted (over-redaction on a prefix match is the
+    # safe direction).  Case-sensitive by design (these prefixes are issued in a
+    # fixed case); do NOT fold — folding would broaden false positives.
+    r"|gh[opsur]_[A-Za-z0-9]{30,255}"  # GitHub PAT (ghp_) + oauth/user/server/refresh
+    r"|github_pat_[A-Za-z0-9_]{40,}"  # GitHub fine-grained PAT
+    r"|glpat-[A-Za-z0-9_-]{16,}"  # GitLab PAT
+    r"|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}"  # Stripe secret / restricted keys
+    r"|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}"  # SendGrid API key
+    r"|sk-proj-[A-Za-z0-9_-]{16,}"  # OpenAI project key
+    r"|sk-ant-[A-Za-z0-9_-]{16,}"  # Anthropic API key
+    r"|npm_[A-Za-z0-9]{24,}"  # npm access token
+    r"|pypi-[A-Za-z0-9_-]{16,}"  # PyPI API token
+    r"|do[opr]_v1_[A-Za-z0-9]{40,}"  # DigitalOcean PAT/OAuth/refresh
+    r"|GOCSPX-[A-Za-z0-9_-]{20,}"  # Google OAuth client secret
+    # DB connection URIs with embedded credentials — redact the
+    # ``scheme://user:pass@`` prefix (the password lives here).
+    r"|(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis(?:s)?|amqp(?:s)?)"
+    r"://[^\s:/@]+:[^\s/@]+@"
     r")",
 )
 
@@ -606,6 +713,81 @@ def redact(text: str) -> str:
     text = redact_exfiltration_urls(text)[0]
     text = redact_credentials(text)[0]
     return text
+
+
+# ── Streaming redaction (pentest issue 3) ──
+# Per-chunk redaction misses a credential split across token/streaming
+# boundaries: a chunk ending ``...AKIA`` and the next starting ``IOSFODNN7...``
+# each individually escape redact_credentials(), so the raw fragments reach
+# WebSocket/SSE consumers even though the final assembled message is redacted.
+# StreamRedactor withholds the trailing run of "credential-class" characters
+# (which could be the start of a not-yet-complete credential) until a
+# terminator arrives or the stream ends, redacting only the confirmed-safe
+# prefix before it is emitted on the wire.
+
+# Characters that can appear inside a credential token/pattern. A credential is
+# a contiguous run of these; any byte OUTSIDE this set terminates an in-progress
+# match, so text up to (and including) such a terminator is safe to redact and
+# emit. Includes URL / base64 / connection-string punctuation so exfil URLs and
+# DB URIs are also held intact across chunk boundaries. (The private-key HEADER
+# phrase contains spaces and is the one pattern that can split on a terminator;
+# it is a non-secret header string and the final full-text pass still redacts
+# the persisted/displayed copy.)
+_CRED_CLASS: frozenset[str] = frozenset(
+    string.ascii_letters + string.digits + "_-+/=.:@%~"
+)
+
+# Upper bound on withheld trailing characters. Larger than the longest
+# fixed-format credential so a split token is always rejoined before emission;
+# bounds latency/memory for a pathologically long unbroken run (only affects a
+# single >512-char secret with no delimiter, which no supported provider issues).
+_STREAM_HOLDBACK_MAX = 512
+
+
+class StreamRedactor:
+    """Rolling-buffer redactor for streamed LLM output.
+
+    Feed raw chunks in order; ``feed`` returns the redacted, safe-to-broadcast
+    prefix (possibly empty while a partial credential is buffered). Call
+    ``flush`` when the stream/segment ends to redact and return the remainder.
+    Adds at most one chunk of latency. A credential is never split across a
+    commit boundary because commits only ever end at a non-credential-class
+    character, while a credential is a contiguous credential-class run.
+    """
+
+    __slots__ = ("_buf", "_redact")
+
+    def __init__(self, redactor: "Callable[[str], str] | None" = None) -> None:
+        self._buf = ""
+        # Resolve at call time so module-load order is irrelevant.
+        self._redact = redactor or redact
+
+    def feed(self, chunk: str) -> str:
+        """Accept a chunk; return the redacted prefix that is safe to emit now."""
+        if not chunk:
+            return ""
+        self._buf += chunk
+        # Start of the maximal trailing credential-class run.
+        i = len(self._buf)
+        while i > 0 and self._buf[i - 1] in _CRED_CLASS:
+            i -= 1
+        # Cap the withheld tail so an unbroken run can't grow without bound.
+        if len(self._buf) - i > _STREAM_HOLDBACK_MAX:
+            i = len(self._buf) - _STREAM_HOLDBACK_MAX
+        if i <= 0:
+            return ""  # whole buffer is a (possibly partial) credential run — hold
+        commit, self._buf = self._buf[:i], self._buf[i:]
+        return self._redact(commit)
+
+    def flush(self) -> str:
+        """Redact and return the buffered remainder; clears the buffer."""
+        out = self._redact(self._buf) if self._buf else ""
+        self._buf = ""
+        return out
+
+    def reset(self) -> None:
+        """Discard the buffer without emitting (segment abandoned/cleared)."""
+        self._buf = ""
 
 
 def is_denied(tool_name: str, extra_patterns: list[str] | None = None) -> str | None:

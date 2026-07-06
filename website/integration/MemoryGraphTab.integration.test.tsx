@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { renderWithProviders } from './helpers'
@@ -80,14 +80,13 @@ describe('MemoryGraphTab Integration Tests', () => {
   })
 
   it('has a working search input', async () => {
-    const user = userEvent.setup()
     renderWithProviders(<MemoryGraphTab />)
 
     await waitFor(() => {
       expect(screen.getByPlaceholderText('Search nodes…')).toBeInTheDocument()
     })
 
-    await user.type(screen.getByPlaceholderText('Search nodes…'), 'typescript')
+    fireEvent.change(screen.getByPlaceholderText('Search nodes…'), { target: { value: 'typescript' } })
     expect(screen.getByPlaceholderText('Search nodes…')).toHaveValue('typescript')
   })
 

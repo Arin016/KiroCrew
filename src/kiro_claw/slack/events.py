@@ -65,6 +65,7 @@ from kiro_claw.slack.blocks import (
 from kiro_claw.slack.files import process_slack_files
 from kiro_claw.slack.handler import (
     _YOLO_TTL_SECS,
+    APPROVAL_AUTO,
     APPROVAL_INTERACTIVE,
     handle_message,
     is_allowed_user,
@@ -846,20 +847,52 @@ async def _publish_home_tab(orch: GatewayOrchestrator, user_id: str) -> None:
         try:
             servers = list_servers()
             skills = _get_skills_loader().list_skills()
-            cap_lines: list[str] = []
+
+            # Slack caps a single section's text at 3000 chars. MCP servers and
+            # skills each get their OWN section with an independent length cap
+            # (appending "…and N more" when the list won't fit) — an uncapped
+            # list (e.g. 100+ skills) would overflow and make views.publish fail
+            # with invalid_arguments, breaking the whole Home tab. Mirrors the
+            # cron block's jobs[:15] guard below.
+            def _capped_names_section(
+                label: str, names: list[str], budget: int = 2900
+            ) -> dict:
+                total = len(names)
+                prefix = f"*{label} ({total}):* "
+                suffix_room = 24  # reserve for "  _…and N more_"
+                shown: list[str] = []
+                used = len(prefix)
+                for nm in names:
+                    add = (", " if shown else "") + nm
+                    if used + len(add) > budget - suffix_room:
+                        break
+                    shown.append(nm)
+                    used += len(add)
+                line = prefix + ", ".join(shown)
+                if len(shown) < total:
+                    line += f"  _…and {total - len(shown)} more_"
+                # Defense-in-depth redaction (AUTOSDE "never trust output").
+                line = redact_credentials(redact_exfiltration_urls(line)[0])[0]
+                return {"type": "section", "text": {"type": "mrkdwn", "text": line}}
+
             if servers:
-                names = ", ".join(s.name for s in servers)
-                raw = f"*MCP Integrations ({len(servers)}):* {names}"
-                cap_lines.append(redact_credentials(redact_exfiltration_urls(raw)[0])[0])
+                blocks.append(
+                    _capped_names_section("MCP Integrations", [s.name for s in servers])
+                )
             if skills:
-                names = ", ".join(s["name"] for s in skills)
-                raw = f"*Skills ({len(skills)}):* {names}"
-                cap_lines.append(redact_credentials(redact_exfiltration_urls(raw)[0])[0])
-            if not cap_lines:
-                cap_lines.append("_No MCP servers or skills configured._")
-            blocks.append(
-                {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(cap_lines)}}
-            )
+                blocks.append(
+                    _capped_names_section("Skills", [s["name"] for s in skills])
+                )
+            if not servers and not skills:
+                blocks.append(
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "_No MCP servers or skills configured._",
+                        },
+                    }
+                )
         except Exception:
             logger.error("Failed to load capabilities for home tab", exc_info=True)
             blocks.append(
@@ -1480,6 +1513,16 @@ async def _handle_message_deleted(orch: GatewayOrchestrator, event: dict) -> Non
         )
 
 
+def _resolve_approval_mode(orch: "GatewayOrchestrator") -> str:
+    """Slack dispatch approval mode: CLI --approval flag wins, else config.
+
+    Normalized to handle_message's auto/interactive contract; reads/yolo are
+    gated separately (gateway approval-event path, global YOLO/trust).
+    """
+    mode = orch._approval_mode or orch._cfg.agent.approval_mode
+    return APPROVAL_AUTO if mode == APPROVAL_AUTO else APPROVAL_INTERACTIVE
+
+
 async def _dispatch_queued(
     orch: GatewayOrchestrator,
     session_key: str,
@@ -1504,7 +1547,7 @@ async def _dispatch_queued(
         msg_ts,
         kwargs.get("sender_id", ""),
         team_id=kwargs.get("team_id", ""),
-        approval_mode=APPROVAL_INTERACTIVE,
+        approval_mode=_resolve_approval_mode(orch),
         context_builder=orch.ctx_builder,
         cron_service=orch.cron_svc,
         conversation_log=orch.conv_log,
@@ -2176,7 +2219,7 @@ async def _route_message(
                 msg_ts,
                 sender_id,
                 team_id=team_id,
-                approval_mode=APPROVAL_INTERACTIVE,
+                approval_mode=_resolve_approval_mode(orch),
                 context_builder=orch.ctx_builder,
                 cron_service=orch.cron_svc,
                 conversation_log=orch.conv_log,

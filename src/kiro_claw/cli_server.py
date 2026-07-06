@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -26,9 +27,14 @@ from kiro_claw.config.loader import (
 )
 from kiro_claw.constants import DATA_WARNING
 from kiro_claw.context import ContextBuilder
-from kiro_claw.dashboard.origin import dashboard_origin, parse_dashboard_url
+from kiro_claw.dashboard.origin import (
+    dashboard_origin,
+    parse_dashboard_url,
+    resolve_dashboard_host,
+)
 from kiro_claw.dashboard.token_auth import parse_duration
 from kiro_claw.embeddings import OllamaManager, make_sync_embed_fn
+from kiro_claw.env import activate_mise
 from kiro_claw.frontend import build_frontend_sync, ensure_dev_dist_symlink
 from kiro_claw.history import ConversationLog, HistoryConsolidator
 from kiro_claw.hooks import HookManager, HooksConfig
@@ -115,9 +121,18 @@ def _token(args: argparse.Namespace) -> None:
     if not token:
         print("❌ Gateway returned empty token")
         sys.exit(1)
-    print(f"http://localhost:{port}?token={token}")
+    # Print the SAME canonical loopback host the gateway uses for its auto-open
+    # and !dashboard links. resolve_dashboard_host() returns "localhost" for the
+    # loopback case — it resolves in every browser and through SSH tunnels (unlike
+    # *.localhost names, which Safari / the macOS resolver do not map). Emitting a
+    # host the gateway does NOT serve on would land the browser on a different
+    # origin, splitting the SPA's per-origin localStorage so all dashboard
+    # settings appear reset. Keeping the host consistent avoids that.
+    host = resolve_dashboard_host(local_only=True)
+    print(f"http://{host}:{port}?token={token}")
     origin = dashboard_origin(KiroClawConfig.load().dashboard.url)
     if origin and "localhost" not in origin:
+        print()
         print(f"{origin}/?token={token}")
 
 
@@ -260,22 +275,113 @@ def _stop(cli_port: int | None = None) -> None:
         sys.exit(1)
 
 
+# Subcommands that launch a long-running KiroClaw *server* process which
+# ``kiroclaw stop`` may need to terminate. These mirror the entry-point
+# subcommands dispatched in ``cli.py`` (``gateway`` / ``dashboard``; ``start``
+# is the historical alias). The task runner (``run``) is intentionally excluded:
+# it is not bound to the dashboard port, so we must never SIGTERM it from
+# ``kiroclaw stop``.
+_KIROCLAW_SERVER_SUBCOMMANDS = frozenset({"gateway", "dashboard", "start"})
+
+
+def _args_look_like_kiroclaw(args: str) -> bool:
+    """Return ``True`` if a process command-line *args* string is a KiroClaw server.
+
+    This gates ``os.kill(pid, SIGTERM)`` in :func:`_stop`, so it must be
+    **precise** (never match an unrelated process that merely mentions
+    "kiroclaw") while still recognising *every* way the gateway can be spawned.
+
+    Instead of enumerating brittle substring variants (``kiro_claw.gateway`` vs
+    ``kiro_claw gateway`` vs ``kiroclaw gateway`` …), we parse the command line
+    *structurally* and key on the real module/binary name plus a known server
+    subcommand (:data:`_KIROCLAW_SERVER_SUBCOMMANDS`). This is deterministic and
+    robust to interpreter path, Python version suffix, and whitespace. Two spawn
+    shapes are recognised:
+
+    * **Module invocation** — ``<python> -m kiro_claw <subcmd>`` (the form used by
+      a service install and the launchd/systemd service), plus the legacy dotted
+      form ``<python> -m kiro_claw.<subcmd>``. A Python interpreter must precede
+      ``-m`` so we don't misread some other tool's ``-m`` flag (e.g. ``grep -m``).
+    * **Console script** — ``/path/to/kiroclaw <subcmd>`` (used when the
+      ``kiroclaw`` wrapper resolves on ``PATH``).
+
+    Examples::
+
+        >>> _args_look_like_kiroclaw("/x/python3.10 -m kiro_claw gateway")
+        True
+        >>> _args_look_like_kiroclaw("python3 -m kiro_claw.dashboard")
+        True
+        >>> _args_look_like_kiroclaw("/usr/local/bin/kiroclaw start")
+        True
+        >>> _args_look_like_kiroclaw("python -m kiro_claw run /tmp/spec.md")  # task runner
+        False
+        >>> _args_look_like_kiroclaw("vim /tmp/kiroclaw-notes.txt")
+        False
+    """
+    # ``ps -o args=`` returns a shell-style string; tokenize it the way a shell
+    # would. Fall back to a naive split on a malformed string (e.g. an odd quote)
+    # so this best-effort identity check never raises.
+    try:
+        tokens = shlex.split(args)
+    except ValueError:
+        tokens = args.split()
+
+    for index, token in enumerate(tokens):
+        # --- Module form: "<python> -m kiro_claw <subcmd>" / "-m kiro_claw.<subcmd>"
+        if token == "-m" and index + 1 < len(tokens):
+            # Only treat "-m" as Python's module flag when a Python interpreter
+            # precedes it; otherwise an unrelated tool's "-m" option could be
+            # misread (e.g. "grep -m kiro_claw gateway file").
+            interpreter_seen = any(
+                os.path.basename(t).startswith("python") for t in tokens[:index]
+            )
+            if interpreter_seen:
+                # "kiro_claw.gateway" -> ("kiro_claw", "gateway"); a bare
+                # "kiro_claw" -> ("kiro_claw", "").
+                package, _, dotted_subcmd = tokens[index + 1].partition(".")
+                if package == "kiro_claw":
+                    # Dotted submodule form: ``-m kiro_claw.gateway``.
+                    if dotted_subcmd in _KIROCLAW_SERVER_SUBCOMMANDS:
+                        return True
+                    # Subcommand-as-argument form: ``-m kiro_claw gateway``. The
+                    # subcommand is argparse's first positional after the module,
+                    # i.e. always at index+2. Check only that slot so a later
+                    # positional/flag value cannot match — e.g.
+                    # ``-m kiro_claw run gateway`` ("gateway" is a file argument
+                    # to the task runner) must NOT be treated as a server.
+                    if (
+                        index + 2 < len(tokens)
+                        and tokens[index + 2] in _KIROCLAW_SERVER_SUBCOMMANDS
+                    ):
+                        return True
+
+        # --- Console-script form: ".../kiroclaw <subcmd>"
+        if (
+            os.path.basename(token) == "kiroclaw"
+            and index + 1 < len(tokens)
+            and tokens[index + 1] in _KIROCLAW_SERVER_SUBCOMMANDS
+        ):
+            return True
+
+    return False
+
+
 def _is_kiroclaw_process(pid: int) -> bool:
-    """Return True if *pid* looks like a KiroClaw gateway process."""
+    """Return ``True`` if *pid* looks like a KiroClaw gateway process.
+
+    Resolves the process command line via ``ps`` and defers classification to
+    :func:`_args_look_like_kiroclaw`. ``FileNotFoundError`` (``ps`` not installed)
+    is intentionally **propagated** so :func:`_stop` can surface its
+    ``ps_not_found`` branch; ``CalledProcessError`` (the PID has already exited)
+    is treated as "not a match".
+    """
     try:
         out = subprocess.check_output(
             ["ps", "-p", str(pid), "-o", "args="], text=True
-        ).strip().lower()
-        # Match both the installed entrypoint (``kiroclaw gateway``) and the
-        # source/module invocation (``python -m kiro_claw gateway``). The
-        # module form appears in ps as ``kiro_claw gateway`` (underscore +
-        # space), which the entrypoint-only checks would otherwise miss, so
-        # ``kiroclaw stop`` could not stop a dev/source-run gateway.
-        return ("kiro_claw.gateway" in out or "kiro_claw.dashboard" in out
-                or "kiro_claw gateway" in out or "-m kiro_claw" in out
-                or "kiroclaw gateway" in out or "kiroclaw start" in out)
+        ).strip()
     except subprocess.CalledProcessError:
         return False
+    return _args_look_like_kiroclaw(out)
 
 
 def _pid_exited(pid: int) -> bool:
@@ -353,7 +459,14 @@ def _print_token_url(port: int) -> None:
                 data = json.loads(resp.read())
                 token = data.get("token", "")
             if token:
-                print(f"\n🔑 http://localhost:{port}?token={token}")
+                # Print the canonical loopback host (kiroclaw.localhost when it
+                # resolves, else localhost) — same host the gateway auto-opens —
+                # so the post-restart URL doesn't land the browser on a different
+                # origin and split the SPA's per-origin localStorage settings.
+                # (The /api/token/local call above stays localhost: it's a loopback
+                # API request, not a browser URL.)
+                host = resolve_dashboard_host(local_only=True)
+                print(f"\n🔑 http://{host}:{port}?token={token}")
                 origin = dashboard_origin(KiroClawConfig.load().dashboard.url)
                 if origin and "localhost" not in origin:
                     print(f"   {origin}/?token={token}")
@@ -598,6 +711,17 @@ async def _gateway(
     approval_mode: str | None = None,
 ) -> None:
     """Load config and start the Slack Socket Mode gateway."""
+    # Activate mise once at gateway start (Mesh-2371) so every subprocess we
+    # later spawn — MCP servers, script crons, kiro-cli — inherits the user's
+    # mise-managed toolchain. Without this, Node-based MCP servers spawn against
+    # the system /usr/bin/node (v18 on AL2) and die during `initialize` with a
+    # stderr-only "Node version 18 detected" error. No-op when mise is absent.
+    _mise_changed = activate_mise()
+    if _mise_changed:
+        logging.getLogger(__name__).info(
+            "Activated mise at gateway start (updated %s)", ", ".join(_mise_changed)
+        )
+
     # Ensure Node >= 16 so frontend builds work (avoids legacy fallback).
     from kiro_claw.cli import _ensure_node, _node_ok  # circular import: cli -> cli_server -> cli
 

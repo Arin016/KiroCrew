@@ -28,6 +28,7 @@ def _mock_state(slot: _ChatSlot | None = None) -> DashboardState:
     state.sessions = MagicMock()
     state.sessions.reset = AsyncMock()
     state.file_indexes = MagicMock()
+    state._background_tasks = set()
     state.file_indexes.acquire = AsyncMock()
     state.file_indexes.release = AsyncMock()
     return state
@@ -112,9 +113,10 @@ class TestChatSlotProject:
             assert resp.status == 404
 
     @pytest.mark.asyncio
-    async def test_change_resets_session(self, tmp_path):
-        """Changing the project resets the session so kiro-cli cold-starts
-        with the new CWD and reloads project-level .kiro/steering/."""
+    async def test_change_defers_session_reset(self, tmp_path):
+        """Endpoint sets the deferred-reset flag instead of resetting inline,
+        because an inline reset would killpg the MCP-core child that called it.
+        chat_runner consumes the flag so the next message picks up the new CWD."""
         slot = _ChatSlot("test")
         state = _mock_state(slot)
         with patch("kiro_claw.dashboard.chat_handlers._save_recent_project"):
@@ -124,11 +126,14 @@ class TestChatSlotProject:
                     json={"project": str(tmp_path)},
                 )
                 assert resp.status == 200
-        state.sessions.reset.assert_awaited_once_with("dashboard:test")
+        # Reset is deferred — endpoint must NOT call it inline.
+        state.sessions.reset.assert_not_awaited()
+        # Flag is set on the slot so chat_runner can consume it at the turn boundary.
+        assert slot._pending_reset_history_key == "dashboard:test"
 
     @pytest.mark.asyncio
-    async def test_unchanged_does_not_reset_session(self, tmp_path):
-        """Setting the same project value is a no-op — no needless cold start."""
+    async def test_unchanged_does_not_set_pending_reset(self, tmp_path):
+        """No-op when project doesn't change: no inline reset and no flag set."""
         slot = _ChatSlot("test")
         slot.project = str(tmp_path)
         state = _mock_state(slot)
@@ -140,3 +145,4 @@ class TestChatSlotProject:
                 )
                 assert resp.status == 200
         state.sessions.reset.assert_not_awaited()
+        assert slot._pending_reset_history_key is None

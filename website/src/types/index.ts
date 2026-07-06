@@ -36,8 +36,11 @@ export interface CronJob {
   enabled: boolean; schedule: string; last_status: string
   cron_expr?: string | null; every?: number | null; every_secs?: number | null
   at?: number | null; created_ts?: number | null
-  agent?: string; channel?: string; approval_mode?: string; silent?: boolean
+  agent?: string; project_path?: string; channel?: string; approval_mode?: string; silent?: boolean
   strict_schedule?: boolean
+  /** When true, this cron's runs do not appear as a chat session in the active
+   * session list (results still go to Slack/notifications + History). Default false. */
+  hide_in_chat?: boolean
   last_run_ts?: number; next_run_ts?: number | null; has_result?: boolean; has_slot?: boolean
   /** IANA timezone the cron expression's hour/minute fields are stored in.
    * Absent / null for legacy jobs created without an explicit TZ — treat as UTC. */

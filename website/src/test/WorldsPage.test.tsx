@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { screen, fireEvent } from '@testing-library/react'
 import { renderWithProviders } from './helpers'
 import WorldsPage from '../pages/WorldsPage'
+import type { AgentSource } from '../hooks/useAgentSync'
 
 // Mock useAgentSync to avoid real API calls
 vi.mock('../hooks/useAgentSync', () => ({
@@ -25,19 +26,19 @@ vi.mock('../hooks/usePopoutSync', () => ({
 
 // Mock all scene components — they use canvas which jsdom doesn't support
 vi.mock('../pages/scenes/OfficeScene', () => ({
-  default: ({ agents }: any) => <div data-testid="scene-office">OfficeScene ({agents?.length ?? 0})</div>,
+  default: ({ agents }: { agents: AgentSource[] }) => <div data-testid="scene-office">OfficeScene ({agents?.length ?? 0})</div>,
 }))
 vi.mock('../pages/scenes/NeuralConstellationScene', () => ({
-  default: ({ agents }: any) => <div data-testid="scene-neural">NeuralScene ({agents.length})</div>,
+  default: ({ agents }: { agents: AgentSource[] }) => <div data-testid="scene-neural">NeuralScene ({agents.length})</div>,
 }))
 vi.mock('../pages/scenes/WizardTowerScene', () => ({
-  default: ({ agents }: any) => <div data-testid="scene-wizard">WizardScene ({agents.length})</div>,
+  default: ({ agents }: { agents: AgentSource[] }) => <div data-testid="scene-wizard">WizardScene ({agents.length})</div>,
 }))
 vi.mock('../pages/scenes/UnderwaterLabScene', () => ({
-  default: ({ agents }: any) => <div data-testid="scene-underwater">UnderwaterScene ({agents.length})</div>,
+  default: ({ agents }: { agents: AgentSource[] }) => <div data-testid="scene-underwater">UnderwaterScene ({agents.length})</div>,
 }))
 vi.mock('../pages/scenes/mission-control/MissionControlScene', () => ({
-  default: ({ agents }: any) => <div data-testid="scene-mission">MissionScene ({agents.length})</div>,
+  default: ({ agents }: { agents: AgentSource[] }) => <div data-testid="scene-mission">MissionScene ({agents.length})</div>,
 }))
 
 beforeEach(() => {

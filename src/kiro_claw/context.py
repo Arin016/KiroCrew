@@ -271,8 +271,14 @@ _CRITICAL_RULES = (
     "inside inline `code` backticks (e.g. `/home/user/project/src/main.py`). "
     "Never use relative paths or bare filenames. This enables the UI file viewer panel.\n"
     "When presenting choices or options to the user, you MUST end your response "
-    "with [OPTIONS: Choice A | Choice B | Choice C] on its own line. "
+    "with [OPTIONS: Choice A | Choice B | Choice C] as the very last line. "
     "This renders interactive buttons in the UI. Users can select multiple options before submitting.\n"
+    "The [OPTIONS:] line MUST be the final line, appear exactly once, and have "
+    "NOTHING after it -- no closing remark, follow-up question, or sign-off. When "
+    "your final message asks the user to choose or act, put everything they need "
+    "(links, CR/ticket IDs, status, a gloss on any unclear option label, and any "
+    "clarifying questions) in the body BEFORE the [OPTIONS:] line -- the UI "
+    "collapses earlier steps, so the final message is all that remains.\n"
     "[END CRITICAL RULES]\n\n"
 )
 
@@ -1246,7 +1252,8 @@ class ContextBuilder:
         # the AskUserQuestion tool instead left CC options unrendered.
         if interactive:
             parts.append(
-                "\n\n(If presenting choices, end with [OPTIONS: choice1 | choice2 | choice3]. "
+                "\n\n(If presenting choices, end with [OPTIONS: choice1 | choice2 | choice3] "
+                "as the very last line — exactly once, nothing after it. "
                 "Users can select multiple options before submitting.)"
             )
 

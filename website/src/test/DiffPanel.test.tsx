@@ -4,8 +4,16 @@ import { render, screen } from '@testing-library/react'
 // Mock Monaco DiffEditor — heavy, lazy-loaded, and unrenderable in jsdom.
 // The mock surfaces props as data attributes so the test can verify the
 // wrapper passes original/modified/language/options correctly.
+interface MockDiffEditorProps {
+  original?: string
+  modified?: string
+  language?: string
+  theme?: string
+  options?: { renderSideBySide?: boolean; lineNumbers?: string }
+}
+
 vi.mock('@monaco-editor/react', () => ({
-  DiffEditor: ({ original, modified, language, theme, options }: any) => (
+  DiffEditor: ({ original, modified, language, theme, options }: MockDiffEditorProps) => (
     <div
       data-testid="monaco-diff"
       data-original={original}

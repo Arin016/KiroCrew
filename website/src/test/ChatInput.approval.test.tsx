@@ -42,7 +42,7 @@ function stateWithApproval(meta: Record<string, unknown> = {}): Partial<RootStat
       ],
       toolLog: [],
       slotStatusDetail: {},
-    } as any,
+    } as unknown as RootState['chat'],
     dashboard: {
       slots: [{ key: 'slot-1', messages: 2, running: true, pending_approval: true, waiting_for_input: false, last_activity_ts: undefined }],
       approvalMode: 'normal',
@@ -51,7 +51,7 @@ function stateWithApproval(meta: Record<string, unknown> = {}): Partial<RootStat
       refreshTrigger: 0,
       unreadSlots: [],
       updateProgress: null,
-    } as any,
+    } as unknown as RootState['dashboard'],
   }
 }
 
@@ -160,8 +160,8 @@ describe('ChatInput approval flow', () => {
 
   it('does not show approval bar without pending approval', () => {
     const store = createTestStore({
-      chat: { activeSlot: 'slot-1', messages: [{ role: 'user', content: 'hi' }], toolLog: [], slotStatusDetail: {} } as any,
-      dashboard: { slots: [{ key: 'slot-1', messages: 1, running: true, pending_approval: false, waiting_for_input: false, last_activity_ts: undefined }], approvalMode: 'normal', connected: true, channelTrusted: false, refreshTrigger: 0, unreadSlots: [], updateProgress: null } as any,
+      chat: { activeSlot: 'slot-1', messages: [{ role: 'user', content: 'hi' }], toolLog: [], slotStatusDetail: {} } as unknown as RootState['chat'],
+      dashboard: { slots: [{ key: 'slot-1', messages: 1, running: true, pending_approval: false, waiting_for_input: false, last_activity_ts: undefined }], approvalMode: 'normal', connected: true, channelTrusted: false, refreshTrigger: 0, unreadSlots: [], updateProgress: null } as unknown as RootState['dashboard'],
     })
     renderWithProviders(<ChatInput {...defaultProps} />, { store })
     expect(screen.queryByText(/Waiting for approval/)).not.toBeInTheDocument()
@@ -175,7 +175,7 @@ describe('ChatInput approval flow', () => {
 
   it('hides Trust reads for non-read-only commands', () => {
     const state = stateWithApproval()
-    ;(state.chat as any).messages[1].meta.is_read_only = ''
+    state.chat!.messages[1].meta!.is_read_only = ''
     const store = createTestStore(state)
     renderWithProviders(<ChatInput {...defaultProps} />, { store })
     expect(screen.queryByText('Trust reads')).not.toBeInTheDocument()
@@ -183,7 +183,7 @@ describe('ChatInput approval flow', () => {
 
   it('trust action falls back to resolveApproval when no activeSlot', async () => {
     const state = stateWithApproval()
-    ;(state.chat as any).activeSlot = null
+    state.chat!.activeSlot = null
     const store = createTestStore(state)
     renderWithProviders(<ChatInput {...defaultProps} />, { store })
     fireEvent.click(screen.getByText('Trust'))
@@ -250,10 +250,11 @@ describe('ChatInput approval flow', () => {
 
   it('non-shell tool hides base command option', () => {
     const state = stateWithApproval()
-    ;(state.chat as any).messages[1].meta.tool_title = 'TaskeiGetTask'
-    ;(state.chat as any).messages[1].meta.full_command = 'TaskeiGetTask'
-    ;(state.chat as any).messages[1].meta.base_command = 'TaskeiGetTask'
-    ;(state.chat as any).messages[1].content = 'TaskeiGetTask'
+    const msg = state.chat!.messages[1]
+    msg.meta!.tool_title = 'TaskeiGetTask'
+    msg.meta!.full_command = 'TaskeiGetTask'
+    msg.meta!.base_command = 'TaskeiGetTask'
+    msg.content = 'TaskeiGetTask'
     const store = createTestStore(state)
     renderWithProviders(<ChatInput {...defaultProps} />, { store })
     fireEvent.click(screen.getByText('Trust'))

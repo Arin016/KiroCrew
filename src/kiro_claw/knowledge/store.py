@@ -127,6 +127,7 @@ class KnowledgeStore:
                 tags TEXT DEFAULT '[]',
                 embedding BLOB,
                 status TEXT DEFAULT 'active',
+                content_hash TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -205,6 +206,16 @@ class KnowledgeStore:
                 PRIMARY KEY (source_id, file_path)
             );
 
+            CREATE TABLE IF NOT EXISTS artifact_item_state (
+                source_id TEXT NOT NULL REFERENCES sources(id),
+                slug TEXT NOT NULL,
+                content_hash TEXT,
+                item_ids TEXT DEFAULT '[]',
+                updated_at TEXT NOT NULL,
+                name TEXT,
+                PRIMARY KEY (source_id, slug)
+            );
+
         """)
         self.db.commit()
 
@@ -221,6 +232,16 @@ class KnowledgeStore:
             self.db.execute("ALTER TABLE items ADD COLUMN embedding_sig TEXT")
         if "embedded_at" not in cols:
             self.db.execute("ALTER TABLE items ADD COLUMN embedded_at TEXT")
+        # Whole-doc extracted-text hash, the cross-source de-dup key (knowledge/dedup.py).
+        # NULL on legacy rows -> they fall back to the fuzzy (embedding) dedup tier.
+        if "content_hash" not in cols:
+            self.db.execute("ALTER TABLE items ADD COLUMN content_hash TEXT")
+        # Index created here (not in the CREATE TABLE DDL) so it runs only after the
+        # column is guaranteed to exist: on a pre-existing DB the DDL block's
+        # CREATE TABLE IF NOT EXISTS is a no-op and the column is added by the ALTER
+        # above; IF NOT EXISTS keeps it idempotent for fresh DBs too.
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_items_content_hash ON items(content_hash)")
         src_cols = {r[1] for r in self.db.execute("PRAGMA table_info(sources)").fetchall()}
         if "sync_status" not in src_cols:
             self.db.execute("ALTER TABLE sources ADD COLUMN sync_status TEXT DEFAULT 'pending'")
@@ -251,10 +272,29 @@ class KnowledgeStore:
                 self.db.execute("ALTER TABLE folder_file_state ADD COLUMN status TEXT DEFAULT 'pending'")
             if "error_message" not in ffs_cols:
                 self.db.execute("ALTER TABLE folder_file_state ADD COLUMN error_message TEXT")
+        # Migrate: artifact_item_state table -- per-artifact item-group tracking
+        # for the aggregate "Artifacts" KB source, keyed by artifact slug.
+        if "artifact_item_state" not in tables:
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS artifact_item_state (
+                    source_id TEXT NOT NULL REFERENCES sources(id),
+                    slug TEXT NOT NULL,
+                    content_hash TEXT,
+                    item_ids TEXT DEFAULT '[]',
+                    updated_at TEXT NOT NULL,
+                    name TEXT,
+                    PRIMARY KEY (source_id, slug)
+                )
+            """)
+        else:
+            ais_cols = {r[1] for r in self.db.execute(
+                "PRAGMA table_info(artifact_item_state)").fetchall()}
+            if "name" not in ais_cols:
+                self.db.execute("ALTER TABLE artifact_item_state ADD COLUMN name TEXT")
         # Clean orphan sources (no items), entities (no mentions/relations), and stale relations
         self.db.execute("BEGIN")
         try:
-            orphan_sources_q = "SELECT id FROM sources WHERE id NOT IN (SELECT DISTINCT source_id FROM items WHERE source_id IS NOT NULL) AND id NOT IN (SELECT source_id FROM ingestion_jobs WHERE status IN ('pending', 'processing')) AND id NOT IN (SELECT DISTINCT source_id FROM folder_file_state)"
+            orphan_sources_q = "SELECT id FROM sources WHERE id NOT IN (SELECT DISTINCT source_id FROM items WHERE source_id IS NOT NULL) AND id NOT IN (SELECT source_id FROM ingestion_jobs WHERE status IN ('pending', 'processing')) AND id NOT IN (SELECT DISTINCT source_id FROM folder_file_state) AND id NOT IN (SELECT DISTINCT source_id FROM artifact_item_state)"
             self.db.execute(f"DELETE FROM source_locations WHERE source_id IN ({orphan_sources_q})")
             self.db.execute(f"DELETE FROM ingestion_jobs WHERE source_id IN ({orphan_sources_q})")
             self.db.execute(f"DELETE FROM sources WHERE id IN ({orphan_sources_q})")
@@ -278,16 +318,17 @@ class KnowledgeStore:
                                 id=row["id"], relation_type=row["relation_type"], weight=row["weight"])
 
     def add_item(self, title, content, item_type, source_id=None, chunk_index=0,
-                 summary=None, tags=None, embedding=None, namespace="default") -> str:
+                 summary=None, tags=None, embedding=None, namespace="default",
+                 content_hash=None) -> str:
         item_id = str(uuid4())
         now = datetime.now().isoformat()
         tags_json = json.dumps(tags or [])
         self.db.execute("BEGIN")
         try:
             self.db.execute(
-                "INSERT INTO items (id, title, content, item_type, source_id, chunk_index, namespace, summary, tags, embedding, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (item_id, title, content, item_type, source_id, chunk_index, namespace, summary, tags_json, embedding, now, now))
+                "INSERT INTO items (id, title, content, item_type, source_id, chunk_index, namespace, summary, tags, embedding, content_hash, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (item_id, title, content, item_type, source_id, chunk_index, namespace, summary, tags_json, embedding, content_hash, now, now))
             # Sync FTS: get the rowid of the inserted item
             rowid = self.db.execute("SELECT rowid FROM items WHERE id = ?", (item_id,)).fetchone()[0]
             self.db.execute(
@@ -411,6 +452,7 @@ class KnowledgeStore:
             self.db.execute("DELETE FROM items WHERE source_id = ?", (source_id,))
             self.db.execute("DELETE FROM ingestion_jobs WHERE source_id = ?", (source_id,))
             self.db.execute("DELETE FROM folder_file_state WHERE source_id = ?", (source_id,))
+            self.db.execute("DELETE FROM artifact_item_state WHERE source_id = ?", (source_id,))
             self.db.execute("DELETE FROM sources WHERE id = ?", (source_id,))
             # Remove orphan entities
             self.db.execute("""

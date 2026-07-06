@@ -77,6 +77,7 @@ export default {
         'brand-glow': { '0%': { opacity: '.6', transform: 'scale(1)' }, '100%': { opacity: '1', transform: 'scale(1.05)' } },
         'gradient-shift': { '0%': { backgroundPosition: '0% 50%' }, '50%': { backgroundPosition: '100% 50%' }, '100%': { backgroundPosition: '0% 50%' } },
         'msg-highlight': { '0%': { boxShadow: 'inset 0 0 0 2px var(--accent)' }, '100%': { boxShadow: 'inset 0 0 0 0px transparent' } },
+        float: { '0%,100%': { transform: 'translateY(0)' }, '50%': { transform: 'translateY(-6px)' } },
       },
       animation: {
         rise: 'rise .35s cubic-bezier(.16,1,.3,1) backwards',
@@ -91,6 +92,7 @@ export default {
         'brand-glow': 'brand-glow 5s ease-in-out infinite alternate',
         'gradient-shift': 'gradient-shift 20s ease infinite',
         'msg-highlight': 'msg-highlight 2s ease-out forwards',
+        float: 'float 3s ease-in-out infinite',
       },
     },
   },

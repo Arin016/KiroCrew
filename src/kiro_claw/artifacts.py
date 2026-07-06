@@ -41,7 +41,7 @@ import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from typing import List as _List
 
 from kiro_claw.config.loader import config_dir
@@ -234,6 +234,72 @@ def _validate_kind(kind: str) -> str:
     return kind
 
 
+#: File-extension → kind map for inferring the kind of a file-backed artifact
+#: (one with a ``source_path``) when the caller didn't pin one. Keys lowercased.
+_EXT_KIND_MAP = {
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".html": "html",
+    ".htm": "html",
+    ".svg": "svg",
+    ".json": "json",
+    ".txt": "text",
+}
+
+#: Substrings whose presence marks inline content as renderable HTML (→
+#: ``widget``). Matched case-insensitively against the lstripped content.
+_HTML_SNIFF_MARKERS = (
+    "<div",
+    "<span",
+    "<style",
+    "<table",
+    "<mcwidget",
+    "<html",
+    "<!doctype html",
+)
+
+#: A leading markdown ATX heading (``#`` .. ``######`` followed by whitespace).
+_MD_HEADING_RE = re.compile(r"^#{1,6}\s")
+
+
+def _infer_kind(content: str, source_path: str = "", explicit: str | None = None) -> str:
+    """Infer an artifact ``kind`` when the caller didn't pin one.
+
+    Resolution order (first match wins):
+
+    1. **Explicit wins** — a non-empty ``explicit`` kind is returned unchanged
+       (back-compat; the caller knows best). Validation happens downstream.
+    2. **Extension** — for file-backed artifacts (``source_path`` set), map the
+       file extension (``.md`` → ``markdown``, ``.json`` → ``json`` ...). An
+       unknown extension on a real file falls back to ``text`` — a file on disk
+       is far likelier plain text than a sandboxed widget.
+    3. **Content sniff** — for inline content with no ``source_path``: HTML-ish
+       markup (``<div``, ``<table``, an ``<mcwidget`` body ...) → ``widget``; a
+       leading markdown heading or content with no HTML tags at all →
+       ``markdown``; anything else falls back to the legacy ``widget`` default
+       so ambiguous blobs keep their prior behavior.
+
+    Only ``widget`` and ``markdown`` are inferred from inline content; the
+    richer kinds (``svg`` / ``json`` / ``text``) require the extension signal.
+    The returned value is not validated here — callers pass it through
+    :func:`_validate_kind`.
+    """
+    if explicit:
+        return explicit
+    if source_path:
+        ext = os.path.splitext(source_path)[1].lower()
+        return _EXT_KIND_MAP.get(ext, "text")
+    sniff = (content or "").lstrip()
+    if not sniff:
+        return "widget"  # empty inline content → keep the legacy default
+    lowered = sniff.lower()
+    if any(marker in lowered for marker in _HTML_SNIFF_MARKERS):
+        return "widget"
+    if _MD_HEADING_RE.match(sniff) or "<" not in sniff:
+        return "markdown"
+    return "widget"
+
+
 def _validate_source(source: str) -> str:
     if source not in ALLOWED_SOURCES:
         raise ArtifactValidationError(
@@ -301,6 +367,13 @@ class ArtifactStore:
     def __init__(self, root: Path | None = None) -> None:
         self._root = (root or (config_dir() / "artifacts")).expanduser()
         self._lock = threading.Lock()
+        # Optional change-listener fired after a content-affecting mutation
+        # (create / content-update / delete). Lets the gateway observe every
+        # write path — agent (MCP-proxied), dashboard, bookmark, CLI, and the
+        # Artifactory pull/clone paths all funnel through this store in the
+        # gateway process, so one listener here catches them all without the
+        # store importing (or knowing about) the knowledge package.
+        self._change_listener: Callable[[str, str], None] | None = None
         # Refuse to land under any sensitive path. is_sensitive_path() handles
         # symlink resolution, so resolve() before checking.
         resolved = self._root.resolve(strict=False)
@@ -314,13 +387,40 @@ class ArtifactStore:
     def root(self) -> Path:
         return self._root
 
+    def set_change_listener(self, listener: Callable[[str, str], None] | None) -> None:
+        """Register a callback fired after a content-affecting mutation.
+
+        The listener is invoked as ``listener(action, slug)`` where ``action``
+        is ``"upsert"`` (create or content-changing update), ``"rename"``
+        (metadata-only name change), or ``"delete"``.
+        It runs *after* the store mutation completes and *outside* the store
+        lock, so the listener may call back into the store (e.g. ``get``).
+        Exceptions raised by the listener are logged and swallowed — a
+        listener failure must never break an artifact write. Pass ``None`` to
+        clear. The store stays dependency-free: it knows nothing about what
+        the listener does.
+        """
+        self._change_listener = listener
+
+    def _fire_change(self, action: str, slug: str) -> None:
+        """Invoke the change-listener, isolating any failure from the writer."""
+        listener = self._change_listener
+        if listener is None:
+            return
+        try:
+            listener(action, slug)
+        except Exception:
+            logger.exception(
+                "artifact change listener failed: action=%s slug=%s", action, slug
+            )
+
     def create(
         self,
         *,
         name: str,
         content: str,
         slug: str | None = None,
-        kind: str = "widget",
+        kind: str | None = None,
         source: str = "chat",
         description: str = "",
         tags: list[str] | None = None,
@@ -339,11 +439,14 @@ class ArtifactStore:
         to ``source_path``.
         """
         name = _validate_name(name)
-        kind = _validate_kind(kind)
+        content = _validate_content(content)
+        # Infer the kind when the caller didn't pin one (explicit kind always
+        # wins). Validated content is needed for the inline content sniff, so
+        # this runs after _validate_content.
+        kind = _validate_kind(_infer_kind(content, source_path, kind))
         source = _validate_source(source)
         description = _validate_description(description)
         tags_list = _validate_tags(tags)
-        content = _validate_content(content)
 
         with self._lock:
             if slug is None:
@@ -379,7 +482,8 @@ class ArtifactStore:
             art.events_backfilled = True
             self._write_artifact(art, content)
             logger.info("artifact created: slug=%s name=%s kind=%s", slug, name, kind)
-            return art
+        self._fire_change("upsert", slug)
+        return art
 
     def get(self, slug: str, *, version: int | None = None) -> Artifact:
         """Return an artifact (with content) by slug, optionally a specific version.
@@ -554,6 +658,7 @@ class ArtifactStore:
         with self._lock:
             art = self._load_meta(slug)
             changed_content = False
+            name_changed = False
             if content is not None:
                 content = _validate_content(content)
                 changed_content = True
@@ -563,7 +668,9 @@ class ArtifactStore:
             if tags is not None:
                 art.tags = _validate_tags(tags)
             if name is not None:
-                art.name = _validate_name(name)
+                new_name = _validate_name(name)
+                name_changed = new_name != art.name
+                art.name = new_name
             art.updated_at = _now_iso()
 
             # Snapshot of current live state (no new content provided).
@@ -639,7 +746,17 @@ class ArtifactStore:
                 changed_content,
                 snapshot,
             )
-            return art
+            fire_upsert = changed_content
+            fire_rename = name_changed and not changed_content
+        # A content change is worth re-ingesting; a metadata-only rename just
+        # refreshes the KB group label (no chunk churn). Description/tag-only
+        # updates fire nothing. Fire outside the lock so the listener may call
+        # get().
+        if fire_upsert:
+            self._fire_change("upsert", slug)
+        elif fire_rename:
+            self._fire_change("rename", slug)
+        return art
 
     def delete(self, slug: str) -> None:
         """Permanently delete an artifact and all of its versions."""
@@ -650,6 +767,7 @@ class ArtifactStore:
                 raise ArtifactNotFoundError(f"artifact not found: {slug}")
             self._rmtree(adir)
             logger.info("artifact deleted: slug=%s", slug)
+        self._fire_change("delete", slug)
 
     def record_impression(
         self,

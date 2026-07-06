@@ -33,7 +33,6 @@ function fmtDuration(start?: number, end?: number) {
 
 export default function TaskDetailPanel({ task, allTasks = [], onClose, onRetry, onApprove, onToggleApproval, editable, onSave, pendingEdits = {}, onEdit }: Props) {
   const typeIcon = task.task_type === 'fix' ? <Wrench className="lucide-inline" /> : task.task_type === 'checkpoint' ? <Shield className="lucide-inline" /> : null;
-  const t = task as any;
   const pending = pendingEdits[task.index];
 
   const [editTitle, setEditTitle] = useState(pending?.title ?? task.title);
@@ -97,7 +96,7 @@ export default function TaskDetailPanel({ task, allTasks = [], onClose, onRetry,
   return (
     <DetailPanel
       title={editable
-        ? <>{typeIcon} Task {task.index}: <input value={editTitle} disabled={saving} onChange={e => { setEditTitle(e.target.value); reportEdit(e.target.value, editDesc, editDeps) }}
+        ? <>{typeIcon} Task {task.index}: <input aria-label="Task title" value={editTitle} disabled={saving} onChange={e => { setEditTitle(e.target.value); reportEdit(e.target.value, editDesc, editDeps) }}
             className="bg-transparent border-b border-accent text-text text-[14px] outline-none w-[200px]" /></>
         : <>{typeIcon} Task {task.index}: {task.title}</>}
       onClose={onClose}
@@ -116,25 +115,25 @@ export default function TaskDetailPanel({ task, allTasks = [], onClose, onRetry,
         <div className="grid grid-cols-2 gap-2 text-[12px] text-muted">
           <div>
             <div className="font-semibold mb-0.5">Created</div>
-            <div>{fmtTime(t.created_at || t.started_at)}</div>
+            <div>{fmtTime(task.created_at || task.started_at)}</div>
           </div>
           <div>
             <div className="font-semibold mb-0.5">Duration</div>
-            <div>{fmtDuration(t.started_at, t.finished_at)}</div>
+            <div>{fmtDuration(task.started_at, task.finished_at)}</div>
           </div>
-          {t.started_at && <div>
+          {task.started_at && <div>
             <div className="font-semibold mb-0.5">Started</div>
-            <div>{fmtTime(t.started_at)}</div>
+            <div>{fmtTime(task.started_at)}</div>
           </div>}
-          {t.finished_at && <div>
+          {task.finished_at && <div>
             <div className="font-semibold mb-0.5">Finished</div>
-            <div>{fmtTime(t.finished_at)}</div>
+            <div>{fmtTime(task.finished_at)}</div>
           </div>}
         </div>
 
         {/* Description */}
         {editable ? (
-          <textarea value={editDesc} disabled={saving} onChange={e => { setEditDesc(e.target.value); reportEdit(editTitle, e.target.value, editDeps) }}
+          <textarea aria-label="Task description" value={editDesc} disabled={saving} onChange={e => { setEditDesc(e.target.value); reportEdit(editTitle, e.target.value, editDeps) }}
             className="w-full text-[13px] leading-relaxed bg-bg-elevated border border-border rounded-md p-2 text-text outline-none resize-y min-h-[80px]" />
         ) : (
           <div className="text-[13px] leading-relaxed whitespace-pre-wrap">{task.description}</div>
@@ -153,8 +152,8 @@ export default function TaskDetailPanel({ task, allTasks = [], onClose, onRetry,
             <div className="text-[12px] font-semibold text-muted mb-1">Depends on</div>
             <div className="flex flex-col gap-1">
               {allTasks.filter(at => at.index < task.index).map(at => (
-                <label key={at.index} className="flex items-center gap-2 text-[12px] text-text cursor-pointer">
-                  <input type="checkbox" checked={editDeps.includes(at.index)} disabled={saving} onChange={() => toggleDep(at.index)} />
+                <label key={at.index} htmlFor={`dep-${at.index}`} className="flex items-center gap-2 text-[12px] text-text cursor-pointer">
+                  <input id={`dep-${at.index}`} type="checkbox" aria-label={`Depend on Task ${at.index}: ${at.title}`} checked={editDeps.includes(at.index)} disabled={saving} onChange={() => toggleDep(at.index)} />
                   Task {at.index}: {at.title}
                 </label>
               ))}
@@ -208,13 +207,13 @@ function ApprovalToggles({ task, onToggleApproval }: { task: TaskDetail; onToggl
   useEffect(() => { setRA(task.requires_approval || false); setFA(task.force_approval || false); }, [task.index, task.requires_approval, task.force_approval]);
   return (
     <div className="flex flex-col gap-1.5">
-      <label className="flex items-center gap-2 text-[12px] text-text cursor-pointer">
-        <input type="checkbox" checked={ra} onChange={async e => { const v = e.target.checked; const prevRA = ra; const prevFA = fa; setRA(v); if (!v && fa) setFA(false); const ok = await onToggleApproval(task.index, 'requires_approval', v); if (!ok) { setRA(prevRA); setFA(prevFA); } }} />
+      <label htmlFor="requires-approval" className="flex items-center gap-2 text-[12px] text-text cursor-pointer">
+        <input id="requires-approval" type="checkbox" aria-label="Requires approval" checked={ra} onChange={async e => { const v = e.target.checked; const prevRA = ra; const prevFA = fa; setRA(v); if (!v && fa) setFA(false); const ok = await onToggleApproval(task.index, 'requires_approval', v); if (!ok) { setRA(prevRA); setFA(prevFA); } }} />
         Requires approval
       </label>
       {(ra || fa) && (
-        <label className="flex items-center gap-2 text-[12px] text-text cursor-pointer pl-4">
-          <input type="checkbox" checked={fa} onChange={async e => { const v = e.target.checked; const prev = fa; setFA(v); const ok = await onToggleApproval(task.index, 'force_approval', v); if (!ok) setFA(prev); }} />
+        <label htmlFor="force-approval" className="flex items-center gap-2 text-[12px] text-text cursor-pointer pl-4">
+          <input id="force-approval" type="checkbox" aria-label="Block in YOLO mode" checked={fa} onChange={async e => { const v = e.target.checked; const prev = fa; setFA(v); const ok = await onToggleApproval(task.index, 'force_approval', v); if (!ok) setFA(prev); }} />
           Block in YOLO mode
         </label>
       )}

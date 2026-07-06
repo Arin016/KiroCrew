@@ -102,4 +102,105 @@ async function stopGatewayGracefully(
   });
 }
 
-module.exports = { postShutdown, stopGatewayGracefully };
+/**
+ * Force-stop whatever KiroClaw process is LISTENing on `port`, then VERIFY the
+ * port actually freed before reporting success.
+ *
+ * The old inline version SIGKILLed the owner and resolved after a fixed 800ms
+ * delay, treating "signal accepted" as "process dead". That is wrong for a
+ * gateway wedged in an uninterruptible kernel wait (macOS `U` state, e.g. a
+ * blocking close() on a dead socket): SIGKILL is queued but never delivered, so
+ * the process lives on and keeps the port. The caller then respawned into a
+ * guaranteed "address already in use" and surfaced a confusing "exited code 1".
+ *
+ * This version polls the listener set after killing and returns `freed` based on
+ * whether the port is ACTUALLY free afterwards (not merely whether our targets
+ * died), plus `survivors` (the KiroClaw PIDs we tried to kill that are still
+ * holding the port) and `foreignHolder` (a non-KiroClaw process still owns it).
+ * `freed === false` means a respawn would just fail to bind — the caller MUST
+ * NOT respawn; it should tell the user a restart is required (`survivors`, an
+ * unkillable wedge) or that another app holds the port (`foreignHolder`).
+ *
+ * All side effects are injected so this is unit-testable without Electron or a
+ * real OS process:
+ *   - getListenPids(port) -> Promise<number[]>   (lsof -t)
+ *   - getCommand(pid)     -> Promise<string>     (ps -o command=)
+ *   - kill(pid, signal)                          (process.kill; may throw)
+ *   - sleep(ms)           -> Promise<void>
+ *
+ * @returns {Promise<{killed:number, freed:boolean, survivors:number[], foreignHolder:boolean}>}
+ */
+async function forceStopPort(
+  port,
+  {
+    getListenPids,
+    getCommand,
+    kill,
+    sleep,
+    isKiroclaw = /kiro_claw|kiroclaw/i,
+    verifyTimeoutMs = 4000,
+    pollIntervalMs = 250,
+    log = () => {},
+  }
+) {
+  const owners = await getListenPids(port);
+  if (!owners.length) {
+    log(`force-stop: no LISTEN owner found on :${port}`);
+    return { killed: 0, freed: true, survivors: [], foreignHolder: false };
+  }
+
+  // Only signal PIDs we can positively identify as KiroClaw — never SIGKILL an
+  // unrelated app that happens to share the port.
+  const targets = [];
+  for (const pid of owners) {
+    const cmd = (await getCommand(pid)).trim();
+    if (isKiroclaw.test(cmd)) {
+      try {
+        kill(pid, "SIGKILL");
+        targets.push(pid);
+        log(`force-stop: SIGKILL pid=${pid} (${cmd.slice(0, 80)})`);
+      } catch (e) {
+        log(`force-stop: kill pid=${pid} failed: ${e && e.message}`);
+      }
+    } else {
+      log(`force-stop: SKIP pid=${pid} — not a KiroClaw process (${cmd.slice(0, 80)})`);
+    }
+  }
+
+  // Verify the kill took: poll until none of the PIDs we killed still hold the
+  // port, or we run out of time. A normal process disappears within a poll or
+  // two; a wedged (uninterruptible) one never will — that is the signal we need.
+  const killed = targets.length;
+  let survivors = targets.slice();
+  let remaining = new Set(owners);
+  const deadline = verifyTimeoutMs;
+  let waited = 0;
+  while (survivors.length && waited < deadline) {
+    await sleep(pollIntervalMs);
+    waited += pollIntervalMs;
+    remaining = new Set(await getListenPids(port));
+    survivors = survivors.filter((pid) => remaining.has(pid));
+  }
+
+  // If we never had any of our own targets to verify (foreign-only holder), the
+  // loop above didn't re-probe — do one explicit check so `freed` reflects the
+  // real port state instead of vacuously claiming free because WE killed nothing.
+  if (!targets.length) {
+    remaining = new Set(await getListenPids(port));
+  }
+
+  // `freed` means the port is genuinely free, NOT just "our targets died". A
+  // foreign process still listening keeps freed=false so the caller surfaces a
+  // restart/port-conflict path rather than respawning into a doomed bind.
+  const freed = remaining.size === 0;
+  const foreignHolder = !freed && survivors.length === 0;
+  if (survivors.length) {
+    log(`force-stop: port :${port} STILL held after ${waited}ms by pid ${survivors.join(", ")} `
+      + `— process is unkillable (likely uninterruptible sleep); a system restart is required`);
+  } else if (foreignHolder) {
+    log(`force-stop: port :${port} held by a non-KiroClaw process we won't kill — respawn would fail to bind`);
+  }
+  return { killed, freed, survivors, foreignHolder };
+}
+
+module.exports = { postShutdown, stopGatewayGracefully, forceStopPort };

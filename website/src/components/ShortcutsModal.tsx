@@ -1,3 +1,4 @@
+import { safeSetItem } from '../utils/safeStorage'
 import { useEffect, useState } from 'react'
 import { X, Keyboard } from 'lucide-react'
 import { DEFAULT_SHORTCUTS, formatShortcut, SHORTCUTS_ENABLED_KEY, SHORTCUTS_ENABLED_EVENT, IS_MAC, MAC_CTRL_DIGITS_KEY } from '../hooks/useKeyboardShortcuts'
@@ -20,19 +21,26 @@ export default function ShortcutsModal({ onClose }: { onClose: () => void }) {
   }, [onClose])
 
   const toggle = (v: boolean) => {
-    localStorage.setItem(SHORTCUTS_ENABLED_KEY, v ? '1' : '0')
+    safeSetItem(SHORTCUTS_ENABLED_KEY, v ? '1' : '0')
     setEnabled(v)
     window.dispatchEvent(new Event(SHORTCUTS_ENABLED_EVENT))
   }
 
   const toggleMacCtrl = (v: boolean) => {
-    localStorage.setItem(MAC_CTRL_DIGITS_KEY, v ? '1' : '0')
+    safeSetItem(MAC_CTRL_DIGITS_KEY, v ? '1' : '0')
     setMacCtrl(v)
     window.dispatchEvent(new Event(SHORTCUTS_ENABLED_EVENT))
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg/60 backdrop-blur-sm animate-rise" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" onClick={onClose}>
+    // Backdrop click-to-dismiss is a supplementary mouse affordance; keyboard
+    // users close via Escape, already wired through the document keydown
+    // listener above, so the dialog role stays keyboard-accessible.
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-bg/60 backdrop-blur-sm animate-rise" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" onClick={onClose}>
+      {/* onClick only stops propagation so inner clicks don't hit the backdrop
+          dismiss handler; it is event plumbing, not an interactive control. */}
+      {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions */}
       <div className="bg-card border border-border rounded-xl p-6 max-w-lg w-full mx-4 shadow-xl max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-5">
           <div className="flex items-center gap-2 text-sm font-bold text-text-strong"><Keyboard size={16} /> Keyboard Shortcuts</div>
@@ -64,20 +72,20 @@ export default function ShortcutsModal({ onClose }: { onClose: () => void }) {
           )
         })}
         <div className="mt-4 pt-3 border-t border-border flex items-center justify-between">
-          <label className="flex items-center gap-2 text-[12px] text-muted cursor-pointer">
-            <Toggle checked={enabled} onChange={toggle} />
+          <span className="flex items-center gap-2 text-[12px] text-muted cursor-pointer">
+            <Toggle checked={enabled} onChange={toggle} label="Enable shortcuts" />
             <span>Enable shortcuts</span>
-          </label>
+          </span>
           <span className="text-[12px] text-muted">
             <Kbd>{/Mac|iPhone|iPad/.test(navigator?.platform ?? '') ? '⌥' : 'Alt'}</Kbd> <span className="text-[11px]">+</span> <Kbd>K</Kbd> always works
           </span>
         </div>
         {IS_MAC && (
           <div className="mt-2 flex items-center">
-            <label className="flex items-center gap-2 text-[12px] text-muted cursor-pointer">
-              <Toggle checked={macCtrl} onChange={toggleMacCtrl} />
+            <span className="flex items-center gap-2 text-[12px] text-muted cursor-pointer">
+              <Toggle checked={macCtrl} onChange={toggleMacCtrl} label="Use Ctrl (not Option) for chat 1 to 9" />
               <span>Use ⌃ Ctrl (not ⌥ Option) for chat 1–9</span>
-            </label>
+            </span>
           </div>
         )}
       </div>

@@ -2,10 +2,26 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
+import subprocess
 
-from kiro_claw.env import _node_version_manager_bins, augmented_path, resolve_krb5_ccname
+from kiro_claw.env import (
+    _node_version_manager_bins,
+    activate_mise,
+    augmented_path,
+    resolve_krb5_ccname,
+)
+
+
+def _fake_run(stdout="", returncode=0, stderr=""):
+    """Return a subprocess.run replacement that yields a canned CompletedProcess."""
+
+    def _run(argv, **kwargs):  # noqa: ANN001 - test shim
+        return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr=stderr)
+
+    return _run
 
 
 def _fake_statfns(spec):
@@ -245,3 +261,103 @@ class TestResolveKrb5Ccname:
         with caplog.at_level(logging.DEBUG, logger="kiro_claw.env"):
             resolve_krb5_ccname(env)
         assert "rejected ccache candidate" not in caplog.text
+
+
+class TestActivateMise:
+    def test_noop_when_mise_absent(self, monkeypatch) -> None:
+        monkeypatch.setattr("kiro_claw.env._mise_bin", lambda: None)
+        env: dict[str, str] = {"PATH": "/usr/bin"}
+        assert activate_mise(env) == []
+        assert env == {"PATH": "/usr/bin"}
+
+    def test_noop_when_disabled_via_env(self, monkeypatch) -> None:
+        # KIROCLAW_NO_MISE escape hatch short-circuits before mise is invoked.
+        called = {"n": 0}
+        monkeypatch.setattr("kiro_claw.env._mise_bin", lambda: called.__setitem__("n", 1))
+        env = {"PATH": "/usr/bin", "KIROCLAW_NO_MISE": "1"}
+        assert activate_mise(env) == []
+        assert called["n"] == 0  # _mise_bin never consulted
+
+    def test_merges_path_and_added_vars(self, monkeypatch) -> None:
+        monkeypatch.setattr("kiro_claw.env._mise_bin", lambda: "/home/u/.local/bin/mise")
+        payload = json.dumps(
+            {
+                "PATH": "/home/u/.local/share/mise/installs/node/24/bin:/usr/bin",
+                "NODE_ENV": "production",
+            }
+        )
+        monkeypatch.setattr("kiro_claw.env.subprocess.run", _fake_run(stdout=payload))
+        env = {"PATH": "/usr/bin"}
+        changed = activate_mise(env)
+        assert changed == ["NODE_ENV", "PATH"]  # sorted
+        assert env["PATH"].startswith("/home/u/.local/share/mise/installs/node/24/bin")
+        assert env["NODE_ENV"] == "production"
+
+    def test_skips_unchanged_vars(self, monkeypatch) -> None:
+        monkeypatch.setattr("kiro_claw.env._mise_bin", lambda: "/m")
+        payload = json.dumps({"PATH": "/usr/bin"})  # identical to current
+        monkeypatch.setattr("kiro_claw.env.subprocess.run", _fake_run(stdout=payload))
+        env = {"PATH": "/usr/bin"}
+        assert activate_mise(env) == []
+
+    def test_nonzero_exit_is_noop(self, monkeypatch) -> None:
+        monkeypatch.setattr("kiro_claw.env._mise_bin", lambda: "/m")
+        monkeypatch.setattr(
+            "kiro_claw.env.subprocess.run", _fake_run(returncode=1, stderr="boom")
+        )
+        env = {"PATH": "/usr/bin"}
+        assert activate_mise(env) == []
+        assert env == {"PATH": "/usr/bin"}
+
+    def test_unparsable_json_is_noop(self, monkeypatch) -> None:
+        monkeypatch.setattr("kiro_claw.env._mise_bin", lambda: "/m")
+        monkeypatch.setattr("kiro_claw.env.subprocess.run", _fake_run(stdout="not json{"))
+        env = {"PATH": "/usr/bin"}
+        assert activate_mise(env) == []
+
+    def test_non_dict_json_is_noop(self, monkeypatch) -> None:
+        monkeypatch.setattr("kiro_claw.env._mise_bin", lambda: "/m")
+        monkeypatch.setattr("kiro_claw.env.subprocess.run", _fake_run(stdout="[1, 2, 3]"))
+        env = {"PATH": "/usr/bin"}
+        assert activate_mise(env) == []
+
+    def test_skips_non_string_values(self, monkeypatch) -> None:
+        monkeypatch.setattr("kiro_claw.env._mise_bin", lambda: "/m")
+        payload = json.dumps({"PATH": "/new", "BOGUS": 42, "ALSO": None})
+        monkeypatch.setattr("kiro_claw.env.subprocess.run", _fake_run(stdout=payload))
+        env: dict[str, str] = {}
+        assert activate_mise(env) == ["PATH"]
+        assert env == {"PATH": "/new"}
+
+    def test_subprocess_failure_is_swallowed(self, monkeypatch) -> None:
+        monkeypatch.setattr("kiro_claw.env._mise_bin", lambda: "/m")
+
+        def _boom(*a, **k):  # noqa: ANN002, ANN003
+            raise OSError("exec failed")
+
+        monkeypatch.setattr("kiro_claw.env.subprocess.run", _boom)
+        env = {"PATH": "/usr/bin"}
+        assert activate_mise(env) == []
+        assert env == {"PATH": "/usr/bin"}
+
+
+class TestNodeVersionManagerBinsCache:
+    """Verify _node_version_manager_bins is cached (lru_cache) to prevent
+    repeated filesystem I/O on the event-loop thread under GIL pressure."""
+
+    def test_is_cached(self, tmp_path) -> None:
+        """Second call with same arg returns cached result without re-globbing."""
+        _node_version_manager_bins.cache_clear()
+        nvm = tmp_path / ".nvm" / "versions" / "node" / "v20.0.0" / "bin"
+        nvm.mkdir(parents=True)
+        result1 = _node_version_manager_bins(str(tmp_path))
+        # Remove the dir -- a non-cached implementation would return [] now
+        nvm.rmdir()
+        result2 = _node_version_manager_bins(str(tmp_path))
+        assert result1 == result2 == [str(nvm)]
+        _node_version_manager_bins.cache_clear()
+
+    def test_cache_info_exists(self) -> None:
+        """lru_cache exposes cache_info -- confirms decorator is applied."""
+        assert hasattr(_node_version_manager_bins, "cache_info")
+        assert hasattr(_node_version_manager_bins, "cache_clear")

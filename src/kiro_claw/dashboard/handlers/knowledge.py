@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import json
 import logging
 import re
@@ -14,7 +13,10 @@ from uuid import uuid4
 
 from aiohttp import web
 
+from kiro_claw.artifacts import get_default_store
+from kiro_claw.config.loader import KiroClawConfig
 from kiro_claw.knowledge.agent_fetch import fetch_url_content
+from kiro_claw.knowledge.artifact_ingest import ArtifactKnowledgeSync
 from kiro_claw.knowledge.chunker import HeadingAwareChunker
 from kiro_claw.knowledge.connectors.base import BaseConnector
 from kiro_claw.knowledge.connectors.local_folder import LocalFolderConnector
@@ -40,6 +42,9 @@ from kiro_claw.security import is_sensitive_path
 from kiro_claw.sel import sel
 
 logger = logging.getLogger(__name__)
+
+# Max length for a user-editable source display name (rename endpoint).
+_MAX_SOURCE_NAME_LEN = 200
 
 
 def _sel_log(tool: str, **kwargs: object) -> None:
@@ -96,23 +101,60 @@ async def _start_watcher_async(app: web.Application) -> None:
     app["_knowledge_watcher_task"] = task
 
 
+async def _start_artifact_ingest_async(app: web.Application) -> None:
+    """Wire artifact -> Knowledge Library sync when auto-ingest is enabled.
+
+    Registers an in-process change-listener on the artifact store: every
+    create / content-update / delete (from the agent's MCP tools, the CLI, the
+    dashboard, bookmarks, and Artifactory pull/clone -- all of which funnel
+    through the store in the gateway process) ingests or removes that
+    artifact's item group in the aggregate "Artifacts" Knowledge source. On the
+    first run that creates the source row, a one-time backfill ingests
+    pre-existing artifacts. Gated on ``knowledge.auto_ingest_artifacts`` (on by
+    default). See ``kiro_claw.knowledge.artifact_ingest`` for the full design.
+    """
+    cfg = KiroClawConfig.load()
+    if not cfg.knowledge.auto_ingest_artifacts:
+        return
+    pipeline = app["knowledge_pipeline"]
+    kinds = set(cfg.knowledge.auto_ingest_artifact_kinds)
+    art_store = get_default_store()
+    sync = ArtifactKnowledgeSync(
+        art_store=art_store,
+        pipeline=pipeline,
+        kinds=kinds,
+        loop=asyncio.get_running_loop(),
+    )
+    art_store.set_change_listener(sync.on_change)
+    # Hold a reference so the listener binding isn't garbage-collected.
+    app["artifact_knowledge_sync"] = sync
+    await sync.start()
+
+
 # ---------- Items ----------
 
 
 def _attach_file_paths(store, items: list[dict]) -> None:
-    """Attach _file_path to items from folder sources (for sub-grouping in UI)."""
+    """Attach _file_path to items for sub-grouping in the Sources UI.
+
+    Folder/vault sources group by file path (from folder_file_state); the
+    aggregate ``artifact`` source groups per-artifact, labelled with the
+    artifact name (from artifact_item_state, falling back to the slug)."""
     source_ids = {i["source_id"] for i in items if i.get("source_id")}
     if not source_ids:
         return
-    # Find which are folder sources
     ph = ",".join("?" * len(source_ids))
     folder_sids = {r["id"] for r in store.db.execute(
         f"SELECT id FROM sources WHERE id IN ({ph}) AND source_type IN ('local_folder', 'obsidian_vault')",  # noqa: S608
         list(source_ids)).fetchall()}
-    if not folder_sids:
+    artifact_sids = {r["id"] for r in store.db.execute(
+        f"SELECT id FROM sources WHERE id IN ({ph}) AND source_type = 'artifact'",  # noqa: S608
+        list(source_ids)).fetchall()}
+    if not folder_sids and not artifact_sids:
         return
-    # Build item_id -> file_path reverse map from folder_file_state
+    # Build item_id -> group-label reverse map.
     item_to_file: dict[str, str] = {}
+    # Folder/vault sources: group label is the file path.
     for sid in folder_sids:
         for row in store.db.execute(
                 "SELECT file_path, item_ids FROM folder_file_state WHERE source_id = ?", (sid,)):
@@ -122,6 +164,17 @@ def _attach_file_paths(store, items: list[dict]) -> None:
                 continue
             for item_id in ids:
                 item_to_file[item_id] = row["file_path"]
+    # Aggregate artifact source: group label is the artifact name (fallback slug).
+    for sid in artifact_sids:
+        for row in store.db.execute(
+                "SELECT slug, name, item_ids FROM artifact_item_state WHERE source_id = ?", (sid,)):
+            try:
+                ids = json.loads(row["item_ids"]) if row["item_ids"] else []
+            except (json.JSONDecodeError, TypeError):
+                continue
+            label = row["name"] or row["slug"]
+            for item_id in ids:
+                item_to_file[item_id] = label
     # Attach to items
     for item in items:
         fp = item_to_file.get(item["id"])
@@ -644,6 +697,33 @@ async def delete_source(request: web.Request) -> web.Response:
     return web.json_response({"status": "deleted"})
 
 
+async def rename_source(request: web.Request) -> web.Response:
+    """PATCH /api/knowledge/sources/{id} -- rename a source (name only).
+
+    Only ``name`` is editable; ``uri`` (the source identity) stays immutable.
+    """
+    store = _store(request)
+    source_id = request.match_info["id"]
+    if not store.db.execute("SELECT 1 FROM sources WHERE id = ?", (source_id,)).fetchone():
+        return web.json_response({"error": "not found"}, status=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    name = body.get("name")
+    if not isinstance(name, str):
+        return web.json_response({"error": "name must be a string"}, status=400)
+    name = name.strip()
+    if not name:
+        return web.json_response({"error": "name cannot be empty"}, status=400)
+    if len(name) > _MAX_SOURCE_NAME_LEN:
+        return web.json_response(
+            {"error": f"name must be {_MAX_SOURCE_NAME_LEN} characters or fewer"}, status=400)
+    store.update_source(source_id, name=name)
+    _sel_log("source.rename", source_id=source_id)
+    return web.json_response({"ok": True, "name": name})
+
+
 def _track_scan_task(app: web.Application, task: asyncio.Task) -> None:  # type: ignore[type-arg]
     """Keep strong reference to scan task and log exceptions."""
     tasks = app.setdefault("_scan_tasks", set())
@@ -1126,6 +1206,37 @@ def _estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
+def _build_context_card(result: dict, content: str, tokens: int) -> dict:
+    """Build a chat-injection context card with citation fields.
+
+    All user/LLM-derived string fields are passed through ``_redact()``
+    (redact_exfiltration_urls + redact_credentials). Source identity
+    (``source_type``/``source_name``/``source_uri``) and the per-document
+    locator (``file_path`` for folders, ``artifact_slug``/``artifact_name``
+    for artifacts) are attached by HybridRetriever (_attach_citation_sources);
+    ``section_title``/``chunk_range`` come from the item's stored location.
+    Any field is absent (None) when the source type or item does not afford it.
+    """
+    safe_content = _redact(content) or ""
+    return {
+        "id": result["id"],
+        "title": _redact(result["title"]) or "(untitled)",
+        "source": _redact(result.get("source")),
+        "source_type": _redact(result.get("source_type")),
+        "source_name": _redact(result.get("source_name")),
+        "source_uri": _redact(result.get("source_uri")),
+        "file_path": _redact(result.get("file_path")),
+        "artifact_slug": _redact(result.get("artifact_slug")),
+        "artifact_name": _redact(result.get("artifact_name")),
+        "section_title": _redact(result.get("section_title")),
+        "chunk_range": _redact(result.get("chunk_range")),
+        "match_type": result.get("match_type", "keyword"),
+        "tokens": tokens,
+        "summary": _redact(result.get("summary")) or safe_content[:200],
+        "content": safe_content,
+    }
+
+
 async def search_for_context(request: web.Request) -> web.Response:
     """GET /api/knowledge/search-for-context?q=...&limit=N
 
@@ -1154,9 +1265,10 @@ async def search_for_context(request: web.Request) -> web.Response:
     embed_fn = embedder.embed if embedder and embedder.is_available() else None
     retriever = HybridRetriever(store, embedder=embed_fn)
     loop = asyncio.get_running_loop()
-    results = await loop.run_in_executor(
-        None, functools.partial(retriever.search, q, limit=limit)
-    )
+    # HybridRetriever.search attaches citation fields (source identity + the
+    # per-document locator) inside this executor call, so all sqlite access
+    # stays on the connection's thread.
+    results = await loop.run_in_executor(None, lambda: retriever.search(q, limit=limit))
 
     cards = []
     total_tokens = 0
@@ -1170,15 +1282,7 @@ async def search_for_context(request: web.Request) -> web.Response:
         if tokens > remaining_budget:
             content = content[:remaining_budget * 4]
             tokens = remaining_budget
-        cards.append({
-            "id": r["id"],
-            "title": _redact(r["title"]) or "(untitled)",
-            "source": _redact(r.get("source")),
-            "match_type": r.get("match_type", "keyword"),
-            "tokens": tokens,
-            "summary": _redact(r.get("summary")) or content[:200],
-            "content": content,
-        })
+        cards.append(_build_context_card(r, content, tokens))
         total_tokens += tokens
 
     _sel_log("search_for_context", query=_redact(q), results=len(cards))
@@ -1234,6 +1338,8 @@ def setup_knowledge_routes(app: web.Application) -> None:
                                               connectors=connectors)
         # Start source watcher (auto-watches local_file sources)
         app.on_startup.append(_start_watcher_async)
+        # Start artifact ingest watcher (no-op unless auto-ingest is enabled)
+        app.on_startup.append(_start_artifact_ingest_async)
 
     app.router.add_get("/api/knowledge/config", get_config)
     app.router.add_get("/api/knowledge/items", list_items)
@@ -1250,6 +1356,7 @@ def setup_knowledge_routes(app: web.Application) -> None:
     app.router.add_post("/api/knowledge/sources/{id}/files/skip", skip_file)
     app.router.add_post("/api/knowledge/sources/{id}/ingest-text", ingest_text)
     app.router.add_delete("/api/knowledge/sources/{id}", delete_source)
+    app.router.add_patch("/api/knowledge/sources/{id}", rename_source)
     app.router.add_get("/api/knowledge/entities", list_entities)
     app.router.add_get("/api/knowledge/graph", get_full_graph)
     app.router.add_get("/api/knowledge/export", export_all)

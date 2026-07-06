@@ -1,6 +1,6 @@
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
-const { HOSTNAME_RE, BINPATH_RE, validateRemoteSettings } = require("../validation");
+const { HOSTNAME_RE, BINPATH_RE, REMOTE_PORT_RE, REMOTE_PATH_RE, validateRemoteSettings } = require("../validation");
 
 describe("HOSTNAME_RE", () => {
   it("accepts valid corp hostnames", () => {
@@ -9,37 +9,26 @@ describe("HOSTNAME_RE", () => {
     assert.ok(HOSTNAME_RE.test("cm-armdev.corp.amazon.com"));
   });
 
-  it("rejects single-character hostnames", () => {
-    assert.ok(!HOSTNAME_RE.test("a"));
-    assert.ok(!HOSTNAME_RE.test("1"));
+  it("accepts SSH config aliases (single-word, no dot required)", () => {
+    assert.ok(HOSTNAME_RE.test("a"));
+    assert.ok(HOSTNAME_RE.test("localhost"));
+    assert.ok(HOSTNAME_RE.test("clouddesk"));
+    assert.ok(HOSTNAME_RE.test("dev-box"));
   });
 
-  it("rejects hostnames starting with dash", () => {
+  it("rejects dangerous hostnames", () => {
+    // SSH option injection
     assert.ok(!HOSTNAME_RE.test("-evil.com"));
     assert.ok(!HOSTNAME_RE.test("-oProxyCommand=bad"));
-  });
-
-  it("rejects hostnames with special characters", () => {
+    // Shell metacharacters
     assert.ok(!HOSTNAME_RE.test("host;evil.com"));
     assert.ok(!HOSTNAME_RE.test("host$(cmd).com"));
     assert.ok(!HOSTNAME_RE.test("host`cmd`.com"));
     assert.ok(!HOSTNAME_RE.test("host|pipe.com"));
-  });
-
-  it("rejects consecutive dots", () => {
+    // Invalid DNS
     assert.ok(!HOSTNAME_RE.test("a..b"));
-    assert.ok(!HOSTNAME_RE.test("host..corp.amazon.com"));
-  });
-
-  it("rejects labels starting or ending with hyphens", () => {
     assert.ok(!HOSTNAME_RE.test("-host.amazon.com"));
     assert.ok(!HOSTNAME_RE.test("host-.amazon.com"));
-    assert.ok(!HOSTNAME_RE.test("host.amazon-.com"));
-  });
-
-  it("rejects hostnames without a dot (requires FQDN)", () => {
-    assert.ok(!HOSTNAME_RE.test("localhost"));
-    assert.ok(!HOSTNAME_RE.test("ab"));
   });
 
   it("accepts shortest valid FQDN (a.b)", () => {
@@ -82,6 +71,43 @@ describe("BINPATH_RE", () => {
   });
 });
 
+
+describe("REMOTE_PORT_RE", () => {
+  it("accepts valid port numbers", () => {
+    assert.ok(REMOTE_PORT_RE.test("1"));
+    assert.ok(REMOTE_PORT_RE.test("7778"));
+    assert.ok(REMOTE_PORT_RE.test("65535"));
+  });
+
+  it("rejects non-numeric input", () => {
+    assert.ok(!REMOTE_PORT_RE.test("abc"));
+    assert.ok(!REMOTE_PORT_RE.test("7778;evil"));
+    assert.ok(!REMOTE_PORT_RE.test("78 80"));
+    assert.ok(!REMOTE_PORT_RE.test(""));
+  });
+});
+
+describe("REMOTE_PATH_RE", () => {
+  it("accepts valid PATH strings", () => {
+    assert.ok(REMOTE_PATH_RE.test("~/.toolbox/bin:/usr/bin:/bin"));
+    assert.ok(REMOTE_PATH_RE.test("~/.toolbox/bin"));
+    assert.ok(REMOTE_PATH_RE.test("/usr/local/bin:/usr/bin"));
+    assert.ok(REMOTE_PATH_RE.test("~/custom/bin"));
+  });
+
+  it("rejects shell metacharacters", () => {
+    assert.ok(!REMOTE_PATH_RE.test("~/bin; rm -rf ~/"));
+    assert.ok(!REMOTE_PATH_RE.test("~/bin$(evil)"));
+    assert.ok(!REMOTE_PATH_RE.test("~/bin`id`"));
+    assert.ok(!REMOTE_PATH_RE.test("~/bin|pipe"));
+    assert.ok(!REMOTE_PATH_RE.test("~/bin && evil"));
+  });
+
+  it("rejects paths starting with dash", () => {
+    assert.ok(!REMOTE_PATH_RE.test("-evil"));
+  });
+});
+
 describe("validateRemoteSettings", () => {
   it("returns null for valid settings", () => {
     assert.equal(validateRemoteSettings("myhost.corp.amazon.com", "~/.local/bin/kiroclaw"), null);
@@ -96,10 +122,9 @@ describe("validateRemoteSettings", () => {
     assert.equal(validateRemoteSettings("myhost.corp.amazon.com", ""), null);
   });
 
-  it("rejects hostname without dot", () => {
-    const err = validateRemoteSettings("localhost", "/usr/bin/kiroclaw");
-    assert.ok(err);
-    assert.ok(err.includes("hostname"));
+  it("accepts SSH config alias as hostname", () => {
+    assert.equal(validateRemoteSettings("clouddesk", "/usr/bin/kiroclaw"), null);
+    assert.equal(validateRemoteSettings("dev-box", "~/.toolbox/bin/kiroclaw"), null);
   });
 
   it("rejects hostname with SSH option injection", () => {
@@ -135,5 +160,20 @@ describe("validateRemoteSettings", () => {
   it("rejects hostname over 253 chars", () => {
     const long = "a" + ".bb".repeat(84) + ".c";  // > 253 chars
     assert.ok(validateRemoteSettings(long, "/usr/bin/kiroclaw"));
+  });
+
+  it("validates remotePort as numeric 1-65535", () => {
+    assert.equal(validateRemoteSettings("host.com", "", "7778", ""), null);
+    assert.ok(validateRemoteSettings("host.com", "", "0", ""));
+    assert.ok(validateRemoteSettings("host.com", "", "99999", ""));
+    assert.ok(validateRemoteSettings("host.com", "", "7778;evil", ""));
+    assert.ok(validateRemoteSettings("host.com", "", "abc", ""));
+  });
+
+  it("validates remotePath rejects injection", () => {
+    assert.equal(validateRemoteSettings("host.com", "", "", "~/.toolbox/bin:/usr/bin:/bin"), null);
+    assert.ok(validateRemoteSettings("host.com", "", "", "~/bin; rm -rf ~/"));
+    assert.ok(validateRemoteSettings("host.com", "", "", "~/a/../../../etc"));
+    assert.ok(validateRemoteSettings("host.com", "", "", "$(evil)"));
   });
 });

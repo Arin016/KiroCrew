@@ -22,7 +22,7 @@ import dashboardReducer from '../store/dashboardSlice'
 import notificationsReducer from '../store/notificationsSlice'
 import { ThemeProvider } from '../hooks/useTheme'
 
-vi.mock('react-virtuoso', () => ({ Virtuoso: ({ data, itemContent }: any) => <div data-testid="virtuoso">{data?.map((d: any, i: number) => <div key={i}>{itemContent(i, d)}</div>)}</div> }))
+vi.mock('react-virtuoso', () => ({ Virtuoso: ({ data, itemContent }: { data?: unknown[]; itemContent: (i: number, d: unknown) => React.ReactNode }) => <div data-testid="virtuoso">{data?.map((d: unknown, i: number) => <div key={i}>{itemContent(i, d)}</div>)}</div> }))
 vi.mock('../api/client', () => ({
   api: {
     chatSlots: vi.fn().mockResolvedValue([]),
@@ -40,7 +40,7 @@ vi.mock('../api/client', () => ({
 vi.mock('../hooks/useVoiceInput', () => ({ useVoiceInput: () => ({ recording: false, transcribing: false, toggle: vi.fn() }), voiceInputSupported: false }))
 vi.mock('../hooks/useBranding', () => ({ useBranding: () => ({ botName: 'Test', avatar: '' }) }))
 vi.mock('../hooks/useAgents', () => ({ useAgents: () => ({ agents: [], defaultAgent: 'default' }) }))
-vi.mock('../components/MarkdownRenderer', () => ({ default: ({ content }: any) => <span>{content}</span> }))
+vi.mock('../components/MarkdownRenderer', () => ({ default: ({ content }: { content: string }) => <span>{content}</span> }))
 vi.mock('../components/WelcomeView', () => ({ default: () => null }))
 vi.mock('../components/MarkdownPanel', () => ({ default: () => null }))
 vi.mock('../pages/chat/ActivityViewer', () => ({ default: () => null }))
@@ -67,7 +67,7 @@ function makeStore(opts: { slotRunning: boolean; slotStopping: boolean; slotStat
         slots: [{ key: 'slot-a', messages: 1, running: opts.slotRunning, stop_state: opts.stopState ?? 'idle', mode: '', pending_approval: false, waiting_for_input: false, last_activity_ts: undefined }],
         unreadSlots: [], refreshTrigger: 0, approvalMode: 'normal',
         subagentRunning: {}, subagentDetails: {}, subagentText: {},
-      } as any,
+      } as unknown as ReturnType<typeof dashboardReducer>,
       chat: {
         activeSlot: 'slot-a', messages: [{ role: 'assistant', content: 'hi', cls: '' }],
         slotRunning: opts.slotRunning, slotStopping: opts.slotStopping, slotState: opts.slotState,
@@ -77,8 +77,8 @@ function makeStore(opts: { slotRunning: boolean; slotStopping: boolean; slotStat
         slotStatusDetail: {}, slotContextPct: {}, slotActivity: {}, slotHistory: [],
         historyOffset: 0, _wsChunkedDuringFetch: false,
         slotMessages: {}, slotLoading: false,
-      } as any,
-      notifications: { items: [] } as any,
+      } as unknown as ReturnType<typeof chatReducer>,
+      notifications: { items: [] } as unknown as ReturnType<typeof notificationsReducer>,
     },
   })
 }

@@ -116,7 +116,7 @@ afterEach(() => {
 let lastBlobContent = ''
 const OriginalBlob = globalThis.Blob
 
-function getSrcdoc(container: HTMLElement): string {
+function getSrcdoc(_container: HTMLElement): string {
   // Return the captured blob content from our mock
   return lastBlobContent
 }
@@ -343,7 +343,7 @@ describe('WidgetFrame openInNewTab', () => {
     expect(p.textContent).toBe('<special> & é')
     // Wrapper iframe is sandboxed (defense-in-depth, even though blob origin
     // is already null).
-    expect(iframe.getAttribute('sandbox')).toBe('allow-scripts')
+    expect(iframe.getAttribute('sandbox')).toBe('allow-scripts allow-popups allow-popups-to-escape-sandbox')
   })
 })
 

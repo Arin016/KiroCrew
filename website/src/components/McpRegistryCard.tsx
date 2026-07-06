@@ -167,7 +167,13 @@ export default function McpRegistryCard() {
           </motion.div>
         ))}</div>}
         {filtered.length > limit && (
-          <div className="flex justify-center py-3 mt-3 text-accent text-[13px] font-medium cursor-pointer hover:bg-accent-subtle rounded-md" onClick={() => setLimit(prev => prev + 50)}>
+          <div
+            role="button"
+            tabIndex={0}
+            className="flex justify-center py-3 mt-3 text-accent text-[13px] font-medium cursor-pointer hover:bg-accent-subtle rounded-md"
+            onClick={() => setLimit(prev => prev + 50)}
+            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setLimit(prev => prev + 50) } }}
+          >
             Load more… ({filtered.length - limit} remaining)
           </div>
         )}

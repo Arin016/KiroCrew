@@ -1,6 +1,37 @@
 import '@testing-library/jest-dom'
 import { server } from './mocks/server'
 
+// jsdom polyfill: PointerEvent. Radix UI (@radix-ui/react-dropdown-menu,
+// @radix-ui/react-context-menu) checks `event instanceof PointerEvent` and
+// ignores events that aren't pointer events. jsdom doesn't implement
+// PointerEvent, so menus never open without this stub.
+if (typeof window !== 'undefined' && !window.PointerEvent) {
+  class Polyfill extends MouseEvent {
+    readonly pointerId: number
+    readonly pointerType: string
+    constructor(type: string, params: PointerEventInit = {}) {
+      super(type, params)
+      this.pointerId = params.pointerId ?? 0
+      this.pointerType = params.pointerType ?? ''
+    }
+  }
+  ;(window as unknown as { PointerEvent: unknown }).PointerEvent = Polyfill
+  ;(globalThis as unknown as { PointerEvent: unknown }).PointerEvent = Polyfill
+}
+
+// jsdom polyfill: Element.prototype.scrollIntoView (used by Radix focus management)
+if (typeof window !== 'undefined') {
+  Element.prototype.scrollIntoView = Element.prototype.scrollIntoView || function () {}
+}
+
+// jsdom polyfill: HTMLElement.prototype.hasPointerCapture / setPointerCapture /
+// releasePointerCapture (used by Radix DismissableLayer)
+if (typeof window !== 'undefined' && !HTMLElement.prototype.hasPointerCapture) {
+  HTMLElement.prototype.hasPointerCapture = function () { return false }
+  HTMLElement.prototype.setPointerCapture = function () {}
+  HTMLElement.prototype.releasePointerCapture = function () {}
+}
+
 // Storage polyfill: on Node 22+ the runtime ships a native `localStorage`
 // (gated by --localstorage-file) that vitest exposes globally; on Node 25 it
 // shadows jsdom's spec-complete Storage with an incomplete one missing

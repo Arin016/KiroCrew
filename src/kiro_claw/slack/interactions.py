@@ -2229,7 +2229,7 @@ async def _handle_tool_approval(
 
     thread_ts = payload.get("message", {}).get("thread_ts", "")
     slack_ops = _orch.slack if _orch else None
-    effective_action = await handle_interaction(channel, msg_ts, action_id, user_id=user_id, thread_ts=thread_ts, slack=slack_ops)
+    effective_action = await handle_interaction(channel, msg_ts, action_id, user_id=user_id, thread_ts=thread_ts, slack=slack_ops, sessions=_orch.sessions if _orch else None)
 
     # Replace buttons with outcome label — only when an action was processed.
     # When effective_action is None (unauthorized user or already resolved),

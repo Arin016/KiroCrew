@@ -1,158 +1,266 @@
-import { useState, useEffect, useCallback, useMemo, memo } from 'react'
-import { Hourglass, ChevronUp, X, Zap } from 'lucide-react'
-import { DndContext, closestCenter, DragOverlay, PointerSensor, useSensor, useSensors, type DragStartEvent, type DragEndEvent } from '@dnd-kit/core'
-import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
-import { CSS } from '@dnd-kit/utilities'
+import { useState, useRef, useEffect, memo } from 'react'
+import { AnimatePresence, motion, useMotionValue, useSpring } from 'framer-motion'
+import { Hourglass, ChevronUp, X, Zap, Pencil, Check } from 'lucide-react'
 import type { ChatMessage } from '../types'
 
+const MAX_PEEK = 2
 const CARD_H = 40
+const PEEK = 6
+const EXPANDED_GAP = 4
+const SCALE_STEP = 0.04
+const HIDDEN_EXTRA_SCALE = 0.02
+const OVERLAP = 11 // overlap to fuse with input area below
 
-function msgId(m: ChatMessage, index?: number): string {
-  return (m.meta?.queueId as string) ?? m.ts ?? (index != null ? `fallback-${index}` : '')
-}
+const DEPTH_BRIGHTNESS = [1, 0.88, 0.76]
+const SPRING = { type: 'spring' as const, stiffness: 400, damping: 30 }
 
-function SortableCard({ m, i, idx, onCancel, onInterrupt }: {
-  m: ChatMessage; i: number; idx: number
-  onCancel?: (id: string) => void; onInterrupt?: (id: string) => void
+/** Inline editor (input + save) swapped in for the message text while editing.
+ *  Owns the live value so its own controls commit the typed text, never stale content. */
+function EditInput({ initial, onCommit, onCancel }: {
+  initial: string
+  onCommit: (value: string) => void
+  onCancel: () => void
 }) {
-  const id = msgId(m, idx)
-  const { setNodeRef, listeners, transform, transition, isDragging } = useSortable({ id })
-
+  const ref = useRef<HTMLInputElement>(null)
+  const [value, setValue] = useState(initial)
+  // Guard so blur and an explicit save/Enter don't both fire onCommit.
+  const committedRef = useRef(false)
+  useEffect(() => { ref.current?.focus(); ref.current?.select() }, [])
+  // Commit only a real change: skip empty and unchanged values so a stray
+  // focus→blur (or clear→blur) doesn't fire a no-op PATCH + WS broadcast.
+  const commit = () => {
+    if (committedRef.current) return
+    committedRef.current = true
+    const trimmed = value.trim()
+    if (trimmed && trimmed !== initial.trim()) onCommit(value)
+    else onCancel()
+  }
+  const cancel = () => { if (committedRef.current) return; committedRef.current = true; onCancel() }
   return (
-    <div
-      ref={setNodeRef}
-      style={{
-        height: CARD_H,
-        transform: transform ? CSS.Transform.toString(transform) : undefined,
-        transition: transition || undefined,
-        opacity: isDragging ? 0.4 : 1,
-        touchAction: 'none',
-        userSelect: 'none',
-      }}
-      className="bg-warn border border-warn/20 px-3 py-2 text-[13px] text-warn-fg rounded-xl mb-1 cursor-grab active:cursor-grabbing"
-      {...listeners}
-    >
-      <span className="flex items-center gap-1.5 h-full">
-        <span className="shrink-0 text-[10px] font-mono opacity-50 w-4 text-center">{i}</span>
-        <span className="truncate flex-1">{m.content}</span>
-        {onInterrupt && id && (
-          <button className="shrink-0 p-0.5 rounded hover:bg-white/20 transition-colors text-white"
-            title="Send now" aria-label="Send now"
-            onPointerDown={e => e.stopPropagation()}
-            onClick={e => { e.stopPropagation(); onInterrupt(id) }}>
-            <Zap size={13} fill="currentColor" />
-          </button>
-        )}
-        {onCancel && id && (
-          <button className="shrink-0 p-0.5 rounded hover:bg-white/20 transition-colors"
-            title="Cancel" aria-label="Cancel queued message"
-            onPointerDown={e => e.stopPropagation()}
-            onClick={e => { e.stopPropagation(); onCancel(id) }}>
-            <X size={13} />
-          </button>
-        )}
-      </span>
-    </div>
+    <>
+      <input
+        ref={ref}
+        value={value}
+        onChange={e => setValue(e.target.value)}
+        // Stop the card's expand/collapse + drag handlers from swallowing pointer + key events.
+        onPointerDown={e => e.stopPropagation()}
+        onClick={e => e.stopPropagation()}
+        onKeyDown={e => {
+          e.stopPropagation()
+          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commit() }
+          else if (e.key === 'Escape') { e.preventDefault(); cancel() }
+        }}
+        onBlur={commit}
+        className="flex-1 min-w-0 bg-white/20 text-warn-fg placeholder:text-warn-fg/50 rounded px-1.5 py-0.5 text-[13px] outline-none border border-white/30 focus:border-white/60"
+        aria-label="Edit queued message"
+      />
+      <button className="shrink-0 p-0.5 rounded hover:bg-white/20 transition-colors text-white"
+        title="Save" aria-label="Save edit"
+        // mousedown commits before the input's blur can fire with the same value.
+        onMouseDown={e => { e.preventDefault(); e.stopPropagation() }}
+        onClick={e => { e.stopPropagation(); commit() }}>
+        <Check size={13} />
+      </button>
+    </>
   )
 }
 
-function QueueStackInner({ messages, onCancel, onInterrupt, onReorder }: {
+function QueueStackInner({ messages, onCancel, onInterrupt, onEdit }: {
   messages: ChatMessage[]
-  onCancel?: (id: string) => void
-  onInterrupt?: (id: string) => void
-  onReorder?: (order: string[]) => void
+  onCancel?: (queueId: string) => void
+  onInterrupt?: (queueId: string) => void
+  onEdit?: (queueId: string, content: string) => void
 }) {
-  const [expanded, setExpanded] = useState(false)
-  const isExpandable = messages.length > 1
-  const showExpanded = expanded && isExpandable
-  const [activeId, setActiveId] = useState<string | null>(null)
+  const [_expanded, setExpanded] = useState(false)
+  const expanded = _expanded && messages.length > 1
+  const [editingId, setEditingId] = useState<string | null>(null)
 
-  useEffect(() => { if (!isExpandable) setExpanded(false) }, [isExpandable])
+  // Reset expanded when queue drains to trivial size
+  useEffect(() => {
+    if (messages.length <= 1) setExpanded(false)
+  }, [messages.length])
 
-  const ids = useMemo(() => messages.map((m, i) => msgId(m, i)), [messages])
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
+  // Drop a stale edit target if its card leaves the queue (e.g. dequeued / cancelled).
+  useEffect(() => {
+    if (editingId && !messages.some(m => (m.meta?.queueId as string) === editingId)) setEditingId(null)
+  }, [messages, editingId])
 
-  const handleDragStart = useCallback((e: DragStartEvent) => setActiveId(e.active.id as string), [])
-  const handleDragEnd = useCallback((e: DragEndEvent) => {
-    setActiveId(null)
-    const { active, over } = e
-    if (!over || active.id === over.id || !onReorder) return
-    const curr = messages.map((m, i) => msgId(m, i))
-    const from = curr.indexOf(active.id as string)
-    const to = curr.indexOf(over.id as string)
-    if (from < 0 || to < 0) return
-    onReorder(arrayMove(curr, from, to))
-  }, [messages, onReorder])
+  const commitEdit = (queueId: string, content: string) => {
+    setEditingId(null)
+    if (onEdit) onEdit(queueId, content)
+  }
+  const cancelEdit = () => setEditingId(null)
 
-  if (!messages.length) return null
+  const peekCount = Math.min(MAX_PEEK, Math.max(0, messages.length - 1))
+  const collapsedHeight = messages.length > 0 ? CARD_H + peekCount * PEEK : 0
+  const expandedHeight = messages.length > 0 ? messages.length * CARD_H + (messages.length - 1) * EXPANDED_GAP : 0
 
-  // Collapsed: simple peek card
-  if (!showExpanded) {
-    return (
-      <div className="px-5 mx-auto w-full" style={{ maxWidth: 'var(--mc-content-width, 900px)' }}>
-        <div
-          className={`bg-warn border border-warn/20 px-3 py-2 text-[13px] text-warn-fg rounded-t-xl ${isExpandable ? 'cursor-pointer' : ''}`}
-          style={{ height: CARD_H, marginBottom: -11 }}
-          onClick={() => isExpandable && setExpanded(true)}
-        >
-          <span className="flex items-center gap-1.5 h-full">
-            <span className="shrink-0 text-[10px] font-mono opacity-50 w-4 text-center">1</span>
-            <span className="shrink-0 inline-flex animate-[hourglass-flip_3s_ease-in-out_infinite]"><Hourglass size={13} /></span>
-            <span className="truncate flex-1">{messages[0].content}</span>
-            {onInterrupt && !isExpandable && msgId(messages[0], 0) && (
-              <button className="shrink-0 p-0.5 rounded hover:bg-white/20 transition-colors text-white"
-                title="Send now" aria-label="Send now"
-                onClick={e => { e.stopPropagation(); onInterrupt(msgId(messages[0], 0)) }}>
-                <Zap size={13} fill="currentColor" />
-              </button>
-            )}
-            {onCancel && !isExpandable && msgId(messages[0], 0) && (
-              <button className="shrink-0 p-0.5 rounded hover:bg-white/20 transition-colors"
-                title="Cancel" aria-label="Cancel queued message"
-                onClick={e => { e.stopPropagation(); onCancel(msgId(messages[0], 0)) }}>
-                <X size={13} />
-              </button>
-            )}
-            {isExpandable && (
-              <span className="shrink-0 flex items-center gap-1 text-[11px] opacity-70">
-                {messages.length} queued <ChevronUp size={12} />
-              </span>
-            )}
-          </span>
-        </div>
-      </div>
-    )
+  const targetHeight = expanded ? expandedHeight : collapsedHeight
+  const targetMargin = messages.length > 0 && !expanded ? -OVERLAP : 0
+
+  // Imperatively control margin: spring on expand/collapse, snap on enter/exit
+  const marginMV = useMotionValue(targetMargin)
+  const marginSpring = useSpring(marginMV, SPRING)
+  const prevExpanded = useRef(expanded)
+
+  useEffect(() => {
+    const expandChanged = prevExpanded.current !== expanded
+    prevExpanded.current = expanded
+
+    if (expandChanged) {
+      // Expand/collapse: animate via spring
+      marginMV.set(targetMargin)
+    } else if (messages.length > 0) {
+      // Enter (count increased) or count decreased but not to 0: snap immediately
+      // When count hits 0, let onExitComplete handle the margin reset
+      marginSpring.jump(targetMargin)
+    }
+  }, [expanded, targetMargin, messages.length]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Handle last-card exit: snap margin to 0 when AnimatePresence finishes
+  const prevCountForExit = useRef(messages.length)
+  const hasExitingRef = useRef(false)
+  useEffect(() => {
+    if (messages.length < prevCountForExit.current) hasExitingRef.current = true
+    prevCountForExit.current = messages.length
+  }, [messages.length])
+
+  const onExitComplete = () => {
+    hasExitingRef.current = false
+    if (messages.length === 0) marginSpring.jump(0)
   }
 
-  // Expanded: dnd-kit sortable list
-  const activeMsg = activeId ? messages.find((m, i) => msgId(m, i) === activeId) : null
-
   return (
-    <div className="px-5 mx-auto w-full" style={{ maxWidth: 'var(--mc-content-width, 900px)' }}>
-      <DndContext sensors={sensors} collisionDetection={closestCenter}
-        onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
-        <SortableContext items={[...ids].reverse()} strategy={verticalListSortingStrategy}>
-          {[...messages].reverse().map((m, vi) => {
-            const num = messages.length - vi
-            const origIdx = messages.length - 1 - vi
-            return <SortableCard key={msgId(m, origIdx)} m={m} i={num} idx={origIdx} onCancel={onCancel} onInterrupt={onInterrupt} />
+    <div className="px-5 mx-auto w-full relative" style={{ maxWidth: 'var(--mc-content-width, 900px)', zIndex: 0 }}>
+      <motion.div
+        className="relative cursor-pointer"
+        animate={{ height: targetHeight }}
+        transition={SPRING}
+        style={{ marginBottom: marginSpring }}
+        onClick={() => messages.length > 1 && setExpanded(e => !e)}
+        onKeyDown={(e: React.KeyboardEvent) => {
+          if ((e.key === 'Enter' || e.key === ' ') && messages.length > 1) {
+            e.preventDefault()
+            setExpanded(prev => !prev)
+          }
+        }}
+        role={messages.length > 1 ? 'button' : undefined}
+        tabIndex={messages.length > 1 ? 0 : undefined}
+        aria-expanded={messages.length > 1 ? expanded : undefined}
+      >
+        <AnimatePresence initial={false} onExitComplete={onExitComplete}>
+          {messages.map((m, i) => {
+            let y: number
+            let scale: number
+            let opacity: number
+            let zIndex: number
+            let brightness: number
+
+            if (expanded) {
+              const pos = messages.length - 1 - i
+              y = pos * (CARD_H + EXPANDED_GAP)
+              scale = 1
+              opacity = 1
+              zIndex = pos + 1
+              brightness = 1
+            } else if (i <= MAX_PEEK) {
+              const depth = i
+              y = (collapsedHeight - CARD_H) - depth * PEEK
+              scale = 1 - (depth + 1) * SCALE_STEP
+              opacity = 1
+              zIndex = (MAX_PEEK + 1) - depth
+              brightness = DEPTH_BRIGHTNESS[depth] ?? DEPTH_BRIGHTNESS[MAX_PEEK]
+            } else {
+              y = (collapsedHeight - CARD_H) - MAX_PEEK * PEEK
+              scale = 1 - (MAX_PEEK + 1) * SCALE_STEP - HIDDEN_EXTRA_SCALE
+              opacity = 0
+              zIndex = 0
+              brightness = DEPTH_BRIGHTNESS[MAX_PEEK]
+            }
+
+            const isFrontCollapsed = !expanded && i === 0
+            const queueId = m.meta?.queueId as string | undefined
+            const isEditing = !!queueId && editingId === queueId
+            // Per-card actions show on the front single card or when expanded.
+            const showActions = (expanded || messages.length === 1) && !!queueId
+
+            return (
+              <motion.div
+                key={m.meta?.queueId as string ?? m.ts ?? `q-${i}-${m.content}`}
+                initial={false}
+                animate={{
+                  opacity, y, scale,
+                  filter: `brightness(${brightness})`,
+                  borderTopLeftRadius: 12,
+                  borderTopRightRadius: 12,
+                  borderBottomLeftRadius: isFrontCollapsed ? 0 : 12,
+                  borderBottomRightRadius: isFrontCollapsed ? 0 : 12,
+                  borderBottomWidth: isFrontCollapsed ? 0 : 1,
+                }}
+                exit={{ y: y + 40, zIndex: 50, borderBottomWidth: 1, borderBottomLeftRadius: 12, borderBottomRightRadius: 12, transition: { duration: 0.3, ease: 'easeIn' } }}
+                transition={SPRING}
+                className="absolute top-0 left-0 right-0 bg-warn border border-warn/20 px-3 py-2 text-[13px] text-warn-fg"
+                style={{ transformOrigin: 'bottom center', height: CARD_H, zIndex }}
+              >
+                <span className="flex items-center gap-1.5 h-full">
+                  <span className="shrink-0 text-[10px] font-mono opacity-50 w-4 text-center">{i + 1}</span>
+                  {isFrontCollapsed && (
+                    <span className="shrink-0 inline-flex animate-[hourglass-flip_3s_ease-in-out_infinite]">
+                      <Hourglass size={13} />
+                    </span>
+                  )}
+                  {isEditing && onEdit ? (
+                    <EditInput initial={m.content} onCommit={v => commitEdit(queueId!, v)} onCancel={cancelEdit} />
+                  ) : (
+                    <>
+                      <span className="truncate flex-1">{m.content}</span>
+                      {onEdit && showActions && (
+                        <button
+                          className="shrink-0 p-0.5 rounded hover:bg-white/20 transition-colors"
+                          title="Edit queued message"
+                          aria-label="Edit queued message"
+                          onClick={(e) => { e.stopPropagation(); setEditingId(queueId!) }}
+                        >
+                          <Pencil size={13} />
+                        </button>
+                      )}
+                      {onInterrupt && showActions && (
+                        <button
+                          className="shrink-0 p-0.5 rounded hover:bg-white/20 transition-colors text-white"
+                          title="Interrupt current turn and send this now"
+                          aria-label="Send now"
+                          onClick={(e) => { e.stopPropagation(); onInterrupt(queueId!) }}
+                        >
+                          <Zap size={13} fill="currentColor" />
+                        </button>
+                      )}
+                      {onCancel && showActions && (
+                        <button
+                          className="shrink-0 p-0.5 rounded hover:bg-white/20 transition-colors"
+                          title="Cancel and move back to input"
+                          aria-label="Cancel queued message"
+                          onClick={(e) => { e.stopPropagation(); onCancel(queueId!) }}
+                        >
+                          <X size={13} />
+                        </button>
+                      )}
+                      {isFrontCollapsed && messages.length > 1 && (
+                        <span className="shrink-0 flex items-center gap-1 text-[11px] opacity-70">
+                          {messages.length} queued
+                          <ChevronUp size={12} />
+                        </span>
+                      )}
+                      {expanded && i === 0 && (
+                        <ChevronUp size={13} className="shrink-0 opacity-50 rotate-180" />
+                      )}
+                    </>
+                  )}
+                </span>
+              </motion.div>
+            )
           })}
-        </SortableContext>
-        <DragOverlay>
-          {activeMsg ? (
-            <div className="bg-warn border border-warn/20 px-3 py-2 text-[13px] text-warn-fg rounded-xl shadow-lg"
-              style={{ height: CARD_H }}>
-              <span className="flex items-center gap-1.5 h-full">
-                <span className="truncate flex-1">{activeMsg.content}</span>
-              </span>
-            </div>
-          ) : null}
-        </DragOverlay>
-      </DndContext>
-      <button className="w-full text-center text-[11px] text-warn-fg/70 hover:text-warn-fg py-1 cursor-pointer bg-transparent border-none"
-        onClick={() => setExpanded(false)}>
-        <ChevronUp size={12} className="inline rotate-180" /> collapse
-      </button>
+        </AnimatePresence>
+      </motion.div>
     </div>
   )
 }
@@ -162,5 +270,5 @@ export default memo(QueueStackInner, (prev, next) =>
   prev.messages.every((m, i) => m === next.messages[i]) &&
   prev.onCancel === next.onCancel &&
   prev.onInterrupt === next.onInterrupt &&
-  prev.onReorder === next.onReorder
+  prev.onEdit === next.onEdit
 )

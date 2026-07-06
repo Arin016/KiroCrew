@@ -1,3 +1,4 @@
+import { safeSetItem } from '../../utils/safeStorage'
 import { STORAGE_KEY } from './constants'
 
 export const extOf = (p: string) => {
@@ -73,6 +74,6 @@ export const loadState = () => {
 
 export const saveState = (state: unknown) => {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+    safeSetItem(STORAGE_KEY, JSON.stringify(state))
   } catch { /* quota */ }
 }

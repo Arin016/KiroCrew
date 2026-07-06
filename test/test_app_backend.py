@@ -330,3 +330,85 @@ class TestBackendLifecycle:
         assert result is None
         # The stale placeholder is gone, so a fresh start_app_backend can spawn again.
         assert "wedged-app" not in bmod._processes
+
+
+class _FakeHealthResp:
+    """Minimal urlopen() stand-in: a 200 response usable as a context manager."""
+
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+
+class TestHealthGatedMcpRegistration:
+    """Health-gated MCP registration (review CR-284432051 + AutoSDE race finding).
+
+    The health-check loop must register an app's MCP servers ONLY when the backend is
+    still tracked and healthy, and scrub them when it never becomes healthy — never write
+    a dead-URL entry (the kiro-cli outage shape)."""
+
+    def _fast_health(self, bmod, monkeypatch):
+        # Make the loop iterate instantly.
+        monkeypatch.setattr(bmod, "_HEALTH_CHECK_INTERVAL", 0)
+        monkeypatch.setattr(bmod, "_HEALTH_CHECK_RETRIES", 3)
+
+    def test_registers_when_healthy_and_still_tracked(self, monkeypatch):
+        import kiro_claw.apps.backend as bmod
+        self._fast_health(bmod, monkeypatch)
+        calls = []
+        monkeypatch.setattr(bmod, "_gate_mcp_registration",
+                            lambda name, port, *, healthy: calls.append((name, port, healthy)))
+
+        monkeypatch.setattr(bmod.urllib.request, "urlopen", lambda *a, **k: _FakeHealthResp())
+
+        with bmod._lock:
+            bmod._processes["hg-app"] = AppProcess(app_name="hg-app", port=9150, healthy=False)
+        try:
+            bmod._health_check_loop("hg-app", 9150, "/health")
+            assert calls == [("hg-app", 9150, True)]  # registered exactly once, healthy
+            assert bmod._processes["hg-app"].healthy is True
+        finally:
+            with bmod._lock:
+                bmod._processes.clear()
+
+    def test_does_not_register_if_stopped_mid_healthcheck(self, monkeypatch):
+        # AutoSDE race finding: app removed from _processes between the poll and the lock →
+        # must NOT register MCP for a now-dead backend.
+        import kiro_claw.apps.backend as bmod
+        self._fast_health(bmod, monkeypatch)
+        calls = []
+        monkeypatch.setattr(bmod, "_gate_mcp_registration",
+                            lambda name, port, *, healthy: calls.append((name, port, healthy)))
+
+        # urlopen "succeeds" but the app is NOT in _processes (stopped mid-check).
+        monkeypatch.setattr(bmod.urllib.request, "urlopen", lambda *a, **k: _FakeHealthResp())
+        with bmod._lock:
+            bmod._processes.clear()  # ensure absent
+
+        bmod._health_check_loop("gone-app", 9151, "/health")
+        assert calls == []  # never registered — no dead-URL entry written
+
+    def test_scrubs_when_never_healthy(self, monkeypatch):
+        import kiro_claw.apps.backend as bmod
+        self._fast_health(bmod, monkeypatch)
+        calls = []
+        monkeypatch.setattr(bmod, "_gate_mcp_registration",
+                            lambda name, port, *, healthy: calls.append((name, port, healthy)))
+
+        def _boom(*a, **k):
+            raise OSError("connection refused")
+        monkeypatch.setattr(bmod.urllib.request, "urlopen", _boom)
+
+        with bmod._lock:
+            bmod._processes["sick-app"] = AppProcess(app_name="sick-app", port=9152, healthy=False)
+        try:
+            bmod._health_check_loop("sick-app", 9152, "/health")
+            # Never healthy → scrub (healthy=False), never register.
+            assert calls == [("sick-app", 9152, False)]
+        finally:
+            with bmod._lock:
+                bmod._processes.clear()

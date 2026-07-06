@@ -116,6 +116,24 @@ class TestValidation:
         errors = m.validate()
         assert any("label" in e for e in errors)
 
+    def test_ui_page_icon_inactive_url_roundtrips(self):
+        # The optional INACTIVE-state icon variant (a muted/dark image the sidebar
+        # swaps in when the nav row is not active) survives from_dict -> to_dict,
+        # and is omitted when unset (back-compat with manifests that lack it).
+        m = AppManifest.from_dict(_valid_manifest(
+            ui={"pages": [{
+                "route": "/x", "label": "X",
+                "iconUrl": "icon.svg", "iconInactiveUrl": "icon-inactive.svg",
+            }]}
+        ))
+        page = m.ui.pages[0]
+        assert page.iconInactiveUrl == "icon-inactive.svg"
+        assert page.to_dict()["iconInactiveUrl"] == "icon-inactive.svg"
+        bare = AppManifest.from_dict(_valid_manifest(
+            ui={"pages": [{"route": "/x", "label": "X"}]}
+        )).ui.pages[0]
+        assert "iconInactiveUrl" not in bare.to_dict()
+
     def test_valid_with_all_fields(self):
         m = AppManifest.from_dict({
             "name": "oncall-watchtower",

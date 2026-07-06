@@ -24,6 +24,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { act, screen } from '@testing-library/react'
 import { renderWithProviders } from './helpers'
+import type { RootState } from '../store'
 import App from '../App'
 
 // Match the App.test.tsx mock setup. Differ only in `isAuthBannerShown`
@@ -78,7 +79,7 @@ Object.defineProperty(window, 'matchMedia', {
     removeEventListener: vi.fn(),
   })),
 })
-globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} } as any
+globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} } as unknown as typeof ResizeObserver
 
 describe('App offline pill — auth banner suppression', () => {
   beforeEach(() => {
@@ -90,7 +91,7 @@ describe('App offline pill — auth banner suppression', () => {
     renderWithProviders(<App />, {
       route: '/chat',
       preloadedState: {
-        dashboard: { connected: false, status: { platform: 'darwin' }, slots: [], approvalMode: 'normal' } as any,
+        dashboard: { connected: false, status: { platform: 'darwin' }, slots: [], approvalMode: 'normal' } as unknown as RootState['dashboard'],
       },
     })
     // The pill carries `aria-label="Gateway offline"`. The sr-only fallback
@@ -104,7 +105,7 @@ describe('App offline pill — auth banner suppression', () => {
     renderWithProviders(<App />, {
       route: '/chat',
       preloadedState: {
-        dashboard: { connected: false, status: { platform: 'darwin' }, slots: [], approvalMode: 'normal' } as any,
+        dashboard: { connected: false, status: { platform: 'darwin' }, slots: [], approvalMode: 'normal' } as unknown as RootState['dashboard'],
       },
     })
     // Loud pulsing pill must be gone.
@@ -118,7 +119,7 @@ describe('App offline pill — auth banner suppression', () => {
     renderWithProviders(<App />, {
       route: '/chat',
       preloadedState: {
-        dashboard: { connected: false, status: { platform: 'darwin' }, slots: [], approvalMode: 'normal' } as any,
+        dashboard: { connected: false, status: { platform: 'darwin' }, slots: [], approvalMode: 'normal' } as unknown as RootState['dashboard'],
       },
     })
     // Initial render: no auth banner → loud pill visible.

@@ -1427,3 +1427,24 @@ body::before{content:'';position:fixed;top:-50%;left:-50%;width:200%;height:200%
   position: relative;
   z-index: 1;
 }
+
+/* File-diff chips (FileChangeChips.tsx): flatter edge — no top highlight or
+ * refraction, just a hairline border. Composes with .glass-surface (keeps the
+ * themed background + blur). Placed after the .glass-surface rules so it wins on
+ * equal specificity; mirrored per-theme to override the dark/light glass shadows. */
+.file-chip {
+  border-color: rgba(0, 0, 0, 0.06);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+.file-chip:not(.glass-static):hover {
+  border-color: rgba(0, 0, 0, 0.10);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+}
+[data-theme*="dark"] .file-chip {
+  border-color: rgba(255, 255, 255, 0.05);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+[data-theme*="dark"] .file-chip:not(.glass-static):hover {
+  border-color: rgba(255, 255, 255, 0.09);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+}

@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState, useCallback, type ReactNode } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Bot, ScrollText, FileText, X, Lock, CheckCircle, AlertCircle, Loader as LoaderIcon, Ban, Handshake, Wrench, FolderOpen, ChevronLeft, ChevronRight, MessageSquare, ListTree } from 'lucide-react'
+import { Bot, ScrollText, FileText, X, Lock, CheckCircle, AlertCircle, Loader as LoaderIcon, Ban, Handshake, Wrench, FolderOpen, ChevronLeft, ChevronRight, MessageSquare, ListTree, ArrowUp, ArrowDown } from 'lucide-react'
 import { api } from '../../api/client'
+import { timeAgo } from '../../utils/timeAgo'
+import { useSortableTable, applySort, type Comparators } from '../../hooks/useSortableTable'
 import { LogViewer } from '../LogsPage'
 import TrustDropdown from '../../components/TrustDropdown'
 import type { SubagentActivity, ToolActivity } from '../../types'
@@ -105,9 +107,26 @@ function SubagentPane({ a, onClick }: { a: SubagentActivity; onClick: () => void
   const fmtElapsed = displayElapsed >= 60 ? `${Math.floor(displayElapsed / 60)}m ${displayElapsed % 60}s` : `${displayElapsed}s`
 
   return (
+    // Card-level mouse convenience that selects the subagent; it wraps its own
+    // interactive controls (Cancel, collapse header) which carry the real
+    // keyboard/AT semantics, so the card itself is not a focus stop.
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
     <div className={`mx-2 mb-3 rounded-lg border bg-card overflow-hidden shadow-sm transition-all animate-scale-in ${isRunning || isPending ? 'border-border-strong' : 'border-border opacity-60'}`} onClick={onClick}>
-      {/* Header */}
-      <div className={`flex items-center gap-2 px-3 py-2.5${isDone ? ' cursor-pointer select-none hover:bg-bg-hover transition-colors' : ''}`} onClick={isDone ? () => setCollapsed(c => !c) : undefined}>
+      {/* Header — collapse toggle when the subagent is done */}
+      <div
+        className={`flex items-center gap-2 px-3 py-2.5${isDone ? ' cursor-pointer select-none hover:bg-bg-hover transition-colors' : ''}`}
+        {...(isDone
+          ? {
+              role: 'button' as const,
+              tabIndex: 0,
+              'aria-expanded': !collapsed,
+              onClick: () => setCollapsed(c => !c),
+              onKeyDown: (e: React.KeyboardEvent) => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setCollapsed(c => !c) }
+              },
+            }
+          : {})}
+      >
         <span>{STATUS[a.status]}</span>
         <span className="text-[13px] font-semibold text-text">Subagent {isPending ? 'Pending Approval' : a.status === 'tool' ? 'Running Tool' : a.status === 'running' ? (a.streaming ? 'Running' : 'Starting…') : a.status === 'done' ? 'Complete' : a.error?.includes('Cancelled') ? 'Cancelled' : 'Error'}</span>
         {a.agent && <code className="text-[11px] text-muted/50 bg-bg-hover px-1.5 py-0.5 rounded">{a.agent}</code>}
@@ -232,7 +251,7 @@ function FileTile({ f, onFileOpen, onFileRemove }: { f: TouchedFile; onFileOpen?
   const { data } = useQuery({
     queryKey: ['file-diff', f.path, f.lastWrite],
     queryFn: () => api.fileDiff(f.path),
-    placeholderData: (prev: any) => prev,
+    placeholderData: (prev) => prev,
   })
   const stats = data?.diff ? countDiffStats(data.diff) : null
   return (
@@ -335,6 +354,32 @@ function FileBrowser({ onFileOpen, initialPath = '' }: { onFileOpen?: (path: str
   const q = search.trim().toLowerCase()
   const filteredDirs = q ? dirs.filter(d => d.name.toLowerCase().includes(q)) : dirs
   const filteredFiles = q ? files.filter(f => f.name.toLowerCase().includes(q)) : files
+  // Sorting is driven by the shared useSortableTable hook (same model used by
+  // the Hooks/Cron/MCP/Memory tables), so the file browser gets the app's
+  // standard column-header toggle and per-table persistence for free. Name
+  // sorts case-insensitively; Date sorts by the mtime epoch seconds from the
+  // browse-files API and opens newest-first. `bidirectional` makes every
+  // column flip plainly between asc and desc (so Date reaches oldest-first
+  // too) rather than the tri-state reset the data tables use. Dirs and files
+  // are sorted as two groups (dirs always above files) that share one sort
+  // model — the hook sorts the dirs, applySort reuses the same model for files.
+  const sortComparators = useMemo<Comparators<{ name: string; mtime?: number }>>(() => ({
+    name: (a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
+    date: (a, b) => (a.mtime ?? 0) - (b.mtime ?? 0),
+  }), [])
+  const { sorted: sortedDirs, sort, toggle } = useSortableTable(
+    filteredDirs, 'activity-file-browser', sortComparators, { key: 'name', dir: 'asc' },
+    { initialDirs: { date: 'desc' }, bidirectional: true },
+  )
+  const sortedFiles = useMemo(
+    () => applySort(filteredFiles, sort, sortComparators),
+    [filteredFiles, sort, sortComparators],
+  )
+
+  // Compact modified-time for the right edge of each row. Reuses the shared
+  // timeAgo util (unix seconds) so relative-time formatting stays consistent
+  // with the rest of the dashboard. Empty when mtime is missing.
+  const fmtMtime = (sec?: number) => (sec ? timeAgo(sec) : '')
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -343,6 +388,7 @@ function FileBrowser({ onFileOpen, initialPath = '' }: { onFileOpen?: (path: str
         <button onClick={goForward} disabled={forwardRef.current.length === 0} className="p-1 text-muted hover:text-text rounded-md hover:bg-bg-hover shrink-0 cursor-pointer bg-transparent border-none disabled:opacity-30 disabled:cursor-default" title="Forward" aria-label="Forward"><ChevronRight size={14} /></button>
         <input
           type="text"
+          aria-label="Search or enter a path"
           value={search}
           onChange={e => setSearch(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter' && search.trim()) navigate(search.trim()); else if (e.key === 'Escape') setSearch('') }}
@@ -350,23 +396,45 @@ function FileBrowser({ onFileOpen, initialPath = '' }: { onFileOpen?: (path: str
           className="flex-1 bg-bg border border-border rounded-md px-2.5 py-1.5 text-[11px] font-mono text-text placeholder:text-muted/50 focus:outline-none focus:border-accent min-w-0"
         />
       </div>
+      {(sortedDirs.length > 0 || sortedFiles.length > 0) && (
+        <div className="flex items-center gap-2.5 px-3 py-1 shrink-0 border-t border-border/30 select-none text-[10px] uppercase tracking-wider text-muted/60">
+          <button
+            onClick={() => toggle('name')}
+            className={`flex items-center gap-1 flex-1 min-w-0 text-left cursor-pointer bg-transparent border-none p-0 hover:text-text transition-colors ${sort.key === 'name' ? 'text-text' : ''}`}
+            aria-label="Sort by name"
+          >
+            Name
+            {sort.key === 'name' && (sort.dir === 'asc' ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+          </button>
+          <button
+            onClick={() => toggle('date')}
+            className={`flex items-center gap-1 shrink-0 cursor-pointer bg-transparent border-none p-0 hover:text-text transition-colors ${sort.key === 'date' ? 'text-text' : ''}`}
+            aria-label="Sort by date modified"
+          >
+            Date
+            {sort.key === 'date' && (sort.dir === 'asc' ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+          </button>
+        </div>
+      )}
       <div className="flex-1 overflow-y-auto px-1.5 py-1">
         {isLoading && <div className="px-3 py-2 text-[12px] text-muted">Loading…</div>}
         {!isLoading && filteredDirs.length === 0 && filteredFiles.length === 0 && (
           <div className="px-3 py-6 text-[12px] text-muted text-center">{q ? 'No matches' : 'Empty directory'}</div>
         )}
-        {filteredDirs.map(d => (
+        {sortedDirs.map(d => (
           <button key={d.path} className="w-full text-left px-3 py-1.5 flex items-center gap-2.5 cursor-pointer hover:bg-bg-hover rounded-lg transition-colors bg-transparent border-none text-[13px]" onClick={() => navigate(d.path)} title={d.path}>
             <FolderOpen size={14} className="text-accent shrink-0" />
-            <span className="text-text truncate">{d.name}</span>
+            <span className="text-text truncate flex-1 min-w-0">{d.name}</span>
+            <span className="shrink-0 ml-2 text-[10px] text-muted tabular-nums">{fmtMtime(d.mtime)}</span>
           </button>
         ))}
-        {filteredFiles.map(f => {
+        {sortedFiles.map(f => {
           const Icon = fileIcon(f.path)
           return (
             <button key={f.path} className="w-full text-left px-3 py-1.5 flex items-center gap-2.5 cursor-pointer hover:bg-bg-hover rounded-lg transition-colors bg-transparent border-none text-[13px]" onClick={() => onFileOpen?.(f.path)} title={f.path}>
               <Icon size={14} className={`${colorForExt(f.path)} shrink-0`} />
-              <span className="text-text truncate">{f.name}</span>
+              <span className="text-text truncate flex-1 min-w-0">{f.name}</span>
+              <span className="shrink-0 ml-2 text-[10px] text-muted tabular-nums">{fmtMtime(f.mtime)}</span>
             </button>
           )
         })}
@@ -429,7 +497,11 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
   ]
 
   return (
-    <div ref={containerRef} className="flex flex-col h-full bg-bg relative" tabIndex={0}>
+    // Focusable container so the imperative Escape keydown listener (attached to
+    // containerRef in the effect above) has a focus target; the panel itself is
+    // a region, not an interactive control.
+    // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
+    <div ref={containerRef} role="region" aria-label="Activity" className="flex flex-col h-full bg-bg relative" tabIndex={0}>
       {/* Tab bar */}
       <div className="px-3 py-2 shrink-0 flex justify-center">
         <SegmentedControl
@@ -492,7 +564,14 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
               </div>
               {browserOpen && <FileBrowser onFileOpen={onFileOpen} initialPath={projectDir} />}
               {browserOpen && (
+                // Resize splitter for the file browser height; role=separator is the
+                // correct semantic but jsx-a11y treats it as non-interactive while the
+                // mousedown drag is intrinsic to a resize handle.
+                // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
                 <div
+                  role="separator"
+                  aria-orientation="horizontal"
+                  aria-label="Resize file browser"
                   className="relative shrink-0 h-1.5 cursor-row-resize z-10 group/drag"
                   onMouseDown={e => {
                     e.preventDefault()

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderWithProviders } from './helpers'
 import MemoryTab from '../src/pages/overview/MemoryTab'
@@ -51,7 +51,6 @@ describe('MemoryTab Integration Tests', () => {
   })
 
   it('updates idle hours setting', async () => {
-    const user = userEvent.setup()
     renderWithProviders(<MemoryTab refreshTrigger={0} />)
 
     await waitFor(() => {
@@ -61,9 +60,8 @@ describe('MemoryTab Integration Tests', () => {
     // Find the input by its value
     const inputs = screen.getAllByRole('spinbutton') as HTMLInputElement[]
     const idleInput = inputs[0] // First number input is idle hours
-    
-    await user.clear(idleInput)
-    await user.type(idleInput, '48')
+
+    fireEvent.change(idleInput, { target: { value: '48' } })
 
     await waitFor(() => {
       expect(idleInput.value).toBe('48')
@@ -71,7 +69,6 @@ describe('MemoryTab Integration Tests', () => {
   })
 
   it('updates max days setting', async () => {
-    const user = userEvent.setup()
     renderWithProviders(<MemoryTab refreshTrigger={0} />)
 
     await waitFor(() => {
@@ -81,9 +78,8 @@ describe('MemoryTab Integration Tests', () => {
     // Find the input by its value
     const inputs = screen.getAllByRole('spinbutton') as HTMLInputElement[]
     const maxDaysInput = inputs[1] // Second number input is max days
-    
-    await user.clear(maxDaysInput)
-    await user.type(maxDaysInput, '60')
+
+    fireEvent.change(maxDaysInput, { target: { value: '60' } })
 
     await waitFor(() => {
       expect(maxDaysInput.value).toBe('60')

@@ -85,6 +85,7 @@ export default function ReasoningEffortDropdown({ slot, currentEffort, embedded 
     commitTimer.current = setTimeout(async () => {
       pendingLevel.current = null
       try { await api.chatSlotReasoningEffort(slot, level) }
+      // eslint-disable-next-line no-console -- intentional failure diagnostic
       catch (err) { console.warn('Failed to set reasoning effort', err) }
     }, 150)
   }

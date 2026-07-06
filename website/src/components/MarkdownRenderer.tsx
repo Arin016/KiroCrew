@@ -1,11 +1,28 @@
-import { memo, useEffect, useMemo, useRef, useId, useCallback, useState } from 'react'
+import { createContext, useContext, memo, useEffect, useMemo, useRef, useId, useCallback, useState } from 'react'
+import Clickable from './Clickable'
 import { Paperclip, X, Download } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
+import type { Components, ExtraProps } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeRaw from 'rehype-raw'
 import rehypeKatex from 'rehype-katex'
 import type { PluggableList } from 'unified'
+import type { Root as HastRoot, RootContent, Element as HastElement, Text as HastText } from 'hast'
+
+/** A hast node that owns a `children` array — either the document root or an
+ *  element. Both accept `Element`/`Text` children, so our inserted glow/reveal
+ *  spans are valid in either. */
+type HastParent = HastRoot | HastElement
+
+/** Splice replacement `<span>`/text nodes into a parent's children, replacing
+ *  the single node at `index`. Root and Element have differently-typed children
+ *  arrays (`RootContent[]` vs `ElementContent[]`) that both admit Element/Text,
+ *  so this narrows on the parent kind to keep the splice type-safe. */
+function spliceChildren(parent: HastParent, index: number, nodes: Array<HastElement | HastText>): void {
+  if (parent.type === 'root') parent.children.splice(index, 1, ...nodes)
+  else parent.children.splice(index, 1, ...nodes)
+}
 import mermaid from 'mermaid'
 import '../utils/hljs'
 import { api } from '../api/client'
@@ -18,8 +35,11 @@ import type { ContentBlock } from '../types'
 
 const PATH_RE = /^~?(?:\.{0,2}\/)?[\w.@~\/ -]*\/[\w.@~: -]*[\w.]$/
 
+/** Context providing the viewed file's directory path for resolving bare relative image paths. */
+export const BasePathCtx = createContext<string | null>(null)
+
 function isDarkTheme(): boolean {
-  return document.documentElement.getAttribute('data-theme') === 'dark'
+  return (document.documentElement.getAttribute('data-theme') || '').includes('dark')
 }
 
 function initMermaid(): void {
@@ -61,7 +81,10 @@ import { CodeBlock } from './CodeBlock'
  *  rendered element. Used in every MD_COMPONENTS override; returns an
  *  empty-valued attribute when sourcePos is disabled (React omits it from
  *  the DOM). */
-const sp = (p: any) => ({ 'data-sourcepos': p['data-sourcepos'] })
+const sp = (node?: HastElement) => {
+  const v = node?.properties?.['data-sourcepos']
+  return { 'data-sourcepos': typeof v === 'string' ? v : undefined }
+}
 
 const MermaidBlock = memo(function MermaidBlock({ code }: { code: string }) {
   const ref = useRef<HTMLDivElement>(null)
@@ -92,20 +115,29 @@ const MermaidBlock = memo(function MermaidBlock({ code }: { code: string }) {
 })
 
 /** Generate a URL-safe slug from heading children (handles nested elements) */
-function textOf(node: any): string {
+function textOf(node: React.ReactNode): string {
   if (typeof node === 'string') return node
   if (Array.isArray(node)) return node.map(textOf).join('')
-  if (node?.props?.alt) return node.props.alt
-  if (node?.props?.children) return textOf(node.props.children)
+  if (isElementWithProps(node)) {
+    const props = node.props
+    if (typeof props.alt === 'string') return props.alt
+    if (props.children != null) return textOf(props.children)
+  }
   return ''
 }
-function slugify(children: any): string | undefined {
+/** Narrow a ReactNode to a ReactElement whose props may carry `alt`/`children`. */
+function isElementWithProps(
+  node: React.ReactNode,
+): node is React.ReactElement<{ alt?: string; children?: React.ReactNode }> {
+  return typeof node === 'object' && node !== null && 'props' in node
+}
+function slugify(children: React.ReactNode): string | undefined {
   const raw = textOf(children).toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-').replace(/^-+|-+$/g, '')
   return raw || undefined
 }
 
-const MD_COMPONENTS: Record<string, React.ComponentType<any>> = {
-  code({ className, children, ...props }: any) {
+const MD_COMPONENTS: Components = {
+  code({ className, children, ...props }) {
     const match = /language-(\w+)/.exec(className || '')
     const lang = match?.[1]
     const codeStr = String(children).replace(/\n$/, '')
@@ -121,25 +153,25 @@ const MD_COMPONENTS: Record<string, React.ComponentType<any>> = {
 
     return <CodeBlock code={codeStr} lang={lang} complete={true} />
   },
-  pre({ children }: any) { return <>{children}</> },
-  table({ children, ...rest }: any) { return <div className="overflow-x-auto my-3"><table {...sp(rest)} className="w-full border-collapse text-sm">{children}</table></div> },
-  th({ children, ...rest }: any) { return <th {...sp(rest)} className="text-left text-muted text-[13px] font-medium px-3 py-2 border-b border-border bg-bg-elevated">{children}</th> },
-  td({ children, ...rest }: any) { return <td {...sp(rest)} className="px-3 py-2 border-b border-border text-sm">{children}</td> },
-  a({ href, children, ...rest }: any) { let ext = false; try { ext = !!href && ALLOWED_PROTOCOLS.has(new URL(href, 'http://x').protocol) } catch {} return <a {...sp(rest)} href={href} {...(ext ? {} : { target: '_blank', rel: 'noopener noreferrer' })} className="text-accent underline underline-offset-2 decoration-accent/40 hover:decoration-accent">{children}</a> },
-  blockquote({ children, ...rest }: any) { return <blockquote {...sp(rest)} className="border-l-[3px] border-accent pl-3 my-2 text-muted italic">{children}</blockquote> },
-  hr(rest: any) { return <hr {...sp(rest)} className="border-border my-4" /> },
-  h1({ children, ...rest }: any) { const id = slugify(children); return <h1 {...sp(rest)} id={id} className="text-xl font-bold mt-4 mb-2 text-text-strong">{children}</h1> },
-  h2({ children, ...rest }: any) { const id = slugify(children); return <h2 {...sp(rest)} id={id} className="text-lg font-bold mt-3 mb-2 text-text-strong">{children}</h2> },
-  h3({ children, ...rest }: any) { const id = slugify(children); return <h3 {...sp(rest)} id={id} className="text-base font-semibold mt-3 mb-1.5 text-text-strong">{children}</h3> },
-  h4({ children, ...rest }: any) { const id = slugify(children); return <h4 {...sp(rest)} id={id} className="text-sm font-semibold mt-2 mb-1 text-text-strong">{children}</h4> },
-  h5({ children, ...rest }: any) { const id = slugify(children); return <h5 {...sp(rest)} id={id} className="text-sm font-medium mt-2 mb-1 text-text-strong">{children}</h5> },
-  h6({ children, ...rest }: any) { const id = slugify(children); return <h6 {...sp(rest)} id={id} className="text-[13px] font-medium mt-2 mb-1 text-muted">{children}</h6> },
-  ul({ children, className, ...rest }: any) { const isTasks = className?.includes('contains-task-list'); return <ul {...sp(rest)} className={isTasks ? 'list-none pl-4 my-2 space-y-1' : 'list-disc pl-8 my-2 space-y-1 marker:text-muted'}>{children}</ul> },
-  ol({ children, className, ...rest }: any) { const isTasks = className?.includes('contains-task-list'); return <ol {...sp(rest)} className={isTasks ? 'list-none pl-4 my-2 space-y-1' : 'list-decimal pl-8 my-2 space-y-1 marker:text-muted'}>{children}</ol> },
-  li({ children, className, ...rest }: any) { const isTask = className?.includes('task-list-item'); return <li {...sp(rest)} className={isTask ? 'text-sm leading-relaxed flex items-start gap-1.5' : 'text-sm leading-relaxed'}>{children}</li> },
-  p({ children, ...rest }: any) { return <p {...sp(rest)} className="my-1.5 leading-relaxed">{children}</p> },
-  strong({ children, ...rest }: any) { return <strong {...sp(rest)} className="font-semibold text-text-strong">{children}</strong> },
-  em({ children, ...rest }: any) { return <em {...sp(rest)} className="italic">{children}</em> },
+  pre({ children }) { return <>{children}</> },
+  table({ node, children }) { return <div className="overflow-x-auto my-3"><table {...sp(node)} className="w-full border-collapse text-sm">{children}</table></div> },
+  th({ node, children }) { return <th {...sp(node)} className="text-left text-muted text-[13px] font-medium px-3 py-2 border-b border-border bg-bg-elevated">{children}</th> },
+  td({ node, children }) { return <td {...sp(node)} className="px-3 py-2 border-b border-border text-sm">{children}</td> },
+  a({ node, href, children }) { let ext = false; try { ext = !!href && ALLOWED_PROTOCOLS.has(new URL(href, 'http://x').protocol) } catch {} return <a {...sp(node)} href={href} {...(ext ? {} : { target: '_blank', rel: 'noopener noreferrer' })} className="text-accent underline underline-offset-2 decoration-accent/40 hover:decoration-accent">{children}</a> },
+  blockquote({ node, children }) { return <blockquote {...sp(node)} className="border-l-[3px] border-accent pl-3 my-2 text-muted italic">{children}</blockquote> },
+  hr({ node }) { return <hr {...sp(node)} className="border-border my-4" /> },
+  h1({ node, children }) { const id = slugify(children); return <h1 {...sp(node)} id={id} className="text-xl font-bold mt-4 mb-2 text-text-strong">{children}</h1> },
+  h2({ node, children }) { const id = slugify(children); return <h2 {...sp(node)} id={id} className="text-lg font-bold mt-3 mb-2 text-text-strong">{children}</h2> },
+  h3({ node, children }) { const id = slugify(children); return <h3 {...sp(node)} id={id} className="text-base font-semibold mt-3 mb-1.5 text-text-strong">{children}</h3> },
+  h4({ node, children }) { const id = slugify(children); return <h4 {...sp(node)} id={id} className="text-sm font-semibold mt-2 mb-1 text-text-strong">{children}</h4> },
+  h5({ node, children }) { const id = slugify(children); return <h5 {...sp(node)} id={id} className="text-sm font-medium mt-2 mb-1 text-text-strong">{children}</h5> },
+  h6({ node, children }) { const id = slugify(children); return <h6 {...sp(node)} id={id} className="text-[13px] font-medium mt-2 mb-1 text-muted">{children}</h6> },
+  ul({ node, children, className }) { const isTasks = className?.includes('contains-task-list'); return <ul {...sp(node)} className={isTasks ? 'list-none pl-4 my-2 space-y-1' : 'list-disc pl-8 my-2 space-y-1 marker:text-muted'}>{children}</ul> },
+  ol({ node, children, className }) { const isTasks = className?.includes('contains-task-list'); return <ol {...sp(node)} className={isTasks ? 'list-none pl-4 my-2 space-y-1' : 'list-decimal pl-8 my-2 space-y-1 marker:text-muted'}>{children}</ol> },
+  li({ node, children, className }) { const isTask = className?.includes('task-list-item'); return <li {...sp(node)} className={isTask ? 'text-sm leading-relaxed flex items-start gap-1.5' : 'text-sm leading-relaxed'}>{children}</li> },
+  p({ node, children }) { return <p {...sp(node)} className="my-1.5 leading-relaxed">{children}</p> },
+  strong({ node, children }) { return <strong {...sp(node)} className="font-semibold text-text-strong">{children}</strong> },
+  em({ node, children }) { return <em {...sp(node)} className="italic">{children}</em> },
   img: ImgWithFallback,
 }
 
@@ -147,11 +179,28 @@ const MD_COMPONENTS: Record<string, React.ComponentType<any>> = {
  *  broken. Previously the onError handler swapped the <img> for a hand-built
  *  SVG via .replaceWith(), which mutated DOM React still owned and could later
  *  trigger "removeChild on Node" reconciliation crashes. */
-function ImgWithFallback({ src, alt, ...props }: any) {
+function ImgWithFallback({
+  node: _node,
+  src,
+  alt,
+  ...props
+}: React.ImgHTMLAttributes<HTMLImageElement> & ExtraProps) {
   const [errored, setErrored] = useState(false)
+  const basePath = useContext(BasePathCtx)
   if (!src) return null
   const isLocal = src.startsWith('/') || src.startsWith('~') || src.startsWith('.')
-  const url = isLocal ? `/api/file-raw?path=${encodeURIComponent(src)}` : src
+    || (basePath && !src.startsWith('http'))
+  let url: string
+  if (isLocal) {
+    if (basePath && !src.startsWith('/') && !src.startsWith('~')) {
+      const resolved = basePath.replace(/\/[^/]*$/, '') + '/' + src
+      url = `/api/file-raw?path=${encodeURIComponent(resolved)}`
+    } else {
+      url = `/api/file-raw?path=${encodeURIComponent(src)}`
+    }
+  } else {
+    url = src
+  }
   if (errored) {
     return (
       <span className="text-sm text-muted inline-flex items-center gap-1">
@@ -162,6 +211,12 @@ function ImgWithFallback({ src, alt, ...props }: any) {
   }
   return (
     <span className="inline-block my-2">
+      {/* The <img> is the lightbox trigger; dispatchLightbox needs the image
+          element itself as currentTarget and the [data-lightbox-image] query
+          relies on it being an <img>, so it can't be a <button>. Keyboard users
+          reach the same lightbox via other focusable controls; a visible <img>
+          preview is presentational here. */}
+      {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions */}
       <img
         src={url} alt={alt || ''} loading="lazy"
         className="max-w-[240px] max-h-[160px] object-contain rounded-md border border-border cursor-pointer hover:opacity-90 transition-opacity"
@@ -199,8 +254,8 @@ const DANGEROUS_PROTOCOLS = ['javascript:', 'data:', 'vbscript:']
 const cleanUrl = (url: string) => url.replace(/[\x00-\x1f\x7f]/g, '').trim().toLowerCase()
 
 function rehypeSanitize() {
-  return (tree: any) => {
-    const walk = (node: any, parent: any, index: number) => {
+  return (tree: HastRoot) => {
+    const walk = (node: RootContent, parent: HastRoot | HastElement, index: number): number | void => {
       if (node.type === 'element') {
         // Remove dangerous elements entirely
         if (DANGEROUS_TAGS.has(node.tagName)) {
@@ -231,18 +286,16 @@ function rehypeSanitize() {
           delete node.properties.srcdoc
         }
       }
-      if (node.children) {
+      if ('children' in node && node.children) {
         for (let i = 0; i < node.children.length; i++) {
           const result = walk(node.children[i], node, i)
           if (typeof result === 'number') i = result - 1  // re-check after splice
         }
       }
     }
-    if (tree.children) {
-      for (let i = 0; i < tree.children.length; i++) {
-        const result = walk(tree.children[i], tree, i)
-        if (typeof result === 'number') i = result - 1
-      }
+    for (let i = 0; i < tree.children.length; i++) {
+      const result = walk(tree.children[i], tree, i)
+      if (typeof result === 'number') i = result - 1
     }
   }
 }
@@ -257,14 +310,14 @@ const REHYPE_PLUGINS: PluggableList = [[rehypeRaw, { passThrough: ['math', 'inli
  * Replaces the deprecated `sourcePos` option removed in react-markdown v10.
  */
 function rehypeSourcepos() {
-  return (tree: any) => {
-    const walk = (node: any) => {
+  return (tree: HastRoot) => {
+    const walk = (node: HastRoot | RootContent) => {
       if (node.type === 'element' && node.position?.start) {
         const s = node.position.start, e = node.position.end ?? s
         node.properties = node.properties || {}
         node.properties['data-sourcepos'] = `${s.line}:${s.column}-${e.line}:${e.column}`
       }
-      if (node.children) for (const c of node.children) walk(c)
+      if ('children' in node && node.children) for (const c of node.children) walk(c)
     }
     walk(tree)
   }
@@ -292,26 +345,24 @@ const GLOW_TAIL_CHARS = 30
  */
 function rehypeStreamingGlow(options?: { tailChars?: number }) {
   const tailChars = options?.tailChars ?? GLOW_TAIL_CHARS
-  return (tree: any) => {
+  return (tree: HastRoot) => {
     // Collect every eligible text node (non-whitespace, not inside code/pre);
     // the streaming tail is the last one. Using an array (rather than a
     // closure-mutated `let`) keeps TypeScript's control-flow narrowing happy.
-    const candidates: { parent: any; index: number; value: string }[] = []
-    const walk = (node: any, parent: any, index: number, inCode: boolean) => {
+    const candidates: { parent: HastParent; index: number; value: string }[] = []
+    const walk = (node: RootContent, parent: HastParent, index: number, inCode: boolean) => {
       if (node.type === 'text') {
         if (!inCode && node.value && node.value.trim()) {
           candidates.push({ parent, index, value: node.value })
         }
         return
       }
-      const code = inCode || node.tagName === 'code' || node.tagName === 'pre'
-      if (node.children) {
+      const code = inCode || (node.type === 'element' && (node.tagName === 'code' || node.tagName === 'pre'))
+      if ('children' in node && node.children) {
         for (let i = 0; i < node.children.length; i++) walk(node.children[i], node, i, code)
       }
     }
-    if (tree.children) {
-      for (let i = 0; i < tree.children.length; i++) walk(tree.children[i], tree, i, false)
-    }
+    for (let i = 0; i < tree.children.length; i++) walk(tree.children[i], tree, i, false)
     const target = candidates[candidates.length - 1]
     if (!target) return
     const { parent, index, value } = target
@@ -325,13 +376,14 @@ function rehypeStreamingGlow(options?: { tailChars?: number }) {
     const before = value.slice(0, cut)
     const tail = value.slice(cut)
     if (!tail.trim()) return
-    const span = {
+    const span: HastElement = {
       type: 'element',
       tagName: 'span',
       properties: { className: ['streaming-glow'] },
       children: [{ type: 'text', value: tail }],
     }
-    parent.children.splice(index, 1, ...(before ? [{ type: 'text', value: before }, span] : [span]))
+    const beforeNode: HastText = { type: 'text', value: before }
+    spliceChildren(parent, index, before ? [beforeNode, span] : [span])
   }
 }
 
@@ -358,29 +410,27 @@ const REVEAL_CHAR_RE = /[\s\S]/g
  * drops out and the tail reverts to plain text (clean for selection/copy).
  */
 function rehypeStreamingReveal() {
-  return (tree: any) => {
-    const candidates: { parent: any; index: number; value: string }[] = []
-    const walk = (node: any, parent: any, index: number, skip: boolean) => {
+  return (tree: HastRoot) => {
+    const candidates: { parent: HastParent; index: number; value: string }[] = []
+    const walk = (node: RootContent, parent: HastParent, index: number, skip: boolean) => {
       if (node.type === 'text') {
         if (!skip && node.value && node.value.trim()) {
           candidates.push({ parent, index, value: node.value })
         }
         return
       }
-      const cls = node.properties?.className
+      const cls = node.type === 'element' ? node.properties?.className : undefined
       const isGlow = Array.isArray(cls) && cls.includes('streaming-glow')
       // Skip text inside `pre` (fenced code/diff render via their own
       // components) and the glow window. Inline `code` is NOT skipped so it
       // char-fades like the surrounding prose — fenced blocks are separate
       // non-markdown blocks, so any `code` reached here is inline.
-      const next = skip || isGlow || node.tagName === 'pre'
-      if (node.children) {
+      const next = skip || isGlow || (node.type === 'element' && node.tagName === 'pre')
+      if ('children' in node && node.children) {
         for (let i = 0; i < node.children.length; i++) walk(node.children[i], node, i, next)
       }
     }
-    if (tree.children) {
-      for (let i = 0; i < tree.children.length; i++) walk(tree.children[i], tree, i, false)
-    }
+    for (let i = 0; i < tree.children.length; i++) walk(tree.children[i], tree, i, false)
     if (candidates.length === 0) return
     // Splice in reverse document order so that replacing one text node with N
     // char spans doesn't invalidate the indices of earlier candidates that
@@ -389,13 +439,13 @@ function rehypeStreamingReveal() {
       const { parent, index, value } = candidates[c]
       const tokens = value.match(REVEAL_CHAR_RE)
       if (!tokens || tokens.length === 0) continue
-      const spans = tokens.map(tok => ({
+      const spans: HastElement[] = tokens.map(tok => ({
         type: 'element',
         tagName: 'span',
         properties: { className: ['ft-word'] },
         children: [{ type: 'text', value: tok }],
       }))
-      parent.children.splice(index, 1, ...spans)
+      spliceChildren(parent, index, spans)
     }
   }
 }
@@ -621,6 +671,11 @@ export default memo(function MarkdownRenderer({ content, streaming = false, onFi
   const streamClass = animOn && streaming ? ' ft-streaming' : ''
 
   return (
+    // Presentational content wrapper for rendered markdown blocks. The onClick is
+    // pure event delegation: it only acts when a rendered inline-code path span is
+    // clicked (open / reveal-in-Finder), so the wrapper itself is not an
+    // interactive control and carries no role.
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
     <div className={`group${animClass}${streamClass}`} onClick={handleClick} data-image-scope="">
       {blocks.map((block, i) => (
         // Key on startLine (stable across streaming) instead of block.type, so
@@ -763,7 +818,11 @@ export function Lightbox() {
   if (!state) return null
   const img = state.images[state.index]
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center cursor-pointer" onClick={() => setState(null)}>
+    <Clickable className="fixed inset-0 z-[9999] bg-black/80 flex items-center justify-center cursor-pointer" onClick={() => setState(null)}>
+      {/* onClick only stops propagation so clicking the image itself doesn't
+          close the overlay; it is not a user action, so no keyboard handler is
+          needed (Escape closes via the global keydown listener above). */}
+      {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions */}
       <img src={img.src} alt={img.alt} className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl" onClick={e => e.stopPropagation()} />
       <div className="absolute top-4 right-4 flex items-center gap-1">
         <button
@@ -782,6 +841,6 @@ export function Lightbox() {
           <X className="lucide-inline" aria-hidden="true" />
         </button>
       </div>
-    </div>
+    </Clickable>
   )
 }

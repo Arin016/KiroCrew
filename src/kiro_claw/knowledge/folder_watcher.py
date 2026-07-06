@@ -14,6 +14,7 @@ from pathlib import Path
 from kiro_claw.security import is_sensitive_path
 from kiro_claw.sel import sel
 
+from .dedup import dedup_document
 from .readers import FileReader
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,30 @@ DEFAULT_MAX_FILES = 5000
 SOURCE_TYPE_SKIP_DIRS: dict[str, set[str]] = {
     "obsidian_vault": {".obsidian", ".trash"},
 }
+
+# OS-generated temp / lock / junk files that are never real documents. Matched
+# case-insensitively against the file basename for every folder source type, in
+# addition to any per-source ignore_patterns. Without this, files that carry an
+# otherwise-supported extension are discovered, fail ingestion, and (since failed
+# files are never auto-retried) leave a source permanently stalled below 100%.
+# The motivating case: macOS AppleDouble sidecars (``._<name>.docx``).
+DEFAULT_IGNORE_GLOBS: tuple[str, ...] = (
+    "._*",            # macOS AppleDouble resource forks
+    ".ds_store",      # macOS Finder metadata
+    "~$*",            # Microsoft Office lock / owner files
+    ".~lock.*",       # LibreOffice lock files
+    "thumbs.db",      # Windows thumbnail cache
+    "desktop.ini",    # Windows folder settings
+    "*.tmp",          # generic temp files
+    "*.temp",
+    "*.swp",          # vim swap files
+    "*.swo",
+    "*~",             # editor backup files
+    ".#*",            # emacs lock files
+    "*.crdownload",   # incomplete browser downloads
+    "*.part",
+    "*.partial",
+)
 
 
 class FolderWatcher:
@@ -77,6 +102,7 @@ class FolderWatcher:
         now = datetime.now().isoformat()
 
         stats: dict[str, int] = {"new": 0, "changed": 0, "deleted": 0, "skipped": 0, "capped": capped, "failed": 0}
+        ingested_paths: list[str] = []  # files (re)ingested this scan, for targeted dedup
 
         # 4. Detect deleted files (use full set, not capped set, to avoid false deletions)
         for file_path in list(existing.keys()):
@@ -93,8 +119,9 @@ class FolderWatcher:
 
             state = existing.get(file_path)
 
-            # Skip files marked as skipped or failed (user must explicitly retry)
-            if state and state.get("status") in ("skipped", "failed"):
+            # Skip files marked skipped/failed (user must retry) or deduped (already
+            # collapsed into another source's copy -- don't re-ingest the on-disk file).
+            if state and state.get("status") in ("skipped", "failed", "deduped"):
                 stats["skipped"] += 1
                 continue
 
@@ -132,8 +159,18 @@ class FolderWatcher:
                 stats["failed"] += 1
             else:
                 self._update_state(source_id, file_path, content_hash, mtime, json.dumps(item_ids), now, "done", commit=False)
+                ingested_paths.append(file_path)
 
         self.store.db.commit()  # Batch commit for all non-crash-recovery updates
+        # Targeted cross-source dedup for each newly ingested/changed file, so a folder
+        # copy collapses any matching one-shot upload. O(k*n) over the k changed files
+        # rather than a full O(n^2) corpus sweep (knowledge/dedup.py).
+        if getattr(self.pipeline, "_dedup_enabled", True):
+            for fpath in ingested_paths:
+                try:
+                    dedup_document(self.store, source_id, file_path=fpath, apply=True)
+                except Exception:
+                    logger.debug("Per-file dedup skipped for %s", fpath, exc_info=True)
         return stats
 
     def _walk(self, root: str, ignore_patterns: list[str], extra_skip_dirs: set[str]) -> list[tuple[str, float]]:
@@ -148,6 +185,9 @@ class FolderWatcher:
 
             rel_dir = os.path.relpath(dirpath, root)
             for fname in filenames:
+                # Skip OS-generated temp/lock/junk files (basename, case-insensitive)
+                if any(fnmatch(fname.lower(), pat) for pat in DEFAULT_IGNORE_GLOBS):
+                    continue
                 rel_path = os.path.join(rel_dir, fname) if rel_dir != "." else fname
                 # Check ignore patterns
                 if any(fnmatch(rel_path, pat) for pat in ignore_patterns):

@@ -1,4 +1,5 @@
 import { API_BASE } from './constants'
+import type { TreeEntry, FileMeta, SearchResult } from './types'
 
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path, { credentials: 'same-origin' })
@@ -13,19 +14,19 @@ export const fileExplorerApi = {
   health: () => get<{ allowedRoots: string[] }>(`${API_BASE}/health`),
 
   tree: (path: string, depth = 1) =>
-    get<{ entries: any[] }>(`${API_BASE}/tree?path=${encodeURIComponent(path)}&depth=${depth}`),
+    get<{ entries: TreeEntry[] }>(`${API_BASE}/tree?path=${encodeURIComponent(path)}&depth=${depth}`),
 
   read: (path: string, maxBytes?: number) => {
     const q = new URLSearchParams({ path })
     if (maxBytes) q.set('max_bytes', String(maxBytes))
-    return get<any>(`${API_BASE}/read?${q.toString()}`)
+    return get<FileMeta>(`${API_BASE}/read?${q.toString()}`)
   },
 
   search: (path: string, q: string, include = '', exclude = '') => {
     const params = new URLSearchParams({ path, q })
     if (include) params.set('include', include)
     if (exclude) params.set('exclude', exclude)
-    return get<{ results: any[]; engine?: string; truncated?: boolean }>(`${API_BASE}/search?${params.toString()}`)
+    return get<{ results: SearchResult[]; engine?: string; truncated?: boolean }>(`${API_BASE}/search?${params.toString()}`)
   },
 
   gitStatus: (path: string) =>
@@ -36,6 +37,6 @@ export const fileExplorerApi = {
 
   complete: (path: string, kind = 'dir', limit = 30) => {
     const q = new URLSearchParams({ path, kind, limit: String(limit) })
-    return get<{ entries: any[] }>(`${API_BASE}/complete?${q.toString()}`)
+    return get<{ entries: TreeEntry[] }>(`${API_BASE}/complete?${q.toString()}`)
   },
 }

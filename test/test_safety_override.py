@@ -345,6 +345,55 @@ class TestSelFaultTolerance:
         assert result.active is False
         assert not override.is_active()
 
+    def test_activate_denied_with_real_async_sel_unwritable(
+        self, override: SafetyOverride, tmp_path, monkeypatch
+    ) -> None:
+        """End-to-end reproduction of the pentest finding.
+
+        Using the REAL async SEL (not a mock), make the log file unwritable and
+        confirm activation is DENIED with no state change. Before the fix,
+        ``log_api_access`` enqueued to the background writer and returned, so
+        the async writer swallowed the PermissionError and YOLO activated
+        unaudited (activation_count incremented, _active flipped True). With the
+        critical synchronous write, the error propagates and activate() rolls
+        back.
+        """
+        from kiro_claw.sel import SecurityEventLog
+
+        SecurityEventLog._instance = None
+        SecurityEventLog._initialized = False
+        real_sel = SecurityEventLog(base_dir=tmp_path)
+        monkeypatch.setattr("kiro_claw.safety_override.sel", lambda: real_sel)
+
+        real_open = open
+
+        def _boom(path, *a, **k):
+            if str(path).endswith("security_events.jsonl") and "a" in (
+                a[0] if a else k.get("mode", "")
+            ):
+                raise PermissionError("SEL file unwritable (chmod 000)")
+            return real_open(path, *a, **k)
+
+        import builtins
+
+        monkeypatch.setattr(builtins, "open", _boom)
+        try:
+            result = override.activate("dashboard")
+        finally:
+            monkeypatch.undo()
+            SecurityEventLog._instance = None
+            SecurityEventLog._initialized = False
+
+        # Fail-closed: activation refused, no state committed.
+        assert result.active is False
+        assert override._active is False
+        assert override._activation_count == 0
+        assert override._expires_at == 0.0
+        # And no activate audit record was persisted.
+        sel_file = tmp_path / "security_events.jsonl"
+        if sel_file.exists():
+            assert "safety_override:activate" not in sel_file.read_text(encoding="utf-8")
+
 
 # ─── Callbacks ──────────────────────────────────────────────────────────────
 

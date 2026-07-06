@@ -272,6 +272,85 @@ class TestMcpToolClient:
         client.close()
         client._proc.terminate.assert_called_once()
 
+    def test_rpc_disconnect_includes_rc_and_stderr_tail(self, tmp_path):
+        """Mesh-2370: a handshake EOF must surface exit code + stderr tail."""
+        from kiro_claw.cron_script import McpToolClient
+        stderr_path = tmp_path / "stderr.log"
+        stderr_path.write_text("Node version 18 detected, but version 20 or higher is required.\n")
+        client = object.__new__(McpToolClient)
+        client._server_name = "atoz-mcp"
+        client._req_id = 0
+        client._stderr_file = SimpleNamespace(name=str(stderr_path))
+        client._proc = MagicMock()
+        client._proc.stdin = MagicMock()
+        client._proc.stdout = MagicMock()
+        client._proc.poll.return_value = 1
+        # _recv returns None (EOF) on the first read
+        with patch.object(McpToolClient, "_recv", return_value=None):
+            with pytest.raises(RuntimeError) as excinfo:
+                client._rpc("initialize")
+        msg = str(excinfo.value)
+        assert "atoz-mcp" in msg
+        assert "initialize" in msg
+        assert "rc=1" in msg
+        assert "version 20 or higher is required" in msg
+
+    def test_rpc_disconnect_empty_stderr(self, tmp_path):
+        from kiro_claw.cron_script import McpToolClient
+        client = object.__new__(McpToolClient)
+        client._server_name = "some-mcp"
+        client._req_id = 0
+        client._stderr_file = SimpleNamespace(name=str(tmp_path / "missing.log"))
+        client._proc = MagicMock()
+        client._proc.stdin = MagicMock()
+        client._proc.stdout = MagicMock()
+        client._proc.poll.return_value = None
+        with patch.object(McpToolClient, "_recv", return_value=None):
+            with pytest.raises(RuntimeError, match=r"stderr tail: \(empty\)"):
+                client._rpc("tools/call")
+
+    def test_stderr_tail_redacts_credentials(self, tmp_path):
+        from kiro_claw.cron_script import McpToolClient
+        stderr_path = tmp_path / "stderr.log"
+        stderr_path.write_text("boom AKIA1234567890123456 failure")
+        client = object.__new__(McpToolClient)
+        client._stderr_file = SimpleNamespace(name=str(stderr_path))
+        tail = client._stderr_tail()
+        assert "AKIA1234567890123456" not in tail
+        assert "boom" in tail
+
+    def test_stderr_tail_redacts_exfiltration_urls(self, tmp_path):
+        from kiro_claw.cron_script import McpToolClient
+        stderr_path = tmp_path / "stderr.log"
+        # Long innocuous query (>= 200 chars) triggers redact_exfiltration_urls'
+        # length-based heuristic. We can't use a credential-shaped value (AKIA,
+        # base64 blob) because redact_credentials runs first and would replace
+        # it before the URL redactor sees it, leaving a short benign query.
+        long_query = "data=" + ("a" * 250)
+        stderr_path.write_text(
+            f"boom https://evil.example.com/leak?{long_query} failure"
+        )
+        client = object.__new__(McpToolClient)
+        client._stderr_file = SimpleNamespace(name=str(stderr_path))
+        tail = client._stderr_tail()
+        assert "evil.example.com/leak" not in tail
+        assert "boom" in tail
+
+    def test_close_removes_stderr_tempfile(self, tmp_path):
+        from kiro_claw.cron_script import McpToolClient
+        stderr_path = tmp_path / "stderr.log"
+        stderr_path.write_text("x")
+        client = object.__new__(McpToolClient)
+        client._proc = MagicMock()
+        client._proc.terminate = MagicMock()
+        client._proc.wait = MagicMock()
+        client._sandbox_cleanup = None
+        # mimic a real file handle: has .close() and .name
+        fh = open(stderr_path, "w+")
+        client._stderr_file = fh
+        client.close()
+        assert not stderr_path.exists()
+
 
 class TestScriptContextNotify:
     """Tests for ScriptContext.notify() HTTP delivery."""

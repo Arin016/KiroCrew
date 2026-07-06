@@ -20,11 +20,11 @@ vi.mock('../hooks/usePopoutSync', () => ({
   usePopoutSync: () => ({ popoutActive: false, broadcastScene: mockBroadcastScene, openPopout: vi.fn() }),
 }))
 
-vi.mock('../pages/scenes/OfficeScene', () => ({ default: (p: any) => <div data-testid="scene-office">OfficeScene ({p.agents?.length ?? 0})</div> }))
-vi.mock('../pages/scenes/NeuralConstellationScene', () => ({ default: (p: any) => <div data-testid="scene-neural">NeuralScene ({p.agents.length})</div> }))
-vi.mock('../pages/scenes/WizardTowerScene', () => ({ default: (p: any) => <div data-testid="scene-wizard">WizardScene ({p.agents.length})</div> }))
-vi.mock('../pages/scenes/UnderwaterLabScene', () => ({ default: (p: any) => <div data-testid="scene-underwater">UnderwaterScene ({p.agents.length})</div> }))
-vi.mock('../pages/scenes/mission-control/MissionControlScene', () => ({ default: (p: any) => <div data-testid="scene-mission">MissionScene ({p.agents.length})</div> }))
+vi.mock('../pages/scenes/OfficeScene', () => ({ default: (p: { agents?: unknown[] }) => <div data-testid="scene-office">OfficeScene ({p.agents?.length ?? 0})</div> }))
+vi.mock('../pages/scenes/NeuralConstellationScene', () => ({ default: (p: { agents: unknown[] }) => <div data-testid="scene-neural">NeuralScene ({p.agents.length})</div> }))
+vi.mock('../pages/scenes/WizardTowerScene', () => ({ default: (p: { agents: unknown[] }) => <div data-testid="scene-wizard">WizardScene ({p.agents.length})</div> }))
+vi.mock('../pages/scenes/UnderwaterLabScene', () => ({ default: (p: { agents: unknown[] }) => <div data-testid="scene-underwater">UnderwaterScene ({p.agents.length})</div> }))
+vi.mock('../pages/scenes/mission-control/MissionControlScene', () => ({ default: (p: { agents: unknown[] }) => <div data-testid="scene-mission">MissionScene ({p.agents.length})</div> }))
 
 beforeEach(() => { localStorage.clear(); mockBroadcastScene.mockClear() })
 

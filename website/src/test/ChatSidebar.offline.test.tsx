@@ -69,10 +69,11 @@ Object.defineProperty(window, 'matchMedia', {
     addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn(),
   })),
 })
-globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) }) as any
+globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) }) as unknown as typeof fetch
 
 import ChatSidebar from '../pages/ChatSidebar'
 import type { ChatSlot, ChatHistoryItem } from '../types'
+import type { RootState } from '../store'
 
 const slot = (key: string, title?: string): ChatSlot => ({
   key, title: title ?? key, messages: 1, running: false, mode: '', created: '', last_ts: '2026-01-01T00:00:00Z',
@@ -94,7 +95,7 @@ function renderSidebar(connected: boolean, opts: { withHistory?: boolean } = {})
       subagentRunning: {}, subagentDetails: {}, subagentText: {},
       sessionDefaultColor: null, sessionColorsMode: 'tint', sessionColorsPalette: 'horizon', sessionColorsIntensity: 'clear',
       slotsLoaded: true,
-    } as any,
+    } as unknown as RootState['dashboard'],
     chat: {
       activeSlot: 's1',
       messages: [], slotRunning: false, slotStopping: false, slotState: 'idle',
@@ -104,7 +105,7 @@ function renderSidebar(connected: boolean, opts: { withHistory?: boolean } = {})
       pendingInput: null, slotContextPct: {}, voicePlaying: false, voiceAudio: null,
       subagents: {}, toolLog: [], activityOpen: false, activityTab: 'tools', slotActivity: {}, slotHistory: [],
       slotMessages: {}, slotLoading: false,
-    } as any,
+    } as unknown as RootState['chat'],
   })
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
@@ -175,7 +176,7 @@ describe('ChatSidebar – offline guards', () => {
   it('mousedown on a history row when offline does NOT dispatch resumeFromHistory', () => {
     renderSidebar(false, { withHistory: true })
     // History section is collapsed by default — expand it first
-    fireEvent.click(screen.getByRole('button', { name: /History/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^older sessions$/i }))
     const histRow = screen.getByText('History 1').closest('div') as HTMLElement | null
     expect(histRow).not.toBeNull()
     fireEvent.mouseDown(histRow!)
@@ -184,7 +185,7 @@ describe('ChatSidebar – offline guards', () => {
 
   it('mousedown on a history row when connected DOES dispatch resumeFromHistory', () => {
     renderSidebar(true, { withHistory: true })
-    fireEvent.click(screen.getByRole('button', { name: /History/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^older sessions$/i }))
     const histRow = screen.getByText('History 1').closest('div') as HTMLElement | null
     expect(histRow).not.toBeNull()
     fireEvent.mouseDown(histRow!)
@@ -216,7 +217,7 @@ describe('ChatSidebar – offline guards', () => {
 
   it('offline history rows expose aria-disabled=true for screen readers', () => {
     renderSidebar(false, { withHistory: true })
-    fireEvent.click(screen.getByRole('button', { name: /History/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^older sessions$/i }))
     // The history row is the outermost flex container with the offline title.
     // closest('[aria-disabled]') walks up to the element that owns the attr.
     const histRow = screen.getByText('History 1').closest('[aria-disabled]') as HTMLElement

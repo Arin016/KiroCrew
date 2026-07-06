@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
+import { render, screen, fireEvent, act } from '@testing-library/react'
 import React from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
@@ -12,15 +12,20 @@ vi.mock('../app-sdk/index', () => ({
   useAppApi: () => ({ get: mockGet, post: mockPost }),
 }))
 
+interface MockChatMessageListProps {
+  messages: unknown[]
+  running: boolean
+}
+
 vi.mock('./ChatMessageList', () => ({
-  default: ({ messages, running }: any) => (
+  default: ({ messages, running }: MockChatMessageListProps) => (
     <div data-testid="chat-message-list" data-count={messages.length} data-running={String(running)} />
   ),
 }))
 
 // Mock ChatMessageList from the correct path (ChatEmbed imports from ./ChatMessageList)
 vi.mock('../app-sdk/ChatMessageList', () => ({
-  default: ({ messages, running }: any) => (
+  default: ({ messages, running }: MockChatMessageListProps) => (
     <div data-testid="chat-message-list" data-count={messages.length} data-running={String(running)} />
   ),
 }))

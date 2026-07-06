@@ -62,6 +62,7 @@ export default function TabStrip({ folderTabs, fileTabs, activeFolderId, activeF
             {renameId === t.id ? (
               <input
                 className="mc-fe-tab-rename"
+                aria-label="Rename workspace tab"
                 autoFocus
                 value={renameDraft}
                 onChange={(e) => setRenameDraft(e.target.value)}

@@ -1336,6 +1336,15 @@ def _refresh_dynamic_fields(config: dict) -> None:
         if shipped_model:
             config["model"] = shipped_model
 
+    # config.json agent.model is the user-facing authority (kiroclaw config set
+    # agent.model). An explicit pick (not the "auto" sentinel) is propagated into
+    # the agent file so kiro-cli's --agent startup load matches it; otherwise the
+    # stale agent-file model shadows config.json and session/set_model loses the
+    # startup race (Mesh-2292). "auto" defers to managed/shipped resolution above.
+    mc_model = (mc_cfg.get("agent") or {}).get("model")
+    if mc_model and mc_model != "auto":
+        config["model"] = mc_model
+
     # Ensure kiro-cli uses agent-level mcpServers exclusively (not global
     # mcp.json).  Existing configs created before this field was added lack
     # it, causing kiro-cli to fall back to the (possibly empty) global file.

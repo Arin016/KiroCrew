@@ -104,6 +104,41 @@ class TestFolderWatcherWalk:
         paths = [p for p, _ in files]
         assert not any(".obsidian" in p for p in paths)
 
+    def test_skips_os_temp_and_junk_files(self, store, pipeline, tmp_path):
+        """OS-generated temp/lock/junk files are excluded even with supported names."""
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "real.md").write_text("# Real doc")
+        # Junk that would otherwise pass the extension allowlist:
+        (vault / "._real.docx").write_bytes(b"AppleDouble")  # macOS resource fork
+        (vault / "~$real.docx").write_bytes(b"lock")         # Office owner/lock file
+        (vault / ".DS_Store").write_bytes(b"\x00\x00")       # macOS Finder metadata (uppercase)
+        (vault / "draft.tmp").write_text("temp")
+        (vault / "note.md.swp").write_bytes(b"swap")         # vim swap
+        (vault / "backup.md~").write_text("backup")          # editor backup
+        (vault / "download.part").write_bytes(b"partial")    # incomplete download
+
+        fw = FolderWatcher(store, pipeline)
+        files = fw._walk(str(vault), [], set())
+        names = {Path(p).name for p, _ in files}
+
+        assert "real.md" in names
+        for junk in ("._real.docx", "~$real.docx", ".DS_Store", "draft.tmp",
+                     "note.md.swp", "backup.md~", "download.part"):
+            assert junk not in names, f"{junk} should be ignored by default"
+
+    def test_discovers_pdf_files(self, store, pipeline, vault):
+        # Part 1: PDFs must be walked, not silently skipped. Before .pdf joined
+        # FileReader.SUPPORTED the extension filter dropped folder PDFs.
+        (vault / "report.pdf").write_bytes(b"%PDF-1.4 minimal")
+        fw = FolderWatcher(store, pipeline)
+        paths = [p for p, _ in fw._walk(str(vault), [], set())]
+        assert any(p.endswith("report.pdf") for p in paths)
+
+    def test_pdf_in_supported_set(self):
+        from kiro_claw.knowledge.readers import FileReader
+        assert ".pdf" in FileReader.SUPPORTED
+
 
 class TestFolderWatcherScan:
     @pytest.mark.asyncio
@@ -181,6 +216,36 @@ class TestFolderWatcherScan:
 
         stats = await fw.scan_source(source)
         assert stats["changed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_junk_files_create_no_state_rows(self, store, pipeline, tmp_path):
+        """Default-ignored junk files never enter folder_file_state, so a source
+        is not left permanently stalled below 100% (the AppleDouble stall bug)."""
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "doc1.md").write_text("# Doc 1")
+        (vault / "doc2.md").write_text("# Doc 2")
+        (vault / "._doc1.md").write_bytes(b"AppleDouble")  # would otherwise fail + stall
+        (vault / "~$doc2.docx").write_bytes(b"lock")
+
+        fw = FolderWatcher(store, pipeline)
+        source_id = store.add_source("test", "local_folder", str(vault))
+        source = {"id": source_id, "uri": str(vault), "source_type": "local_folder", "properties": "{}"}
+
+        async def fake_ingest(path, **kwargs):
+            store.add_item("title", "content", "doc", source_id=source_id)
+            return "job1"
+        pipeline.ingest_file = fake_ingest
+
+        stats = await fw.scan_source(source)
+        assert stats["new"] == 2
+        assert stats["skipped"] == 0
+        assert stats["failed"] == 0
+
+        rows = store.db.execute(
+            "SELECT file_path FROM folder_file_state WHERE source_id = ?", (source_id,)).fetchall()
+        tracked = {Path(r["file_path"]).name for r in rows}
+        assert tracked == {"doc1.md", "doc2.md"}
 
 
 class TestFolderFileStateTable:

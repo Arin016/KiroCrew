@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { Download, X } from 'lucide-react'
 
@@ -51,20 +51,39 @@ export default function UpdateModal() {
   const installMutation = useMutation({ mutationFn: () => getUpdateApi()!.install() })
   const installing = installMutation.isPending
 
-  if (!update || update.state !== 'downloaded' || dismissed) return null
+  const open = !!update && update.state === 'downloaded' && !dismissed
 
-  const version = update.version || ''
-  const notes = (update.notes || '').trim()
+  // Escape dismisses the modal (unless an install is in flight), matching the
+  // backdrop-click affordance and keeping the overlay keyboard-accessible.
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !installing) setDismissed(true)
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [open, installing])
+
+  if (!open) return null
+
+  const version = update!.version || ''
+  const notes = (update!.notes || '').trim()
   const dismiss = () => { if (!installing) setDismissed(true) }
 
   return (
     <div
       className="fixed inset-0 z-50 bg-bg/80 backdrop-blur-sm flex items-center justify-center animate-rise"
-      onClick={dismiss}
+      role="button"
+      tabIndex={-1}
+      aria-label="Dismiss update dialog"
+      // Only dismiss when the click lands on the backdrop itself, not when it
+      // bubbles up from the dialog — avoids needing a stopPropagation handler
+      // (and its a11y warning) on the non-interactive dialog element.
+      onClick={e => { if (e.target === e.currentTarget) dismiss() }}
+      onKeyDown={e => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); dismiss() } }}
     >
       <div
         className="bg-card border border-border rounded-xl shadow-xl w-[460px] max-w-[90vw] flex flex-col overflow-hidden"
-        onClick={e => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-label="Update ready"

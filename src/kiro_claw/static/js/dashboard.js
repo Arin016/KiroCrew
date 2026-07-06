@@ -241,10 +241,18 @@ document.getElementById('cron-add-btn').onclick=async()=>{
 async function rLessons(){try{const d=await(await fetch('/api/lessons')).json();const t=document.getElementById('les-tb');
   if(!d.lessons.length){t.innerHTML='<tr><td colspan="4" class="empty">No lessons</td></tr>';return}
   t.innerHTML=d.lessons.slice(-20).reverse().map(l=>{
-    let acts=`<button class="act-btn danger" onclick="lesDel('${esc(l.rule.replace(/'/g,"\\'"))}')">Delete</button>`;
-    return`<tr><td>${esc(l.rule)}</td><td><span class="badge b-ok">${l.category}</span></td><td>${new Date(l.ts).toLocaleString()}</td><td>${acts}</td></tr>`;
+    let acts=`<button class="act-btn danger" data-action="les-del" data-rule="${esc(l.rule)}">Delete</button>`;
+    return`<tr><td>${esc(l.rule)}</td><td><span class="badge b-ok">${esc(l.category)}</span></td><td>${esc(new Date(l.ts).toLocaleString())}</td><td>${acts}</td></tr>`;
   }).join('')}catch(e){}}
-window.lesDel=async(rule)=>{await fetch('/api/lessons',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({rule})});rLessons()};
+async function lesDel(rule){await fetch('/api/lessons',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({rule})});rLessons()}
+// Event delegation on the stable table body: the button carries the rule in a
+// data-* attribute (attribute-escaped by esc), so there is no inline JS-string
+// context for an attacker to break out of. dataset.rule is the browser-decoded
+// original value, exactly what the DELETE body needs.
+document.getElementById('les-tb').addEventListener('click',e=>{
+  const b=e.target.closest('button[data-action="les-del"]');
+  if(b)lesDel(b.dataset.rule);
+});
 document.getElementById('les-add-btn').onclick=async()=>{
   const rule=document.getElementById('les-rule').value.trim();
   const cat=document.getElementById('les-cat').value;
@@ -260,10 +268,15 @@ async function rSkills(){
     const skills=await(await fetch('/api/skills')).json();
     const el=document.getElementById('skills-list');
     if(!skills.length){el.innerHTML='<div class="empty">No skills installed</div>';return}
-    el.innerHTML=skills.map(s=>`<div class="skill-item" onclick="showSkill('${esc(s.name)}')"><span class="skill-name">${esc(s.name)}</span><span class="skill-desc">${esc(s.description||'')}</span></div>`).join('');
+    el.innerHTML=skills.map(s=>`<div class="skill-item" data-skill="${esc(s.name)}"><span class="skill-name">${esc(s.name)}</span><span class="skill-desc">${esc(s.description||'')}</span></div>`).join('');
   }catch(e){}
 }
-window.showSkill=async(name)=>{
+// Delegation on the stable container (no inline JS-string context).
+document.getElementById('skills-list').addEventListener('click',e=>{
+  const it=e.target.closest('.skill-item[data-skill]');
+  if(it)showSkill(it.dataset.skill);
+});
+async function showSkill(name){
   try{
     const d=await(await fetch('/api/skills/'+encodeURIComponent(name))).json();
     _activeSkillName=name;
@@ -354,15 +367,20 @@ function _renderMcp(servers){
     const status=s.status==='ok'?'<span class="badge b-ok">Online</span>':s.status==='error'?'<span class="badge b-err" title="'+esc(s.error||'')+'">Error</span>':s.status==='probing'?'<span class="badge b-warn">Probing…</span>':'<span class="badge b-warn">Unknown</span>';
     const tools=s.tools&&s.tools.length?s.tools.map(t=>'<code style="font-size:11px">'+esc(t)+'</code>').join(', '):'<span class="empty">—</span>';
     const src=s.source==='agent'?'<span class="badge b-ok">agent</span>':s.source==='mcp.json'?'<span class="badge b-warn">mcp.json</span>':'<span class="badge b-warn">discovered</span>';
-    const toggle=en?`<button class="act-btn" onclick="mcpToggle('${esc(s.name)}',false)">Disable</button>`:`<button class="act-btn" onclick="mcpToggle('${esc(s.name)}',true)">Enable</button>`;
+    const toggle=en?`<button class="act-btn" data-action="mcp-toggle" data-mcp="${esc(s.name)}" data-enable="0">Disable</button>`:`<button class="act-btn" data-action="mcp-toggle" data-mcp="${esc(s.name)}" data-enable="1">Enable</button>`;
     const rowStyle=en?'':'opacity:.5';
     return`<tr style="${rowStyle}"><td><code>${esc(s.name)}</code></td><td><code style="font-size:11px">${esc(s.command)} ${(s.args||[]).map(a=>esc(a)).join(' ')}</code></td><td>${status}</td><td>${tools}</td><td>${src}</td><td>${toggle}</td></tr>`;
   }).join('');
 }
-window.mcpToggle=async(name,enabled)=>{
+async function mcpToggle(name,enabled){
   await fetch('/api/mcp/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,enabled})});
   rMcp();
-};
+}
+// Delegation on the stable mcp table body (no inline JS-string context).
+document.getElementById('mcp-tb').addEventListener('click',e=>{
+  const b=e.target.closest('button[data-action="mcp-toggle"]');
+  if(b)mcpToggle(b.dataset.mcp,b.dataset.enable==='1');
+});
 document.getElementById('mcp-probe-btn').onclick=async()=>{
   const btn=document.getElementById('mcp-probe-btn');
   btn.textContent='🔍 Probing…';btn.disabled=true;
@@ -452,8 +470,14 @@ function startLogSSE(){if(logSSE)return;logSSE=new EventSource('/api/logs');
   logSSE.onerror=()=>{logSSE.close();logSSE=null;setTimeout(startLogSSE,3000)}}
 
 // ── Helpers ──
-function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
-function md(t){let h=esc(t);h=h.replace(/```(\w*)\n([\s\S]*?)```/g,'<pre><code>$2</code></pre>');h=h.replace(/`([^`]+)`/g,'<code>$1</code>');h=h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');h=h.replace(/\*(.+?)\*/g,'<em>$1</em>');return h}
+// Escape ALL HTML-attribute-significant characters. The prior version left
+// " ' and ` unescaped, so a value placed inside a double-quoted attribute
+// (title="...", data-key="...") could break out and inject event handlers
+// (stored XSS). Escaping quotes+backtick closes the attribute-context breakout;
+// JS-string contexts (onclick) are additionally handled via data-* attributes
+// + event delegation rather than inline handlers (see rLessons/rSkills/_renderMcp).
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;').replace(/`/g,'&#x60;')}
+function md(t){let h=String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');h=h.replace(/```(\w*)\n([\s\S]*?)```/g,'<pre><code>$2</code></pre>');h=h.replace(/`([^`]+)`/g,'<code>$1</code>');h=h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');h=h.replace(/\*(.+?)\*/g,'<em>$1</em>');h=h.replace(/`/g,'&#x60;');return h}
 function safeSetHTML(el,html){if(typeof DOMPurify==='undefined'){el.textContent=html;return;}el.textContent='';const clean=DOMPurify.sanitize(html,{ALLOWED_TAGS:['pre','code','strong','em'],ALLOWED_ATTR:[]});const t=document.createElement('template');t.innerHTML=clean;el.replaceChildren(t.content);}
 
 // ── Multi-session Chat ──

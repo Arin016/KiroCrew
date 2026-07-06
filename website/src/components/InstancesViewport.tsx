@@ -232,7 +232,15 @@ export default function InstancesViewport() {
   // ((re)connecting or down) so we can show the in-pane panel instead of a blank
   // pane. Bail only when there is nothing to show, or when embedded.
   const activeInst = activeId ? instancesQuery.data?.instances.find(i => i.id === activeId) : undefined
-  const showPanel = activeId !== null && !warm[activeId]
+  // Surface the in-pane panel when the active tab has no warm iframe (down /
+  // reconnecting) OR when it has a stale warm entry whose live tunnel is no
+  // longer connected. Without the status check a mid-session drop would leave a
+  // dead iframe on screen with no error/Retry affordance.
+  // A MISSING activeInst (instances query still loading / refetching, or not yet
+  // in the results) is treated as "no evidence of disconnection" so we never
+  // flash the panel over a perfectly healthy warm iframe.
+  const activeLive = !activeInst || activeInst.status?.state === 'connected'
+  const showPanel = activeId !== null && (!warm[activeId] || !activeLive)
   if (embedded || (warmIds.length === 0 && !showPanel)) return null
 
   const nameFor = (id: string) =>

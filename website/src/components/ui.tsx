@@ -5,16 +5,16 @@ import InfoTip from './InfoTip'
 
 /* ── Shared UI primitives ── */
 
-export function Card({ children, className = '' }: { children: React.ReactNode; className?: string }) {
+export function Card({ children, className = '', ...rest }: Omit<React.ComponentPropsWithoutRef<'div'>, 'dangerouslySetInnerHTML'>) {
   return (
-    <div className={`card-glow border border-border bg-card rounded-lg p-5 mb-4 animate-rise shadow-sm transition-all ${className}`}>
+    <div className={twMerge('card-glow border border-border bg-card rounded-lg p-5 mb-4 animate-rise shadow-sm transition-all', className)} {...rest}>
       {children}
     </div>
   )
 }
 
-export function CardTitle({ children }: { children: React.ReactNode }) {
-  return <h3 className="text-sm font-semibold tracking-tight text-text-strong mb-3.5 flex items-center gap-2">{children}</h3>
+export function CardTitle({ children, className, ...rest }: Omit<React.ComponentPropsWithoutRef<'h3'>, 'dangerouslySetInnerHTML'>) {
+  return <h3 className={twMerge("text-sm font-semibold tracking-tight text-text-strong mb-3.5 flex items-center gap-2", className)} {...rest}>{children}</h3>
 }
 
 export const Btn = React.forwardRef<HTMLButtonElement, React.ButtonHTMLAttributes<HTMLButtonElement> & { danger?: boolean; primary?: boolean }>(
@@ -35,13 +35,14 @@ export const Btn = React.forwardRef<HTMLButtonElement, React.ButtonHTMLAttribute
   )
 )
 
-export function SendBtn({ children, onClick, disabled, style }: { children: React.ReactNode; onClick: () => void; disabled?: boolean; style?: React.CSSProperties }) {
+export function SendBtn({ children, onClick, disabled, style, className, ...rest }: { children: React.ReactNode } & Omit<React.ComponentPropsWithoutRef<'button'>, 'children' | 'dangerouslySetInnerHTML'>) {
   return (
     <button
-      className="btn-sweep bg-accent text-accent-fg border-none rounded-lg px-4 h-9 text-sm font-semibold cursor-pointer hover:bg-accent-hover hover:shadow-[0_0_20px_var(--accent-glow)] disabled:opacity-30 disabled:cursor-not-allowed transition-all font-body"
+      className={twMerge("btn-sweep bg-accent text-accent-fg border-none rounded-lg px-4 h-9 text-sm font-semibold cursor-pointer hover:bg-accent-hover hover:shadow-[0_0_20px_var(--accent-glow)] disabled:opacity-30 disabled:cursor-not-allowed transition-all font-body", className)}
       onClick={onClick}
       disabled={disabled}
       style={style}
+      {...rest}
     >
       {children}
     </button>
@@ -115,14 +116,14 @@ export function SearchInput({ className = '', ...props }: React.InputHTMLAttribu
   )
 }
 
-export function Badge({ variant, children }: { variant: 'ok' | 'err' | 'warn' | 'aim'; children: React.ReactNode }) {
+export function Badge({ variant, children, className, ...rest }: { variant: 'ok' | 'err' | 'warn' | 'aim' } & Omit<React.ComponentPropsWithoutRef<'span'>, 'children' | 'dangerouslySetInnerHTML'> & { children: React.ReactNode }) {
   const cls =
     variant === 'ok' ? 'bg-ok-subtle text-ok'
     : variant === 'err' ? 'bg-danger-subtle text-danger'
     : variant === 'aim' ? 'bg-aim-subtle text-aim'
     : 'bg-warn-subtle text-warn'
   return (
-    <span className={`inline-flex items-center gap-1 px-2 py-[2px] rounded-full text-[13px] font-medium font-mono whitespace-nowrap hover:scale-105 transition-transform ${cls}`}>
+    <span className={twMerge(`inline-flex items-center gap-1 px-2 py-[2px] rounded-full text-[13px] font-medium font-mono whitespace-nowrap hover:scale-105 transition-transform ${cls}`, className)} {...rest}>
       {children}
     </span>
   )
@@ -132,20 +133,27 @@ export function AimBadge({ source }: { source: string }) {
   const cls =
     source === 'aim' ? 'bg-aim-subtle text-aim border-aim/30'
     : source === 'kiroclaw' ? 'bg-accent-subtle text-accent border-accent/30'
+    : source === 'project' ? 'text-ok border-ok/30'
     : 'bg-bg-elevated text-muted border-border'
   return <span className={`px-1.5 py-[2px] rounded-full text-[11px] font-bold border shrink-0 ${cls}`}>{source}</span>
 }
 
-export function StatCard({ label, value, accent, colorClass, delay, onClick, active, title }: { label: string; value?: string | number | null; accent?: boolean; colorClass?: string; delay?: number; onClick?: () => void; active?: boolean; title?: string }) {
+export function StatCard({ label, value, accent, colorClass, delay, onClick, active, title, className, ...rest }: { label: string; value?: string | number | null; accent?: boolean; colorClass?: string; delay?: number; onClick?: () => void; active?: boolean; title?: string } & Omit<React.ComponentPropsWithoutRef<'div'>, 'title' | 'onClick' | 'dangerouslySetInnerHTML'>) {
   const loading = value === undefined || value === null
   return (
+    // role/tabIndex/onKeyDown are all applied together with onClick, so the card
+    // is fully keyboard-accessible whenever it is interactive; eslint can't see
+    // the conditional role, hence the scoped disables.
+    /* eslint-disable-next-line jsx-a11y/no-static-element-interactions */
     <div
-      className={`stat-accent relative overflow-hidden bg-card rounded-md px-4 py-3.5 border shadow-[inset_0_1px_0_var(--card-hl)] animate-rise hover:border-border-strong hover:-translate-y-0.5 hover:shadow-md transition-all ${active ? 'border-accent ring-1 ring-accent/40' : 'border-border'} ${onClick ? 'cursor-pointer' : ''}`}
+      className={twMerge(`stat-accent relative overflow-hidden bg-card rounded-md px-4 py-3.5 border shadow-[inset_0_1px_0_var(--card-hl)] animate-rise hover:border-border-strong hover:-translate-y-0.5 hover:shadow-md transition-all ${active ? 'border-accent ring-1 ring-accent/40' : 'border-border'} ${onClick ? 'cursor-pointer' : ''}`, className)}
       style={delay ? { animationDelay: `${delay}ms` } : undefined}
       onClick={onClick}
       role={onClick ? 'button' : undefined}
+      // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
       tabIndex={onClick ? 0 : undefined}
       onKeyDown={onClick ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } } : undefined}
+      {...rest}
     >
       <div className="text-muted text-[13px] font-medium uppercase tracking-[.04em] flex items-center gap-1">{label}{title && <InfoTip text={title} />}</div>
       {loading

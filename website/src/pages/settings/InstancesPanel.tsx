@@ -101,17 +101,17 @@ function AddInstanceForm({ onAdded, usedPorts }: { onAdded: () => void; usedPort
         <Plus className="lucide-inline" /> Add instance
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <label className="flex flex-col gap-1 text-[13px] text-muted">
+        <label htmlFor="add-instance-name" className="flex flex-col gap-1 text-[13px] text-muted">
           Name
-          <input className={inputCls} value={name} onChange={e => setName(e.target.value)} placeholder="Remote Host 1" />
+          <input id="add-instance-name" aria-label="Name" className={inputCls} value={name} onChange={e => setName(e.target.value)} placeholder="Remote Host 1" />
         </label>
-        <label className="flex flex-col gap-1 text-[13px] text-muted">
+        <label htmlFor="add-instance-ssh-host" className="flex flex-col gap-1 text-[13px] text-muted">
           SSH host / alias
-          <input className={inputCls} value={sshHost} onChange={e => setSshHost(e.target.value)} placeholder="host-1-alias" />
+          <input id="add-instance-ssh-host" aria-label="SSH host / alias" className={inputCls} value={sshHost} onChange={e => setSshHost(e.target.value)} placeholder="host-1-alias" />
         </label>
-        <label className="flex flex-col gap-1 text-[13px] text-muted">
+        <label htmlFor="add-instance-remote-port" className="flex flex-col gap-1 text-[13px] text-muted">
           Remote port
-          <input className={inputCls} value={remotePort} onChange={e => setRemotePort(e.target.value)} placeholder="7777" inputMode="numeric" />
+          <input id="add-instance-remote-port" aria-label="Remote port" className={inputCls} value={remotePort} onChange={e => setRemotePort(e.target.value)} placeholder="7777" inputMode="numeric" />
           <span className="text-[12px] text-muted leading-snug">
             Must match the port the remote gateway serves on (its{' '}
             <code className="text-text">dashboard.url</code>). Each connected instance
@@ -124,13 +124,15 @@ function AddInstanceForm({ onAdded, usedPorts }: { onAdded: () => void; usedPort
             </span>
           ) : null}
         </label>
-        <label className="flex flex-col gap-1 text-[13px] text-muted">
+        <label htmlFor="add-instance-ttl" className="flex flex-col gap-1 text-[13px] text-muted">
           Token TTL
-          <input className={inputCls} value={ttl} onChange={e => setTtl(e.target.value)} placeholder="20h" />
+          <input id="add-instance-ttl" aria-label="Token TTL" className={inputCls} value={ttl} onChange={e => setTtl(e.target.value)} placeholder="20h" />
         </label>
-        <label className="flex flex-col gap-1 text-[13px] text-muted sm:col-span-2">
+        <label htmlFor="add-instance-remote-bin" className="flex flex-col gap-1 text-[13px] text-muted sm:col-span-2">
           Remote kiroclaw path <span className="text-muted-strong">(optional)</span>
           <input
+            id="add-instance-remote-bin"
+            aria-label="Remote kiroclaw path"
             className={inputCls}
             value={remoteBin}
             onChange={e => setRemoteBin(e.target.value)}

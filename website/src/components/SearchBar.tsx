@@ -93,6 +93,7 @@ export default function SearchBar({ term, setTerm, matches, currentIdx, next, pr
         value={term}
         onChange={e => setTerm(e.target.value)}
         onKeyDown={handleKeyDown}
+        aria-label="Find in chat"
         placeholder="Find in chat…"
         className={`bg-transparent border-none outline-none text-text placeholder:text-muted text-[13px] ${docked ? 'flex-1 min-w-0' : 'w-[180px]'}`}
       />

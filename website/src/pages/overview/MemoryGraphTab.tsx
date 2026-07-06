@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type ReactNode } from 'react'
+import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Network as NetworkIcon, RefreshCw } from 'lucide-react'
 import { Network } from 'vis-network'
@@ -28,6 +28,12 @@ const GROUP_LABELS: Record<string, ReactNode> = {
 interface GraphNode { id: string; label: string; group: string; title: string }
 interface GraphEdge { from: string; to: string }
 
+// Minimal shapes for the vis-network DataSet items we build below. Only the
+// fields we read/update are typed; the extra vis-network styling props ride the
+// index signature so `DataSet`'s `PartItem` (id-bearing) constraint is met.
+interface VisNode { id: string; label: string; group: string; hidden?: boolean; [k: string]: unknown }
+interface VisEdge { id: string; from: string; to: string; [k: string]: unknown }
+
 export default function MemoryGraphTab() {
   const containerRef = useRef<HTMLDivElement>(null)
   const networkRef = useRef<Network | null>(null)
@@ -43,16 +49,20 @@ export default function MemoryGraphTab() {
       return r as { nodes: GraphNode[]; edges: GraphEdge[] }
     },
   })
-  const nodes = data?.nodes ?? []
-  const edges = data?.edges ?? []
+  // Memoize the derived arrays so the `?? []` fallback doesn't hand the network
+  // -building effects a fresh reference on every render (which would tear down
+  // and rebuild the vis-network needlessly). Keyed on the react-query `data`,
+  // which is itself reference-stable between renders until a refetch.
+  const nodes = useMemo(() => data?.nodes ?? [], [data])
+  const edges = useMemo(() => data?.edges ?? [], [data])
 
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchImmediate), 300)
     return () => clearTimeout(t)
   }, [searchImmediate])
 
-  const nodesDS = useRef(new DataSet<any>())
-  const edgesDS = useRef(new DataSet<any>())
+  const nodesDS = useRef(new DataSet<VisNode>())
+  const edgesDS = useRef(new DataSet<VisEdge>())
 
   useEffect(() => {
     if (!containerRef.current || nodes.length === 0) return
@@ -93,6 +103,7 @@ export default function MemoryGraphTab() {
       })
       networkRef.current = net
     } catch (err) {
+      // eslint-disable-next-line no-console -- intentional init-failure diagnostic
       console.warn('MemoryGraph: vis-network init failed', err)
       if (net && !destroyed) { net.destroy(); destroyed = true }
       net = undefined
@@ -107,7 +118,7 @@ export default function MemoryGraphTab() {
   useEffect(() => {
     if (!networkRef.current) return
     const searchLower = search.toLowerCase()
-    nodesDS.current.forEach((n: any) => {
+    nodesDS.current.forEach((n: VisNode) => {
       const hidden = (!!filter && n.group !== filter) ||
         (!!search && !n.label.toLowerCase().includes(searchLower))
       nodesDS.current.update({ id: n.id, hidden })
@@ -129,6 +140,7 @@ export default function MemoryGraphTab() {
       </CardTitle>
       <div className="flex gap-2 flex-wrap mb-3 items-center">
         <input
+          aria-label="Search memory nodes"
           className="bg-bg-elevated border border-border rounded-md px-3 py-1.5 text-text text-sm font-body outline-none transition-colors focus-ring flex-1 min-w-[200px]"
           placeholder="Search nodes…" value={searchImmediate} onChange={e => setSearchImmediate(e.target.value)}
         />

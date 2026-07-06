@@ -256,9 +256,15 @@ function FilePreviewStrip({ files, onRemove }: { files: string[]; onRemove?: (pa
         return (
           <div key={path} className="relative group/preview shrink-0" title={path}>
             <span className="absolute -top-1.5 -left-1.5 w-5 h-5 rounded-full bg-accent text-white text-[10px] font-bold flex items-center justify-center z-10">{i + 1}</span>
-            <img src={src} alt={path} className="h-16 rounded border border-border object-contain cursor-pointer hover:opacity-80 transition-opacity"
-              data-lightbox-image=""
-              onClick={(e) => dispatchLightbox(e.currentTarget)} />
+            <button
+              type="button"
+              aria-label={`Open preview of ${path.split('/').pop()}`}
+              className="block cursor-pointer"
+              onClick={(e) => { const img = e.currentTarget.querySelector('img'); if (img) dispatchLightbox(img) }}
+            >
+              <img src={src} alt={path} className="h-16 rounded border border-border object-contain hover:opacity-80 transition-opacity"
+                data-lightbox-image="" />
+            </button>
             {onRemove && (
               <button
                 aria-label="Remove"
@@ -411,6 +417,7 @@ function ChatInput({
       setApprovalSubmitting(false)
     }
     const fail = (err: unknown) => {
+      // eslint-disable-next-line no-console -- surface real approval-resolution failures to the dev console
       console.error('Approval failed:', err)
       setApprovalSubmitting(false)
     }
@@ -840,6 +847,7 @@ function ChatInput({
       setTextUndoable(data.changed && data.optimized ? data.optimized : valueRef.current.trim())
     },
     onError: (err, variables) => {
+      // eslint-disable-next-line no-console -- surface prompt-optimizer failures to the dev console
       console.warn('optimizer failed', err)
       if (valueRef.current.trim() !== variables.prompt.trim()) return
       setTextUndoable(valueRef.current.trim())
@@ -1178,7 +1186,7 @@ function ChatInput({
       }
       e.preventDefault()
     }
-  }, [onSend, onChange, sentMessages, sendOnEnter, pasteBlocks, onPasteBlocksChange, connected])
+  }, [onSend, onChange, sentMessages, sendOnEnter, pasteBlocks, onPasteBlocksChange, connected, ime, optimizePrompt])
 
   /** Intercept clipboard paste — files go to upload path, big text gets collapsed into a token. */
   const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -1393,7 +1401,12 @@ function ChatInput({
       )}
 
       {/* Drag handle — always visible, sits above approval bar or input */}
+      {/* Pointer-drag resize handle for the message input (double-click resets).
+          Resize is a pure visual enhancement — the textarea already auto-sizes to
+          its content and there is no per-pixel keyboard resize gesture — so the
+          handle is aria-hidden and carries no interactive semantics. */}
       {!showGhost && <div
+        aria-hidden="true"
         className="flex items-center justify-center h-[6px] cursor-row-resize group/drag"
         onMouseDown={handleDragStart}
         onDoubleClick={resetHeight}
@@ -1500,7 +1513,7 @@ function ChatInput({
         </div>
       )}
 
-      <input ref={fileInputRef} type="file" multiple accept={FILE_ACCEPT} className="hidden" onChange={handleFileInputChange} />
+      <input ref={fileInputRef} type="file" aria-label="Attach files" multiple accept={FILE_ACCEPT} className="hidden" onChange={handleFileInputChange} />
 
       <SlashCommandMenu input={value} anchorRef={inputRef as React.RefObject<HTMLElement>} open={slashMenuOpen} onSelect={cmd => { onChange(cmd); setSlashMenuOpen(false) }} onClose={() => setSlashMenuOpen(false)} />
 
@@ -1548,7 +1561,11 @@ function ChatInput({
         exit={{ opacity: 0, height: 0 }}
         transition={{ type: 'spring', damping: 26, stiffness: 280, mass: 0.7 }}
         style={{ overflow: 'hidden' }}
-      ><div
+      >{/* File drag-and-drop target. Drag-drop is inherently pointer-only; the
+           keyboard-accessible path is the "Attach files" button that opens the
+           hidden file input above. Hence the scoped disable for the drop zone. */}
+      {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
+      <div
         data-testid="input-wrapper"
         ref={wrapperRef}
         className={`${hasApproval ? 'rounded-b-2xl rounded-t-none' : 'rounded-2xl'} relative transition-colors overflow-hidden ${manualHeight !== null ? 'flex flex-col min-h-0' : ''} ${(cleanMode || memoryMode === 'incognito' || memoryMode === 'temporary') ? 'border-2' : 'border'} ${dragOver ? 'border-accent bg-accent-subtle' : cleanMode ? 'border-accent bg-bg-elevated' : memoryMode === 'temporary' ? 'border-aim bg-bg-elevated' : memoryMode === 'incognito' ? 'border-warn bg-bg-elevated' : 'border-border bg-bg-elevated focus-within:border-accent/50'}`}

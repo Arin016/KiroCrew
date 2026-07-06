@@ -102,3 +102,19 @@ def test_prompt_preview_truncation():
     d = s.to_dict()
     assert len(d["prompt_preview"]) == 241  # 240 + "…"
     assert d["prompt_preview"].endswith("…")
+
+
+def test_queue_depth_zero_when_no_queue():
+    s = _slot({"role": "assistant", "content": "Done. What next?", "ts": "t1"})
+    d = s.to_dict()
+    assert d["queue_depth"] == 0
+
+
+def test_queue_depth_reflects_queued_prompts():
+    # A finished turn (assistant last) with prompts queued behind it: the Board
+    # must see queue_depth so it can show the session in Working, not Your Turn.
+    s = _slot({"role": "assistant", "content": "Done.", "ts": "t1"})
+    s.queue_append("next prompt")
+    s.queue_append("and another")
+    d = s.to_dict()
+    assert d["queue_depth"] == 2

@@ -69,8 +69,10 @@ export function KnowledgePicker({ results, query, loading, onInject, onSkip }: P
 
       <div className="space-y-2 mb-3">
         {results.map(r => (
-          <label key={r.id} className="flex items-start gap-2 p-2 rounded border border-border hover:border-accent/50 cursor-pointer transition-colors">
+          <label key={r.id} htmlFor={`knowledge-${r.id}`} className="flex items-start gap-2 p-2 rounded border border-border hover:border-accent/50 cursor-pointer transition-colors">
             <input
+              id={`knowledge-${r.id}`}
+              aria-label={r.title}
               type="checkbox"
               checked={selected.has(r.id)}
               onChange={() => toggle(r.id)}

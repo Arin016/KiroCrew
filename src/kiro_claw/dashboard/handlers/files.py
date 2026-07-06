@@ -2036,11 +2036,18 @@ async def api_browse_files(request: web.Request) -> web.Response:
             # benign dir pointing at ~/.aws would otherwise pass through.
             if is_sensitive_path(os.path.realpath(entry.path)):
                 continue
+            # Capture mtime so the activity-panel browser can offer a
+            # sort-by-date option; fall back to 0 on a race (entry removed
+            # mid-scan) so one unstattable entry never breaks the listing.
+            try:
+                mtime = int(entry.stat(follow_symlinks=True).st_mtime)
+            except OSError:
+                mtime = 0
             if entry.is_dir(follow_symlinks=True):
                 if entry.name not in skip:
-                    dirs.append({"name": entry.name, "path": entry.path})
+                    dirs.append({"name": entry.name, "path": entry.path, "mtime": mtime})
             elif entry.is_file(follow_symlinks=True):
-                files.append({"name": entry.name, "path": entry.path})
+                files.append({"name": entry.name, "path": entry.path, "mtime": mtime})
     except PermissionError:
         pass
     _sel().log_api_access(caller=caller, operation="browse_files", outcome="allowed", resources=base)

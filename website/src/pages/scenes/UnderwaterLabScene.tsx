@@ -624,14 +624,14 @@ export default function UnderwaterLabScene({ agents, visible = true }: Props) {
     return () => {
       cancelLoop()
     }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [])  
 
   useVisibleSync(visibleRef, visible)
 
   return (
     <div style={SCENE_CONTAINER_STYLE(W, H)}>
-      <canvas ref={canvasRef} style={{ ...PIXEL_CANVAS_STYLE, ...canvasProps.style }} onMouseMove={canvasProps.onMouseMove} onMouseLeave={canvasProps.onMouseLeave} onClick={canvasProps.onClick} />
-      <canvas ref={textRef} style={TEXT_CANVAS_STYLE} />
+      <canvas ref={canvasRef} aria-label="Underwater lab scene" style={{ ...PIXEL_CANVAS_STYLE, ...canvasProps.style }} onMouseMove={canvasProps.onMouseMove} onMouseLeave={canvasProps.onMouseLeave} onClick={canvasProps.onClick} />
+      <canvas ref={textRef} aria-label="Underwater lab scene labels" style={TEXT_CANVAS_STYLE} />
       {tooltipEl}
     </div>
   )

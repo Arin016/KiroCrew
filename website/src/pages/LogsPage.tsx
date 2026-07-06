@@ -109,7 +109,7 @@ export function LogViewer({ compact }: { compact?: boolean }) {
         ))}
       </div>
       <div className={`flex gap-2 ${compact ? 'mb-2' : 'mb-3'} items-center`}>
-        <input type="text" placeholder="Filter logs..." value={search}
+        <input type="text" aria-label="Filter logs" placeholder="Filter logs..." value={search}
           onChange={e => { const v = e.target.value; setSearch(v); if (!v) setMatchesOnly(false) }}
           className={`flex-1 ${sz.input} rounded-lg border border-border bg-surface text-text font-mono placeholder:text-muted focus:outline-none focus:border-accent`}
         />

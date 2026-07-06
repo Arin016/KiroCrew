@@ -58,6 +58,7 @@ from kiro_claw.providers.base import (
 )
 from kiro_claw.safety_override import safety_override
 from kiro_claw.security import (
+    StreamRedactor,
     is_sensitive_path,
     redact,
     redact_credentials,
@@ -133,9 +134,45 @@ _TRUNCATION_MARKER = "\n… [truncated]"
 
 # Slack UX strings
 _THINKING = "_Thinking…_"
+_THINKING_PLACEHOLDER = "💭 _Thinking…_"
 _CURSOR = " ▍"
 _NO_RESPONSE = "_No response._"
 _STATUS_WORKING = "is working on your request"
+
+# Max chars of reasoning to surface inline in Slack before truncating. Keeps
+# the 💭 Thinking block from becoming a wall of text (Mesh-1805); the full
+# reasoning remains available in the dashboard Activity panel.
+_THINKING_PREVIEW_LIMIT = 600
+
+
+def _condense_thinking(mrkdwn: str, *, limit: int = _THINKING_PREVIEW_LIMIT) -> str:
+    """Render reasoning as a subdued, truncated Slack blockquote.
+
+    Keeps the reasoning visible but prevents a wall of text: truncates to
+    ``limit`` chars on a whitespace boundary and renders each line as a
+    blockquote so it appears indented/muted relative to the answer.
+
+    Args:
+        mrkdwn: Reasoning text, already converted to Slack mrkdwn and redacted.
+        limit: Soft character cap before truncation.
+
+    Returns:
+        A Slack-mrkdwn string headed by ``💭 *Thinking*``.
+    """
+    text = mrkdwn.strip()
+    truncated = False
+    if len(text) > limit:
+        # Break on the last whitespace (space, newline, tab) in the window so
+        # reasoning whose only break is a newline still cuts cleanly instead of
+        # falling through to the hard cut.
+        boundaries = list(re.finditer(r"\s", text[:limit]))
+        cut = boundaries[-1].start() if boundaries and boundaries[-1].start() >= limit // 2 else limit
+        text = text[:cut].rstrip()
+        truncated = True
+    quoted = "\n".join(f"> {ln}" if ln.strip() else ">" for ln in text.splitlines())
+    suffix = "\n> _…full reasoning in dashboard Activity_" if truncated else ""
+    return f"💭 *Thinking*\n{quoted}{suffix}"
+
 
 # Pending approvals: keyed by f"{channel}:{approval_msg_ts}"
 # Module-level dict — safe because gateway runs in a single asyncio event loop.
@@ -2399,8 +2436,15 @@ async def handle_message(
 
     use_slack_stream = False
     stream_ts: str | None = None
+    thinking_ts: str | None = None  # 💭 reasoning placeholder, posted above the answer
+    _show_thinking = KiroClawConfig.load().slack.show_thinking
     _stream_had_redaction = False  # True when per-chunk redaction modified a streamed chunk
-
+    # Rolling-buffer redactor for the live Slack wire: withholds the trailing
+    # credential-class run so a credential split across streaming chunks can't
+    # reach Slack unredacted (issue 3). The final message is posted from the
+    # complete, fully-redacted `accumulated`, so the held tail is superseded at
+    # stop_stream — no data loss.
+    _sred = StreamRedactor()
     accumulated = ""
     thinking_accumulated = ""
     stream_buffer = ""  # unsent chunks for streaming API (buffered between rate-limited appends)
@@ -2431,18 +2475,30 @@ async def handle_message(
         return new_ts
 
     async def _append_stream(text: str) -> bool:
-        """Append text to stream, rotating on failure. Redacts before sending."""
-        if not text or not stream_ts:
+        """Append text to stream, rotating on failure.
+
+        Streams through the rolling redactor (``_sred``) so a credential split
+        across streaming chunks can't reach Slack unredacted (issue 3): only the
+        confirmed-safe prefix is sent now; the trailing (possible-partial-
+        credential) run is withheld until the next append. The final message is
+        posted from the complete, fully-redacted ``accumulated`` at stop_stream,
+        so the withheld tail is superseded — never lost.
+        """
+        nonlocal _stream_had_redaction
+        if not stream_ts:
             return True
         if channel_activation == ACTIVATION_REVIEW:
             return True  # Suppress streaming text in review mode
-        text, _ = redact_exfiltration_urls(text)
-        text, _ = redact_credentials(text)
-        ok = await slack.append_stream(channel, stream_ts, text)
+        safe = _sred.feed(text)  # redacts the confirmed-safe prefix internally
+        if not safe:
+            return True  # whole delta withheld (partial credential) — nothing to send yet
+        if "[REDACTED" in safe:
+            _stream_had_redaction = True
+        ok = await slack.append_stream(channel, stream_ts, safe)
         if not ok and use_slack_stream:
             if await _rotate_stream():
                 assert stream_ts is not None
-                return await slack.append_stream(channel, stream_ts, text)
+                return await slack.append_stream(channel, stream_ts, safe)
         return ok
 
     async def _append_task(task_id: str, title: str, status: str, details: str = "") -> bool:
@@ -2507,7 +2563,7 @@ async def handle_message(
 
     async def _ensure_stream_started() -> None:
         """Lazy-start the stream on first event. Falls back to chat.update."""
-        nonlocal stream_ts, use_slack_stream
+        nonlocal stream_ts, use_slack_stream, thinking_ts
         if stream_ts is not None:
             return
         if channel_activation == ACTIVATION_REVIEW:
@@ -2515,6 +2571,21 @@ async def handle_message(
             stream_ts = _REVIEW_PLACEHOLDER_TS
             use_slack_stream = False
             return
+        # Reserve the 💭 reasoning slot ABOVE the answer *before* the response
+        # message is created (Mesh-1805). This must run regardless of which
+        # event arrived first: if a text/tool event precedes the first
+        # reasoning chunk, posting the placeholder here is the only way to keep
+        # reasoning above the answer (the reasoning-chunk branch never got the
+        # chance). Guarded on thinking_ts is None so we never double-post when
+        # the reasoning branch already claimed the slot. An empty placeholder
+        # (no reasoning this turn) is cleaned up at end of turn.
+        if _show_thinking and thinking_ts is None:
+            try:
+                thinking_ts = await slack.post_message(
+                    channel, _THINKING_PLACEHOLDER, reply_ts
+                )
+            except Exception:
+                logger.debug("Failed to reserve thinking slot", exc_info=True)
         stream_ts = await slack.start_stream(
             channel, reply_ts, team_id=team_id or None, user_id=user_id or None
         )
@@ -2724,13 +2795,31 @@ async def handle_message(
                     else:
                         assert stream_ts is not None
                         if channel_activation != ACTIVATION_REVIEW:
-                            await _safe_update(slack, channel, stream_ts, accumulated + _CURSOR)
+                            await _safe_update(slack, channel, stream_ts, redact(accumulated) + _CURSOR)
                     last_edit = now
 
             elif event.kind == EVENT_THINKING_CHUNK:
                 status_ctrl.set_phase("thinking")
                 status_ctrl.on_progress()
                 thinking_accumulated += event.text
+                # Claim the 💭 slot as soon as reasoning starts so it appears
+                # promptly during a long thinking phase (early feedback). This
+                # is an optimization for the common reasoning-first case; the
+                # ordering guarantee itself lives in _ensure_stream_started,
+                # which reserves the slot before the answer message whenever it
+                # hasn't been claimed yet (handles text/tool-first turns).
+                if (
+                    _show_thinking
+                    and thinking_ts is None
+                    and stream_ts is None
+                    and channel_activation != ACTIVATION_REVIEW
+                ):
+                    try:
+                        thinking_ts = await slack.post_message(
+                            channel, _THINKING_PLACEHOLDER, reply_ts
+                        )
+                    except Exception:
+                        logger.debug("Failed to post thinking placeholder", exc_info=True)
 
             elif event.kind == EVENT_TOOL_CALL:
                 _tool_gap = True
@@ -2801,7 +2890,7 @@ async def handle_message(
                     accumulated += tool_status
                     assert stream_ts is not None
                     if channel_activation != ACTIVATION_REVIEW:
-                        await _safe_update(slack, channel, stream_ts, accumulated + _CURSOR)
+                        await _safe_update(slack, channel, stream_ts, redact(accumulated) + _CURSOR)
                 last_edit = time.monotonic()
 
                 # wait tool blocks MCP for up to 30min — finalize the
@@ -3028,6 +3117,11 @@ async def handle_message(
                 await slack.delete_message(channel, stream_ts)
             except Exception:
                 logger.debug("Failed to delete cancelled stream", exc_info=True)
+        if thinking_ts:
+            try:
+                await slack.delete_message(channel, thinking_ts)
+            except Exception:
+                logger.debug("Failed to delete thinking placeholder", exc_info=True)
         if _working_ts:
             try:
                 await slack.delete_message(channel, _working_ts)
@@ -3049,6 +3143,11 @@ async def handle_message(
     # Suppress error replies for trusted bot messages to prevent echo loops
     if from_trusted_bot and _had_error:
         logger.info("Suppressing error reply to trusted bot message to prevent echo loop")
+        if thinking_ts:
+            try:
+                await slack.delete_message(channel, thinking_ts)
+            except Exception:
+                logger.debug("Failed to delete thinking placeholder", exc_info=True)
         if conversation_log and not _is_slack_restricted(session_key):
             save_conversation_turn(
                 conversation_log,
@@ -3157,8 +3256,11 @@ async def handle_message(
         # No stream was started (e.g. no text chunks) — post the final text directly
         await slack.post_message(channel, clean_text or _NO_RESPONSE, reply_ts)
 
-    # Post thinking/reasoning as a thread reply between response and timing footer
-    if thinking_accumulated and KiroClawConfig.load().slack.show_thinking:
+    # Render reasoning as a condensed, subdued blockquote (Mesh-1805). When a
+    # placeholder was posted above the answer, update it in place so the thread
+    # reads reasoning → answer. Otherwise (the stream started before any
+    # reasoning arrived) fall back to a post after the answer.
+    if thinking_accumulated and _show_thinking:
         thinking_mrkdwn = to_slack_mrkdwn(thinking_accumulated)
         thinking_mrkdwn, exfil_warnings = redact_exfiltration_urls(thinking_mrkdwn)
         for w in exfil_warnings:
@@ -3166,12 +3268,25 @@ async def handle_message(
         thinking_mrkdwn, cred_warnings = redact_credentials(thinking_mrkdwn)
         for w in cred_warnings:
             logger.warning("Credential redacted in thinking: %s", w)
-        thinking_parts = split_message(f"💭 *Thinking*\n\n{thinking_mrkdwn}")
-        for part in thinking_parts:
+        thinking_block = _condense_thinking(thinking_mrkdwn)
+        if thinking_ts:
             try:
-                await slack.post_message(channel, part, reply_ts)
+                await slack.update_message(channel, thinking_ts, thinking_block)
             except Exception:
-                logger.warning("Failed to post thinking message", exc_info=True)
+                logger.warning("Failed to update thinking message", exc_info=True)
+        else:
+            for part in split_message(thinking_block):
+                try:
+                    await slack.post_message(channel, part, reply_ts)
+                except Exception:
+                    logger.warning("Failed to post thinking message", exc_info=True)
+    elif thinking_ts:
+        # Placeholder was posted but no reasoning was captured — remove it so
+        # the thread isn't left with a dangling "💭 Thinking…".
+        try:
+            await slack.delete_message(channel, thinking_ts)
+        except Exception:
+            logger.debug("Failed to delete empty thinking placeholder", exc_info=True)
 
     # ── Timing footer ──
     elapsed = time.monotonic() - _t0
@@ -3537,6 +3652,7 @@ async def handle_interaction(
     user_id: str = "",
     thread_ts: str = "",
     slack: SlackClientOps | None = None,
+    sessions: SessionManager | None = None,
 ) -> str | None:
     """Handle a Block Kit button click for tool approval.
 
@@ -3676,6 +3792,11 @@ async def handle_interaction(
                 )
                 return None
             _trusted_sessions.add(session_key)
+            # Propagate to subagents: the subagent loop reads
+            # get_approval_policy(parent)=="auto" (see subagent.py), so the
+            # in-memory _trusted_sessions set alone never reaches them.
+            if sessions is not None:
+                sessions.set_approval_policy(session_key, "auto")
             logger.info("Trust mode ON (late click) for session %s", session_key)
             sel().log_api_access(
                 caller=user_id,
@@ -3716,6 +3837,8 @@ async def handle_interaction(
                 return _ACTION_REJECT
             elif pending.session_key:
                 _trusted_sessions.add(pending.session_key)
+                if sessions is not None:
+                    sessions.set_approval_policy(pending.session_key, "auto")
                 logger.info("Trust mode ON for session %s", pending.session_key)
             else:
                 logger.warning(
@@ -3852,7 +3975,13 @@ def _remove_all_jobs(cron_service: CronService) -> str:
     jobs = cron_service.list_jobs(include_disabled=True)
     if not jobs:
         return "No cron jobs to remove."
-    lines = [f"- `{j.id}` — {j.name}" for j in jobs]
+    lines = []
+    for j in jobs:
+        # j.name is free-form user/LLM-supplied text reaching a Slack reply and
+        # the persisted conversation log — redact it like the `cron list` branch
+        # does for j.message (j.id is a generated UUID, left as-is).
+        safe_name, _ = redact_credentials(redact_exfiltration_urls(j.name)[0])
+        lines.append(f"- `{j.id}` — {safe_name}")
     for j in jobs:
         cron_service.remove_job(j.id)
     return f"✅ Removed {len(lines)} cron job(s):\n" + "\n".join(lines)

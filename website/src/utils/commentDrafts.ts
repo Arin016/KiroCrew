@@ -1,3 +1,4 @@
+import { safeSetItem } from './safeStorage'
 /**
  * Per-file inline comment draft persistence. Pending (unsubmitted) comments
  * survive `MarkdownPanel` close, page refresh, and browser crashes via
@@ -32,6 +33,7 @@ export function loadCommentDrafts(): CommentDrafts {
     }
     return clean
   } catch (e) {
+    // eslint-disable-next-line no-console
     if (import.meta.env.DEV) console.warn('commentDrafts: load failed', e)
     return {}
   }
@@ -58,12 +60,10 @@ function capDrafts(drafts: CommentDrafts): void {
 export function saveCommentDrafts(drafts: CommentDrafts): void {
   const toSave = { ...drafts }
   capDrafts(toSave)
-  try {
-    localStorage.setItem(COMMENT_DRAFTS_KEY, JSON.stringify(toSave))
+  const ok = safeSetItem(COMMENT_DRAFTS_KEY, JSON.stringify(toSave))
+  if (ok) {
     // Sync evictions back to the caller only after a successful persist.
     for (const k of Object.keys(drafts)) if (!(k in toSave)) delete drafts[k]
-  } catch (e) {
-    if (import.meta.env.DEV) console.warn('commentDrafts: save failed', e)
   }
 }
 

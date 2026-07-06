@@ -77,7 +77,7 @@ describe('AgentSelector — keyboard navigation', () => {
     const input = screen.getByPlaceholderText('Type to filter…')
     fireEvent.change(input, { target: { value: 'onc' } })
     fireEvent.keyDown(input, { key: 'Enter' })
-    expect(onChange).toHaveBeenCalledWith('oncall')
+    expect(onChange).toHaveBeenCalledWith('oncall', undefined)
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
   })
 
@@ -87,7 +87,7 @@ describe('AgentSelector — keyboard navigation', () => {
     await flush()
     const trigger = screen.getByLabelText('Switch agent')
     fireEvent.click(opt('research'))
-    expect(onChange).toHaveBeenCalledWith('research')
+    expect(onChange).toHaveBeenCalledWith('research', undefined)
     expect(document.activeElement).toBe(trigger)
   })
 })

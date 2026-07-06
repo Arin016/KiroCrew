@@ -16,6 +16,8 @@ from pathlib import Path
 from aiohttp import web
 from aiohttp.client_exceptions import ClientConnectionResetError
 
+from kiro_claw.aim_agents import auto_register_project as _auto_register_project
+from kiro_claw.aim_agents import find_agent_file as _find_agent_file
 from kiro_claw.config.loader import (
     KiroClawConfig,
     _workspace_name_for_dir,
@@ -36,6 +38,7 @@ from kiro_claw.dashboard.chat_runner import _run_chat
 from kiro_claw.dashboard.chat_utils import (
     _THEME_PERSONAS,
     _build_stream_chunk,
+    _edit_queued_by_id,
     _emit_agent_assignment,
     _history_key_for,
     _normalize_model,
@@ -512,6 +515,27 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
     return web.json_response(slot.to_dict())
 
 
+def _reject_pending_approvals(slot: _ChatSlot) -> None:
+    """Reject all pending approval futures so the chat runner unblocks.
+
+    When a stop/interrupt is triggered while the agent is waiting for tool
+    approval, the chat runner is suspended on the approval future. Without
+    resolving it, the stream generator stays paused, _turn_done never fires,
+    and the cooperative cancel times out — forcing a hard kill.
+    """
+    for aid, fut in list(slot._approval_futures.items()):
+        if not fut.done():
+            fut.set_result("rejected")
+            sel().log_tool_invocation(
+                session_key=_history_key_for(slot.key),
+                agent=getattr(slot, "agent", "") or "kiroclaw",
+                source="dashboard",
+                tool_name=f"approval_reject:{aid}",
+                tool_kind="permission",
+                outcome="rejected_on_stop",
+            )
+
+
 def _resolve_stop_event(slot: _ChatSlot, outcome: str) -> None:
     """Update the in-flight stop_event message in place with final state."""
     stop_id = slot._stop_event_id
@@ -587,6 +611,8 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
             slot._stop_state = "idle"
             state.push_slots_update()
 
+        # Unblock chat runner if it's suspended waiting for tool approval.
+        _reject_pending_approvals(slot)
         await state.sessions.stop_turn(
             _history_key_for(name), force=True, on_hard=_on_hard_force
         )
@@ -670,6 +696,9 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
         slot._stop_state = "idle"
         state.push_slots_update()
 
+    # Unblock chat runner if it's suspended waiting for tool approval.
+    _reject_pending_approvals(slot)
+
     outcome = await state.sessions.stop_turn(
         _history_key_for(name), force=False, preserve_queue=True, on_soft=_on_soft, on_hard=_on_hard
     )
@@ -746,6 +775,9 @@ async def api_chat_slot_interrupt(request: web.Request) -> web.Response:
     slot.append("system", stop_msg, stop_msg)
     state.push_slots_update()
 
+    # Unblock chat runner if it's suspended waiting for tool approval.
+    _reject_pending_approvals(slot)
+
     outcome = await state.sessions.stop_turn(
         _history_key_for(name),
         force=False,
@@ -788,6 +820,41 @@ async def api_chat_slot_queue_cancel(request: web.Request) -> web.Response:
     sel().log_tool_invocation(
         session_key=f"dashboard:{name}", agent="kiroclaw", source="dashboard",
         tool_name="queue_cancel", tool_kind="permission",
+        outcome="allowed",
+        metadata={"queue_id": queue_id, "slot": name},
+    )
+    return web.json_response({"ok": True, "content": _redacted})
+
+
+async def api_chat_slot_queue_edit(request: web.Request) -> web.Response:
+    """PATCH /api/chat/slots/{slot}/queue/{queue_id} — edit a queued message.
+
+    Accepts ``{"content": "new text"}`` and replaces the content of the
+    matching queue item in place (order preserved).  Broadcasts a
+    ``queue_edit`` WebSocket event so all connected clients update in sync.
+    """
+    state: DashboardState = request.app["state"]
+    name = request.match_info["slot"]
+    queue_id = request.match_info["queue_id"]
+    slot = state._slots.get(name)
+    if not slot:
+        return web.json_response({"error": "not found"}, status=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    content = body.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return web.json_response({"error": "content must be a non-empty string"}, status=400)
+    if not slot.queue_edit_by_id(queue_id, content):
+        return web.json_response({"error": "queue item not found"}, status=404)
+    _edit_queued_by_id(slot.messages, queue_id, content)
+    _redacted = _redact_for_display(content)
+    state.broadcast_ws("queue_edit", {"slot": name, "queue_id": queue_id, "content": _redacted})
+    state.push_slots_update()
+    sel().log_tool_invocation(
+        session_key=f"dashboard:{name}", agent="kiroclaw", source="dashboard",
+        tool_name="queue_edit", tool_kind="permission",
         outcome="allowed",
         metadata={"queue_id": queue_id, "slot": name},
     )
@@ -1030,8 +1097,28 @@ async def api_chat_slot_agent(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
     agent_name = body.get("agent", "")
+    explicit_path = body.get("project_path", "")
+    if explicit_path and not agent_name:
+        sel().log_api_access(
+            caller="dashboard",
+            operation="chat.slot_agent",
+            outcome="denied",
+            source="api_chat_slot_agent",
+            resources=explicit_path,
+            error="project_path provided without agent name",
+        )
+        return web.json_response(
+            {"error": "project_path requires a non-empty agent; use POST /api/chat/slots/{slot}/project to set the project directly"},
+            status=400,
+        )
     if agent_name and not _AGENT_NAME_RE.match(agent_name):
         return web.json_response({"error": "invalid agent name"}, status=400)
+
+    # Snapshot slot state so we can restore on error paths (e.g. 409)
+    prev_agent = slot.agent
+    prev_workspace = slot.workspace
+    prev_project = slot.project
+
     slot.agent = agent_name
 
     # Resolve workspace from agent bindings
@@ -1053,6 +1140,77 @@ async def api_chat_slot_agent(request: web.Request) -> web.Response:
             slot.project = default_project_dir(workspace)
     except Exception:
         logger.warning("Failed to resolve agent bindings for %r", agent_name, exc_info=True)
+        slot.agent = prev_agent
+        slot.workspace = prev_workspace
+
+    # Auto-set project path for project-scoped agents (contextual launch).
+    # project_path in the request body is the only way to associate an agent with a project.
+    # If project_path is absent the caller wants the global agent — no slot.project change.
+    try:
+        if explicit_path:
+            # Caller explicitly named a project — validate it before committing slot state.
+            resolved_path = str(Path(explicit_path).expanduser().resolve())
+            if not os.path.isdir(resolved_path):
+                slot.agent = prev_agent
+                slot.workspace = prev_workspace
+                slot.project = prev_project
+                sel().log_api_access(
+                    caller="dashboard",
+                    operation="chat.slot_agent",
+                    outcome="denied",
+                    source="api_chat_slot_agent",
+                    resources=resolved_path,
+                    error="project_path is not a directory",
+                )
+                return web.json_response({"error": "project_path is not a directory"}, status=400)
+            if is_sensitive_path(resolved_path):
+                slot.agent = prev_agent
+                slot.workspace = prev_workspace
+                slot.project = prev_project
+                sel().log_api_access(
+                    caller="dashboard",
+                    operation="chat.slot_agent",
+                    outcome="denied",
+                    source="api_chat_slot_agent",
+                    resources=explicit_path,
+                    error="sensitive project_path rejected",
+                )
+                return web.json_response({"error": "project_path rejected as sensitive"}, status=403)
+            # Verify the named agent exists in this project before committing.
+            # Uses name-field matching (not filename stem) to mirror kiro-cli's --agent resolution.
+            agent_file = _find_agent_file(
+                Path(resolved_path) / ".kiro" / "agents", agent_name
+            )
+            if agent_file is None:
+                slot.agent = prev_agent
+                slot.workspace = prev_workspace
+                slot.project = prev_project
+                sel().log_api_access(
+                    caller="dashboard",
+                    operation="chat.slot_agent",
+                    outcome="denied",
+                    source="api_chat_slot_agent",
+                    resources=resolved_path,
+                    error=f"agent {agent_name!r} not found in project",
+                )
+                return web.json_response(
+                    {"error": f"agent {agent_name!r} not found in project"}, status=404
+                )
+            slot.project = resolved_path
+            logger.info("Explicit project for %r: %s", agent_name, resolved_path)
+            sel().log_api_access(
+                caller="dashboard",
+                operation="chat.slot_agent",
+                outcome="ok",
+                source="api_chat_slot_agent",
+                resources=resolved_path,
+            )
+    except Exception:
+        logger.warning("Failed to validate project path for %r", agent_name, exc_info=True)
+        slot.agent = prev_agent
+        slot.workspace = prev_workspace
+        slot.project = prev_project
+        return web.json_response({"error": "failed to validate project_path"}, status=500)
 
     # Reset session so next message uses the new agent
     logger.info("Slot %s agent switched to %r, resetting session", name, agent_name or "kiroclaw")
@@ -1244,18 +1402,27 @@ async def api_chat_slot_project(request: web.Request) -> web.Response:
             await asyncio.to_thread(_save_recent_project, project)
         except Exception:
             logger.warning("Failed to save recent project", exc_info=True)
+        # Auto-register agents for this project dir (direct read, no walk).
+        # Runs synchronously so the registry is populated before the response returns —
+        # the user can immediately pick a project agent without a timing race.
+        try:
+            await asyncio.to_thread(_auto_register_project, project)
+        except Exception:
+            logger.warning("auto_register_project failed for %s", project, exc_info=True)
     # Reset the session so the next message cold-starts with the new CWD and
     # picks up project-level .kiro/steering/**/*.md (mirrors api_chat_slot_agent).
     # Only on an actual change — avoids a needless cold start on a no-op set.
-    # reset() no-ops when no live session exists; conversation context survives
-    # via kiro-cli session/load and conversation_log replay.
+    #
+    # Deferred via a flag because this endpoint is reachable over loopback HTTP
+    # from inside the kiro-cli process group (the set_project MCP tool); an
+    # inline reset would killpg() the caller. Consumed in chat_runner.
     if project != old_project:
-        await state.sessions.reset(_history_key_for(name))
+        slot._pending_reset_history_key = _history_key_for(name)
     state.push_slots_update()
     return web.json_response({"ok": True, "project": project})
 
 
-_MAX_RECENT_PROJECTS = 10
+_MAX_RECENT_PROJECTS = 100
 
 
 def _recent_projects_path() -> Path:

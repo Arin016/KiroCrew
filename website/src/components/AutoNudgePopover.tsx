@@ -54,8 +54,8 @@ export default function AutoNudgePopover({ slotKey, anchorRect, loop, onClose, o
       if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`)
       onChange(data.loop)
       onClose()
-    } catch (e: any) {
-      setError(e.message || String(e))
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
     } finally {
       setSaving(false)
     }
@@ -74,8 +74,8 @@ export default function AutoNudgePopover({ slotKey, anchorRect, loop, onClose, o
       }
       onChange(null)
       onClose()
-    } catch (e: any) {
-      setError(e.message || String(e))
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
     } finally {
       setSaving(false)
     }
@@ -118,6 +118,7 @@ export default function AutoNudgePopover({ slotKey, anchorRect, loop, onClose, o
 
       <div className="text-muted text-[11px] mb-1">Goal description</div>
       <textarea
+        aria-label="Goal description"
         value={message}
         onChange={e => setMessage(e.target.value)}
         rows={6}
@@ -130,6 +131,7 @@ export default function AutoNudgePopover({ slotKey, anchorRect, loop, onClose, o
           <div className="text-muted text-[11px] mb-1">Idle seconds before nudge</div>
           <input
             type="number"
+            aria-label="Idle seconds before nudge"
             min={15}
             max={86400}
             value={idleSecs}
@@ -141,6 +143,7 @@ export default function AutoNudgePopover({ slotKey, anchorRect, loop, onClose, o
           <div className="text-muted text-[11px] mb-1">Max cycles (0 = ∞)</div>
           <input
             type="number"
+            aria-label="Max cycles (0 = infinite)"
             min={0}
             value={maxCycles}
             onChange={e => setMaxCycles(parseInt(e.target.value) || 0)}

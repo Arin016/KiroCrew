@@ -5,6 +5,7 @@ the backend process lifecycle: spawn on enable, health-check, stop on disable.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -20,8 +21,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from kiro_claw.apps.manager import app_dir, get_app_manifest
+from kiro_claw.apps.manager import app_dir, get_app_manifest, list_apps
 from kiro_claw.apps.registry import minimal_env
+from kiro_claw.atomic_write import atomic_write
+from kiro_claw.config.loader import config_dir
 from kiro_claw.sandbox import wrap_argv
 from kiro_claw.sel import sel
 
@@ -43,6 +46,12 @@ _HEALTH_CHECK_INTERVAL = 2.0
 # make the immediate-exit detection test flaky.
 _SPAWN_SURVIVAL_CHECKS = 8
 _SPAWN_SURVIVAL_INTERVAL = 0.2
+
+# Startup stale-reap timing (see _reap_stale_app_backends). The SIGTERM grace is
+# applied PER orphan, not shared across the batch.
+_REAP_SIGTERM_GRACE = 3.0  # seconds to wait for an orphan to exit after SIGTERM
+_REAP_POLL_INTERVAL = 0.1  # liveness re-poll cadence during the grace window
+_PS_TIMEOUT = 2  # seconds before a `ps` start-time probe is abandoned
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +364,14 @@ def _start_app_backend_body(app_name: str, manifest) -> AppProcess | None:
                     healthy=True, started_at=time.time(), log_path=str(log_path),
                     adopted_pids=adopted_pids,
                 )
+                # Adopted (externally-managed) backends are deliberately NOT
+                # recorded for the startup stale-reap: the reap SIGTERMs a whole
+                # process GROUP (safe only for our own start_new_session children),
+                # whereas an external process's group may hold unrelated processes.
+                # If the gateway dies, the external instance keeps running and is
+                # simply re-probed and re-adopted on the next start — so reaping it
+                # would kill a healthy service we would immediately re-adopt. stop's
+                # adopted path kills only the lsof-revalidated PIDs for this reason.
                 with _lock:
                     _processes[app_name] = ap
                     _allocated_ports[app_name] = port
@@ -587,6 +604,9 @@ def _start_app_backend_body(app_name: str, manifest) -> AppProcess | None:
 
     logger.info("Started app %s backend on port %d (pid %d)", app_name, port, proc.pid)
 
+    # Persist identity for the startup stale-reap (see _reap_stale_app_backends).
+    _record_app_pid(app_name, proc.pid, port)
+
     # Health check in background
     threading.Thread(
         target=_health_check_loop,
@@ -623,6 +643,8 @@ def stop_app_backend(app_name: str) -> bool:
     with _lock:
         ap = _processes.pop(app_name, None)
         _allocated_ports.pop(app_name, None)
+
+    _forget_app_pid(app_name)
 
     if not ap:
         return False
@@ -784,6 +806,36 @@ def get_app_backend_port(app_name: str) -> int | None:
 # Health checking
 # ---------------------------------------------------------------------------
 
+def _gate_mcp_registration(app_name: str, port: int, *, healthy: bool) -> None:
+    """Register the app's MCP servers once its backend is healthy, or scrub them if not.
+
+    Called from the health-check loop so the global mcp.json never carries an HTTP MCP url
+    for an app whose backend isn't actually serving (review CR-284432051: the boot/enable
+    paths previously registered with an optimistic pre-health port — an enabled app whose
+    backend never became healthy left a dead url that broke every kiro-cli session). On
+    health success we (re)register with the confirmed live port; on failure we deregister
+    so no dead entry survives. Never raises — registration must not crash the health loop."""
+    try:
+        if healthy:
+            # circular import: bridges imports backend.get_app_backend_port, so deferring
+            # this import to call time breaks the backend ↔ bridges module cycle.
+            from kiro_claw.apps.bridges import reregister_app_mcp_servers
+
+            reregister_app_mcp_servers(app_name, live_port=port)
+        else:
+            # circular import: see above — bridges ↔ backend cycle, deferred to call time.
+            from kiro_claw.apps.bridges import _deregister_mcp_servers
+
+            removed = _deregister_mcp_servers(app_name)
+            if removed:
+                logger.warning(
+                    "Scrubbed %d MCP server(s) for app %s after backend failed health check",
+                    removed, app_name,
+                )
+    except Exception as exc:  # noqa: BLE001 — health loop must never crash on reconcile
+        logger.warning("Health-gated MCP registration failed for app %s: %s", app_name, exc)
+
+
 def _health_check_loop(app_name: str, port: int, health_path: str) -> None:
     """Poll the health endpoint until it responds or we give up."""
     url = f"http://127.0.0.1:{port}{health_path}"
@@ -797,12 +849,22 @@ def _health_check_loop(app_name: str, port: int, health_path: str) -> None:
             with urllib.request.urlopen(req, timeout=_HEALTH_CHECK_TIMEOUT) as resp:
                 if resp.status < 400:
                     with _lock:
-                        if app_name in _processes:
-                            _processes[app_name].healthy = True
+                        # Stopped/disabled between the health poll and here: do NOT
+                        # register MCP for a backend that's no longer tracked — that would
+                        # write the exact dead-URL entry this change exists to prevent
+                        # (AutoSDE race-condition finding). Mirror the top-of-loop guard.
+                        if app_name not in _processes:
+                            return
+                        _processes[app_name].healthy = True
                     logger.info(
                         "App %s backend healthy (port %d, attempt %d)",
                         app_name, port, attempt + 1,
                     )
+                    # Health-gated MCP registration (review CR-284432051): only now that the
+                    # backend has passed /health do we write its HTTP MCP url (live port) to
+                    # global mcp.json. Registering before this could leave a dead-but-enabled
+                    # url for an app whose backend never became healthy — the kiro-cli outage.
+                    _gate_mcp_registration(app_name, port, healthy=True)
                     return
         except (urllib.error.URLError, OSError):
             pass
@@ -811,11 +873,264 @@ def _health_check_loop(app_name: str, port: int, health_path: str) -> None:
         "App %s backend failed health check after %d attempts",
         app_name, _HEALTH_CHECK_RETRIES,
     )
+    # Backend never became healthy: scrub any optimistic/stale MCP entry so kiro-cli does
+    # not keep dialing a dead port on every session (the reverted-outage shape).
+    _gate_mcp_registration(app_name, port, healthy=False)
 
 
 # ---------------------------------------------------------------------------
 # Gateway startup — start backends for all enabled apps
 # ---------------------------------------------------------------------------
+
+# ── App-backend PID persistence + startup stale-reap ──────────────────────────
+#
+# App backends run in their OWN session (start_new_session=True) and are NOT in
+# the gateway's process group, so when the liveness probe SIGKILLs a wedged
+# gateway (no on_cleanup runs) they orphan, reparent to PID 1, and accumulate
+# across restarts. We persist each spawned backend's (pid, start_time) to a
+# pidfile and reap any survivors of a PRIOR generation on the next clean start.
+# See docs/request-for-change/rfc-event-loop-fault-isolation.md.
+
+
+# Serializes the pidfile read-modify-write. _record_app_pid runs on the
+# to_thread worker that spawns a backend (both the runtime app-enable path and
+# the startup reconcile offload start_app_backend via asyncio.to_thread) while
+# _forget_app_pid runs on the to_thread worker that stops one — distinct OS
+# threads, so without this lock their non-atomic read-modify-writes of the
+# whole JSON dict lose each other's entries.
+_pidfile_lock = threading.Lock()
+
+
+def _pidfile_path() -> Path:
+    return config_dir() / "app_backends.pids.json"
+
+
+def _proc_start_time(pid: int) -> str | None:
+    """Stable per-process start time, or None if unavailable.
+
+    PID-reuse guard: a recorded pid whose live start_time no longer matches has
+    been recycled to an unrelated process and MUST NOT be killed. The value must
+    be stable across gateway restarts (the reap compares a string recorded by a
+    prior generation against one read now), so it cannot use ``hash()`` — that
+    is salted per interpreter by ``PYTHONHASHSEED``.
+
+    Linux reads ``/proc/<pid>/stat`` field 22 (start time in clock ticks since
+    boot): monotonic, locale-independent, and far finer than 1s, so same-second
+    PID reuse cannot alias. macOS falls back to ``ps -o lstart=`` (1s resolution,
+    locale/TZ-formatted); a format/resolution drift there can only make the guard
+    FAIL SAFE (decline to reap → orphan leaks), never kill the wrong process.
+    """
+    try:
+        if sys.platform == "linux":
+            stat = Path(f"/proc/{pid}/stat").read_text()
+            # The comm field can contain spaces/parens; split after the last ')'.
+            fields = stat.rsplit(")", 1)[1].split()
+            return fields[19]  # field 22 (1-based) = starttime in clock ticks
+        out = subprocess.check_output(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            stderr=subprocess.DEVNULL, timeout=_PS_TIMEOUT,
+        )
+        return out.decode().strip() or None
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if ``pid`` names a live process.
+
+    ``PermissionError`` (EPERM) means the process EXISTS but is owned by another
+    uid — alive, not gone — so it must NOT be conflated with
+    ``ProcessLookupError``. Treating EPERM as "gone" would skip the SIGKILL of a
+    SIGTERM-ignoring orphan whose credentials changed.
+    """
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _read_pidfile() -> dict[str, dict[str, Any]]:
+    try:
+        with open(_pidfile_path()) as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        # A corrupt/half-written pidfile (e.g. a SIGKILL mid-write before atomic
+        # writes landed, or a leftover from an older build) silently disabling
+        # the reap is exactly the leak this feature exists to prevent — log it.
+        logger.warning("App-backend pidfile unreadable (%s); stale-reap skipped this start", exc)
+        return {}
+
+
+def _write_pidfile(data: dict[str, dict[str, Any]]) -> None:
+    # Atomic temp-file + rename (fsync): the whole point of the pidfile is to
+    # survive a gateway SIGKILL, so a non-atomic open("w") that truncates first
+    # would leave an empty/partial file if the kill lands mid-write.
+    try:
+        atomic_write(_pidfile_path(), json.dumps(data), fsync=True)
+    except OSError as exc:
+        logger.debug("Could not write app-backend pidfile: %s", exc)
+
+
+def _record_app_pid(app_name: str, pid: int, port: int) -> None:
+    """Persist a spawned backend's identity for the startup stale-reap. Never raises."""
+    if pid <= 0:
+        return
+    try:
+        # Compute start_time BEFORE taking the lock: on macOS _proc_start_time
+        # shells out to `ps` (up to _PS_TIMEOUT), and holding _pidfile_lock
+        # across that slow IO would serialize concurrent enable/stop/uninstall
+        # ops behind it. Mirrors the reap path's validate-lock-free /
+        # store-under-lock discipline.
+        start_time = _proc_start_time(pid)
+        with _pidfile_lock:
+            data = _read_pidfile()
+            data[app_name] = {"pid": pid, "start_time": start_time, "port": port}
+            _write_pidfile(data)
+    except Exception as exc:  # noqa: BLE001 — persistence must never break a spawn
+        logger.debug("Could not record app pid for %s: %s", app_name, exc)
+
+
+def _forget_app_pid(app_name: str) -> None:
+    """Drop an app's pidfile entry (called on a clean stop). Never raises."""
+    try:
+        with _pidfile_lock:
+            data = _read_pidfile()
+            if data.pop(app_name, None) is not None:
+                _write_pidfile(data)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Could not forget app pid for %s: %s", app_name, exc)
+
+
+def _reap_stale_app_backends() -> int:
+    """Reap app backends left running by a prior gateway generation.
+
+    Runs at gateway startup BEFORE the new generation spawns (off the event loop
+    — see start_enabled_app_backends' caller). A recorded pid is terminated only
+    when it is still alive AND its current start_time POSITIVELY matches the
+    recorded one (PID-reuse guard); if identity cannot be confirmed the pid is
+    left alone — declining to reap leaks a recoverable orphan, whereas killing an
+    unverifiable pid could signal an unrelated recycled process group. Returns
+    the count terminated.
+    """
+    with _pidfile_lock:
+        data = _read_pidfile()
+    if not data:
+        return 0
+    # ``handled`` = entries we either terminated or confirmed already-gone; they
+    # are removed from the pidfile at the end. Entries left out of ``handled``
+    # (identity unconfirmed but still alive) are KEPT for a later attempt so a
+    # transient ps failure does not permanently abandon a real orphan.
+    # ``handled`` maps each handled app_name -> the exact pidfile entry we acted
+    # on. The final merge drops an entry ONLY if it is still identical: a
+    # concurrent enable that re-recorded the app with a NEW pid mid-scan writes a
+    # different entry, which must survive (clobbering it would re-introduce the
+    # orphan leak this feature prevents).
+    handled: dict[str, Any] = {}
+    reaped: list[tuple[str, int, Any]] = []
+    for app_name, entry in data.items():
+        try:
+            pid = int(entry.get("pid", 0))
+        except (TypeError, ValueError):
+            handled[app_name] = entry  # malformed entry — drop
+            continue
+        if pid <= 0:
+            handled[app_name] = entry
+            continue
+        try:
+            os.kill(pid, 0)  # alive?
+        except ProcessLookupError:
+            handled[app_name] = entry  # already gone — drop
+            continue
+        except PermissionError:
+            # Alive but owned by another uid → not our orphan; cannot signal it.
+            handled[app_name] = entry
+            logger.info("Skipping stale-reap of %s pid %d: not owned by gateway", app_name, pid)
+            continue
+        except OSError:
+            handled[app_name] = entry
+            continue
+        recorded_st = entry.get("start_time")
+        live_st = _proc_start_time(pid)
+        if not recorded_st or live_st is None or live_st != recorded_st:
+            # Identity unconfirmed: no baseline captured, ps failed now, or the
+            # pid was recycled. Do NOT kill, and KEEP the entry (omit from
+            # ``handled``) so a future start can retry once ps recovers.
+            logger.info(
+                "Skipping stale-reap of %s pid %d: start_time unconfirmed (recycled or unreadable)",
+                app_name, pid,
+            )
+            continue
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            handled[app_name] = entry  # gone between the probe and the signal
+            continue
+        handled[app_name] = entry
+        # Carry recorded_st so the delayed SIGKILL can re-confirm identity before
+        # signalling (PID-reuse guard, below).
+        reaped.append((app_name, pid, recorded_st))
+        try:
+            sel().log_api_access(
+                caller="gateway", operation="app_backend_stale_reap",
+                outcome="sigterm", resources=f"{app_name} pid={pid}",
+            )
+        except Exception as exc:
+            logger.debug("SEL audit failed for app_backend_stale_reap %s: %s", app_name, exc)
+    # Escalate to SIGKILL for any matched orphan that ignored SIGTERM. Each pid
+    # gets its OWN grace window — a shared deadline would let the first slow
+    # exiter consume the whole budget and SIGKILL the rest instantly. No lock is
+    # held here: the kill/poll touches no shared file and can sleep for seconds.
+    for app_name, pid, recorded_st in reaped:
+        deadline = time.monotonic() + _REAP_SIGTERM_GRACE
+        while _pid_alive(pid) and time.monotonic() < deadline:
+            time.sleep(_REAP_POLL_INTERVAL)
+        if not _pid_alive(pid):
+            continue
+        # Re-confirm identity before the destructive SIGKILL. The pid may have
+        # exited and been recycled to an unrelated process during the grace
+        # window (macOS's ~99998 PID space makes reuse materially likely within
+        # _REAP_SIGTERM_GRACE); without this, os.killpg below could signal an
+        # innocent recycled process group. Same PID-reuse guard the SIGTERM path
+        # applies — skip the kill on mismatch (leak-not-mis-kill).
+        if _proc_start_time(pid) != recorded_st:
+            logger.info(
+                "Skipping stale-reap SIGKILL of %s pid %d: start_time changed (PID recycled)",
+                app_name, pid,
+            )
+            continue
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            continue
+        try:
+            sel().log_api_access(
+                caller="gateway", operation="app_backend_stale_reap",
+                outcome="sigkill", resources=f"{app_name} pid={pid}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("SEL audit failed for app_backend_stale_reap sigkill %s: %s", app_name, exc)
+    # Drop only the entries we handled, re-reading under the lock so a concurrent
+    # enable/disable that wrote during the scan is merged, not clobbered. Drop an
+    # entry ONLY if it still equals what we handled: a mid-scan re-record (new
+    # pid) yields a different entry that must be kept.
+    with _pidfile_lock:
+        current = _read_pidfile()
+        for app_name, handled_entry in handled.items():
+            if current.get(app_name) == handled_entry:
+                current.pop(app_name, None)
+        _write_pidfile(current)
+    if reaped:
+        logger.info("Startup stale-reap: terminated %d orphaned app backend(s)", len(reaped))
+    return len(reaped)
+
 
 def start_enabled_app_backends() -> list[str]:
     """Start backends for all enabled apps that declare one.
@@ -823,10 +1138,44 @@ def start_enabled_app_backends() -> list[str]:
     Called during gateway startup to restore app backends.
     Returns list of app names that were started.
     """
-    from kiro_claw.apps.manager import _app_activation_denied, list_apps
+    # Reap app backends left running by a prior (e.g. SIGKILLed) gateway
+    # generation before starting the new one. See the RFC,
+    # "Apps as supervised sandboxed children".
+    _reap_stale_app_backends()
+
+    from kiro_claw.apps.manager import _app_activation_denied
+
+    apps = list_apps()
+
+    # Boot reconcile (regression CR-281976055 / revert CR-284300496): scrub global
+    # mcp.json entries for any installed-but-NOT-enabled app that declares MCP servers.
+    # A disabled app's backend is not running, so its HTTP MCP url points at a dead port;
+    # left in ~/.kiro/settings/mcp.json it breaks EVERY kiro session (connect failure →
+    # "transient 5xx" → 3 retries → hard error). Enable's deregister can be missed (crash
+    # mid-enable, a resources-mismatch branch), so reconcile at boot before starting any
+    # backend. Enabled apps are (re)registered with their live port via the health-gate.
+    for app_info in apps:
+        if app_info.get("enabled"):
+            continue
+        name = app_info.get("name", "")
+        manifest = app_info.get("manifest", {})
+        if not name or not manifest.get("mcpServers"):
+            continue
+        try:
+            # circular import: bridges imports from backend, so defer to call time.
+            from kiro_claw.apps.bridges import _deregister_mcp_servers
+
+            removed = _deregister_mcp_servers(name)
+            if removed:
+                logger.info(
+                    "Boot reconcile: scrubbed %d stale MCP server(s) for disabled app %s",
+                    removed, name,
+                )
+        except Exception as exc:  # noqa: BLE001 — boot must never crash on reconcile
+            logger.warning("Boot MCP reconcile failed for disabled app %s: %s", name, exc)
 
     started: list[str] = []
-    for app_info in list_apps():
+    for app_info in apps:
         if not app_info.get("enabled"):
             continue
         name = app_info.get("name", "")
@@ -846,16 +1195,13 @@ def start_enabled_app_backends() -> list[str]:
         if ap:
             started.append(name)
             logger.info("Auto-started backend for app %s on port %d", name, ap.port)
-            # Re-register the app's MCP servers now that the backend is up on its real
-            # allocated port — an HTTP MCP url with backend.port:"auto" was registered at
-            # install/enable time with the manifest's illustrative port, which is wrong if
-            # the backend landed elsewhere (e.g. 9101 when 9100 was taken). Without this,
-            # agents call the stale port and every app tool call silently fails on reboot.
-            try:
-                # circular import: bridges imports backend.get_app_backend_port; deferring
-                # this import to call time breaks the backend ↔ bridges module cycle.
-                from kiro_claw.apps.bridges import reregister_app_mcp_servers
-                reregister_app_mcp_servers(name, live_port=ap.port)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("MCP re-registration after auto-start failed for %s: %s", name, exc)
+            # MCP re-registration is HEALTH-GATED (review CR-284432051): the health-check
+            # loop started by start_app_backend calls _gate_mcp_registration once /health
+            # passes, writing the HTTP MCP url with the real allocated port (which may differ
+            # from the manifest's illustrative port). Registering here — before health — is
+            # exactly what could leave a dead url for an enabled-but-never-healthy app and
+            # break every kiro-cli session. EXCEPTION: an adopted already-healthy instance
+            # runs no health loop, so register it synchronously now.
+            if ap.healthy:
+                _gate_mcp_registration(name, ap.port, healthy=True)
     return started

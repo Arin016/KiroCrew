@@ -110,9 +110,16 @@ export default function SnipOverlay({ frame, onComplete, onCancel, onError }: Pr
       aria-label="Crop screen capture"
       className="fixed inset-0 z-[200] bg-black/50 flex flex-col items-center justify-center gap-4"
     >
+      {/* Freeform pointer-drag crop region (like macOS Cmd+Shift+4). There is no
+          ARIA role that models "drag a rectangle to select", and there is no
+          per-pixel keyboard equivalent; Escape-to-cancel is wired globally on the
+          window (see the keydown effect above) and the parent is role="dialog".
+          Hence the scoped disable for the mouse-only drag surface. */}
+      {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
       <div
         ref={surfaceRef}
         data-testid="snip-surface"
+        aria-label="Drag to select the screen region to capture"
         className="relative max-w-[90vw] max-h-[80vh] cursor-crosshair select-none"
         onMouseDown={onDown}
         onMouseMove={onMove}

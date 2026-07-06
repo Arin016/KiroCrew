@@ -203,6 +203,9 @@ export default function WateringHoleScene({ agents, visible = true }: Props) {
     const C = canvasRef.current!
     const TC = textRef.current!
     const { X, T, d } = initSceneCanvases(C, TC, W, H, S)
+    // Capture the (stable, never-reassigned) ripples array so the cleanup
+    // clears the same instance without reading ripplesRef.current post-unmount.
+    const ripples = ripplesRef.current
 
     /* ── Background ── */
     const drawBackground = () => {
@@ -688,14 +691,14 @@ export default function WateringHoleScene({ agents, visible = true }: Props) {
     const stop = runSceneLoop(visibleRef, tickRef, update, draw)
     return () => {
       stop()
-      ripplesRef.current.length = 0
+      ripples.length = 0
     }
   }, [])
 
   return (
     <div style={SCENE_CONTAINER_STYLE(W, H)}>
-      <canvas ref={canvasRef} style={{ ...PIXEL_CANVAS_STYLE, ...canvasProps.style }} onMouseMove={canvasProps.onMouseMove} onMouseLeave={canvasProps.onMouseLeave} onClick={canvasProps.onClick} />
-      <canvas ref={textRef} style={TEXT_CANVAS_STYLE} />
+      <canvas ref={canvasRef} aria-label="Watering hole scene" style={{ ...PIXEL_CANVAS_STYLE, ...canvasProps.style }} onMouseMove={canvasProps.onMouseMove} onMouseLeave={canvasProps.onMouseLeave} onClick={canvasProps.onClick} />
+      <canvas ref={textRef} aria-label="Watering hole scene labels" style={TEXT_CANVAS_STYLE} />
       {tooltipEl}
     </div>
   )

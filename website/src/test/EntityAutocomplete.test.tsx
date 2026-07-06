@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, act, fireEvent } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { MemoryRouter } from 'react-router'
+// Must match the router package the component tree uses: EmbeddingStatus (rendered
+// by KnowledgePage) calls useNavigate from 'react-router-dom', and in react-router
+// v7 the -dom package has its own context instance, so MemoryRouter must come from
+// 'react-router-dom' or useNavigate won't see the router.
+import { MemoryRouter } from 'react-router-dom'
 
 // Mock the knowledge API
 const mockKnowledgeApi = vi.fn().mockResolvedValue([])

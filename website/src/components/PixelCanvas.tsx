@@ -98,5 +98,5 @@ export default function PixelCanvas({ slots }: PixelCanvasProps) {
     return () => cancelAnimationFrame(raf)
   }, [render])
 
-  return <canvas ref={canvasRef} width={W * SCALE} height={H * SCALE} style={{ imageRendering: 'pixelated', aspectRatio: '1/1' }} className="w-full rounded-lg" />
+  return <canvas ref={canvasRef} aria-label="Agent activity animation" width={W * SCALE} height={H * SCALE} style={{ imageRendering: 'pixelated', aspectRatio: '1/1' }} className="w-full rounded-lg" />
 }

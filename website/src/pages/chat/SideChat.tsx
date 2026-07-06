@@ -106,12 +106,13 @@ export default function SideChat({ slot }: { slot: string }) {
     isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
   }, [])
 
+  const lastMessageContent = messages[messages.length - 1]?.content
   useEffect(() => {
     const el = scrollRef.current
     if (el && isNearBottomRef.current) {
       requestAnimationFrame(() => { el.scrollTop = el.scrollHeight })
     }
-  }, [messages.length, messages[messages.length - 1]?.content])
+  }, [messages.length, lastMessageContent])
 
   const send = useCallback(() => {
     const q = draft.trim()
@@ -200,6 +201,7 @@ export default function SideChat({ slot }: { slot: string }) {
           value={draft}
           onChange={e => setDraft(e.target.value)}
           onKeyDown={onKeyDown}
+          aria-label="Ask a side question"
           placeholder="Ask a side question…"
           rows={2}
           disabled={sendMutation.isPending}

@@ -1,3 +1,4 @@
+import { safeSetItem } from '../utils/safeStorage'
 /**
  * Tracks which agent IDs have been seen in each scene.
  * If an agent was previously seen, scenes skip the entrance animation.
@@ -17,7 +18,7 @@ function loadFromStorage(): Record<string, string[]> {
 function saveToStorage() {
   const obj: Record<string, string[]> = {}
   memoryCache.forEach((set, key) => { obj[key] = [...set] })
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(obj)) } catch { /* ignore */ }
+  try { safeSetItem(STORAGE_KEY, JSON.stringify(obj)) } catch { /* ignore */ }
 }
 
 function getOrInit(sceneKey: string): Set<string> {

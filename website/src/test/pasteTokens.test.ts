@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import {
   shouldCollapse,
   countLines,
@@ -10,6 +10,12 @@ import {
   pruneBlocks,
   expandAll,
   mergePreservedPastes,
+  saveStoredPaste,
+  readStoredPaste,
+  STORE_KEY,
+  STORE_CAP,
+  STORE_TTL_MS,
+  STORE_MAX_BYTES,
   PASTE_TOKEN_REGEX,
   type PasteBlock,
 } from '../utils/pasteTokens'
@@ -172,6 +178,95 @@ describe('pasteTokens', () => {
       const out = mergePreservedPastes(existing, incoming)
       expect(out[0].content).toBe('some other text')
       expect(out[0].meta).toBeUndefined()
+    })
+  })
+
+  // mc-paste-store-v1 localStorage side table: byte/entry/TTL bounding so it
+  // cannot grow unbounded and exhaust the localStorage quota.
+  describe('saveStoredPaste / readStoredPaste store bounding', () => {
+    beforeEach(() => { localStorage.clear() })
+
+    const storeSize = (): number => {
+      const raw = localStorage.getItem(STORE_KEY)
+      return raw ? Object.keys(JSON.parse(raw)).length : 0
+    }
+
+    it('round-trips a saved paste by expanded content key', () => {
+      const b = block({ id: 'a', seq: 1, content: 'AAA' })
+      saveStoredPaste('expanded AAA text', 'display [ Paste #1 · 3 lines ]', [b])
+      const got = readStoredPaste('expanded AAA text')
+      expect(got?.displayTxt).toBe('display [ Paste #1 · 3 lines ]')
+      expect(got?.pastes).toEqual([b])
+    })
+
+    it('ignores empty pastes / empty content', () => {
+      saveStoredPaste('', 'd', [block()])
+      saveStoredPaste('key', 'd', [])
+      expect(storeSize()).toBe(0)
+    })
+
+    it('caps total serialized bytes, keeping only the newest entries that fit', () => {
+      // Each entry holds ~50 KB of content; STORE_MAX_BYTES (2 MB) admits far
+      // fewer than the number we write, so the byte-aware LRU must evict.
+      const big = 'x'.repeat(50_000)
+      const total = Math.ceil(STORE_MAX_BYTES / 50_000) + 20
+      for (let i = 0; i < total; i++) {
+        saveStoredPaste(`key-${i}`, 'd', [block({ seq: 1, content: big })])
+      }
+      const raw = localStorage.getItem(STORE_KEY)!
+      expect(raw.length).toBeLessThanOrEqual(STORE_MAX_BYTES)
+      // Newest write must survive; an early (evicted) one must be gone.
+      expect(readStoredPaste(`key-${total - 1}`)).not.toBeNull()
+      expect(readStoredPaste('key-0')).toBeNull()
+    })
+
+    it('keeps the newest entry even when it alone exceeds the byte budget', () => {
+      const huge = 'y'.repeat(STORE_MAX_BYTES + 100_000)
+      saveStoredPaste('huge-key', 'd', [block({ seq: 1, content: huge })])
+      expect(readStoredPaste('huge-key')).not.toBeNull()
+      expect(storeSize()).toBe(1)
+    })
+
+    it('caps entry count at STORE_CAP, evicting oldest', () => {
+      // Small entries so the byte cap never trips — isolate the count cap.
+      for (let i = 0; i < STORE_CAP + 10; i++) {
+        saveStoredPaste(`k-${i}`, 'd', [block({ seq: 1, content: 's' })])
+      }
+      expect(storeSize()).toBe(STORE_CAP)
+      expect(readStoredPaste(`k-${STORE_CAP + 9}`)).not.toBeNull() // newest kept
+      expect(readStoredPaste('k-0')).toBeNull()                    // oldest evicted
+    })
+
+    it('drops entries older than the TTL on read', () => {
+      const stale = {
+        'old-key': { displayTxt: 'd', pastes: [block()], savedAt: Date.now() - STORE_TTL_MS - 1 },
+        'fresh-key': { displayTxt: 'd', pastes: [block()], savedAt: Date.now() },
+      }
+      localStorage.setItem(STORE_KEY, JSON.stringify(stale))
+      expect(readStoredPaste('old-key')).toBeNull()
+      expect(readStoredPaste('fresh-key')).not.toBeNull()
+    })
+
+    it('breaks same-millisecond savedAt ties by seq — newer seq survives eviction', () => {
+      // The seq tiebreaker is the headline correctness mechanism: content-
+      // addressed keys can be numeric, so insertion-order / stable-sort LRU is
+      // unsafe. This test isolates it. Seed two entries with an IDENTICAL
+      // savedAt but different seq, each large enough that only ONE fits under
+      // STORE_MAX_BYTES alongside a newer trigger entry. savedAt alone cannot
+      // order the pair — only seq can — so this test FAILS if the
+      // `(b.seq ?? 0) - (a.seq ?? 0)` tiebreaker is removed from writeStore.
+      const T = Date.now()
+      const big = 'x'.repeat(1_200_000) // ~1.2 MB; two cannot coexist under the 2 MB cap
+      localStorage.setItem(STORE_KEY, JSON.stringify({
+        'tie-old': { displayTxt: 'd', pastes: [block({ seq: 1, content: big })], savedAt: T, seq: 1 },
+        'tie-new': { displayTxt: 'd', pastes: [block({ seq: 1, content: big })], savedAt: T, seq: 2 },
+      }))
+      // A tiny fresh save triggers writeStore's byte-aware eviction; being the
+      // newest it always survives, so the eviction boundary falls between the
+      // two tied entries and only seq decides which one is kept.
+      saveStoredPaste('trigger-key', 'd', [block({ seq: 1, content: 's' })])
+      expect(readStoredPaste('tie-new')).not.toBeNull() // newer seq kept
+      expect(readStoredPaste('tie-old')).toBeNull()     // older seq evicted
     })
   })
 })

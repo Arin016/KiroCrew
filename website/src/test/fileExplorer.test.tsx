@@ -165,7 +165,7 @@ describe('file-explorer/api', () => {
 
   it('health calls correct URL with credentials', async () => {
     const mockResponse = { ok: true, json: () => Promise.resolve({ allowedRoots: ['/home'] }) }
-    vi.mocked(fetch).mockResolvedValue(mockResponse as any)
+    vi.mocked(fetch).mockResolvedValue(mockResponse as unknown as Response)
 
     const { fileExplorerApi } = await import('../apps/file-explorer/api')
     const result = await fileExplorerApi.health()
@@ -175,7 +175,7 @@ describe('file-explorer/api', () => {
 
   it('throws on non-ok response', async () => {
     const mockResponse = { ok: false, status: 403, text: () => Promise.resolve('forbidden') }
-    vi.mocked(fetch).mockResolvedValue(mockResponse as any)
+    vi.mocked(fetch).mockResolvedValue(mockResponse as unknown as Response)
 
     const { fileExplorerApi } = await import('../apps/file-explorer/api')
     await expect(fileExplorerApi.health()).rejects.toThrow('forbidden')
@@ -183,7 +183,7 @@ describe('file-explorer/api', () => {
 
   it('tree encodes path parameter', async () => {
     const mockResponse = { ok: true, json: () => Promise.resolve({ entries: [] }) }
-    vi.mocked(fetch).mockResolvedValue(mockResponse as any)
+    vi.mocked(fetch).mockResolvedValue(mockResponse as unknown as Response)
 
     const { fileExplorerApi } = await import('../apps/file-explorer/api')
     await fileExplorerApi.tree('/path with spaces', 2)
@@ -195,7 +195,7 @@ describe('file-explorer/api', () => {
 
   it('search builds correct params', async () => {
     const mockResponse = { ok: true, json: () => Promise.resolve({ results: [], engine: 'rg' }) }
-    vi.mocked(fetch).mockResolvedValue(mockResponse as any)
+    vi.mocked(fetch).mockResolvedValue(mockResponse as unknown as Response)
 
     const { fileExplorerApi } = await import('../apps/file-explorer/api')
     await fileExplorerApi.search('/root', 'query', '*.ts')
@@ -206,7 +206,7 @@ describe('file-explorer/api', () => {
 
   it('read includes max_bytes when provided', async () => {
     const mockResponse = { ok: true, json: () => Promise.resolve({ content: 'hi' }) }
-    vi.mocked(fetch).mockResolvedValue(mockResponse as any)
+    vi.mocked(fetch).mockResolvedValue(mockResponse as unknown as Response)
 
     const { fileExplorerApi } = await import('../apps/file-explorer/api')
     await fileExplorerApi.read('/file.txt', 1024)

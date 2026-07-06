@@ -6,7 +6,7 @@ import InfoTip from '../../components/InfoTip'
 import { esc } from '../../api/helpers'
 import VectorMemoryCard from './VectorMemoryCard'
 import MemoryGraphTab from './MemoryGraphTab'
-import type { Lesson } from '../../types'
+import type { Lesson, SessionInfo } from '../../types'
 import { useSortableTable } from '../../hooks/useSortableTable'
 import SortableHeader from '../../components/SortableHeader'
 
@@ -59,7 +59,7 @@ export default function MemoryTab({ refreshTrigger }: { refreshTrigger: number }
   const consolidate = async () => {
     setConsolidating(true); setConsolidateMsg(''); setConsolidateOk(false)
     const sessions = await api.sessions(200).catch(() => ({ sessions: [] }))
-    const keys = sessions?.sessions?.map((s: any) => s.key).filter(Boolean) || []
+    const keys = sessions?.sessions?.map((s: SessionInfo) => s.key).filter(Boolean) || []
     if (keys.length === 0) { setConsolidateMsg(<><XCircle className="lucide-inline" /> No sessions to consolidate — start a chat first</>); setConsolidating(false); return }
     const results = await Promise.allSettled(keys.map((k: string) => api.consolidateMemory(k, true)))
     const succeeded = results.filter(r => r.status === 'fulfilled').length
@@ -77,14 +77,14 @@ export default function MemoryTab({ refreshTrigger }: { refreshTrigger: number }
     {view === 'graph' ? <MemoryGraphTab /> : <>
     <Card><CardTitle>Memory Settings <InfoTip text="Controls how conversation history is consolidated into memory." /></CardTitle>
       <div className="flex gap-3 items-end flex-wrap">
-        <label className="flex flex-col gap-1 text-[13px] text-muted">
+        <label htmlFor="memory-idle-hours" className="flex flex-col gap-1 text-[13px] text-muted">
           <span>Consolidation idle (hours)</span>
-          <input type="number" min={0.5} max={24} step={0.5} className="w-24 bg-bg-elevated border border-border rounded-md px-3 py-2 text-text text-sm font-body outline-none transition-colors focus-ring" value={idleHours} onChange={e => setIdleHours(Number(e.target.value))} />
+          <input id="memory-idle-hours" aria-label="Consolidation idle (hours)" type="number" min={0.5} max={24} step={0.5} className="w-24 bg-bg-elevated border border-border rounded-md px-3 py-2 text-text text-sm font-body outline-none transition-colors focus-ring" value={idleHours} onChange={e => setIdleHours(Number(e.target.value))} />
         </label>
         {!migrated && (
-          <label className="flex flex-col gap-1 text-[13px] text-muted">
+          <label htmlFor="memory-max-days" className="flex flex-col gap-1 text-[13px] text-muted">
             <span>History retention (days)</span>
-            <input type="number" min={7} max={365} step={1} className="w-24 bg-bg-elevated border border-border rounded-md px-3 py-2 text-text text-sm font-body outline-none transition-colors focus-ring" value={maxDays} onChange={e => setMaxDays(Number(e.target.value))} />
+            <input id="memory-max-days" aria-label="History retention (days)" type="number" min={7} max={365} step={1} className="w-24 bg-bg-elevated border border-border rounded-md px-3 py-2 text-text text-sm font-body outline-none transition-colors focus-ring" value={maxDays} onChange={e => setMaxDays(Number(e.target.value))} />
           </label>
         )}
         <Btn onClick={async () => { await api.saveMemorySettings({ history_idle_hours: idleHours, history_max_days: maxDays }); setSettingsSaved(true); scheduleClear(() => setSettingsSaved(false), 2000) }}>{settingsSaved ? <><Check className="lucide-inline" /> Saved</> : 'Save'}</Btn>
@@ -97,11 +97,11 @@ export default function MemoryTab({ refreshTrigger }: { refreshTrigger: number }
     <VectorMemoryCard onActiveChange={setVectorActive} onMigratedChange={setMigrated} />
     {!vectorActive && (<>
       <Card><CardTitle>Preferences <InfoTip text="Learned user preferences (coding style, tools, workflows). Auto-updated by memory consolidation." /> <Btn onClick={async () => { await api.saveMemoryPreferences(pref); setPrefSaved(true); scheduleClear(() => setPrefSaved(false), 2000) }}>{prefSaved ? <><Check className="lucide-inline" /> Saved</> : 'Save'}</Btn></CardTitle>
-        <textarea className="w-full bg-bg-elevated border border-border rounded-md p-3 text-text text-sm font-body outline-none resize-y leading-relaxed transition-colors focus-ring" rows={8} value={pref} onChange={e => setPref(e.target.value)} placeholder="Loading…" /></Card>
+        <textarea aria-label="Preferences" className="w-full bg-bg-elevated border border-border rounded-md p-3 text-text text-sm font-body outline-none resize-y leading-relaxed transition-colors focus-ring" rows={8} value={pref} onChange={e => setPref(e.target.value)} placeholder="Loading…" /></Card>
       <Card><CardTitle>Projects <Btn onClick={async () => { await api.saveMemoryProjects(proj); setProjSaved(true); scheduleClear(() => setProjSaved(false), 2000) }}>{projSaved ? <><Check className="lucide-inline" /> Saved</> : 'Save'}</Btn></CardTitle>
-        <textarea className="w-full bg-bg-elevated border border-border rounded-md p-3 text-text text-sm font-body outline-none resize-y leading-relaxed transition-colors focus-ring" rows={8} value={proj} onChange={e => setProj(e.target.value)} placeholder="Loading…" /></Card>
+        <textarea aria-label="Projects" className="w-full bg-bg-elevated border border-border rounded-md p-3 text-text text-sm font-body outline-none resize-y leading-relaxed transition-colors focus-ring" rows={8} value={proj} onChange={e => setProj(e.target.value)} placeholder="Loading…" /></Card>
       <Card><CardTitle>Daily History <Btn onClick={async () => { await api.saveMemoryHistory(hist); setHistSaved(true); scheduleClear(() => setHistSaved(false), 2000) }}>{histSaved ? <><Check className="lucide-inline" /> Saved</> : 'Save'}</Btn></CardTitle>
-        <textarea className="w-full bg-bg-elevated border border-border rounded-md p-3 text-text text-sm font-mono outline-none resize-y leading-relaxed transition-colors focus-ring" rows={10} value={hist} onChange={e => setHist(e.target.value)} placeholder="No history yet" /></Card>
+        <textarea aria-label="Daily History" className="w-full bg-bg-elevated border border-border rounded-md p-3 text-text text-sm font-mono outline-none resize-y leading-relaxed transition-colors focus-ring" rows={10} value={hist} onChange={e => setHist(e.target.value)} placeholder="No history yet" /></Card>
     </>)}
     {!vectorActive && (
       <Card><CardTitle>Lessons <InfoTip text="Persistent lessons injected into every session. Auto-extracted from task runner failures. Add manually via 'kiroclaw learn add'. When vector memory is active, lessons are managed in the Semantic tab as lesson.* entries." /></CardTitle>
@@ -112,7 +112,7 @@ export default function MemoryTab({ refreshTrigger }: { refreshTrigger: number }
         </select>
         <SendBtn onClick={async () => { if (!rule) return; await api.createLesson(rule, cat); setRule(''); loadLessons() }}>Add</SendBtn>
       </div>
-      <table className="w-full border-collapse table-striped"><thead><tr><SortableHeader label="Rule" sortKey="rule" sort={lessonSort} onToggle={toggleLessonSort} /><SortableHeader label="Category" sortKey="category" sort={lessonSort} onToggle={toggleLessonSort} /><SortableHeader label="When" sortKey="ts" sort={lessonSort} onToggle={toggleLessonSort} /><th className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium"></th></tr></thead>
+      <table className="w-full border-collapse table-striped"><thead><tr><SortableHeader label="Rule" sortKey="rule" sort={lessonSort} onToggle={toggleLessonSort} /><SortableHeader label="Category" sortKey="category" sort={lessonSort} onToggle={toggleLessonSort} /><SortableHeader label="When" sortKey="ts" sort={lessonSort} onToggle={toggleLessonSort} /><th aria-label="Actions" className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium"></th></tr></thead>
         <tbody>{lessons.length === 0 ? <tr><td colSpan={4} className="text-muted italic px-2.5 py-3.5 text-sm">No lessons</td></tr> : sortedLessons.map((l) => (
           <tr key={`${l.rule}-${l.ts}`} className="hover:bg-bg-hover transition-colors"><td className="px-2.5 py-2 border-b border-border text-sm">{esc(l.rule)}</td><td className="px-2.5 py-2 border-b border-border text-sm"><Badge variant="ok">{l.category}</Badge></td><td className="px-2.5 py-2 border-b border-border text-sm">{new Date(l.ts).toLocaleString()}</td>
             <td className="px-2.5 py-2 border-b border-border text-sm"><Btn danger onClick={async () => { await api.deleteLesson(l.rule); loadLessons() }}>Delete</Btn></td></tr>

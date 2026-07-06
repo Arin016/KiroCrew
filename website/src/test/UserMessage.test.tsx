@@ -18,6 +18,17 @@ describe('UserMessage', () => {
     expect(screen.getByTestId('content')).toHaveTextContent('hello')
   })
 
+  // Mesh-2056: the read-only bubble must carry white-space: pre-wrap so
+  // user-typed line breaks (Shift+Enter) survive. Markdown renders a single
+  // source newline as a literal "\n" text node, which the default
+  // white-space: normal would collapse to a space (run-on paragraph).
+  it('preserves newlines via white-space: pre-wrap on the bubble', () => {
+    const { container } = render(<UserMessage content={'line one\nline two'} renderContent={renderContent} />)
+    const bubble = container.querySelector('.msg-content') as HTMLElement
+    expect(bubble).toBeInTheDocument()
+    expect(bubble.style.whiteSpace).toBe('pre-wrap')
+  })
+
   it('shows timestamp when provided', () => {
     render(<UserMessage content="hi" timestamp="Apr 27, 2026, 08:00 PM" renderContent={renderContent} />)
     expect(screen.getByText('Apr 27, 2026, 08:00 PM')).toBeInTheDocument()

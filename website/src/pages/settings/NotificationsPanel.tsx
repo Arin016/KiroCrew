@@ -54,10 +54,13 @@ export function NotificationsPanel() {
             onChange={v => update({ enabled: v })}
           />
           <div className="flex flex-col gap-1.5 py-1.5">
+            {/* Slider is correctly associated via htmlFor+id (a range input can't be nested); label-has-for's nesting requirement is a false positive here. */}
+            {/* eslint-disable-next-line jsx-a11y/label-has-for */}
             <label htmlFor="mc-volume-slider" className="text-[13px] font-semibold text-text">Volume</label>
             <div className="text-[12px] text-muted">{Math.round(settings.volume * 100)}%</div>
             <input
               id="mc-volume-slider"
+              aria-label="Volume"
               type="range" min={0} max={100} step={5}
               value={Math.round(settings.volume * 100)}
               onChange={e => update({ volume: Number(e.target.value) / 100 })}

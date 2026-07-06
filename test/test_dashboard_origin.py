@@ -14,6 +14,8 @@ from kiro_claw.dashboard.origin import (
     dashboard_origin,
     format_dashboard_urls,
     parse_dashboard_url,
+    resolve_dashboard_host,
+    should_canonicalize_host,
 )
 
 
@@ -364,3 +366,183 @@ class TestAllowedLoopbackPortsEnv:
         origins = build_allowed_origins(7777, local_only=True)
         assert "http://localhost:7777" in origins
         assert "http://localhost:8777" not in origins
+
+
+class TestShouldCanonicalizeHost:
+    """Loopback host canonicalization for the SPA's per-origin localStorage."""
+
+    def test_redirects_localhost_to_canonical_document_nav(self) -> None:
+        assert should_canonicalize_host(
+            "localhost:7777",
+            "kiroclaw.localhost",
+            method="GET",
+            sec_fetch_dest="document",
+        )
+
+    def test_redirects_127_to_canonical(self) -> None:
+        assert should_canonicalize_host(
+            "127.0.0.1:7777", "localhost", method="GET", sec_fetch_dest="document"
+        )
+
+    def test_no_redirect_when_already_canonical(self) -> None:
+        assert not should_canonicalize_host(
+            "kiroclaw.localhost:7777",
+            "kiroclaw.localhost",
+            method="GET",
+            sec_fetch_dest="document",
+        )
+
+    def test_no_redirect_for_non_document_dest(self) -> None:
+        # XHR / fetch / websocket / sub-resource requests must never be redirected.
+        for dest in ("empty", "websocket", "script", "style", "image", None):
+            assert not should_canonicalize_host(
+                "localhost:7777",
+                "kiroclaw.localhost",
+                method="GET",
+                sec_fetch_dest=dest,
+            )
+
+    def test_no_redirect_for_mutating_methods(self) -> None:
+        for method in ("POST", "PUT", "DELETE", "PATCH"):
+            assert not should_canonicalize_host(
+                "localhost:7777",
+                "kiroclaw.localhost",
+                method=method,
+                sec_fetch_dest="document",
+            )
+
+    def test_no_redirect_for_non_loopback_request_host(self) -> None:
+        # A real hostname / reverse-proxy vhost is never canonicalized.
+        assert not should_canonicalize_host(
+            "kiroclaw.example.com:7777",
+            "kiroclaw.localhost",
+            method="GET",
+            sec_fetch_dest="document",
+        )
+
+    def test_no_redirect_when_canonical_not_loopback(self) -> None:
+        assert not should_canonicalize_host(
+            "localhost:7777",
+            "kiroclaw.example.com",
+            method="GET",
+            sec_fetch_dest="document",
+        )
+
+    def test_host_without_port(self) -> None:
+        assert should_canonicalize_host(
+            "localhost", "kiroclaw.localhost", method="GET", sec_fetch_dest="document"
+        )
+
+    def test_ipv6_loopback_bracket_host_redirected(self) -> None:
+        # [::1]:7777 must parse to ::1 (not "[") and converge like other loopbacks.
+        assert should_canonicalize_host(
+            "[::1]:7777",
+            "kiroclaw.localhost",
+            method="GET",
+            sec_fetch_dest="document",
+        )
+
+    def test_ipv6_loopback_bracket_host_without_port(self) -> None:
+        assert should_canonicalize_host(
+            "[::1]", "kiroclaw.localhost", method="GET", sec_fetch_dest="document"
+        )
+
+
+class TestResolveDashboardHost:
+    """Canonical loopback host must be plain ``localhost`` (resolves everywhere,
+    including Safari / SSH tunnels — unlike ``*.localhost``)."""
+
+    def test_local_only_returns_localhost(self) -> None:
+        assert resolve_dashboard_host(local_only=True) == "localhost"
+
+    def test_configured_host_wins(self) -> None:
+        assert (
+            resolve_dashboard_host(local_only=True, configured_host="myhost.example")
+            == "myhost.example"
+        )
+
+
+class TestBuildHostCanonicalRedirect:
+    """End-to-end tests for the extracted 302 middleware (runtime behavior)."""
+
+    @pytest.mark.asyncio
+    async def test_document_nav_302s_preserving_port_path_query(self) -> None:
+        from urllib.parse import urlsplit
+
+        from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_claw.dashboard.server import build_host_canonical_redirect
+
+        async def _ok(_request: web.Request) -> web.Response:
+            return web.Response(text="ok")
+
+        app = web.Application(middlewares=[build_host_canonical_redirect("kiroclaw.localhost")])
+        app.router.add_get("/chat", _ok)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get(
+                "/chat",
+                params={"token": "abc123"},
+                headers={"Host": "localhost:7777", "Sec-Fetch-Dest": "document"},
+                allow_redirects=False,
+            )
+            assert resp.status == 302
+            loc = urlsplit(resp.headers["Location"])
+            assert loc.hostname == "kiroclaw.localhost"  # host converged
+            assert loc.port == 7777  # port preserved
+            assert loc.path == "/chat"  # path preserved
+            assert "token=abc123" in loc.query  # ?token= preserved
+
+    @pytest.mark.asyncio
+    async def test_xhr_and_post_not_redirected(self) -> None:
+        from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_claw.dashboard.server import build_host_canonical_redirect
+
+        async def _ok(_request: web.Request) -> web.Response:
+            return web.Response(text="ok")
+
+        app = web.Application(middlewares=[build_host_canonical_redirect("kiroclaw.localhost")])
+        app.router.add_get("/api/x", _ok)
+        app.router.add_post("/api/x", _ok)
+
+        async with TestClient(TestServer(app)) as client:
+            # XHR/fetch (Sec-Fetch-Dest: empty) on a loopback alias is NOT redirected.
+            xhr = await client.get(
+                "/api/x",
+                headers={"Host": "localhost:7777", "Sec-Fetch-Dest": "empty"},
+                allow_redirects=False,
+            )
+            assert xhr.status == 200
+            # A mutating method is never redirected, even as a document nav.
+            post = await client.post(
+                "/api/x",
+                headers={"Host": "localhost:7777", "Sec-Fetch-Dest": "document"},
+                allow_redirects=False,
+            )
+            assert post.status == 200
+
+    @pytest.mark.asyncio
+    async def test_empty_canonical_host_is_noop(self) -> None:
+        # local_only=False passes canonical_host="" -> middleware never redirects
+        # (reverse-proxy / remote-host deployments are untouched).
+        from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_claw.dashboard.server import build_host_canonical_redirect
+
+        async def _ok(_request: web.Request) -> web.Response:
+            return web.Response(text="ok")
+
+        app = web.Application(middlewares=[build_host_canonical_redirect("")])
+        app.router.add_get("/chat", _ok)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get(
+                "/chat",
+                headers={"Host": "localhost:7777", "Sec-Fetch-Dest": "document"},
+                allow_redirects=False,
+            )
+            assert resp.status == 200

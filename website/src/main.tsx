@@ -2,7 +2,7 @@ import React, { StrictMode, Suspense, lazy } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClientProvider } from '@tanstack/react-query'
 import { store } from './store'
 import { BrandingProvider } from './hooks/useBranding'
 import { ProviderProvider } from './providers'
@@ -10,6 +10,7 @@ import { ThemeProvider } from './hooks/useTheme'
 import { UIModeProvider } from './hooks/useUIMode'
 import { initRum } from './rum'
 import App from './App'
+import { queryClient } from './api/queryClient'
 import ErrorBoundary from './components/ErrorBoundary'
 import 'katex/dist/katex.min.css'
 import 'monaco-editor/esm/vs/base/browser/ui/codicons/codicon/codicon.css'
@@ -27,10 +28,6 @@ if (import.meta.env.DEV) {
 }
 
 const WorldsPopout = lazy(() => import('./pages/WorldsPopout'))
-
-const queryClient = new QueryClient({
-  defaultOptions: { queries: { retry: 1, staleTime: 30_000 } },
-})
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

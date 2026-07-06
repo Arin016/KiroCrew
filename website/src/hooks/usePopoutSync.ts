@@ -1,3 +1,4 @@
+import { safeSetItem } from '../utils/safeStorage'
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { SCENE_STORAGE_KEY, POPOUT_CHANNEL } from '../pages/scenes/config'
 
@@ -28,10 +29,10 @@ export function usePopoutSync(isPopout: boolean, onSceneChange?: (scene: string)
       if (!isPopout) {
         if (msg.type === 'popout-open') { pongReceived.current = true; setPopoutActive(true) }
         if (msg.type === 'popout-close') setPopoutActive(false)
-        if (msg.type === 'scene') { localStorage.setItem(SCENE_STORAGE_KEY, msg.scene); onSceneChangeRef.current?.(msg.scene) }
+        if (msg.type === 'scene') { safeSetItem(SCENE_STORAGE_KEY, msg.scene); onSceneChangeRef.current?.(msg.scene) }
         if (msg.type === 'pong') { pongReceived.current = true; setPopoutActive(true) }
       } else {
-        if (msg.type === 'scene') { localStorage.setItem(SCENE_STORAGE_KEY, msg.scene); onSceneChangeRef.current?.(msg.scene) }
+        if (msg.type === 'scene') { safeSetItem(SCENE_STORAGE_KEY, msg.scene); onSceneChangeRef.current?.(msg.scene) }
         if (msg.type === 'ping') ch.postMessage({ type: 'pong' } satisfies PopoutMsg)
       }
     }
@@ -74,8 +75,10 @@ export function usePopoutSync(isPopout: boolean, onSceneChange?: (scene: string)
     }
     const w = Math.min(960, screen.availWidth * 0.6)
     const h = Math.round(w / 1.5) + 80
-    const left = ((screen as any).availLeft ?? 0) + (screen.availWidth - w) / 2
-    const top = ((screen as any).availTop ?? 0) + (screen.availHeight - h) / 2
+    // availLeft/availTop are non-standard (Firefox / legacy) Screen fields.
+    const multiScreen = screen as Screen & { availLeft?: number; availTop?: number }
+    const left = (multiScreen.availLeft ?? 0) + (screen.availWidth - w) / 2
+    const top = (multiScreen.availTop ?? 0) + (screen.availHeight - h) / 2
     popoutRef.current = window.open(
       '/worlds-popout',
       'kiroclaw-worlds',

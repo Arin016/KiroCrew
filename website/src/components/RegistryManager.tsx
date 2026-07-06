@@ -4,6 +4,7 @@
  * Allows users to add, edit, and remove org-owned app registries
  * directly from the App Store UI instead of editing config.json.
  */
+import type React from 'react'
 import { useState } from 'react'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import {
@@ -38,7 +39,7 @@ export default function RegistryManager() {
       queryClient.invalidateQueries({ queryKey: ['registry'] })
       setError('')
     },
-    onError: (e: any) => setError(e.message || 'Failed to update registries'),
+    onError: (e: unknown) => setError(e instanceof Error ? e.message : 'Failed to update registries'),
   })
 
   const handleAdd = () => {
@@ -133,29 +134,35 @@ export default function RegistryManager() {
         <div className="mt-4 border border-accent/30 rounded-lg p-4 bg-accent/5 animate-rise">
           <div className="grid grid-cols-[1fr_1fr_auto] gap-3 mb-3">
             <div>
-              <label className="text-[12px] text-muted mb-1 block">Display Name</label>
+              {/* eslint-disable-next-line jsx-a11y/label-has-for -- deprecated rule can't see the htmlFor→id link to the custom Input control; label-has-associated-control is satisfied. */}
+              <label htmlFor="registry-name" className="text-[12px] text-muted mb-1 block">Display Name</label>
               <Input
+                id="registry-name"
                 placeholder="e.g. Identity Services"
                 value={editName}
-                onChange={(e: any) => setEditName(e.target.value)}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditName(e.target.value)}
               />
             </div>
             <div>
-              <label className="text-[12px] text-muted mb-1 block">Repo *</label>
+              {/* eslint-disable-next-line jsx-a11y/label-has-for -- deprecated rule can't see the htmlFor→id link to the custom Input control; label-has-associated-control is satisfied. */}
+              <label htmlFor="registry-repo" className="text-[12px] text-muted mb-1 block">Repo *</label>
               <Input
+                id="registry-repo"
                 placeholder="e.g. my-kiroclaw-app-registry"
                 value={editRepo}
-                onChange={(e: any) => setEditRepo(e.target.value)}
-                onKeyDown={(e: any) => e.key === 'Enter' && handleAdd()}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditRepo(e.target.value)}
+                onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => e.key === 'Enter' && handleAdd()}
               />
             </div>
             <div>
-              <label className="text-[12px] text-muted mb-1 block">Branch</label>
+              {/* eslint-disable-next-line jsx-a11y/label-has-for -- deprecated rule can't see the htmlFor→id link to the custom Input control; label-has-associated-control is satisfied. */}
+              <label htmlFor="registry-branch" className="text-[12px] text-muted mb-1 block">Branch</label>
               <Input
+                id="registry-branch"
                 placeholder="mainline"
                 value={editBranch}
-                onChange={(e: any) => setEditBranch(e.target.value)}
-                onKeyDown={(e: any) => e.key === 'Enter' && handleAdd()}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditBranch(e.target.value)}
+                onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => e.key === 'Enter' && handleAdd()}
               />
             </div>
           </div>

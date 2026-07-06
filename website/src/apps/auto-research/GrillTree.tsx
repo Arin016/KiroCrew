@@ -73,6 +73,7 @@ export default function GrillTree({ tree, dispatch, onExpand }: Props) {
 
           {node.kind === 'research' ? (
             <input className="flex-1 bg-transparent text-text border-b border-transparent focus:border-border outline-none"
+                   aria-label="Research question"
                    value={node.text} onChange={e => dispatch({ type: 'edit', id: node.id, text: e.target.value })} />
           ) : <span className="flex-1 text-text">{node.text}</span>}
 
@@ -95,6 +96,7 @@ export default function GrillTree({ tree, dispatch, onExpand }: Props) {
             ) : (
               <>
                 <input placeholder="answer…" defaultValue={node.answer}
+                       aria-label="Clarifier answer"
                        className="bg-bg border border-border rounded px-1.5 py-0.5 text-text"
                        onKeyDown={e => { if (e.key === 'Enter') dispatch({ type: 'setAnswer', id: node.id, answer: e.currentTarget.value }) }} />
                 <button onClick={() => dispatch({ type: 'accept', id: node.id })} className="flex items-center gap-1 text-accent"><ThumbsUp size={12} /> accept</button>

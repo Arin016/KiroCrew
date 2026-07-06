@@ -27,7 +27,7 @@ export default function AgentCfgTab() {
       try { const config = JSON.parse(cfg); saveMut.mutate(config) } catch { alert('Invalid JSON') }
     }}>{saveMut.isSuccess ? <><Check className="lucide-inline" /> Saved</> : 'Save'}</Btn></CardTitle>
       <p className="text-muted text-[13px] mb-3">After saving, use <Zap className="lucide-inline" /> Apply & Restart Sessions at the top to apply changes.</p>
-      <textarea className="w-full bg-bg-elevated border border-border rounded-md p-3 text-text font-mono text-[13px] outline-none resize-y leading-normal transition-colors focus-ring" rows={16} value={cfg} onChange={e => setCfg(e.target.value)} placeholder="Loading…" />
+      <textarea aria-label="Agent config JSON" className="w-full bg-bg-elevated border border-border rounded-md p-3 text-text font-mono text-[13px] outline-none resize-y leading-normal transition-colors focus-ring" rows={16} value={cfg} onChange={e => setCfg(e.target.value)} placeholder="Loading…" />
     </Card>
   )
 }

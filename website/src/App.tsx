@@ -23,11 +23,16 @@ import { recordSessionStart, recordEvent } from './rum'
 import { ZoomProvider } from './hooks/ZoomProvider'
 import { api, isAuthBannerShown } from './api/client'
 import { safeSetItem } from './utils/safeStorage'
-import { Rocket, Menu, Bell, Users, BookOpen, BookOpenText, MessageSquareDot, Settings, Code, RefreshCw, Palette, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, X, Inbox, Gamepad2, KanbanSquare, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain, FolderTree, ChevronUp, MoreHorizontal, Coins } from 'lucide-react'
+import { gcOrphanedStorage } from './utils/storageGc'
+import { Rocket, Menu, Bell, Users, BookOpen, BookOpenText, MessageSquareDot, Settings, Code, RefreshCw, Palette, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, X, Inbox, Gamepad2, KanbanSquare, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain, FolderTree, ChevronUp, MoreHorizontal, Coins, Contact } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { DndContext, closestCenter, MouseSensor, TouchSensor, useSensor, useSensors, DragOverlay, type DragStartEvent, type DragEndEvent } from '@dnd-kit/core'
+import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import ChatPage from './pages/ChatPage'
 import OrchestratedChatPage from './pages/OrchestratedChatPage'
 import ErrorBoundary from './components/ErrorBoundary'
+import Clickable from './components/Clickable'
 import MarkdownRenderer, { Lightbox } from './components/MarkdownRenderer'
 import NotificationsPage from './pages/NotificationsPage'
 import NotificationDetailPanel from './components/notifications/NotificationDetailPanel'
@@ -68,6 +73,22 @@ import ShortcutsModal from './components/ShortcutsModal'
 import Modal from './components/Modal'
 
 type LogSubscribeFn = (cb: ((data: { level: string; msg: string }) => void) | null) => void
+
+/** Minimal shape of an entry from `GET /api/apps`, limited to the fields the
+ *  Apps-nav builder reads. */
+interface AppListEntry {
+  name: string
+  displayName?: string
+  enabled?: boolean
+  origin?: string
+  orphaned?: boolean
+  manifest?: {
+    ui?: {
+      entry?: string
+      pages?: Array<{ route: string; icon?: string; iconUrl?: string; label?: string }>
+    }
+  }
+}
 export const WsContext = createContext<{
   subscribeLogs: LogSubscribeFn
   subscribeSubagents: (s: boolean) => void
@@ -109,7 +130,16 @@ const BUILTIN_ICONS: Record<string, React.ReactElement> = {
   BookOpenText: <BookOpenText size={16} />,
   Brain: <Brain size={16} />,
   FolderTree: <FolderTree size={16} />,
+  Contact: <Contact size={16} />,
 }
+
+// Apps-nav fetch resilience (see refreshAppNav). The dashboard loads
+// `/api/apps` once on mount; right after a `kiroclaw update` the gateway is
+// mid-restart (cold backend, apps-dir scan) and that first request can fail or
+// time out. Retry with bounded backoff so the Apps rail self-heals instead of
+// staying empty until a manual reload or an app enable/disable.
+const APP_NAV_MAX_RETRIES = 4
+const APP_NAV_RETRY_BASE_MS = 500
 
 const UPDATE_STEPS: Record<string, { icon: ReactNode; label: string }> = {
   pulling:    { icon: <Download className="lucide-inline" />, label: 'Pulling latest changes' },
@@ -165,7 +195,7 @@ function UpdateOverlay({ onCancel }: { onCancel: () => void }) {
   }, [dispatch, onCancel])
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg/80 backdrop-blur-sm animate-rise">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-bg/80 backdrop-blur-sm animate-rise">
       <div className="bg-card border border-border rounded-xl p-8 max-w-md w-full mx-4 shadow-xl text-center">
         <div className="text-4xl mb-4 animate-pulse">{info?.icon || <RefreshCw className="lucide-inline" />}</div>
         <div className="text-lg font-bold text-text-strong mb-2">Updating KiroClaw…</div>
@@ -367,6 +397,36 @@ function NavItem({ path, label, icon, active, collapsed, badge, onClickOverride,
   )
 }
 
+/** dnd-kit sortable wrapper for one Apps-nav row. Mirrors SortableFolderBlock in
+ *  ChatSidebar: setNodeRef + sortable transform position the row so siblings
+ *  reflow to open a gap as it's dragged; the source dims while a DragOverlay
+ *  renders the floating ghost. Only `listeners` are spread (not `attributes`),
+ *  so the inner NavItem keeps its own role="button"/tabIndex and no nested
+ *  drag role is exposed on the wrapper (role="presentation"). Sensor activation
+ *  constraints (see appDndSensors) let a plain click/tap reach NavItem
+ *  navigation; only a deliberate mouse-drag or touch press-and-hold reorders. */
+function SortableAppNavRow({ id, children }: { id: string; children: React.ReactNode }) {
+  const { setNodeRef, listeners, transform, transition, isDragging } = useSortable({ id })
+  return (
+    <div
+      ref={setNodeRef}
+      role="presentation"
+      style={{
+        transform: transform ? CSS.Transform.toString(transform) : undefined,
+        transition: transition || undefined,
+        opacity: isDragging ? 0.4 : 1,
+        // 'manipulation' (not 'none') keeps native vertical scroll working when
+        // a swipe starts on a row — the TouchSensor's press-and-hold delay is
+        // what arms a drag, so the row doesn't need to suppress all gestures.
+        touchAction: 'manipulation',
+      }}
+      {...listeners}
+    >
+      {children}
+    </div>
+  )
+}
+
 /** The "N more" / "Show less" Apps-overflow toggle. Mirrors NavItem: a text row
  *  when expanded, an icon-only button with a portaled hover label when the
  *  sidebar is collapsed, so the collapse-to-more behavior works in both modes. */
@@ -488,7 +548,7 @@ function NotificationsBellButton() {
         <Bell size={13} />
         <span className="w-0 overflow-hidden">{'\u200B'}</span>
         {unacked.length > 0 && (
-          <span className="absolute -top-1 -right-1 min-w-[16px] h-[16px] px-1 rounded-full bg-accent text-accent-fg text-[10px] font-bold flex items-center justify-center shadow-[0_0_8px_var(--accent-glow)] animate-dot-breathe" aria-hidden="true">
+          <span className="absolute -top-1 -right-1 min-w-[16px] h-[16px] px-1 rounded-full bg-accent text-accent-fg text-[10px] font-bold flex items-center justify-center shadow-[0_0_8px_var(--accent-glow)]" aria-hidden="true">
             {unacked.length > 99 ? '99+' : unacked.length}
           </span>
         )}
@@ -516,13 +576,18 @@ function NotificationsBellButton() {
             <div className="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
               <span className="text-[13px] font-semibold text-text-strong">Activity Feed</span>
             </div>
-            <div className="flex-1 min-h-0 px-3 py-2">
+            <div className="flex-1 min-h-0 px-3 py-2 flex flex-col">
               <NotificationFeed
                 selectedTs={selectedTs}
                 onSelect={n => setSelectedTs(n.ts)}
               />
             </div>
-            <div className="px-3 py-2 border-t border-border shrink-0">
+            {/* Solid, occluding footer bar. The feed list above uses a `scroll-shadow`
+                bottom fade; on the translucent glass surface that fade dissolved the
+                last notification row right into this link, reading as overlap. A solid
+                `bg-bg-elevated` bar (with its own stacking level) gives a crisp boundary
+                so scrolled rows clearly end above "Open inbox". */}
+            <div className="px-3 py-2 border-t border-border shrink-0 relative z-[1] bg-bg-elevated">
               <button
                 className="w-full text-[13px] text-accent hover:text-accent-hover bg-transparent border-none cursor-pointer text-center py-1"
                 onClick={() => { setOpen(false); navigate('/notifications') }}
@@ -637,7 +702,21 @@ export default function App() {
   // Dynamic app nav items — all apps (builtin + installed) with UI pages
   const [appNavItems, setAppNavItems] = useState<Array<{ path: string; id: string; label: string; group: string; icon: React.ReactElement }>>([])
   const [appNavOrder, setAppNavOrder] = useState<string[]>(() => { try { return JSON.parse(localStorage.getItem('mc-app-nav-order') || '[]') } catch { return [] } })
-  const appDragRef = useRef<string | null>(null)
+  // Apps nav reorder is dnd-kit sortable (mirrors QueueStack): rows reflow to
+  // open a gap as you drag, and a DragOverlay renders the floating ghost.
+  // activeAppDragId tracks the app being dragged, for the overlay + source dim.
+  const [activeAppDragId, setActiveAppDragId] = useState<string | null>(null)
+  // Split mouse/touch sensors so touch can both scroll AND drag:
+  //  - MouseSensor: 8px distance lets a plain click reach NavItem navigation;
+  //    only a deliberate drag past the threshold starts a reorder (desktop).
+  //  - TouchSensor: 250ms press-and-hold (5px tolerance) arms a drag, so a
+  //    quick finger-swipe still scrolls the nav rail natively and only a
+  //    deliberate hold starts a reorder. A single PointerSensor can't do this:
+  //    its `touch-action: none` requirement steals every swipe for dragging.
+  const appDndSensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 5 } }),
+  )
   // Collapse a long Apps list behind a "N more" toggle so the nav can't grow
   // unbounded. Above APPS_NAV_LIMIT visible entries the overflow is hidden until
   // the user expands (persisted).
@@ -650,25 +729,35 @@ export default function App() {
     const orderMap = new Map(appNavOrder.map((id, i) => [id, i]))
     return items.sort((a, b) => (orderMap.get(a.id) ?? 999) - (orderMap.get(b.id) ?? 999))
   }, [appNavItems, appNavOrder])
-  const handleAppDrop = useCallback((targetId: string) => {
-    const srcId = appDragRef.current
-    if (!srcId || srcId === targetId) return
+  const handleAppDragStart = useCallback((e: DragStartEvent) => setActiveAppDragId(e.active.id as string), [])
+  const handleAppDragEnd = useCallback((e: DragEndEvent) => {
+    setActiveAppDragId(null)
+    const { active, over } = e
+    if (!over || active.id === over.id) return
     const ids = sortedAppGroup.map(n => n.id)
-    const srcIdx = ids.indexOf(srcId)
-    const tgtIdx = ids.indexOf(targetId)
-    if (srcIdx < 0 || tgtIdx < 0) return
-    ids.splice(srcIdx, 1)
-    ids.splice(tgtIdx, 0, srcId)
-    setAppNavOrder(ids)
-    safeSetItem('mc-app-nav-order', JSON.stringify(ids))
+    const from = ids.indexOf(active.id as string)
+    const to = ids.indexOf(over.id as string)
+    if (from < 0 || to < 0) return
+    const next = arrayMove(ids, from, to)
+    setAppNavOrder(next)
+    safeSetItem('mc-app-nav-order', JSON.stringify(next))
   }, [sortedAppGroup])
-  const refreshAppNav = useCallback(() => {
+  // Drag cancel (e.g. Escape) fires onDragCancel, NOT onDragEnd — clear the
+  // active id here too, else the source row stays dimmed and the overlay ghost
+  // lingers. Mirrors ChatSidebar's handleSidebarDragCancel.
+  const handleAppDragCancel = useCallback(() => setActiveAppDragId(null), [])
+  const appNavRetryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const refreshAppNav = useCallback((attempt = 0) => {
+    // Cancel any pending retry up-front so external triggers (the reconnect
+    // effect, the mc:apps-changed handler) or a just-fired retry can never run
+    // overlapping fetch chains — exactly one chain is ever active.
+    if (appNavRetryRef.current) { clearTimeout(appNavRetryRef.current); appNavRetryRef.current = null }
     api.listApps()
-      .then((apps: any[]) => {
+      .then((apps: AppListEntry[]) => {
         const items = apps
-          .filter(a => a.enabled && a.manifest?.ui?.pages?.length > 0)
+          .filter(a => a.enabled && (a.manifest?.ui?.pages?.length ?? 0) > 0)
           .flatMap(a => {
-            const page = a.manifest.ui.pages[0]
+            const page = a.manifest!.ui!.pages![0]
             const isBuiltin = a.origin === 'builtin'
             const isOrphaned = !!a.orphaned
             // A builtin that ships a dynamic UI bundle (manifest.ui.entry) has no
@@ -702,14 +791,39 @@ export default function App() {
         setAppNavItems(items)
         dispatch(setEnabledAppIds(items.map(i => i.id)))
       })
-      .catch(() => {})
+      .catch(() => {
+        // A transient failure (e.g. the gateway mid-restart right after a
+        // `kiroclaw update`, or the cold apps-dir scan) used to be swallowed
+        // here, leaving the Apps rail empty until a manual reload or an app
+        // enable/disable. Retry with bounded exponential backoff so it
+        // self-heals. The reconnect effect below covers the WS-drop case.
+        if (attempt >= APP_NAV_MAX_RETRIES) return
+        appNavRetryRef.current = setTimeout(() => refreshAppNav(attempt + 1), APP_NAV_RETRY_BASE_MS * 2 ** attempt)
+      })
   }, [dispatch])
-  useEffect(() => { refreshAppNav() }, [refreshAppNav])
+  useEffect(() => {
+    refreshAppNav()
+    return () => { if (appNavRetryRef.current) clearTimeout(appNavRetryRef.current) }
+  }, [refreshAppNav])
   useEffect(() => {
     const handler = () => refreshAppNav()
     window.addEventListener('mc:apps-changed', handler)
     return () => window.removeEventListener('mc:apps-changed', handler)
   }, [refreshAppNav])
+  // Refetch the Apps nav when the gateway connection is *re*-established after a
+  // drop — e.g. a `kiroclaw update` restart disconnects then reconnects the
+  // WebSocket. Only fires on a connected→disconnected→connected cycle, NOT the
+  // initial connect (the mount fetch already covers that), so a normal load
+  // never double-fetches.
+  const appNavConnStateRef = useRef<'init' | 'up' | 'down'>('init')
+  useEffect(() => {
+    if (connected) {
+      if (appNavConnStateRef.current === 'down') refreshAppNav()
+      appNavConnStateRef.current = 'up'
+    } else if (appNavConnStateRef.current === 'up') {
+      appNavConnStateRef.current = 'down'
+    }
+  }, [connected, refreshAppNav])
 
   // App badge counts — apps call useNavBadge() to push counts
   const [appBadges, setAppBadges] = useState<Record<string, number>>({})
@@ -738,6 +852,7 @@ export default function App() {
   const [fullChangelog, setFullChangelog] = useState('')
   const [showFull, setShowFull] = useState(false)
   const [devMode, setDevMode] = useState(() => localStorage.getItem('mc-dev-mode') === '1')
+  const [devPageSeen, setDevPageSeen] = useState(true)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const toggleShortcutsModal = useCallback(() => setShortcutsOpen(p => !p), [])
@@ -886,13 +1001,33 @@ export default function App() {
 
   // Listen for dev mode changes from Settings > Developer
   useEffect(() => {
-    const handler = (e: Event) => setDevMode((e as CustomEvent).detail)
+    const handler = (e: Event) => {
+      const enabled = (e as CustomEvent).detail
+      setDevMode(enabled)
+      if (enabled) setDevPageSeen(false)
+    }
     window.addEventListener('mc-dev-mode-changed', handler)
     return () => window.removeEventListener('mc-dev-mode-changed', handler)
   }, [])
+  // Sync dev-mode state to Electron on startup (so View > DevTools menu is correct)
+  useEffect(() => {
+    const electronAPI = (window as Window & { electronAPI?: { setDevMode?: (v: boolean) => void } }).electronAPI
+    electronAPI?.setDevMode?.(devMode)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  // Dismiss the dev-page notification dot once the user visits /developer
+  useEffect(() => {
+    if (location.pathname === '/developer') setDevPageSeen(true)
+  }, [location.pathname])
 
   useEffect(() => {
-    dispatch(fetchSlots()); dispatch(fetchNotifications())
+    dispatch(fetchSlots()).then(action => {
+      // Run localStorage GC after we know which sessions are alive
+      if (fetchSlots.fulfilled.match(action)) {
+        const liveIds = new Set((action.payload as Array<{ key: string }>).map(s => s.key))
+        gcOrphanedStorage(liveIds)
+      }
+    })
+    dispatch(fetchNotifications())
     // Fetch status immediately to sync YOLO state (WS status push is periodic)
     api.status().then(s => { dispatch(sseStatus(s)); recordSessionStart(s) }).catch(() => {})
   }, [dispatch])
@@ -931,7 +1066,7 @@ export default function App() {
       const text = filtered.join('\n').trim()
       if (text) { setChanges(text); setShowChangelog(true) }
     }).catch(() => {}).finally(() => safeSetItem('mc-last-version', version))
-  }, [version]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [version])  
 
   // Browser tab title badge — sums every built-in surface's badge (chat,
   // orchestrated, notifications, secretary, ...) plus the orthogonal
@@ -964,13 +1099,14 @@ export default function App() {
     setUpdating(true)
     try {
       await api.applyUpdate()
-    } catch (err: any) {
+    } catch (err: unknown) {
       setUpdating(false)
       let msg = 'Update failed'
+      const errMessage = err instanceof Error ? err.message : ''
       try {
-        const parsed = JSON.parse(err?.message || '')
+        const parsed = JSON.parse(errMessage || '')
         if (parsed.error) msg = parsed.error
-      } catch { if (err?.message) msg = err.message }
+      } catch { if (errMessage) msg = errMessage }
       setUpdateError(msg)
     }
   }, [])
@@ -1135,7 +1271,7 @@ export default function App() {
             {updateProgress ? <><Loader2 size={12} className="animate-spin" />{!isMobile && <span className="font-mono text-[13px]">Updating…</span>}</> : updateAvailable ? <span className="font-mono text-[13px] text-accent">{isMobile ? '↑' : `v${version} ↑`}</span> : !isMobile ? <span className="font-mono text-[13px]">v{version}</span> : <Settings size={13} />}
           </button>
           {settingsOpen && (
-            <div ref={settingsMenuRef} className="absolute right-0 top-full mt-1 z-50 bg-bg-elevated border border-border rounded-xl shadow-lg min-w-[200px] p-0.5 gap-0.5 flex flex-col animate-slide-up">
+            <div ref={settingsMenuRef} className="absolute right-0 top-full mt-1 z-[9999] bg-bg-elevated border border-border rounded-xl shadow-lg min-w-[200px] p-0.5 gap-0.5 flex flex-col animate-slide-up">
               <button className="w-full text-left px-3 py-2 rounded-md text-[12px] font-medium text-muted hover:text-text hover:bg-bg-hover cursor-pointer transition-colors border-none bg-transparent flex items-center gap-2" onClick={() => { setSettingsOpen(false); checkForUpdate() }}>{checking ? <><Loader2 size={13} className="animate-spin" /> Checking…</> : updateAvailable ? <><Package size={13} /> Update Available</> : <><RefreshCw size={13} /> Check for Updates</>}</button>
               <div className="px-3 py-2">
                 <div className="text-[12px] font-medium text-muted flex items-center gap-1.5 mb-1.5"><Palette size={13} /> Theme</div>
@@ -1155,7 +1291,7 @@ export default function App() {
 
       {/* Update error modal */}
       {updateError && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg/80 backdrop-blur-sm animate-rise" role="dialog" aria-modal="true" aria-label="Update error">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-bg/80 backdrop-blur-sm animate-rise" role="dialog" aria-modal="true" aria-label="Update error">
           <div className="bg-card border border-border rounded-xl p-8 max-w-md w-full mx-4 shadow-xl text-center">
             <div className="text-4xl mb-4"><AlertTriangle className="lucide-inline" /></div>
             <div className="text-lg font-bold text-text-strong mb-2">Update Failed</div>
@@ -1169,11 +1305,11 @@ export default function App() {
 
       {/* Changelog modal */}
       {showChangelog && !updating && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg/60 backdrop-blur-sm animate-rise" role="dialog" aria-modal="true" aria-label="Changelog" onClick={() => { setShowChangelog(false); setShowFull(false) }}>
-          <div className={`bg-card border border-border rounded-xl p-6 w-full mx-4 shadow-xl transition-all duration-300 ${showFull ? 'max-w-2xl' : 'max-w-md'}`} onClick={e => e.stopPropagation()}>
+        <Clickable className="fixed inset-0 z-[100] flex items-center justify-center bg-bg/60 backdrop-blur-sm animate-rise" onClick={e => { if (e && e.target === e.currentTarget) { setShowChangelog(false); setShowFull(false) } }}>
+          <div role="dialog" aria-modal="true" aria-label="Changelog" className={`bg-card border border-border rounded-xl p-6 w-full mx-4 shadow-xl transition-all duration-300 ${showFull ? 'max-w-2xl' : 'max-w-md'}`}>
             <div className="flex justify-between items-center mb-4">
               <div className="text-sm font-bold text-text-strong"><Package className="lucide-inline" /> v{version}</div>
-              <button className="text-muted text-[13px] cursor-pointer hover:text-text" onClick={() => { setShowChangelog(false); setShowFull(false) }}><X className="lucide-inline" /></button>
+              <button aria-label="Close" className="text-muted text-[13px] cursor-pointer hover:text-text" onClick={() => { setShowChangelog(false); setShowFull(false) }}><X className="lucide-inline" /></button>
             </div>
             {updateAvailable ? (
               <>
@@ -1198,7 +1334,7 @@ export default function App() {
             )}
             <div className="flex items-center justify-between mt-4 pt-3 border-t border-border">
               <span className="text-[13px] text-muted">Auto-update on restart</span>
-              <button className={`w-9 h-5 rounded-full transition-colors cursor-pointer border-none ${autoUpdate ? 'bg-accent' : 'bg-border'}`}
+              <button aria-label="Auto-update on restart" role="switch" aria-checked={autoUpdate} className={`w-9 h-5 rounded-full transition-colors cursor-pointer border-none ${autoUpdate ? 'bg-accent' : 'bg-border'}`}
                 onClick={async () => { const next = !autoUpdate; setAutoUpdate(next); await api.setAutoUpdate(next) }}>
                 <span className={`block w-3.5 h-3.5 rounded-full bg-white shadow transition-transform ${autoUpdate ? 'translate-x-4' : 'translate-x-0.5'}`} />
               </button>
@@ -1214,7 +1350,7 @@ export default function App() {
               )}
             </div>
           </div>
-        </div>
+        </Clickable>
       )}
 
       {/* Updating overlay */}
@@ -1223,7 +1359,7 @@ export default function App() {
 
       {/* Theme onboarding for new users */}
       {showOnboarding && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg/80 backdrop-blur-sm animate-rise">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-bg/80 backdrop-blur-sm animate-rise">
           <div className="bg-card border border-border rounded-xl p-6 max-w-sm w-full mx-4 shadow-xl">
             <div className="text-center mb-4">
               <div className="text-lg font-bold text-text-strong">Choose your look</div>
@@ -1320,33 +1456,65 @@ export default function App() {
                 ? fullList.filter((n, i) => i < APPS_NAV_LIMIT || activePath === n.path || activePath.startsWith(n.path + '/'))
                 : fullList
               const hiddenCount = fullList.length - visible.length
-              return (<>
-              {visible.map(n => {
-              const iconEl = n.icon
-              // role=presentation: this wrapper only carries the pointer
-              // drag-reorder handlers; the interactive control is the nested
-              // NavItem (role=button), so don't expose the wrapper itself.
-              return (
-                <div key={n.id} role="presentation" draggable={isAppsGroup} onDragStart={isAppsGroup ? () => { appDragRef.current = n.id } : undefined} onDragOver={isAppsGroup ? e => e.preventDefault() : undefined} onDrop={isAppsGroup ? () => handleAppDrop(n.id) : undefined}>
+              // Render one nav row for app `n` (used both in-list and, for the
+              // Apps group, inside the DragOverlay ghost).
+              const renderNavItem = (n: typeof fullList[number]) => (
                 <NavItem
                   path={n.path}
                   label={n.label}
-                  icon={iconEl}
+                  icon={n.icon}
                   active={n.path === '/apps' ? activePath === '/apps' : (activePath === n.path || activePath.startsWith(n.path + '/'))}
                   collapsed={effectiveCollapsed}
                   onClick={closeMobileNav}
                   onClickOverride={isChat && (activePath === n.path || activePath.startsWith(n.path + '/')) ? () => window.dispatchEvent(new Event('toggle-pin-chat-sidebar')) : undefined}
                   badge={<NavBadge navId={n.id} collapsed={effectiveCollapsed} appBadges={appBadges} />}
                 />
-                </div>
               )
-              })}
+              // Non-Apps groups: static rows, no drag. Wrapper div preserves the
+              // grid child structure (one direct child per item).
+              if (!isAppsGroup) {
+                return (<>
+                {visible.map(n => <div key={n.id}>{renderNavItem(n)}</div>)}
+                </>)
+              }
+              // Apps group: dnd-kit sortable. Rows reflow to open a gap as one is
+              // dragged; the source dims and a DragOverlay renders the ghost.
+              // SortableContext/DndContext add no DOM wrapper, so the parent grid
+              // gap is unchanged.
+              //
+              // Overflow caveat: when collapsed behind "N more", the active app
+              // may be PULLED IN from the overflow to keep its nav state visible
+              // (`visible` keeps it past APPS_NAV_LIMIT). That pulled-in row must
+              // NOT be sortable: handleAppDragEnd resolves from/to against the
+              // FULL order, so dropping onto a row whose full-list index is
+              // >= APPS_NAV_LIMIT would push the dragged app past the limit and
+              // into the hidden overflow (it would disappear). Restrict the
+              // sortable set to the always-visible window (first APPS_NAV_LIMIT)
+              // and render any pulled-in overflow row as a plain static row —
+              // still navigable, but it registers no droppable, so a drag can
+              // never resolve to it and both endpoints stay in-window. (Trimming
+              // only SortableContext.items is insufficient: useSortable registers
+              // a droppable per wrapped row regardless of the items array.)
+              const sortableRows = overflowing ? visible.slice(0, APPS_NAV_LIMIT) : visible
+              const pulledInRows = overflowing ? visible.slice(APPS_NAV_LIMIT) : []
+              const activeApp = activeAppDragId ? fullList.find(n => n.id === activeAppDragId) : null
+              return (<>
+              <DndContext sensors={appDndSensors} collisionDetection={closestCenter} onDragStart={handleAppDragStart} onDragEnd={handleAppDragEnd} onDragCancel={handleAppDragCancel}>
+                <SortableContext items={sortableRows.map(n => n.id)} strategy={verticalListSortingStrategy}>
+                  {sortableRows.map(n => (
+                    <SortableAppNavRow key={n.id} id={n.id}>{renderNavItem(n)}</SortableAppNavRow>
+                  ))}
+                </SortableContext>
+                {/* Pulled-in active overflow row(s): static, non-draggable. */}
+                {pulledInRows.map(n => <div key={n.id} role="presentation">{renderNavItem(n)}</div>)}
+                <DragOverlay>{activeApp ? renderNavItem(activeApp) : null}</DragOverlay>
+              </DndContext>
               {/* Show the toggle whenever the list is collapsible, NOT only when
                *  hiddenCount > 0 — otherwise navigating to an app that's the sole
                *  overflow item pulls it into `visible` (hiddenCount → 0) and the
                *  toggle vanishes, causing a jarring layout shift as you move
                *  between apps. The toggle stays put; only its label changes. */}
-              {isAppsGroup && fullList.length > APPS_NAV_LIMIT && (
+              {fullList.length > APPS_NAV_LIMIT && (
                 <NavToggle
                   collapsed={effectiveCollapsed}
                   expanded={appsExpanded}
@@ -1365,7 +1533,11 @@ export default function App() {
           const devPath = '/developer'
           return (
             <div className="mt-auto grid gap-0.5">
-              {devMode && (
+              {devMode && (() => {
+                const dotClass = effectiveCollapsed
+                  ? 'absolute top-1 right-1 w-2 h-2 bg-accent rounded-full z-10 animate-pulse'
+                  : 'absolute top-1/2 -translate-y-1/2 right-2 w-2 h-2 bg-accent rounded-full z-10 animate-pulse'
+                return (
                 <NavItem
                   path={devPath}
                   label="Developer"
@@ -1373,8 +1545,10 @@ export default function App() {
                   active={activePath === devPath}
                   collapsed={effectiveCollapsed}
                   onClick={closeMobileNav}
+                  badge={!devPageSeen && activePath !== devPath ? <span className={dotClass} /> : undefined}
                 />
-              )}
+                )
+              })()}
               <NavItem
                 path="#"
                 label="Shortcuts"
@@ -1444,8 +1618,10 @@ export default function App() {
         </main>
         <AnimatePresence>
           {terminalEnabled && terminalOpen && <CliPanel />}
-          <BrowserLiveView />
         </AnimatePresence>
+        {/* Self-managed floating panel: lifecycle-driven (hidden → small → chip),
+            not a motion.* child, so it lives outside AnimatePresence. */}
+        <BrowserLiveView />
       </div>
     </div>{/* /Local dashboard grid */}
       </div>{/* /Local pane */}

@@ -53,7 +53,7 @@ export default function ArtifactsPage() {
     queryFn: () => api.artifacts({}),
   })
 
-  const artifacts = data?.artifacts || []
+  const artifacts = useMemo(() => data?.artifacts || [], [data])
   const allTags = useMemo(() => {
     const s = new Set<string>()
     for (const a of allTagsData?.artifacts || []) for (const t of a.tags || []) s.add(t)

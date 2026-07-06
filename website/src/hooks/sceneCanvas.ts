@@ -102,5 +102,5 @@ export function useSceneLoop({ canvasRef, textRef, W, H, S, visible, setup }: Sc
 
 /** Sync visible prop to a ref for use in animation loops */
 export function useVisibleSync(visibleRef: React.MutableRefObject<boolean>, visible: boolean) {
-  useEffect(() => { visibleRef.current = visible }, [visible])
+  useEffect(() => { visibleRef.current = visible }, [visible, visibleRef])
 }

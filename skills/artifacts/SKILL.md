@@ -11,9 +11,12 @@ away with the conversation. An **artifact** is a widget (or other content)
 that's been given a stable identity, a version history, and a URL the user
 can open from `/artifacts/<slug>` in the dashboard.
 
-Artifacts exist so the user can build a personal library of useful UIs
-(CR queue, pipeline health, ticket triage, custom dashboards) and keep
-iterating on them across sessions without losing prior versions.
+Artifacts exist so the user can build a library of durable, named work — useful
+UIs (CR queue, pipeline health, ticket triage, dashboards) and substantial
+documents (plans, design docs, analyses, reports) alike — to return to, iterate
+on across sessions without losing prior versions, or share with peers for
+feedback. The library is curated: it holds work worth keeping, not a mirror of
+every file or a copy of the chat.
 
 ## Mental model
 
@@ -40,18 +43,26 @@ All under the `@kiroclaw-core` MCP server.
 
 ## When to save proactively
 
-Save without being asked when ALL of these hold:
+When you produce work worth keeping — something the user would plausibly want
+later — save it:
 
-1. You emitted an `<mcwidget>` (or other significant artifact-like content) this turn.
-2. The user is likely to want it again — e.g. it represents an ongoing workflow, status snapshot, or working tool, not a one-shot answer.
-3. The widget has clear semantic identity — a CR queue, a pipeline dashboard, a ticket card. Not "a chart of the array I just sorted".
+- A **widget** with its own identity (CR queue, pipeline dashboard, ticket
+  card): save it without asking, and note it in one line — *"Saved as artifact
+  `cr-queue`."*
+- A substantial **document** (plan, design, analysis, report, reference): if you
+  wrote it to a workspace file, save it file-backed (`artifact_save` with
+  `source_path`, and `kind="markdown"` for markdown); if it lives only inline in
+  chat, offer to save it.
 
-When in doubt, **don't** auto-save trivial demo widgets. Save when the
-user says "save this", "remember this", "make this persistent", or when
-context strongly implies they'll iterate.
+Don't save throwaway output: one-shot answers, quick demo widgets, scratch
+notes, or project/package code that belongs in a CR.
 
-After auto-saving, mention it briefly: *"Saved as artifact `cr-queue`."*
-Don't suggest the iterate phrasing — the user already knows. Just confirm.
+## Reuse before starting fresh
+
+Before writing a plan/doc/analysis from scratch, check whether one already
+exists: `artifact_list(q="<topic>")` finds your own artifacts — offer to iterate
+on a strong match instead of duplicating it. (Use `artifact_list` for this;
+don't run a knowledge search just to find artifacts.)
 
 ## Always check before `artifact_save` (kind=widget)
 

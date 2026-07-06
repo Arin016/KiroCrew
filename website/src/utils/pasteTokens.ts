@@ -1,3 +1,4 @@
+import { safeSetItem } from './safeStorage'
 /**
  * Paste-token utilities.
  *
@@ -169,11 +170,45 @@ export function mergePreservedPastes<M extends { role: string; content: string; 
 
 /* ---- localStorage side table: content-addressed paste preservation ---- */
 
-const STORE_KEY = 'mc-paste-store-v1'
-const STORE_CAP = 200
+export const STORE_KEY = 'mc-paste-store-v1'
+export const STORE_CAP = 200
+// Discard entries not touched within this window. Mirrors the 30-day draft
+// TTL (DRAFT_TTL_MS in chatDrafts) so sent-paste rehydration data ages out on
+// the same schedule as the unsent drafts it complements.
+export const STORE_TTL_MS = 30 * 24 * 60 * 60 * 1000
+// Byte ceiling for the serialized store. The STORE_CAP entry count alone does
+// NOT bound size — 200 large pastes (logs, files, transcripts) can reach ~5 MB
+// and exhaust the localStorage quota, after which every other setItem (e.g.
+// saveChatConfig) throws QuotaExceededError and silently breaks the UI. A
+// byte-aware LRU keeps only the newest entries that fit. Matches the
+// DRAFT_MAX_STORE_BYTES budget the slot-draft stores adopt in Mesh-1909.
+export const STORE_MAX_BYTES = 2 * 1024 * 1024
 
-interface StoredPaste { displayTxt: string; pastes: PasteBlock[]; files?: string[]; savedAt: number }
+// `seq` is a monotonic insertion counter used as the recency tiebreaker.
+// `savedAt` (wall-clock ms) is too coarse: a burst of pastes within the same
+// millisecond all share a savedAt, and a stable sort would then preserve
+// insertion order (oldest-first) — floating the OLDEST entries to the front of
+// a "newest-first" sort and evicting newer ones. `seq` is strictly increasing
+// per write (derived as max(existing)+1, so it survives reloads), giving an
+// unambiguous recency order under sub-millisecond writes.
+interface StoredPaste { displayTxt: string; pastes: PasteBlock[]; files?: string[]; savedAt: number; seq?: number }
 type Store = Record<string, StoredPaste>
+
+/** True if a stored entry is structurally valid and within the TTL window. */
+function isFresh(v: StoredPaste, cutoff: number): boolean {
+  return !!v && typeof v.savedAt === 'number' && v.savedAt >= cutoff
+}
+
+/** Next monotonic insertion seq = max existing + 1 (1 when empty). Derived from
+ *  the store itself so it stays monotonic across page reloads without a
+ *  module-level counter that would reset to 0 and collide with persisted seqs. */
+function nextStoreSeq(store: Store): number {
+  let max = 0
+  for (const v of Object.values(store)) {
+    if (typeof v.seq === 'number' && v.seq > max) max = v.seq
+  }
+  return max + 1
+}
 
 function readStore(): Store {
   if (typeof localStorage === 'undefined') return {}
@@ -181,7 +216,15 @@ function readStore(): Store {
     const raw = localStorage.getItem(STORE_KEY)
     if (!raw) return {}
     const parsed = JSON.parse(raw)
-    return typeof parsed === 'object' && parsed ? parsed as Store : {}
+    if (typeof parsed !== 'object' || !parsed) return {}
+    // Drop entries past the TTL so stale paste content is never rehydrated;
+    // the physical removal happens on the next writeStore.
+    const cutoff = Date.now() - STORE_TTL_MS
+    const fresh: Store = {}
+    for (const [k, v] of Object.entries(parsed as Store)) {
+      if (isFresh(v, cutoff)) fresh[k] = v
+    }
+    return fresh
   } catch {
     return {}
   }
@@ -189,16 +232,31 @@ function readStore(): Store {
 
 function writeStore(store: Store): void {
   if (typeof localStorage === 'undefined') return
-  // Evict oldest entries past the cap to bound growth.
+  // Bound the store on three axes, newest-first so the most recent pastes
+  // always survive: (1) drop TTL-expired entries, (2) cap entry count, and
+  // (3) cap total serialized bytes via a byte-aware LRU. The newest entry is
+  // never evicted (the count > 0 guard), even if it alone exceeds the budget.
+  const cutoff = Date.now() - STORE_TTL_MS
   const entries = Object.entries(store)
-  if (entries.length > STORE_CAP) {
-    entries.sort((a, b) => a[1].savedAt - b[1].savedAt)
-    const trimmed: Store = {}
-    for (const [k, v] of entries.slice(-STORE_CAP)) trimmed[k] = v
-    store = trimmed
+    .filter(([, v]) => isFresh(v, cutoff))
+    // Newest first. Tiebreak same-millisecond savedAt by the monotonic `seq`
+    // so a burst of writes orders by true insertion recency, not stable-sort
+    // insertion order (which would float the oldest entry to the front).
+    .sort((a, b) => (b[1].savedAt - a[1].savedAt) || ((b[1].seq ?? 0) - (a[1].seq ?? 0)))
+  const kept: Store = {}
+  let bytes = 2 // enclosing "{}"
+  let count = 0
+  for (const [k, v] of entries) {
+    if (count >= STORE_CAP) break
+    // Approx serialized contribution of this entry: "key":value plus comma.
+    const entryBytes = JSON.stringify(k).length + 1 + JSON.stringify(v).length + 1
+    if (count > 0 && bytes + entryBytes > STORE_MAX_BYTES) break
+    kept[k] = v
+    bytes += entryBytes
+    count++
   }
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(store))
+    safeSetItem(STORE_KEY, JSON.stringify(kept))
   } catch { /* quota exceeded or storage unavailable — ignore */ }
 }
 
@@ -215,11 +273,15 @@ export function saveStoredPaste(
   const store = readStore()
   // Key by trimEnd() to match what the backend stores (it strips trailing whitespace).
   const key = expandedContent.trimEnd()
+  // Compute seq BEFORE inserting so a re-save of an existing key still advances
+  // its recency. Delete-then-reinsert isn't needed — eviction sorts on seq.
+  const seq = nextStoreSeq(store)
   store[key] = {
     displayTxt,
     pastes,
     ...(files && files.length ? { files } : {}),
     savedAt: Date.now(),
+    seq,
   }
   writeStore(store)
 }

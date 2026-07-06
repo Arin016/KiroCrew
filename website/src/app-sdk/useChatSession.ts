@@ -37,6 +37,20 @@ export interface ChatSessionState {
   resetSession: () => void
 }
 
+/** Minimal shape of a chat folder returned by /api/chat/folders. */
+interface ChatFolder {
+  id: string
+  name: string
+}
+
+/** Minimal shape of a chat slot returned by /api/chat/slots. */
+interface ChatSlot {
+  key: string
+  title?: string
+  messages?: number
+  running?: boolean
+}
+
 const DEFAULT_SEED = ({ label, path, isPackage }: { label: string; path: string; isPackage: boolean }) =>
   `Session: ${label}\nWorking directory: ${path}\n` +
   `You are a developer assistant for this ${isPackage ? 'package' : 'workspace'}.\n\n` +
@@ -56,12 +70,12 @@ export function useChatSession(opts: ChatSessionOptions): ChatSessionState {
   // Best-effort folder assignment — extracted to avoid running on every refetch
   const assignFolder = useCallback(async (slotKey: string) => {
     try {
-      const folders = await api.get<any[]>('/api/chat/folders')
+      const folders = await api.get<ChatFolder[]>('/api/chat/folders')
       const folderList = Array.isArray(folders) ? folders : []
       const folderName = appName.charAt(0).toUpperCase() + appName.slice(1)
-      let folder = folderList.find((f: any) => f.name === folderName)
+      let folder = folderList.find((f: ChatFolder) => f.name === folderName)
       if (!folder) {
-        folder = await api.post<any>('/api/chat/folders', { name: folderName })
+        folder = await api.post<ChatFolder>('/api/chat/folders', { name: folderName })
       }
       if (folder?.id) {
         await api.patch('/api/chat/slots/' + encodeURIComponent(slotKey) + '/folder', { folder_id: folder.id })
@@ -72,7 +86,7 @@ export function useChatSession(opts: ChatSessionOptions): ChatSessionState {
   const { data: slotData, isLoading, error: queryError } = useQuery({
     queryKey: ['app-sdk-session', slotName],
     queryFn: async () => {
-      const slots = await api.get<any[]>('/api/chat/slots')
+      const slots = await api.get<ChatSlot[]>('/api/chat/slots')
       const list = Array.isArray(slots) ? slots : []
       const found = list.find(s => s.key === slotName)
       return found ? { found: true as const, slot: found } : { found: false as const, slot: null }
@@ -92,7 +106,7 @@ export function useChatSession(opts: ChatSessionOptions): ChatSessionState {
 
   const createMutation = useMutation({
     mutationFn: async () => {
-      const slot = await api.post<any>('/api/chat/slots', { name: slotName, agent })
+      const slot = await api.post<ChatSlot>('/api/chat/slots', { name: slotName, agent })
       const isPackage = workspacePath.includes('/src/')
       const seedMsg = seed({ label, path: workspacePath, isPackage })
       try {
@@ -140,7 +154,7 @@ export function useChatSession(opts: ChatSessionOptions): ChatSessionState {
     status,
     slotKey: slot?.key ?? (createMutation.data?.key ?? null),
     slotInfo: slot
-      ? { key: slot.key, title: slot.title || label, messages: slot.messages || 0, running: slot.running }
+      ? { key: slot.key, title: slot.title || label, messages: slot.messages || 0, running: !!slot.running }
       : createMutation.data
         ? { key: createMutation.data.key, title: label, messages: 0, running: true }
         : null,

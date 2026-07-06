@@ -32,6 +32,7 @@ import contextlib
 import enum
 import logging
 import os
+import re
 import signal
 import time
 from collections.abc import Awaitable, Callable
@@ -42,6 +43,9 @@ import aiohttp
 from kiro_claw.instances.constants import DEFAULT_MAX_RECOVERY_ATTEMPTS as _MAX_RECOVERY
 from kiro_claw.instances.constants import DEFAULT_PROBE_FAILURE_THRESHOLD as _PROBE_FAILS
 from kiro_claw.instances.constants import DEFAULT_PROBE_INTERVAL_SECS as _PROBE_INTERVAL
+from kiro_claw.instances.constants import (
+    DEFAULT_RECOVER_BACKOFF_MAX_SECS as _RECOVER_BACKOFF_MAX_SECS,
+)
 from kiro_claw.instances.constants import DEFAULT_TOKEN_PROBE_TIMEOUT_SECS as _TOKEN_PROBE_TIMEOUT
 from kiro_claw.instances.constants import DEFAULT_TOKEN_REFRESH_FRACTION as _REFRESH_FRACTION
 from kiro_claw.instances.constants import (
@@ -49,7 +53,7 @@ from kiro_claw.instances.constants import (
 )
 from kiro_claw.instances.diagnostics import diagnose_instance
 from kiro_claw.instances.port_allocator import PortAllocator, _is_port_free
-from kiro_claw.instances.registry import Instance, InstancesRegistry
+from kiro_claw.instances.registry import _UNALLOCATED_PORT, Instance, InstancesRegistry
 from kiro_claw.instances.token_mint import (
     TokenMintError,
     mint_remote_token,
@@ -61,6 +65,7 @@ from kiro_claw.instances.validation import (
     validate_remote_bin,
     validate_ssh_host,
 )
+from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +83,6 @@ _MAX_STDERR_CHARS = 2000
 # can't spin a tight respawn loop. Applied in the scheduling seam (_on_tunnel_exit)
 # so direct _recover() callers (tests) aren't slowed.
 _RECOVER_BACKOFF_BASE_SECS = 1.0
-_RECOVER_BACKOFF_MAX_SECS = 15.0
 
 # ssh prints these benign advisory lines to stderr on connect (post-quantum KEX
 # warning); they are NOT failures. Strip them from captured stderr so the real
@@ -91,10 +95,10 @@ _BENIGN_SSH_STDERR_MARKERS = (
 )
 
 
-def _recover_backoff_secs(attempt: int) -> float:
-    """Exponential backoff (capped) before a self-heal rebuild. *attempt* is 1-based."""
+def _recover_backoff_secs(attempt: int, cap: float = _RECOVER_BACKOFF_MAX_SECS) -> float:
+    """Exponential backoff before a self-heal rebuild, capped at *cap*. *attempt* is 1-based."""
     base = _RECOVER_BACKOFF_BASE_SECS * (2 ** max(0, attempt - 1))
-    return min(base, _RECOVER_BACKOFF_MAX_SECS)
+    return min(base, cap)
 
 
 def _strip_benign_ssh_noise(text: str) -> str:
@@ -105,6 +109,23 @@ def _strip_benign_ssh_noise(text: str) -> str:
         if ln.strip() and not any(m in ln.lower() for m in _BENIGN_SSH_STDERR_MARKERS)
     ]
     return "\n".join(kept).strip()
+
+
+# CSI/ANSI escape sequences (WSSH banners carry color + cursor moves such as
+# \x1b[31m and \x1b[1G); strip them so a control sequence can't corrupt surfaced
+# status text or dashboard tooltips.
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _sanitize_banner(text: str) -> str:
+    """ANSI-strip + credential/exfil-redact untrusted ssh stderr before it is
+    surfaced in status/logs, capped at 200 chars. The banner is external,
+    proxy-controlled text, so it is a redacted secondary detail only — never a
+    classification signal."""
+    cleaned = _ANSI_CSI_RE.sub("", text)
+    cleaned = redact_credentials(cleaned)[0]
+    cleaned = redact_exfiltration_urls(cleaned)[0]
+    return cleaned[:200]
 
 
 class TunnelState(enum.Enum):
@@ -192,6 +213,7 @@ class _SshTunnel:
         *,
         connect_timeout_secs: float = _DEFAULT_CONNECT_TIMEOUT_SECS,
         compression: bool = True,
+        probe_failure_threshold: int = _PROBE_FAILS,
         on_exit: Callable[[str], None] | None = None,
     ) -> None:
         self._id = instance_id
@@ -200,6 +222,9 @@ class _SshTunnel:
         self._remote_port = remote_port
         self._connect_timeout = connect_timeout_secs
         self._compression = compression
+        # Consecutive health-probe failures tolerated before this tunnel is torn
+        # down to trigger self-heal; the manager threads the config-tunable value.
+        self._probe_fails = probe_failure_threshold
         self._on_exit = on_exit  # Phase 3 seam: called(instance_id) on unexpected exit
 
         self._proc: asyncio.subprocess.Process | None = None
@@ -296,10 +321,10 @@ class _SshTunnel:
                 logger.warning(
                     "Tunnel health probe failed (%d/%d) for %s",
                     self._probe_failures,
-                    _PROBE_FAILS,
+                    self._probe_fails,
                     self._id,
                 )
-                if self._probe_failures >= _PROBE_FAILS:
+                if self._probe_failures >= self._probe_fails:
                     logger.warning(
                         "Tunnel for %s unhealthy after %d probe failures — tearing "
                         "down to trigger recovery",
@@ -380,19 +405,49 @@ class _SshTunnel:
                 self._on_exit(self._id)
 
     def _exit_error(self, returncode: int | None) -> str:
-        """Compose a human error from exit code + captured stderr."""
+        """Compose a human error from exit code + captured stderr.
+
+        Classifies on real ssh signals, not on prose the WSSH proxy passes
+        through. A genuine auth failure (permission denied / publickey /
+        certificate expired) is reported as auth; a WSSH session/transport drop
+        (idle timeout, banner-exchange timeout, reset, refused) is reported as a
+        transport drop — never as an auth verdict inferred from banner text. The
+        raw banner is ANSI-stripped and credential-redacted before it is
+        surfaced as a secondary detail.
+        """
         if self._probe_failed:
             return "health probe failed — tunnel alive but not forwarding"
         # Drop ssh's benign post-quantum KEX advisory so it can't mask the real
         # failure (the loop symptom was this warning hiding "bind: ... in use").
         tail = _strip_benign_ssh_noise(self._stderr_buf)
         low = tail.lower()
-        if "permission denied" in low or "expired" in low:
-            return f"ssh auth failed (check SSH access): {tail[:200]}"
+        detail = _sanitize_banner(tail)
+        # Genuine ssh auth signals first, so a real auth failure is never masked
+        # by a transport phrase that happens to co-occur in the same banner.
+        if (
+            "permission denied" in low
+            or "publickey" in low
+            or "authentication failed" in low
+            or "certificate has expired" in low
+            or "certificate expired" in low
+        ):
+            return f"ssh auth failed (check SSH access): {detail}"
+        # WSSH / transport session drops — not an auth problem. Worded neutrally
+        # because this method is also used for the initial-connect failure path,
+        # where no self-heal is armed yet (so it must not promise reconnection).
+        if (
+            "timed out during banner exchange" in low
+            or "session ended unexpectedly" in low
+            or "connection timed out" in low
+            or "connection reset" in low
+            or "closed by remote host" in low
+            or "connection refused" in low
+        ):
+            return f"ssh tunnel transport drop: {detail}"
         if "address already in use" in low or "cannot listen to port" in low:
-            return f"ssh forward bind failed (local port already in use): {tail[:200]}"
+            return f"ssh forward bind failed (local port already in use): {detail}"
         if tail:
-            return f"ssh exited {returncode}: {tail[:200]}"
+            return f"ssh exited {returncode}: {detail}"
         return f"ssh exited with code {returncode}"
 
     async def _capture_stderr(self) -> None:
@@ -458,6 +513,9 @@ class SshTunnelManager:
         base_port: int = DEFAULT_TUNNEL_BASE_PORT,
         connect_timeout_secs: float = _DEFAULT_CONNECT_TIMEOUT_SECS,
         ssh_compression: bool = True,
+        max_recovery_attempts: int = _MAX_RECOVERY,
+        recover_backoff_max_secs: float = _RECOVER_BACKOFF_MAX_SECS,
+        probe_failure_threshold: int = _PROBE_FAILS,
         mint_token: Callable[..., Awaitable[str]] = mint_remote_token,
         tunnel_factory: Callable[..., _SshTunnel] | None = None,
     ) -> None:
@@ -465,6 +523,12 @@ class SshTunnelManager:
         self._allocator = PortAllocator(base_port=base_port)
         self._connect_timeout = connect_timeout_secs
         self._ssh_compression = ssh_compression
+        # Self-heal tunables (config-tunable via instances.*): max consecutive
+        # recovery attempts before give-up, the cap on the per-attempt backoff,
+        # and the per-tunnel consecutive-probe-failure teardown threshold.
+        self._max_recovery = max_recovery_attempts
+        self._recover_backoff_max = recover_backoff_max_secs
+        self._probe_fails = probe_failure_threshold
         self._mint_token = mint_token
         self._tunnel_factory = tunnel_factory or _SshTunnel
         # Only the real ssh path reaps OS-level orphans; injected fakes (tests)
@@ -625,6 +689,7 @@ class SshTunnelManager:
                 inst.remote_port,
                 connect_timeout_secs=self._connect_timeout,
                 compression=self._ssh_compression,
+                probe_failure_threshold=self._probe_fails,
                 on_exit=self._on_tunnel_exit,
             )
             self._tunnels[instance_id] = tunnel
@@ -658,25 +723,46 @@ class SshTunnelManager:
             with contextlib.suppress(Exception):
                 self._registry.update(instance_id, local_port=local_port, was_connected=True)
                 self._registry.set_last_active(instance_id)
+            # A successful (re)connect clears any stale give-up counter so the next
+            # unexpected drop gets a full fresh recovery budget instead of tripping
+            # the cap immediately.
+            self._recover_attempts.pop(instance_id, None)
             # Connected cleanly — drop any retained failure reason from a prior
             # attempt so status() no longer reports a stale error.
             self._last_error.pop(instance_id, None)
             return tunnel.status
 
     async def disconnect(self, instance_id: str) -> bool:
-        """Tear down *instance_id*'s tunnel and drop its token. Returns existed?"""
+        """Tear down *instance_id*'s tunnel, drop its token, clear its port hint.
+
+        Returns whether a live tunnel existed.
+
+        The persisted ``local_port`` is reset to the unallocated sentinel here —
+        symmetric with :meth:`connect` setting it — so a disconnected instance
+        never leaves a stale port recorded. Without this the freed port reads as
+        perpetually reserved (``_reserved_ports`` / the ``local_port == 0``
+        "unallocated" contract), and the instance can't be reconnected. The
+        registry cleanup runs even when no live tunnel is tracked, so a port left
+        behind by an unclean prior exit can still be cleared by a disconnect.
+        """
         async with self._lock:
             tunnel = self._tunnels.pop(instance_id, None)
             self._tokens.pop(instance_id, None)
             self._recover_attempts.pop(instance_id, None)
             self._last_error.pop(instance_id, None)
             self._cancel_token_refresh(instance_id)
-            if tunnel is None:
-                return False
-            await tunnel.stop()
+            if tunnel is not None:
+                await tunnel.stop()
+            # Clear the lazy-reconnect hint AND the recorded local port together
+            # (one atomic write). local_port must return to the unallocated
+            # sentinel so the now-free port is not treated as reserved forever.
             with contextlib.suppress(Exception):
-                self._registry.set_was_connected(instance_id, False)
-            return True
+                self._registry.update(
+                    instance_id,
+                    was_connected=False,
+                    local_port=_UNALLOCATED_PORT,
+                )
+            return tunnel is not None
 
     async def shutdown(self) -> None:
         """Tear down all tunnels (gateway shutdown). Leaves registry hints intact
@@ -710,7 +796,9 @@ class SshTunnelManager:
         flapping link / bind race can't spin a tight respawn loop — and so direct
         ``_recover`` callers (unit tests) aren't slowed.
         """
-        delay = _recover_backoff_secs(self._recover_attempts.get(instance_id, 0) + 1)
+        delay = _recover_backoff_secs(
+            self._recover_attempts.get(instance_id, 0) + 1, self._recover_backoff_max
+        )
         task = asyncio.create_task(self._recover_after(instance_id, delay))
         self._recovery_tasks.add(task)
         task.add_done_callback(self._recovery_tasks.discard)
@@ -747,6 +835,7 @@ class SshTunnelManager:
             inst.remote_port,
             connect_timeout_secs=self._connect_timeout,
             compression=self._ssh_compression,
+            probe_failure_threshold=self._probe_fails,
             on_exit=self._on_tunnel_exit,
         )
         self._tunnels[inst.id] = tunnel
@@ -786,9 +875,9 @@ class SshTunnelManager:
 
             attempts = self._recover_attempts.get(instance_id, 0) + 1
             self._recover_attempts[instance_id] = attempts
-            if attempts > _MAX_RECOVERY:
+            if attempts > self._max_recovery:
                 logger.error(
-                    "Giving up self-heal for %s after %d attempts", instance_id, _MAX_RECOVERY
+                    "Giving up self-heal for %s after %d attempts", instance_id, self._max_recovery
                 )
                 self._schedule_diagnosis(instance_id)
                 return

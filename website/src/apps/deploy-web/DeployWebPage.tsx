@@ -10,6 +10,48 @@ import Clickable from '../../components/Clickable'
 // { status, data } by the api client rather than thrown.
 interface Site { site_id: string; bucket: string; distribution_id: string }
 
+// Response shapes from deploy_web/handlers.py + iam.py.
+interface VerifyResult {
+  reachable: boolean
+  account?: string
+  note?: string
+  s3_reachable?: boolean
+  cloudfront_reachable?: boolean
+  detail?: string
+}
+// 200 + requires_confirm on the deploy path.
+interface DeployPreview {
+  requires_confirm: true
+  public?: boolean
+  site_id: string
+  bytes: number
+  scan: string
+  message: string
+}
+// 409 pre-publish scan block.
+interface ScanBlock {
+  blocked: true
+  reason: 'scan'
+  findings: string
+  count: number
+}
+// 200 deploy success.
+interface DeployResult {
+  url: string
+  status: string
+  reused: boolean
+}
+// 200 + requires_confirm on recall/destroy.
+interface SiteActionConfirm {
+  requires_confirm: true
+  action: 'recall' | 'destroy'
+  site_id: string
+  message: string
+}
+
+const errMessage = (e: unknown, fallback: string) =>
+  (e instanceof Error ? e.message : undefined) || fallback
+
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
   return (
@@ -26,7 +68,7 @@ function SetupCard() {
   const { data: config } = useQuery({ queryKey: ['deploy-web-config'], queryFn: () => api.deployWebConfig() })
   const [profile, setProfile] = useState<string | null>(null)
   const [region, setRegion] = useState<string | null>(null)
-  const [verifyResult, setVerifyResult] = useState<any>(null)
+  const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null)
   const [showPolicy, setShowPolicy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -42,13 +84,13 @@ function SetupCard() {
   const saveMut = useMutation({
     mutationFn: () => api.deployWebSaveConfig({ profile: profileVal.trim(), region: regionVal.trim() }),
     onSuccess: () => { setError(null); qc.invalidateQueries({ queryKey: ['deploy-web-config'] }); qc.invalidateQueries({ queryKey: ['deploy-web-sites'] }) },
-    onError: (e: any) => setError(e?.message || 'Failed to save config'),
+    onError: (e: unknown) => setError(errMessage(e, 'Failed to save config')),
   })
 
   const verifyMut = useMutation({
     mutationFn: () => api.deployWebVerify(),
-    onSuccess: (r) => setVerifyResult(r.data),
-    onError: (e: any) => setVerifyResult({ reachable: false, note: e?.message || 'Verification failed' }),
+    onSuccess: (r) => setVerifyResult(r.data as VerifyResult),
+    onError: (e: unknown) => setVerifyResult({ reachable: false, note: errMessage(e, 'Verification failed') }),
   })
 
   return (
@@ -58,13 +100,13 @@ function SetupCard() {
         Bring your own AWS account. KiroClaw never stores credentials — only the profile <em>name</em>, resolved by your local AWS CLI.
       </div>
       <div className="flex flex-wrap items-end gap-3">
-        <label className="text-sm">
+        <label htmlFor="deploy-web-profile" className="text-sm">
           <div className="text-xs text-muted mb-0.5">AWS profile</div>
-          <input className="text-sm p-1.5 rounded bg-bg border border-border w-48" placeholder="my-profile" value={profileVal} onChange={e => setProfile(e.target.value)} />
+          <input id="deploy-web-profile" aria-label="AWS profile" className="text-sm p-1.5 rounded bg-bg border border-border w-48" placeholder="my-profile" value={profileVal} onChange={e => setProfile(e.target.value)} />
         </label>
-        <label className="text-sm">
+        <label htmlFor="deploy-web-region" className="text-sm">
           <div className="text-xs text-muted mb-0.5">Region</div>
-          <input className="text-sm p-1.5 rounded bg-bg border border-border w-36" placeholder="us-west-2" value={regionVal} onChange={e => setRegion(e.target.value)} />
+          <input id="deploy-web-region" aria-label="Region" className="text-sm p-1.5 rounded bg-bg border border-border w-36" placeholder="us-west-2" value={regionVal} onChange={e => setRegion(e.target.value)} />
         </label>
         <button className="text-sm px-3 py-1.5 rounded-md bg-accent text-white disabled:opacity-50" disabled={saveMut.isPending || !profileVal.trim()} onClick={() => saveMut.mutate()}>{saveMut.isPending ? 'Saving…' : 'Save'}</button>
         <button className="text-sm px-3 py-1.5 rounded-md bg-bg-elevated disabled:opacity-50" disabled={verifyMut.isPending || !config?.profile} onClick={() => verifyMut.mutate()}>{verifyMut.isPending ? 'Checking…' : 'Verify access'}</button>
@@ -105,9 +147,9 @@ function PublishCard({ configured }: { configured: boolean }) {
   const [artifactSlug, setArtifactSlug] = useState('')
   const [localDir, setLocalDir] = useState('')
   const [overrideScan, setOverrideScan] = useState(false)
-  const [preview, setPreview] = useState<any>(null)   // requires_confirm payload
-  const [scanBlock, setScanBlock] = useState<any>(null)  // 409 scan payload
-  const [result, setResult] = useState<any>(null)
+  const [preview, setPreview] = useState<DeployPreview | null>(null)   // requires_confirm payload
+  const [scanBlock, setScanBlock] = useState<ScanBlock | null>(null)  // 409 scan payload
+  const [result, setResult] = useState<DeployResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -124,12 +166,12 @@ function PublishCard({ configured }: { configured: boolean }) {
     setBusy(true); setError(null)
     try {
       const { status, data } = await api.deployWebDeploy(buildBody(extra))
-      if (status === 409 && data?.reason === 'scan') { setScanBlock(data); setPreview(null); setResult(null) }
-      else if (status === 200 && data?.requires_confirm) { setPreview(data); setScanBlock(null); setResult(null) }
-      else if (status === 200) { setResult(data); setPreview(null); setScanBlock(null); qc.invalidateQueries({ queryKey: ['deploy-web-sites'] }) }
+      if (status === 409 && data?.reason === 'scan') { setScanBlock(data as ScanBlock); setPreview(null); setResult(null) }
+      else if (status === 200 && data?.requires_confirm) { setPreview(data as DeployPreview); setScanBlock(null); setResult(null) }
+      else if (status === 200) { setResult(data as DeployResult); setPreview(null); setScanBlock(null); qc.invalidateQueries({ queryKey: ['deploy-web-sites'] }) }
       else { setError(data?.error || `Deploy failed (HTTP ${status})`) }
-    } catch (e: any) {
-      setError(e?.message || 'Deploy failed')
+    } catch (e: unknown) {
+      setError(errMessage(e, 'Deploy failed'))
     } finally { setBusy(false) }
   }
 
@@ -141,17 +183,17 @@ function PublishCard({ configured }: { configured: boolean }) {
       <div className="text-xs text-muted mb-3">Publishes to a <strong>public</strong> HTTPS URL (private S3 + CloudFront + OAC) on your own AWS account.</div>
       {!configured && <div className="text-xs text-warn mb-3 flex items-center gap-1"><AlertTriangle size={12} /> Set an AWS profile in Setup first.</div>}
       <div className="space-y-3">
-        <label className="text-sm block">
+        <label htmlFor="deploy-web-site-id" className="text-sm block">
           <div className="text-xs text-muted mb-0.5">Site ID</div>
-          <input className="text-sm p-1.5 rounded bg-bg border border-border w-64" placeholder="my-demo" value={siteId} onChange={e => { setSiteId(e.target.value); reset() }} />
+          <input id="deploy-web-site-id" aria-label="Site ID" className="text-sm p-1.5 rounded bg-bg border border-border w-64" placeholder="my-demo" value={siteId} onChange={e => { setSiteId(e.target.value); reset() }} />
         </label>
         <div className="flex items-center gap-4 text-sm">
-          <label className="flex items-center gap-1.5"><input type="radio" checked={sourceKind === 'artifact'} onChange={() => { setSourceKind('artifact'); reset() }} /> Artifact</label>
-          <label className="flex items-center gap-1.5"><input type="radio" checked={sourceKind === 'local'} onChange={() => { setSourceKind('local'); reset() }} /> Local directory</label>
+          <label htmlFor="deploy-web-source-artifact" className="flex items-center gap-1.5"><input id="deploy-web-source-artifact" aria-label="Artifact" type="radio" checked={sourceKind === 'artifact'} onChange={() => { setSourceKind('artifact'); reset() }} /> Artifact</label>
+          <label htmlFor="deploy-web-source-local" className="flex items-center gap-1.5"><input id="deploy-web-source-local" aria-label="Local directory" type="radio" checked={sourceKind === 'local'} onChange={() => { setSourceKind('local'); reset() }} /> Local directory</label>
         </div>
         {sourceKind === 'artifact'
-          ? <input className="text-sm p-1.5 rounded bg-bg border border-border w-full" placeholder="artifact slug (e.g. my-dashboard)" value={artifactSlug} onChange={e => { setArtifactSlug(e.target.value); reset() }} />
-          : <input className="text-sm p-1.5 rounded bg-bg border border-border w-full" placeholder="/path/to/site (must be within home / a workspace dir)" value={localDir} onChange={e => { setLocalDir(e.target.value); reset() }} />}
+          ? <input aria-label="Artifact slug" className="text-sm p-1.5 rounded bg-bg border border-border w-full" placeholder="artifact slug (e.g. my-dashboard)" value={artifactSlug} onChange={e => { setArtifactSlug(e.target.value); reset() }} />
+          : <input aria-label="Local directory path" className="text-sm p-1.5 rounded bg-bg border border-border w-full" placeholder="/path/to/site (must be within home / a workspace dir)" value={localDir} onChange={e => { setLocalDir(e.target.value); reset() }} />}
       </div>
 
       {/* Pre-publish scan gate (409) */}
@@ -159,8 +201,8 @@ function PublishCard({ configured }: { configured: boolean }) {
         <div className="p-3 rounded-md mt-3 border border-warn bg-warn/10">
           <div className="text-sm font-medium text-warn flex items-center gap-1"><AlertTriangle size={14} /> Pre-publish scan found {scanBlock.count} issue(s)</div>
           <pre className="text-[11px] mt-1 whitespace-pre-wrap">{scanBlock.findings}</pre>
-          <label className="flex items-center gap-2 text-xs mt-2">
-            <input type="checkbox" checked={overrideScan} onChange={e => setOverrideScan(e.target.checked)} /> Publish anyway (I've reviewed these)
+          <label htmlFor="deploy-web-override-scan" className="flex items-center gap-2 text-xs mt-2">
+            <input id="deploy-web-override-scan" aria-label="Publish anyway" type="checkbox" checked={overrideScan} onChange={e => setOverrideScan(e.target.checked)} /> Publish anyway (I've reviewed these)
           </label>
           <button className="text-xs px-2 py-1 mt-2 rounded bg-accent text-white disabled:opacity-50" disabled={!overrideScan || busy} onClick={() => run()}>Re-run with override</button>
         </div>
@@ -200,7 +242,7 @@ function PublishCard({ configured }: { configured: boolean }) {
 // ── Site row: recall (empty, reversible) + destroy (delete infra) ───────────
 function SiteRow({ site }: { site: Site }) {
   const qc = useQueryClient()
-  const [pending, setPending] = useState<{ action: 'recall' | 'destroy'; data: any } | null>(null)
+  const [pending, setPending] = useState<{ action: 'recall' | 'destroy'; data: SiteActionConfirm } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
@@ -210,10 +252,10 @@ function SiteRow({ site }: { site: Site }) {
     try {
       const fn = action === 'recall' ? api.deployWebRecall : api.deployWebDestroy
       const { status, data } = await fn({ site_id: site.site_id, ...(confirm ? { confirm: true } : {}) })
-      if (status === 200 && data?.requires_confirm) setPending({ action, data })
+      if (status === 200 && data?.requires_confirm) setPending({ action, data: data as SiteActionConfirm })
       else if (status === 200) { setDone(action === 'recall' ? 'Recalled' : 'Destroyed'); setPending(null); qc.invalidateQueries({ queryKey: ['deploy-web-sites'] }) }
       else setError(data?.error || `Failed (HTTP ${status})`)
-    } catch (e: any) { setError(e?.message || 'Request failed') } finally { setBusy(false) }
+    } catch (e: unknown) { setError(errMessage(e, 'Request failed')) } finally { setBusy(false) }
   }
 
   return (

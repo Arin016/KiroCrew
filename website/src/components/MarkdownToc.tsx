@@ -115,8 +115,22 @@ const MarkdownOutlineRail = memo(function MarkdownOutlineRail({ containerRef }: 
     if (!container || entries.length === 0) return
     const headings = container.querySelectorAll('h1, h2, h3, h4, h5, h6')
     if (headings.length === 0) return
+    // Whether the viewport is scrolled to (within 2px of) the bottom. Guarded
+    // on actual scrollability: for a short doc that fits without a scrollbar
+    // (scrollHeight === clientHeight) the raw distance is 0, which would
+    // wrongly read as "at bottom" — so require a real overflow first. There the
+    // observer's top-20% band owns active-tracking and this stays false.
+    const atBottom = () => {
+      const max = container.scrollHeight - container.clientHeight
+      return max > 2 && container.scrollTop >= max - 2
+    }
     const observer = new IntersectionObserver((obs) => {
       if (scrollLock.current) return // a click jump is animating — don't fight it
+      // At the very bottom the last heading can never reach the top-20% active
+      // band (its trailing content is shorter than the -80% rootMargin), so the
+      // observer would leave the final tick perpetually unlit. The scroll
+      // listener below owns that case — don't let a stale intersection fight it.
+      if (atBottom()) return
       for (const e of obs) {
         if (e.isIntersecting) {
           const domIdx = Array.from(headings).indexOf(e.target as Element)
@@ -127,7 +141,18 @@ const MarkdownOutlineRail = memo(function MarkdownOutlineRail({ containerRef }: 
       }
     }, { root: container, rootMargin: '0px 0px -80% 0px', threshold: 0 })
     headings.forEach(h => observer.observe(h))
-    return () => observer.disconnect()
+    // Scroll-end fallback: when the viewport is scrolled to the bottom, force
+    // the last heading active. Without this, any heading whose following
+    // content is shorter than 80% of the viewport height (most commonly the
+    // final heading) never enters the observer's top-20% band and its tick
+    // stays dark even though the user has reached it.
+    const onScrollEnd = () => {
+      if (scrollLock.current) return
+      if (atBottom()) setActive(entries.length - 1)
+    }
+    container.addEventListener('scroll', onScrollEnd, { passive: true })
+    onScrollEnd() // catch the case where the doc loads already scrolled to the end
+    return () => { observer.disconnect(); container.removeEventListener('scroll', onScrollEnd) }
   }, [containerRef, entries])
 
   // Position the collapsed tick column. When it fits, center it. When it
@@ -212,6 +237,10 @@ const MarkdownOutlineRail = memo(function MarkdownOutlineRail({ containerRef }: 
     // Wrapper spans the viewport height but is click-through (pointer-events-none);
     // only the tick column and the expanded flyout opt back into pointer events,
     // so the rail never steals clicks/selection from the document underneath.
+    // <nav> is the correct landmark for this TOC rail. The hover handlers only
+    // reveal the flyout and are mirrored by onFocusCapture/onBlurCapture for
+    // keyboard users, so the pointer listeners add no keyboard-only behavior.
+    // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
     <nav
       aria-label="Table of contents"
       className="absolute inset-y-0 right-0 z-20 pointer-events-none select-none"

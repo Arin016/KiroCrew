@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { screen, waitFor, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+
+vi.mock('@radix-ui/react-dropdown-menu', () => import('./__mocks__/@radix-ui/react-dropdown-menu'))
+vi.mock('@radix-ui/react-context-menu', () => import('./__mocks__/@radix-ui/react-context-menu'))
+
 import ChatSidebar from '../src/pages/ChatSidebar'
 import { renderWithProviders } from './helpers'
 import { server } from './mocks/server'
@@ -523,12 +527,12 @@ describe('ChatSidebar Cleanup', () => {
   it('action buttons stay visible while context menu is open', async () => {
     renderWithProviders(<ChatSidebar {...defaultProps} />)
     const row = await screen.findByText('Pipeline debug')
+    // Open the context menu (mock sets data-state="open" on trigger)
     fireEvent.contextMenu(row)
-    await screen.findByRole('menuitem', { name: /Rename/ })
-    // The action bar for the targeted session should have opacity-100 (not group-hover:opacity-100)
-    const actionBar = row.closest('[class*="group"]')!.querySelector('[class*="bg-card"]')
-    expect(actionBar?.className).toContain('opacity-100')
-    expect(actionBar?.className).not.toContain('opacity-0')
+    // The ContextMenu trigger child should now have data-state="open",
+    // which activates the CSS has-[[data-state=open]]:opacity-100 rule.
+    const sessionRow = row.closest('.session-row')!
+    expect(sessionRow.getAttribute('data-state')).toBe('open')
   })
 
   it('clicking Duplicate button calls fork endpoint and switches slot', async () => {

@@ -108,7 +108,7 @@ Only write \`STOP\` or call \`autonudge_stop\` for the two cases above.
 ## Kill switches
 
 - \`touch $ANCHOR/STOP\` — agent halts at next cycle entry.
-- UI 🔁 → Stop loop — service stops scheduling.
+- UI 🎯 → Stop loop — service stops scheduling.
 - \`autonudge_stop(reason="...")\` — in-loop self-halt MCP tool.
 EOF
   echo "wrote: $GOAL_MD_PATH"
@@ -121,5 +121,5 @@ Next:
   1. Fill 5 DoD criteria in: $ANCHOR/LOOP.md
   2. Review discovery sources in: $GOAL_MD_PATH
   3. ls $ANCHOR/STOP  (must say "No such file")
-  4. Arm the loop (UI 🔁 or REST) — see $ANCHOR/LOOP.md §"Start the loop (REST)"
+  4. Arm the loop (UI 🎯 "Set a goal" or REST) — see $ANCHOR/LOOP.md §"Start the loop (REST)"
 EOF

@@ -35,6 +35,32 @@ export function getContrastingTextColor(bgHex: string): string {
   return brightness > 128 ? '#100f0f' : '#ffffff'
 }
 
+/** Human-readable hue name for a swatch (e.g. "Teal", "Light blue"). Used for color-picker tooltips. */
+export function colorName(hex: string): string {
+  const rgb = parseColor(hex)
+  if (!rgb) return hex
+  const [r, g, b] = rgb.map(v => v / 255)
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min
+  const l = (max + min) / 2
+  // Neutral test on chroma (d) directly, not HSL saturation: s = d/(1-|2l-1|)
+  // is singular near l=0/l=1, so a 1-bit channel delta on a near-white/black
+  // swatch blows up past any saturation threshold and gets a false hue label.
+  if (d < 0.04) return l > 0.8 ? 'White' : l < 0.2 ? 'Black' : 'Gray'
+  let h = 0
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d) % 6
+    else if (max === g) h = (b - r) / d + 2
+    else h = (r - g) / d + 4
+    h = (h * 60 + 360) % 360
+  }
+  // 12-name hue wheel keyed on HSL hue angle (degrees).
+  const hues = ['Red', 'Orange', 'Yellow', 'Lime', 'Green', 'Teal', 'Cyan', 'Sky', 'Blue', 'Indigo', 'Purple', 'Pink']
+  const base = hues[Math.round(h / 30) % 12]
+  if (l > 0.78) return `Light ${base.toLowerCase()}`
+  if (l < 0.32) return `Dark ${base.toLowerCase()}`
+  return base
+}
+
 function rgbToOklch(r: number, g: number, b: number): { L: number; C: number; h: number } {
   const [rl, gl, bl] = [r, g, b].map(v => {
     const s = v / 255

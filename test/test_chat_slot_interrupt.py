@@ -148,3 +148,57 @@ class TestChatSlotInterrupt:
             # Mock doesn't invoke on_soft callback, so state stays soft_pending
             # (on_soft would set it to idle in production)
             assert slot._stop_state in ("soft_pending", "idle")
+
+    @pytest.mark.asyncio
+    async def test_interrupt_rejects_pending_approval_futures(self, _patch_sel):
+        """Pending approval futures are resolved before stop_turn so the
+        chat runner can unblock."""
+        import asyncio
+
+        slot = _ChatSlot("test")
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        slot.task = mock_task
+        slot._queue = [{"queue_id": "q1", "content": "msg"}]
+
+        # Simulate a pending approval future (agent waiting for permission)
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[str] = loop.create_future()
+        slot._approval_futures["req-123"] = fut
+
+        state = _mock_state(slot)
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat/slots/test/interrupt",
+                json={},
+            )
+            assert resp.status == 200
+            # The future should be resolved with "rejected"
+            assert fut.done()
+            assert fut.result() == "rejected"
+
+
+class TestRefusalRecoverySkippedOnCancel:
+    """Recovery prompt should not fire when the turn was cancelled by the
+    user (stop_reason='cancelled')."""
+
+    def test_cancelled_turn_suppresses_recovery(self):
+        """The guard must return False when stop_reason is cancelled,
+        even with non-empty refusal_reasons."""
+        from kiro_claw.acp.types import STOP_REASON_CANCELLED
+        from kiro_claw.dashboard.state import should_queue_refusal_recovery
+
+        refusal_reasons = [("Creating /tmp/name.txt", "command '---' is not on the read-only allowlist")]
+        assert not should_queue_refusal_recovery(
+            refusal_reasons, stopping=False, needs_reset=False, stop_reason=STOP_REASON_CANCELLED
+        )
+
+    def test_normal_refusal_still_triggers_recovery(self):
+        """When the turn ends normally (not cancelled) with refusal reasons,
+        recovery should still fire."""
+        from kiro_claw.dashboard.state import should_queue_refusal_recovery
+
+        refusal_reasons = [("write /tmp/x", "not on read-only allowlist")]
+        assert should_queue_refusal_recovery(
+            refusal_reasons, stopping=False, needs_reset=False, stop_reason=""
+        )

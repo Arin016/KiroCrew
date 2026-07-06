@@ -27,11 +27,19 @@ interface SettingsToggleProps {
 
 export function SettingsToggle({ label, description, checked, onChange, disabled }: SettingsToggleProps) {
   return (
+    // The whole row is a mouse-only click convenience that mirrors the inner
+    // <Toggle> (role="switch", tabIndex, keyboard handler, aria-label). Keyboard
+    // and screen-reader users operate the Toggle directly; adding a second
+    // keyboard target on the row would create a redundant, confusing focus stop.
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
     <div className={`flex items-center justify-between py-1.5 group ${disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`} onClick={() => !disabled && onChange(!checked)}>
       <div className="flex-1 min-w-0 mr-4">
         <div className="text-[13px] font-semibold text-text group-hover:text-text-strong transition-colors">{label}</div>
         {description && <div className="text-[12px] text-muted mt-0.5">{description}</div>}
       </div>
+      {/* stopPropagation prevents the row's mouse-click convenience from double-
+          toggling; the inner Toggle carries all keyboard/AT semantics. */}
+      {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions */}
       <div onClick={e => e.stopPropagation()}>
         <Toggle checked={checked} onChange={onChange} disabled={disabled} label={label} />
       </div>
@@ -120,6 +128,7 @@ export function SettingsInput({ label, description, hint, value, onChange, onBlu
           placeholder={placeholder}
           disabled={disabled}
           rows={3}
+          aria-label={ariaLabel ?? label}
           className="w-full rounded border border-border bg-bg px-2 py-1 text-sm text-text focus:border-accent focus:outline-none resize-y flex-none"
         />
       ) : (

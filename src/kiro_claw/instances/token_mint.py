@@ -24,6 +24,8 @@ import contextlib
 import logging
 import re
 
+from kiro_claw.security import redact_credentials, redact_exfiltration_urls
+
 logger = logging.getLogger(__name__)
 
 # Sentinel meaning "no custom bin path — try every candidate". Stored as-is;
@@ -238,20 +240,24 @@ async def mint_remote_token(
 
     stdout = stdout_b.decode("utf-8", "replace")
     stderr = stderr_b.decode("utf-8", "replace").strip()
+    # stderr is proxy-controlled (WSSH banner etc.); redact credentials/exfil URLs
+    # before surfacing it in an exception that may reach logs/status. The token
+    # only ever appears on stdout, never stderr.
+    safe_stderr = redact_exfiltration_urls(redact_credentials(stderr)[0])[0] if stderr else ""
 
     if proc.returncode != 0:
         # stderr may carry the "binary not found" diagnostic — safe to log; it
         # never contains the token (token only ever appears on stdout).
         raise TokenMintError(
             f"remote token mint on {ssh_host} exited {proc.returncode}: "
-            f"{stderr or '<no stderr>'}"
+            f"{safe_stderr or '<no stderr>'}"
         )
 
     token = parse_token_from_stdout(stdout)
     if not token:
         raise TokenMintError(
             f"could not parse a token from {ssh_host} output "
-            f"(stderr: {stderr or '<none>'})"
+            f"(stderr: {safe_stderr or '<none>'})"
         )
     return token
 
@@ -289,4 +295,7 @@ async def run_remote_kiroclaw(
             await proc.wait()
         return -1, f"timed out after {timeout_secs}s"
     err = err_b.decode("utf-8", "replace").strip()
-    return (proc.returncode if proc.returncode is not None else -1), err[:300]
+    # Proxy-controlled stderr (e.g. a WSSH banner) can carry credential-looking
+    # text or exfil URLs; redact before returning since callers surface this tail.
+    safe_err = redact_exfiltration_urls(redact_credentials(err)[0])[0] if err else ""
+    return (proc.returncode if proc.returncode is not None else -1), safe_err[:300]

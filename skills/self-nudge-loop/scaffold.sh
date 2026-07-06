@@ -67,7 +67,7 @@ When all five are true, agent posts the DoD checklist with ticks, calls \`autonu
 ## Start the loop (UI)
 
 1. \`ls $STOP_PATH\` → must say "No such file".
-2. Click 🔁 Repeat in the composer toolbar.
+2. Click the 🎯 "Set a goal" (bullseye) icon in the composer toolbar.
 3. Popover — **all four fields** (no blanks):
    - Nudge: paste from §"Ready-to-paste nudge" below
    - Idle seconds: \`60\`
@@ -132,7 +132,7 @@ EXECUTE (<=5 tool calls per cycle, hard cap):
 RECORD:
 11. Append progress to the claimed card (kanban-md edit --add-body) or to a Cycle Log section in LOOP.md.
 12. DM the owner a tick via send_message (owner DM is default — no channel arg). Template:
-    "🔁 $PROJECT cycle-<n> · <task-id>  Done: <1-line>  Next: <1-line>  Status: <col>"
+    "🎯 $PROJECT cycle-<n> · <task-id>  Done: <1-line>  Next: <1-line>  Status: <col>"
     One DM per productive cycle. Skip halted / no-op cycles.
 13. If task complete: handoff to Review (NOT Done — human approves Done).
 
@@ -148,7 +148,7 @@ One cycle = one step.
 | Method | Speed | Notes |
 |---|---|---|
 | Agent self-halt via \`autonudge_stop\` | next cycle | Cleanest. Works unattended. |
-| UI 🔁 → Stop loop | instant | Fastest manual. |
+| UI 🎯 → Stop loop | instant | Fastest manual. |
 | \`touch $STOP_PATH\` | <=60s | Agent halts and calls autonudge_stop; service honors sentinel. |
 | \`max_cycles: 30\` reached | bounded | Loop deactivates (not removed). Re-arm via PATCH/UI. |
 | REST DELETE \`/api/autonudge/{loop_id}\` | instant | Clean removal. |
@@ -231,5 +231,5 @@ Done. Next:
   1. Edit $ANCHOR/LOOP.md — fill the 5 Definition-of-Done criteria.
   2. (Optional) Seed tasks: kanban-md --dir $BOARD_PATH create "..." --status todo
   3. Confirm STOP absent: ls $STOP_PATH
-  4. Arm via UI (click 🔁) or REST (see LOOP.md §"Start the loop (REST)").
+  4. Arm via UI (click 🎯 "Set a goal") or REST (see LOOP.md §"Start the loop (REST)").
 EOF

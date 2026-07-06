@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import Clickable from './Clickable'
 import { Gamepad2, X } from 'lucide-react'
 import PixelCanvas, { type SlotData } from './PixelCanvas'
 import type { ProjectRun } from '../types'
@@ -28,20 +29,23 @@ export default function PixelCanvasWidget({ run }: { run: ProjectRun }) {
         {active > 0 && <span className="absolute -top-1.5 -right-1.5 flex h-4 min-w-4 items-center justify-center rounded-full text-[10px] font-bold text-accent-fg" style={{ background: 'var(--accent)' }}>{active}</span>}
       </button>
       {open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,.4)' }} onClick={() => setOpen(false)}>
-          <div className="w-full max-w-2xl mx-4 rounded-xl shadow-lg overflow-hidden" style={{ background: 'var(--card)', border: '1px solid var(--border)' }} onClick={e => e.stopPropagation()}>
+        <Clickable className="fixed inset-0 z-[100] flex items-center justify-center" style={{ background: 'rgba(0,0,0,.4)' }} onClick={() => setOpen(false)}>
+          {/* Stop clicks/keys inside the modal from bubbling to the backdrop's
+              close handler — the dialog container itself is not interactive. */}
+          {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+          <div role="dialog" aria-modal="true" aria-label={`${name} — Workspace`} className="w-full max-w-2xl mx-4 rounded-xl shadow-lg overflow-hidden" style={{ background: 'var(--card)', border: '1px solid var(--border)' }} onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
               <span className="text-sm font-bold" style={{ color: 'var(--text-strong)' }}>{name} — Workspace</span>
               <div className="flex items-center gap-2">
                 <span className="text-[12px]" style={{ color: 'var(--muted)' }}>{active} agent{active !== 1 ? 's' : ''}</span>
-                <button className="text-lg cursor-pointer bg-transparent border-none font-body" style={{ color: 'var(--muted)' }} onClick={() => setOpen(false)}><X className="lucide-inline" /></button>
+                <button aria-label="Close" className="text-lg cursor-pointer bg-transparent border-none font-body" style={{ color: 'var(--muted)' }} onClick={() => setOpen(false)}><X className="lucide-inline" /></button>
               </div>
             </div>
             <div className="p-4">
               <PixelCanvas slots={slots} />
             </div>
           </div>
-        </div>
+        </Clickable>
       )}
     </>
   )

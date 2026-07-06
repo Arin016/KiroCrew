@@ -3341,3 +3341,46 @@ class TestMcpMergePriority:
         )
         assert "srv" in config["mcpServers"], "server dropped: global source dict corrupted by override"
         assert config["mcpServers"]["srv"]["command"] == kiro_cmd
+
+
+class TestRefreshDynamicFieldsSyncsConfigModel:
+    """config.json agent.model must propagate into the kiro agent file so
+    kiro-cli's --agent startup load matches it (Mesh-2292)."""
+
+    def _write_mc_config(self, tmp_path: Path, model) -> Path:
+        mc = tmp_path / "config.json"
+        body = {} if model is None else {"agent": {"model": model}}
+        mc.write_text(json.dumps(body), encoding="utf-8")
+        return mc
+
+    def test_explicit_config_model_overrides_managed_default(self, tmp_path: Path):
+        from kiro_claw.agent import _refresh_dynamic_fields
+
+        # model_managed=True would re-sync the agent file from the shipped
+        # default; an explicit config.json pick must still win.
+        agent_state.set_model_managed("kiroclaw", True)
+        mc = self._write_mc_config(tmp_path, "claude-opus-4.8")
+        config = {"name": "kiroclaw", "model": "stale-from-install"}
+        with patch("kiro_claw.agent._mc_config_path", return_value=mc):
+            _refresh_dynamic_fields(config)
+        assert config["model"] == "claude-opus-4.8"
+
+    def test_auto_sentinel_does_not_clobber_agent_model(self, tmp_path: Path):
+        from kiro_claw.agent import _refresh_dynamic_fields
+
+        # "auto" defers to managed/shipped resolution; it must not overwrite
+        # the existing agent-file model with the literal "auto".
+        mc = self._write_mc_config(tmp_path, "auto")
+        config = {"name": "kiroclaw", "model": "claude-haiku-4.5"}
+        with patch("kiro_claw.agent._mc_config_path", return_value=mc):
+            _refresh_dynamic_fields(config)
+        assert config["model"] == "claude-haiku-4.5"
+
+    def test_no_config_model_leaves_agent_model_untouched(self, tmp_path: Path):
+        from kiro_claw.agent import _refresh_dynamic_fields
+
+        mc = self._write_mc_config(tmp_path, None)
+        config = {"name": "kiroclaw", "model": "claude-sonnet-4.6"}
+        with patch("kiro_claw.agent._mc_config_path", return_value=mc):
+            _refresh_dynamic_fields(config)
+        assert config["model"] == "claude-sonnet-4.6"

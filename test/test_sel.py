@@ -768,3 +768,146 @@ class TestAsyncWriter:
         ids = [e["event_id"] for e in log.recent(limit=10)]
         assert "e1" not in ids  # the failed write is absent
         assert "e2" in ids and "e0" in ids
+
+
+class TestCriticalWrite:
+    """Fail-closed ``critical=True`` audits — the crux of "audit-or-deny".
+
+    The async writer swallows filesystem errors and warns (an audit log is
+    eventually-durable). A CRITICAL audit must NOT be swallowed: it is written
+    synchronously and the error propagates, so the caller (safety-override
+    activation, unattended heartbeat auto-approve) can refuse the action it was
+    about to audit rather than proceed unaudited. Pentest: YOLO activated while
+    the SEL file was chmod 000 because ``log()`` never raised.
+    """
+
+    def test_critical_log_raises_when_file_unwritable(self, tmp_path: Path) -> None:
+        """A critical write to an unwritable SEL file re-raises OSError."""
+        log = SecurityEventLog(base_dir=tmp_path)
+        real_open = open
+
+        def _boom(path, *a, **k):
+            if str(path).endswith("security_events.jsonl") and "a" in (a[0] if a else k.get("mode", "")):
+                raise PermissionError("SEL file unwritable (chmod 000)")
+            return real_open(path, *a, **k)
+
+        import builtins
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr(builtins, "open", _boom)
+        try:
+            with pytest.raises(OSError):
+                log.log(_make_event(event_id="crit"), critical=True)
+        finally:
+            mp.undo()
+
+    def test_critical_log_persists_synchronously_without_flush(self, tmp_path: Path) -> None:
+        """A critical write lands on disk immediately (no flush() needed)."""
+        log = SecurityEventLog(base_dir=tmp_path)
+        log.log(_make_event(event_id="crit-ok"), critical=True)
+        # Read the raw file directly — do NOT call recent() (which flushes),
+        # proving the write was synchronous.
+        raw = (tmp_path / "security_events.jsonl").read_text(encoding="utf-8")
+        assert "crit-ok" in raw
+
+    def test_critical_drains_queued_events_first_preserving_chain(self, tmp_path: Path) -> None:
+        """Queued async events are drained before the critical write so the
+        on-disk HMAC chain keeps enqueue order and verifies clean."""
+        log = SecurityEventLog(base_dir=tmp_path)
+        log.log(_make_event(event_id="async-1"))
+        log.log(_make_event(event_id="async-2"))
+        log.log(_make_event(event_id="crit"), critical=True)  # drains then writes
+        total, valid = log.verify_integrity()
+        assert total == valid == 3
+        ids = [e["event_id"] for e in log.recent(limit=10)]
+        assert {"async-1", "async-2", "crit"} <= set(ids)
+
+    def test_sync_mode_critical_raises(self, tmp_path: Path) -> None:
+        """In sync mode a critical write still re-raises on failure."""
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
+        real_open = open
+
+        def _boom(path, *a, **k):
+            if str(path).endswith("security_events.jsonl"):
+                raise OSError("disk full")
+            return real_open(path, *a, **k)
+
+        import builtins
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr(builtins, "open", _boom)
+        try:
+            with pytest.raises(OSError):
+                log.log(_make_event(event_id="crit-sync"), critical=True)
+        finally:
+            mp.undo()
+
+    def test_non_critical_log_still_swallows_write_error(self, tmp_path: Path) -> None:
+        """Regression guard: a NON-critical write must remain best-effort
+        (swallow + warn), never propagate to the hot-path caller."""
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
+        real_open = open
+
+        def _boom(path, *a, **k):
+            if str(path).endswith("security_events.jsonl"):
+                raise OSError("disk full")
+            return real_open(path, *a, **k)
+
+        import builtins
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr(builtins, "open", _boom)
+        try:
+            log.log(_make_event(event_id="soft"))  # must NOT raise
+        finally:
+            mp.undo()
+
+    def test_log_api_access_critical_raises(self, tmp_path: Path) -> None:
+        """``log_api_access(critical=True)`` propagates a write failure."""
+        log = SecurityEventLog(base_dir=tmp_path)
+        real_open = open
+
+        def _boom(path, *a, **k):
+            if str(path).endswith("security_events.jsonl") and "a" in (a[0] if a else k.get("mode", "")):
+                raise PermissionError("unwritable")
+            return real_open(path, *a, **k)
+
+        import builtins
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr(builtins, "open", _boom)
+        try:
+            with pytest.raises(OSError):
+                log.log_api_access(
+                    caller="safety_override",
+                    operation="safety_override:activate",
+                    outcome="enabled",
+                    critical=True,
+                )
+        finally:
+            mp.undo()
+
+    def test_log_tool_invocation_critical_raises(self, tmp_path: Path) -> None:
+        """``log_tool_invocation(critical=True)`` propagates a write failure."""
+        log = SecurityEventLog(base_dir=tmp_path)
+        real_open = open
+
+        def _boom(path, *a, **k):
+            if str(path).endswith("security_events.jsonl") and "a" in (a[0] if a else k.get("mode", "")):
+                raise PermissionError("unwritable")
+            return real_open(path, *a, **k)
+
+        import builtins
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr(builtins, "open", _boom)
+        try:
+            with pytest.raises(OSError):
+                log.log_tool_invocation(
+                    session_key="_hb",
+                    tool_name="ReadInternalWebsites",
+                    outcome="auto_approved",
+                    critical=True,
+                )
+        finally:
+            mp.undo()

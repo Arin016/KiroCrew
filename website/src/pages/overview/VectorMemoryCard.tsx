@@ -17,6 +17,63 @@ const extractError = (err: unknown): string => {
   catch { return msg || 'Unknown error' }
 }
 
+interface VectorStats {
+  migrated?: boolean
+  semantic_active?: number
+  episodic_active?: number
+  embedded_count?: number
+  faiss_index_size?: number
+  has_legacy_memory?: boolean
+}
+
+interface EmbeddingStatus {
+  setup_step?: string
+  setup_error?: string
+  provider?: string
+  model_available?: boolean
+  server_healthy?: boolean
+  ollama_installed?: boolean
+  needs_docker?: boolean
+}
+
+interface SemanticEntry {
+  key: string
+  value_json?: unknown
+  confidence: number
+  source?: string
+}
+
+interface EpisodicEntry {
+  id: string
+  text?: string
+  tags?: unknown
+  importance: number
+  score?: number
+  created_at?: string
+  ts?: string
+}
+
+interface AuditEvent {
+  event_type: string
+  memory_type?: string
+  memory_key?: string
+  new_value?: string
+  old_value?: string
+  created_at?: string
+}
+
+interface MigrateResult {
+  error?: string
+  semantic?: number
+  episodic?: number
+  skipped?: number
+}
+
+interface ContextPreview {
+  semantic_context?: string
+  episodic_context?: string
+}
+
 export function parseTags(raw: unknown): string[] {
   let t: unknown = raw || [];
   if (typeof t === 'string') {
@@ -29,12 +86,12 @@ export function parseTags(raw: unknown): string[] {
 }
 
 export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: { onActiveChange?: (active: boolean) => void; onMigratedChange?: (migrated: boolean) => void }) {
-  const [stats, setStats] = useState<any>(null)
-  const [embStatus, setEmbStatus] = useState<any>(null)
-  const [semantic, setSemantic] = useState<any[]>([])
-  const [episodic, setEpisodic] = useState<any[]>([])
+  const [stats, setStats] = useState<VectorStats | null>(null)
+  const [embStatus, setEmbStatus] = useState<EmbeddingStatus | null>(null)
+  const [semantic, setSemantic] = useState<SemanticEntry[]>([])
+  const [episodic, setEpisodic] = useState<EpisodicEntry[]>([])
   const [epHasMore, setEpHasMore] = useState(false)
-  const [events, setEvents] = useState<any[]>([])
+  const [events, setEvents] = useState<AuditEvent[]>([])
   const [epQuery, setEpQuery] = useState('')
   const [epTagFilter, setEpTagFilter] = useState<string|null>(null)
   const [newKey, setNewKey] = useState(''); const [newVal, setNewVal] = useState('')
@@ -44,8 +101,8 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
   const [eventFilter, setEventFilter] = useState<string>('all')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [evHasMore, setEvHasMore] = useState(false)
-  const [migrating, setMigrating] = useState(false); const [migrateResult, setMigrateResult] = useState<any>(null)
-  const [inspectorQuery, setInspectorQuery] = useState(''); const [preview, setPreview] = useState<any>(null)
+  const [migrating, setMigrating] = useState(false); const [migrateResult, setMigrateResult] = useState<MigrateResult | null>(null)
+  const [inspectorQuery, setInspectorQuery] = useState(''); const [preview, setPreview] = useState<ContextPreview | null>(null)
   const [writeError, setWriteError] = useState('')
 
   const ALLOWLIST_PREFIXES = useMemo(() => [
@@ -56,7 +113,7 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
   ], [])
 
   const keySuggestions = useMemo(() => {
-    const existing = new Set(semantic.map((e: any) => e.key))
+    const existing = new Set(semantic.map(e => e.key))
     return ALLOWLIST_PREFIXES.filter(p => !existing.has(p.replace(/\.$/, '')))
   }, [semantic, ALLOWLIST_PREFIXES])
 
@@ -73,7 +130,9 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
     ])
     setStats(st); setEmbStatus(emb); setSemantic(sem?.entries || [])
     if (st?.migrated != null) onMigratedChange?.(st.migrated)
-  }, [])
+    // onMigratedChange is the parent's stable useState setter (setMigrated), so
+    // including it can't cause a refetch loop; it just satisfies exhaustive-deps.
+  }, [onMigratedChange])
 
   useEffect(() => { load() }, [load])
 
@@ -132,9 +191,9 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
     return <Badge variant="err">● {v}</Badge>
   }
 
-  const active = !enabling && ((stats != null && (stats.semantic_active > 0 || stats.episodic_active > 0)) || (embStatus?.provider && embStatus.provider !== 'none'))
-  const filteredEvents = eventFilter === 'all' ? events : events.filter((e: any) => e.event_type === eventFilter)
-  const eventTypes = useMemo(() => [...new Set(events.map((e: any) => e.event_type))], [events])
+  const active = !enabling && ((stats != null && ((stats.semantic_active ?? 0) > 0 || (stats.episodic_active ?? 0) > 0)) || (embStatus?.provider && embStatus.provider !== 'none'))
+  const filteredEvents = eventFilter === 'all' ? events : events.filter(e => e.event_type === eventFilter)
+  const eventTypes = useMemo(() => [...new Set(events.map(e => e.event_type))], [events])
 
   useEffect(() => { onActiveChange?.(!!active) }, [active, onActiveChange])
 
@@ -277,18 +336,18 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
           <div className="relative" style={{ flex: 1 }}>
             <Input placeholder="Key (e.g. pref.backend.framework)" value={newKey} onChange={e => { setNewKey(e.target.value); setWriteError('') }}
               list="key-suggestions" className="w-full" />
-            <datalist id="key-suggestions">{filteredKeys.map(k => <option key={k} value={k} />)}</datalist>
+            <datalist id="key-suggestions">{filteredKeys.map(k => <option key={k} value={k}>{k}</option>)}</datalist>
           </div>
           <Input placeholder="Value" style={{ flex: 2 }} value={newVal} onChange={e => { setNewVal(e.target.value); setWriteError('') }} 
-            onKeyDown={async e => { if (e.key === 'Enter' && newKey && newVal) { try { await api.vectorSemanticWrite(newKey, newVal); setNewKey(''); setNewVal(''); setWriteError(''); load() } catch (err: any) { setWriteError(extractError(err)) } } }} />
-          <SendBtn onClick={async () => { if (!newKey || !newVal) return; try { await api.vectorSemanticWrite(newKey, newVal); setNewKey(''); setNewVal(''); setWriteError(''); load() } catch (e: any) { setWriteError(extractError(e)) } }}>Set</SendBtn>
+            onKeyDown={async e => { if (e.key === 'Enter' && newKey && newVal) { try { await api.vectorSemanticWrite(newKey, newVal); setNewKey(''); setNewVal(''); setWriteError(''); load() } catch (err: unknown) { setWriteError(extractError(err)) } } }} />
+          <SendBtn onClick={async () => { if (!newKey || !newVal) return; try { await api.vectorSemanticWrite(newKey, newVal); setNewKey(''); setNewVal(''); setWriteError(''); load() } catch (e: unknown) { setWriteError(extractError(e)) } }}>Set</SendBtn>
         </div>
         {writeError && <p className="text-danger text-[13px] mb-2"><AlertTriangle className="lucide-inline" /> {writeError}</p>}
         <div className="max-h-[500px] overflow-y-auto">
         <table className="w-full border-collapse table-striped"><thead><tr>
           {['Key','Value','Confidence','Source',''].map(h => <th key={h} className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium sticky top-0 bg-card z-10">{h}</th>)}
         </tr></thead><tbody>
-          {semantic.length === 0 ? <tr><td colSpan={5} className="text-muted italic px-2.5 py-3.5 text-sm">No semantic entries</td></tr> : semantic.map((e: any) => {
+          {semantic.length === 0 ? <tr><td colSpan={5} className="text-muted italic px-2.5 py-3.5 text-sm">No semantic entries</td></tr> : semantic.map(e => {
             let val = e.value_json
             if (typeof val === 'string') { try { val = JSON.parse(val) } catch { /* raw string, keep as-is */ } }
             const valStr = typeof val === 'object' && val !== null ? JSON.stringify(val, null, 2) : String(val ?? '')
@@ -298,11 +357,14 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
                 <td className="px-2.5 py-2 border-b border-border text-sm font-mono text-accent/80">{esc(e.key)}</td>
                 <td className="px-2.5 py-2 border-b border-border text-sm cursor-pointer max-w-[400px]" onClick={() => { if (!isEditing) { setEditKey(e.key); setEditVal(valStr) } }}>
                   {isEditing ? (
+                    // Presentational wrapper: stops the parent cell's edit-trigger
+                    // click from firing while interacting with the edit controls.
+                    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
                     <div className="flex gap-1 items-center" onClick={ev => ev.stopPropagation()}>
                       <Input value={editVal} onChange={ev => setEditVal(ev.target.value)} className="!py-1 !px-2 !text-sm"
-                        onKeyDown={async ev => { if (ev.key === 'Enter') { try { await api.vectorSemanticWrite(e.key, editVal); setEditKey(null); setWriteError(''); load() } catch (err: any) { setWriteError(extractError(err)) } } if (ev.key === 'Escape') setEditKey(null) }}
+                        onKeyDown={async ev => { if (ev.key === 'Enter') { try { await api.vectorSemanticWrite(e.key, editVal); setEditKey(null); setWriteError(''); load() } catch (err: unknown) { setWriteError(extractError(err)) } } if (ev.key === 'Escape') setEditKey(null) }}
                         autoFocus />
-                      <Btn onClick={async () => { try { await api.vectorSemanticWrite(e.key, editVal); setEditKey(null); setWriteError(''); load() } catch (err: any) { setWriteError(extractError(err)) } }}><Check className="lucide-inline" /></Btn>
+                      <Btn onClick={async () => { try { await api.vectorSemanticWrite(e.key, editVal); setEditKey(null); setWriteError(''); load() } catch (err: unknown) { setWriteError(extractError(err)) } }}><Check className="lucide-inline" /></Btn>
                       <Btn onClick={() => setEditKey(null)}><X className="lucide-inline" /></Btn>
                     </div>
                   ) : (
@@ -311,7 +373,7 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
                 </td>
                 <td className="px-2.5 py-2 border-b border-border text-sm">{confidenceBadge(e.confidence)}</td>
                 <td className="px-2.5 py-2 border-b border-border text-sm"><Badge variant={e.source === 'user_explicit' ? 'aim' : 'ok'}>{e.source}</Badge></td>
-                <td className="px-2.5 py-2 border-b border-border text-sm"><Btn danger onClick={async () => { try { await api.vectorSemanticDelete(e.key); setWriteError(''); load() } catch (err: any) { setWriteError(extractError(err)) } }}>Delete</Btn></td>
+                <td className="px-2.5 py-2 border-b border-border text-sm"><Btn danger onClick={async () => { try { await api.vectorSemanticDelete(e.key); setWriteError(''); load() } catch (err: unknown) { setWriteError(extractError(err)) } }}>Delete</Btn></td>
               </tr>
             )
           })}
@@ -331,7 +393,7 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
           {!epQuery && epTagFilter && <Btn onClick={() => { setEpTagFilter(null); loadEpisodic('', false, null) }}>Clear</Btn>}
         </div>
         {episodic.length > 0 && (() => {
-          const allTags = [...new Set(episodic.flatMap((e: any) => parseTags(e.tags)))]
+          const allTags = [...new Set(episodic.flatMap(e => parseTags(e.tags)))]
           return allTags.length > 0 ? (
             <div className="flex gap-1.5 flex-wrap mb-3">
               <span className="text-muted text-[12px] self-center mr-1">Filter by tag:</span>
@@ -346,7 +408,7 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
         <table className="w-full border-collapse table-striped"><thead><tr>
           {['Text','Tags','Imp.',...(epQuery ? ['Score'] : []),'When',''].map(h => <th key={h} className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium sticky top-0 bg-card z-10">{h}</th>)}
         </tr></thead><tbody>
-          {episodic.length === 0 ? <tr><td colSpan={epQuery ? 6 : 5} className="text-muted italic px-2.5 py-3.5 text-sm">No episodic entries</td></tr> : episodic.map((e: any) => {
+          {episodic.length === 0 ? <tr><td colSpan={epQuery ? 6 : 5} className="text-muted italic px-2.5 py-3.5 text-sm">No episodic entries</td></tr> : episodic.map(e => {
             const tags = parseTags(e.tags);
             return (
               <tr key={e.id} className="hover:bg-bg-hover transition-colors">
@@ -379,7 +441,7 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
         <table className="w-full border-collapse table-striped"><thead><tr>
           {['Event','Key/Type','Details','When'].map(h => <th key={h} className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium sticky top-0 bg-card z-10">{h}</th>)}
         </tr></thead><tbody>
-          {filteredEvents.length === 0 ? <tr><td colSpan={4} className="text-muted italic px-2.5 py-3.5 text-sm">No events</td></tr> : filteredEvents.map((e: any, i: number) => (
+          {filteredEvents.length === 0 ? <tr><td colSpan={4} className="text-muted italic px-2.5 py-3.5 text-sm">No events</td></tr> : filteredEvents.map((e, i: number) => (
             <tr key={i} className="hover:bg-bg-hover transition-colors">
               <td className="px-2.5 py-2 border-b border-border text-sm">
                 <Badge variant={e.event_type.includes('block') || e.event_type.includes('reject') ? 'err' : e.event_type.includes('skip') ? 'warn' : 'ok'}>{e.event_type}</Badge>

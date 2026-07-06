@@ -17,6 +17,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook } from '@testing-library/react'
 import { Provider } from 'react-redux'
+import type { RootState } from '../store'
 import { createTestStore } from './helpers'
 
 const apiStatusMock = vi.hoisted(() => vi.fn())
@@ -36,7 +37,7 @@ function makeStore(connected: boolean) {
       subagentRunning: {}, subagentDetails: {}, subagentText: {},
       sessionDefaultColor: null, sessionColorsMode: 'tint', sessionColorsPalette: 'horizon', sessionColorsIntensity: 'clear',
       slotsLoaded: true,
-    } as any,
+    } as RootState['dashboard'],
     chat: {
       activeSlot: null, messages: [], slotRunning: false, slotStopping: false, slotState: 'idle',
       slotStatusDetail: {}, slotHasMore: false, slotOldestIndex: 0, loadingOlder: false,
@@ -44,7 +45,7 @@ function makeStore(connected: boolean) {
       pendingInput: null, slotContextPct: {}, voicePlaying: false, voiceAudio: null,
       subagents: {}, toolLog: [], activityOpen: false, activityTab: 'tools', slotActivity: {}, slotHistory: [],
       slotMessages: {}, slotLoading: false,
-    } as any,
+    } as RootState['chat'],
   })
 }
 

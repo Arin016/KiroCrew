@@ -3,14 +3,21 @@ import { screen, fireEvent, waitFor } from '@testing-library/react'
 import { renderWithProviders, createTestStore } from './helpers'
 import ToolCallLine from '../pages/chat/ToolCallLine'
 import { resolveByApprovalId } from '../store/chatSlice'
+import type { RootState } from '../store'
 import type { ChatMessage } from '../types'
+
+type ChatState = RootState['chat']
 
 const LS_KEY = 'mc-chat-config'
 
 // jsdom polyfill: SegmentedControl uses ResizeObserver to switch between
 // full / compact / dropdown layouts based on container width.
 if (typeof globalThis.ResizeObserver === 'undefined') {
-  ;(globalThis as any).ResizeObserver = class { observe() {}; unobserve() {}; disconnect() {} }
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver
 }
 
 beforeEach(() => { localStorage.clear() })
@@ -27,7 +34,7 @@ describe('ToolCallLine simplifiedToolNames', () => {
         messages: [toolMsg()],
         toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', output: 'hello', ts: 1 }],
         slotRunning: false,
-      } as any,
+      } as unknown as ChatState,
     })
     renderWithProviders(<ToolCallLine message={toolMsg()} running={false} />, { store })
     expect(screen.getByText('Say hello')).toBeTruthy()
@@ -40,7 +47,7 @@ describe('ToolCallLine simplifiedToolNames', () => {
         messages: [toolMsg()],
         toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', output: 'hello', ts: 1 }],
         slotRunning: false,
-      } as any,
+      } as unknown as ChatState,
     })
     renderWithProviders(<ToolCallLine message={toolMsg()} running={false} />, { store })
     expect(screen.getByText('Running: echo hello')).toBeTruthy()
@@ -54,7 +61,7 @@ describe('ToolCallLine simplifiedToolNames', () => {
         messages: [msg],
         toolLog: [{ type: 'tool', text: 'echo hello', tool_call_id: 'tc_2', output: 'hello', ts: 1 }],
         slotRunning: false,
-      } as any,
+      } as unknown as ChatState,
     })
     renderWithProviders(<ToolCallLine message={msg} running={false} />, { store })
     expect(screen.getByText('Running: echo hello')).toBeTruthy()
@@ -68,7 +75,7 @@ describe('ToolCallLine inline expansion', () => {
         messages: [toolMsg()],
         toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', input: 'echo "hi"', output: 'hi-output-content', ts: 1 }],
         slotRunning: false,
-      } as any,
+      } as unknown as ChatState,
     })
     renderWithProviders(<ToolCallLine message={toolMsg()} running={false} />, { store })
     // Collapsed: output content not yet rendered
@@ -90,7 +97,7 @@ describe('ToolCallLine inline expansion', () => {
         messages: [toolMsg()],
         toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', output: 'only-output', ts: 1 }],
         slotRunning: false,
-      } as any,
+      } as unknown as ChatState,
     })
     renderWithProviders(<ToolCallLine message={toolMsg()} running={false} />, { store })
     fireEvent.click(screen.getByRole('button', { name: /Show details/i }))
@@ -104,7 +111,7 @@ describe('ToolCallLine inline expansion', () => {
         // Output present, no input → Input segment should be disabled, Output active.
         toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', output: 'only-output', ts: 1 }],
         slotRunning: false,
-      } as any,
+      } as unknown as ChatState,
     })
     renderWithProviders(<ToolCallLine message={toolMsg()} running={false} />, { store })
     fireEvent.click(screen.getByRole('button', { name: /Show details/i }))
@@ -121,7 +128,7 @@ describe('ToolCallLine inline expansion', () => {
   it('shows historical-message message when no toolLog entry exists and no purpose meta', () => {
     const msg = toolMsg({ meta: { tool_call_id: 'tc_orphan' } })
     const store = createTestStore({
-      chat: { messages: [msg], toolLog: [], slotRunning: false } as any,
+      chat: { messages: [msg], toolLog: [], slotRunning: false } as unknown as ChatState,
     })
     renderWithProviders(<ToolCallLine message={msg} running={false} />, { store })
     fireEvent.click(screen.getByRole('button', { name: /Show details/i }))
@@ -133,7 +140,7 @@ describe('ToolCallLine inline expansion', () => {
     localStorage.setItem(LS_KEY, JSON.stringify({ simplifiedToolNames: false }))
     const msg = toolMsg({ meta: { tool_call_id: 'tc_orphan', purpose: 'Said hello earlier' } })
     const store = createTestStore({
-      chat: { messages: [msg], toolLog: [], slotRunning: false } as any,
+      chat: { messages: [msg], toolLog: [], slotRunning: false } as unknown as ChatState,
     })
     renderWithProviders(<ToolCallLine message={msg} running={false} />, { store })
     fireEvent.click(screen.getByRole('button', { name: /Show details/i }))
@@ -152,7 +159,7 @@ describe('ToolCallLine inline expansion', () => {
       },
     })
     const store = createTestStore({
-      chat: { messages: [msg], toolLog: [], slotRunning: false } as any,
+      chat: { messages: [msg], toolLog: [], slotRunning: false } as unknown as ChatState,
     })
     renderWithProviders(<ToolCallLine message={msg} running={false} />, { store })
     fireEvent.click(screen.getByRole('button', { name: /Show details/i }))
@@ -172,7 +179,7 @@ describe('ToolCallLine inline expansion', () => {
     localStorage.setItem(LS_KEY, JSON.stringify({ simplifiedToolNames: true }))
     const msg = toolMsg({ meta: { tool_call_id: 'tc_orphan', purpose: 'Said hello earlier' } })
     const store = createTestStore({
-      chat: { messages: [msg], toolLog: [], slotRunning: false } as any,
+      chat: { messages: [msg], toolLog: [], slotRunning: false } as unknown as ChatState,
     })
     renderWithProviders(<ToolCallLine message={msg} running={false} />, { store })
     fireEvent.click(screen.getByRole('button', { name: /Show details/i }))
@@ -183,14 +190,14 @@ describe('ToolCallLine inline expansion', () => {
 
   it('auto-expands and clears focus when redux focusToolCallId matches', () => {
     // Stub scrollIntoView (jsdom doesn't implement it) so the auto-scroll branch doesn't throw
-    Element.prototype.scrollIntoView = vi.fn() as any
+    Element.prototype.scrollIntoView = vi.fn() as unknown as typeof Element.prototype.scrollIntoView
     const store = createTestStore({
       chat: {
         messages: [toolMsg()],
         toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', output: 'auto-output-content', ts: 1 }],
         slotRunning: false,
         focusToolCallId: 'tc_1',
-      } as any,
+      } as unknown as ChatState,
     })
     renderWithProviders(<ToolCallLine message={toolMsg()} running={false} />, { store })
     // Auto-expanded → default Output section content visible
@@ -200,14 +207,14 @@ describe('ToolCallLine inline expansion', () => {
   })
 
   it('does not auto-expand when focusToolCallId targets a different tool', () => {
-    Element.prototype.scrollIntoView = vi.fn() as any
+    Element.prototype.scrollIntoView = vi.fn() as unknown as typeof Element.prototype.scrollIntoView
     const store = createTestStore({
       chat: {
         messages: [toolMsg()],
         toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', output: 'should-not-show', ts: 1 }],
         slotRunning: false,
         focusToolCallId: 'tc_OTHER',
-      } as any,
+      } as unknown as ChatState,
     })
     renderWithProviders(<ToolCallLine message={toolMsg()} running={false} />, { store })
     expect(screen.queryByText('should-not-show')).toBeNull()
@@ -226,7 +233,7 @@ describe('ToolCallLine inline expansion', () => {
         messages: [msg, pendingPerm],
         toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', input: 'echo "hi"', ts: 1 }],
         slotRunning: true,
-      } as any,
+      } as unknown as ChatState,
     })
     const { rerender } = renderWithProviders(<ToolCallLine message={msg} running={true} />, { store })
     // Pending → locked open with "Awaiting approval" aria-label
@@ -253,7 +260,7 @@ describe('ToolCallLine inline expansion', () => {
         messages: [msg, pendingPerm],
         toolLog: [{ type: 'tool', text: 'echo hello', purpose: 'Say hello', tool_call_id: 'tc_1', input: 'echo "hi"', ts: 1 }],
         slotRunning: true,
-      } as any,
+      } as unknown as ChatState,
     })
     renderWithProviders(<ToolCallLine message={msg} running={true} />, { store })
     const btn = screen.getByRole('button', { name: /Awaiting approval/i })

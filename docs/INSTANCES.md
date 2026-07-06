@@ -120,8 +120,12 @@ Module responsibilities:
    (3) consecutive failures it tears the child down so recovery fires.
 4. **2-tier self-heal.** On unexpected exit: **Tier 1** rebuilds the tunnel
    reusing the existing token; **Tier 2** re-mints the token over SSH then
-   rebuilds. Capped at `DEFAULT_MAX_RECOVERY_ATTEMPTS` (3) consecutive attempts;
-   if it gives up, the diagnosis ladder runs automatically.
+   rebuilds. Capped at `DEFAULT_MAX_RECOVERY_ATTEMPTS` (8) consecutive attempts
+   with a capped-exponential backoff (`DEFAULT_RECOVER_BACKOFF_MAX_SECS`, 30s) —
+   a ~2 min recovery window that outlasts a transient drop (screen lock, WSSH
+   warmup); the counter also resets on a successful `connect()`. The attempt cap,
+   backoff cap, and probe-failure threshold are config-tunable (`instances.*`). If
+   it gives up, the diagnosis ladder runs automatically.
 5. **Proactive token refresh.** A per-instance loop re-mints the token at
    `DEFAULT_TOKEN_REFRESH_FRACTION` (0.8) of its TTL, ahead of the ~20h cap.
 6. **Diagnose / restart.** `?diagnose=1` runs the probe ladder on demand;
@@ -295,5 +299,5 @@ and it already covers bastions and SSM that inline flags cannot.
 | Iframe is blank | CSP `frame-src` relaxation only applies to active tunnel ports; ensure the instance is **connected** (port allocated). |
 | Connect fails with an SSH auth error | Refresh your SSH credentials (re-add the key to `ssh-agent`); tunnels self-heal once SSH auth is restored. |
 | Connect fails | Use **Diagnose** — the ladder reports the first broken link: `ssh_unreachable` (check SSH access / host alias), `remote_down` (remote gateway not running), or `tunnel_down` (reconnect). |
-| Instance keeps dropping | Health probe + 2-tier self-heal retry up to 3×; if it gives up, diagnosis runs automatically. Check the remote gateway and SSH stability. |
+| Instance keeps dropping | Health probe + 2-tier self-heal retry over a ~2 min window (default 8 attempts, capped-exponential backoff; config-tunable via `instances.max_recovery_attempts` / `recover_backoff_max_secs` / `probe_failure_threshold`; `max_recovery_attempts` is clamped to `[1, 100]` and `recover_backoff_max_secs` to `(0, 300]` so it can't loop indefinitely); if it gives up, diagnosis runs automatically. Check the remote gateway and SSH stability. |
 | An instance silently disappeared from the warm set | It was LRU-evicted (warm set full). Raise `instances.warm_set_cap` or reconnect on demand. |

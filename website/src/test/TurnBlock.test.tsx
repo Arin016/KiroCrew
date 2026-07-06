@@ -78,7 +78,7 @@ describe('TurnBlock — file role visibility', () => {
     const { container } = render(
       <TurnBlock
         turn={turn}
-        renderItem={(it) => <div data-testid={`item-${it.kind === 'single' ? it.msg.role + '-' + (it as any).idx : 'group'}`}>{it.kind === 'single' ? it.msg.content : 'group'}</div>}
+        renderItem={(it) => <div data-testid={`item-${it.kind === 'single' ? it.msg.role + '-' + it.idx : 'group'}`}>{it.kind === 'single' ? it.msg.content : 'group'}</div>}
       />
     )
     const rendered = Array.from(container.querySelectorAll('[data-testid^="item-"]'))

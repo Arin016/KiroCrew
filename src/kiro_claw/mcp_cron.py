@@ -543,6 +543,15 @@ def _list_tools() -> list[dict[str, Any]]:
                         "are included (~200 tokens vs ~30-55k). Also caps last_result "
                         "to 2000 chars. Use for simple polling/checker jobs.",
                     },
+                    "hide_in_chat": {
+                        "type": "boolean",
+                        "description": "When true, this cron's runs do NOT appear as a chat "
+                        "session in the dashboard active-session list (default false). Set true "
+                        "for fire-and-forget jobs (digests, cleanups, polling) so they stay out "
+                        "of the Chats sidebar — the result still goes to Slack/dashboard "
+                        "notification and the History tab. Only applies to agent crons "
+                        "(LLM jobs with a message); script/command crons never create a slot.",
+                    },
                     "strict_schedule": {
                         "type": "boolean",
                         "description": "When true, fire exactly on schedule with no jitter. "
@@ -622,6 +631,13 @@ def _list_tools() -> list[dict[str, Any]]:
                         "type": "boolean",
                         "description": "When true, skip memory/lessons/skills/history "
                         "injection. Only date/time + agent identity are included.",
+                    },
+                    "hide_in_chat": {
+                        "type": "boolean",
+                        "description": "When true, this cron's runs do NOT appear as a chat "
+                        "session in the dashboard active-session list. Set true to keep "
+                        "fire-and-forget jobs out of the Chats sidebar (result still goes to "
+                        "Slack/bell + History).",
                     },
                 },
                 "required": ["job_id"],
@@ -984,6 +1000,10 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         minimal_context_explicit = isinstance(minimal_context, bool)
         if isinstance(minimal_context, bool):
             job.minimal_context = minimal_context
+        hide_in_chat = args.get("hide_in_chat")
+        hide_in_chat_explicit = isinstance(hide_in_chat, bool)
+        if isinstance(hide_in_chat, bool):
+            job.hide_in_chat = hide_in_chat
         strict_schedule = args.get("strict_schedule")
         strict_schedule_explicit = isinstance(strict_schedule, bool)
         if isinstance(strict_schedule, bool):
@@ -1004,6 +1024,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             or tz
             or persistent_session_explicit
             or minimal_context_explicit
+            or hide_in_chat_explicit
             or strict_schedule_explicit
             or script
             or command
@@ -1045,6 +1066,10 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             mc = args["minimal_context"]
             if isinstance(mc, bool):
                 kwargs["minimal_context"] = mc
+        if "hide_in_chat" in args:
+            hic = args["hide_in_chat"]
+            if isinstance(hic, bool):
+                kwargs["hide_in_chat"] = hic
         if "cron_expr" in args and args["cron_expr"]:
             kwargs["cron_expr"] = args["cron_expr"]
         if "every" in args and args["every"]:

@@ -114,53 +114,41 @@ class TestIsOurChild:
             yield
 
     def test_rejects_missing_proc(self):
-        with patch("kiro_claw.acp.client.Path") as mock_path_cls:
-            mock_path_cls.return_value.exists.return_value = False
-            assert _is_our_child(999, expected_start=1) is False
+        with (
+            patch("kiro_claw.acp.client._get_start_time", return_value=1),
+            patch("kiro_claw.acp.client._read_basename", return_value=None),
+        ):
+            # recorded basename was "node" but _read_basename returns None (process gone)
+            assert _is_our_child(999, expected_start=1, expected_basename=b"node") is False
 
     def test_rejects_unknown_binary(self):
-        with patch("kiro_claw.acp.client.Path") as mock_path_cls:
-            inst = mock_path_cls.return_value
-            inst.exists.return_value = True
-            inst.read_bytes.return_value = b"postgres\x00--flag"
-            assert _is_our_child(999, expected_start=1) is False
+        with (
+            patch("kiro_claw.acp.client._get_start_time", return_value=1),
+            patch("kiro_claw.acp.client._read_basename", return_value=b"postgres"),
+        ):
+            # recorded basename was "node" but live binary is "postgres" (recycled)
+            assert _is_our_child(999, expected_start=1, expected_basename=b"node") is False
 
     def test_rejects_start_time_mismatch(self):
-        with (
-            patch("kiro_claw.acp.client.Path") as mock_path_cls,
-            patch("kiro_claw.acp.client._get_start_time", return_value=200),
-        ):
-            inst = mock_path_cls.return_value
-            inst.exists.return_value = True
-            inst.read_bytes.return_value = b"kiro-cli\x00acp"
+        with patch("kiro_claw.acp.client._get_start_time", return_value=200):
             assert _is_our_child(999, expected_start=100) is False
 
     def test_accepts_matching_kiro(self):
         with (
-            patch("kiro_claw.acp.client.Path") as mock_path_cls,
             patch("kiro_claw.acp.client._get_start_time", return_value=100),
+            patch("kiro_claw.acp.client._read_basename", return_value=b"kiro-cli"),
         ):
-            inst = mock_path_cls.return_value
-            inst.exists.return_value = True
-            inst.read_bytes.return_value = b"kiro-cli\x00acp"
-            assert _is_our_child(999, expected_start=100) is True
+            assert _is_our_child(999, expected_start=100, expected_basename=b"kiro-cli") is True
 
     def test_accepts_mcp_in_name(self):
         with (
-            patch("kiro_claw.acp.client.Path") as mock_path_cls,
             patch("kiro_claw.acp.client._get_start_time", return_value=50),
+            patch("kiro_claw.acp.client._read_basename", return_value=b"builder-mcp"),
         ):
-            inst = mock_path_cls.return_value
-            inst.exists.return_value = True
-            inst.read_bytes.return_value = b"builder-mcp\x00serve"
-            assert _is_our_child(999, expected_start=50) is True
+            assert _is_our_child(999, expected_start=50, expected_basename=b"builder-mcp") is True
 
     def test_none_start_time_denied(self):
-        with patch("kiro_claw.acp.client.Path") as mock_path_cls:
-            inst = mock_path_cls.return_value
-            inst.exists.return_value = True
-            inst.read_bytes.return_value = b"kiro-cli\x00acp"
-            assert _is_our_child(999, expected_start=None) is False
+        assert _is_our_child(999, expected_start=None) is False
 
 
 # ── 4. _direct_children: /proc and pgrep fallback ──
@@ -199,11 +187,12 @@ class TestSnapshotProcessTree:
         with (
             patch("kiro_claw.acp.client._get_child_pids", return_value=[200, 300, 400]),
             patch("kiro_claw.acp.client._get_start_time", side_effect=lambda p: p * 10),
+            patch("kiro_claw.acp.client._read_basename", side_effect=lambda p: f"proc{p}".encode()),
             patch("kiro_claw.session_pid.config_dir", return_value=tmp_path),
         ):
             await client._snapshot_process_tree()
 
-        assert client._child_pids == {200: 2000, 300: 3000, 400: 4000}
+        assert client._child_pids == {200: (2000, b"proc200"), 300: (3000, b"proc300"), 400: (4000, b"proc400")}
         # Verify child:parent lines written to kiro_pids.txt
         content = (tmp_path / "kiro_pids.txt").read_text()
         lines = {ln.strip() for ln in content.splitlines() if ln.strip()}
@@ -226,17 +215,18 @@ class TestSnapshotProcessTree:
         client = AcpClient.__new__(AcpClient)
         client._pid = 100
         # Simulate early snapshot already captured PID 200
-        client._child_pids = {200: 2000}
+        client._child_pids = {200: (2000, b"node")}
 
         with (
             patch("kiro_claw.acp.client._get_child_pids", return_value=[200, 300]),
             patch("kiro_claw.acp.client._get_start_time", side_effect=lambda p: p * 10),
+            patch("kiro_claw.acp.client._read_basename", side_effect=lambda p: f"proc{p}".encode()),
             patch("kiro_claw.session_pid.config_dir", return_value=tmp_path),
         ):
             await client._snapshot_process_tree()
 
-        # PID 200 keeps original start_time, PID 300 is new
-        assert client._child_pids == {200: 2000, 300: 3000}
+        # PID 200 keeps original record, PID 300 is new
+        assert client._child_pids == {200: (2000, b"node"), 300: (3000, b"proc300")}
 
 
 # ── 6. Session cleanup on cancellation ──

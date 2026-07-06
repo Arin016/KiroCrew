@@ -18,14 +18,14 @@ from aiohttp import web
 
 from kiro_claw.acp.client import _resolve_kiro_bin
 from kiro_claw.dashboard.state import DashboardState
-from kiro_claw.history import SEARCH_MIN_CHARS
+from kiro_claw.history import SEARCH_MIN_CHARS, _archive_dir
 from kiro_claw.mcp_discovery import (
     discover_servers_to_sync,
     register_servers_for_cc,
     sync_to_agent_config,
 )
 from kiro_claw.sandbox import wrap_argv
-from kiro_claw.security import redact_credentials, redact_exfiltration_urls
+from kiro_claw.security import redact, redact_credentials, redact_exfiltration_urls
 from kiro_claw.validation import sanitize_string
 
 logger = logging.getLogger(__name__)
@@ -713,11 +713,6 @@ async def api_session_archive_list(request: web.Request) -> web.Response:
 
 async def api_session_archive_read(request: web.Request) -> web.Response:
     """GET /api/session/archive/{name} — read a single archive file as JSONL text."""
-    from pathlib import Path
-
-    from kiro_claw.history import _archive_dir
-    from kiro_claw.security import redact_credentials, redact_exfiltration_urls
-
     name = request.match_info.get("name", "")
     if not name.endswith(".jsonl"):
         return web.json_response({"error": "invalid archive name"}, status=400)
@@ -749,6 +744,6 @@ async def api_session_archive_read(request: web.Request) -> web.Response:
         return web.json_response({"error": "unreadable archive"}, status=422)
     # Archives contain LLM output; redact credentials and exfiltration URLs before serving.
     redacted = await asyncio.to_thread(
-        lambda: redact_exfiltration_urls(redact_credentials(raw)[0])[0]
+        lambda: redact(raw)
     )
     return web.Response(text=redacted, content_type="application/x-ndjson")

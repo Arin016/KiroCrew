@@ -4,8 +4,8 @@ import { renderWithProviders } from './helpers'
 import ProjectDetailPage from '../pages/ProjectDetailPage'
 import type { ProjectRun } from '../types'
 
-vi.mock('../pages/aidlc/DagView', () => ({ default: ({ nodes }: any) => <div data-testid="dag-view">{nodes.length} nodes</div> }))
-vi.mock('../pages/aidlc/PhasedView', () => ({ default: ({ tasks }: any) => <div data-testid="phased-view">{tasks.length} tasks</div> }))
+vi.mock('../pages/aidlc/DagView', () => ({ default: ({ nodes }: { nodes: unknown[] }) => <div data-testid="dag-view">{nodes.length} nodes</div> }))
+vi.mock('../pages/aidlc/PhasedView', () => ({ default: ({ tasks }: { tasks: unknown[] }) => <div data-testid="phased-view">{tasks.length} tasks</div> }))
 vi.mock('../pages/aidlc/TaskDetailPanel', () => ({ default: () => <div data-testid="task-panel">Panel</div> }))
 
 const mockRun = (overrides: Partial<ProjectRun> = {}): ProjectRun => ({

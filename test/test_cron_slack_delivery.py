@@ -142,3 +142,58 @@ class TestFailurePathSlackGuarded:
         with pytest.raises(RuntimeError, match="job broke"):
             _run_callback(gw, job, stream_side_effect=RuntimeError("job broke"))
         gw.slack.post_message.assert_awaited_once()
+
+
+class TestCronJobIsSilent:
+    """_cron_job_is_silent resolves the parent cron job's silent flag (Mesh-2451).
+
+    A silent cron's subagent completions must not post to Slack. The gateway
+    delivery decision ORs this helper with info.silent, so a silent cron is
+    quiet even though spawn_run never propagates silent to the sub-agent.
+    """
+
+    def _gw_with_job(self, silent):
+        gw = _make_gateway()
+        gw.cron_svc = MagicMock()
+        job = MagicMock()
+        job.silent = silent
+        gw.cron_svc.get_job.return_value = job
+        return gw
+
+    def test_silent_cron_persistent_key(self) -> None:
+        gw = self._gw_with_job(True)
+        assert gw._cron_job_is_silent("cron:j1") is True
+        gw.cron_svc.get_job.assert_called_once_with("j1")
+
+    def test_silent_cron_ephemeral_key(self) -> None:
+        # Ephemeral session keys carry a run-id suffix: cron:{job_id}:{run_id}.
+        gw = self._gw_with_job(True)
+        assert gw._cron_job_is_silent("cron:j1:run-abc123") is True
+        gw.cron_svc.get_job.assert_called_once_with("j1")
+
+    def test_non_silent_cron(self) -> None:
+        gw = self._gw_with_job(False)
+        assert gw._cron_job_is_silent("cron:j1") is False
+
+    def test_unknown_job_returns_false(self) -> None:
+        gw = _make_gateway()
+        gw.cron_svc = MagicMock()
+        gw.cron_svc.get_job.return_value = None
+        assert gw._cron_job_is_silent("cron:does-not-exist") is False
+
+    def test_non_cron_key_returns_false_without_lookup(self) -> None:
+        gw = self._gw_with_job(True)
+        assert gw._cron_job_is_silent("dashboard:chat-1") is False
+        assert gw._cron_job_is_silent("slack:thread:123") is False
+        gw.cron_svc.get_job.assert_not_called()
+
+    def test_cron_svc_none_returns_false(self) -> None:
+        gw = _make_gateway()
+        gw.cron_svc = None
+        assert gw._cron_job_is_silent("cron:j1") is False
+
+    def test_malformed_cron_key_returns_false(self) -> None:
+        gw = self._gw_with_job(True)
+        # "cron:" with no job id → empty job_id → no match.
+        gw.cron_svc.get_job.return_value = None
+        assert gw._cron_job_is_silent("cron:") is False

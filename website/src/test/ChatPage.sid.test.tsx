@@ -14,7 +14,15 @@ import { createTestStore } from './helpers'
 import { switchSlot } from '../store/chatSlice'
 import { sseSlots } from '../store/dashboardSlice'
 import { ThemeProvider } from '../hooks/useTheme'
+import type { RootState } from '../store'
 import type { ChatSlot } from '../types'
+
+/** Deep-partial preloaded state for createTestStore — test fixtures intentionally
+ *  omit fields the reducer fills from initialState. */
+type PreloadState = {
+  dashboard?: Partial<RootState['dashboard']>
+  chat?: Partial<RootState['chat']>
+}
 
 // --- Stub child components (same as ChatPage.persist test) ---
 vi.mock('react-virtuoso', () => ({ Virtuoso: () => null }))
@@ -65,7 +73,7 @@ Object.defineProperty(window, 'matchMedia', {
     addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn(),
   })),
 })
-globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) }) as any
+globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) }) as unknown as typeof fetch
 
 import ChatPage from '../pages/ChatPage'
 
@@ -99,22 +107,23 @@ function renderChatPage(opts: {
   slots?: ChatSlot[]
 }) {
   const { route = '/chat', mode, activeSlot = null, slots = [] } = opts
-  const store = createTestStore({
+  const preload: PreloadState = {
     dashboard: {
       status: { platform: 'darwin' }, connected: true, slots, approvalMode: 'normal',
       channelTrusted: false, refreshTrigger: 0, unreadSlots: [], updateProgress: null,
       subagentRunning: {}, subagentDetails: {}, subagentText: {},
       sessionDefaultColor: null, sessionColorsMode: 'tint', sessionColorsPalette: 'horizon', sessionColorsIntensity: 'clear',
-    } as any,
+    },
     chat: {
       activeSlot, messages: [], slotRunning: false, slotStopping: false, slotState: 'idle',
       slotStatusDetail: {}, slotHasMore: false, slotOldestIndex: 0, loadingOlder: false,
       lastChunkSeq: undefined, history: [], historyHasMore: false, historyOffset: 0,
       pendingInput: null, slotContextPct: {}, voicePlaying: false, voiceAudio: null,
-      subagents: {}, toolLog: [], activityOpen: false, activityTab: 'tools', slotActivity: {}, slotHistory: [],
+      subagents: {}, toolLog: [], activityOpen: false, activityTab: 'logs', slotActivity: {}, slotHistory: [],
       slotMessages: {}, slotLoading: false,
-    } as any,
-  })
+    },
+  }
+  const store = createTestStore(preload as Partial<RootState>)
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const result = render(
     <QueryClientProvider client={qc}>
@@ -305,7 +314,7 @@ describe('ChatPage ?sid= URL parameter', () => {
   // router's navigate(); navigate(-1/+1) is a real POP (useNavigationType()==='POP').
   describe('browser Back/Forward (history POP) retrace', () => {
     function renderForPop(initialSlots: ChatSlot[]) {
-      const store = createTestStore({
+      const preload: PreloadState = {
         dashboard: {
           // connected: true is required — the POP-handler effect bails on
           // `if (!connected) return` (so offline tabs don't dispatch a
@@ -316,16 +325,17 @@ describe('ChatPage ?sid= URL parameter', () => {
           channelTrusted: false, refreshTrigger: 0, unreadSlots: [], updateProgress: null,
           subagentRunning: {}, subagentDetails: {}, subagentText: {},
           sessionDefaultColor: null, sessionColorsMode: 'tint', sessionColorsPalette: 'horizon', sessionColorsIntensity: 'clear',
-        } as any,
+        },
         chat: {
           activeSlot: null, messages: [], slotRunning: false, slotStopping: false, slotState: 'idle',
           slotStatusDetail: {}, slotHasMore: false, slotOldestIndex: 0, loadingOlder: false,
           lastChunkSeq: undefined, history: [], historyHasMore: false, historyOffset: 0,
           pendingInput: null, slotContextPct: {}, voicePlaying: false, voiceAudio: null,
-          subagents: {}, toolLog: [], activityOpen: false, activityTab: 'tools', slotActivity: {}, slotHistory: [],
+          subagents: {}, toolLog: [], activityOpen: false, activityTab: 'logs', slotActivity: {}, slotHistory: [],
           slotMessages: {}, slotLoading: false,
-        } as any,
-      })
+        },
+      }
+      const store = createTestStore(preload as Partial<RootState>)
       const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
       render(
         <QueryClientProvider client={qc}>

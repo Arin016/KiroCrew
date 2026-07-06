@@ -3,7 +3,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import DiffBlock from '../components/DiffBlock'
 
 beforeEach(() => {
-  globalThis.fetch = vi.fn(() => Promise.resolve({ ok: true })) as any
+  globalThis.fetch = vi.fn(() => Promise.resolve({ ok: true })) as unknown as typeof fetch
 })
 
 const simpleDiff = `--- a/file.ts
@@ -131,7 +131,7 @@ describe('DiffBlock', () => {
   })
 
   it('hides View file button when file does not exist', async () => {
-    globalThis.fetch = vi.fn(() => Promise.resolve({ ok: false, status: 404 })) as any
+    globalThis.fetch = vi.fn(() => Promise.resolve({ ok: false, status: 404 })) as unknown as typeof fetch
     render(<DiffBlock code={simpleDiff} complete={true} onFileOpen={() => {}} />)
     await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled())
     expect(screen.queryByTitle(/^Open .* in side panel$/)).not.toBeInTheDocument()
@@ -142,7 +142,7 @@ describe('DiffBlock', () => {
     // it asymmetric with the side-by-side / copy buttons. Now all three
     // are hover-gated together, and Open drops the icon for a plain
     // text label since the diff header already prefixes the file name.
-    globalThis.fetch = vi.fn(() => Promise.resolve({ ok: true, status: 200 })) as any
+    globalThis.fetch = vi.fn(() => Promise.resolve({ ok: true, status: 200 })) as unknown as typeof fetch
     render(<DiffBlock code={simpleDiff} complete={true} onFileOpen={() => {}} />)
     await waitFor(() => expect(screen.getByText('Open')).toBeInTheDocument())
     // No labeled icon variant.
@@ -159,7 +159,7 @@ describe('DiffBlock', () => {
     // emits "Created /path/to/file:" before the diff content. The
     // surrounding chat renderer extracts the path and passes it as a
     // hint so DiffBlock's Open file button still works.
-    globalThis.fetch = vi.fn(() => Promise.resolve({ ok: true, status: 200 })) as any
+    globalThis.fetch = vi.fn(() => Promise.resolve({ ok: true, status: 200 })) as unknown as typeof fetch
     const headerlessDiff = '+ # Hello\n+ World\n'
     render(<DiffBlock code={headerlessDiff} complete={true} onFileOpen={() => {}} pathHint="/tmp/hello.md" />)
     await waitFor(() => expect(screen.getByText('Open')).toBeInTheDocument())
@@ -167,7 +167,7 @@ describe('DiffBlock', () => {
   })
 
   it('headers in diff content win over pathHint', async () => {
-    globalThis.fetch = vi.fn(() => Promise.resolve({ ok: true, status: 200 })) as any
+    globalThis.fetch = vi.fn(() => Promise.resolve({ ok: true, status: 200 })) as unknown as typeof fetch
     // simpleDiff has a real +++ b/<path> header — that should win.
     render(<DiffBlock code={simpleDiff} complete={true} onFileOpen={() => {}} pathHint="/wrong/path" />)
     await waitFor(() => expect(screen.getByText('Open')).toBeInTheDocument())

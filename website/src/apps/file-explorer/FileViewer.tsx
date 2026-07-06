@@ -1,5 +1,5 @@
 import { FileText, AlertTriangle, FileQuestion, RefreshCw, Download, Copy, ShieldAlert } from 'lucide-react'
-import MarkdownRenderer from '../../components/MarkdownRenderer'
+import MarkdownRenderer, { BasePathCtx } from '../../components/MarkdownRenderer'
 import { EmptyState, Skeleton } from '../../components/ui'
 import { IMAGE_EXTS, LANG_BY_EXT } from './constants'
 import { extOf, basename, formatBytes, formatTime, isSensitivePath } from './utils'
@@ -25,7 +25,7 @@ function renderViewerBody({ ext, fileMeta, content, openFile }: { ext: string; f
     return <div className="mc-fe-img-wrap"><img src={src} alt={openFile} style={{ maxWidth: '100%', maxHeight: '100%' }} /></div>
   }
   if (ext === '.md' || ext === '.markdown') {
-    return <MarkdownRenderer content={content || ''} />
+    return <BasePathCtx.Provider value={openFile}><MarkdownRenderer content={content || ''} /></BasePathCtx.Provider>
   }
   const lang = LANG_BY_EXT[ext] || 'plaintext'
   const maxRun = (content || '').match(/`{3,}/g)?.reduce((max, s) => Math.max(max, s.length), 0) ?? 0

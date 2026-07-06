@@ -163,3 +163,53 @@ class TestBrowseFiles:
                 assert data["files"] == []
         finally:
             restricted.chmod(0o755)
+
+    @pytest.mark.asyncio
+    async def test_entries_include_mtime(self, tmp_path, mock_sel):
+        """Each dir and file entry carries an integer mtime so the activity
+        panel can offer a sort-by-date option."""
+        (tmp_path / "alpha").mkdir()
+        (tmp_path / "readme.md").write_text("hello")
+        async with TestClient(TestServer(_make_app())) as client:
+            resp = await client.get(f"/api/browse-files?path={tmp_path}")
+            data = await resp.json()
+            for entry in data["dirs"] + data["files"]:
+                assert "mtime" in entry, entry
+                assert isinstance(entry["mtime"], int)
+                assert entry["mtime"] > 0
+
+    @pytest.mark.asyncio
+    async def test_entry_unstattable_mtime_degrades_to_zero(self, tmp_path, mock_sel):
+        """A scandir entry whose stat() raises OSError (file removed mid-scan,
+        permission race, broken symlink under follow_symlinks=True) still
+        appears in the listing with mtime == 0; the directory listing must
+        degrade gracefully rather than 500. Pins the OSError->mtime=0 contract
+        that the happy-path test_entries_include_mtime does not exercise.
+        """
+        target = tmp_path / "racey.md"
+        target.write_text("x")
+
+        class _OSErrorEntry:
+            name = "racey.md"
+            path = str(target)
+
+            def is_dir(self, follow_symlinks: bool = True) -> bool:
+                return False
+
+            def is_file(self, follow_symlinks: bool = True) -> bool:
+                return True
+
+            def stat(self, follow_symlinks: bool = True):
+                raise OSError("stat raced (entry removed mid-scan)")
+
+        with patch(
+            "kiro_claw.dashboard.handlers.files.os.scandir",
+            return_value=[_OSErrorEntry()],
+        ):
+            async with TestClient(TestServer(_make_app())) as client:
+                resp = await client.get(f"/api/browse-files?path={tmp_path}")
+                # The unstattable entry must not break the whole listing.
+                assert resp.status == 200
+                data = await resp.json()
+                entry = next(e for e in data["files"] if e["name"] == "racey.md")
+                assert entry["mtime"] == 0

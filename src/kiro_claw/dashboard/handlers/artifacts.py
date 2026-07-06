@@ -243,7 +243,7 @@ async def api_artifacts_create(request: web.Request) -> web.Response:
             name=body.get("name", ""),
             content=body.get("content", ""),
             slug=body.get("slug"),
-            kind=body.get("kind", "widget"),
+            kind=body.get("kind"),
             source=body.get("source", "chat"),
             description=body.get("description", ""),
             tags=body.get("tags") or [],

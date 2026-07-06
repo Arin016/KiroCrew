@@ -687,6 +687,41 @@ class TestShutdown:
         await orch._shutdown()
         assert task.cancelled()
 
+    @pytest.mark.asyncio
+    async def test_shutdown_disarms_watchdog_before_reaping(self):
+        # The loop-stall watchdog's armed dump-then-exit timer MUST be cancelled
+        # at the very start of shutdown — before close_all()/cancel_all() trigger
+        # the child-reaping burst that can wedge the loop — or that wedge would
+        # _exit(1) the process mid-shutdown. Assert stop() runs and the heartbeat
+        # is cancelled, and that ordering: the watchdog is disarmed before the
+        # session/subagent teardown that does the reaping.
+        order: list[str] = []
+        orch = _make_orchestrator()
+        orch.cron_svc = None
+        orch.heartbeat_svc = None
+        orch.secretary_svc = None
+        orch.subagent_mgr = MagicMock()
+        orch.subagent_mgr.cancel_all = AsyncMock(side_effect=lambda: order.append("reap"))
+        orch.sessions = _mock_sessions()
+        orch.sessions.close_all = AsyncMock(side_effect=lambda: order.append("reap"))
+        ds = _mock_dashboard_state()
+        wd = MagicMock()
+        wd.stop = MagicMock(side_effect=lambda: order.append("watchdog_stop"))
+        hb = MagicMock()
+        hb.cancel = MagicMock(side_effect=lambda: order.append("heartbeat_cancel"))
+        ds._loop_watchdog = wd
+        ds._loop_heartbeat = hb
+        orch.dashboard_state = ds
+        orch._dashboard_runner = MagicMock()
+        orch._dashboard_runner.cleanup = AsyncMock()
+        await orch._shutdown()
+        wd.stop.assert_called_once()
+        hb.cancel.assert_called_once()
+        # Disarm happens before the first reaping step.
+        assert order[0] == "watchdog_stop"
+        assert "heartbeat_cancel" in order[:2]
+        assert order.index("watchdog_stop") < order.index("reap")
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Tests: _check_for_updates
@@ -3681,3 +3716,47 @@ class TestSlackSubagentCompletionPersistence:
 
         # Exactly ONE completion persisted (2 appends: user + assistant), not 4.
         assert orch.conv_log.append.call_count == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tests: _connect_slack resilience (Slack connect must never crash the gateway)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestConnectSlackResilience:
+    """A failing Slack socket-mode connect must fall back to dashboard-only."""
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_slack_disabled(self):
+        orch = _make_orchestrator()
+        orch._socket_client = None
+        assert await orch._connect_slack() is False
+
+    @pytest.mark.asyncio
+    async def test_returns_true_on_successful_connect(self, capsys):
+        orch = _make_orchestrator()
+        orch._socket_client = MagicMock()
+        orch._socket_client.connect = AsyncMock()
+        assert await orch._connect_slack() is True
+        orch._socket_client.connect.assert_awaited_once()
+        assert "connected to Slack" in capsys.readouterr().out
+
+    @pytest.mark.asyncio
+    async def test_connect_timeout_is_non_fatal(self, capsys):
+        # Reproduces the proxy/timeout crash: connect raises TimeoutError.
+        orch = _make_orchestrator()
+        orch._socket_client = MagicMock()
+        orch._socket_client.connect = AsyncMock(side_effect=asyncio.TimeoutError)
+        # Must NOT raise — gateway continues in dashboard-only mode.
+        assert await orch._connect_slack() is False
+        assert "dashboard-only" in capsys.readouterr().out
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self):
+        # CancelledError is BaseException, not Exception — real cancellation
+        # must still propagate (we only swallow ordinary connect failures).
+        orch = _make_orchestrator()
+        orch._socket_client = MagicMock()
+        orch._socket_client.connect = AsyncMock(side_effect=asyncio.CancelledError)
+        with pytest.raises(asyncio.CancelledError):
+            await orch._connect_slack()

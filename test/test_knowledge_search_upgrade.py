@@ -163,6 +163,65 @@ class TestSearchForContext:
         assert KNOWLEDGE_FETCH_TOP_N == 3
         assert KNOWLEDGE_FETCH_MAX_TOKENS == 4096
 
+    def test_context_card_carries_citation_fields(self):
+        try:
+            from kiro_claw.dashboard.handlers.knowledge import _build_context_card
+        except TypeError:
+            pytest.skip("requires Python 3.10+ (type union syntax)")
+        result = {
+            "id": "i1",
+            "title": "Auth Design",
+            "summary": "JWT summary",
+            "source": "src-1",
+            "source_type": "local_folder",
+            "source_name": "Opportunity Planner",
+            "source_uri": "/home/nrb/projects/op/src/",
+            "file_path": "/home/nrb/projects/op/src/auth.md",
+            "section_title": "Token Lifecycle",
+            "chunk_range": "10-25",
+            "match_type": "keyword+vector",
+        }
+        card = _build_context_card(result, content="body", tokens=1)
+        assert card["source_type"] == "local_folder"
+        assert card["source_name"] == "Opportunity Planner"
+        assert card["file_path"] == "/home/nrb/projects/op/src/auth.md"
+        assert card["section_title"] == "Token Lifecycle"
+        assert card["chunk_range"] == "10-25"
+
+    def test_context_card_artifact_slug(self):
+        try:
+            from kiro_claw.dashboard.handlers.knowledge import _build_context_card
+        except TypeError:
+            pytest.skip("requires Python 3.10+ (type union syntax)")
+        result = {
+            "id": "i3",
+            "title": "OP Vision",
+            "source": "art-src",
+            "source_type": "artifact",
+            "source_name": "Artifacts",
+            "artifact_slug": "op-vision",
+            "artifact_name": "OP Vision Plan",
+        }
+        card = _build_context_card(result, content="body", tokens=1)
+        assert card["source_type"] == "artifact"
+        assert card["artifact_slug"] == "op-vision"
+        assert card["artifact_name"] == "OP Vision Plan"
+
+    def test_context_card_without_location_degrades(self):
+        try:
+            from kiro_claw.dashboard.handlers.knowledge import _build_context_card
+        except TypeError:
+            pytest.skip("requires Python 3.10+ (type union syntax)")
+        result = {"id": "i2", "title": "DB Schema", "source": "src-2"}
+        card = _build_context_card(result, content="body", tokens=1)
+        # No location / no source meta -> citation fields are None, not errors.
+        assert card["section_title"] is None
+        assert card["chunk_range"] is None
+        assert card["source_name"] is None
+        assert card["source_type"] is None
+        assert card["file_path"] is None
+        assert card["artifact_slug"] is None
+
 
 class TestRedactMeta:
     """_redact_meta security helper."""

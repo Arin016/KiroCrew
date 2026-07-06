@@ -22,9 +22,9 @@ afterEach(() => {
 describe('RunInTerminalBtn – security boundary', () => {
   describe('no programmatic trigger path', () => {
     it('sendToTerminal is not exposed on window or globalThis', () => {
-      expect((window as any).sendToTerminal).toBeUndefined()
-      expect((globalThis as any).sendToTerminal).toBeUndefined()
-      expect((window as any).terminalRegistry).toBeUndefined()
+      expect((window as unknown as Record<string, unknown>).sendToTerminal).toBeUndefined()
+      expect((globalThis as unknown as Record<string, unknown>).sendToTerminal).toBeUndefined()
+      expect((window as unknown as Record<string, unknown>).terminalRegistry).toBeUndefined()
     })
 
     it('widget postMessage (mc-widget-action) cannot invoke sendToTerminal', () => {

@@ -119,7 +119,7 @@ class TestResetProcessTreeKill:
     @pytest.mark.asyncio
     async def test_reset_merges_fresh_child_scan(self, cfg):
         """reset() merges stored _child_pids with fresh _get_child_pids scan."""
-        provider = _make_provider(pid=12345, child_pids={12346: 100})
+        provider = _make_provider(pid=12345, child_pids={12346: (100, b"node")})
         mgr = SessionManager(cfg, provider_factory=_provider_factory(provider))
         await mgr.get_or_create("t1")
 
@@ -127,6 +127,7 @@ class TestResetProcessTreeKill:
             patch("kiro_claw.session.os.kill", side_effect=ProcessLookupError),
             patch("kiro_claw.acp.client._get_child_pids", return_value=[12347, 12348]),
             patch("kiro_claw.acp.client._get_start_time", return_value=999),
+            patch("kiro_claw.acp.client._read_basename", return_value=b"node"),
             patch("kiro_claw.acp.client._kill_escaped_children") as mock_sweep,
         ):
             await mgr.reset("t1")
@@ -139,7 +140,7 @@ class TestResetProcessTreeKill:
         assert 12346 in swept  # from stored _child_pids
         assert 12347 in swept  # from fresh scan
         assert 12348 in swept  # from fresh scan
-        assert swept[12347] == 999  # start_time from _get_start_time
+        assert swept[12347] == (999, b"node")  # (start_time, basename) from fresh scan
 
     @pytest.mark.asyncio
     async def test_reset_skips_kill_for_non_int_pid(self, cfg):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import faulthandler
 import importlib
 import json
 import logging
@@ -15,12 +16,14 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
+from kiro_claw.apps.backend import start_enabled_app_backends
 from kiro_claw.apps.builtins import BUILTIN_NAMES
 from kiro_claw.apps.hooks_integration import (
     init_hooks_system,
     on_gateway_shutdown,
     on_gateway_startup,
 )
+from kiro_claw.apps.manager import register_builtin_apps
 from kiro_claw.browser.setup import (
     get_extension_token,
     has_playwright_extension,
@@ -36,6 +39,7 @@ from kiro_claw.dashboard import (
     handlers_channel,
     handlers_instances,
     handlers_project,
+    openai_compat,
     stt_stream,
     ws,
 )
@@ -57,7 +61,14 @@ from kiro_claw.dashboard.handlers.auth_refresh import (
 )
 from kiro_claw.dashboard.handlers.knowledge import setup_knowledge_routes
 from kiro_claw.dashboard.handlers.tunnel import api_tunnel_status
-from kiro_claw.dashboard.origin import bind_address_for, build_allowed_origins, check_origin
+from kiro_claw.dashboard.loop_watchdog import LoopStallWatchdog
+from kiro_claw.dashboard.origin import (
+    bind_address_for,
+    build_allowed_origins,
+    check_origin,
+    resolve_dashboard_host,
+    should_canonicalize_host,
+)
 from kiro_claw.dashboard.port_reclaim import (
     FOREIGN_HOLDER,
     HEALTHY_PEER,
@@ -65,7 +76,11 @@ from kiro_claw.dashboard.port_reclaim import (
     reclaim_stale_gateway_port,
 )
 from kiro_claw.dashboard.state import _DEFAULT_PORT, DashboardState
-from kiro_claw.dashboard.token_auth import token_auth_middleware
+from kiro_claw.dashboard.token_auth import (
+    _is_spa_shell_request,
+    token_auth_middleware,
+)
+from kiro_claw.executors import subprocess_executor
 from kiro_claw.hooks import ScriptHookStore, set_global_hook_store
 from kiro_claw.instances.registry import InstancesRegistry
 from kiro_claw.instances.ssh_tunnel_manager import SshTunnelManager, TunnelState
@@ -107,6 +122,79 @@ logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 _DIST_DIR = _STATIC_DIR / "dist"
+
+
+# Base Content-Security-Policy applied to all dashboard responses.
+# See ``_apply_security_headers`` for the full rationale and the
+# instances-mode ``frame-src`` extension.
+_BASE_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' "
+    "https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
+    "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
+    "img-src 'self' data: blob: https:; "
+    "font-src 'self' data:; "
+    "connect-src 'self' ws://localhost:* ws://127.0.0.1:*; "
+    "media-src 'self' blob:; "
+    "worker-src 'self' blob:; "
+    "frame-src 'self' blob:{frame_src_extra}; "
+    "object-src 'none'; base-uri 'self'"
+)
+
+_INSTANCES_FRAME_SRC_EXTRA = (
+    " http://127.0.0.1:* http://localhost:* http://*.localhost:*"
+)
+
+# Permissions-Policy header. Chrome 143+ changed the default policy so
+# that clipboard-write is DENIED unless explicitly allowlisted, even in
+# secure contexts like http://localhost (crbug.com/414348233). Without
+# this header, ``navigator.clipboard.writeText`` fails with a permissions
+# policy violation, breaking the "Copy link" button on published
+# artifacts. Grant same-origin only; cross-origin remains denied.
+_PERMISSIONS_POLICY = (
+    "clipboard-write=(self), clipboard-read=(self)"
+)
+
+
+def _apply_security_headers(
+    resp: web.StreamResponse, app: web.Application
+) -> None:
+    """Apply cache-control and security headers to a dashboard response.
+
+    Sets four groups of headers (all via ``setdefault`` so handlers keep
+    the ability to override):
+
+    1. Cache-Control / Pragma / Expires — prevent Chrome from caching stale
+       assets across upgrades.
+    2. Content-Security-Policy — defense-in-depth against XSS. Primary XSS
+       protection is rehypeSanitize (strips script/iframe/form/foreignObject
+       at HAST level before rendering). CSP allows ``'unsafe-inline'``
+       because widget iframes (blob: sandbox) inherit parent CSP per W3C
+       spec — inline scripts in widgets need it. Widget isolation is
+       enforced by ``sandbox="allow-scripts"`` (no parent DOM access) +
+       widget-level CSP meta (connect-src 'none'). When the instances
+       feature is enabled, ``frame-src`` is extended with a loopback
+       wildcard so dynamically-connected tunnel ports can be framed.
+    3. Permissions-Policy — required by Chrome 143+ to permit
+       ``navigator.clipboard.writeText`` even on secure contexts. Without
+       an explicit ``clipboard-write=(self)`` grant, the Copy-link button
+       on published artifacts fails with a permissions-policy violation
+       (crbug.com/414348233).
+    """
+    resp.headers.setdefault(
+        "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0"
+    )
+    resp.headers.setdefault("Pragma", "no-cache")
+    resp.headers.setdefault("Expires", "0")
+
+    state = app.get("state")
+    instances_mgr = getattr(state, "instances_manager", None) if state else None
+    frame_src_extra = _INSTANCES_FRAME_SRC_EXTRA if instances_mgr is not None else ""
+    resp.headers.setdefault(
+        "Content-Security-Policy",
+        _BASE_CSP.format(frame_src_extra=frame_src_extra),
+    )
+    resp.headers.setdefault("Permissions-Policy", _PERMISSIONS_POLICY)
 
 
 def _register_dist_static_routes(app: web.Application, dist_dir: Path) -> None:
@@ -229,6 +317,7 @@ def _register_mcp_routes(app: web.Application) -> None:
     app.router.add_post("/api/browser-event", handlers.api_browser_event)
     app.router.add_post("/api/browser-auth-retry", handlers.api_browser_auth_retry)
     app.router.add_post("/api/browser/frame", handlers.api_browser_frame)
+    app.router.add_post("/api/browser/pump-audit", handlers.api_browser_pump_audit)
     app.router.add_get("/api/browser/config", handlers.api_browser_config_get)
     app.router.add_put("/api/browser/config", handlers.api_browser_config_save)
     app.router.add_post("/api/session-keepalive", handlers.api_session_keepalive)
@@ -419,6 +508,26 @@ async def _revive_intended_instances(
             logger.warning("Startup auto-reconnect of %s failed", inst.id, exc_info=True)
 
 
+def _dispatch_override_expiry_notification(state: DashboardState, notify_coro_factory: Any) -> bool:
+    """Schedule the Slack override-expiry DM unless disabled via config.
+
+    Gated by ``agent.notify_override_expiry`` (read live so it can be toggled
+    without a restart). Returns True if a notification task was scheduled, False
+    if skipped — either disabled via config or no running event loop.
+    """
+    if not KiroClawConfig.load().agent.notify_override_expiry:
+        return False
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.debug("No running event loop — Slack expiry notification skipped")
+        return False
+    task = loop.create_task(notify_coro_factory())
+    state._background_tasks.add(task)
+    task.add_done_callback(state._background_tasks.discard)
+    return True
+
+
 def _register_instances_hooks(
     app: web.Application, state: DashboardState, port: int
 ) -> None:
@@ -447,6 +556,9 @@ def _register_instances_hooks(
             registry,
             base_port=_cfg.instances.tunnel_base_port,
             ssh_compression=_cfg.instances.ssh_compression,
+            max_recovery_attempts=_cfg.instances.max_recovery_attempts,
+            recover_backoff_max_secs=_cfg.instances.recover_backoff_max_secs,
+            probe_failure_threshold=_cfg.instances.probe_failure_threshold,
         )
         state.instances_registry = registry
         state.instances_manager = manager
@@ -461,7 +573,21 @@ def _register_instances_hooks(
             "embedded instances to share first-party cookies.",
             port,
         )
-        await _revive_intended_instances(registry, manager)
+        # Auto-reconnect intended instances in the BACKGROUND rather than
+        # awaiting here. on_startup handlers fire during runner.setup(), BEFORE
+        # site.start() binds the HTTP port, so awaiting serial SSH-tunnel
+        # connects — each of which can hang for its full timeout when the
+        # network/DNS is down — delayed the port bind well past the desktop
+        # app's 30s gateway-wait window, producing a spurious "Retry/Quit"
+        # dialog and relaunch loop. Firing it as a tracked background task lets
+        # the port bind immediately; tunnels reconnect (or surface their error
+        # on the instance tab, which persists on failure) without gating
+        # startup.
+        revive_task = asyncio.create_task(
+            _revive_intended_instances(registry, manager)
+        )
+        state._background_tasks.add(revive_task)
+        revive_task.add_done_callback(state._background_tasks.discard)
 
     async def _instances_shutdown(app_: web.Application) -> None:
         manager = getattr(state, "instances_manager", None)
@@ -470,6 +596,40 @@ def _register_instances_hooks(
 
     app.on_startup.append(_instances_startup)
     app.on_cleanup.append(_instances_shutdown)
+
+
+def build_host_canonical_redirect(canonical_host: str) -> Any:
+    """Build the loopback-host-canonicalization middleware.
+
+    Converges non-canonical loopback aliases (127.0.0.1 / ::1 / localhost) onto
+    *canonical_host* with a 302 so the SPA's per-origin localStorage settings
+    are not split across hostnames. Only top-level document GET/HEAD navigations
+    are redirected (see :func:`should_canonicalize_host`); APIs, WebSockets, and
+    sub-resource fetches are untouched. Pass ``canonical_host=""`` (e.g. when not
+    local_only) to make the middleware a no-op so reverse-proxy / remote-host
+    deployments are never redirected.
+
+    Extracted to a module-level factory (rather than an inline closure) so the
+    runtime behavior — the 302, port+path+``?token=`` preservation, and the
+    gating — is unit-testable.
+    """
+
+    @web.middleware  # type: ignore[misc]
+    async def host_canonical_redirect(
+        request: web.Request,
+        handler: object,
+    ) -> web.StreamResponse:
+        if canonical_host and should_canonicalize_host(
+            request.host,
+            canonical_host,
+            method=request.method,
+            sec_fetch_dest=request.headers.get("Sec-Fetch-Dest"),
+        ):
+            # Preserve port + path + query (including ?token=) — only host changes.
+            raise web.HTTPFound(location=str(request.url.with_host(canonical_host)))
+        return await handler(request)  # type: ignore[operator]
+
+    return host_canonical_redirect
 
 
 async def start_dashboard(
@@ -691,6 +851,7 @@ async def start_dashboard(
     app.router.add_post("/api/chat/slots/{slot}/stop", chat.api_chat_slot_stop)
     app.router.add_post("/api/chat/slots/{slot}/interrupt", chat.api_chat_slot_interrupt)
     app.router.add_delete("/api/chat/slots/{slot}/queue/{queue_id}", chat.api_chat_slot_queue_cancel)
+    app.router.add_patch("/api/chat/slots/{slot}/queue/{queue_id}", chat.api_chat_slot_queue_edit)
     app.router.add_put("/api/chat/slots/{slot}/queue/order", chat.api_chat_slot_queue_reorder)
     app.router.add_delete("/api/chat/slots/{slot}", chat.api_chat_slot_delete)
     app.router.add_post("/api/chat/slots/{slot}/agent", chat.api_chat_slot_agent)
@@ -716,6 +877,7 @@ async def start_dashboard(
     app.router.add_delete("/api/workspaces/{name}", handlers.api_workspaces_delete)
     # Agents
     app.router.add_get("/api/agents/installed", handlers.api_agents_installed)
+    app.router.add_post("/api/agents/rescan", handlers.api_agents_rescan)
     app.router.add_get("/api/models", handlers.api_models)
     app.router.add_get("/api/effort-levels", handlers.api_effort_levels)
     app.router.add_get("/api/slash-commands", handlers.api_slash_commands)
@@ -786,6 +948,9 @@ async def start_dashboard(
     app.router.add_post("/api/chat/slots/{slot}/slack-link", chat.api_chat_slot_slack_link)
     app.router.add_post("/api/chat/slots/{slot}/slack-unlink", chat.api_chat_slot_slack_unlink)
     app.router.add_get("/api/slack/channels", chat.api_slack_channels)
+
+    # OpenAI-compatible API
+    app.router.add_post("/v1/chat/completions", openai_compat.api_completions)
 
     # Task runner (MCP routes via _register_mcp_routes; dashboard-only routes below)
     app.router.add_post("/api/taskrunner/plan", handlers.api_taskrunner_plan)
@@ -977,15 +1142,19 @@ async def start_dashboard(
     app.router.add_post("/api/apps/{name}/token", handlers.api_app_token)
 
     # Register built-in apps (idempotent — surfaces baked-in features in App Store)
-    from kiro_claw.apps.manager import register_builtin_apps
     register_builtin_apps()
 
     # Knowledge Library
     setup_knowledge_routes(app)
 
-    # Start backends for enabled apps
-    from kiro_claw.apps.backend import start_enabled_app_backends
-    started_apps = start_enabled_app_backends()
+    # Start backends for enabled apps on the subprocess_executor bulkhead: the
+    # startup stale-reap shells out to `ps` per orphan and may SIGTERM→sleep→
+    # SIGKILL for seconds, and start_app_backend blocks on a survival poll — all
+    # wedge-prone blocking work that would freeze this event loop if run inline.
+    # subprocess_executor (not the default to_thread pool) isolates it so a hung
+    # `ps` cannot starve asyncio's default executor (the RFC's bulkhead intent).
+    started_apps = await asyncio.get_running_loop().run_in_executor(
+        subprocess_executor(), start_enabled_app_backends)
     if started_apps:
         logger.info("Started %d app backend(s): %s", len(started_apps), ", ".join(started_apps))
 
@@ -1085,52 +1254,14 @@ async def start_dashboard(
     ) -> web.StreamResponse:
         resp = await handler(request)  # type: ignore[operator]
         if hasattr(resp, "headers"):
-            resp.headers.setdefault(
-                "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0"
-            )
-            resp.headers.setdefault("Pragma", "no-cache")
-            resp.headers.setdefault("Expires", "0")
-            # CSP: defense-in-depth against XSS. Restricts script sources to
-            # CSP: defense-in-depth layer. Primary XSS protection is rehypeSanitize
-            # (strips script/iframe/form/foreignObject at HAST level before rendering).
-            # CSP must allow 'unsafe-inline' because widget iframes (blob: sandbox)
-            # inherit parent CSP per W3C spec — inline scripts in widgets need it.
-            # Widget isolation is enforced by sandbox="allow-scripts" (no parent DOM
-            # access) + widget-level CSP meta (connect-src 'none').
-            # Instances feature: when enabled, allow framing of loopback origins
-            # so embedded remote dashboards render. We MUST use a loopback
-            # wildcard rather than enumerating connected ports: CSP is fixed at
-            # document-load time, but tunnels are connected dynamically *after*
-            # the page loads and get fresh allocator ports — enumerating only
-            # currently-connected ports would never include a port connected
-            # later in the same page session, so the iframe would be blocked.
-            # Scope stays local: 127.0.0.1 / localhost / *.localhost only, gated
-            # on the manager existing (i.e. instances.enabled), never a public
-            # wildcard. *.localhost is required because the embedded pane uses the
-            # parent dashboard's own hostname (see InstancesViewport srcFor) and
-            # users commonly open the dashboard on names like kiroclaw.localhost.
-            _frame_src_extra = ""
-            _st = request.app.get("state")
-            _imgr = getattr(_st, "instances_manager", None) if _st else None
-            if _imgr is not None:
-                _frame_src_extra = " http://127.0.0.1:* http://localhost:* http://*.localhost:*"
-            resp.headers.setdefault(
-                "Content-Security-Policy",
-                "default-src 'self'; "
-                "script-src 'self' 'unsafe-inline' "
-                "https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
-                "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
-                "img-src 'self' data: blob: https:; "
-                "font-src 'self' data:; "
-                "connect-src 'self' ws://localhost:* ws://127.0.0.1:*; "
-                "media-src 'self' blob:; "
-                "worker-src 'self' blob:; "
-                "frame-src 'self' blob:" + _frame_src_extra + "; "
-                "object-src 'none'; base-uri 'self'",
-            )
+            _apply_security_headers(resp, request.app)
         return resp  # type: ignore[return-value]
 
-    # SPA fallback: serve index.html for client-side React Router paths
+    # SPA fallback: serve index.html for client-side React Router paths.
+    # Uses the same _is_spa_shell_request predicate as the auth middleware so
+    # the two layers never drift. Bare /apps/{name} paths (no sub-path) are
+    # treated as SPA navigations and served index.html — this fixes browser
+    # refresh on e.g. /apps/code-review-sage which has no server-side route.
     @web.middleware  # type: ignore[misc]
     async def spa_fallback(
         request: web.Request,
@@ -1139,9 +1270,7 @@ async def start_dashboard(
         try:
             return await handler(request)  # type: ignore[operator]
         except web.HTTPNotFound:
-            if request.method == "GET" and not request.path.startswith(
-                ("/api/", "/assets/", "/static/", "/sprites/", "/vendor/", "/fonts/")
-            ):
+            if _is_spa_shell_request(request):
                 return await handlers.index(request)
             raise
 
@@ -1202,8 +1331,27 @@ async def start_dashboard(
     _internal_secret = os.urandom(16).hex()
     app["local_secret"] = _internal_secret
 
+    # Host canonicalization: converge loopback aliases (127.0.0.1 / localhost /
+    # kiroclaw.localhost) onto a single origin so the SPA's per-origin
+    # localStorage (theme, zoom, layout, notifications, ...) is never split
+    # across hostnames. localStorage keys on scheme://host:port, so reaching the
+    # dashboard on "localhost" one time and "kiroclaw.localhost" the next (e.g.
+    # `kiroclaw token` historically printed localhost while the gateway
+    # auto-opens kiroclaw.localhost) lands the browser in a different, empty
+    # bucket and all settings appear reset. The canonical host is resolved once
+    # at startup (it is stable for the gateway's lifetime). Only top-level
+    # document GET/HEAD navigations on a non-canonical loopback alias are
+    # redirected (see should_canonicalize_host); APIs, WebSockets, and
+    # sub-resource fetches are untouched — once the document settles on the
+    # canonical host every later request is already canonical. Disabled unless
+    # local_only, so reverse-proxy / remote-host deployments are never affected.
+    _canonical_host = resolve_dashboard_host(local_only) if local_only else ""
+
+    host_canonical_redirect = build_host_canonical_redirect(_canonical_host)
+
     # Explicit middleware ordering — self-documenting and immune to future insertions
     app.middlewares[:] = [
+        host_canonical_redirect,
         no_cache_middleware,
         csrf_middleware,
         token_auth_middleware(
@@ -1213,6 +1361,7 @@ async def start_dashboard(
                     "/api/delete-message",
                     "/api/browser-event",
                     "/api/browser/frame",
+                    "/api/browser/pump-audit",
                     "/api/session-keepalive",
                     "/api/session-tool-policy",
                     "/api/hooks/agent",
@@ -1233,11 +1382,13 @@ async def start_dashboard(
                     "/api/crons",  # CLI cron trigger; prefix covers all sub-routes (consistent with spawn/taskrunner)
                     "/api/taskrunner",
                     "/api/artifacts",
+                    "/v1/chat/completions",  # OpenAI-compat API
                 }
             ),
             internal_secret=_internal_secret,
             port=port,
             local_only=local_only,
+            spa_shell_handler=handlers.index,
         ),
         sel_audit_middleware,
         spa_fallback,
@@ -1265,6 +1416,19 @@ async def start_dashboard(
             )
             raise RuntimeError("dashboard_url requires token auth middleware")
 
+    # ── Loop stall watchdog shutdown ─────────────────────────────────────────
+    # Register the cleanup hook HERE, before ``runner.setup()`` freezes the
+    # app's signal lists (appending after setup raises "Cannot modify frozen
+    # list"). The watchdog itself is created after ``runner.setup()`` and stored
+    # on ``state._loop_watchdog``; this hook only fires at shutdown — long after
+    # that assignment — so the lazy ``getattr`` always resolves it.
+    async def _watchdog_shutdown(app_: web.Application) -> None:
+        wd = getattr(state, "_loop_watchdog", None)
+        if wd is not None:
+            wd.stop()
+
+    app.on_cleanup.append(_watchdog_shutdown)
+
     # ── Instances (multi-instance management) ────────────────────────────────
     # Register the opt-in instances startup/cleanup hooks HERE, before
     # ``runner.setup()`` freezes the app's signal lists. See
@@ -1288,11 +1452,29 @@ async def start_dashboard(
     # elapsed. If the loop wedges (e.g. a coroutine blocks it), this task can't
     # be scheduled, so the log goes SILENT during the stall and the first tick
     # after recovery reports a lag >> 10s — that gap IS the wedge, measured.
+    #
+    # The heartbeat also "beats" an off-loop stall watchdog (a daemon thread).
+    # The recovery-lag log above only fires if the loop EVER recovers; when it
+    # wedges permanently the log just goes silent. The watchdog runs on its own
+    # thread — unaffected by a loop thread blocked in a syscall — and dumps all
+    # thread stacks via faulthandler once the heartbeat stops beating, so the
+    # stuck frame lands in the log automatically instead of leaving us to sample
+    # the PID by hand.
+    _loop_watchdog = LoopStallWatchdog()
+
     async def _loop_heartbeat() -> None:
-        interval = 10.0
+        # 5s (not 10s) so the watchdog's armed dump-then-exit timer is re-petted
+        # at a finer resolution. The timer fires exit_after seconds after the
+        # LAST beat, so the real silence the gateway tolerates before _exit is
+        # ``exit_after - (time since last beat)`` — i.e. up to one interval less
+        # than exit_after. A 5s interval keeps that worst case at ~20s (vs ~15s
+        # at 10s), so genuinely-recoverable 15-20s stalls are less likely to be
+        # killed while still landing well under the Electron probe's kill window.
+        interval = 5.0
         while True:
             t0 = time.monotonic()
             await asyncio.sleep(interval)
+            _loop_watchdog.beat()
             lag = time.monotonic() - t0 - interval
             if lag > 1.0:
                 logger.warning("event-loop heartbeat: lag %.1fs (loop was blocked)", lag)
@@ -1312,6 +1494,16 @@ async def start_dashboard(
     _hb = asyncio.create_task(_loop_heartbeat())
     _hb.add_done_callback(_heartbeat_done)
     state._loop_heartbeat = _hb  # prevent GC
+
+    # Arm the stall watchdog only when faulthandler is enabled — i.e. under the
+    # real gateway entrypoint (see cli `gateway` dispatch). Tests that spin up
+    # the dashboard directly don't enable faulthandler, so they don't leak a
+    # watchdog thread; the heartbeat still beats it harmlessly.
+    if faulthandler.is_enabled():
+        _loop_watchdog.start()
+    # Stopped on shutdown via the ``_watchdog_shutdown`` on_cleanup hook,
+    # which is registered before ``runner.setup()`` freezes the signal lists.
+    state._loop_watchdog = _loop_watchdog  # prevent GC; stop on cleanup
 
     # Fire background MCP probe at startup (non-blocking)
     asyncio.create_task(handlers._bg_mcp_probe())
@@ -1362,13 +1554,7 @@ async def start_dashboard(
         except Exception:
             logger.debug("Could not clear trusted sessions", exc_info=True)
         # Slack notification (prevent GC with background_tasks set)
-        try:
-            loop = asyncio.get_running_loop()
-            task = loop.create_task(_notify_slack_override_expired())
-            state._background_tasks.add(task)
-            task.add_done_callback(state._background_tasks.discard)
-        except RuntimeError:
-            logger.debug("No running event loop — Slack expiry notification skipped")
+        _dispatch_override_expiry_notification(state, _notify_slack_override_expired)
 
     safety_override().on_expired = _on_override_expired
 

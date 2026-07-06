@@ -27,10 +27,18 @@ _PARENT_LINE_TRUNCATE = 500
 
 
 def _format_parent_snapshot(slot: _ChatSlot) -> str:
-    """Render parent user/assistant turns as a text block; tool/error rows skipped."""
+    """Render parent user/assistant turns as a text block; tool/error rows skipped.
+
+    Iterates newest-first and accumulates under the char cap, then re-reverses
+    so the block stays chronological. This keeps the *most recent* turns when
+    the transcript exceeds the cap — a side follow-up almost always concerns
+    what just happened, so dropping the tail (the old forward-iterate + break
+    behaviour) starved the model of exactly the relevant context. Mirrors
+    ``_format_side_history``.
+    """
     lines: list[str] = []
     total = 0
-    for entry in slot.messages:
+    for entry in reversed(slot.messages):
         role = entry.get("role", "")
         if role not in ("user", "assistant"):
             continue
@@ -44,6 +52,7 @@ def _format_parent_snapshot(slot: _ChatSlot) -> str:
         total += len(line)
     if not lines:
         return ""
+    lines.reverse()
     body = "\n".join(lines)
     return f"{_PARENT_SNAPSHOT_HEADER}\n{body}\n{_PARENT_SNAPSHOT_FOOTER}"
 

@@ -19,8 +19,10 @@ from kiro_claw.acp.client import (
     AcpError,
     AcpProcessDied,
     _format_acp_error,
+    _is_model_substitution_advisory,
     _make_unified_diff,
     _resolve_vendored_claude_acp,
+    _substitute_model_from_advisory,
     _vendored_claude_acp_roots,
 )
 from kiro_claw.acp.types import ACP_BACKEND_CLAUDE, AcpPromptStats
@@ -1000,40 +1002,52 @@ class TestIsOurChild:
 
         assert _is_our_child(999999) is False
 
-    def test_own_pid_is_python(self):
-        import os
-
-        from kiro_claw.acp.client import _get_start_time, _is_our_child
-
-        pid = os.getpid()
-        start = _get_start_time(pid)
-        # On build machines the exe may be 'brazilpython' which isn't in the
-        # allowlist. Just verify start-time logic works when exe matches.
-        result = _is_our_child(pid, expected_start=start)
-        # Either True (python in allowlist) or False (wrapper exe) — both valid
-        assert isinstance(result, bool)
-
-    def test_known_exe_with_matching_start(self, monkeypatch):
+    def test_own_pid_matches_with_basename(self, monkeypatch):
         import sys
 
         import kiro_claw.acp.client as client_mod
         from kiro_claw.acp.client import _is_our_child
 
         monkeypatch.setattr(client_mod, "_get_start_time", lambda pid: 42)
-        # Force macOS branch so subprocess_mod.check_output is used for exe
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(
+            client_mod.subprocess_mod,
+            "check_output",
+            lambda cmd, **kw: b"python3",
+        )
+        # With correct start_time and basename, should match
+        assert _is_our_child(999, expected_start=42, expected_basename=b"python3") is True
+
+    def test_basename_match_returns_true(self, monkeypatch):
+        import sys
+
+        import kiro_claw.acp.client as client_mod
+        from kiro_claw.acp.client import _is_our_child
+
+        monkeypatch.setattr(client_mod, "_get_start_time", lambda pid: 42)
         monkeypatch.setattr(sys, "platform", "darwin")
         monkeypatch.setattr(
             client_mod.subprocess_mod,
             "check_output",
             lambda cmd, **kw: b"node",
         )
-        assert _is_our_child(999, expected_start=42) is True
+        assert _is_our_child(999, expected_start=42, expected_basename=b"node") is True
 
-    def test_init_pid_not_ours(self):
-        from kiro_claw.acp.client import _get_start_time, _is_our_child
+    def test_basename_mismatch_returns_false(self, monkeypatch):
+        import sys
 
-        start = _get_start_time(1)
-        assert _is_our_child(1, expected_start=start) is False
+        import kiro_claw.acp.client as client_mod
+        from kiro_claw.acp.client import _is_our_child
+
+        monkeypatch.setattr(client_mod, "_get_start_time", lambda pid: 42)
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(
+            client_mod.subprocess_mod,
+            "check_output",
+            lambda cmd, **kw: b"firefox",
+        )
+        # Recorded as node, but live reads as firefox → recycled
+        assert _is_our_child(999, expected_start=42, expected_basename=b"node") is False
 
     def test_no_start_time_rejects(self):
         import os
@@ -1051,8 +1065,8 @@ class TestIsOurChild:
         # Our own PID with a wrong start time → should reject (recycled)
         assert _is_our_child(os.getpid(), expected_start=-999) is False
 
-    def test_deep_research_binary_recognized(self, monkeypatch):
-        """deep-research MCP binary should be recognized as our child."""
+    def test_novel_binary_tracked(self, monkeypatch):
+        """Any binary recorded at spawn is supervised — no allowlist needed."""
         import sys
 
         import kiro_claw.acp.client as client_mod
@@ -1063,9 +1077,19 @@ class TestIsOurChild:
         monkeypatch.setattr(
             client_mod.subprocess_mod,
             "check_output",
-            lambda cmd, **kw: b"deep-research",
+            lambda cmd, **kw: b"some-future-mcp-server",
         )
-        assert _is_our_child(999, expected_start=42) is True
+        # Novel binary name that would have failed the old allowlist
+        assert _is_our_child(999, expected_start=42, expected_basename=b"some-future-mcp-server") is True
+
+    def test_none_basename_denied_fail_closed(self, monkeypatch):
+        """When no basename was recorded, deny (fail-closed)."""
+        import kiro_claw.acp.client as client_mod
+        from kiro_claw.acp.client import _is_our_child
+
+        monkeypatch.setattr(client_mod, "_get_start_time", lambda pid: 42)
+        # No expected_basename → deny-by-default even with matching start_time
+        assert _is_our_child(999, expected_start=42, expected_basename=None) is False
 
 
 class TestKillEscapedChildren:
@@ -1090,7 +1114,7 @@ class TestKillEscapedChildren:
                 return  # alive check
             killed.append(pid)
 
-        def fake_is_our(pid, expected_start=None):
+        def fake_is_our(pid, expected_start=None, expected_basename=None):
             return pid != 200  # 200 is "recycled"
 
         monkeypatch.setattr(client_mod.os, "kill", fake_kill)
@@ -1108,9 +1132,39 @@ class TestChildPidsField:
 
     def test_cleared_on_reset(self):
         client = AcpClient()
-        client._child_pids = {123: None, 456: None}
+        client._child_pids = {123: (None, b"node"), 456: (None, b"python")}
         client._reset_state()
         assert client._child_pids == {}
+
+
+class TestReadBasename:
+    def test_reads_basename_from_ps(self, monkeypatch):
+        import sys
+
+        import kiro_claw.acp.client as client_mod
+        from kiro_claw.acp.client import _read_basename
+
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(
+            client_mod.subprocess_mod,
+            "check_output",
+            lambda cmd, **kw: b"/usr/local/bin/node\n",
+        )
+        assert _read_basename(123) == b"node"
+
+    def test_returns_none_on_error(self, monkeypatch):
+        import subprocess
+        import sys
+
+        import kiro_claw.acp.client as client_mod
+        from kiro_claw.acp.client import _read_basename
+
+        def raise_error(cmd, **kw):
+            raise subprocess.CalledProcessError(1, cmd)
+
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(client_mod.subprocess_mod, "check_output", raise_error)
+        assert _read_basename(999999) is None
 
 
 class TestProcessMessage:
@@ -4372,22 +4426,16 @@ class TestToolStallWatchdog:
         # Process is alive but silent: _read_message always returns None.
         client._read_message = AsyncMock(return_value=None)
         client._is_process_alive = lambda: True
-        # Recovery kills the wedged child; stub it so the test doesn't touch a
-        # real process (there is none — AcpClient was not spawned).
-        client._kill_process = AsyncMock()
 
         actions = []
         # Generous outer timeout; the watchdog must end the loop well before it.
         t0 = time.monotonic()
-        with pytest.raises(AcpProcessDied, match="tool stalled"):
-            async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
-                actions.append(action)
+        async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
+            actions.append(action)
         elapsed = time.monotonic() - t0
 
-        # No spurious actions, the wedged child was killed, and the turn-done
-        # waiter was released via the finally so no cooperative-stop hangs.
+        # Loop returned (did not hang) and emitted no spurious actions.
         assert actions == []
-        client._kill_process.assert_awaited_once()
         assert client._turn_done.is_set()
         # Prove it was the watchdog (stall window 0.2s) that ended the loop,
         # not the outer 30s deadline — guards against the watchdog branch being
@@ -4443,7 +4491,6 @@ class TestToolStallWatchdog:
         client._turn_done.clear()
         client._tool_dispatched = True  # a tool was dispatched this turn
         client._stale_eligible = False
-        client._kill_process = AsyncMock()
 
         # One progress frame, then silence forever.
         frames = [JsonRpcMessage(method="session/update", params={})]
@@ -4457,14 +4504,12 @@ class TestToolStallWatchdog:
         actions = []
         # The single frame is yielded as an action; then the watchdog must end
         # the loop well before this generous outer timeout.
-        with pytest.raises(AcpProcessDied, match="tool stalled"):
-            async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
-                actions.append(action)
+        async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
+            actions.append(action)
 
         # The flag was NOT cleared by the inbound frame (that's _dispatch_events'
-        # job), so the watchdog still fired, killed the child, and raised.
+        # job), so the watchdog still fired and the loop returned.
         assert client._tool_dispatched is True
-        client._kill_process.assert_awaited_once()
         assert client._turn_done.is_set()
 
     @pytest.mark.asyncio
@@ -4531,6 +4576,91 @@ class TestToolStallWatchdog:
 
         assert saw_result
         assert client._tool_dispatched is False
+
+
+class TestToolStallKeepalive:
+    """Keepalive pings (touch_activity) must prevent false tool-stall timeouts
+    for MCP tools that legitimately block (wait, spawn_sub_agents)."""
+
+    @pytest.mark.asyncio
+    async def test_keepalive_prevents_tool_stall(self, tmp_path, monkeypatch):
+        """When _last_activity is refreshed by keepalive pings, the tool stall
+        watchdog must NOT fire even if no JSON-RPC stdout data arrives."""
+        from kiro_claw.acp import client as acp_client
+
+        monkeypatch.setattr(acp_client, "_TOOL_STALL_TIMEOUT", 0.5)
+        monkeypatch.setattr(acp_client, "_READ_TIMEOUT", 0.05)
+
+        client = AcpClient(work_dir=tmp_path)
+        client._turn_done.clear()
+        client._tool_dispatched = True
+        client._stale_eligible = False
+        client._is_process_alive = lambda: True
+
+        # _read_message must actually yield to the event loop (simulating the
+        # real readline timeout) so the keepalive pinger gets scheduled.
+        async def slow_read(*_a, **_kw):
+            await asyncio.sleep(0.05)
+            return None
+
+        client._read_message = slow_read  # type: ignore[assignment]
+
+        # Simulate keepalive pings refreshing _last_activity every 0.1s
+        # while no stdout data arrives.
+        stop = asyncio.Event()
+
+        async def keepalive_pinger():
+            while not stop.is_set():
+                client.touch_activity()
+                await asyncio.sleep(0.1)
+
+        pinger = asyncio.create_task(keepalive_pinger())
+
+        actions: list[object] = []
+        # Outer timeout 1.2s > stall window 0.5s.  Without the fix, the
+        # watchdog would fire at ~0.5s.  With the fix, keepalive keeps it
+        # alive and the loop runs to the outer deadline.
+        t0 = time.monotonic()
+        async for action, _ in client._prompt_loop(req_id=1, timeout=1.2):
+            actions.append(action)
+        elapsed = time.monotonic() - t0
+
+        stop.set()
+        await pinger
+
+        # Loop ran to outer timeout (1.2s), NOT cut short by stall watchdog (0.5s).
+        assert elapsed >= 1.0, (
+            f"loop exited at {elapsed:.2f}s — watchdog fired despite keepalive"
+        )
+        assert actions == []
+
+    @pytest.mark.asyncio
+    async def test_genuine_stall_still_fires_without_keepalive(self, tmp_path, monkeypatch):
+        """Without keepalive pings, the tool stall watchdog must still fire
+        when a dispatched tool goes completely silent."""
+        from kiro_claw.acp import client as acp_client
+
+        monkeypatch.setattr(acp_client, "_TOOL_STALL_TIMEOUT", 0.2)
+        monkeypatch.setattr(acp_client, "_READ_TIMEOUT", 0.02)
+
+        client = AcpClient(work_dir=tmp_path)
+        client._turn_done.clear()
+        client._tool_dispatched = True
+        client._stale_eligible = False
+        client._read_message = AsyncMock(return_value=None)
+        client._is_process_alive = lambda: True
+        # No keepalive pings — _last_activity stays at construction time.
+
+        actions: list[object] = []
+        t0 = time.monotonic()
+        async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
+            actions.append(action)
+        elapsed = time.monotonic() - t0
+
+        # Watchdog fired quickly (at ~0.2s stall window), NOT the outer 30s.
+        assert elapsed < 5.0, f"watchdog didn't fire ({elapsed:.2f}s)"
+        assert actions == []
+        assert client._turn_done.is_set()
 
 
 class TestSendMessageStreamBranches:
@@ -5071,6 +5201,23 @@ class TestCaptureAvailableModels:
         am = c.available_models()
         assert [m["modelId"] for m in am] == ["claude-opus-4-8-1m", "claude-sonnet-4-6"]
         assert am[1]["description"] == ""  # missing description -> empty string
+        assert c._resolved_model_id == "claude-opus-4-8-1m"
+
+    def test_current_model_id_defaults_to_none(self):
+        c = self._client()
+        assert c._resolved_model_id is None
+
+    def test_current_model_id_not_overwritten_when_absent(self):
+        """A later session/new (or session/load) without currentModelId (e.g.
+        a minimal/degenerate response) must not clobber a previously-resolved
+        model id — _track_metadata's window resolution should keep working."""
+        c = self._client()
+        c._capture_available_models({
+            "models": {"currentModelId": "claude-opus-4.6", "availableModels": []}
+        })
+        assert c._resolved_model_id == "claude-opus-4.6"
+        c._capture_available_models({"models": {"availableModels": []}})
+        assert c._resolved_model_id == "claude-opus-4.6"
 
     def test_no_models_key_leaves_empty(self):
         c = self._client()
@@ -5813,3 +5960,1088 @@ class TestDispatchSubagentEvents:
         txt = [a for a in acts if a.text == "hello from sub"]
         assert len(tc) == 1 and tc[0].sub_session_id == "s1" and tc[0].title == "read"
         assert len(txt) == 1 and txt[0].sub_session_id == "s1"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_redacts_and_extracts_subagent_output(self):
+        """Sub-agent titles/text are LLM-influenced, so credentials + exfil URLs
+        must be scrubbed before they surface as EVENT_SUBAGENT_ACTIVITY. Also
+        the streamed text must be read from the nested ``content.text`` shape
+        kiro-cli 2.10.0 emits, not only the flat top-level ``text`` field."""
+        from kiro_claw.acp.types import (
+            EVENT_SUBAGENT_ACTIVITY,
+            JsonRpcMessage,
+        )
+
+        client = AcpClient()
+
+        frames = [
+            # tool_call_chunk with a credential embedded in the title
+            ("subagent_activity", JsonRpcMessage(params={
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "tool_call_chunk",
+                    "toolCallId": "tc-1",
+                    "title": "leak AKIAIOSFODNN7EXAMPLE now",
+                },
+            })),
+            # agent_message_chunk with the text under nested content.text (2.10.0)
+            ("subagent_activity", JsonRpcMessage(params={
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"text": "secret AKIAIOSFODNN7EXAMPLE here"},
+                },
+            })),
+            ("complete", JsonRpcMessage(result={"stopReason": "end_turn"})),
+        ]
+
+        async def _fake_loop(req_id, timeout):
+            for f in frames:
+                yield f
+
+        client._prompt_loop = _fake_loop  # type: ignore[assignment]
+
+        events = []
+        async for ev in client._dispatch_events(req_id=1, timeout=1.0):
+            events.append(ev)
+
+        acts = [e for e in events if e.kind == EVENT_SUBAGENT_ACTIVITY]
+        tc = [a for a in acts if a.tool_call_id == "tc-1"]
+        txt = [a for a in acts if a.text]
+        # Title redacted (credential scrubbed, no raw AKIA leaks through).
+        assert len(tc) == 1
+        assert "AKIAIOSFODNN7EXAMPLE" not in tc[0].title
+        assert "[REDACTED" in tc[0].title
+        # Nested content.text was extracted (robustness) AND redacted (security).
+        assert len(txt) == 1 and txt[0].sub_session_id == "s1"
+        assert "AKIAIOSFODNN7EXAMPLE" not in txt[0].text
+        assert "[REDACTED" in txt[0].text
+
+    @pytest.mark.asyncio
+    async def test_dispatch_subagent_text_edge_cases(self):
+        """Regression guards for the nested-vs-flat content.text extraction:
+        (1) an EMPTY nested content.text must not shadow a populated flat
+        top-level ``text`` (older payloads); (2) a reasoning/thinking content
+        block must NOT surface as user-visible sub-agent output; (3) a non-dict
+        ``content`` must not raise (the flat pre-port read tolerated it)."""
+        from kiro_claw.acp.types import (
+            EVENT_SUBAGENT_ACTIVITY,
+            JsonRpcMessage,
+        )
+
+        client = AcpClient()
+
+        frames = [
+            # (1) empty nested content.text + populated flat text -> flat wins
+            ("subagent_activity", JsonRpcMessage(params={
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"text": ""},
+                    "text": "flat fallback output",
+                },
+            })),
+            # (2) reasoning/thinking content block -> suppressed (no user text)
+            ("subagent_activity", JsonRpcMessage(params={
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "thinking", "text": "internal reasoning"},
+                },
+            })),
+            # (3) non-dict content -> must not crash; flat text used if present
+            ("subagent_activity", JsonRpcMessage(params={
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": ["a", "list", "block"],
+                    "text": "flat when content is a list",
+                },
+            })),
+            ("complete", JsonRpcMessage(result={"stopReason": "end_turn"})),
+        ]
+
+        async def _fake_loop(req_id, timeout):
+            for f in frames:
+                yield f
+
+        client._prompt_loop = _fake_loop  # type: ignore[assignment]
+
+        events = []
+        async for ev in client._dispatch_events(req_id=1, timeout=1.0):
+            events.append(ev)
+
+        txt = [e.text for e in events if e.kind == EVENT_SUBAGENT_ACTIVITY and e.text]
+        # (1) flat fallback surfaced when nested content.text is empty.
+        assert "flat fallback output" in txt
+        # (2) the reasoning block was never surfaced as sub-agent output.
+        assert "internal reasoning" not in txt
+        # (3) non-dict content did not crash and the flat text still surfaced.
+        assert "flat when content is a list" in txt
+
+
+class TestTrackMetadataCredits:
+    """_track_metadata extracts per-turn credits from kiro meteringUsage."""
+
+    @staticmethod
+    def _metadata_msg(credit_values, *, pct=17.1):
+        from kiro_claw.acp.types import JsonRpcMessage
+
+        return JsonRpcMessage(
+            method="_kiro.dev/metadata",
+            params={
+                "contextUsagePercentage": pct,
+                "meteringUsage": [
+                    {"value": v, "unit": "credit", "unitPlural": "credits"}
+                    for v in credit_values
+                ],
+            },
+        )
+
+    def test_accumulates_credits_from_metering_usage(self):
+        client = AcpClient()
+        client._track_metadata(self._metadata_msg([0.63]))
+        assert client.last_prompt_stats.credits == pytest.approx(0.63)
+        assert client.last_prompt_stats.context_pct == pytest.approx(17.1)
+
+    def test_sums_credits_across_notifications(self):
+        client = AcpClient()
+        client._track_metadata(self._metadata_msg([0.5]))
+        client._track_metadata(self._metadata_msg([0.25, 0.25]))
+        assert client.last_prompt_stats.credits == pytest.approx(1.0)
+
+    def test_ignores_non_credit_units_and_bad_values(self):
+        client = AcpClient()
+        msg = self._metadata_msg([])
+        msg.params["meteringUsage"] = [
+            {"value": 5, "unit": "token"},
+            {"value": "x", "unit": "credit"},
+            {"value": 0.4, "unit": "credit"},
+        ]
+        client._track_metadata(msg)
+        assert client.last_prompt_stats.credits == pytest.approx(0.4)
+
+    def test_metadata_without_metering_usage_leaves_credits_zero(self):
+        from kiro_claw.acp.types import JsonRpcMessage
+
+        client = AcpClient()
+        client._track_metadata(
+            JsonRpcMessage(
+                method="_kiro.dev/metadata",
+                params={"contextUsagePercentage": 12.5},
+            )
+        )
+        assert client.last_prompt_stats.credits == 0.0
+        assert client.last_prompt_stats.context_pct == pytest.approx(12.5)
+
+
+class TestTrackMetadataWindowResolution:
+    """_track_metadata derives context_window_tokens from the resolved model
+    when no usage_update has set it (kiro-cli 2.10+ no longer sends one)."""
+
+    @staticmethod
+    def _metadata_msg(pct):
+        from kiro_claw.acp.types import JsonRpcMessage
+
+        return JsonRpcMessage(
+            method="_kiro.dev/metadata",
+            params={"contextUsagePercentage": pct},
+        )
+
+    def test_resolves_1m_window_from_resolved_model_id(self):
+        client = AcpClient()
+        assert client._model == "auto"
+        client._resolved_model_id = "claude-opus-4.6"
+        client._track_metadata(self._metadata_msg(25.0))
+        assert client.last_prompt_stats.context_window_tokens == 1_000_000
+        assert client.last_prompt_stats.context_used_tokens == 250_000
+        assert client.last_prompt_stats.context_pct == pytest.approx(25.0)
+
+    def test_resolves_200k_window_for_200k_model(self):
+        client = AcpClient()
+        client._resolved_model_id = "claude-opus-4.5"
+        client._track_metadata(self._metadata_msg(50.0))
+        assert client.last_prompt_stats.context_window_tokens == 200_000
+        assert client.last_prompt_stats.context_used_tokens == 100_000
+
+    def test_falls_back_to_self_model_when_resolved_model_id_unset(self):
+        client = AcpClient()
+        client._model = "claude-sonnet-4.6"
+        client._track_metadata(self._metadata_msg(10.0))
+        assert client.last_prompt_stats.context_window_tokens == 1_000_000
+
+    def test_does_not_overwrite_window_already_set_by_usage_update(self):
+        client = AcpClient()
+        client._resolved_model_id = "claude-opus-4.5"  # would resolve to 200K
+        client.last_prompt_stats.context_window_tokens = 1_000_000
+        client.last_prompt_stats.context_used_tokens = 300_000
+        client._track_metadata(self._metadata_msg(50.0))
+        assert client.last_prompt_stats.context_window_tokens == 1_000_000
+        assert client.last_prompt_stats.context_pct == pytest.approx(50.0)
+
+    def test_no_model_resolvable_leaves_window_zero(self):
+        client = AcpClient()
+        client._model = ""
+        client._resolved_model_id = None
+        client._track_metadata(self._metadata_msg(5.0))
+        assert client.last_prompt_stats.context_window_tokens == 0
+
+    def test_malformed_pct_does_not_raise_or_update_stats(self):
+        from kiro_claw.acp.types import JsonRpcMessage
+
+        client = AcpClient()
+        client._resolved_model_id = "claude-opus-4.6"
+        client.last_prompt_stats.context_pct = 42.0
+        client._track_metadata(
+            JsonRpcMessage(method="_kiro.dev/metadata", params={"contextUsagePercentage": "not-a-number"})
+        )
+        assert client.last_prompt_stats.context_pct == 42.0
+        assert client.last_prompt_stats.context_window_tokens == 0
+
+
+class TestSubstitutionAdvisory:
+    """The model-substitution advisory (-32603 'Using X instead') is non-fatal.
+
+    claude-agent-acp returns a JSON-RPC -32603 error frame on session/new (and
+    related calls) when admin-tier / headless-tier policy substitutes the
+    requested model for another. The substitute is already live, so KiroClaw
+    must treat the advisory as a warning and keep the session, NOT raise.
+    """
+
+    def test_advisory_detected(self):
+        err = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": {
+                "details": (
+                    'Model "opus" is restricted by your organization\'s '
+                    "settings. Using global.anthropic.claude-sonnet-4-6[1m] "
+                    "instead."
+                )
+            },
+        }
+        assert _is_model_substitution_advisory(err) is True
+
+    def test_advisory_detected_data_is_plain_string(self):
+        err = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": 'Model "x" is restricted ... Using y instead.',
+        }
+        assert _is_model_substitution_advisory(err) is True
+
+    def test_real_internal_error_still_raises(self):
+        # A genuine -32603 with no substitution wording must NOT be swallowed.
+        err = {"code": -32603, "message": "Internal error", "data": "request_id: abc-123"}
+        assert _is_model_substitution_advisory(err) is False
+
+    def test_throttle_not_treated_as_advisory(self):
+        err = {
+            "code": -32603,
+            "message": "ThrottlingException: rate exceeded",
+            "data": "rate limit",
+        }
+        assert _is_model_substitution_advisory(err) is False
+
+    def test_wrong_code_not_advisory(self):
+        # Right wording, wrong code -> still raise (only -32603 qualifies).
+        err = {
+            "code": -32602,
+            "message": "Invalid params",
+            "data": {"details": 'Model "x" is restricted ... Using y instead'},
+        }
+        assert _is_model_substitution_advisory(err) is False
+
+    def test_non_dict_not_advisory(self):
+        assert _is_model_substitution_advisory("plain string") is False
+        assert _is_model_substitution_advisory(None) is False
+
+    def test_empty_or_missing_data_not_advisory(self):
+        assert _is_model_substitution_advisory({"code": -32603, "message": "Internal error"}) is False
+        assert _is_model_substitution_advisory({"code": -32603, "data": ""}) is False
+
+    def test_partial_wording_not_advisory(self):
+        # "is restricted" without the "Using X instead" half must not match.
+        err = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": {"details": 'Model "opus" is restricted by your settings.'},
+        }
+        assert _is_model_substitution_advisory(err) is False
+
+    @pytest.mark.asyncio
+    async def test_wait_for_response_returns_result_on_advisory(self, tmp_path):
+        """_wait_for_response returns the result (no raise) on a substitution advisory."""
+        client = AcpClient(work_dir=tmp_path)
+        advisory = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": {
+                "details": (
+                    'Model "opus" is restricted by your organization\'s '
+                    "settings. Using global.anthropic.claude-sonnet-4-6[1m] instead."
+                )
+            },
+        }
+        msg = MagicMock()
+        msg.is_response_for.return_value = True
+        msg.error = advisory
+        msg.result = {"sessionId": "abc-123"}
+        msg.method = None
+        msg.id = 7
+
+        async def _one_message(timeout=0.0):
+            return msg
+
+        client._read_message = _one_message  # type: ignore[assignment]
+        out = await client._wait_for_response(7, timeout=1.0)
+        assert out == {"sessionId": "abc-123"}
+
+    @pytest.mark.asyncio
+    async def test_wait_for_response_raises_on_real_error(self, tmp_path):
+        """A genuine -32603 (no substitution wording) still raises AcpError."""
+        client = AcpClient(work_dir=tmp_path)
+        real_err = {"code": -32603, "message": "Internal error", "data": "request_id: zzz"}
+        msg = MagicMock()
+        msg.is_response_for.return_value = True
+        msg.error = real_err
+        msg.result = None
+        msg.method = None
+        msg.id = 9
+
+        async def _one_message(timeout=0.0):
+            return msg
+
+        client._read_message = _one_message  # type: ignore[assignment]
+        with pytest.raises(AcpError):
+            await client._wait_for_response(9, timeout=1.0)
+
+    @pytest.mark.asyncio
+    async def test_wait_for_response_records_substitute_on_error_only_advisory(self, tmp_path):
+        """Spec-real advisory frame: error set, result is None.
+
+        A spec-compliant JSON-RPC response carries either result or error,
+        not both. On the realistic error-only advisory (no co-located result):
+          1. ``_wait_for_response`` must NOT raise; it returns ``{}``.
+          2. It MUST record the gateway-named substitute model on
+             ``self._last_substitution_model`` so the session/new caller can
+             adopt it and re-issue creation. Without this, ``_session_id``
+             would silently become None and the next call would crash on the
+             ``Cannot set config option before session is initialized`` guard.
+        """
+        client = AcpClient(work_dir=tmp_path)
+        advisory = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": {
+                "details": (
+                    'Model "opus" is restricted by your organization\'s '
+                    "settings. Using global.anthropic.claude-sonnet-4-6[1m] instead."
+                )
+            },
+        }
+        msg = MagicMock()
+        msg.is_response_for.return_value = True
+        msg.error = advisory
+        msg.result = None  # spec-real: error-only frame, no co-located result
+        msg.method = None
+        msg.id = 11
+
+        async def _one_message(timeout=0.0):
+            return msg
+
+        client._read_message = _one_message  # type: ignore[assignment]
+        out = await client._wait_for_response(11, timeout=1.0)
+
+        assert out == {}, "advisory must surface as empty dict, not raise"
+        assert (
+            client._last_substitution_model
+            == "global.anthropic.claude-sonnet-4-6[1m]"
+        ), "substitute model must be recorded for the session/new caller to adopt"
+
+
+class TestSubstituteModelExtractor:
+    """_substitute_model_from_advisory pulls the gateway-served model id out of
+    the -32603 advisory so the session/new caller can adopt it."""
+
+    def test_extracts_versioned_substitute(self):
+        err = {
+            "code": -32603,
+            "data": {
+                "details": (
+                    'Model "opus" is restricted by your organization\'s '
+                    "settings. Using global.anthropic.claude-sonnet-4-6[1m] instead."
+                )
+            },
+        }
+        assert (
+            _substitute_model_from_advisory(err)
+            == "global.anthropic.claude-sonnet-4-6[1m]"
+        )
+
+    def test_extracts_with_trailing_period_and_quotes(self):
+        err = {
+            "code": -32603,
+            "data": {"details": "Model X is restricted. Using claude-opus-4-6[1m] instead."},
+        }
+        assert _substitute_model_from_advisory(err) == "claude-opus-4-6[1m]"
+
+    def test_returns_none_for_real_internal_error(self):
+        err = {"code": -32603, "data": "request_id: abc-123"}
+        assert _substitute_model_from_advisory(err) is None
+
+    def test_returns_none_for_wrong_code(self):
+        err = {"code": -32602, "data": {"details": "is restricted ... Using y instead"}}
+        assert _substitute_model_from_advisory(err) is None
+
+    def test_returns_none_for_non_dict(self):
+        assert _substitute_model_from_advisory(None) is None
+        assert _substitute_model_from_advisory("plain") is None
+
+
+class TestSubstitutionFollow:
+    """session/new returning a substitution advisory carries NO sessionId.
+    _new_session_following_substitution must adopt the substitute model and
+    re-issue session/new so a real session is actually created -- otherwise the
+    next step (set_config_option) crashes on the uninitialized-session guard.
+    This is the no-sessionId path the earlier suite did not cover.
+    """
+
+    def _advisory_resp(self):
+        # Mirrors what _wait_for_response returns on the advisory: empty dict,
+        # plus it sets _last_substitution_model as a side effect (simulated here).
+        return {}
+
+    @pytest.mark.asyncio
+    async def test_adopts_substitute_and_reissues(self, tmp_path):
+        client = AcpClient(work_dir=tmp_path)
+        client._acp_backend = ACP_BACKEND_CLAUDE
+        client._model = "global.anthropic.claude-opus-4-8[1m]"
+        # Avoid touching the real filesystem seeding.
+        client._write_claude_local_settings = MagicMock()  # type: ignore[assignment]
+
+        sent = []
+
+        async def _send(method, params):
+            sent.append(method)
+            return len(sent)
+
+        # First wait: advisory (no sessionId) + record substitute, as the real
+        # _wait_for_response does. Second wait: real session on the substitute.
+        calls = {"n": 0}
+
+        async def _wait(req_id, timeout=0.0):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                client._last_substitution_model = "global.anthropic.claude-sonnet-4-6[1m]"
+                return {}  # advisory frame -> no sessionId
+            return {"sessionId": "real-sess-1"}
+
+        client._send_request = _send  # type: ignore[assignment]
+        client._wait_for_response = _wait  # type: ignore[assignment]
+
+        resp = await client._new_session_following_substitution()
+
+        assert resp.get("sessionId") == "real-sess-1"
+        # Adopted the gateway-served model and re-seeded settings before retry.
+        assert client._model == "global.anthropic.claude-sonnet-4-6[1m]"
+        client._write_claude_local_settings.assert_called_once()
+        # Exactly two session/new issues: the original + one retry (bounded).
+        assert sent.count("session/new") == 2
+
+    @pytest.mark.asyncio
+    async def test_happy_path_no_retry(self, tmp_path):
+        client = AcpClient(work_dir=tmp_path)
+        client._acp_backend = ACP_BACKEND_CLAUDE
+        client._model = "global.anthropic.claude-sonnet-4-6[1m]"
+        client._write_claude_local_settings = MagicMock()  # type: ignore[assignment]
+
+        sent = []
+
+        async def _send(method, params):
+            sent.append(method)
+            return len(sent)
+
+        async def _wait(req_id, timeout=0.0):
+            return {"sessionId": "sess-ok"}
+
+        client._send_request = _send  # type: ignore[assignment]
+        client._wait_for_response = _wait  # type: ignore[assignment]
+
+        resp = await client._new_session_following_substitution()
+
+        assert resp.get("sessionId") == "sess-ok"
+        # No substitution -> no re-seed, single session/new.
+        client._write_claude_local_settings.assert_not_called()
+        assert sent.count("session/new") == 1
+
+    @pytest.mark.asyncio
+    async def test_no_infinite_retry_when_substitute_unparseable(self, tmp_path):
+        # Advisory fired but substitute could not be parsed (None) -> we do NOT
+        # retry; caller gets an empty resp and raises a clear error upstream.
+        client = AcpClient(work_dir=tmp_path)
+        client._acp_backend = ACP_BACKEND_CLAUDE
+        client._model = "global.anthropic.claude-opus-4-8[1m]"
+        client._write_claude_local_settings = MagicMock()  # type: ignore[assignment]
+
+        sent = []
+
+        async def _send(method, params):
+            sent.append(method)
+            return len(sent)
+
+        async def _wait(req_id, timeout=0.0):
+            client._last_substitution_model = None  # unparseable
+            return {}
+
+        client._send_request = _send  # type: ignore[assignment]
+        client._wait_for_response = _wait  # type: ignore[assignment]
+
+        resp = await client._new_session_following_substitution()
+
+        assert resp.get("sessionId") is None
+        client._write_claude_local_settings.assert_not_called()
+        assert sent.count("session/new") == 1  # no retry
+
+    @pytest.mark.asyncio
+    async def test_no_retry_when_substitute_same_as_current(self, tmp_path):
+        # Defensive: if the gateway "substitutes" to the model we already asked
+        # for, don't loop -- treat as terminal (no retry).
+        client = AcpClient(work_dir=tmp_path)
+        client._acp_backend = ACP_BACKEND_CLAUDE
+        client._model = "global.anthropic.claude-sonnet-4-6[1m]"
+        client._write_claude_local_settings = MagicMock()  # type: ignore[assignment]
+
+        sent = []
+
+        async def _send(method, params):
+            sent.append(method)
+            return len(sent)
+
+        async def _wait(req_id, timeout=0.0):
+            client._last_substitution_model = "global.anthropic.claude-sonnet-4-6[1m]"
+            return {}
+
+        client._send_request = _send  # type: ignore[assignment]
+        client._wait_for_response = _wait  # type: ignore[assignment]
+
+        resp = await client._new_session_following_substitution()
+
+        assert resp.get("sessionId") is None
+        client._write_claude_local_settings.assert_not_called()
+        assert sent.count("session/new") == 1
+
+
+class TestSubstitutionWrappersAndRedaction:
+    """Pin the wrapper raise paths and the dual-redaction discipline applied to
+    backend-derived strings before they hit logger sinks (which fan out to the
+    dashboard activity feed and Slack).
+    """
+
+    @pytest.mark.asyncio
+    async def test_initialize_session_raises_on_no_sessionid(self, tmp_path):
+        """If the helper still returns no sessionId after the substitution-follow
+        retry, _initialize_session raises AcpError loudly instead of letting the
+        next handshake step crash on the opaque "Cannot set config option before
+        session is initialized" guard.
+        """
+        client = AcpClient(work_dir=tmp_path)
+        client._acp_backend = ACP_BACKEND_CLAUDE
+        client._process = MagicMock()
+        client._process.returncode = None
+
+        async def _send(method, params):
+            return 1
+
+        async def _wait(req_id, timeout=0.0):
+            return {"protocolVersion": 1, "agentCapabilities": {"loadSession": False}}
+
+        client._send_request = _send  # type: ignore[assignment]
+        client._wait_for_response = _wait  # type: ignore[assignment]
+
+        async def _no_session(*args, **kwargs):
+            return {}
+
+        client._new_session_following_substitution = _no_session  # type: ignore[assignment]
+
+        with pytest.raises(AcpError) as excinfo:
+            await client._initialize_session()
+        assert "session/new returned no sessionId" in str(excinfo.value)
+        assert "the backend did not create a session" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_initialize_session_message_omits_substitute_when_unchanged(self, tmp_path):
+        """When the helper returns no sessionId and self._model is unchanged
+        (no substitution happened), the AcpError text MUST NOT include the
+        "even after adopting substitute model" clause.
+        """
+        client = AcpClient(work_dir=tmp_path)
+        client._acp_backend = ACP_BACKEND_CLAUDE
+        client._process = MagicMock()
+        client._process.returncode = None
+        client._model = "global.anthropic.claude-opus-4-8[1m]"
+
+        async def _send(method, params):
+            return 1
+
+        async def _wait(req_id, timeout=0.0):
+            return {"protocolVersion": 1, "agentCapabilities": {"loadSession": False}}
+
+        client._send_request = _send  # type: ignore[assignment]
+        client._wait_for_response = _wait  # type: ignore[assignment]
+
+        async def _no_session_no_substitution(*args, **kwargs):
+            # Helper returned without changing self._model -> no substitution.
+            return {}
+
+        client._new_session_following_substitution = _no_session_no_substitution  # type: ignore[assignment]
+
+        with pytest.raises(AcpError) as excinfo:
+            await client._initialize_session()
+        assert "even after adopting substitute model" not in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_initialize_session_message_includes_substitute_when_changed(self, tmp_path):
+        """When the helper adopted a substitute (self._model != model_before),
+        the AcpError text MUST include the "even after adopting substitute
+        model {...}" clause.
+        """
+        client = AcpClient(work_dir=tmp_path)
+        client._acp_backend = ACP_BACKEND_CLAUDE
+        client._process = MagicMock()
+        client._process.returncode = None
+        client._model = "global.anthropic.claude-opus-4-8[1m]"
+
+        async def _send(method, params):
+            return 1
+
+        async def _wait(req_id, timeout=0.0):
+            return {"protocolVersion": 1, "agentCapabilities": {"loadSession": False}}
+
+        client._send_request = _send  # type: ignore[assignment]
+        client._wait_for_response = _wait  # type: ignore[assignment]
+
+        async def _no_session_with_substitution(*args, **kwargs):
+            # Helper adopted the gateway-served substitute before giving up.
+            client._model = "global.anthropic.claude-sonnet-4-6[1m]"
+            return {}
+
+        client._new_session_following_substitution = _no_session_with_substitution  # type: ignore[assignment]
+
+        with pytest.raises(AcpError) as excinfo:
+            await client._initialize_session()
+        assert "even after adopting substitute model" in str(excinfo.value)
+        assert "claude-sonnet-4-6" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_new_session_following_substitution_redacts_log_payload(self, tmp_path):
+        """The substitute model logged in _new_session_following_substitution
+        MUST flow through redact_exfiltration_urls + redact_credentials before
+        reaching logger.warning. Drives the helper with a substitute that
+        contains a URL-shaped token and asserts the emitted log payload was
+        redacted.
+        """
+        client = AcpClient(work_dir=tmp_path)
+        client._acp_backend = ACP_BACKEND_CLAUDE
+        client._model = "global.anthropic.claude-opus-4-8[1m]"
+        client._write_claude_local_settings = MagicMock()  # type: ignore[assignment]
+
+        # Inject a substitute that embeds an AWS access-key-shaped substring
+        # so the dual redactor heuristic actually fires (redact_exfiltration_urls
+        # matches the URL because the query carries an AKIA token, and
+        # redact_credentials matches the standalone AKIA pattern). A bare
+        # arbitrary URL is too tame for the heuristic and would leave the test
+        # asserting on a no-op pass-through.
+        url_shaped = "http://attacker.example.com/exfil?token=AKIAIOSFODNN7EXAMPLE"
+
+        sent: list[str] = []
+
+        async def _send(method, params):
+            sent.append(method)
+            return len(sent)
+
+        wait_calls = {"n": 0}
+
+        async def _wait(req_id, timeout=0.0):
+            wait_calls["n"] += 1
+            if wait_calls["n"] == 1:
+                client._last_substitution_model = url_shaped
+                return {}  # no sessionId on first call
+            return {"sessionId": "real-sess"}
+
+        client._send_request = _send  # type: ignore[assignment]
+        client._wait_for_response = _wait  # type: ignore[assignment]
+
+        with patch("kiro_claw.acp.client.logger") as mock_logger:
+            await client._new_session_following_substitution()
+
+        # Find the warning call that mentions the substitution adoption.
+        adopt_calls = [
+            c for c in mock_logger.warning.call_args_list
+            if c.args and "adopting gateway-served model" in c.args[0]
+        ]
+        assert adopt_calls, "expected an 'adopting gateway-served model' warning"
+        # The redacted payload is the second positional argument.
+        emitted = adopt_calls[0].args[1]
+        # The credential MUST be gone. The URL MUST be replaced with the
+        # redactor diagnostic marker. The redactor preserves the host name
+        # inside "[REDACTED: suspicious URL to <host>]" so operators can
+        # investigate the leak source -- that is BY DESIGN, not a bypass.
+        assert "AKIAIOSFODNN7EXAMPLE" not in emitted, (
+            "AWS access-key substring MUST be redacted before logging"
+        )
+        assert "REDACTED" in emitted, (
+            "the redactor marker MUST appear, proving the URL was rewritten"
+        )
+        assert "http://attacker.example.com/exfil?token=" not in emitted, (
+            "the bare exfil URL MUST NOT be emitted verbatim"
+        )
+
+    @pytest.mark.asyncio
+    async def test_initialize_session_redacts_model_in_info_log(self, tmp_path):
+        """The "ACP session created: ... (model=...)" info log MUST flow
+        self._model through dual-redaction. Drive _initialize_session through
+        the happy path with a URL-shaped self._model and confirm the emitted
+        info log does not leak it.
+        """
+        client = AcpClient(work_dir=tmp_path)
+        client._acp_backend = ACP_BACKEND_CLAUDE
+        client._process = MagicMock()
+        client._process.returncode = None
+        # AWS access-key-shaped substring guarantees both redactors fire (URL
+        # query matches _EXFIL_PATTERNS; standalone key matches _CREDENTIAL_PATTERNS).
+        client._model = "http://attacker.example.com/m?token=AKIAIOSFODNN7EXAMPLE"
+
+        async def _send(method, params):
+            return 1
+
+        async def _wait(req_id, timeout=0.0):
+            return {"protocolVersion": 1, "agentCapabilities": {"loadSession": False}}
+
+        client._send_request = _send  # type: ignore[assignment]
+        client._wait_for_response = _wait  # type: ignore[assignment]
+
+        async def _ok_session(*args, **kwargs):
+            return {"sessionId": "sess-ok"}
+
+        client._new_session_following_substitution = _ok_session  # type: ignore[assignment]
+        client._capture_available_models = MagicMock()  # type: ignore[assignment]
+        client._store_session_config = MagicMock()  # type: ignore[assignment]
+
+        async def _drain():
+            return None
+
+        client._drain_notifications = _drain  # type: ignore[assignment]
+
+        with patch("kiro_claw.acp.client.logger") as mock_logger:
+            await client._initialize_session()
+
+        info_calls = [
+            c for c in mock_logger.info.call_args_list
+            if c.args and "ACP session created" in c.args[0]
+        ]
+        assert info_calls, "expected an 'ACP session created' info log"
+        # Format: logger.info("ACP session created: %s (model=%s)", sid, model_log)
+        # The third positional arg is the redacted model.
+        emitted_model = info_calls[0].args[2]
+        # See sibling test for the design note: redactor keeps the host as a
+        # diagnostic label inside "[REDACTED: suspicious URL to <host>]".
+        assert "AKIAIOSFODNN7EXAMPLE" not in emitted_model, (
+            "AWS access-key substring MUST be redacted before logging"
+        )
+        assert "REDACTED" in emitted_model, (
+            "the redactor marker MUST appear, proving the URL was rewritten"
+        )
+        assert "http://attacker.example.com/m?token=" not in emitted_model, (
+            "the bare exfil URL MUST NOT be emitted verbatim"
+        )
+
+    @pytest.mark.asyncio
+    async def test_initialize_session_acperror_redacts_substitute_model(self, tmp_path):
+        """The AcpError raised on no-sessionId-after-substitution MUST flow
+        self._model through dual-redaction before interpolating it into the
+        message. AcpError propagates to the dashboard activity feed and Slack
+        via the same path as the logger sinks, so the redaction discipline
+        applies to exception messages too -- not just logger.* calls.
+        """
+        client = AcpClient(work_dir=tmp_path)
+        client._acp_backend = ACP_BACKEND_CLAUDE
+        client._process = MagicMock()
+        client._process.returncode = None
+        client._model = "global.anthropic.claude-opus-4-8[1m]"
+
+        async def _send(method, params):
+            return 1
+
+        async def _wait(req_id, timeout=0.0):
+            return {"protocolVersion": 1, "agentCapabilities": {"loadSession": False}}
+
+        client._send_request = _send  # type: ignore[assignment]
+        client._wait_for_response = _wait  # type: ignore[assignment]
+
+        async def _no_session_with_credshaped(*args, **kwargs):
+            # Helper adopted a credential-shaped substitute then gave up without
+            # producing a sessionId. Drives the "even after adopting substitute
+            # model X" branch where X is credential-shaped.
+            client._model = "AKIAIOSFODNN7EXAMPLE"
+            return {}
+
+        client._new_session_following_substitution = _no_session_with_credshaped  # type: ignore[assignment]
+
+        with pytest.raises(AcpError) as excinfo:
+            await client._initialize_session()
+
+        msg = str(excinfo.value)
+        assert "AKIAIOSFODNN7EXAMPLE" not in msg, (
+            "AWS access-key-shaped substitute MUST be redacted before reaching the AcpError message"
+        )
+        assert "even after adopting substitute model" in msg
+
+    @pytest.mark.asyncio
+    async def test_wait_for_response_catchall_raise_redacts_msg_error(self, tmp_path):
+        """The catch-all `raise AcpError(f"JSON-RPC error: {msg.error}")` MUST
+        flow msg.error through dual-redaction before f-string-interpolating it
+        into the exception message.
+        """
+        client = AcpClient(work_dir=tmp_path)
+        real_err = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": "request_id: AKIAIOSFODNN7EXAMPLE backend trace failed",
+        }
+        msg = MagicMock()
+        msg.is_response_for.return_value = True
+        msg.error = real_err
+        msg.result = None
+        msg.method = None
+        msg.id = 13
+
+        async def _one_message(timeout=0.0):
+            return msg
+
+        client._read_message = _one_message  # type: ignore[assignment]
+
+        with pytest.raises(AcpError) as excinfo:
+            await client._wait_for_response(13, timeout=1.0)
+
+        emitted = str(excinfo.value)
+        assert "AKIAIOSFODNN7EXAMPLE" not in emitted, (
+            "AWS access-key-shaped substring in msg.error MUST be redacted "
+            "before reaching the catch-all AcpError message"
+        )
+        assert "JSON-RPC error" in emitted, (
+            "the catch-all AcpError prefix MUST still be present"
+        )
+
+
+class TestAcpClientIsShellSignal:
+    """The canonical is_shell flow: the ACP shell kind ("execute") must be
+    captured at the tool_call boundary and inherited by the later
+    permission_request event (which carries no reliable kind), so the dashboard
+    exempts long shell command titles from the 256-char cap. Regression for the
+    empty-kind permission path (long shell commands rejected as
+    "Tool name exceeds max length 256").
+    """
+
+    def _tool_call_msg(self, kind, tool_call_id="tc-1", command="echo hi"):
+        from kiro_claw.acp.types import JsonRpcMessage
+
+        return JsonRpcMessage(
+            method="session/update",
+            params={
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": tool_call_id,
+                    "title": "Running a very long command",
+                    "kind": kind,
+                    "rawInput": {"command": command},
+                }
+            },
+        )
+
+    def _permission_msg(self, tool_call_id="tc-1", kind=None):
+        from kiro_claw.acp.types import JsonRpcMessage
+
+        tool_call = {"toolCallId": tool_call_id, "title": "x" * 400}
+        # By default no "kind" on the permission payload — mirrors live
+        # behaviour where the request_permission toolCall carries an empty
+        # kind. Pass kind=... to exercise the payload-kind fallback branch.
+        if kind is not None:
+            tool_call["kind"] = kind
+        return JsonRpcMessage(
+            id=42,
+            method="session/request_permission",
+            params={
+                "toolCall": tool_call,
+                "options": [{"optionId": "allow_once", "name": "Allow once"}],
+            },
+        )
+
+    def _refinement_msg(self, kind, tool_call_id="tc-1", command="echo hi"):
+        from kiro_claw.acp.types import JsonRpcMessage
+
+        update = {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": tool_call_id,
+            "title": "refined title",
+            "rawInput": {"command": command},
+        }
+        # kind is optional on a refinement; only include it when provided so
+        # tests can exercise the no-clobber path (kind absent).
+        if kind is not None:
+            update["kind"] = kind
+        return JsonRpcMessage(method="session/update", params={"update": update})
+
+    def test_execute_kind_marks_event_is_shell(self, tmp_path):
+        from kiro_claw.acp.client import AcpClient
+
+        client = AcpClient(work_dir=tmp_path)
+        ev = client._extract_tool_event(self._tool_call_msg("execute"))
+        assert ev is not None
+        assert ev.is_shell is True
+        assert client._tool_call_is_shell.get("tc-1") is True
+
+    def test_non_shell_kind_not_is_shell(self, tmp_path):
+        from kiro_claw.acp.client import AcpClient
+
+        client = AcpClient(work_dir=tmp_path)
+        ev = client._extract_tool_event(self._tool_call_msg("edit"))
+        assert ev is not None
+        assert ev.is_shell is False
+
+    def test_permission_event_inherits_is_shell_from_tool_call(self, tmp_path):
+        from kiro_claw.acp.client import AcpClient
+
+        client = AcpClient(work_dir=tmp_path)
+        # 1. tool_call notification arrives first (kind="execute")
+        client._extract_tool_event(self._tool_call_msg("execute"))
+        # 2. permission request for the SAME toolCallId carries no kind
+        perm = client._build_permission_event(self._permission_msg())
+        assert perm.is_shell is True  # inherited via the toolCallId cache
+
+    def test_permission_event_non_shell_stays_false(self, tmp_path):
+        from kiro_claw.acp.client import AcpClient
+
+        client = AcpClient(work_dir=tmp_path)
+        client._extract_tool_event(self._tool_call_msg("edit"))
+        perm = client._build_permission_event(self._permission_msg())
+        assert perm.is_shell is False
+
+    def test_end_to_end_long_shell_title_passes_validation(self, tmp_path):
+        """The full regression: a 400-char shell title validates only because
+        is_shell propagated from tool_call → permission → _validate_tool_name."""
+        from kiro_claw.acp.client import AcpClient
+        from kiro_claw.dashboard.chat_utils import _validate_tool_name
+
+        client = AcpClient(work_dir=tmp_path)
+        client._extract_tool_event(self._tool_call_msg("execute"))
+        perm = client._build_permission_event(self._permission_msg())
+        # Mirrors the chat_runner call site.
+        assert _validate_tool_name(perm.title, is_shell=perm.is_shell) == perm.title
+
+    def test_refinement_kindless_does_not_clobber_cached_shell(self, tmp_path):
+        """A refinement update that omits `kind` must NOT overwrite the
+        is_shell=True cached by the initial tool_call notification (kind is
+        optional on updates). Regression for the no-clobber invariant."""
+        from kiro_claw.acp.client import AcpClient
+
+        client = AcpClient(work_dir=tmp_path)
+        # 1. initial tool_call carries kind="execute" → caches True
+        client._extract_tool_event(self._tool_call_msg("execute"))
+        # 2. refinement arrives WITHOUT a kind — must preserve the cached True
+        ev = client._extract_tool_call_refinement(self._refinement_msg(None))
+        assert ev is not None
+        assert ev.is_shell is True
+        assert client._tool_call_is_shell.get("tc-1") is True
+
+    def test_refinement_with_kind_refreshes_shell_signal(self, tmp_path):
+        """A refinement that DOES carry a kind refreshes the cached signal."""
+        from kiro_claw.acp.client import AcpClient
+
+        client = AcpClient(work_dir=tmp_path)
+        # initial tool_call had no shell kind (edit) → cached False
+        client._extract_tool_event(self._tool_call_msg("edit"))
+        # refinement now reports kind="execute" → must flip cache to True
+        ev = client._extract_tool_call_refinement(self._refinement_msg("execute"))
+        assert ev is not None
+        assert ev.is_shell is True
+        assert client._tool_call_is_shell.get("tc-1") is True
+
+    def test_permission_payload_kind_is_not_trusted_on_cache_miss(self, tmp_path):
+        """SECURITY (deny-by-default): a cache miss must NOT be rescued by the
+        permission payload's own kind. The payload is agent/LLM-influenced, so
+        trusting kind="execute" there would let a malicious agent waive the
+        length cap on the very name being validated. With no preceding
+        tool_call to populate the cache, is_shell must stay False even when the
+        payload claims kind="execute"."""
+        from kiro_claw.acp.client import AcpClient
+
+        client = AcpClient(work_dir=tmp_path)
+        # No _extract_tool_event call → cache miss; payload tries kind="execute".
+        perm = client._build_permission_event(self._permission_msg(kind="execute"))
+        assert perm.is_shell is False
+
+    def test_permission_event_does_not_pop_shell_cache(self, tmp_path):
+        """The permission event must read the cached signal with .get(), not
+        .pop(): a later tool_call_update refinement for the same toolCallId
+        reads the same cache, so popping would make it wrongly see is_shell=
+        False. Regression for the AutoSDE .pop()-consumes-the-entry bug."""
+        from kiro_claw.acp.client import AcpClient
+
+        client = AcpClient(work_dir=tmp_path)
+        client._extract_tool_event(self._tool_call_msg("execute"))
+        perm = client._build_permission_event(self._permission_msg())
+        assert perm.is_shell is True
+        # Entry survives → a post-permission refinement still resolves True.
+        assert client._tool_call_is_shell.get("tc-1") is True
+        ev = client._extract_tool_call_refinement(self._refinement_msg(None))
+        assert ev is not None and ev.is_shell is True
+
+    def test_is_shell_kind_is_none_safe(self):
+        """_is_shell_kind tolerates a non-str/None kind without raising — the
+        ACP payload can carry "kind": null (JSON-legal), and equality keeps the
+        classifier crash-free where a `.lower()`-based predicate would not."""
+        from kiro_claw.acp.client import _is_shell_kind
+
+        assert _is_shell_kind(None) is False
+        assert _is_shell_kind("") is False
+        assert _is_shell_kind("edit") is False
+        assert _is_shell_kind("execute") is True
+
+    def test_permission_event_null_kind_does_not_crash(self, tmp_path):
+        """A request_permission payload carrying "kind": null (JSON-legal, and
+        emitted by real ACP/MCP servers) must not crash event construction, and
+        the resulting title must still validate. Guards the chat-runner event
+        loop against a null-kind AttributeError on the length-cap path."""
+        from kiro_claw.acp.client import AcpClient
+        from kiro_claw.acp.types import JsonRpcMessage
+        from kiro_claw.dashboard.chat_utils import _validate_tool_name
+
+        client = AcpClient(work_dir=tmp_path)
+        msg = JsonRpcMessage(
+            id=7,
+            method="session/request_permission",
+            params={
+                "toolCall": {"toolCallId": "tc-null", "title": "ReadFile", "kind": None},
+                "options": [{"optionId": "allow_once", "name": "Allow once"}],
+            },
+        )
+        perm = client._build_permission_event(msg)
+        # No cached tool_call → deny-by-default; short non-shell name validates.
+        assert perm.is_shell is False
+        assert _validate_tool_name(perm.title, is_shell=perm.is_shell) == "ReadFile"
+
+    def test_is_shell_propagates_through_to_llm_event(self):
+        """AcpProvider._to_llm_event re-wraps an event field-by-field; the
+        is_shell flag must survive that copy or the dashboard (which consumes
+        the re-wrapped LLMEvent) would never see it on the live ACP path."""
+        from kiro_claw.acp.types import AcpEvent
+        from kiro_claw.providers.acp import AcpProvider
+        from kiro_claw.providers.base import EVENT_PERMISSION_REQUEST
+
+        src = AcpEvent(kind=EVENT_PERMISSION_REQUEST, title="x" * 400, is_shell=True)
+        wrapped = AcpProvider._to_llm_event(src)
+        assert wrapped.is_shell is True
+        # And the default carries through as False when not a shell tool.
+        not_shell = AcpProvider._to_llm_event(AcpEvent(kind=EVENT_PERMISSION_REQUEST))
+        assert not_shell.is_shell is False

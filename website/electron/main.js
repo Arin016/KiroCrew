@@ -9,22 +9,28 @@ const { findKiroclawBin } = require("./find-bin");
 const { createTokenRetryHandler } = require("./token-retry");
 const { createDisplayMediaHandler } = require("./display-media");
 const { initAutoUpdate } = require("./auto-update");
-const { stopGatewayGracefully: _stopGatewayGracefully } = require("./gateway-stop");
+const { stopGatewayGracefully: _stopGatewayGracefully, forceStopPort } = require("./gateway-stop");
 const { waitForGateway, describeGatewayFailure, tailLines, isPortInUse } = require("./gateway-wait");
 const { sanitizeWindowState, captureWindowState } = require("./window-state");
+const { createLivenessMonitor } = require("./gateway-liveness");
+const { capturePySpyDump } = require("./pyspy-dump");
 
 // ── Persistent settings for remote tunnel mode ──
 
 const {
   DEFAULT_REMOTE_BIN,
+  DEFAULT_REMOTE_PATH,
   buildRemoteTokenCommand,
   parseTokenFromStdout,
 } = require("./remote-token");
 
+const { migrateRemoteHostConfig, getRemoteHostConfig, setRemoteHostConfig } = require("./host-config");
+
 const store = new Store({
   defaults: {
-    remoteHost: "",                        // e.g. "myhost.corp.amazon.com"
-    kiroclawBinPath: DEFAULT_REMOTE_BIN,   // full path for non-interactive SSH
+    remoteHost: "",                        // LEGACY — migrated to remoteHosts
+    kiroclawBinPath: DEFAULT_REMOTE_BIN,   // LEGACY — migrated to remoteHosts
+    remoteHosts: {},                       // { [port]: { host, binPath, remotePort?, remotePath? } }
     sshTimeoutMs: 20000,
     windowState: null,                     // persisted main-window geometry (see window-state.js)
   },
@@ -43,6 +49,11 @@ function resolvePort() {
 
 const PORT = resolvePort();
 const BACKEND_URL = `http://localhost:${PORT}`;
+
+// Migrate legacy single-host config to per-port map
+if (migrateRemoteHostConfig(store, PORT)) {
+  console.log(`Migrated legacy remoteHost to remoteHosts[${PORT}]`);
+}
 const HEALTH_URL = `${BACKEND_URL}/api/status`;
 const POLL_INTERVAL_MS = 500;
 const MAX_WAIT_MS = 30_000; // 30s max wait for backend
@@ -58,6 +69,10 @@ app.name = "KiroClaw";
 let mainWindow = null;
 let tray = null;
 let gatewayProcess = null;
+// Post-handoff backend liveness monitor (primary window only). Detects a wedged
+// gateway — alive TCP socket, frozen event loop — that the spawn 'exit' watcher
+// can't, since the process never exits. See gateway-liveness.js.
+let livenessMonitor = null;
 // Terminal exit of the gateway we SPAWNED, recorded so the readiness wait can
 // fail fast instead of polling a dead port. {code,signal} on exit, {error} on a
 // spawn error, null while the child is alive (or was never spawned — reuse
@@ -138,26 +153,38 @@ function startGateway() {
         glog("---- spawning gateway; child stdout+stderr follows ----");
         gatewayStartFailure = null; // re-arm for this spawn attempt
 
-        gatewayProcess = spawn(bin, ["gateway", "--no-open"], {
+        // Bind handlers to THIS child via a captured reference, not the
+        // module-global. recoverWedgedGateway SIGKILLs the wedged child and then
+        // respawns; the dead child's 'exit'/'error' fire asynchronously and could
+        // land AFTER the fresh child is assigned. Without an identity guard they
+        // would null out the healthy replacement and set a bogus
+        // gatewayStartFailure, breaking the very recovery they race with.
+        const child = spawn(bin, ["gateway", "--no-open"], {
           stdio: ["ignore", childOut, childOut],
           detached: false,
           env: { ...cleanEnv, KIROCLAW_PROJECT_DIR: path.resolve(__dirname, "..") },
         });
+        gatewayProcess = child;
         // The child inherits its own dup of the fd; close our copy so it doesn't leak.
         if (typeof childOut === "number") { try { fs.closeSync(childOut); } catch { /* ignore */ } }
 
-        gatewayProcess.on("error", (err) => {
+        child.on("error", (err) => {
           // ENOENT = bin not found on disk; EACCES = present but not executable.
           glog(`spawn ERROR code=${err.code || "?"} msg=${err.message}`);
+          if (gatewayProcess !== child) return; // stale child we already replaced
           gatewayStartFailure = { error: err.message };
           sendStatus(`Gateway failed: ${err.message}`);
           resolve(false);
         });
-        gatewayProcess.on("exit", (code, signal) => {
+        child.on("exit", (code, signal) => {
           glog(`gateway child exited code=${code} signal=${signal}`);
           if (signal === "SIGKILL") {
             glog("HINT: SIGKILL on a freshly-spawned bundled binary almost always means macOS Gatekeeper blocked an unsigned/quarantined nested executable. On the recipient's Mac run: xattr -cr <path to KiroClaw.app>");
           }
+          // Only the CURRENT child may mutate the shared state. A stale child's
+          // late exit (e.g. the one recoverWedgedGateway just SIGKILLed) must be
+          // a no-op so it can't orphan the replacement or fake a spawn failure.
+          if (gatewayProcess !== child) return;
           // Record the terminal exit so waitForBackend fails fast instead of
           // polling a dead port. Harmless on a graceful shutdown (no wait is
           // running) and on a healthy start (the wait already resolved); a
@@ -196,33 +223,30 @@ function stopGateway() {
 
 // ── Remote tunnel token fetch ──
 
-function fetchRemoteToken() {
-  const host = store.get("remoteHost");
-  const binPath = store.get("kiroclawBinPath");
-  if (!host) return Promise.resolve("");
-  const validationErr = validateRemoteSettings(host, binPath);
+function fetchRemoteToken(port) {
+  const config = getRemoteHostConfig(store, port || PORT);
+  if (!config || !config.host) return Promise.resolve({ token: "", error: null });
+  const { host, binPath, remotePort, remotePath } = config;
+  const validationErr = validateRemoteSettings(host, binPath, remotePort, remotePath);
   if (validationErr) {
     console.error(`Refusing SSH token fetch: ${validationErr}`);
-    return Promise.resolve("");
+    return Promise.resolve({ token: "", error: validationErr });
   }
 
-  const remoteCmd = buildRemoteTokenCommand(binPath);
-  const debugHint = binPath === DEFAULT_REMOTE_BIN ? "candidates" : `custom=${binPath}`;
+  const effectivePort = remotePort || port || PORT;
+  const remoteCmd = buildRemoteTokenCommand(binPath, { port: effectivePort, remotePath: remotePath || undefined });
+  const sshArgs = ["-o", "ConnectTimeout=10", host, remoteCmd];
 
   return new Promise((resolve) => {
     sendStatus("Fetching token from remote dev desktop…");
-    console.log(`SSH token fetch: ssh ${host} (${debugHint})`);
-    execFile("/usr/bin/ssh", [
-      "-o", "ConnectTimeout=10",
-      host,
-      remoteCmd,
-    ], { timeout: Math.max(store.get("sshTimeoutMs") || 20000, 5000) }, (err, stdout, stderr) => {
+    console.log(`SSH token fetch: ssh ${host} for port ${effectivePort}`);
+    execFile("/usr/bin/ssh", sshArgs, { timeout: Math.max(store.get("sshTimeoutMs") || 20000, 5000) }, (err, stdout, stderr) => {
       if (err) {
         console.error("SSH token fetch failed:", err.message);
         if (stderr) console.error("SSH stderr:", stderr.trim().slice(0, 500));
-        return resolve("");
+        return resolve({ token: "", error: stderr?.trim() || err.message });
       }
-      resolve(parseTokenFromStdout(stdout));
+      resolve({ token: parseTokenFromStdout(stdout), error: null });
     });
   });
 }
@@ -408,7 +432,7 @@ function setupWindowContents(win, backendUrl) {
   win.webContents = view.webContents;
 
   function applyTitle() {
-    const suffix = customName || `[:${port}]`;
+    const suffix = customName || getRemoteHostConfig(store, port)?.defaultName || `[:${port}]`;
     win.setTitle(`KiroClaw ${suffix}`);
   }
 
@@ -422,6 +446,8 @@ function setupWindowContents(win, backendUrl) {
     e.preventDefault();
     Menu.buildFromTemplate([
       { label: "Rename Tab…", click: () => renameCurrentTab() },
+      { label: "Set Remote Host…", click: () => promptRemoteHost() },
+      { label: "Refresh Token", click: () => refreshToken() },
       { type: "separator" },
       { label: "New Connection Tab…", click: () => openNewTab() },
       { label: "Merge All Windows", click: () => mergeAllWindows() },
@@ -537,7 +563,13 @@ function createWindow() {
   mainWindow.on("leave-full-screen", persist);
 
   // Auto-refresh token on 403 (gateway secret regenerated after restart)
-  const onNavigate = createTokenRetryHandler(() => refreshToken());
+  const onNavigate = createTokenRetryHandler(async () => {
+    let token = await fetchLocalToken(BACKEND_URL);
+    if (!token) ({ token } = await fetchRemoteToken(PORT));
+    if (token && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.loadURL(`${BACKEND_URL}?token=${token}`);
+    }
+  });
   mainWindow.webContents.on("did-navigate", (_e, _url, httpCode) => {
     onNavigate(httpCode).catch((err) => console.error("Token retry failed:", err));
   });
@@ -569,8 +601,7 @@ function createTray() {
       { label: "New Connection Tab…", click: () => openNewTab() },
       { label: "Merge All Windows", click: () => mergeAllWindows() },
       { type: "separator" },
-      { label: "Set Remote Host…", click: () => promptRemoteHost() },
-      { label: "Refresh Token", click: () => refreshToken() },
+      { label: "Open Config File", click: () => shell.openPath(store.path) },
       { type: "separator" },
       { label: "Quit", click: () => { isQuitting = true; app.quit(); } },
     ])
@@ -581,100 +612,97 @@ function createTray() {
 // ── Remote host settings ──
 
 async function promptRemoteHost() {
-  const current = store.get("remoteHost") || "";
-  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
-  const { response } = await dialog.showMessageBox(parent, {
-    type: "question",
-    title: "Remote Host",
-    message: "Enter your dev desktop hostname for remote token fetch.",
-    detail: current
-      ? `Current: ${current}\n\nLeave empty and click "Clear" to remove.`
-      : "Example: myhost.corp.amazon.com\n\nThis is used to run 'kiroclaw token' via SSH.",
-    buttons: ["Configure…", "Clear", "Cancel"],
-    defaultId: 0,
-  });
-  if (response === 2) return; // Cancel
-  if (response === 1) {
-    store.set("remoteHost", "");
-    const clearParent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
-    dialog.showMessageBox(clearParent, { message: "Remote host cleared.", type: "info" });
-    return;
-  }
-  // Prompt for the actual hostname using an input dialog
+  const focused = BaseWindow.getFocusedWindow() || mainWindow;
+  if (!focused || focused.isDestroyed() || !focused._mcBackendUrl) return;
+  const port = new URL(focused._mcBackendUrl).port;
+  const config = getRemoteHostConfig(store, port);
+  const currentHost = config?.host || "";
+  const currentBin = config?.binPath || DEFAULT_REMOTE_BIN;
+  const currentRemotePort = config?.remotePort || "";
+  const currentRemotePath = config?.remotePath || "";
+
+  const css = await getModalCSS();
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const win = new BrowserWindow({
-    width: 480, height: 220, resizable: false,
-    parent: mainWindow, modal: true,
-    webPreferences: { nodeIntegration: false, contextIsolation: true, preload: path.join(__dirname, "preload.js") },
+  const promptWin = new BrowserWindow({
+    width: 480, height: 400, resizable: false, useContentSize: true,
+    parent: focused, modal: true, backgroundColor: "#00000000",
+    webPreferences: { nodeIntegration: false, contextIsolation: true },
   });
   const html = `<!DOCTYPE html><html><head><style>
-    * { margin:0; padding:0; box-sizing:border-box; }
-    body { font-family:-apple-system,sans-serif; padding:24px; background:#1e293b; color:#e2e8f0; }
-    label { display:block; margin-bottom:8px; font-size:13px; color:#94a3b8; }
-    input { width:100%; padding:10px; border-radius:6px; border:1px solid #475569;
-      background:#0f172a; color:#e2e8f0; font-size:14px; outline:none; margin-bottom:12px; }
-    input:focus { border-color:#f97316; }
-    .row { display:flex; gap:8px; }
-    button { flex:1; padding:8px; border-radius:6px; border:none; cursor:pointer; font-size:13px; font-weight:600; }
-    .save { background:#f97316; color:#fff; } .save:hover { background:#ea580c; }
-    .cancel { background:#334155; color:#94a3b8; } .cancel:hover { background:#475569; }
-    .hint { font-size:11px; color:#64748b; margin-bottom:12px; }
+    ${css}
   </style></head><body>
-    <label>Remote dev desktop hostname</label>
-    <input id="h" value="${esc(current)}" placeholder="myhost.corp.amazon.com" autofocus>
-    <div class="hint">Used to run <code>kiroclaw token</code> via SSH</div>
+    <label>Remote host for :${port}</label>
+    <input id="h" value="${esc(currentHost)}" placeholder="myhost.corp.amazon.com" autofocus>
+    <div class="hint">Leave empty to use local token (no SSH).</div>
     <label>kiroclaw binary path</label>
-    <input id="b" value="${esc(store.get("kiroclawBinPath"))}" placeholder="$HOME/.local/bin/kiroclaw">
-    <div class="row"><button class="save" onclick="save()">Save</button>
+    <input id="b" value="${esc(currentBin)}" placeholder="${DEFAULT_REMOTE_BIN}">
+    <label>Remote port <span style="font-weight:normal;opacity:0.6">(default: same as tab = ${port})</span></label>
+    <input id="rp" value="${esc(currentRemotePort)}" placeholder="${port}">
+    <label>Remote PATH <span style="font-weight:normal;opacity:0.6">(default: ${DEFAULT_REMOTE_PATH})</span></label>
+    <input id="pa" value="${esc(currentRemotePath)}" placeholder="${DEFAULT_REMOTE_PATH}">
+    <div class="row"><button class="ok" onclick="save()">Save</button>
     <button class="cancel" onclick="window.close()">Cancel</button></div>
     <script>
       function save() {
-        const h = document.getElementById('h').value.trim();
-        const b = document.getElementById('b').value.trim();
-        document.title = JSON.stringify({host:h, bin:b});
+        document.title = JSON.stringify({
+          host: document.getElementById('h').value.trim(),
+          bin: document.getElementById('b').value.trim(),
+          remotePort: document.getElementById('rp').value.trim(),
+          remotePath: document.getElementById('pa').value.trim(),
+        });
         window.close();
       }
       document.addEventListener('keydown', e => { if(e.key==='Enter') save(); if(e.key==='Escape') window.close(); });
     </script>
   </body></html>`;
-  win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-  // Capture title while window is alive — win.getTitle() throws after "closed" fires.
+  promptWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  promptWin.setMenu(null);
+
   let savedTitle = null;
-  win.on("page-title-updated", (_e, title) => { savedTitle = title; });
-  win.on("closed", () => {
+  promptWin.on("page-title-updated", (_e, title) => { savedTitle = title; });
+  promptWin.on("closed", () => {
     try {
       if (savedTitle && savedTitle.startsWith("{")) {
-        const { host, bin } = JSON.parse(savedTitle);
-        const err = validateRemoteSettings(host, bin);
-        const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
-        if (err) {
-          dialog.showMessageBox(parent, { type: "error", title: "Invalid Input", message: err });
-          return;
+        const { host, bin, remotePort, remotePath } = JSON.parse(savedTitle);
+        if (host) {
+          const err = validateRemoteSettings(host, bin, remotePort, remotePath);
+          const parent = focused && !focused.isDestroyed() ? focused : null;
+          if (err) {
+            dialog.showMessageBox(parent, { type: "error", title: "Invalid Input", message: err });
+            return;
+          }
         }
-        store.set("remoteHost", host);
-        if (bin) store.set("kiroclawBinPath", bin);
-        console.log(`Remote host set to: ${host}, bin: ${bin}`);
-        dialog.showMessageBox(parent, { message: `Remote host set to ${host}`, type: "info" });
+        setRemoteHostConfig(store, port, { host, binPath: bin, remotePort, remotePath });
+        const parent = focused && !focused.isDestroyed() ? focused : null;
+        const msg = host ? `Remote host for :${port} set to ${host}` : `Remote host for :${port} cleared (using local token)`;
+        console.log(msg);
+        dialog.showMessageBox(parent, { message: msg, type: "info" });
       }
     } catch (e) { console.error("Failed to parse remote host settings:", e.message); }
   });
 }
 
 async function refreshToken() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  let token = await fetchLocalToken();
-  if (!token) token = await fetchRemoteToken();
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const win = BaseWindow.getFocusedWindow() || mainWindow;
+  if (!win || win.isDestroyed() || !win._mcBackendUrl) return;
+  const backendUrl = win._mcBackendUrl;
+  const port = new URL(backendUrl).port;
+
+  let token = await fetchLocalToken(backendUrl);
+  let sshErr = null;
+  if (!token) ({ token, error: sshErr } = await fetchRemoteToken(port));
+  if (win.isDestroyed()) return;
   if (token) {
-    mainWindow.webContents.loadURL(`${BACKEND_URL}?token=${token}`);
+    win.webContents.loadURL(`${backendUrl}?token=${token}`);
   } else {
-    dialog.showMessageBox(mainWindow, {
+    const config = getRemoteHostConfig(store, port);
+    dialog.showMessageBox(win, {
       type: "warning",
       title: "Token Refresh",
       message: "Could not fetch a fresh token.",
-      detail: store.get("remoteHost")
-        ? "SSH to remote host failed. Check your connection."
-        : "No remote host configured. Use 'Set Remote Host…' in the tray menu.",
+      detail: config?.host
+        ? `SSH to ${config.host} failed.\n\n${sshErr || "Check your connection."}`
+        : "No remote host configured for this tab. Use 'Set Remote Host…' from the Tab menu.",
     });
   }
 }
@@ -786,38 +814,157 @@ function showGatewayErrorDialog(parentWin, opts) {
   });
 }
 
-/**
- * Best-effort force-stop of whatever holds `port`, scoped to KiroClaw processes
- * only. Finds the LISTEN owners via lsof, verifies each is a kiroclaw/kiro_claw
- * process via ps (so we never SIGKILL an unrelated app that happens to share
- * the port), kills them, and waits briefly for the socket to free. Absolute
- * tool paths because a packaged GUI app has a minimal PATH.
- *
- * @param {number} port
- * @returns {Promise<{killed:number}>}
- */
-function forceStopGatewayPort(port) {
-  return new Promise((resolve) => {
-    execFile("/usr/sbin/lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], { timeout: 5000 }, (err, stdout) => {
-      const pids = String(stdout || "").split(/\s+/)
-        .map((s) => parseInt(s, 10)).filter((n) => Number.isInteger(n) && n > 1);
-      if (!pids.length) { glog(`force-stop: no LISTEN owner found on :${port}`); return resolve({ killed: 0 }); }
-      let pending = pids.length;
-      let killed = 0;
-      pids.forEach((pid) => {
-        execFile("/bin/ps", ["-p", String(pid), "-o", "command="], { timeout: 5000 }, (_e2, cmdOut) => {
-          const cmd = String(cmdOut || "").trim();
-          if (/kiro_claw|kiroclaw/i.test(cmd)) {
-            try { process.kill(pid, "SIGKILL"); killed++; glog(`force-stop: SIGKILL pid=${pid} (${cmd.slice(0, 80)})`); }
-            catch (k) { glog(`force-stop: kill pid=${pid} failed: ${k.message}`); }
-          } else {
-            glog(`force-stop: SKIP pid=${pid} — not a KiroClaw process (${cmd.slice(0, 80)})`);
-          }
-          if (--pending === 0) setTimeout(() => resolve({ killed }), 800); // let the socket release
-        });
-      });
+// Absolute tool paths because a packaged GUI app has a minimal PATH. lsof lives
+// at DIFFERENT paths per platform: /usr/sbin/lsof on macOS, /usr/bin/lsof on
+// Linux. Hard-coding one means the other platform silently fails to exec, and a
+// swallowed ENOENT looked like "no LISTEN owner" → forceStopPort reported the
+// port freed and respawned into a still-wedged backend. Probe both, then PATH.
+const LSOF_CANDIDATES = ["/usr/sbin/lsof", "/usr/bin/lsof"];
+function _resolveLsof() {
+  for (const c of LSOF_CANDIDATES) {
+    try { if (fs.existsSync(c)) return c; } catch { /* ignore unreadable candidate */ }
+  }
+  return "lsof"; // fall back to PATH
+}
+function _lsofListenPids(port) {
+  return new Promise((resolve, reject) => {
+    execFile(_resolveLsof(), ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], { timeout: 5000 }, (err, stdout) => {
+      // lsof exits non-zero with empty output when there is simply no match —
+      // that is a genuinely free port, NOT an error. Only a failure to EXECUTE
+      // the binary (ENOENT/EACCES) must be surfaced, so the caller never
+      // mistakes "couldn't probe" for "port is free".
+      if (err && (err.code === "ENOENT" || err.code === "EACCES")) {
+        return reject(err);
+      }
+      resolve(String(stdout || "").split(/\s+/)
+        .map((s) => parseInt(s, 10)).filter((n) => Number.isInteger(n) && n > 1));
     });
   });
+}
+
+function _psCommand(pid) {
+  return new Promise((resolve) => {
+    execFile("/bin/ps", ["-p", String(pid), "-o", "command="], { timeout: 5000 }, (_e, cmdOut) => {
+      resolve(String(cmdOut || ""));
+    });
+  });
+}
+
+/**
+ * Best-effort force-stop of whatever holds `port`, scoped to KiroClaw processes
+ * only, then VERIFY the port actually freed (see forceStopPort in gateway-stop.js).
+ * Returns {killed, freed, survivors}: `freed === false` means the holder could
+ * not be killed (uninterruptible-sleep wedge) and a respawn would just fail to
+ * bind — callers must surface "restart required" instead of retrying.
+ *
+ * @param {number} port
+ * @returns {Promise<{killed:number, freed:boolean, survivors:number[]}>}
+ */
+function forceStopGatewayPort(port) {
+  return forceStopPort(port, {
+    getListenPids: _lsofListenPids,
+    getCommand: _psCommand,
+    kill: (pid, sig) => process.kill(pid, sig),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    log: glog,
+  });
+}
+
+/**
+ * Start (or restart) the post-handoff liveness monitor for the primary window.
+ * Polls /api/status; on sustained unresponsiveness it force-restarts the wedged
+ * gateway. Only the primary window on our own port is monitored — connection
+ * tabs point at backends we didn't spawn and must not trigger a respawn.
+ */
+function startLivenessMonitor(win) {
+  if (livenessMonitor) { livenessMonitor.stop(); livenessMonitor = null; }
+  livenessMonitor = createLivenessMonitor({
+    probe: () => checkBackend(HEALTH_URL),
+    isWindowAlive: () => !!win && !win.isDestroyed(),
+    onUnresponsive: () => {
+      if (livenessMonitor) { livenessMonitor.stop(); livenessMonitor = null; }
+      if (isQuitting) return; // intentional shutdown — not a wedge
+      recoverWedgedGateway(win).catch((e) => glog(`liveness recovery failed: ${e && e.message}`));
+    },
+    onRecovered: () => glog("liveness: backend responsive again (transient blip)"),
+    log: (m) => glog(`liveness: ${m}`),
+  });
+  livenessMonitor.start();
+}
+
+/**
+ * Recover a gateway that is alive-but-unresponsive (wedged event loop). A
+ * graceful /api/shutdown can't help — that endpoint runs on the very loop that
+ * is frozen — so SIGKILL the child, clear the port, respawn, and re-run the
+ * boot flow. showLoadingThenConnect shows the loading screen + status (a visible
+ * "restarting" state instead of an eternal spinner) and starts a fresh monitor
+ * on success; its own catch handles a restart that fails.
+ */
+async function recoverWedgedGateway(win) {
+  glog("liveness: backend unresponsive — force-killing wedged gateway and restarting");
+  // Capture the frozen stack from OUTSIDE the wedged process BEFORE the kill.
+  // The in-process faulthandler watchdog races (and loses to) this very SIGKILL,
+  // and a starved loop often can't dump itself — py-spy reads stacks via ptrace
+  // so the post-restart crash report gets the real frozen frame. Best-effort and
+  // time-bounded; it never blocks the kill beyond its own timeout.
+  if (gatewayProcess && gatewayProcess.pid) {
+    await capturePySpyDump({
+      pid: gatewayProcess.pid,
+      dumpDir: path.dirname(gatewayLogPath()),
+      log: (m) => glog(`liveness: ${m}`),
+    }).catch((e) => glog(`liveness: py-spy capture threw: ${e && e.message}`));
+  }
+  try { if (gatewayProcess) gatewayProcess.kill("SIGKILL"); } catch (e) { glog(`SIGKILL failed: ${e && e.message}`); }
+  gatewayProcess = null;
+  let freed = true;
+  let foreignHolder = false;
+  try { ({ freed, foreignHolder } = await forceStopGatewayPort(PORT)); }
+  catch (e) {
+    // We couldn't even probe the port (lsof failed to exec). Don't silently
+    // assume freed — let the respawn's bind be the arbiter, but say so loudly.
+    glog(`liveness: port probe failed (${e && e.message}); attempting respawn and letting bind confirm`);
+  }
+  if (!win || win.isDestroyed() || isQuitting) return;
+  // If the wedged process is unkillable, or a foreign process still owns the
+  // port, respawning would just hit "address already in use". Don't pretend we
+  // recovered — show the honest error path so the user learns a restart (or
+  // freeing the other app) is required.
+  if (!freed) {
+    glog(`liveness: port still held after force-stop (${foreignHolder ? "foreign holder" : "unkillable wedge"}); surfacing restart-required`);
+    return showUnrecoverableGatewayError(win, PORT);
+  }
+  gatewayStartFailure = null; // re-arm so waitForGateway doesn't fail-fast on the kill we just did
+  await startGateway(); // spawn a fresh child before re-waiting
+  if (win.isDestroyed() || isQuitting) return;
+  return showLoadingThenConnect(win, BACKEND_URL);
+}
+
+/**
+ * Terminal state: a wedged gateway is holding the port and cannot be killed
+ * (uninterruptible kernel sleep — e.g. a blocking close() on a dead socket).
+ * No respawn can succeed until the OS reaps it, which only a restart guarantees.
+ * Tell the user plainly instead of looping a doomed retry.
+ */
+async function showUnrecoverableGatewayError(win, port) {
+  if (!win || win.isDestroyed()) return;
+  let logTail = "";
+  try { logTail = tailLines(fs.readFileSync(gatewayLogPath(), "utf8"), 60); } catch { /* no log yet */ }
+  const action = await showGatewayErrorDialog(win, {
+    title: `KiroClaw — backend stuck on port ${port}`,
+    message: `The KiroClaw backend is wedged and cannot be stopped — it is in an `
+      + `uninterruptible state and is still holding port ${port}, so it can't be `
+      + `force-stopped or restarted in place. Restart your computer to clear it. `
+      + `(This is a known backend hang; see the launch log below for the cause.)`,
+    logTail,
+    logPath: gatewayLogPath(),
+    portConflict: false, // hide "Force-stop & Retry" — it cannot work here
+    port,
+  });
+  if (win.isDestroyed()) return;
+  if (action === "reveal") {
+    try { shell.showItemInFolder(gatewayLogPath()); } catch { /* best effort */ }
+  }
+  if (win === mainWindow) { isQuitting = true; app.quit(); } else { win.destroy(); }
 }
 
 async function showLoadingThenConnect(win, backendUrl = BACKEND_URL) {
@@ -830,7 +977,7 @@ async function showLoadingThenConnect(win, backendUrl = BACKEND_URL) {
     await waitForBackend(win, healthUrl, { watchSpawn: backendUrl === BACKEND_URL });
     if (win.isDestroyed()) return;
     let token = await fetchLocalToken(backendUrl);
-    if (!token && backendUrl === BACKEND_URL) token = await fetchRemoteToken();
+    if (!token) ({ token } = await fetchRemoteToken(new URL(backendUrl).port));
     if (win.isDestroyed()) return;
 
     if (token) {
@@ -839,6 +986,7 @@ async function showLoadingThenConnect(win, backendUrl = BACKEND_URL) {
       await fadeLoadingScreen(wc);
       if (win.isDestroyed()) return;
       wc.loadURL(`${backendUrl}?token=${token}`);
+      if (backendUrl === BACKEND_URL) startLivenessMonitor(win);
     } else {
       // Fallback — check if gateway allows unauthenticated access
       const status = await new Promise((resolve) => {
@@ -852,6 +1000,7 @@ async function showLoadingThenConnect(win, backendUrl = BACKEND_URL) {
         wc.loadFile(path.join(__dirname, "token-prompt.html"), { query: { port: new URL(backendUrl).port } });
       } else {
         wc.loadURL(backendUrl);
+        if (backendUrl === BACKEND_URL) startLivenessMonitor(win);
       }
     }
   } catch (err) {
@@ -898,7 +1047,16 @@ async function showLoadingThenConnect(win, backendUrl = BACKEND_URL) {
         continue; // re-show the dialog
       }
       if (action === "force-retry") {
-        await forceStopGatewayPort(PORT);
+        let freed = true;
+        try { ({ freed } = await forceStopGatewayPort(PORT)); }
+        catch (e) { glog(`force-stop: port probe failed (${e && e.message}); letting retry's bind confirm`); }
+        if (win.isDestroyed()) return;
+        if (!freed) {
+          // The port is still held — by an unkillable wedge or a foreign app.
+          // Either way a retry would just re-hit "address already in use", so
+          // tell the user a restart is required rather than looping the failure.
+          return showUnrecoverableGatewayError(win, PORT);
+        }
       }
       if (action === "retry" || action === "force-retry") {
         gatewayStartFailure = null; // let the retry genuinely re-probe
@@ -976,7 +1134,8 @@ async function openNewTab() {
     setupWindowContents(tabWin, backendUrl);
 
     const onNavigate = createTokenRetryHandler(async () => {
-      const token = await fetchLocalToken(backendUrl);
+      let token = await fetchLocalToken(backendUrl);
+      if (!token) ({ token } = await fetchRemoteToken(port));
       if (token && !tabWin.isDestroyed()) {
         tabWin.webContents.loadURL(`${backendUrl}?token=${token}`);
       }
@@ -997,24 +1156,29 @@ function renameCurrentTab() {
   if (!focused || !focused._mcSetCustomName) return;
 
   const currentTitle = focused.getTitle();
+  const port = focused._mcBackendUrl ? new URL(focused._mcBackendUrl).port : "";
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
   getDashboardThemeVars().then((vars) => {
   const css = vars && vars.bg ? modalCSSFromVars(vars) : modalCSSForMode(nativeTheme.shouldUseDarkColors);
   const promptWin = new BrowserWindow({
-    width: 400, height: 180, resizable: false, useContentSize: true,
+    width: 400, height: 200, resizable: false, useContentSize: true,
     parent: focused, modal: true, backgroundColor: "#00000000",
     webPreferences: { nodeIntegration: false, contextIsolation: true },
   });
   const html = `<!DOCTYPE html><html><head><style>
     ${css}
+    .check-row { display:flex; align-items:center; gap:6px; margin-top:8px; }
+    .check-row input { width:auto; margin:0; }
+    .check-row label { margin:0; font-size:12px; }
   </style></head><body>
     <label>Tab name</label>
     <input id="n" value="${esc(currentTitle.replace(/^KiroClaw /g, ''))}" autofocus>
     <div class="row"><button class="ok" onclick="go()">Rename</button>
     <button class="cancel" onclick="window.close()">Cancel</button></div>
+    <div class="check-row"><input type="checkbox" id="d"><label for="d">Set as default name for :${port} tabs</label></div>
     <script>
-      function go() { document.title = document.getElementById('n').value.trim(); window.close(); }
+      function go() { document.title = JSON.stringify({name: document.getElementById('n').value.trim(), setDefault: document.getElementById('d').checked}); window.close(); }
       document.addEventListener('keydown', e => { if(e.key==='Enter') go(); if(e.key==='Escape') window.close(); });
     </script>
   </body></html>`;
@@ -1024,8 +1188,21 @@ function renameCurrentTab() {
   let savedTitle = null;
   promptWin.on("page-title-updated", (_e, title) => { savedTitle = title; });
   promptWin.on("closed", () => {
-    if (savedTitle && focused && !focused.isDestroyed()) {
-      focused._mcSetCustomName(savedTitle);
+    if (!savedTitle || !focused || focused.isDestroyed()) return;
+    try {
+      const { name, setDefault } = JSON.parse(savedTitle);
+      if (name) {
+        focused._mcSetCustomName(name);
+        if (setDefault && port) {
+          const hosts = store.get("remoteHosts") || {};
+          const key = String(port);
+          hosts[key] = { ...(hosts[key] || {}), defaultName: name };
+          store.set("remoteHosts", hosts);
+        }
+      }
+    } catch {
+      // Legacy plain-text fallback (shouldn't happen)
+      if (savedTitle) focused._mcSetCustomName(savedTitle);
     }
   });
   }); // end getDashboardThemeVars().then()
@@ -1083,17 +1260,63 @@ app.whenReady().then(async () => {
     { role: "appMenu" },
     { role: "editMenu" },
     {
+      label: "View",
+      submenu: [
+        { role: "reload" },
+        { role: "forceReload" },
+        { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { type: "separator" },
+        { role: "togglefullscreen" },
+        { type: "separator" },
+        {
+          label: "Toggle Developer Tools",
+          accelerator: "CmdOrCtrl+Shift+I",
+          id: "devtools-toggle",
+          visible: false, // hidden until dev-mode IPC fires
+          click: () => {
+            const focused = BrowserWindow.getFocusedWindow();
+            if (!focused) return;
+            // WebContentsView-based windows: find the main content view
+            const views = focused.contentView && focused.contentView.children;
+            if (views && views.length > 0) {
+              // The first view with a real page loaded is the dashboard
+              const mainView = views.find(v => {
+                try { const u = v.webContents && v.webContents.getURL(); return u && u.includes("localhost"); }
+                catch { return false; }
+              });
+              if (mainView) { mainView.webContents.toggleDevTools(); return; }
+            }
+            // Fallback: BrowserWindow.webContents (non-WebContentsView windows)
+            if (focused.webContents) focused.webContents.toggleDevTools();
+          },
+        },
+      ],
+    },
+    {
       label: "Tab",
       submenu: [
         { label: "New Connection Tab…", accelerator: "CmdOrCtrl+T", click: () => openNewTab() },
         { label: "Rename Tab…", accelerator: "CmdOrCtrl+Shift+R", click: () => renameCurrentTab() },
-        { type: "separator" },
         { label: "Merge All Windows", click: () => mergeAllWindows() },
+        { type: "separator" },
+        { label: "Set Remote Host…", click: () => promptRemoteHost() },
+        { label: "Refresh Token", accelerator: "CmdOrCtrl+Shift+T", click: () => refreshToken() },
+        { label: "Open Config File", click: () => shell.openPath(store.path) },
       ],
     },
     { role: "windowMenu" },
   ]);
   Menu.setApplicationMenu(appMenu);
+
+  // DevTools gate: renderer sends dev-mode state, we toggle menu visibility.
+  ipcMain.on("dev-mode-changed", (_event, enabled) => {
+    const menu = Menu.getApplicationMenu();
+    const item = menu && menu.getMenuItemById("devtools-toggle");
+    if (item) item.visible = !!enabled;
+  });
 
   // Enable the chat input's screen-snip tool inside the Electron shell.
   // Without a display-media request handler, Electron (>= 20) rejects the

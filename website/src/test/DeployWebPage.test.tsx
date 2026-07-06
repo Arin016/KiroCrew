@@ -21,7 +21,7 @@ import { store } from '../store'
 vi.mock('../api/client', () => ({
   api: {
     deployWebConfig: vi.fn(() => Promise.resolve({ profile: '', region: 'us-west-2' })),
-    deployWebSaveConfig: vi.fn((b: any) => Promise.resolve(b)),
+    deployWebSaveConfig: vi.fn((b: { profile: string; region: string }) => Promise.resolve(b)),
     deployWebIamPolicy: vi.fn(() => Promise.resolve({ policy: '{"Version":"2012-10-17","Statement":[]}' })),
     deployWebVerify: vi.fn(() => Promise.resolve({ status: 200, data: { reachable: true, account: '123456789012' } })),
     deployWebSites: vi.fn(() => Promise.resolve({ sites: [], configured: false })),

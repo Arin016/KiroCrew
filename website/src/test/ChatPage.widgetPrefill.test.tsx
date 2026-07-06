@@ -12,8 +12,9 @@ import { ThemeProvider } from '../hooks/useTheme'
 import chatReducer from '../store/chatSlice'
 import dashboardReducer from '../store/dashboardSlice'
 import notificationsReducer from '../store/notificationsSlice'
+import type { RootState } from '../store'
 
-vi.mock('react-virtuoso', () => ({ Virtuoso: ({ data, itemContent }: any) => <div data-testid="virtuoso">{data?.map((d: any, i: number) => <div key={i}>{itemContent(i, d)}</div>)}</div> }))
+vi.mock('react-virtuoso', () => ({ Virtuoso: ({ data, itemContent }: { data?: unknown[]; itemContent: (i: number, d: unknown) => React.ReactNode }) => <div data-testid="virtuoso">{data?.map((d: unknown, i: number) => <div key={i}>{itemContent(i, d)}</div>)}</div> }))
 vi.mock('../api/client', () => ({
   api: {
     chatSlots: vi.fn().mockResolvedValue([]),
@@ -34,7 +35,7 @@ vi.mock('../api/client', () => ({
 vi.mock('../hooks/useVoiceInput', () => ({ useVoiceInput: () => ({ recording: false, transcribing: false, toggle: vi.fn() }), voiceInputSupported: false }))
 vi.mock('../hooks/useBranding', () => ({ useBranding: () => ({ botName: 'Test', avatar: '' }) }))
 vi.mock('../hooks/useAgents', () => ({ useAgents: () => ({ agents: [], defaultAgent: 'default' }) }))
-vi.mock('../components/MarkdownRenderer', () => ({ default: ({ content }: any) => <span>{content}</span> }))
+vi.mock('../components/MarkdownRenderer', () => ({ default: ({ content }: { content: string }) => <span>{content}</span> }))
 vi.mock('../components/WelcomeView', () => ({ default: () => null }))
 vi.mock('../components/MarkdownPanel', () => ({ default: () => null }))
 vi.mock('../pages/chat/ActivityViewer', () => ({ default: () => null }))
@@ -64,7 +65,7 @@ function makeStore(activeSlot: string, slots: { key: string; mode?: string }[]) 
         status: null, connected: true, slots: slots.map(s => ({ key: s.key, messages: 1, running: false, mode: s.mode || '', pending_approval: false, waiting_for_input: false, last_activity_ts: undefined })),
         unreadSlots: [], refreshTrigger: 0, approvalMode: 'normal',
         subagentRunning: {}, subagentDetails: {}, subagentText: {},
-      } as any,
+      } as unknown as RootState['dashboard'],
       chat: {
         activeSlot, messages: [{ role: 'assistant', content: 'hi', cls: '' }],
         slotRunning: false, slotStopping: false, slotState: 'idle',
@@ -74,8 +75,8 @@ function makeStore(activeSlot: string, slots: { key: string; mode?: string }[]) 
         slotStatusDetail: {}, slotContextPct: {}, slotActivity: {}, slotHistory: [],
         historyOffset: 0, _wsChunkedDuringFetch: false,
         slotMessages: {}, slotLoading: false,
-      } as any,
-      notifications: { items: [] } as any,
+      } as unknown as RootState['chat'],
+      notifications: { items: [] } as unknown as RootState['notifications'],
     },
   })
 }
@@ -146,6 +147,6 @@ describe('ChatPage widget action pre-fill (P454989291)', { timeout: 15_000 }, ()
 
     await waitFor(() => expect(api.sendChat).toHaveBeenCalled())
     const metaArg = vi.mocked(api.sendChat).mock.calls[0][4]
-    expect(metaArg === undefined || (metaArg as any).origin !== 'widget').toBe(true)
+    expect(metaArg === undefined || metaArg.origin !== 'widget').toBe(true)
   })
 })

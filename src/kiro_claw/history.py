@@ -479,34 +479,24 @@ class ConversationLog:
         needle = query.casefold()
         scored: list[tuple[float, int, dict]] = []  # (score, -rank, meta)
         for rank, meta in enumerate(self.list_sessions()[:_SEARCH_SCAN_WINDOW]):
-            path = self._path(meta["key"])
             content_hits = 0
             doc_chars = 0
             texts: list[str] = []
-            try:
-                with open(path, encoding="utf-8", errors="replace") as f:
-                    for line in f:
-                        # Always parse - a raw-line fast path would miss
-                        # queries containing JSON-escapable chars
-                        # (backslash, quote, newline) because the on-disk
-                        # line has escaped forms while the parsed content
-                        # has literal chars.  Skip unparseable lines to
-                        # avoid matching on structural JSON keys.
-                        try:
-                            obj = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        raw = obj.get("content") if isinstance(obj, dict) else None
-                        text = raw if isinstance(raw, str) else ""
-                        if text:
-                            # Accumulate length only for content text so
-                            # the length normalizer's denominator matches
-                            # the hit counter's numerator (no penalty for
-                            # verbose metadata / tool-call lines).
-                            doc_chars += len(text)
-                            texts.append(text)
-            except OSError:
-                continue
+            # Pull parsed messages from the mtime-keyed cache (_read_messages)
+            # rather than re-opening + re-parsing the file here. The snippet
+            # path (search_chat_history) already reads each matched key via the
+            # same cache, so this collapses the prior two-parses-per-query into
+            # one. Content semantics are unchanged: only string ``content``
+            # fields are counted, in file order, so the \x00-join hit count and
+            # the doc_chars length normalizer stay identical to the previous
+            # inline scan. _read_messages is OSError-safe and returns [] for a
+            # missing/unreadable file, so it also subsumes the old try/except.
+            for obj in self._read_messages(meta["key"]):
+                raw = obj.get("content") if isinstance(obj, dict) else None
+                text = raw if isinstance(raw, str) else ""
+                if text:
+                    doc_chars += len(text)
+                    texts.append(text)
             # Casefold + count once per file instead of per line: a 200-line
             # session produces one temporary casefolded string instead of 200,
             # bounding GC pressure under rapid-fire search keystrokes.  The

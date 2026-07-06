@@ -539,14 +539,14 @@ export default function NeuralConstellationScene({ agents, visible = true }: Pro
     }
 
     return runSceneLoop(visibleRef, tickRef, update, draw)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [])  
 
   useVisibleSync(visibleRef, visible)
 
   return (
     <div style={SCENE_CONTAINER_STYLE(W, H)}>
-      <canvas ref={canvasRef} style={{ ...PIXEL_CANVAS_STYLE, ...canvasProps.style }} onMouseMove={canvasProps.onMouseMove} onMouseLeave={canvasProps.onMouseLeave} onClick={canvasProps.onClick} />
-      <canvas ref={textRef} style={TEXT_CANVAS_STYLE} />
+      <canvas ref={canvasRef} aria-label="Neural constellation animation" style={{ ...PIXEL_CANVAS_STYLE, ...canvasProps.style }} onMouseMove={canvasProps.onMouseMove} onMouseLeave={canvasProps.onMouseLeave} onClick={canvasProps.onClick} />
+      <canvas ref={textRef} aria-label="Neural constellation text overlay" style={TEXT_CANVAS_STYLE} />
       {tooltipEl}
     </div>
   )

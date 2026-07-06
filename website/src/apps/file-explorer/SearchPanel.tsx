@@ -44,6 +44,7 @@ export default function SearchPanel({ rootPath, onClose, onJump }: SearchPanelPr
         <Search size={14} style={{ color: 'var(--muted)' }} />
         <input
           ref={inputRef}
+          aria-label={`Search in ${basename(rootPath) || rootPath}`}
           className="mc-fe-search-input"
           type="text"
           placeholder={`Search in ${basename(rootPath) || rootPath}...`}
@@ -52,6 +53,7 @@ export default function SearchPanel({ rootPath, onClose, onJump }: SearchPanelPr
           onKeyDown={(e) => { if (e.key === 'Escape') onClose() }}
         />
         <input
+          aria-label="Glob filter (comma-separated patterns)"
           className="mc-fe-search-glob"
           type="text"
           placeholder="glob (e.g. *.md)"

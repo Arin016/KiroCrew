@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from aiohttp import web
 
+from kiro_claw.acp.types import STOP_REASON_CANCELLED
 from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import DASHBOARD_PORT, config_dir
 from kiro_claw.dashboard.side_state import SideState
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
         SubagentManager,
         TaskRunner,
     )
+    from kiro_claw.dashboard.loop_watchdog import LoopStallWatchdog  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +276,22 @@ SUBAGENT_COMPLETION_PREFIX = "[Subagent completion event]"
 REFUSAL_RECOVERY_PREFIX = "[Tool refusal — automatic recovery]"
 
 
+def should_queue_refusal_recovery(
+    refusal_reasons: list, stopping: bool, needs_reset: bool, stop_reason: str
+) -> bool:
+    """Decide whether to auto-queue a refusal-recovery prompt after a turn.
+
+    Returns False (skip recovery) when:
+    - No refusals occurred
+    - A stop is still in progress
+    - A session reset is already re-queuing
+    - The turn was cancelled by the user (not a policy block)
+    """
+    return bool(
+        refusal_reasons and not stopping and not needs_reset and stop_reason != STOP_REASON_CANCELLED
+    )
+
+
 def build_refusal_recovery_prompt(refusals: list[tuple[str, str]]) -> str:
     """Build the body of an automatic continuation after a recoverable tool refusal.
 
@@ -338,6 +356,22 @@ def _parse_options(text: str) -> list[str]:
 VALID_MEMORY_MODES = ("persistent", "incognito", "temporary")
 
 
+def _ascii_slot_key(name: str) -> str:
+    """Return *name* with any character outside printable ASCII replaced by ``-``.
+
+    A slot key becomes the session key (``dashboard:{slot.key}``) that
+    kiroclaw-core sends as the ``X-Session-Key`` HTTP header on every gateway
+    call. Header values are latin-1 per RFC 7230, so a non-latin-1 char (e.g.
+    an em-dash from a title-derived slot name) would abort every tool call
+    (Mesh-2435). ASCII control characters (notably CR/LF) are excluded too, so
+    a name can never inject into or split the header. Idempotent;
+    printable-ASCII names — including the auto-generated ``chat-N-<ts>`` keys —
+    are returned unchanged. (Path-separator/traversal containment for keys later
+    used as filesystem paths is enforced separately at the persistence layer.)
+    """
+    return re.sub(r"[^\x20-\x7e]", "-", name)
+
+
 class _ChatSlot:
     """Independent chat session that runs server-side."""
 
@@ -368,6 +402,7 @@ class _ChatSlot:
         "_has_reader",
         "_stop_state",
         "_stop_event_id",
+        "_pending_reset_history_key",
         "_dirty",
         "_orch_tracker",
         "_auto_run",
@@ -451,6 +486,10 @@ class _ChatSlot:
         self._has_reader: bool = False  # True when HTTP SSE stream is draining
         self._stop_state: str = "idle"  # 'idle' | 'soft_pending' | 'killing'
         self._stop_event_id: str | None = None  # transcript message id for in-flight stop
+        # Set by api_chat_slot_project; consumed in _run_chat instead of
+        # inline because the endpoint can be reached from inside the kiro-cli
+        # process group via the set_project MCP tool.
+        self._pending_reset_history_key: str | None = None
         self._dirty: bool = False  # True when messages changed since last flush
         self._orch_tracker: Any = None  # OrchestrationTracker, set by gateway
         self._auto_run: bool = False  # "Go All" — skip stage gates
@@ -638,6 +677,17 @@ class _ChatSlot:
                 return item["content"]
         return None
 
+    def queue_edit_by_id(self, queue_id: str, content: str) -> bool:
+        """Replace the content of a queue item by ID. Returns True if found.
+
+        Order is preserved — only the content of the matching item changes.
+        """
+        for item in self._queue:
+            if item["id"] == queue_id:
+                item["content"] = content
+                return True
+        return False
+
     @property
     def running(self) -> bool:
         return self.task is not None and not self.task.done()
@@ -778,6 +828,7 @@ class _ChatSlot:
             "project": self.project,
             "messages": len(self.messages),
             "running": self.running,
+            "queue_depth": self.queue_depth,
             "stopping": self._stopping,
             "pending_approval": pending_approval,
             "pending_approval_info": pending_approval_info,
@@ -868,6 +919,10 @@ class DashboardState:
         self._terminal_sessions: dict[str, Any] = {}  # PTY sessions for CLI panel
         self._terminal_reaper: asyncio.Task | None = None  # type: ignore[type-arg]
         self._loop_heartbeat: asyncio.Task | None = None  # type: ignore[type-arg]
+        # Off-loop event-loop stall watchdog; armed under the real gateway
+        # entrypoint (faulthandler enabled) and stopped on shutdown. Annotated
+        # here so the assignment in start_dashboard type-checks under mypy strict.
+        self._loop_watchdog: "LoopStallWatchdog | None" = None
 
         # Knowledge Library
         self._knowledge_store: "KnowledgeStore | None" = None  # Lazy-initialized on first access
@@ -1365,6 +1420,15 @@ class DashboardState:
         app: str = "",
     ) -> _ChatSlot:
         """Return existing slot or create a new one."""
+        if name:
+            # Slot keys flow into the session key (``dashboard:{slot.key}``)
+            # that kiroclaw-core sends as the ``X-Session-Key`` HTTP header on
+            # every gateway call. Header values are latin-1 (RFC 7230), so a
+            # non-latin-1 char in a name/title-derived key would abort every
+            # tool call (Mesh-2435). Normalize to ASCII *before* the lookup so
+            # the key is header-, filesystem-, and match-safe, and repeat calls
+            # with the same name resolve to the same slot.
+            name = _ascii_slot_key(name)
         if name and name in self._slots:
             existing = self._slots[name]
             if memory_mode is not None and memory_mode != existing.memory_mode:
@@ -1373,8 +1437,6 @@ class DashboardState:
                 )
             return existing
         if not name:
-            import time
-
             self._slot_counter += 1
             ts = int(time.time())
             name = f"chat-{self._slot_counter}-{ts}"
@@ -1467,7 +1529,11 @@ class DashboardState:
         """
         if not folder_id:
             return ""
-        by_id = {f["id"]: f for f in self._folders}
+        # load_folders() does no id-filtering (unlike load_tags), so a legacy or
+        # corrupt folders.json may contain dicts lacking an "id" key. Skip those
+        # rather than letting a hard index raise KeyError mid-walk — the docstring
+        # promises tolerance of dangling references and "" for an unknown id.
+        by_id = {f["id"]: f for f in self._folders if isinstance(f, dict) and f.get("id")}
         names: list[str] = []
         seen: set[str] = set()
         fid = folder_id
@@ -1714,6 +1780,10 @@ class DashboardState:
             return
         msg = json.dumps({"type": msg_type, "data": data})
         self._send_ws_all(msg)
+
+    def ws_client_count(self) -> int:
+        """Number of connected dashboard WS clients (live subscribers)."""
+        return len(self._ws_clients)
 
     def broadcast_browser_event(self, event_type: str, data: dict) -> None:
         """Broadcast a browser activity event to all connected WS clients.

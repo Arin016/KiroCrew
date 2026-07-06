@@ -28,6 +28,7 @@ export function loadFileDrafts(): FileDrafts {
     }
     return out
   } catch (e) {
+    // eslint-disable-next-line no-console -- intentional dev-only diagnostic
     if (import.meta.env.DEV) console.warn('chatFileDrafts: load failed', e)
     return {}
   }
@@ -37,6 +38,7 @@ export function saveFileDrafts(drafts: FileDrafts): void {
   try {
     sessionStorage.setItem(FILE_DRAFTS_KEY, JSON.stringify(drafts))
   } catch (e) {
+    // eslint-disable-next-line no-console -- intentional dev-only diagnostic
     if (import.meta.env.DEV) console.warn('chatFileDrafts: save failed', e)
   }
 }

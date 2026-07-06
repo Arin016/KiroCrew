@@ -25,9 +25,7 @@ export function useSSE() {
         try {
           const detail: McNotificationDetail = { kind: n.kind }
           window.dispatchEvent(new CustomEvent(MC_NOTIFICATION_EVENT, { detail }))
-        } catch (err) {
-          console.warn('mc-notification listener error', err)
-        }
+        } catch { /* notification listener error — non-fatal, ignore */ }
       } catch { /* ignore */ }
     })
     sse.addEventListener('slots', (e) => {

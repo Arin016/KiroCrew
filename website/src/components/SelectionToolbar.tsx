@@ -166,7 +166,10 @@ export default function SelectionToolbar({ containerRef, actions, externalSelect
       document.removeEventListener('keyup', onKeyUp)
       document.removeEventListener('mousedown', onMouseDown)
     }
-  }, [checkSelection])
+    // `containerRef` is a stable RefObject (its identity never changes across
+    // renders), so listing it does not re-run the effect; it satisfies the
+    // linter without changing the listener lifecycle.
+  }, [checkSelection, containerRef])
 
   const handleAction = useCallback((action: SelectionAction) => {
     const text = selectedTextRef.current

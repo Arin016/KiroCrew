@@ -24,15 +24,15 @@ import {
 
 export interface AppApi {
   /** GET request scoped to declared permissions. */
-  get<T = any>(path: string, init?: RequestInit): Promise<T>
+  get<T = unknown>(path: string, init?: RequestInit): Promise<T>
   /** POST request scoped to declared permissions. */
-  post<T = any>(path: string, body?: any): Promise<T>
+  post<T = unknown>(path: string, body?: unknown): Promise<T>
   /** PUT request scoped to declared permissions. */
-  put<T = any>(path: string, body?: any): Promise<T>
+  put<T = unknown>(path: string, body?: unknown): Promise<T>
   /** PATCH request scoped to declared permissions. */
-  patch<T = any>(path: string, body?: any): Promise<T>
+  patch<T = unknown>(path: string, body?: unknown): Promise<T>
   /** DELETE request scoped to declared permissions. */
-  del<T = any>(path: string): Promise<T>
+  del<T = unknown>(path: string): Promise<T>
 }
 
 export interface AppPermissions {
@@ -59,7 +59,7 @@ export interface AppTheme {
 interface AppSdkContextValue {
   api: AppApi
   info: AppInfo
-  subscribe: (event: string, cb: (data: any) => void) => () => void
+  subscribe: (event: string, cb: (data: unknown) => void) => () => void
   navigate: (path: string) => void
   notify: (message: string, opts?: { type?: 'info' | 'success' | 'error' }) => void
 }
@@ -82,17 +82,18 @@ export function useAppApi(): AppApi {
 }
 
 /** Subscribe to a real-time WebSocket event. Unsubscribes on unmount. */
-export function useAppEvents(event: string, callback: (data: any) => void): void {
+export function useAppEvents(event: string, callback: (data: unknown) => void): void {
   const { subscribe, info } = useCtx()
   const cbRef = useRef(callback)
   cbRef.current = callback
 
   useEffect(() => {
     if (!info.permissions.events.includes(event) && !info.permissions.events.includes('*')) {
+      // eslint-disable-next-line no-console -- intentional permission diagnostic
       console.warn(`[app-sdk] App "${info.name}" not permitted to subscribe to event "${event}"`)
       return
     }
-    return subscribe(event, (data: any) => cbRef.current(data))
+    return subscribe(event, (data: unknown) => cbRef.current(data))
   }, [event, subscribe, info])
 }
 
@@ -164,6 +165,11 @@ export interface ChatLaunchOptions {
   message?: string
 }
 
+/** Launch intent written to a global slot for ChatPage to consume on mount. */
+interface ChatLaunchIntent extends ChatLaunchOptions {
+  ts: number
+}
+
 /**
  * Launch a chat session in the host dashboard.
  *
@@ -177,7 +183,7 @@ export function useChatLauncher(): {
   const { navigate } = useCtx()
 
   const openChat = useCallback((opts: ChatLaunchOptions = {}) => {
-    ;(window as any).__mc_chat_launch = {
+    ;(window as Window & { __mc_chat_launch?: ChatLaunchIntent }).__mc_chat_launch = {
       agent: opts.agent,
       message: opts.message,
       ts: Date.now(),
@@ -250,7 +256,7 @@ export function AppApiProvider({
   appVersion?: string
   allowedApiPaths: string[]
   allowedEvents: string[]
-  subscribeFn: (event: string, cb: (data: any) => void) => () => void
+  subscribeFn: (event: string, cb: (data: unknown) => void) => () => void
   navigateFn: (path: string) => void
   notifyFn: (message: string, opts?: { type?: 'info' | 'success' | 'error' }) => void
   children: ReactNode

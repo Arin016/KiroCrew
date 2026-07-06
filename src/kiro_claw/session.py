@@ -81,6 +81,7 @@ from kiro_claw import model_registry, shutdown_event
 from kiro_claw.agent import _enforce_denied_commands
 from kiro_claw.config import KiroClawConfig
 from kiro_claw.config.loader import build_provider_factory, default_project_dir
+from kiro_claw.executors import maintenance_executor
 from kiro_claw.providers.base import CancelOutcome, LLMProvider
 from kiro_claw.sel import sel
 from kiro_claw.session_map import _KIRO_SESSIONS_DIR  # noqa: F401
@@ -194,6 +195,12 @@ def detect_provider_switch(session_map: "SessionMap", session_key: str, new_prov
 
 
 _MAX_POOL = 10
+
+# Cap on how many provider.shutdown() calls close_all runs concurrently. Each
+# shutdown fans out 2-3 (potentially wedged) subprocess_executor tasks; matching
+# this to the subprocess pool size (executors._MAX_SUBPROCESS_WORKERS) keeps a
+# mass shutdown from enqueueing dozens of uncancellable teardown tasks at once.
+_CLOSE_ALL_CONCURRENCY = 8
 
 # Bound on the won-race stale-retry recursion in get_or_create. Each retry
 # requires the winning session to have been recycled/reaped in the narrow
@@ -1360,7 +1367,7 @@ class SessionManager:
                     raw_pid = _cc_proc.pid
             pid = raw_pid if isinstance(raw_pid, int) else None
             raw_children = getattr(client, "_child_pids", None) if client else None
-            child_pids: dict[int, int | None] = (
+            child_pids: dict = (
                 dict(raw_children) if isinstance(raw_children, dict) else {}
             )
             # Lazy import to avoid circular dependency with acp.client.
@@ -1370,6 +1377,7 @@ class SessionManager:
                 _get_child_pids,
                 _get_start_time,
                 _kill_escaped_children,
+                _read_basename,
             )
 
             if pid:
@@ -1378,7 +1386,7 @@ class SessionManager:
                 # start-time comparison to skip recycled PIDs safely.
                 for p in _get_child_pids(pid):
                     if p not in child_pids:
-                        child_pids[p] = _get_start_time(p)
+                        child_pids[p] = (_get_start_time(p), _read_basename(p))
             await session.provider.shutdown()
             # Verify process is actually dead; force-kill entire tree if not
             if pid:
@@ -1632,11 +1640,20 @@ class SessionManager:
             self._sessions.clear()
             self._compact_cooldown_until.clear()
 
+        # Bound concurrent shutdowns: each provider.shutdown() -> _kill_process()
+        # enqueues 2-3 subprocess_executor tasks (child scan, record capture,
+        # escaped-child sweep), several of which can block on a wedged kernel
+        # resource. Without a cap, a mass shutdown of the warm pool + active
+        # sessions would flood the bounded subprocess pool with uncancellable
+        # tasks at once; the semaphore lets them drain in pool-sized waves.
+        _close_sem = asyncio.Semaphore(_CLOSE_ALL_CONCURRENCY)
+
         async def _close_one(provider: LLMProvider) -> None:
-            try:
-                await provider.shutdown()
-            except Exception:
-                pass
+            async with _close_sem:
+                try:
+                    await provider.shutdown()
+                except Exception:
+                    pass
 
         all_providers = [s.provider for s in sessions.values()] + pool_providers
         if not all_providers:
@@ -2006,9 +2023,14 @@ class SessionManager:
                 except Exception:
                     logger.exception("Cleanup loop: _expire_idle crashed; continuing")
 
-            # Sweep MCP servers orphaned by crashed/expired sessions
+            # Sweep MCP servers orphaned by crashed/expired sessions.
+            # Offloaded to the bounded maintenance pool (not the default
+            # executor) so the per-PID os.kill loop + file lock can't block the
+            # event loop or starve its DNS resolution (Mesh-1968).
             try:
-                mcp_killed = _cleanup_orphaned_mcp_servers()
+                mcp_killed = await asyncio.get_running_loop().run_in_executor(
+                    maintenance_executor(), _cleanup_orphaned_mcp_servers
+                )
                 if mcp_killed:
                     logger.info("Periodic sweep: cleaned %d orphaned MCP servers", mcp_killed)
             except Exception:

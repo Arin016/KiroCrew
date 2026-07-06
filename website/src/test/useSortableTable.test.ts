@@ -69,4 +69,24 @@ describe('useSortableTable', () => {
     act(() => result.current.toggle('name'))
     expect(result.current.sort).toEqual({ key: 'value', dir: 'asc' })
   })
+
+  it('bidirectional option flips asc <-> desc without ever resetting', () => {
+    const { result } = renderHook(() => useSortableTable(data, 'test-bidir', comparators, { key: 'name', dir: 'asc' }, { bidirectional: true }))
+    act(() => result.current.toggle('value'))
+    expect(result.current.sort).toEqual({ key: 'value', dir: 'asc' })
+    act(() => result.current.toggle('value'))
+    expect(result.current.sort).toEqual({ key: 'value', dir: 'desc' })
+    act(() => result.current.toggle('value'))
+    expect(result.current.sort).toEqual({ key: 'value', dir: 'asc' })
+  })
+
+  it('initialDirs sets the first-selection direction per column', () => {
+    const { result } = renderHook(() => useSortableTable(data, 'test-initdir', comparators, { key: 'name', dir: 'asc' }, { initialDirs: { value: 'desc' }, bidirectional: true }))
+    // First selection of value opens descending per initialDirs.
+    act(() => result.current.toggle('value'))
+    expect(result.current.sort).toEqual({ key: 'value', dir: 'desc' })
+    // Then it flips bidirectionally.
+    act(() => result.current.toggle('value'))
+    expect(result.current.sort).toEqual({ key: 'value', dir: 'asc' })
+  })
 })

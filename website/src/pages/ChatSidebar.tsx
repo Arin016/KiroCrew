@@ -1,13 +1,15 @@
 import { useState, useRef, useEffect, memo, useMemo, useCallback, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import { LayoutGroup, AnimatePresence, motion } from 'framer-motion'
-import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, MessageSquarePlus, Folder, ChevronRight, ChevronDown, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns3, GripVertical, Zap, Check, Link2, Copy, ListFilter } from 'lucide-react'
-import { DndContext, closestCenter, pointerWithin, KeyboardSensor, PointerSensor, useSensor, useSensors, useDraggable, useDroppable, DragOverlay, type DragEndEvent, type DragStartEvent, type CollisionDetection } from '@dnd-kit/core'
+import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, MessageSquarePlus, Folder, FolderOpen, ChevronRight, ChevronDown, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns3, GripVertical, Zap, Check, Link2, Copy, ListFilter } from 'lucide-react'
+import { DndContext, closestCenter, pointerWithin, KeyboardSensor, PointerSensor, useSensor, useSensors, useDraggable, useDroppable, DragOverlay, MeasuringStrategy, type DragEndEvent, type DragStartEvent, type DragOverEvent, type CollisionDetection } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy, useSortable, sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAppDispatch, useAppSelector } from '../store'
 import { useConnected } from '../hooks/useConnected'
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from '../components/ui/dropdown-menu'
+import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from '../components/ui/context-menu'
 import { offlineProps } from '../utils/offline'
 import { switchSlot, createSlot, deleteSlot, fetchHistory, resumeFromHistory, deleteHistorySession } from '../store/chatSlice'
 import { sseSlotTitle, updateSlotFolder, updateSlotPin, markSlotUnread, markSlotRead } from '../store/dashboardSlice'
@@ -20,7 +22,6 @@ import { useIsMobile } from '../hooks/useIsMobile'
 import { copySessionLink } from '../utils/shareUrl'
 import { safeSetItem } from '../utils/safeStorage'
 import { resolveFolderAgent } from '../utils/folderAgent'
-import FolderPickerSubmenu from '../components/FolderPickerSubmenu'
 import type { ChatFolder, ChatTag, TagColumn, TagColumnMode } from '../types'
 import { decideUnreadDrain } from './unreadDrain'
 import { loadChatConfig, saveChatConfig } from './chat/ChatSettings'
@@ -110,6 +111,9 @@ interface Slot {
   title?: string
   running: boolean
   unread?: boolean
+  // `pending_approval` rides on every ChatSlot payload; the sidebar reads it to
+  // suppress the "your turn" dot and show the yellow "Needs approval" subtitle.
+  pending_approval?: boolean
   agent?: string
   workspace?: string
   created?: string
@@ -208,6 +212,29 @@ function dateSegment(ts: number | string | undefined): string {
   return d.toLocaleDateString([], { year: 'numeric', month: 'long' })
 }
 
+/** A folder's icon: a Lucide folder glyph as a uniform base. When collapsed
+ *  (resting) it shows the closed Folder glyph with the folder's custom emoji
+ *  (if any) overlaid on its flat face. When expanded it swaps to FolderOpen and
+ *  drops the emoji — the open shape plus the rotated chevron carry the state,
+ *  and FolderOpen's angled flap has no flat face for the emoji to sit on cleanly.
+ *  Every folder keeps the same fixed footprint so the sidebar stays aligned, and
+ *  the board view shows the emoji too (it previously rendered only the bare glyph). */
+function FolderGlyph({ icon, size = 14, open = false, className = 'text-muted shrink-0' }: { icon?: string; size?: number; open?: boolean; className?: string }) {
+  const Glyph = open ? FolderOpen : Folder
+  return (
+    <span className="relative inline-flex shrink-0 items-center justify-center" style={{ width: size, height: size }}>
+      <Glyph size={size} className={className} />
+      {icon && !open && (
+        <span
+          aria-hidden
+          className="absolute inset-x-0 bottom-0 flex items-center justify-center leading-none pointer-events-none"
+          style={{ top: Math.round(size * 0.42), fontSize: Math.max(7, Math.round(size * 0.52)) }}
+        >{icon}</span>
+      )}
+    </span>
+  )
+}
+
 /** Animated collapsible for unknown-height content (folder bodies).
  *  Uses CSS grid `1fr`/`0fr` trick so we can animate to intrinsic height
  *  without measuring. For fixed-height panels use Framer Motion instead. */
@@ -250,24 +277,38 @@ interface ChatSidebarProps {
   collapsible?: boolean
 }
 
-type SortKey = 'date-desc' | 'date-asc' | 'name-asc' | 'name-desc'
+type SortKey = 'date-desc' | 'date-asc' | 'created-desc' | 'created-asc' | 'name-asc' | 'name-desc'
 const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: 'date-desc', label: 'Newest' },
   { value: 'date-asc', label: 'Oldest' },
+  { value: 'created-desc', label: 'Created (Newest)' },
+  { value: 'created-asc', label: 'Created (Oldest)' },
   { value: 'name-asc', label: 'A → Z' },
   { value: 'name-desc', label: 'Z → A' },
 ]
 const SORT_LS_KEY = 'mc-session-sort'
 
 function compareSlots(a: Slot, b: Slot, key: SortKey): number {
+  return compareBySort(a, b, key)
+}
+
+/** Shared comparator for both active sessions and history items. */
+function compareBySort(a: { title?: string; key: string; created?: string; last_ts?: string; modified?: number }, b: typeof a, key: SortKey): number {
   if (key === 'name-asc' || key === 'name-desc') {
     const na = (a.title || a.key).toLowerCase()
     const nb = (b.title || b.key).toLowerCase()
     return key === 'name-asc' ? na.localeCompare(nb) : nb.localeCompare(na)
   }
-  const ta = a.last_ts || a.created || ''
-  const tb = b.last_ts || b.created || ''
-  return key === 'date-desc' ? tb.localeCompare(ta) : ta.localeCompare(tb)
+  if (key === 'created-desc' || key === 'created-asc') {
+    const ca = a.created || ''
+    const cb = b.created || ''
+    return key === 'created-desc' ? cb.localeCompare(ca) : ca.localeCompare(cb)
+  }
+  // date-desc / date-asc: use last activity (modified epoch, last_ts ISO, or created ISO)
+  const toEpoch = (item: typeof a) => item.modified ?? (item.last_ts ? new Date(item.last_ts).getTime() / 1000 : item.created ? new Date(item.created).getTime() / 1000 : 0)
+  const ta = toEpoch(a)
+  const tb = toEpoch(b)
+  return key === 'date-desc' ? tb - ta : ta - tb
 }
 
 export const SIDEBAR_MIN = 180
@@ -302,7 +343,6 @@ function ChatSidebar({
   const [renamingSlot, setRenamingSlot] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const cancelRenameRef = useRef(false)
-  const [ctxMenu, setCtxMenu] = useState<{ key: string; x: number; y: number } | null>(null)
   const [sortKey, setSortKey] = useState<SortKey>(() => {
     const saved = localStorage.getItem(SORT_LS_KEY)
     return SORT_OPTIONS.some(o => o.value === saved) ? saved as SortKey : 'date-desc'
@@ -413,15 +453,6 @@ function ChatSidebar({
     document.body.style.userSelect = 'none'
   }, [historyHeight])
   const [cleanupOpen, setCleanupOpen] = useState(false)
-  const [headerMenuOpen, setHeaderMenuOpen] = useState(false)
-  // Split create-button: main segment = New chat; caret opens a menu with
-  // New folder + New chat in folder (flat folder flyout). Menu is portaled to
-  // <body> so the right-edge folder flyout escapes the sidebar's overflow clip.
-  const [createMenuOpen, setCreateMenuOpen] = useState(false)
-  const [createSubmenuOpen, setCreateSubmenuOpen] = useState(false)
-  const [createRect, setCreateRect] = useState<DOMRect | null>(null)
-  const createBtnRef = useRef<HTMLButtonElement>(null)
-  const createMenuRef = useRef<HTMLDivElement>(null)
   const [filterSortOpen, setFilterSortOpen] = useState(false)
   const [cleanupDays, setCleanupDays] = useState(3)
   const [cleanupExpanded, setCleanupExpanded] = useState(false)
@@ -533,10 +564,15 @@ function ChatSidebar({
     window.addEventListener('mc-config-changed', onChange)
     return () => window.removeEventListener('mc-config-changed', onChange)
   }, [])
-  // When feature is disabled, treat it as zero columns → sidebar falls back to legacy layout
-  const columns: TagColumn[] = tagColumnsEnabled ? rawColumns : []
-  const orderedColumns = useMemo(() => [...columns].sort((a, b) => a.order - b.order), [columns])
+  // When feature is disabled, treat it as zero columns → sidebar falls back to legacy layout.
+  // Derive the effective column list inside the memo so its identity only changes
+  // when the stable inputs (rawColumns / tagColumnsEnabled) change, not every render.
+  const orderedColumns = useMemo(() => {
+    const columns: TagColumn[] = tagColumnsEnabled ? rawColumns : []
+    return [...columns].sort((a, b) => a.order - b.order)
+  }, [rawColumns, tagColumnsEnabled])
   const [tagCtxSlot, setTagCtxSlot] = useState<string | null>(null)
+  const [tagCtxPos, setTagCtxPos] = useState<{ x: number; y: number } | null>(null)
   const [columnEditId, setColumnEditId] = useState<string | null>(null)  // column whose popover is open
   const [popoverPos, setPopoverPos] = useState<{ top: number; left: number } | null>(null)
   // Anchor the popover to the edit button's bounding rect so it stays put even
@@ -571,32 +607,6 @@ function ChatSidebar({
     const id = setTimeout(() => document.addEventListener('mousedown', handler), 0)
     return () => { clearTimeout(id); document.removeEventListener('mousedown', handler) }
   }, [columnEditId])
-
-  // Close header menu on outside click
-  useEffect(() => {
-    if (!headerMenuOpen) return
-    const handler = (e: MouseEvent) => {
-      const t = e.target as HTMLElement | null
-      if (t?.closest('[data-header-menu]')) return
-      setHeaderMenuOpen(false)
-    }
-    const id2 = setTimeout(() => document.addEventListener('mousedown', handler), 0)
-    return () => { clearTimeout(id2); document.removeEventListener('mousedown', handler) }
-  }, [headerMenuOpen])
-
-  // Close the split create-menu on outside click. The menu is portaled to
-  // <body>, so the guard must check both the trigger wrapper and the portal.
-  useEffect(() => {
-    if (!createMenuOpen) return
-    const handler = (e: MouseEvent) => {
-      const t = e.target as Node | null
-      if (createBtnRef.current?.closest('[data-create-menu]')?.contains(t as Node)) return
-      if (createMenuRef.current?.contains(t as Node)) return
-      setCreateMenuOpen(false); setCreateSubmenuOpen(false)
-    }
-    const cid = setTimeout(() => document.addEventListener('mousedown', handler), 0)
-    return () => { clearTimeout(cid); document.removeEventListener('mousedown', handler) }
-  }, [createMenuOpen])
 
   // Close filter/sort popover on outside click
   useEffect(() => {
@@ -842,6 +852,7 @@ function ChatSidebar({
   }, [])
   const handleSidebarDragEnd = useCallback((event: DragEndEvent) => {
     setActiveDrag(null)
+    if (dragExpandTimer.current) { clearTimeout(dragExpandTimer.current.timer); dragExpandTimer.current = null }
     const { active, over } = event
     if (!over) return
     const a = active.data.current as { type?: string; key?: string } | undefined
@@ -861,13 +872,56 @@ function ChatSidebar({
       else if (o?.type === 'folder') assignToFolder(a.key, over.id as string)
     }
   }, [reorderFolders, assignToFolder])
-  const handleSidebarDragCancel = useCallback(() => setActiveDrag(null), [])
+  const handleSidebarDragCancel = useCallback(() => { setActiveDrag(null); if (dragExpandTimer.current) { clearTimeout(dragExpandTimer.current.timer); dragExpandTimer.current = null } }, [])
+  // Auto-expand collapsed folders when a dragged item hovers over them for 500ms.
+  const dragExpandTimer = useRef<{ id: string; timer: ReturnType<typeof setTimeout> } | null>(null)
+  const handleSidebarDragOver = useCallback((event: DragOverEvent) => {
+    const over = event.over
+    const overData = over?.data.current as { type?: string; folderId?: string | null } | undefined
+    const targetFolderId = overData?.type === 'folder-drop' ? overData.folderId : null
+    // If hovering a collapsed folder, blink ring twice then expand
+    if (targetFolderId) {
+      const f = folders.find(x => x.id === targetFolderId)
+      if (f?.collapsed) {
+        if (dragExpandTimer.current?.id !== targetFolderId) {
+          if (dragExpandTimer.current) clearTimeout(dragExpandTimer.current.timer)
+          dragExpandTimer.current = {
+            id: targetFolderId,
+            timer: setTimeout(() => {
+              // Blink the folder ring twice before expanding
+              const el = document.querySelector(`[data-folder-drop="${targetFolderId}"]`) as HTMLElement | null
+              if (el) {
+                const ring = 'inset 0 0 0 2px var(--accent)'
+                const dim = () => { el.style.boxShadow = ring; el.style.opacity = '0.4' }
+                const bright = () => { el.style.boxShadow = ring; el.style.opacity = '1' }
+                bright(); setTimeout(dim, 100); setTimeout(bright, 200); setTimeout(dim, 300)
+                setTimeout(() => {
+                  el.style.boxShadow = ''; el.style.opacity = ''
+                  updateFolderMutation.mutate({ id: targetFolderId, body: { collapsed: false } })
+                  dragExpandTimer.current = null
+                }, 450)
+              } else {
+                updateFolderMutation.mutate({ id: targetFolderId, body: { collapsed: false } })
+                dragExpandTimer.current = null
+              }
+            }, 500),
+          }
+        }
+        return
+      }
+    }
+    // Moved away from the folder or it's already expanded — clear timer
+    if (dragExpandTimer.current) {
+      clearTimeout(dragExpandTimer.current.timer)
+      dragExpandTimer.current = null
+    }
+  }, [folders, updateFolderMutation])
   const createChatInFolderMutation = useMutation({
     mutationFn: ({ folderId }: { folderId: string; columnId?: string }) => {
       const agent = resolveFolderAgent(folders, folderId, defaultAgent)
       return dispatch(createSlot({ agent, mode })).unwrap()
     },
-    onSuccess: (slot: any, { folderId, columnId }: { folderId: string; columnId?: string }) => {
+    onSuccess: (slot: Slot, { folderId, columnId }: { folderId: string; columnId?: string }) => {
       if (slot?.key) {
         assignToFolder(slot.key, folderId)
         // Board view: also drop the new session into the column it was created
@@ -877,7 +931,10 @@ function ChatSidebar({
         if (columnId) dropSlotMutation.mutate({ slot: slot.key, columnId })
       }
     },
-    onError: (err: unknown) => console.error('Failed to create chat in folder:', err),
+    onError: (err: unknown) => {
+      // eslint-disable-next-line no-console -- surface chat-creation failures for diagnostics
+      console.error('Failed to create chat in folder:', err)
+    },
   })
   const createChatInFolder = useCallback((folderId: string, columnId?: string) => { createChatInFolderMutation.mutate({ folderId, columnId }) }, [createChatInFolderMutation])
 
@@ -906,6 +963,9 @@ function ChatSidebar({
       return cfSlots.length > 0 || descendantMatch(folders, cf.id, filteredSlots.filter(s => colSlotKeys.has(s.key)), slotFolders)
     }).length
     return (
+      // Drag-and-drop folder drop zone: the drag handlers make this a mouse-only
+      // drop target with no keyboard analogue, so scope-disable the static-interaction rule.
+      // eslint-disable-next-line jsx-a11y/no-static-element-interactions
       <div key={`col-${columnId}-folder-${folder.id}`}
         data-testid={`col-${columnId}-folder-${folder.id}`}
         className="rounded-md transition-all mb-0.5"
@@ -931,9 +991,23 @@ function ChatSidebar({
           <span className="shrink-0 text-muted transition-transform duration-150" style={{ transform: folder.collapsed ? 'rotate(0deg)' : 'rotate(90deg)' }}>
             <ChevronRight size={12} />
           </span>
-          <Folder size={11} className="shrink-0 text-muted" />
-          <span className="flex-1 truncate">{folder.name}</span>
+          <FolderGlyph icon={folder.icon} size={11} open={!folder.collapsed} className="shrink-0 text-muted" />
+          {editingId === folder.id ? (
+            /* Inline rename input — board-view parity with renderFolderHeader.
+             *  Without this branch the ⋯-menu "Rename" set editingId but no
+             *  field ever appeared, so rename silently did nothing here. The
+             *  collapse handler is on the OUTER div, so the input's onClick +
+             *  onMouseDown stopPropagation are load-bearing (they keep typing/
+             *  clicking the field from bubbling to toggleCollapse). */
+            <Input className="flex-1 py-0.5 text-[12px] min-w-0" autoFocus value={editName} onChange={e => setEditName(e.target.value)} onClick={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => renameCommit(folder.id, editName), onEscape: () => setEditingId(null), onBlur: () => renameCommit(folder.id, editName) })} />
+          ) : (
+            // Double-click rename is a mouse-only power shortcut; the accessible
+            // path is the ⋯-menu Rename item, so scope-disable the interaction rule.
+            // eslint-disable-next-line jsx-a11y/no-static-element-interactions
+            <span className="flex-1 truncate" title="Double-click to rename" onDoubleClick={e => { e.stopPropagation(); setEditingId(folder.id); setEditName(folder.name) }}>{folder.name}</span>
+          )}
           <span className="text-[10px] text-muted shrink-0">{count}</span>
+          {editingId !== folder.id && (
           <span className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5">
             <select className="text-[10px] text-muted bg-transparent border-none cursor-pointer outline-none max-w-[60px]" title="Default agent" value={folder.default_agent || ''} onClick={e => e.stopPropagation()} onChange={e => { e.stopPropagation(); updateFolderMutation.mutate({ id: folder.id, body: { default_agent: e.target.value } }) }}>
               <option value="">agent…</option>
@@ -949,6 +1023,7 @@ function ChatSidebar({
               <X size={10} />
             </button>
           </span>
+          )}
         </div>
         <FolderBody open={!folder.collapsed}>
           <div className="border-l border-border ml-2 pl-1">
@@ -1013,6 +1088,12 @@ function ChatSidebar({
         transition={{ layout: { type: 'spring', stiffness: 500, damping: 35 }, opacity: { duration: 0.2 }, x: { duration: 0.2 } }}>
         <DndDraggable id={`session:${s.key}`} data={{ type: 'session', key: s.key }} disabled={scope !== 'list' || renamingSlot === s.key}>
           {({ setNodeRef, listeners, isDragging }) => (
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+        {/* Session row: a dnd-kit draggable node wrapped by a ContextMenuTrigger;
+            adding tabIndex/keyboard here fights the DnD keyboard sensor and the
+            context-menu trigger, so scope-disable the interaction/click rules. */}
+        {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events */}
         <div ref={scope === 'list' ? setNodeRef : undefined} {...(scope === 'list' ? listeners : {})}
           data-draggable={(renamingSlot !== s.key).toString()}
           className={`session-row group relative flex items-start gap-2.5 px-4 py-2 rounded-md text-sm transition-all select-none ${isActive ? !connected ? 'session-active text-text-strong bg-accent-subtle cursor-not-allowed' : 'session-active text-text-strong bg-accent-subtle cursor-pointer' : !connected ? 'text-muted opacity-50 cursor-not-allowed' : 'text-muted hover:text-text hover:bg-bg-hover cursor-pointer'} ${rowColor ? 'session-colored' : ''} ${rowColor && colorMode === 'gradient' ? 'session-gradient' : ''} ${isDragging ? 'opacity-40' : ''}`}
@@ -1037,10 +1118,14 @@ function ChatSidebar({
             if (!connected) return
             dispatch(switchSlot(s.key))
             onSelectSlot?.(s.key)
-          }}
-          onContextMenu={e => { e.preventDefault(); setCtxMenu({ key: s.key, x: e.clientX, y: e.clientY }) }}>
-          {s.unread && (
-            <span className="absolute right-1.5 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full pointer-events-none" style={{ background: 'var(--info)' }} />
+          }}>
+          {s.unread && !s.running && !s.pending_approval && (
+            // Blue dot = "your turn": the agent finished its turn (not running)
+            // and you haven't opened the session since (unread). Redefined from
+            // the old "any unseen output" trigger so it no longer lights
+            // mid-stream; a pending approval gets its own yellow subtitle
+            // treatment instead. (CR-284529836)
+            <span className="absolute right-1.5 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full pointer-events-none" style={{ background: 'var(--info)' }} title="Agent finished — your turn" />
           )}
           <div className="flex-1 min-w-0 overflow-hidden">
             <div className={`text-[11px] font-semibold truncate leading-tight flex items-center gap-1 ${agentColor}`}>
@@ -1062,7 +1147,21 @@ function ChatSidebar({
                 <Input className="w-full bg-transparent border border-accent rounded px-1 py-0 text-text-strong outline-none text-[13px] select-text" autoFocus value={renameValue} onChange={e => setRenameValue(e.target.value)} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => { (document.activeElement as HTMLInputElement)?.blur() }, onEscape: () => { cancelRenameRef.current = true; setRenamingSlot(null) }, onBlur: () => { if (!cancelRenameRef.current && renameValue.trim()) { dispatch(sseSlotTitle({ key: s.key, title: renameValue.trim() })); api.renameSlot(s.key, renameValue.trim()).catch(() => { queryClient.invalidateQueries({ queryKey: ['chat-slots'] }) }) } cancelRenameRef.current = false; setRenamingSlot(null) } })} onMouseDown={e => e.stopPropagation()} />
               ) : (s.title && s.title !== s.key ? s.title : s.key)}
             </div>
-            {s.running ? <div className="text-[12px] text-accent leading-snug truncate mt-0.5 flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse shrink-0" />{slotStatusDetail[s.key]?.text || 'Thinking…'}</div> : s.last_message && <div className="text-[12px] text-muted leading-snug truncate mt-0.5">{s.last_message}</div>}
+            {s.pending_approval ? (
+              // Pending approval outranks running (mirrors the Board's
+              // inferLane, which returns its approval lane before the running
+              // check): show the yellow dot + "Needs approval" even if the slot
+              // still reports running, so an owed approval is never hidden
+              // behind a "Thinking…" spinner.
+              <div className="text-[12px] leading-snug mt-0.5 flex items-center gap-1.5 min-w-0">
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ background: 'var(--warn)' }} title="Needs approval" />
+                <span className="truncate"><span className="font-medium" style={{ color: 'var(--warn)' }}>Needs approval</span>{s.last_message ? <span className="text-muted"> · {s.last_message}</span> : null}</span>
+              </div>
+            ) : s.running ? (
+              <div className="text-[12px] text-accent leading-snug truncate mt-0.5 flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse shrink-0" />{slotStatusDetail[s.key]?.text || 'Thinking…'}</div>
+            ) : s.last_message ? (
+              <div className="text-[12px] text-muted leading-snug truncate mt-0.5">{s.last_message}</div>
+            ) : null}
             {tagColumnsEnabled && s.tags && s.tags.length > 0 && (
               <div className="flex flex-wrap gap-1 mt-1">
                 {s.tags.map(tid => {
@@ -1079,18 +1178,54 @@ function ChatSidebar({
           </div>
           {isMobile ? (
             <div className="absolute top-1/2 -translate-y-1/2 right-1.5 flex items-center gap-0.5">
-              <button type="button" className="text-muted/50 active:text-text p-1 cursor-pointer bg-transparent border-none" aria-label="More options" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); const rect = (e.currentTarget as HTMLElement).getBoundingClientRect(); setCtxMenu({ key: s.key, x: rect.left, y: rect.bottom + 4 }) }}><MoreVertical size={14} /></button>
-              <button type="button" className="text-muted/50 active:text-text p-1 cursor-pointer bg-transparent border-none" title="Duplicate" aria-label="Duplicate" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); forkMutation.mutate(s.key) }}><Copy size={14} /></button>
-              <button type="button" className="text-muted/50 active:text-danger p-1 cursor-pointer bg-transparent border-none" aria-label="Close session" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(s.key)) }}><X size={14} /></button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button type="button" className="text-muted/50 active:text-text p-1 cursor-pointer bg-transparent border-none" aria-label="More options" onMouseDown={e => e.stopPropagation()}><MoreVertical size={14} /></button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="min-w-[160px]">
+                  <DropdownMenuItem onClick={() => { const sl = slots.find(x => x.key === s.key); setRenamingSlot(s.key); setRenameValue(sl?.title && sl.title !== sl.key ? sl.title : '') }}><Pencil size={13} /> Rename</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => { const sl = slots.find(x => x.key === s.key); if (sl) copySessionLink(sl.key, sl.title, undefined, mode) }}><Link2 size={13} /> Copy link</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => { forkMutation.mutate(s.key) }}><Copy size={13} /> Duplicate</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => dispatch(unreadSet.has(s.key) ? markSlotRead(s.key) : markSlotUnread(s.key))}><Circle size={13} /> {unreadSet.has(s.key) ? 'Mark as read' : 'Mark as unread'}</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => togglePin(s.key)}><Pin size={13} /> {pinned.has(s.key) ? 'Unpin' : 'Pin'}</DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem className="text-danger focus:text-danger" onClick={() => { if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(s.key)) }}><X size={13} /> Close session</DropdownMenuItem>
+                  {tagColumnsEnabled && <DropdownMenuItem onClick={() => { setTagCtxSlot(s.key); setTagCtxPos({ x: 0, y: 0 }) }}><TagIcon size={13} /> Tags…</DropdownMenuItem>}
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           ) : (
-            <IconButtonGroup reveal className={`absolute top-1/2 -translate-y-1/2 right-1.5 ${ctxMenu?.key === s.key ? 'opacity-100' : ''}`}>
-              <IconButton title="More" aria-label="More options" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); const rect = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect(); setCtxMenu({ key: s.key, x: rect.left, y: rect.bottom + 4 }) }}><MoreVertical size={12} /></IconButton>
+            <IconButtonGroup reveal className="absolute top-1/2 -translate-y-1/2 right-1.5 has-[[data-state=open]]:opacity-100">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <IconButton title="More" aria-label="More options" onMouseDown={e => e.stopPropagation()}><MoreVertical size={12} /></IconButton>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="min-w-[160px]">
+                  <DropdownMenuItem onClick={() => { const sl = slots.find(x => x.key === s.key); setRenamingSlot(s.key); setRenameValue(sl?.title && sl.title !== sl.key ? sl.title : '') }}><Pencil size={13} /> Rename</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => { const sl = slots.find(x => x.key === s.key); if (sl) copySessionLink(sl.key, sl.title, undefined, mode) }}><Link2 size={13} /> Copy link</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => dispatch(unreadSet.has(s.key) ? markSlotRead(s.key) : markSlotUnread(s.key))}><Circle size={13} /> {unreadSet.has(s.key) ? 'Mark as read' : 'Mark as unread'}</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => togglePin(s.key)}><Pin size={13} /> {pinned.has(s.key) ? 'Unpin' : 'Pin'}</DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem className="text-danger focus:text-danger" onClick={() => { if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(s.key)) }}><X size={13} /> Close session</DropdownMenuItem>
+                  {tagColumnsEnabled && <DropdownMenuItem onClick={() => { setTagCtxSlot(s.key); setTagCtxPos({ x: 0, y: 0 }) }}><TagIcon size={13} /> Tags…</DropdownMenuItem>}
+                </DropdownMenuContent>
+              </DropdownMenu>
               <IconButton variant="accent" title="Duplicate" aria-label="Duplicate" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); forkMutation.mutate(s.key) }}><Copy size={12} /></IconButton>
               <IconButton variant="danger" title="Close" aria-label="Close session" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(s.key)) }}><X size={12} /></IconButton>
             </IconButtonGroup>
           )}
         </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent className="min-w-[160px]">
+            <ContextMenuItem onClick={() => { const sl = slots.find(x => x.key === s.key); setRenamingSlot(s.key); setRenameValue(sl?.title && sl.title !== sl.key ? sl.title : '') }}><Pencil size={13} /> Rename</ContextMenuItem>
+            <ContextMenuItem onClick={() => { const sl = slots.find(x => x.key === s.key); if (sl) copySessionLink(sl.key, sl.title, undefined, mode) }}><Link2 size={13} /> Copy link</ContextMenuItem>
+            <ContextMenuItem onClick={() => dispatch(unreadSet.has(s.key) ? markSlotRead(s.key) : markSlotUnread(s.key))}><Circle size={13} /> {unreadSet.has(s.key) ? 'Mark as read' : 'Mark as unread'}</ContextMenuItem>
+            <ContextMenuItem onClick={() => togglePin(s.key)}><Pin size={13} /> {pinned.has(s.key) ? 'Unpin' : 'Pin'}</ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem className="text-danger focus:text-danger" onClick={() => { if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(s.key)) }}><X size={13} /> Close session</ContextMenuItem>
+            {tagColumnsEnabled && <ContextMenuItem onClick={() => { setTagCtxSlot(s.key); setTagCtxPos({ x: 0, y: 0 }) }}><TagIcon size={13} /> Tags…</ContextMenuItem>}
+          </ContextMenuContent>
+        </ContextMenu>
           )}
         </DndDraggable>
         {showDivider && <div className="mx-3 border-b border-border" />}
@@ -1099,15 +1234,26 @@ function ChatSidebar({
   }
 
   // ── Folder row: matches session-row width (full width minus drawer padding) ──
+  // Recursively check if a folder or any descendant contains an unread slot.
+  const folderTreeHasUnread = (folderId: string): boolean => {
+    for (const k of unreadSet) { if (slotFolders[k] === folderId) return true }
+    return folders.some(f => f.parent_id === folderId && folderTreeHasUnread(f.id))
+  }
+
   const renderFolderHeader = (folder: ChatFolder, dragHandleProps?: React.HTMLAttributes<HTMLElement>) => {
     const childFolders = folders.filter(f => f.parent_id === folder.id)
     const childSlots = filteredSlots.filter(s => slotFolders[s.key] === folder.id)
     const count = childSlots.length + childFolders.length
+    const hasUnread = folderTreeHasUnread(folder.id)
     // The whole header is the drag-to-reorder handle (pointer listeners forwarded
     // via dragHandleProps). The PointerSensor activation distance keeps the
     // collapse toggle + action buttons clickable; drag is off while renaming.
     const draggable = !!dragHandleProps && editingId !== folder.id
     return (
+      // Folder header doubles as the dnd-kit drag handle (dragHandleProps) and a
+      // collapse toggle; the drag-handle listeners + spread props make a native
+      // <button> impractical, so scope-disable the interaction/click rules.
+      // eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events
       <div key={`folder-header-${folder.id}`}
         {...(draggable ? dragHandleProps : {})}
         className={`group relative flex items-center gap-2 pr-2 py-1.5 rounded-md cursor-pointer text-sm text-muted hover:text-text hover:bg-bg-hover transition-all ${draggable ? 'cursor-grab active:cursor-grabbing' : ''}`}
@@ -1116,14 +1262,16 @@ function ChatSidebar({
         <span data-testid={`folder-collapse-${folder.id}`} className="shrink-0 text-muted transition-transform duration-150" style={{ transform: folder.collapsed ? 'rotate(0deg)' : 'rotate(90deg)' }}>
           <ChevronRight size={14} />
         </span>
-        {folder.icon
-          ? <span className="text-[14px] leading-none shrink-0">{folder.icon}</span>
-          : <Folder size={14} className="text-muted shrink-0" />}
+        <FolderGlyph icon={folder.icon} size={14} open={!folder.collapsed} />
         {editingId === folder.id ? (
           <Input className="flex-1 py-0.5 text-[13px] min-w-0" autoFocus value={editName} onChange={e => setEditName(e.target.value)} onClick={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => renameCommit(folder.id, editName), onEscape: () => setEditingId(null), onBlur: () => renameCommit(folder.id, editName) })} />
         ) : (
+          // Double-click rename is a mouse-only power shortcut; the hover Rename
+          // button is the accessible path, so scope-disable the interaction rule.
+          // eslint-disable-next-line jsx-a11y/no-static-element-interactions
           <span className="flex-1 text-[13px] font-medium text-text truncate" title="Double-click to rename" onDoubleClick={e => { e.stopPropagation(); setEditingId(folder.id); setEditName(folder.name) }}>{folder.name}</span>
         )}
+        {hasUnread && folder.collapsed && <span className="w-2 h-2 rounded-full shrink-0" style={{ background: 'var(--info)' }} />}
         <span className="text-[11px] text-muted tabular-nums shrink-0">{count}</span>
         {folder.default_agent && <span className="text-[10px] text-accent bg-accent/10 px-1.5 py-0.5 rounded-full shrink-0 truncate max-w-[60px]" title={`Default agent: ${folder.default_agent}`}>{folder.default_agent}</span>}
         {editingId !== folder.id && (
@@ -1132,10 +1280,10 @@ function ChatSidebar({
             <option value="">agent…</option>
             {installedAgents.map(a => <option key={a.name} value={a.name}>{a.name}</option>)}
           </select>
-          <span className="cursor-pointer p-[4px] rounded text-muted hover:text-text hover:bg-bg-hover transition-all" title="Rename folder" aria-label="Rename folder" data-testid={`folder-rename-${folder.id}`} onClick={e => { e.stopPropagation(); setEditingId(folder.id); setEditName(folder.name) }}><Pencil size={12} /></span>
-          <span className="cursor-pointer p-[4px] rounded text-muted hover:text-accent hover:bg-bg-hover transition-all" title="New chat in folder" aria-label="New chat in folder" onClick={e => { e.stopPropagation(); createChatInFolder(folder.id) }}><MessageSquarePlus size={12} /></span>
-          <span className="cursor-pointer p-[4px] rounded text-muted hover:text-accent hover:bg-bg-hover transition-all" title="New subfolder" aria-label="New subfolder" onClick={e => { e.stopPropagation(); setCreatingIn(folder.id); setNewName('') }}><FolderPlus size={12} /></span>
-          <span className="cursor-pointer p-[4px] rounded text-muted hover:text-danger hover:bg-danger-subtle transition-all" data-testid={`folder-delete-${folder.id}`} title="Delete folder" aria-label="Delete folder" onClick={e => { e.stopPropagation(); if (confirm(`Delete "${folder.name}"?`)) deleteFolderMutation.mutate(folder.id) }}><X size={12} /></span>
+          <button type="button" className="cursor-pointer p-[4px] rounded text-muted hover:text-text hover:bg-bg-hover transition-all bg-transparent border-none" title="Rename folder" aria-label="Rename folder" data-testid={`folder-rename-${folder.id}`} onClick={e => { e.stopPropagation(); setEditingId(folder.id); setEditName(folder.name) }}><Pencil size={12} /></button>
+          <button type="button" className="cursor-pointer p-[4px] rounded text-muted hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none" title="New chat in folder" aria-label="New chat in folder" onClick={e => { e.stopPropagation(); createChatInFolder(folder.id) }}><MessageSquarePlus size={12} /></button>
+          <button type="button" className="cursor-pointer p-[4px] rounded text-muted hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none" title="New subfolder" aria-label="New subfolder" onClick={e => { e.stopPropagation(); setCreatingIn(folder.id); setNewName('') }}><FolderPlus size={12} /></button>
+          <button type="button" className="cursor-pointer p-[4px] rounded text-muted hover:text-danger hover:bg-danger-subtle transition-all bg-transparent border-none" data-testid={`folder-delete-${folder.id}`} title="Delete folder" aria-label="Delete folder" onClick={e => { e.stopPropagation(); if (confirm(`Delete "${folder.name}"?`)) deleteFolderMutation.mutate(folder.id) }}><X size={12} /></button>
         </div>
         )}
       </div>
@@ -1149,12 +1297,9 @@ function ChatSidebar({
     const childSlots = filteredSlots.filter(s => slotFolders[s.key] === folder.id)
     const childNodes: React.ReactNode[] = []
     for (const cf of childFolders) childNodes.push(...renderFolderBlock(cf, depth + 1, visited))
-    childSlots.forEach((s, i) => {
-      const isActive = activeSlot === s.key
-      const nextIsActive = i < childSlots.length - 1 && activeSlot === childSlots[i + 1].key
-      const showDivider = i < childSlots.length - 1 && !isActive && !nextIsActive
-      childNodes.push(renderSessionRow(s, depth + 1, showDivider))
-    })
+    // New-subfolder name input sits after the existing subfolders, just above the
+    // sessions — a new folder is appended (order = folder count), so it lands at the
+    // bottom of the sibling folders, above the chats. The placeholder matches that.
     if (creatingIn === folder.id) {
       childNodes.push(
         <div key={`new-sub-${folder.id}`} className="py-1 pr-2" style={{ paddingLeft: '8px' }}>
@@ -1162,6 +1307,12 @@ function ChatSidebar({
         </div>
       )
     }
+    childSlots.forEach((s, i) => {
+      const isActive = activeSlot === s.key
+      const nextIsActive = i < childSlots.length - 1 && activeSlot === childSlots[i + 1].key
+      const showDivider = i < childSlots.length - 1 && !isActive && !nextIsActive
+      childNodes.push(renderSessionRow(s, depth + 1, showDivider))
+    })
     // Hide folders with no matching children when searching or filtering unreads
     if ((slotFilter || activeFilters.size > 0) && childNodes.length === 0) return []
     // Wrap children in a bordered container so the folder's extent is visually
@@ -1202,7 +1353,7 @@ function ChatSidebar({
     return [
       <DndDroppable key={`folder-drop-${folder.id}`} id={`folder-drop:${folder.id}`} data={{ type: 'folder-drop', folderId: folder.id }}>
         {({ setNodeRef, isOver }) => (
-          <div ref={setNodeRef} className={`rounded-md transition-all mb-0.5${isOver ? ' ring-1 ring-accent' : ''}`}>
+          <div ref={setNodeRef} data-folder-drop={folder.id} className={`rounded-md transition-all mb-0.5${isOver ? ' ring-1 ring-accent' : ''}`}>
             {renderFolderHeader(folder, dragHandleProps)}
             <FolderBody key={`folder-body-${folder.id}`} open={!folder.collapsed && !forceCollapsed}>{wrapped}</FolderBody>
           </div>
@@ -1214,6 +1365,10 @@ function ChatSidebar({
   const rootFolders = useMemo(() => folders.filter(f => !f.parent_id).sort((a, b) => a.order - b.order), [folders])
   const rootFolderIds = useMemo(() => rootFolders.map(f => f.id), [rootFolders])
   const ungroupedSlots = filteredSlots.filter(s => !slotFolders[s.key])
+  // True while actively dragging a session that currently lives in a folder.
+  // Used to reveal the empty-state drop placeholder inside the "No folder"
+  // group so there's always a reachable ungroup target.
+  const draggingFolderedSession = activeDrag?.type === 'session' && !!slotFolders[activeDrag.id]
 
   // Narrow-sidebar header responsiveness: below ~256px the full "New chat"
   // label no longer fits next to the label + kebab, so collapse the create
@@ -1223,7 +1378,8 @@ function ChatSidebar({
 
   return (
     <div className="sidebar-inner bg-bg-elevated border border-border rounded-xl shadow-sm flex flex-col shrink-0 relative h-full" style={{ width: sidebarWidth }}>
-      {/* Drag handle */}
+      {/* Drag handle — mouse-only column resize gesture; no keyboard analogue. */}
+      {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
       <div
         className="sidebar-resize-handle absolute top-0 -right-[2px] w-[5px] h-full cursor-col-resize z-10 group/drag flex items-center justify-center"
         onMouseDown={e => { e.preventDefault(); sidebarDragging.current = true; sidebarStartX.current = e.clientX; sidebarStartW.current = sidebarWidth; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none'; onDragChange?.(true) }}
@@ -1237,21 +1393,21 @@ function ChatSidebar({
           {!tinyHeader && <span className="text-[13px] font-medium text-muted uppercase tracking-[.04em] truncate">Sessions</span>}
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
-          <div className="relative" data-header-menu>
-            <button className="w-7 h-7 rounded-md border border-border bg-transparent text-muted cursor-pointer flex items-center justify-center hover:border-border-strong hover:text-text transition-all" onClick={() => setHeaderMenuOpen(!headerMenuOpen)} title="More options" aria-label="More options" aria-haspopup="menu" aria-expanded={headerMenuOpen}><MoreVertical size={14} /></button>
-            {headerMenuOpen && (
-              <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] rounded-lg border border-border bg-bg-elevated shadow-lg py-1 animate-rise" role="menu">
-                <button role="menuitem" className="w-full px-3 py-1.5 text-left text-[13px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors" onClick={() => { setHeaderMenuOpen(false); const isActive = tagColumnsEnabled && rawColumns.length > 0; const next = !isActive; const cfg = loadChatConfig(); saveChatConfig({ ...cfg, tagColumnsEnabled: next }); if (next && rawColumns.length === 0) { createColumnMutation.mutate({ name: '', tag_ids: [], mode: 'any' }) } }}>
-                  <Columns3 size={14} className={tagColumnsEnabled && rawColumns.length > 0 ? 'text-accent' : 'text-muted'} />
-                  {tagColumnsEnabled && rawColumns.length > 0 ? 'Switch to list view' : 'Switch to board view'}
-                </button>
-                <button role="menuitem" className="w-full px-3 py-1.5 text-left text-[13px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors" onClick={() => { setHeaderMenuOpen(false); setCleanupOpen(!cleanupOpen); setCleanupExpanded(false); setCleanupError('') }}>
-                  <BrushCleaning size={14} className="text-muted" />
-                  Clean up sessions
-                </button>
-              </div>
-            )}
-          </div>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button className="w-7 h-7 rounded-md border border-border bg-transparent text-muted cursor-pointer flex items-center justify-center hover:border-border-strong hover:text-text transition-all" title="More options" aria-label="More options"><MoreVertical size={14} /></button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-[180px]">
+              <DropdownMenuItem onClick={() => { const isActive = tagColumnsEnabled && rawColumns.length > 0; const next = !isActive; const cfg = loadChatConfig(); saveChatConfig({ ...cfg, tagColumnsEnabled: next }); if (next && rawColumns.length === 0) { createColumnMutation.mutate({ name: '', tag_ids: [], mode: 'any' }) } }}>
+                <Columns3 size={14} className={tagColumnsEnabled && rawColumns.length > 0 ? 'text-accent' : 'text-muted'} />
+                {tagColumnsEnabled && rawColumns.length > 0 ? 'Switch to list view' : 'Switch to board view'}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => { setCleanupOpen(!cleanupOpen); setCleanupExpanded(false); setCleanupError('') }}>
+                <BrushCleaning size={14} className="text-muted" />
+                Clean up sessions
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           {/* Split create-button: main segment = one-click New chat; caret
            *  opens a menu grouping New folder + New chat in folder (flat
            *  folder flyout). Replaces the old standalone New-folder + New-chat
@@ -1260,43 +1416,43 @@ function ChatSidebar({
           <div className="relative flex items-center rounded-md bg-accent text-accent-fg overflow-hidden shrink-0" data-create-menu>
             <button
               className={`flex items-center h-7 cursor-pointer bg-transparent border-none text-accent-fg hover:bg-accent-hover active:scale-95 transition-all ${compactHeader ? 'justify-center w-7' : 'gap-1.5 pl-2 pr-2.5 text-[12px] font-semibold'}`}
-              onClick={() => { setCreateMenuOpen(false); setCreateSubmenuOpen(false); dispatch(createSlot({ agent: defaultAgent || undefined, mode })).then(() => requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus())) }}
+              onClick={() => { dispatch(createSlot({ agent: defaultAgent || undefined, mode })).then(() => requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus())) }}
               title="New chat" aria-label="New chat session"><Plus size={15} />{!compactHeader && <span className="whitespace-nowrap">New chat</span>}</button>
             <span className="w-px h-4 bg-accent-fg opacity-30" aria-hidden="true" />
-            <button ref={createBtnRef}
-              className="flex items-center justify-center w-6 h-7 cursor-pointer bg-transparent border-none text-accent-fg hover:bg-black/10 active:scale-95 transition-all"
-              onClick={() => { if (!createMenuOpen && createBtnRef.current) setCreateRect(createBtnRef.current.getBoundingClientRect()); setCreateMenuOpen(o => !o); setCreateSubmenuOpen(false) }}
-              title="Create…" aria-label="More create options" aria-haspopup="menu" aria-expanded={createMenuOpen}><ChevronDown size={13} /></button>
-            {createMenuOpen && createRect && createPortal(
-              <div ref={createMenuRef} data-create-menu role="menu"
-                className="fixed z-[60] min-w-[200px] rounded-lg border border-border bg-bg-elevated shadow-lg py-1 animate-rise"
-                style={{ top: createRect.bottom + 6, right: Math.max(8, window.innerWidth - createRect.right) }}>
-                <button role="menuitem"
-                  className="w-full px-3 py-1.5 text-left text-[13px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors"
-                  onMouseEnter={() => setCreateSubmenuOpen(false)}
-                  onClick={() => { setCreateMenuOpen(false); setCreateSubmenuOpen(false); setCreatingIn('__root__'); setNewName('') }}>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  className="flex items-center justify-center w-6 h-7 cursor-pointer bg-transparent border-none text-accent-fg hover:bg-black/10 active:scale-95 transition-all"
+                  title="Create…" aria-label="More create options"><ChevronDown size={13} /></button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-[200px]">
+                <DropdownMenuItem onClick={() => { setCreatingIn('__root__'); setNewName('') }}>
                   <FolderPlus size={14} className="text-muted" /> New folder
-                </button>
+                </DropdownMenuItem>
                 {folders.length > 0 && (
-                  <div className="relative" onMouseEnter={() => setCreateSubmenuOpen(true)}>
-                    <button role="menuitem" aria-haspopup="menu" aria-expanded={createSubmenuOpen}
-                      className="w-full px-3 py-1.5 text-left text-[13px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors"
-                      onClick={() => setCreateSubmenuOpen(o => !o)}>
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger>
                       <Folder size={14} className="text-muted" /> New chat in folder
                       <ChevronRight size={13} className="ml-auto text-muted" />
-                    </button>
-                    {createSubmenuOpen && (
-                      <FolderPickerSubmenu folders={folders} onPick={fid => {
-                        if (!fid) return
-                        setCreateMenuOpen(false); setCreateSubmenuOpen(false); createChatInFolder(fid)
-                        requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus())
-                      }} />
-                    )}
-                  </div>
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent className="max-h-[300px] overflow-y-auto">
+                      {(() => {
+                        const roots = folders.filter(f => !f.parent_id)
+                        const childrenOf = (pid: string) => folders.filter(f => f.parent_id === pid)
+                        const items: { f: ChatFolder; depth: number }[] = []
+                        const walk = (list: ChatFolder[], depth: number) => { for (const f of list) { items.push({ f, depth }); walk(childrenOf(f.id), depth + 1) } }
+                        walk(roots, 0)
+                        return items.map(({ f, depth }) => (
+                          <DropdownMenuItem key={f.id} style={{ paddingLeft: `${12 + depth * 16}px` }} onClick={() => { createChatInFolder(f.id); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus()) }}>
+                            <Folder size={14} className={depth === 0 ? 'text-muted' : 'text-muted/60'} /> {f.name}
+                          </DropdownMenuItem>
+                        ))
+                      })()}
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
                 )}
-              </div>,
-              document.body
-            )}
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
       </div>
@@ -1324,7 +1480,7 @@ function ChatSidebar({
                   : noStale
                     ? 'No inactive sessions to archive.'
                     : cleanupPreview != null && <>
-                      {archivable.length} session{archivable.length !== 1 ? 's' : ''} will be moved to history.{activeIsStale ? ' (1 skipped — currently selected)' : ''} Pinned sessions are kept.
+                      {archivable.length} session{archivable.length !== 1 ? 's' : ''} will be moved to older sessions.{activeIsStale ? ' (1 skipped — currently selected)' : ''} Pinned sessions are kept.
                       {archivable.length > 0 && (
                         <button className="ml-1 text-accent hover:underline cursor-pointer bg-transparent border-none p-0 text-[12px]" onClick={() => setCleanupExpanded(!cleanupExpanded)}>
                           {cleanupExpanded ? 'Hide' : 'Show'} {archivable.length} session{archivable.length !== 1 ? 's' : ''} ▸
@@ -1448,7 +1604,7 @@ function ChatSidebar({
           <motion.div layoutScroll className="flex-1 min-h-0 overflow-y-auto p-2 flex flex-col">
             {/* One DndContext owns folder reorder (sortable) + session drag-to-
              *  assign (draggable rows + droppable folder/root targets). */}
-            <DndContext sensors={dndSensors} collisionDetection={sidebarCollision} onDragStart={handleSidebarDragStart} onDragEnd={handleSidebarDragEnd} onDragCancel={handleSidebarDragCancel}>
+            <DndContext sensors={dndSensors} collisionDetection={sidebarCollision} measuring={{ droppable: { strategy: MeasuringStrategy.Always } }} onDragStart={handleSidebarDragStart} onDragOver={handleSidebarDragOver} onDragEnd={handleSidebarDragEnd} onDragCancel={handleSidebarDragCancel}>
               {/* Root lane is the fallback drop target: dropping a session on
                *  empty space (not over a folder) ungroups it (folderId: null). */}
               <DndDroppable id="root-lane" data={{ type: 'folder-drop', folderId: null }}>
@@ -1462,12 +1618,42 @@ function ChatSidebar({
                         <Input className="w-full py-1 text-[13px]" autoFocus placeholder="Folder name…" value={newName} onChange={e => setNewName(e.target.value)} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => createFolder(newName), onEscape: () => { cancelledRef.current = true; setCreatingIn(null); setNewName('') }, onBlur: () => { if (cancelledRef.current) { cancelledRef.current = false; return } if (newName.trim()) createFolder(newName); else setCreatingIn(null) } })} />
                       </div>
                     )}
-                    {ungroupedSlots.map((s, i) => {
-                      const nextIsActive = i < ungroupedSlots.length - 1 && activeSlot === ungroupedSlots[i + 1].key
-                      const isActive = activeSlot === s.key
-                      const showDivider = i < ungroupedSlots.length - 1 && !isActive && !nextIsActive
-                      return renderSessionRow(s, 0, showDivider)
-                    })}
+                    {/* Ungrouped sessions live in a headerless droppable bucket
+                     *  (folderId: null) that fills the remaining height below the
+                     *  folders, so the whole empty lower area is a drop target —
+                     *  dropping a session here ungroups it. The ring only lights up
+                     *  while dragging a foldered session (when ungrouping applies). */}
+                    {(rootFolders.length > 0 || ungroupedSlots.length > 0) && (
+                      <DndDroppable id="root-group" data={{ type: 'folder-drop', folderId: null }}>
+                        {({ setNodeRef: setRootGroupRef, isOver }) => (
+                          <div ref={setRootGroupRef} className={`flex flex-col flex-1 min-h-0 rounded-md transition-all ${isOver && draggingFolderedSession ? 'ring-1 ring-accent' : ''}`}>
+                            {ungroupedSlots.map((s, i) => {
+                              const nextIsActive = i < ungroupedSlots.length - 1 && activeSlot === ungroupedSlots[i + 1].key
+                              const isActive = activeSlot === s.key
+                              const showDivider = i < ungroupedSlots.length - 1 && !isActive && !nextIsActive
+                              return renderSessionRow(s, 0, showDivider)
+                            })}
+                            {/* In-flow discovery affordance: a text button just below the
+                                last session that expands the Older Sessions pane. Hidden
+                                once open. */}
+                            {!historyOpen && (
+                              <button
+                                type="button"
+                                onClick={() => { setHistoryOpen(true); dispatch(fetchHistory(false)) }}
+                                className="mt-1 mx-1 px-2 py-1.5 text-left text-[12px] text-muted hover:text-accent hover:bg-accent-subtle rounded-md cursor-pointer bg-transparent border-none transition-colors"
+                              >
+                                Show all older sessions
+                              </button>
+                            )}
+                            {ungroupedSlots.length === 0 && draggingFolderedSession && (
+                              <div className="m-1 min-h-[72px] flex items-center justify-center rounded-md border border-dashed border-border text-[12px] text-muted">
+                                Drop here to remove from folder
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </DndDroppable>
+                    )}
                   </div>
                 )}
               </DndDroppable>
@@ -1475,7 +1661,7 @@ function ChatSidebar({
                 {activeDrag ? (() => {
                   if (activeDrag.type === 'folder') {
                     const f = folders.find(x => x.id === activeDrag.id)
-                    return <div className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-[13px] text-text shadow-lg max-w-[240px] truncate pointer-events-none flex items-center gap-2"><Folder size={14} className="text-muted shrink-0" />{f?.name ?? 'Folder'}</div>
+                    return <div className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-[13px] text-text shadow-lg max-w-[240px] truncate pointer-events-none flex items-center gap-2"><FolderGlyph icon={f?.icon} size={14} />{f?.name ?? 'Folder'}</div>
                   }
                   const ds = slots.find(x => x.key === activeDrag.id)
                   const label = ds?.title && ds.title !== ds.key ? ds.title : (ds?.key ?? activeDrag.id)
@@ -1492,6 +1678,9 @@ function ChatSidebar({
               const colTags = col.tag_ids.map(tid => tagById[tid]).filter(Boolean) as ChatTag[]
               const isStatusLane = colTags.length === 1 && !!colTags[0].status
               return (
+                // Board column is a drag-and-drop drop zone (column reorder + session
+                // card drop); mouse-only drag handlers, so scope-disable the rule.
+                // eslint-disable-next-line jsx-a11y/no-static-element-interactions
                 <div key={col.id} data-testid={`column-${col.id}`} className="flex flex-col flex-1 min-w-[220px] bg-card border border-border rounded-md overflow-hidden"
                   onDragOver={e => {
                     const types = e.dataTransfer.types
@@ -1524,7 +1713,8 @@ function ChatSidebar({
                     if (k) dropSlotMutation.mutate({ slot: k, columnId: col.id })
                   }}>
                   <div className="flex items-center gap-1 p-2 border-b border-border bg-bg-elevated">
-                    {/* Reorder handle: drag columns to reorder */}
+                    {/* Reorder handle: mouse-only drag source for column reordering. */}
+                    {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
                     <span draggable
                       className="cursor-grab text-muted hover:text-text shrink-0"
                       onDragStart={e => { e.dataTransfer.setData('application/mc-column', col.id); e.dataTransfer.effectAllowed = 'move' }}
@@ -1583,10 +1773,12 @@ function ChatSidebar({
                           <button key={m} role="radio" aria-checked={col.mode === m} className={`text-[11px] px-2 py-0.5 rounded cursor-pointer border transition-all ${col.mode === m ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text'}`} onClick={() => updateColumnMutation.mutate({ id: col.id, body: { mode: m } })}>{m}</button>
                         ))}
                       </div>
-                      <label className="flex items-center gap-2 px-1 py-1 mb-2 text-[11px] text-muted cursor-pointer select-none hover:text-text" title="Also show sessions that have no tags at all">
+                      <label htmlFor={`column-include-untagged-${col.id}`} className="flex items-center gap-2 px-1 py-1 mb-2 text-[11px] text-muted cursor-pointer select-none hover:text-text" title="Also show sessions that have no tags at all">
                         <input
                           type="checkbox"
+                          id={`column-include-untagged-${col.id}`}
                           data-testid={`column-include-untagged-${col.id}`}
+                          aria-label="Include untagged sessions"
                           checked={!!col.include_untagged}
                           onChange={e => updateColumnMutation.mutate({ id: col.id, body: { include_untagged: e.target.checked } })}
                           className="cursor-pointer"
@@ -1610,6 +1802,7 @@ function ChatSidebar({
                               <input
                                 type="text"
                                 data-testid={`tag-name-${t.id}`}
+                                aria-label={`Rename tag ${t.name}`}
                                 defaultValue={t.name}
                                 className="flex-1 min-w-0 bg-transparent border-none outline-none text-[12px] text-text py-0 px-0.5 rounded focus:bg-bg-elevated focus:border focus:border-accent/50"
                                 onBlur={e => { const v = e.target.value.trim(); if (v && v !== t.name) updateTagMutation.mutate({ id: t.id, body: { name: v } }) }}
@@ -1643,6 +1836,7 @@ function ChatSidebar({
                         <input
                           type="text"
                           data-testid={`tag-create-${col.id}`}
+                          aria-label="New tag name"
                           placeholder="New tag… ↵"
                           className="flex-1 min-w-0 bg-transparent border-none outline-none text-[12px] text-text py-0 px-0.5 placeholder:text-muted/60"
                           onKeyDown={e => {
@@ -1714,8 +1908,11 @@ function ChatSidebar({
       </div>}
 
       {/* When expanded: doubles as the resize handle (accent on hover, drag to resize, dbl-click to collapse).
-          When collapsed: just a static 1px divider between sessions and the History header. */}
+          When collapsed: just a static 1px divider between sessions and the Older Sessions footer. */}
       {historyOpen ? (
+        // Separator that doubles as a mouse-only resize handle (drag) / collapse
+        // (double-click); no keyboard analogue, so scope-disable the rule.
+        // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
         <div
           role="separator"
           aria-orientation="horizontal"
@@ -1729,7 +1926,10 @@ function ChatSidebar({
       ) : (
         <div className="border-t border-border" />
       )}
-      {/* History header row — whole row is the click target; Clear-all button stops propagation. */}
+      {/* Older Sessions footer — the persistent collapse/expand header for the
+          history pane. The inline "Show all older sessions" button (above, below
+          the last session) is the in-flow discovery affordance. Whole row is the
+          click target; the Clear button stops propagation. */}
       <div
         role="button"
         tabIndex={0}
@@ -1738,17 +1938,18 @@ function ChatSidebar({
         className="flex justify-between items-center px-3 py-3 cursor-pointer select-none"
         aria-expanded={historyOpen}
         aria-controls="history-pane"
+        aria-label="Older sessions"
       >
         <span className="flex items-center gap-1.5 text-[13px] font-semibold text-text-strong leading-none">
           <ChevronRight size={16} className={`shrink-0 transition-transform duration-200 ${historyOpen ? 'rotate-90' : '-rotate-90'}`} />
           <Clock size={14} className="shrink-0" />
-          <span className="leading-none">History</span>
+          <span className="leading-none">Older Sessions</span>
         </span>
         {historyOpen && history.length > 0 && (
           <button
             className="px-2 py-0.5 rounded-md border border-border bg-transparent text-muted text-[12px] cursor-pointer hover:text-danger hover:border-danger transition-all"
-            onClick={async e => { e.stopPropagation(); if (confirm('Clear closed history sessions? Active tabs and pinned sessions will be kept.')) { await api.clearSessions(); dispatch(fetchHistory(false)) } }}
-          >Clear history</button>
+            onClick={async e => { e.stopPropagation(); if (confirm('Clear closed sessions? Active tabs and pinned sessions will be kept.')) { await api.clearSessions(); dispatch(fetchHistory(false)) } }}
+          >Clear</button>
         )}
       </div>
       <AnimatePresence initial={false}>
@@ -1764,7 +1965,7 @@ function ChatSidebar({
           >
             <div className="px-2 pb-1">
               <div className="relative">
-                <SearchInput className="w-full" placeholder="Search history…" value={historyFilter} onChange={e => setHistoryFilter(e.target.value)} />
+                <SearchInput className="w-full" placeholder="Search older sessions…" value={historyFilter} onChange={e => setHistoryFilter(e.target.value)} />
                 {historyFilter && (
                   <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text cursor-pointer bg-transparent border-none p-0 leading-none transition-colors" onClick={() => setHistoryFilter('')} aria-label="Clear search"><X size={13} /></button>
                 )}
@@ -1781,9 +1982,13 @@ function ChatSidebar({
                   return ((s.title || '') + s.key).toLowerCase().includes(historyFilter.toLowerCase())
                 })
                 // Hide date segments when the user has an active search — results are
-                // score-ranked by backend relevance, not date-ranked, so segments are
-                // misleading (items within a bucket appear out of recency order).
+                // Segments only make sense when the list is date-ordered. For name/created
+                // sorts (or active search, which is relevance-ranked) they'd interleave.
                 const showSegments = !(historyFilter.trim().length >= SEARCH_MIN_CHARS && historySearchResults)
+                  && (sortKey === 'date-desc' || sortKey === 'date-asc')
+                // Skip the sort only when the backend already returns date-desc order, i.e.
+                // no active search (search results are relevance-ranked, not date-ranked).
+                const sortedHistory = (sortKey === 'date-desc' && !historySearchResults) ? filteredHistory : [...filteredHistory].sort((a, b) => compareBySort(a, b, sortKey))
                 let prevSeg = ''
                 // Derive agent color the same way renderSessionRow does so history rows
                 // match the session-row visual language (agent name tinted by source).
@@ -1793,7 +1998,7 @@ function ChatSidebar({
                   if (meta?.source === 'builtin') return 'text-muted'
                   return 'text-accent'
                 }
-                return filteredHistory.map((s, idx) => {
+                return sortedHistory.map((s, idx) => {
                   const tsForSegment = s.modified ?? s.created
                   const seg = dateSegment(tsForSegment)
                   const showHeader = showSegments && seg !== prevSeg
@@ -1804,8 +2009,8 @@ function ChatSidebar({
                   const isDashboard = s.key.startsWith('dashboard')
                   // Divider between consecutive rows — but not before a segment header
                   // (the header itself separates), and not after the last row.
-                  const isLast = idx === filteredHistory.length - 1
-                  const nextSeg = !isLast ? dateSegment(filteredHistory[idx + 1].modified ?? filteredHistory[idx + 1].created) : seg
+                  const isLast = idx === sortedHistory.length - 1
+                  const nextSeg = !isLast ? dateSegment(sortedHistory[idx + 1].modified ?? sortedHistory[idx + 1].created) : seg
                   const showDivider = !isLast && (!showSegments || nextSeg === seg)
                   return (
                     <Fragment key={s.key}>
@@ -1815,6 +2020,9 @@ function ChatSidebar({
                       {/* Row mirrors session-row two-line layout: agent+timestamp header, title body.
                           Platform glyph (Monitor for dashboard, Slack logo for Slack sessions) occupies
                           the same left column that session rows use for the unread dot — keeps widths aligned. */}
+                      {/* History row uses onMouseDown (preventDefault) to resume/delete
+                          without stealing focus from the transcript; scope-disable the rule. */}
+                      {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
                       <div className={`group relative flex items-start gap-2.5 pr-4 py-2 rounded-md text-sm transition-all select-none ${!connected ? 'text-muted opacity-50 cursor-not-allowed' : 'text-muted hover:text-text hover:bg-bg-hover cursor-pointer'}`} style={{ paddingLeft: '10px' }} title={s.title || s.key} {...offlineProps(connected, 'resume sessions')} onMouseDown={e => {
                         e.preventDefault()
                         if ((e.target as HTMLElement).closest?.('[data-close]')) { if (confirm('Are you sure you want to delete this history session?')) dispatch(deleteHistorySession(s.key)); return }
@@ -1851,48 +2059,15 @@ function ChatSidebar({
                   )
                 })
               })()}
+              {/* Load-more uses onMouseDown+preventDefault to trigger without stealing
+                  focus from the transcript; scope-disable the static-interaction rule. */}
+              {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
               {historyHasMore && <div className="flex justify-center py-2 text-accent text-[13px] font-medium cursor-pointer hover:bg-accent-subtle rounded-md" onMouseDown={e => { e.preventDefault(); dispatch(fetchHistory(true)) }}>Load more…</div>}
             </div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Context menu */}
-      {ctxMenu && (
-        <div role="presentation" className="fixed inset-0 z-[9999]" onClick={() => setCtxMenu(null)} onContextMenu={e => { e.preventDefault(); setCtxMenu(null) }} onKeyDown={e => { if (e.key === 'Escape') setCtxMenu(null) }}>
-          <div role="menu" className="absolute bg-bg-elevated border border-border rounded-lg shadow-lg py-1 min-w-[160px] text-[13px]"
-            style={{ left: Math.min(ctxMenu.x, window.innerWidth - 170), top: Math.min(ctxMenu.y, window.innerHeight - 140) }}
-            onClick={e => e.stopPropagation()}>
-            <button role="menuitem" autoFocus className="w-full px-3 py-1.5 text-left text-text hover:bg-bg-hover cursor-pointer flex items-center gap-2 bg-transparent border-none font-body"
-              onClick={() => { const s = slots.find(sl => sl.key === ctxMenu.key); setRenamingSlot(ctxMenu.key); setRenameValue(s?.title && s.title !== s.key ? s.title : ''); setCtxMenu(null) }}>
-              <Pencil size={13} /> Rename
-            </button>
-            <button role="menuitem" className="w-full px-3 py-1.5 text-left text-text hover:bg-bg-hover cursor-pointer flex items-center gap-2 bg-transparent border-none font-body"
-              onClick={() => { const s = slots.find(sl => sl.key === ctxMenu.key); if (s) copySessionLink(s.key, s.title, undefined, mode); setCtxMenu(null) }}>
-              <Link2 size={13} /> Copy link
-            </button>
-            <button role="menuitem" className="w-full px-3 py-1.5 text-left text-text hover:bg-bg-hover cursor-pointer flex items-center gap-2 bg-transparent border-none font-body"
-              onClick={() => { dispatch(unreadSet.has(ctxMenu.key) ? markSlotRead(ctxMenu.key) : markSlotUnread(ctxMenu.key)); setCtxMenu(null) }}>
-              <Circle size={13} /> {unreadSet.has(ctxMenu.key) ? 'Mark as read' : 'Mark as unread'}
-            </button>
-            <button role="menuitem" className="w-full px-3 py-1.5 text-left text-text hover:bg-bg-hover cursor-pointer flex items-center gap-2 bg-transparent border-none font-body"
-              onClick={() => { togglePin(ctxMenu.key); setCtxMenu(null) }}>
-              <Pin size={13} /> {pinned.has(ctxMenu.key) ? 'Unpin' : 'Pin'}
-            </button>
-            <div className="mx-2 my-1 border-b border-border" />
-            <button role="menuitem" className="w-full px-3 py-1.5 text-left text-danger hover:bg-danger-subtle cursor-pointer flex items-center gap-2 bg-transparent border-none font-body"
-              onClick={() => { if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(ctxMenu.key)); setCtxMenu(null) }}>
-              <X size={13} /> Close session
-            </button>
-            {tagColumnsEnabled && (
-              <button role="menuitem" className="w-full px-3 py-1.5 text-left text-text hover:bg-bg-hover cursor-pointer flex items-center gap-2 bg-transparent border-none font-body"
-                onClick={() => { setTagCtxSlot(ctxMenu.key); setCtxMenu(null) }}>
-                <TagIcon size={13} /> Tags…
-              </button>
-            )}
-          </div>
-        </div>
-      )}
       {/* Per-slot tag assignment popover (opened from context menu) */}
       {tagCtxSlot && (() => {
         const slot = slots.find(s => s.key === tagCtxSlot)
@@ -1915,9 +2090,14 @@ function ChatSidebar({
                 setTagCtxSlot(null)
               }
             }}>
+            {/* Modal dialog: onClick stops backdrop-dismiss bubbling and onKeyDown
+                handles Escape-to-close — the standard dialog idiom the rule misfires on. */}
+            {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
             <div role="dialog" aria-modal="true" aria-label="Assign tags" data-testid="slot-tag-picker"
               className="absolute bg-bg-elevated border border-border rounded-lg shadow-lg p-2 min-w-[240px] text-[13px]"
-              style={{ left: '50%', top: '30%', transform: 'translate(-50%, 0)' }}
+              style={tagCtxPos
+                ? { left: Math.max(0, Math.min(tagCtxPos.x, window.innerWidth - 250)), top: Math.max(0, Math.min(tagCtxPos.y, window.innerHeight - 370)) }
+                : { left: '50%', top: '30%', transform: 'translate(-50%, 0)' }}
               onClick={e => e.stopPropagation()}
               onKeyDown={e => { if (e.key === 'Escape') setTagCtxSlot(null) }}>
               <div className="flex items-center justify-between mb-1">

@@ -18,7 +18,7 @@ interface KiroClawCfg {
   default_workspace: string
   memory_stores: Record<string, MemoryStoreCfg>
   default_memory_store: string
-  agent: { default_agent: string; provider: string; model: string; approval_mode: string; sandbox: string; subagent_max_turns?: number; max_subagents?: number; subagent_auto_max?: number; conductor_skill?: boolean; max_channels: number; max_channel_agents: number; enforce_denied_commands: string }
+  agent: { default_agent: string; provider: string; model: string; approval_mode: string; sandbox: string; subagent_max_turns?: number; max_subagents?: number; subagent_auto_max?: number; conductor_skill?: boolean; tool_search?: boolean; max_channels: number; max_channel_agents: number; enforce_denied_commands: string }
   session: { timeout_secs: number; pool_size: number; pool_agent: string; pool_ttl_secs: number }
   memory: { embedding_provider: string }
   auto_update: boolean
@@ -83,7 +83,7 @@ function CfgNumber({ label, path, value, suffix, min, max, hint, onSave }: { lab
   }
   return (
     <CfgRow label={label} hint={hint} ok={ok && !err}>
-      <input type="number" min={min} max={max} placeholder={min !== undefined && max !== undefined ? `${min}–${max}` : undefined}
+      <input type="number" aria-label={label} min={min} max={max} placeholder={min !== undefined && max !== undefined ? `${min}–${max}` : undefined}
         className={`${inputCls} text-right ${err ? 'border-danger' : ''}`}
         value={local}
         onChange={e => { setLocal(e.target.value); setErr('') }}
@@ -268,6 +268,7 @@ export default function KiroClawCfgTab() {
           <CfgSelect key={`enforce-${rev}`} label="Enforce Denied Commands" path="agent.enforce_denied_commands" value={cfg.agent.enforce_denied_commands ?? 'all'} options={['all', 'kiroclaw']} hint="Immediate. 'all' enforces on every agent; 'kiroclaw' only on kiroclaw.json." onSave={save} />
           <div className={readonlyCls}><span className="text-muted"><Lock className="lucide-inline" /> Embedding Provider</span><span className="text-text font-mono text-[13px]">{cfg.memory.embedding_provider}</span></div>
           <CfgToggle key={`autoupdate-${rev}`} label="Auto Update" path="auto_update" value={cfg.auto_update} hint="Next update check cycle." onSave={save} />
+          <CfgToggle key={`toolsearch-${rev}`} label="MCP Tool Search" path="agent.tool_search" value={cfg.agent.tool_search ?? true} hint="Enable dynamic MCP tool discovery via kiro-cli. Takes effect on next session." onSave={save} />
           <div className={readonlyCls}><span className="text-muted">Max Channels</span><span className="text-text font-mono text-[13px]">{cfg.agent.max_channels}</span></div>
           <div className={readonlyCls}><span className="text-muted">Max Channel Agents</span><span className="text-text font-mono text-[13px]">{cfg.agent.max_channel_agents}</span></div>
         </div>
@@ -300,7 +301,7 @@ function SubagentSettings({ cfg, onSaved }: { cfg: KiroClawCfg; onSaved: () => v
     try {
       const res = await api.saveKiroclawConfig({ subagent_max_turns: maxTurns, max_subagents: maxSubs, subagent_auto_max: autoMax, conductor_skill: conductor })
       if (res.error) { setMsg(res.error); setMsgOk(false) } else { setMsg(<><Check className="lucide-inline" /> Saved</>); setMsgOk(true); onSaved() }
-    } catch (e: any) { setMsg(e.message); setMsgOk(false) }
+    } catch (e) { setMsg(e instanceof Error ? e.message : String(e)); setMsgOk(false) }
     finally { setSaving(false) }
   }
 
@@ -308,30 +309,34 @@ function SubagentSettings({ cfg, onSaved }: { cfg: KiroClawCfg; onSaved: () => v
     <Card>
       <CardTitle><Bot className="lucide-inline" /> Subagent Settings <InfoTip text="Controls how many subagents can run concurrently and how many tool calls each subagent is allowed. Changes take effect on the next subagent spawn." /></CardTitle>
       <div className="grid grid-cols-2 gap-x-6 gap-y-3 max-[600px]:grid-cols-1">
-        <label className="flex justify-between items-center gap-3 py-1.5 border-b border-border text-sm">
+        {/* label-has-for flags a label whose only control is a <button>; the
+            toggle button is self-labeling (its text is the value) and the label
+            wrapper only extends the click target to the row text — intentional. */}
+        {/* eslint-disable-next-line jsx-a11y/label-has-for */}
+        <label htmlFor="subagent-orchestrator-mode" className="flex justify-between items-center gap-3 py-1.5 border-b border-border text-sm">
           <span className="text-muted inline-flex items-center gap-1">Orchestrator Mode <InfoTip text="Enable conductor skill for multi-agent orchestration. Restart required." /></span>
-          <button onClick={() => setConductor(!conductor)}
+          <button id="subagent-orchestrator-mode" aria-label="Orchestrator Mode" onClick={() => setConductor(!conductor)}
             className={`px-3 py-1 rounded text-[13px] font-medium border cursor-pointer transition-all ${conductor ? 'bg-accent/10 border-accent text-accent' : 'bg-transparent border-border text-muted'}`}>
             {conductor ? 'Enabled' : 'Disabled'}
           </button>
         </label>
-        <label className="flex justify-between items-center gap-3 py-1.5 border-b border-border text-sm">
+        <label htmlFor="subagent-max-turns" className="flex justify-between items-center gap-3 py-1.5 border-b border-border text-sm">
           <span className="text-muted inline-flex items-center gap-1">Max Turns per Subagent <InfoTip text="Tool-call budget per subagent (1–200). Default: 100." /></span>
-          <input type="number" min={1} max={200} value={maxTurns} onChange={e => setMaxTurns(parseInt(e.target.value) || 1)}
+          <input id="subagent-max-turns" aria-label="Max Turns per Subagent" type="number" min={1} max={200} value={maxTurns} onChange={e => setMaxTurns(parseInt(e.target.value) || 1)}
             className="w-20 px-2 py-1 rounded border border-border bg-bg-elevated text-text font-mono text-[13px] text-right" />
         </label>
-        <label className="flex justify-between items-center gap-3 py-1.5 border-b border-border text-sm">
+        <label htmlFor="subagent-max-concurrent" className="flex justify-between items-center gap-3 py-1.5 border-b border-border text-sm">
           <span className="text-muted inline-flex items-center gap-1">Max Concurrent Subagents <InfoTip text={`Maximum subagents running at once. 0 = auto-size from host memory/CPU (capped at ${hardCap}). Default: 3.`} /></span>
           <span className="inline-flex items-center gap-2">
             {maxSubs === 0 && <span className="text-[11px] text-muted">auto</span>}
-            <input type="number" min={0} max={hardCap} value={maxSubs} onChange={e => { const v = parseInt(e.target.value); setMaxSubs(Number.isNaN(v) ? 0 : Math.max(0, v)) }}
+            <input id="subagent-max-concurrent" aria-label="Max Concurrent Subagents" type="number" min={0} max={hardCap} value={maxSubs} onChange={e => { const v = parseInt(e.target.value); setMaxSubs(Number.isNaN(v) ? 0 : Math.max(0, v)) }}
               className="w-20 px-2 py-1 rounded border border-border bg-bg-elevated text-text font-mono text-[13px] text-right" />
           </span>
         </label>
         {maxSubs === 0 && (
-          <label className="flex justify-between items-center gap-3 py-1.5 border-b border-border text-sm">
+          <label htmlFor="subagent-auto-size-max" className="flex justify-between items-center gap-3 py-1.5 border-b border-border text-sm">
             <span className="text-muted inline-flex items-center gap-1">Auto-Size Max <InfoTip text="Ceiling on the auto-sized concurrent subagent count (only applies when Max Concurrent Subagents = 0). The host memory/CPU formula never exceeds this. Range 1–64. Default: 16." /></span>
-            <input type="number" min={1} max={64} value={autoMax} onChange={e => { const v = parseInt(e.target.value); setAutoMax(Number.isNaN(v) ? 1 : Math.min(64, Math.max(1, v))) }}
+            <input id="subagent-auto-size-max" aria-label="Auto-Size Max" type="number" min={1} max={64} value={autoMax} onChange={e => { const v = parseInt(e.target.value); setAutoMax(Number.isNaN(v) ? 1 : Math.min(64, Math.max(1, v))) }}
               className="w-20 px-2 py-1 rounded border border-border bg-bg-elevated text-text font-mono text-[13px] text-right" />
           </label>
         )}

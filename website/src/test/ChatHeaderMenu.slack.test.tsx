@@ -24,13 +24,15 @@ vi.mock('../api/client', () => ({
 }))
 
 import { useAppSelector } from '../store'
+import type { RootState } from '../store'
+import type { ChatSlot } from '../types'
 import { api } from '../api/client'
 import { ChatHeaderMenu } from '../pages/ChatPage'
 
 /** Binds currentSlot to the store the way ChatPage does (useAppSelector), so a
  *  post-click updateSlot dispatch actually re-renders the menu branch. */
 function ConnectedMenu({ slotKey }: { slotKey: string }) {
-  const currentSlot = useAppSelector((s: any) => s.dashboard.slots.find((x: any) => x.key === slotKey))
+  const currentSlot = useAppSelector((s: RootState) => s.dashboard.slots.find((x: ChatSlot) => x.key === slotKey))
   return (
     <ChatHeaderMenu
       activeSlot={slotKey}
@@ -47,9 +49,9 @@ const dashboardState = {
   channelTrusted: false, refreshTrigger: 0, unreadSlots: [], updateProgress: null,
   subagentRunning: {}, subagentDetails: {}, subagentText: {},
   sessionDefaultColor: null, sessionColorsMode: 'tint', sessionColorsPalette: 'horizon', sessionColorsIntensity: 'clear',
-} as any
+} as RootState['dashboard']
 
-function renderMenu(slot: any) {
+function renderMenu(slot: Partial<ChatSlot>) {
   // Seed the slot into the store's slots[] so updateSlot (which only mutates an
   // existing slot) has a target to flip.
   const store = createTestStore({ dashboard: { ...dashboardState, slots: [{ ...slot }] } })
@@ -76,7 +78,7 @@ function renderMenu(slot: any) {
   return { store, ...utils }
 }
 
-function renderConnectedMenu(slot: any) {
+function renderConnectedMenu(slot: Partial<ChatSlot>) {
   const store = createTestStore({ dashboard: { ...dashboardState, slots: [{ ...slot }] } })
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const utils = render(
@@ -118,7 +120,7 @@ describe('ChatHeaderMenu — Slack unlink', () => {
 
     await waitFor(() => expect(api.unlinkSlack).toHaveBeenCalledWith('chat-1-100'))
     await waitFor(() => {
-      const slot = store.getState().dashboard.slots.find((s: any) => s.key === 'chat-1-100')
+      const slot = store.getState().dashboard.slots.find((s: ChatSlot) => s.key === 'chat-1-100')
       expect(slot?.slack_linked).toBe(false)
       // All three link fields cleared, not just the flag.
       expect(slot?.slack_channel).toBeUndefined()

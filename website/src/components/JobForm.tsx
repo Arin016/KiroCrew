@@ -15,7 +15,7 @@ const CRON_DOW_TO_GRID: Record<number, number> = { 1: 1, 2: 2, 3: 3, 4: 4, 5: 5,
 
 /** Parse a CronJob into initial form state */
 function parseJobDefaults(job?: CronJob) {
-  if (!job) return { name: '', message: '', agent: '', channel: '', approvalMode: '', silent: false, strictSchedule: false, schedMode: 'interval' as const, intVal: 1, intUnit: 'hours' as const, weekDays: [] as number[], weekTime: '09:00', cronExpr: '' }
+  if (!job) return { name: '', message: '', agent: '', channel: '', approvalMode: '', silent: false, strictSchedule: false, hideInChat: false, schedMode: 'interval' as const, intVal: 1, intUnit: 'hours' as const, weekDays: [] as number[], weekTime: '09:00', cronExpr: '' }
   const isInterval = !!(job.every_secs || (job.schedule || '').match(/^every\s+\d+/))
   const secs = job.every_secs || (() => { const m = (job.schedule || '').match(/^every\s+(\d+)\s*([sh])/); if (!m) return 3600; return m[2] === 'h' ? parseInt(m[1]) * 3600 : parseInt(m[1]) })()
   const intUnit = secs >= 86400 ? 'days' as const : secs >= 3600 ? 'hours' as const : 'minutes' as const
@@ -32,7 +32,7 @@ function parseJobDefaults(job?: CronJob) {
     weekDays = expandDow(cronParts[4]).map(d => CRON_DOW_TO_GRID[d] || 1)
     weekTime = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`
   }
-  return { name: job.name, message: job.message, agent: job.agent || '', channel: job.channel || '', approvalMode: job.approval_mode || '', silent: job.silent || false, strictSchedule: job.strict_schedule || false, schedMode, intVal, intUnit, weekDays, weekTime, cronExpr: cronRaw }
+  return { name: job.name, message: job.message, agent: job.agent || '', projectPath: job.project_path || '', channel: job.channel || '', approvalMode: job.approval_mode || '', silent: job.silent || false, strictSchedule: job.strict_schedule || false, hideInChat: job.hide_in_chat || false, schedMode, intVal, intUnit, weekDays, weekTime, cronExpr: cronRaw }
 }
 
 /** Build the API body from form state. Returns null if validation fails (sets error). */
@@ -43,10 +43,12 @@ function buildBody(
 ): Record<string, string | number | boolean> | null {
   if (!f.name || !f.message) { setError('Name and message are required'); return null }
   const body: Record<string, string | number | boolean> = { name: f.name, message: f.message, agent: f.agent }
+  if (f.projectPath) body.project_path = f.projectPath
   if (f.channel) body.channel = f.channel
   if (f.approvalMode) body.approval_mode = f.approvalMode
   body.silent = f.silent
   body.strict_schedule = f.strictSchedule
+  body.hide_in_chat = f.hideInChat
   if (f.schedMode === 'interval') {
     body.every = f.intVal * (f.intUnit === 'minutes' ? 60 : f.intUnit === 'hours' ? 3600 : 86400)
   } else if (f.schedMode === 'weekly') {
@@ -83,10 +85,12 @@ export default function JobForm({ job, agents, defaultAgent, onSaved, layout = '
   const [name, setName] = useState(defaults.name)
   const [msg, setMsg] = useState(defaults.message)
   const [agent, setAgent] = useState(defaults.agent)
+  const [projectPath, setProjectPath] = useState(defaults.projectPath || '')
   const [channel, setChannel] = useState(defaults.channel)
   const [approvalMode, setApprovalMode] = useState(defaults.approvalMode)
   const [silent, setSilent] = useState(defaults.silent)
   const [strictSchedule, setStrictSchedule] = useState(defaults.strictSchedule)
+  const [hideInChat, setHideInChat] = useState(defaults.hideInChat)
   const [schedMode, setSchedMode] = useState(defaults.schedMode)
   const [intVal, setIntVal] = useState(defaults.intVal)
   const [intUnit, setIntUnit] = useState(defaults.intUnit)
@@ -100,7 +104,7 @@ export default function JobForm({ job, agents, defaultAgent, onSaved, layout = '
 
   const submit = async () => {
     setError(''); setSaving(true)
-    const f = { name, message: msg, agent, channel, approvalMode, silent, strictSchedule, schedMode, intVal, intUnit, weekDays, weekTime, cronExpr }
+    const f = { name, message: msg, agent, projectPath, channel, approvalMode, silent, strictSchedule, hideInChat, schedMode, intVal, intUnit, weekDays, weekTime, cronExpr }
     const body = buildBody(f, tz, setError)
     if (!body) { setSaving(false); return }
     try {
@@ -108,7 +112,7 @@ export default function JobForm({ job, agents, defaultAgent, onSaved, layout = '
         ? await api.updateCron(job.id, body)
         : await api.createCron(body).catch((e: Error) => ({ error: e.message }))
       if (res.error) { setError(res.error); setSaving(false); return }
-      if (!job) { setName(''); setMsg(''); setWeekDays([]); setIntVal(1); setChannel(''); setApprovalMode(''); setSilent(false); setStrictSchedule(false) }
+      if (!job) { setName(''); setMsg(''); setWeekDays([]); setIntVal(1); setChannel(''); setApprovalMode(''); setSilent(false); setStrictSchedule(false); setHideInChat(false); setProjectPath('') }
       onSaved()
     } catch { setError('Failed to save'); setSaving(false) }
   }
@@ -124,37 +128,41 @@ export default function JobForm({ job, agents, defaultAgent, onSaved, layout = '
     <div className="flex flex-col gap-3">
       {vertical ? (<>
         <div className="flex flex-col gap-1">
-          <label className="text-[12px] text-muted font-medium">Name</label>
+          <span className="text-[12px] text-muted font-medium">Name</span>
           <span className="text-[11px] text-muted/70">A short label for this job</span>
-          <Input value={name} onChange={e => setName(e.target.value)} />
+          <Input id="jobform-name" aria-label="Name" value={name} onChange={e => setName(e.target.value)} />
         </div>
         <div className="flex flex-col gap-1">
-          <label className="text-[12px] text-muted font-medium">{job?.script ? 'Script' : job?.command ? 'Command' : 'Message'}</label>
-          {job?.script ? (
+          {job?.script ? (<>
+            <span className="text-[12px] text-muted font-medium">Script</span>
             <code className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-text text-[12px] font-mono break-all">{job.script}</code>
-          ) : job?.command ? (
+          </>) : job?.command ? (<>
+            <span className="text-[12px] text-muted font-medium">Command</span>
             <code className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-text text-[12px] font-mono break-all">{job.command}</code>
-          ) : (<>
-          <span className="text-[11px] text-muted/70">The prompt or task sent to the agent when this job fires</span>
-          <textarea className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-text text-sm font-body outline-none resize-y min-h-[60px] focus-ring" value={msg} onChange={e => setMsg(e.target.value)} />
-          </>)}
+          </>) : (
+          <div className="flex flex-col gap-1">
+            <span className="text-[12px] text-muted font-medium">Message</span>
+            <span className="text-[11px] text-muted/70">The prompt or task sent to the agent when this job fires</span>
+            <textarea id="jobform-message" aria-label="Message" className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-text text-sm font-body outline-none resize-y min-h-[60px] focus-ring" value={msg} onChange={e => setMsg(e.target.value)} />
+          </div>)}
         </div>
       </>) : (
         <div className="flex gap-2 items-center flex-wrap">
           <Input placeholder="Job name" value={name} onChange={e => setName(e.target.value)} />
           <Input placeholder="Message / task" style={{ flex: 2 }} value={msg} onChange={e => setMsg(e.target.value)} />
-          <AgentSelector agents={agents} defaultAgent={defaultAgent} value={agent} onChange={setAgent} />
+          <AgentSelector agents={agents} defaultAgent={defaultAgent} value={agent} activeProjectPath={projectPath} onChange={(name, pp) => { setAgent(name); setProjectPath(pp || '') }} />
           <Input placeholder="Channel ID (optional)" style={{ flex: '0 0 170px' }} value={channel} onChange={e => setChannel(e.target.value)} />
           <select className={CRON_SEL} value={approvalMode} onChange={e => setApprovalMode(e.target.value)}>
             <option value="">Approval: default</option><option value="auto">auto</option>
           </select>
-          <label className="flex items-center gap-1.5 text-muted text-[13px] cursor-pointer"><input type="checkbox" checked={silent} onChange={e => setSilent(e.target.checked)} /> Silent</label>
-          <label className="flex items-center gap-1.5 text-muted text-[13px] cursor-pointer"><input type="checkbox" checked={strictSchedule} onChange={e => setStrictSchedule(e.target.checked)} /> Strict schedule</label>
+          <label htmlFor="jobform-silent" className="flex items-center gap-1.5 text-muted text-[13px] cursor-pointer"><input id="jobform-silent" aria-label="Silent" type="checkbox" checked={silent} onChange={e => setSilent(e.target.checked)} /> Silent</label>
+          <label htmlFor="jobform-strict-schedule" className="flex items-center gap-1.5 text-muted text-[13px] cursor-pointer"><input id="jobform-strict-schedule" aria-label="Strict schedule" type="checkbox" checked={strictSchedule} onChange={e => setStrictSchedule(e.target.checked)} /> Strict schedule</label>
+          <label htmlFor="jobform-hide-in-chat" className="flex items-center gap-1.5 text-muted text-[13px] cursor-pointer"><input id="jobform-hide-in-chat" aria-label="Hide in chat" type="checkbox" checked={hideInChat} onChange={e => setHideInChat(e.target.checked)} /> Hide in chat</label>
         </div>
       )}
 
       {/* Schedule */}
-      {vertical && <div className="flex flex-col gap-0.5"><label className="text-[12px] text-muted font-medium">Schedule</label><span className="text-[11px] text-muted/70">How often this job runs</span></div>}
+      {vertical && <div className="flex flex-col gap-0.5"><span className="text-[12px] text-muted font-medium">Schedule</span><span className="text-[11px] text-muted/70">How often this job runs</span></div>}
       <div className={`flex gap-2 items-center flex-wrap ${vertical ? '' : ''}`}>
         <select className={CRON_SEL} value={schedMode} onChange={e => setSchedMode(e.target.value as 'interval' | 'weekly' | 'cron')}>
           <option value="interval">Every interval</option>
@@ -187,22 +195,22 @@ export default function JobForm({ job, agents, defaultAgent, onSaved, layout = '
       {/* Vertical-only: agent, channel, actions */}
       {vertical && (<>
         <div className="flex flex-col gap-1">
-          <label className="text-[12px] text-muted font-medium">Agent</label>
+          <span className="text-[12px] text-muted font-medium">Agent</span>
           <span className="text-[11px] text-muted/70">Which agent handles this job. Leave default for the primary agent.</span>
-          <AgentSelector agents={agents} defaultAgent={defaultAgent} value={agent} onChange={setAgent} />
+          <AgentSelector agents={agents} defaultAgent={defaultAgent} value={agent} activeProjectPath={projectPath} onChange={(name, pp) => { setAgent(name); setProjectPath(pp || '') }} />
         </div>
         <div className="flex flex-col gap-1">
-          <label className="text-[12px] text-muted font-medium">Channel ID</label>
+          <span className="text-[12px] text-muted font-medium">Channel ID</span>
           <span className="text-[11px] text-muted/70">Slack channel to post results to. Leave empty for DM.</span>
-          <Input value={channel} onChange={e => setChannel(e.target.value)} placeholder="Optional" />
+          <Input id="jobform-channel" aria-label="Channel ID" value={channel} onChange={e => setChannel(e.target.value)} placeholder="Optional" />
         </div>
-        <div className="flex flex-col gap-1">
-          <label className="text-[12px] text-muted font-medium">Approval</label>
+        <label htmlFor="jobform-approval" className="flex flex-col gap-1">
+          <span className="text-[12px] text-muted font-medium">Approval</span>
           <span className="text-[11px] text-muted/70">How tool calls are approved during execution</span>
-          <select className={CRON_SEL} value={approvalMode} onChange={e => setApprovalMode(e.target.value)}>
+          <select id="jobform-approval" className={CRON_SEL} value={approvalMode} onChange={e => setApprovalMode(e.target.value)}>
             <option value="">Default</option><option value="auto">Auto-approve</option>
           </select>
-        </div>
+        </label>
         <SettingsToggle
           label="Silent mode"
           description="Suppress automatic message delivery. The agent controls when to notify."
@@ -214,6 +222,12 @@ export default function JobForm({ job, agents, defaultAgent, onSaved, layout = '
           description="Fire exactly on schedule with no jitter. By default, jobs are spread randomly to reduce traffic spikes."
           checked={strictSchedule}
           onChange={setStrictSchedule}
+        />
+        <SettingsToggle
+          label="Hide in chat"
+          description="Keep this job's runs out of the active session list. Turn on for fire-and-forget jobs (digests, cleanups) — results still reach Slack/notifications and the History tab."
+          checked={hideInChat}
+          onChange={setHideInChat}
         />
         {vertical && !externalSubmit && (
           <SendBtn onClick={submit} disabled={saving}>

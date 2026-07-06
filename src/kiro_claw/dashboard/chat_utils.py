@@ -93,7 +93,7 @@ def _build_stream_chunk(msg: dict) -> str:
     else:
         cls_val = _redact_deep(cls_val)
     return json.dumps(
-        {"type": msg["role"], "content": content, "ts": msg.get("ts", ""),
+        {"type": msg.get("role", ""), "content": content, "ts": msg.get("ts", ""),
          "cls": cls_val,
          **({"meta": meta} if meta else {})}
     )
@@ -259,12 +259,20 @@ def _emit_agent_assignment(slot_key: str, agent: str, outcome: str = "applied") 
     )
 
 
-def _validate_tool_name(tool_name: str, tool_kind: str = "") -> str:
-    """Validate and sanitize tool display names for hook matching."""
+def _validate_tool_name(tool_name: str, *, is_shell: bool = False) -> str:
+    """Validate and sanitize tool display names for hook matching.
+
+    ``is_shell`` is the provider-agnostic signal (set at the provider boundary)
+    that this tool call is a shell/exec command, whose display title is the full
+    command line and legitimately exceeds the length cap. Keying the exemption
+    on this flag rather than a hardcoded set of provider tool_kind literals
+    (e.g. "execute"/"Bash") stops the cap from silently re-breaking long shell
+    commands on every engine migration or tool rename.
+    """
     sanitized = sanitize_string(tool_name)
     if not sanitized:
         raise ValueError("Tool name cannot be empty")
-    if tool_kind != "execute" and len(sanitized) > MAX_TOOL_NAME_LEN:
+    if not is_shell and len(sanitized) > MAX_TOOL_NAME_LEN:
         raise ValueError(f"Tool name exceeds max length {MAX_TOOL_NAME_LEN}")
     return sanitized
 
@@ -388,6 +396,21 @@ def _remove_queued_by_id(messages: list[dict], queue_id: str) -> bool:
             cls = json.loads(m.get("cls", "{}"))
             if cls.get("queue_id") == queue_id:
                 del messages[i]
+                return True
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return False
+
+
+def _edit_queued_by_id(messages: list[dict], queue_id: str, content: str) -> bool:
+    """Update the content of a 'queued' placeholder by queue_id stored in cls JSON."""
+    for m in messages:
+        if m.get("role") != "queued":
+            continue
+        try:
+            cls = json.loads(m.get("cls", "{}"))
+            if cls.get("queue_id") == queue_id:
+                m["content"] = content
                 return True
         except (json.JSONDecodeError, TypeError):
             pass

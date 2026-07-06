@@ -769,12 +769,12 @@ export default function PandaOfficeScene({ agents, visible = true }: { agents: A
       cancelLoop()
       timeouts.forEach(clearTimeout)
     }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [])  
 
   return (
     <div style={SCENE_CONTAINER_STYLE(W, H)}>
-      <canvas ref={canvasRef} style={{ ...PIXEL_CANVAS_STYLE, ...canvasProps.style }} onMouseMove={canvasProps.onMouseMove} onMouseLeave={canvasProps.onMouseLeave} onClick={canvasProps.onClick} />
-      <canvas ref={textRef} style={TEXT_CANVAS_STYLE} />
+      <canvas ref={canvasRef} aria-label="Panda office scene" style={{ ...PIXEL_CANVAS_STYLE, ...canvasProps.style }} onMouseMove={canvasProps.onMouseMove} onMouseLeave={canvasProps.onMouseLeave} onClick={canvasProps.onClick} />
+      <canvas ref={textRef} aria-label="Panda office scene labels" style={TEXT_CANVAS_STYLE} />
       {tooltipEl}
     </div>
   )

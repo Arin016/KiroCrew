@@ -40,10 +40,12 @@ from typing import Any
 from urllib.parse import urlencode, urlparse
 
 from kiro_claw.aim_agents import list_agents
+from kiro_claw.artifacts import _infer_kind
 from kiro_claw.config.loader import KiroClawConfig, config_dir, outbox_dir
 from kiro_claw.dashboard.origin import parse_dashboard_url
 from kiro_claw.history import ConversationLog
 from kiro_claw.hooks import FileTooLargeError, safe_read_file_bytes
+from kiro_claw.knowledge.dedup import dedup_sweep
 from kiro_claw.knowledge.embedder import create_embedder_from_config
 from kiro_claw.knowledge.retrieval import HybridRetriever
 from kiro_claw.knowledge.store import KnowledgeStore
@@ -67,12 +69,14 @@ from kiro_claw.validation import (
     AUTONUDGE_STOP_SCHEMA,
     CHANNEL_ID_RE,
     GET_CHAT_SESSION_SCHEMA,
+    KNOWLEDGE_DEDUP_SCHEMA,
     LOCAL_KNOWLEDGE_SEARCH_SCHEMA,
     MAX_MEDIUM_STRING,
     MAX_SHORT_STRING,
     MCP_CORE_SCHEMAS,
     REGISTER_HOOK_SCHEMA,
     SEARCH_CHAT_HISTORY_SCHEMA,
+    SET_PROJECT_SCHEMA,
     SPAWN_RUN_SCHEMA,
     SPAWN_SUB_AGENTS_SCHEMA,
     TASK_RUN_SCHEMA,
@@ -572,7 +576,12 @@ def _list_tools() -> list[dict[str, Any]]:
                     "kind": {
                         "type": "string",
                         "enum": ["widget", "html", "markdown", "svg", "json", "text"],
-                        "description": "Artifact kind. Default: widget.",
+                        "description": (
+                            "Artifact kind. Optional — inferred from the content "
+                            "when omitted (HTML-ish body -> widget, markdown text "
+                            "-> markdown). Pass explicitly to override; markdown "
+                            "documents should set kind='markdown'."
+                        ),
                     },
                     "source": {
                         "type": "string",
@@ -792,6 +801,29 @@ def _list_tools() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "knowledge_dedup",
+            "description": (
+                "Find and collapse cross-source duplicate documents in the Knowledge "
+                "Base (e.g. the same file uploaded directly AND synced via a folder). "
+                "Defaults to a DRY-RUN preview that lists which duplicate would be "
+                "deleted and which copy is kept, changing nothing. Pass apply=true to "
+                "perform the hard deletes. Use when the user asks to de-duplicate, "
+                "clean up, or preview duplicates in their knowledge base."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "apply": {
+                        "type": "boolean",
+                        "description": (
+                            "false (default) = dry-run preview, no changes. "
+                            "true = perform the hard deletes."),
+                        "default": False,
+                    },
+                },
+            },
+        },
+        {
             "name": "search_chat_history",
             "description": (
                 "Search your own past conversation transcripts (chat history) by "
@@ -917,6 +949,44 @@ def _list_tools() -> list[dict[str, Any]]:
                 "required": ["snapshot", "query"],
             },
         },
+        {
+            "name": "set_project",
+            "description": (
+                "Set the calling chat slot's project directory. The directory scopes "
+                "file search, @-mention auto-complete, the [PROJECT] context line, "
+                "and project-level .kiro/steering/**/*.md. "
+                "\n\n"
+                "Use after a skill scaffolds a new working tree (e.g. brazil-workspace) "
+                "so the agent retargets to the new source instead of the old one. "
+                "To clear the project, pass path=\"\" with clear=true. "
+                "\n\n"
+                "Restrictions: only works in dashboard sessions with explicit identity "
+                "(injected KIROCLAW_SESSION_KEY or per-call caller context). Subagents, "
+                "Slack, and cron contexts are rejected — those resolve via PID-walk and "
+                "would silently mutate the wrong slot. Sensitive paths (~/.aws, ~/.ssh, "
+                "etc.) are blocked by the underlying endpoint. "
+                "\n\n"
+                "The session is reset on the NEXT turn boundary (not inline) so this "
+                "tool returns cleanly without killing its own caller."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Absolute path to the new project directory. "
+                            "Must be non-empty unless clear=true."
+                        ),
+                    },
+                    "clear": {
+                        "type": "boolean",
+                        "description": "Set true to clear the project scope (path must be empty).",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
     ]
 
 
@@ -926,6 +996,51 @@ def _internal_secret() -> str:
         return (config_dir() / ".local_secret").read_text().strip()
     except Exception:
         return ""
+
+
+# Cached user-scoped token for routes that reject ``X-Internal-Secret`` and
+# require a real session token (e.g. ``/api/autonudge*``). Bootstrapped on
+# demand from ``/api/token/local`` using the same local secret we already hold,
+# and refreshed once it nears expiry. ``(token, expires_at_monotonic)``.
+_USER_TOKEN_CACHE: tuple[str, float] = ("", 0.0)
+
+
+def _local_user_token() -> str:
+    """Exchange the local secret for a short-lived user-scoped token.
+
+    A few routes (notably ``/api/autonudge*``) deliberately reject the
+    machine-to-machine ``X-Internal-Secret`` handshake and require a
+    user-scoped token instead. ``GET /api/token/local`` mints one for any
+    loopback caller that presents the local secret via the ``X-Local-Secret``
+    header. We cache the token in-process and refresh it shortly before
+    expiry so a self-halting loop doesn't pay the round-trip every call.
+
+    Returns ``""`` if the exchange fails; callers surface that as the usual
+    ``{"error": ...}`` path rather than crashing.
+    """
+    global _USER_TOKEN_CACHE
+    cached, expires_at = _USER_TOKEN_CACHE
+    # 30s safety margin so a token doesn't expire mid-request.
+    if cached and time.monotonic() < expires_at - 30:
+        return cached
+    secret = _internal_secret()
+    if not secret:
+        return ""
+    req = urllib.request.Request(
+        f"{_API}/api/token/local?ttl=15m",
+        headers={"X-Local-Secret": secret},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except Exception:
+        return ""
+    token = str(data.get("token", ""))
+    if not token:
+        return ""
+    ttl = float(data.get("expires_in", 900) or 900)
+    _USER_TOKEN_CACHE = (token, time.monotonic() + ttl)
+    return token
 
 
 def _get_ppid(pid: int) -> int:
@@ -1044,6 +1159,23 @@ def _resolve_session_key() -> str:
     except Exception:
         pass
     return ""
+
+
+def _resolve_session_key_strict() -> str:
+    """Resolve the session key, refusing PID-walked identities.
+
+    Like ``_resolve_session_key`` but drops the ``/proc`` ancestor walk:
+    only the gateway-injected ``KIROCLAW_SESSION_KEY`` env var is accepted.
+    Returns ``""`` when only the PID-walk would have matched.
+
+    Required by state-mutating MCP tools. A subagent spawned via
+    ``spawn_run`` lives under the parent slot's process tree, so a
+    PID-walk from its MCP-core child silently resolves to the parent —
+    which would let the subagent mutate state on the wrong slot.
+    Read-only callers (audit, telemetry) keep the lenient resolver
+    where misattribution is harmless.
+    """
+    return os.environ.get("KIROCLAW_SESSION_KEY", "")
 
 
 def _vet_messaging_governance(caller_session: str) -> str | None:
@@ -1231,10 +1363,32 @@ def _vet_memory_writes_governance(caller_session: str) -> str | None:
         return None
 
 
+def _session_key_header_error(sk: str) -> str | None:
+    """Return an actionable error if the session key cannot go in an HTTP header.
+
+    http.client encodes header values as latin-1, so a non-latin-1 char in the
+    session key (e.g. an em-dash from a tab title) raises UnicodeEncodeError
+    before the request is sent. Detect it up front and tell the user to rename
+    the tab, rather than surfacing the raw codec error (Mesh-2241).
+    """
+    try:
+        sk.encode("latin-1")
+        return None
+    except UnicodeEncodeError:
+        return (
+            "session key contains a character invalid in HTTP headers "
+            "(non-latin-1, e.g. an em-dash or emoji in the tab title) — "
+            "rename the chat tab to use ASCII characters and retry"
+        )
+
+
 def _post(path: str, body: dict | None = None) -> dict:
     data = json.dumps(body or {}).encode()
     headers = {"Content-Type": "application/json", "X-Internal-Secret": _internal_secret()}
     sk = _resolve_session_key()
+    _sk_err = _session_key_header_error(sk)
+    if _sk_err:
+        return {"error": _sk_err}
     if sk:
         headers["X-Session-Key"] = sk
     req = urllib.request.Request(
@@ -1246,13 +1400,53 @@ def _post(path: str, body: dict | None = None) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        # urlopen raises HTTPError on 4xx/5xx; str(e) is only "HTTP Error 400:
+        # Bad Request" — the structured {"error": ...} body lives in e.read().
+        # Surface it so callers can act on the backend's actual error (e.g.
+        # the learn_add "unknown session" mapping) instead of an opaque code.
+        return _http_error_body(e)
     except Exception as e:
         return {"error": str(e)}
+
+
+def _http_error_body(exc: urllib.error.HTTPError) -> dict:
+    """Decode the JSON body of an ``HTTPError`` into the standard error dict.
+
+    Prefers the structured ``{"error": ...}`` JSON body (so callers can match
+    on the backend's actual message), then the raw body text, then
+    ``str(exc)`` — so a non-JSON or empty error response still yields a usable
+    ``{"error": ...}`` payload instead of an opaque ``"HTTP Error 400"``.
+
+    An HTTP response body is content originating outside KiroClaw, so the
+    decoded message is redacted (``redact_exfiltration_urls`` +
+    ``redact_credentials``) before it is handed back to a caller that may echo
+    it to the LLM / dashboard / Slack. Redaction leaves plain markers like
+    ``"unknown session"`` intact, so downstream matching is unaffected.
+    """
+    try:
+        raw = exc.read().decode("utf-8", "replace").strip()
+    except Exception:
+        raw = ""
+    message = raw or str(exc)
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict) and "error" in parsed:
+                message = str(parsed["error"])
+        except Exception:
+            pass
+    message, _ = redact_exfiltration_urls(message)
+    message, _ = redact_credentials(message)
+    return {"error": message}
 
 
 def _get(path: str) -> dict:
     headers = {"X-Internal-Secret": _internal_secret()}
     sk = _resolve_session_key()
+    _sk_err = _session_key_header_error(sk)
+    if _sk_err:
+        return {"error": _sk_err}
     if sk:
         headers["X-Session-Key"] = sk
     req = urllib.request.Request(
@@ -1262,6 +1456,8 @@ def _get(path: str) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return _http_error_body(e)
     except Exception as e:
         return {"error": str(e)}
 
@@ -1270,6 +1466,9 @@ def _delete(path: str, body: dict | None = None) -> dict:
     data = json.dumps(body or {}).encode() if body else None
     headers = {"X-Internal-Secret": _internal_secret()}
     sk = _resolve_session_key()
+    _sk_err = _session_key_header_error(sk)
+    if _sk_err:
+        return {"error": _sk_err}
     if sk:
         headers["X-Session-Key"] = sk
     if data:
@@ -1283,8 +1482,87 @@ def _delete(path: str, body: dict | None = None) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return _http_error_body(e)
     except Exception as e:
         return {"error": str(e)}
+
+
+def _with_token(path: str, token: str) -> str:
+    """Append ``?token=`` (or ``&token=``) to *path* for user-token routes."""
+    sep = "&" if "?" in path else "?"
+    return f"{path}{sep}{urlencode({'token': token})}"
+
+
+def _get_user(path: str) -> dict:
+    """GET a user-token-gated route (e.g. ``/api/autonudge*``).
+
+    These routes reject ``X-Internal-Secret``; authenticate with a
+    bootstrapped user token passed as the ``?token=`` query param instead.
+    """
+    token = _local_user_token()
+    if not token:
+        return {"error": "could not obtain local user token"}
+    req = urllib.request.Request(f"{_API}{_with_token(path, token)}")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return _http_error_body(e)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _delete_user(path: str) -> dict:
+    """DELETE a user-token-gated route (e.g. ``/api/autonudge/{id}``)."""
+    token = _local_user_token()
+    if not token:
+        return {"error": "could not obtain local user token"}
+    req = urllib.request.Request(
+        f"{_API}{_with_token(path, token)}",
+        method="DELETE",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return _http_error_body(e)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _artifact_ref_link(slug: str, name: str) -> str:
+    """Render a clickable ``[<name>](/artifacts/<slug>)`` markdown link.
+
+    The chat renderer turns this into an anchor the frontend intercepts to open
+    the artifact in the side panel; ``/artifacts/<slug>`` is the canonical
+    full-page route, so it also degrades to a normal navigation if interception
+    is absent. Used for non-widget kinds, which (unlike widgets) don't
+    round-trip via ``<mcwidget>`` and otherwise have no clickable form in chat.
+    """
+    # name/slug are LLM-influenced and rendered verbatim on the dashboard, so
+    # scrub for credential / exfiltration patterns (same guard as other
+    # tool-result paths).
+    label = name or slug
+    label, _ = redact_exfiltration_urls(label)
+    label, _ = redact_credentials(label)
+    # Unescaped ']' would break the markdown link syntax.
+    label = label.replace("[", "(").replace("]", ")")
+    # A literal newline in the label splits the link text across lines, breaking
+    # the single-line markdown anchor — collapse CR/LF to spaces so a crafted
+    # name can't fragment the rendered link.
+    label = label.replace("\r", " ").replace("\n", " ")
+    safe_slug, _ = redact_exfiltration_urls(slug or "")
+    safe_slug, _ = redact_credentials(safe_slug)
+    # Constrain to the slug charset so a crafted value can't inject ')'/markdown
+    # out of the URL.
+    safe_slug = _re.sub(r"[^a-z0-9-]", "", safe_slug.lower())
+    # If sanitization leaves no slug (e.g. the '?' fallback or an all-redacted
+    # value), a link would dangle at /artifacts/ with no target — degrade to
+    # plain text so the name still surfaces without a broken anchor.
+    if not safe_slug:
+        return label
+    return f"[{label}](/artifacts/{safe_slug})"
 
 
 def _artifact_reemit_hint(slug: str, name: str, kind: str = "widget") -> str:
@@ -1723,6 +2001,8 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
                     "lesson you want to save — it will not carry over "
                     "from this session automatically."
                 )
+            # ``err_val`` is already redacted at the trust boundary by
+            # ``_http_error_body`` (HTTP bodies are untrusted external content).
             return f"Error: {err_val}"
         return f"Saved lesson ({scope}): {rule}"
 
@@ -2125,7 +2405,12 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         # mode Mesh-1715 surfaced (Fight Club: agent created
         # ``rules-of-fight-club`` even though ``a07ece9a8c3309aa`` named
         # "The Rules of Fight Club" already existed).
-        kind_for_dedup = args.get("kind", "widget")
+        # Resolve the kind the same way the store will (CR-1 kind inference):
+        # an explicit kind wins, else infer from the inline content. The MCP
+        # save path never forwards a source_path, so content sniff is the only
+        # signal. This keeps the widget-only duplicate probe below from firing
+        # on a markdown/text deliverable that merely shares a name with a widget.
+        kind_for_dedup = args.get("kind") or _infer_kind(args.get("content", ""), "", None)
         source_for_dedup = args.get("source", "chat")
         explicit_slug = args.get("slug")
         target_name = args.get("name", "")
@@ -2198,9 +2483,14 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             return f"Error: {d['error']}"
         slug = d.get("slug", "?")
         version = d.get("version", 1)
+        name = d.get("name", args.get("name", ""))
+        kind = d.get("kind", args.get("kind", "widget"))
+        # Widgets re-surface via the re-emit tag; only non-widgets need the link.
+        ref_link = "" if kind == "widget" else f"{_artifact_ref_link(slug, name)}\n\n"
         return (
             f"Saved artifact: slug={slug} version={version}\n\n"
-            f"{_artifact_reemit_hint(slug, d.get('name', args.get('name', '')), d.get('kind', args.get('kind', 'widget')))}"
+            f"{ref_link}"
+            f"{_artifact_reemit_hint(slug, name, kind)}"
             f"{dedup_hint}"
         )
 
@@ -2239,6 +2529,8 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         kind = d.get("kind", "widget")
         if kind == "widget":
             out_body += "\n\n" + _artifact_reemit_hint(d.get("slug", "?"), d.get("name", ""), kind)
+        else:
+            out_body += "\n\n" + _artifact_ref_link(d.get("slug", "?"), d.get("name", ""))
         return out_body
 
     if name == "artifact_update":
@@ -2291,6 +2583,9 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         if d.get("kind", "widget") == "widget":
             out.append("")
             out.append(_artifact_reemit_hint(d.get("slug", slug), d.get("name", ""), "widget"))
+        else:
+            out.append("")
+            out.append(_artifact_ref_link(d.get("slug", slug), d.get("name", "")))
         return "\n".join(out)
 
     if name == "artifact_revert":
@@ -2419,7 +2714,10 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             )
         slot_key = sk.split(":", 1)[1]
         reason = args.get("reason", "").strip()
-        lookup = _get(f"/api/autonudge/slot/{slot_key}")
+        # /api/autonudge* rejects X-Internal-Secret and requires a user-scoped
+        # token, so use the token-aware helpers (bootstrapped via
+        # /api/token/local) rather than the plain internal-secret _get/_delete.
+        lookup = _get_user(f"/api/autonudge/slot/{slot_key}")
         if lookup.get("error"):
             sel().log_tool_invocation(
                 session_key=sk, source="mcp", tool_name="autonudge_stop", outcome="error"
@@ -2432,7 +2730,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             )
             return "No active auto-nudge loop on this session — nothing to stop."
         loop_id = loop.get("id", "")
-        resp = _delete(f"/api/autonudge/{loop_id}")
+        resp = _delete_user(f"/api/autonudge/{loop_id}")
         if resp.get("error"):
             sel().log_tool_invocation(
                 session_key=sk, source="mcp", tool_name="autonudge_stop", outcome="error"
@@ -2649,27 +2947,52 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             )
             return "No relevant knowledge found."
 
-        # Resolve source names
-        source_names: dict[str, str] = {}
-        for r in results:
-            sid = r.get("source")
-            if sid and sid not in source_names:
-                row = store.db.execute("SELECT name FROM sources WHERE id = ?", (sid,)).fetchone()
-                source_names[sid] = row["name"] if row else "(unknown)"
-
-        # Format output
+        # Format output. Source identity (source_type/source_name/source_uri)
+        # and the per-document locator (file_path for folders, artifact_slug +
+        # artifact_name for artifacts) are attached by HybridRetriever
+        # (_attach_citation_sources).
         lines = [
             "\U0001f4da Knowledge Library "
             "(supplementary reference \u2014 extract only what's relevant to the question):"
         ]
         for r in results:
             title = r.get("title") or "(untitled)"
-            source = source_names.get(r.get("source", ""), "")
+            source_type = r.get("source_type") or ""
+            artifact_slug = r.get("artifact_slug")
+            artifact_name = r.get("artifact_name")
+            # Document identity shown before the section. For artifacts this is
+            # the artifact's own name -- the aggregate "Artifacts" source name
+            # carries no information; for every other type it's the source name.
+            if source_type == "artifact":
+                source = artifact_name or r.get("source_name") or artifact_slug or ""
+            else:
+                source = r.get("source_name") or ""
             content = r.get("content", "")
             lines.append("\n---")
             lines.append(f"## {title}")
             if source:
-                lines.append(f"**Source:** {source}")
+                # Citation: [type] name, then section + line range when present.
+                cite = "**Source:**"
+                if source_type:
+                    cite += f" [{source_type}]"
+                cite += f" {source}"
+                section = r.get("section_title")
+                if section:
+                    cite += f" \u2014 {section}"
+                chunk_range = r.get("chunk_range")
+                if chunk_range:
+                    cite += f" (lines {chunk_range})"
+                lines.append(cite)
+                # The most specific locator the source type affords, mirroring
+                # the folder File: line.
+                file_path = r.get("file_path")
+                uri = r.get("source_uri") or ""
+                if file_path:
+                    lines.append(f"**File:** {file_path}")
+                elif artifact_slug:
+                    lines.append(f"**Artifact:** {artifact_slug}")
+                elif uri:
+                    lines.append(f"**Link:** {uri}")
             lines.append(f"\n{content}")
 
         output = "\n".join(lines)
@@ -2682,6 +3005,40 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             outcome="success",
             metadata={"query": query, "result_count": len(results)},
         )
+        return output
+
+    if name == "knowledge_dedup":
+        args = validate_tool_args(args, KNOWLEDGE_DEDUP_SCHEMA)
+        apply = bool(args.get("apply", False))
+        db_path = Path(config_dir()) / "workspace" / "knowledge" / "knowledge.db"
+        if not db_path.exists():
+            sel().log_tool_invocation(
+                session_key=_resolve_session_key(), source="mcp",
+                tool_name="knowledge_dedup", outcome="not_configured",
+            )
+            return "Knowledge Library is not configured. Ingest documents via the dashboard first."
+        store = KnowledgeStore(str(db_path))
+        try:
+            results = dedup_sweep(store, apply=apply)
+        finally:
+            store.db.close()
+        sel().log_tool_invocation(
+            session_key=_resolve_session_key(), source="mcp",
+            tool_name="knowledge_dedup",
+            outcome="applied" if apply else "preview",
+            metadata={"duplicate_count": len(results), "apply": apply},
+        )
+        if not results:
+            return "No cross-source duplicate documents found."
+        mode = "Deleted" if apply else "Would delete (dry run; set apply=true to delete)"
+        lines = [f"{mode} — {len(results)} duplicate document(s):"]
+        for r in results:
+            lines.append(
+                f"- {r['loser']} ({r['items_deleted']} chunks) -> kept "
+                f"{r['winner']} [{r['reason']}]")
+        output = "\n".join(lines)
+        output, _ = redact_exfiltration_urls(output)
+        output, _ = redact_credentials(output)
         return output
 
     if name == "browse_outline":
@@ -2712,6 +3069,45 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             outcome="success",
         )
         return result
+
+    if name == "set_project":
+        # Defense-in-depth: _call_tool() already validates, but the explicit
+        # call here keeps the schema gate visible at the extraction site.
+        args = validate_tool_args(args, SET_PROJECT_SCHEMA)
+        path = args.get("path", "")
+        sk = _resolve_session_key_strict()
+        if not sk.startswith("dashboard:"):
+            sel().log_tool_invocation(
+                session_key=sk or "<unresolved>", source="mcp",
+                tool_name="set_project", outcome="rejected",
+                error="non-dashboard or unresolved session",
+            )
+            return (
+                "Error: set_project only works in dashboard sessions with explicit "
+                "identity. Slack, cron, and subagent contexts are rejected to avoid "
+                "cross-context state mutation."
+            )
+        slot_name = sk[len("dashboard:"):]
+        d = _post(f"/api/chat/slots/{slot_name}/project", {"project": path})
+        err_val = d.get("error")
+        if err_val:
+            sel().log_tool_invocation(
+                session_key=sk, source="mcp",
+                tool_name="set_project", outcome="error",
+                error=str(err_val),
+            )
+            return f"Error: {err_val}"
+        sel().log_tool_invocation(
+            session_key=sk, source="mcp",
+            tool_name="set_project", outcome="success",
+        )
+        new_project = d.get("project") or ""
+        if not new_project:
+            return "Project cleared. The next message will cold-start with no project scope."
+        return (
+            f"Project set to {new_project}. The session will cold-start with the new "
+            "CWD and project-level .kiro/steering on the next message."
+        )
 
     return f"Unknown tool: {name}"
 

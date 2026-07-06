@@ -1,6 +1,6 @@
 import React from 'react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { render, screen, waitFor, within, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderWithProviders } from './helpers'
 import SkillsTab from '../src/pages/overview/SkillsTab'
@@ -227,7 +227,6 @@ describe('SkillsTab Integration Tests', () => {
   // ── Filter & Search ────────────────────────────────────────────────
 
   it('filters skills by search term', async () => {
-    const user = userEvent.setup()
     renderWithProviders(<SkillsTab />)
 
     await waitFor(() => {
@@ -235,7 +234,7 @@ describe('SkillsTab Integration Tests', () => {
     })
 
     const filterInput = screen.getByPlaceholderText(/filter skills/i)
-    await user.type(filterInput, 'writing')
+    fireEvent.change(filterInput, { target: { value: 'writing' } })
 
     // "Amazon Writing" appears in both the list row and the auto-selected
     // detail header, so scope the row assertion to the listbox.
@@ -254,7 +253,7 @@ describe('SkillsTab Integration Tests', () => {
 
     const list = screen.getByRole('listbox', { name: 'Skills' })
     const filterInput = screen.getByPlaceholderText(/filter skills/i)
-    await user.type(filterInput, 'writing')
+    fireEvent.change(filterInput, { target: { value: 'writing' } })
     expect(within(list).queryByText('Code Search')).not.toBeInTheDocument()
 
     const clearBtn = screen.getByRole('button', { name: /clear search/i })

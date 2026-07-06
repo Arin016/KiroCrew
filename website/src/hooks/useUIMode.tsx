@@ -1,3 +1,4 @@
+import { safeSetItem } from '../utils/safeStorage'
 import {
   useState,
   useEffect,
@@ -59,7 +60,7 @@ export function UIModeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     applyUI(uiMode)
     try {
-      localStorage.setItem(STORAGE_KEY, uiMode)
+      safeSetItem(STORAGE_KEY, uiMode)
     } catch {
       // localStorage unavailable (private mode, quota) — DOM still updates
     }

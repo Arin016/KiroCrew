@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { File, FileCode, FileJson, FileText, Image, Paintbrush, Settings, Terminal } from 'lucide-react'
-import { FILE_COLORS, FILE_ICONS, fileIcon, colorForExt } from '../utils/fileIcons'
+import { FILE_COLORS, fileIcon, colorForExt } from '../utils/fileIcons'
 
 describe('fileIcon', () => {
   it('returns FileCode for code extensions', () => {

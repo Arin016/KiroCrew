@@ -34,6 +34,7 @@ ctx.onmessage = (e: MessageEvent<HighlightRequest>) => {
     // Plain-text fallback is correct, but leave a breadcrumb in the worker
     // console (devtools) so a systematically-failing language is noticeable.
     html = ''
+    // eslint-disable-next-line no-console
     console.warn('[hljsWorker] highlight failed', (e as Error)?.name)
   }
   const res: HighlightResponse = { id, html }

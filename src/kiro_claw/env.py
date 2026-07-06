@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import functools
 import getpass
+import json
 import logging
 import os
+import shutil
 import stat
+import subprocess
 import sys
+from collections.abc import MutableMapping
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -25,6 +29,7 @@ _EXTRA_PATH_DIRS = (
 )
 
 
+@functools.lru_cache(maxsize=1)
 def _node_version_manager_bins(home: str) -> list[str]:
     """Return node bin dirs from version managers with dynamic version paths.
 
@@ -34,6 +39,14 @@ def _node_version_manager_bins(home: str) -> list[str]:
     non-login gateway (launchd / systemd) does not inherit these on ``$PATH``,
     so adding them lets us find globally-installed MCP binaries such as
     ``claude-agent-acp`` that were installed via ``npm i -g`` under nvm/fnm.
+
+    Cached for the process lifetime (``lru_cache(maxsize=1)``, ``home`` is
+    constant per process): the filesystem glob is the surface a prior GIL-storm
+    wedge got caught in, so it must run exactly once.  Trade-off: a node version
+    installed via nvm/fnm *while the long-lived gateway is running* is not
+    visible until the gateway restarts.  Acceptable — installing node mid-session
+    is rare, and a restart picks it up.  Call ``cache_clear()`` if that ever
+    needs to be re-discovered without a restart.
     """
     bins: list[str] = []
     roots = (
@@ -76,6 +89,92 @@ def augmented_path(base_path: str = "") -> str:
     extra += _node_version_manager_bins(home)
     parts = extra + ([base_path] if base_path else [])
     return os.pathsep.join(parts)
+
+
+@functools.lru_cache(maxsize=1)
+def _mise_bin() -> str | None:
+    """Locate the ``mise`` binary in a non-login (daemon) context.
+
+    A systemd / launchd gateway does not source the user's shell rc, so
+    ``~/.local/bin`` (mise's default install dir) is often absent from the
+    inherited ``$PATH``.  Try ``$PATH`` first, then fall back to the canonical
+    install location before giving up.
+    """
+    found = shutil.which("mise")
+    if found:
+        return found
+    candidate = Path.home() / ".local" / "bin" / "mise"
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate)
+    return None
+
+
+def activate_mise(env: MutableMapping[str, str] | None = None) -> list[str]:
+    """Merge mise's resolved environment into *env* (defaults to ``os.environ``).
+
+    Run once at gateway start so every subprocess the gateway later spawns —
+    MCP servers, script crons, kiro-cli — inherits the user's mise-managed
+    toolchain (Node, Python, kubectl, …) exactly as an interactive shell
+    would.  This prevents the most common MCP failure mode: a Node-based MCP
+    server spawned against the system ``/usr/bin/node`` (v18 on AL2) instead of
+    the user's mise ``node@20+``, which exits during ``initialize`` with a
+    stderr-only "Node version 18 detected, but version 20 or higher is
+    required" error and surfaces only as "MCP server disconnected during
+    'initialize' call" (Mesh-2371).
+
+    Best-effort and non-fatal: a no-op (returns ``[]``) when mise is not
+    installed, when disabled via ``KIROCLAW_NO_MISE``, or when invoking /
+    parsing mise fails — the gateway always starts regardless.  Returns the
+    sorted list of env var names that were added or changed, for logging.
+
+    ``mise env --json`` returns only the variables mise manages (PATH plus any
+    ``[env]`` / tool-provided vars), not the whole environment, so the merge is
+    bounded.  We pass the current env in and resolve from ``$HOME`` so the
+    user's *global* mise config is used (not whatever ``.mise.toml`` happens to
+    sit in the daemon's cwd), and ``--json`` avoids fragile ``export NAME=VALUE``
+    shell-quoting parsing.
+    """
+    target = os.environ if env is None else env
+    if target.get("KIROCLAW_NO_MISE"):
+        logger.debug("mise activation skipped: KIROCLAW_NO_MISE set")
+        return []
+    mise = _mise_bin()
+    if not mise:
+        return []
+    try:
+        proc = subprocess.run(
+            [mise, "env", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=dict(target),
+            cwd=str(Path.home()),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("mise activation skipped: %s", type(exc).__name__)
+        return []
+    if proc.returncode != 0:
+        logger.debug(
+            "mise env --json exited %s: %s",
+            proc.returncode,
+            proc.stderr.strip()[:200],
+        )
+        return []
+    try:
+        resolved = json.loads(proc.stdout)
+    except ValueError as exc:
+        logger.debug("mise env --json unparsable: %s", type(exc).__name__)
+        return []
+    if not isinstance(resolved, dict):
+        return []
+    changed: list[str] = []
+    for key, value in resolved.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        if target.get(key) != value:
+            target[key] = value
+            changed.append(key)
+    return sorted(changed)
 
 
 def resolve_krb5_ccname(env: dict[str, str]) -> None:

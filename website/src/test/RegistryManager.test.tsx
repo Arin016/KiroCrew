@@ -8,8 +8,8 @@ const mockUpdateRegistries = vi.fn()
 
 vi.mock('../api/client', () => ({
   api: {
-    listRegistries: (...args: any[]) => mockListRegistries(...args),
-    updateRegistries: (...args: any[]) => mockUpdateRegistries(...args),
+    listRegistries: (...args: unknown[]) => mockListRegistries(...args),
+    updateRegistries: (...args: unknown[]) => mockUpdateRegistries(...args),
   },
 }))
 

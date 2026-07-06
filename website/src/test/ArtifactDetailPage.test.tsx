@@ -491,7 +491,7 @@ describe('ArtifactDetailPage', () => {
     // detail page exposes a "Snapshot" button outside edit mode.
     vi.mocked(api).artifact = vi
       .fn()
-      .mockResolvedValue(mkArtifact({ kind: 'markdown', live_dirty: true } as any))
+      .mockResolvedValue(mkArtifact({ kind: 'markdown', live_dirty: true }))
     vi.mocked(api).artifactVersions = vi
       .fn()
       .mockResolvedValue({ slug: 'cr-queue', versions: [1] })
@@ -503,7 +503,7 @@ describe('ArtifactDetailPage', () => {
   it('Snapshot hidden when artifact is in sync with latest version', async () => {
     vi.mocked(api).artifact = vi
       .fn()
-      .mockResolvedValue(mkArtifact({ kind: 'markdown', live_dirty: false } as any))
+      .mockResolvedValue(mkArtifact({ kind: 'markdown', live_dirty: false }))
     vi.mocked(api).artifactVersions = vi
       .fn()
       .mockResolvedValue({ slug: 'cr-queue', versions: [1] })
@@ -515,7 +515,7 @@ describe('ArtifactDetailPage', () => {
   it('Snapshot click calls updateArtifact with snapshot:true (no content)', async () => {
     vi.mocked(api).artifact = vi
       .fn()
-      .mockResolvedValue(mkArtifact({ kind: 'markdown', live_dirty: true } as any))
+      .mockResolvedValue(mkArtifact({ kind: 'markdown', live_dirty: true }))
     vi.mocked(api).artifactVersions = vi
       .fn()
       .mockResolvedValue({ slug: 'cr-queue', versions: [1] })
@@ -550,13 +550,13 @@ describe('ArtifactDetailPage', () => {
 
   it('version dropdown is disabled while saving (round 12)', async () => {
     vi.mocked(api).artifact = vi.fn().mockResolvedValue(
-      mkArtifact({ kind: 'markdown', live_dirty: true } as any),
+      mkArtifact({ kind: 'markdown', live_dirty: true }),
     )
     vi.mocked(api).artifactVersions = vi
       .fn()
       .mockResolvedValue({ slug: 'cr-queue', versions: [1] })
     // Make updateArtifact hang so we can observe the in-flight saving state.
-    let resolveUpdate: ((v: any) => void) | null = null
+    let resolveUpdate: ((v: Artifact) => void) | null = null
     vi.mocked(api).updateArtifact = vi.fn().mockImplementation(() =>
       new Promise((resolve) => { resolveUpdate = resolve }),
     )

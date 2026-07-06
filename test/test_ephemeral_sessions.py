@@ -533,6 +533,97 @@ class TestMcpCoreSessionKeyPassthrough:
         req = mock_urlopen.call_args[0][0]
         assert req.get_header("X-session-key") is None
 
+    def test_post_surfaces_http_error_json_body(self):
+        """Regression (P451748812): on an HTTP 400 the structured
+        ``{"error": ...}`` body lives in ``HTTPError.read()``, not ``str(e)``
+        (which is only ``"HTTP Error 400: Bad Request"``). ``_post`` must
+        decode the body so the learn_add wrapper's ``unknown session`` mapping
+        can match instead of leaking an opaque transport error.
+        """
+        import io
+        import urllib.error
+
+        with (
+            patch("kiro_claw.mcp_core.urllib.request.urlopen") as mock_urlopen,
+            patch("kiro_claw.mcp_core._resolve_session_key", return_value="1781215864.487849"),
+        ):
+            mock_urlopen.side_effect = urllib.error.HTTPError(
+                url="http://x/api/lessons", code=400, msg="Bad Request",
+                hdrs=None, fp=io.BytesIO(b'{"error": "unknown session"}'),
+            )
+            from kiro_claw.mcp_core import _post
+            result = _post("/api/lessons", {"rule": "x", "category": "knowledge"})
+
+        assert result == {"error": "unknown session"}
+
+    def test_post_falls_back_to_raw_body_for_non_json_error(self):
+        """A non-JSON error body still yields a usable ``{"error": ...}``
+        rather than crashing the JSON decode.
+        """
+        import io
+        import urllib.error
+
+        with (
+            patch("kiro_claw.mcp_core.urllib.request.urlopen") as mock_urlopen,
+            patch("kiro_claw.mcp_core._resolve_session_key", return_value=""),
+        ):
+            mock_urlopen.side_effect = urllib.error.HTTPError(
+                url="http://x/api/lessons", code=500, msg="Internal Server Error",
+                hdrs=None, fp=io.BytesIO(b"upstream exploded"),
+            )
+            from kiro_claw.mcp_core import _post
+            result = _post("/api/lessons", {"rule": "x"})
+
+        assert "error" in result
+        assert result["error"] == "upstream exploded"
+
+    def test_post_redacts_credentials_in_http_error_body(self):
+        """An HTTP error body is untrusted external content — credentials in it
+        must be redacted before the error dict reaches a caller that may echo
+        it to the LLM/dashboard/Slack (AutoSDE security-controls rule).
+        """
+        import io
+        import urllib.error
+
+        with (
+            patch("kiro_claw.mcp_core.urllib.request.urlopen") as mock_urlopen,
+            patch("kiro_claw.mcp_core._resolve_session_key", return_value=""),
+        ):
+            mock_urlopen.side_effect = urllib.error.HTTPError(
+                url="http://x/api/lessons", code=502, msg="Bad Gateway",
+                hdrs=None,
+                fp=io.BytesIO(b'{"error": "upstream rejected key AKIAIOSFODNN7EXAMPLE"}'),
+            )
+            from kiro_claw.mcp_core import _post
+            result = _post("/api/lessons", {"rule": "x"})
+
+        assert "AKIAIOSFODNN7EXAMPLE" not in result["error"]
+        assert "REDACTED" in result["error"]
+
+    def test_learn_add_tool_maps_unknown_session_to_friendly_message(self):
+        """End-to-end: the learn_add tool dispatch turns a backend
+        ``unknown session`` (now correctly surfaced by ``_post``) into the
+        user-actionable message instead of ``Error: HTTP Error 400``.
+        """
+        import io
+        import urllib.error
+
+        with (
+            patch("kiro_claw.mcp_core.urllib.request.urlopen") as mock_urlopen,
+            patch("kiro_claw.mcp_core._resolve_session_key", return_value="1781215864.487849"),
+        ):
+            mock_urlopen.side_effect = urllib.error.HTTPError(
+                url="http://x/api/lessons", code=400, msg="Bad Request",
+                hdrs=None, fp=io.BytesIO(b'{"error": "unknown session"}'),
+            )
+            from kiro_claw.mcp_core import _call_tool_inner
+            out = _call_tool_inner(
+                "learn_add", {"rule": "use conduit for ADA", "category": "tool"}
+            )
+
+        assert "not saved" in out.lower()
+        assert "HTTP Error 400" not in out
+
 
 # ── Cross-tab privacy filtering (history.py) ──
 
@@ -990,3 +1081,90 @@ class TestSessionSlotRecovery:
             caller="dashboard:ui", operation="learn_add", outcome="allowed",
             source="dashboard", resources="dashboard_ui",
         )
+
+    @pytest.mark.asyncio
+    async def test_learn_add_allowed_for_bare_slack_thread_ts_without_jsonl(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression (P451748812): a Slack thread keys its session off the
+        bare ``thread_ts`` (e.g. ``1781215864.487849``), not a ``slack:``
+        prefix. The first ``learn_add`` in a fresh thread arrives *before*
+        the session JSONL is flushed (the transcript is written only after
+        the LLM turn completes), so without recognising the bare-ts shape it
+        would race the flush and 400 with ``unknown session``. The key must be
+        allowed via the Slack namespace even with an empty sessions dir.
+        """
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.handlers._get_memory",
+            MagicMock(return_value=MagicMock(vector_store=None)),
+        )
+        state = _make_state(tmp_path)
+        # Empty sessions dir: no JSONL fallback is possible, so the allow can
+        # only come from the bare-thread_ts namespace recognition.
+        (tmp_path / ".kiroclaw" / "sessions").mkdir(parents=True, exist_ok=True)
+
+        with patch("kiro_claw.dashboard.handlers.cron._sel") as mock_sel:
+            async with TestClient(TestServer(_make_app(state))) as client:
+                resp = await client.post(
+                    "/api/lessons",
+                    json={"rule": "remember this", "category": "knowledge"},
+                    headers={"X-Session-Key": "1781215864.487849"},
+                )
+                assert resp.status == 200
+
+        # Audited as a Slack-namespace allow, not a JSONL recovery.
+        mock_sel().log_api_access.assert_any_call(
+            caller="1781215864.487849", operation="learn_add", outcome="allowed",
+            source="dashboard", resources="slack_namespace",
+        )
+
+    @pytest.mark.asyncio
+    async def test_learn_add_rejects_non_slack_bare_numeric_key(self, tmp_path, monkeypatch):
+        """The bare-ts heuristic must not widen authorization: a numeric key
+        that does not match the Slack ``thread_ts`` shape (too-short
+        sub-second component) with no backing JSONL is still ``unknown
+        session``. Guards against the regex matching arbitrary ``N.M`` keys.
+        """
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        (tmp_path / ".kiroclaw" / "sessions").mkdir(parents=True, exist_ok=True)
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/lessons",
+                json={"rule": "remember this", "category": "knowledge"},
+                headers={"X-Session-Key": "123.45"},
+            )
+            assert resp.status == 400
+            data = await resp.json()
+            assert data["error"] == "unknown session"
+
+    @pytest.mark.asyncio
+    async def test_learn_add_rejects_unicode_digit_thread_ts_lookalike(self, tmp_path, monkeypatch):
+        """Security: the Slack-ts regex gates an authorization decision, so it
+        must match ASCII digits only. A key built from non-ASCII Unicode
+        decimal digits (Arabic-Indic) that is otherwise thread_ts-shaped must
+        NOT be granted slack_namespace access — `[0-9]` (not `\\d`) enforces
+        this. With no backing JSONL the call is rejected as unknown session.
+        """
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        (tmp_path / ".kiroclaw" / "sessions").mkdir(parents=True, exist_ok=True)
+
+        # Arabic-Indic digits forming "١٧٨١٢١٥٨٦٤.٤٨٧٨٤٩" — \d would match this,
+        # [0-9] does not.
+        unicode_ts = "١٧٨١٢١٥٨٦٤.٤٨٧٨٤٩"
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/lessons",
+                json={"rule": "remember this", "category": "knowledge"},
+                headers={"X-Session-Key": unicode_ts},
+            )
+            assert resp.status == 400
+            data = await resp.json()
+            assert data["error"] == "unknown session"

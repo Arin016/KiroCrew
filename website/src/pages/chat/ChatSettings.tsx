@@ -215,11 +215,11 @@ export default function ChatSettings({ config, onChange }: { config: ChatConfig;
             </div>
             <div className="flex items-center justify-between mt-2">
               <span className="text-[13px] text-muted">AWS Profile</span>
-              <input className="bg-bg-elevated border border-border rounded-md px-2 py-1 text-[13px] text-text outline-none w-[120px]" placeholder="default" value={localAwsProfile} onChange={e => setLocalAwsProfile(e.target.value)} onBlur={e => setVoice({ aws_profile: e.target.value.trim() })} />
+              <input aria-label="AWS Profile" className="bg-bg-elevated border border-border rounded-md px-2 py-1 text-[13px] text-text outline-none w-[120px]" placeholder="default" value={localAwsProfile} onChange={e => setLocalAwsProfile(e.target.value)} onBlur={e => setVoice({ aws_profile: e.target.value.trim() })} />
             </div>
             <div className="flex items-center justify-between mt-2">
               <span className="text-[13px] text-muted">AWS Region</span>
-              <input className="bg-bg-elevated border border-border rounded-md px-2 py-1 text-[13px] text-text outline-none w-[120px]" placeholder="us-east-1" value={localAwsRegion} onChange={e => setLocalAwsRegion(e.target.value)} onBlur={e => setVoice({ region: e.target.value.trim() })} />
+              <input aria-label="AWS Region" className="bg-bg-elevated border border-border rounded-md px-2 py-1 text-[13px] text-text outline-none w-[120px]" placeholder="us-east-1" value={localAwsRegion} onChange={e => setLocalAwsRegion(e.target.value)} onBlur={e => setVoice({ region: e.target.value.trim() })} />
             </div>
           </div>
         </div>,
@@ -231,14 +231,21 @@ export default function ChatSettings({ config, onChange }: { config: ChatConfig;
 
 function Toggle({ label, hint, checked, onChange }: { label: string; hint?: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
-    <label className="flex items-center justify-between cursor-pointer group">
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className="flex items-center justify-between w-full text-left bg-transparent border-none p-0 cursor-pointer group"
+    >
       <div>
         <span className="text-[13px] text-muted group-hover:text-text transition-colors">{label}</span>
         {hint && <div className="text-[11px] text-muted/60">{hint}</div>}
       </div>
-      <div className={`w-9 h-5 rounded-full relative transition-colors ${checked ? 'bg-accent' : 'bg-border'}`} onClick={() => onChange(!checked)}>
+      <div className={`w-9 h-5 rounded-full relative transition-colors ${checked ? 'bg-accent' : 'bg-border'}`}>
         <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-4' : 'translate-x-0.5'}`} />
       </div>
-    </label>
+    </button>
   )
 }

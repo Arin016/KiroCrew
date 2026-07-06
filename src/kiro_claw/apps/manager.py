@@ -1109,7 +1109,8 @@ def register_builtin_apps() -> int:
             existing.version = app_data["version"]
             existing.displayName = app_data["displayName"]
             existing.updatedAt = _now_iso()
-            existing.origin = "builtin"
+            has_ui_bundle = bool(app_data.get("ui", {}).get("entry"))
+            existing.origin = "local" if has_ui_bundle else "builtin"
             existing.resources = "gateway"
             existing.lifecycle = "locked"
             # Sync migratedTo from definition (overwrite stale values)

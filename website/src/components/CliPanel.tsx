@@ -1,3 +1,4 @@
+import { safeSetItem } from '../utils/safeStorage'
 import React, { useState, useEffect, useCallback, useRef, memo } from 'react'
 import { motion } from 'framer-motion'
 import { X, ArrowUpDown, Plus, TerminalSquare } from 'lucide-react'
@@ -95,7 +96,7 @@ const SessionChip = memo(function SessionChip({
   session: TerminalSession
   active: boolean
   onSelect: () => void
-  onClose: (e: React.MouseEvent) => void
+  onClose: (e: React.MouseEvent | React.KeyboardEvent) => void
   onRename: (label: string) => void
 }) {
   const [editing, setEditing] = useState(false)
@@ -125,6 +126,7 @@ const SessionChip = memo(function SessionChip({
       {editing ? (
         <input
           ref={inputRef}
+          aria-label="Rename tab"
           value={draft}
           onChange={e => setDraft(e.target.value)}
           onBlur={commit}
@@ -137,8 +139,10 @@ const SessionChip = memo(function SessionChip({
       )}
       <span
         role="button"
+        tabIndex={0}
         aria-label="Close tab"
         onClick={onClose}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClose(e) } }}
         className="ml-0.5 hover:text-red-400 transition-colors"
       >
         <X size={10} />
@@ -333,7 +337,7 @@ export default function CliPanel() {
 
   // Stable callbacks for SessionChip (prevent re-renders)
   const handleSelect = useCallback((id: string) => dispatch(setActiveSession(id)), [dispatch])
-  const handleClose = useCallback((id: string, e: React.MouseEvent) => {
+  const handleClose = useCallback((id: string, e: React.MouseEvent | React.KeyboardEvent) => {
     e.stopPropagation()
     // Optimistic: instant UI cleanup, backend delete is fire-and-forget
     destroyTerm(id)
@@ -368,7 +372,7 @@ export default function CliPanel() {
       document.removeEventListener('mouseup', onUp)
       setSize(s => {
         const clamped = Math.max(isBottomRef.current ? MIN_H : MIN_W, s)
-        localStorage.setItem(isBottomRef.current ? HEIGHT_KEY : WIDTH_KEY, String(clamped))
+        safeSetItem(isBottomRef.current ? HEIGHT_KEY : WIDTH_KEY, String(clamped))
         return clamped
       })
     }
@@ -389,8 +393,15 @@ export default function CliPanel() {
       <div
         className="flex flex-col overflow-hidden relative w-full h-full"
       >
-        {/* Resize handle */}
+        {/* Resize handle — a pointer-drag splitter carrying the correct
+            role="separator"/aria-orientation semantics. The rule treats "separator"
+            as non-interactive, so the drag-only onMouseDown is flagged despite the
+            role being the ARIA-correct choice for a resizer. */}
+        {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
         <div
+          role="separator"
+          aria-orientation={isBottom ? 'horizontal' : 'vertical'}
+          aria-label="Resize terminal panel"
           className={`absolute z-20 group/drag ${
             isBottom
               ? 'left-0 right-0 top-0 h-[6px] cursor-ns-resize'

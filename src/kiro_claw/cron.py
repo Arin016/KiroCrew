@@ -94,6 +94,7 @@ class CronJob:
     channel: str | None = None
     thread_ts: str | None = None
     enabled: bool = True
+    user_paused: bool = False  # True when explicitly paused by user; never mutated by execution
     last_run_ts: float | None = None
     last_status: str | None = None  # "ok" | "error"
     last_error: str | None = None
@@ -117,10 +118,12 @@ class CronJob:
     timezone: str = ""  # IANA timezone for skip evaluation
     persistent_session: bool = True  # False → fresh ephemeral session per run (Mesh-1026)
     minimal_context: bool = False  # True → skip memory/lessons/skills/history (Mesh-1632)
+    hide_in_chat: bool = False  # True → don't create a dashboard chat slot; result still goes to history + Slack/bell
 
     # When agent_sequence is set, it takes precedence over agent_id.
     # The execution logic runs agents in order; see Phase 3.
     agent_sequence: list[str] = field(default_factory=list)
+    project_path: str = ""  # project root for project-scoped agent (empty = global agent)
     env: dict[str, str] = field(default_factory=dict)  # per-job environment variables
     timeout_secs: int = _JOB_TIMEOUT_SECS
     strict_schedule: bool = False  # when True, skip jitter and fire exactly on schedule
@@ -403,8 +406,10 @@ class CronService:
             now = time.time()
             for job_id, started in list(self._job_start_times.items()):
                 elapsed = now - started
+                job = next((j for j in self._jobs if j.id == job_id), None)
+                deadline = max(min(job.timeout_secs, 86400), _JOB_TIMEOUT_SECS) if job else _JOB_TIMEOUT_SECS
                 jitter_allowance = self._job_jitter.get(job_id, 0.0)
-                if elapsed <= _JOB_TIMEOUT_SECS + jitter_allowance:
+                if elapsed <= deadline + jitter_allowance:
                     continue
                 task = self._running_tasks.get(job_id)
                 if task and task.done():
@@ -414,15 +419,15 @@ class CronService:
                 logger.warning(
                     "Reaper: cron job %s exceeded %ds (ran %.0fs), force-killing",
                     job_id,
-                    _JOB_TIMEOUT_SECS,
+                    deadline,
                     elapsed,
                 )
                 try:
-                    await self._force_reap(job_id, elapsed)
+                    await self._force_reap(job_id, elapsed, deadline)
                 except Exception:
                     logger.exception("Reaper: failed to reap cron job %s", job_id)
 
-    async def _force_reap(self, job_id: str, elapsed: float) -> None:
+    async def _force_reap(self, job_id: str, elapsed: float, deadline: int = _JOB_TIMEOUT_SECS) -> None:
         """Kill a cron job's session process and cancel its task."""
         # Mesh-1026: use the active per-run session key if registered;
         # fall back to the stable key for persistent or legacy callers.
@@ -459,7 +464,7 @@ class CronService:
         if job:
             job.last_status = "error"
             job.last_error = (
-                f"Reaped after {int(elapsed)}s (exceeded {_JOB_TIMEOUT_SECS}s deadline)"
+                f"Reaped after {int(elapsed)}s (exceeded {deadline}s deadline)"
             )
             job.last_run_ts = time.time()
             try:
@@ -511,11 +516,13 @@ class CronService:
         if not self._sessions:
             return
         try:
+            # circular import: cron → acp.client → session → cron
             from kiro_claw.acp.client import (
                 _get_child_pids,
                 _get_start_time,
                 _is_our_child,
                 _kill_escaped_children,
+                _read_basename,
             )
 
             session = self._sessions._sessions.get(session_key)
@@ -531,12 +538,12 @@ class CronService:
             # Snapshot child tree before killing — children in different
             # PGIDs survive killpg.
             raw_children = getattr(client, "_child_pids", None)
-            child_pids: dict[int, int | None] = (
+            child_pids: dict = (
                 dict(raw_children) if isinstance(raw_children, dict) else {}
             )
             for p in _get_child_pids(pid):
                 if p not in child_pids:
-                    child_pids[p] = _get_start_time(p)
+                    child_pids[p] = (_get_start_time(p), _read_basename(p))
             # Validate PID hasn't been recycled before killing.
             original_start = getattr(client, "_start_time", None)
             if original_start is None:
@@ -657,6 +664,8 @@ class CronService:
                     job.message = kwargs["message"]
                 if "agent_id" in kwargs:
                     job.agent_id = kwargs["agent_id"] or ""
+                if "project_path" in kwargs:
+                    job.project_path = kwargs["project_path"] or ""
                 if "channel" in kwargs:
                     job.channel = kwargs["channel"] or None
                 if "approval_mode" in kwargs:
@@ -673,6 +682,8 @@ class CronService:
                     job.persistent_session = bool(kwargs["persistent_session"])
                 if "minimal_context" in kwargs:
                     job.minimal_context = bool(kwargs["minimal_context"])
+                if "hide_in_chat" in kwargs:
+                    job.hide_in_chat = bool(kwargs["hide_in_chat"])
 
                 # Schedule changes (already validated above)
                 if "cron_expr" in kwargs and kwargs["cron_expr"]:
@@ -704,6 +715,7 @@ class CronService:
             self._sync()
             for job in self._jobs:
                 if job.id == job_id:
+                    job.user_paused = not enabled
                     job.enabled = enabled
                     self._save()
                     self._arm_timer()
@@ -807,6 +819,14 @@ class CronService:
         if include_disabled:
             return list(self._jobs)
         return [j for j in self._jobs if j.enabled]
+
+    def get_job(self, job_id: str) -> CronJob | None:
+        """Find a job by its id. Returns the CronJob, or None if not found."""
+        self._sync()
+        for job in self._jobs:
+            if job.id == job_id:
+                return job
+        return None
 
     def status(self) -> dict[str, Any]:
         """Service status summary."""
@@ -1059,7 +1079,12 @@ class CronService:
                 by_id[job.id].last_run_ts = job.last_run_ts
                 by_id[job.id].last_status = job.last_status
                 by_id[job.id].last_error = job.last_error
-                by_id[job.id].enabled = job.enabled
+                # Only propagate enabled=False for one-shot at-jobs that fired.
+                # Never overwrite enabled for recurring jobs — user_paused is the
+                # sole authority for user-controlled pause/resume state.
+                if job.schedule.kind == "at" and not job.delete_after_run:
+                    by_id[job.id].enabled = job.enabled
+                    by_id[job.id].user_paused = not job.enabled
                 by_id[job.id].last_result = job.last_result
                 by_id[job.id].last_posted_hash = job.last_posted_hash
                 by_id[job.id].consecutive_dupes = job.consecutive_dupes
@@ -1123,7 +1148,8 @@ class CronService:
                     ),
                     channel=j.get("channel"),
                     thread_ts=j.get("thread_ts"),
-                    enabled=j.get("enabled", True),
+                    enabled=not j.get("user_paused", not j.get("enabled", True)),
+                    user_paused=j.get("user_paused", not j.get("enabled", True)),
                     last_run_ts=j.get("last_run_ts"),
                     last_status=j.get("last_status"),
                     last_error=j.get("last_error"),
@@ -1147,6 +1173,7 @@ class CronService:
                     timezone=j.get("timezone", ""),
                     persistent_session=j.get("persistent_session", True),
                     minimal_context=j.get("minimal_context", False),
+                    hide_in_chat=j.get("hide_in_chat", False),
                     agent_sequence=j.get("agent_sequence", []),
                     env=j.get("env", {}),
                     timeout_secs=j.get("timeout_secs", _JOB_TIMEOUT_SECS),
@@ -1183,6 +1210,7 @@ class CronService:
                     "channel": j.channel,
                     "thread_ts": j.thread_ts,
                     "enabled": j.enabled,
+                    "user_paused": j.user_paused,
                     "last_run_ts": j.last_run_ts,
                     "last_status": j.last_status,
                     "last_error": j.last_error,
@@ -1206,6 +1234,7 @@ class CronService:
                     "timezone": j.timezone,
                     "persistent_session": j.persistent_session,
                     "minimal_context": j.minimal_context,
+                    "hide_in_chat": j.hide_in_chat,
                     "agent_sequence": j.agent_sequence,
                     "env": j.env,
                     "timeout_secs": j.timeout_secs,

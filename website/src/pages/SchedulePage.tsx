@@ -1,4 +1,6 @@
+import { safeSetItem } from '../utils/safeStorage'
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import Clickable from '../components/Clickable'
 import { AnimatePresence, motion } from 'framer-motion'
 import { List, CalendarDays, ClipboardList, ChevronRight, Globe, Check, History } from 'lucide-react'
 import { api } from '../api/client'
@@ -40,6 +42,9 @@ export function CollapsibleMessage({ message }: { message: string }) {
         <span className={open ? 'text-muted text-[12px] min-w-0' : 'truncate min-w-0'}>{open ? 'Hide message' : preview}</span>
       </Btn>
       {open && (
+        // Presentational content block; the handler only stops the click from
+        // bubbling to the parent row toggle — it adds no interactive behavior.
+        // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/click-events-have-key-events
         <pre
           onClick={e => e.stopPropagation()}
           className="mt-1.5 p-2.5 bg-bg-elevated border border-border rounded-md text-[12px] font-mono whitespace-pre-wrap break-words max-h-[280px] overflow-y-auto leading-relaxed"
@@ -87,7 +92,7 @@ export default function SchedulePage() {
   })
   useEffect(() => {
     try {
-      localStorage.setItem(RENDER_TZ_STORAGE_KEY, renderTz)
+      safeSetItem(RENDER_TZ_STORAGE_KEY, renderTz)
     } catch {
       // localStorage unavailable — don't block rendering
     }
@@ -190,6 +195,8 @@ export default function SchedulePage() {
             {jobsView === 'calendar' ? (<>
               <div className="flex items-center gap-2 mb-3 text-[13px] text-muted">
                 <Globe className="lucide-inline" />
+                {/* Control is correctly associated via htmlFor+id (the select can't be nested); label-has-for's nesting requirement is a false positive here. */}
+                {/* eslint-disable-next-line jsx-a11y/label-has-for */}
                 <label htmlFor="schedule-render-tz" className="mr-1">Render in</label>
                 <TimezoneSelect id="schedule-render-tz" value={renderTz} onChange={setRenderTz} />
                 <InfoTip text="Changes only how the calendar grid is displayed — does not change when any job actually fires." />
@@ -310,7 +317,9 @@ function JobDetailPanel({ job, agents, defaultAgent, onClose, onSaved }: {
 
   return (
     <div ref={panelRef} className="shrink-0 border-l border-border bg-bg flex flex-col h-full overflow-hidden relative" style={{ width, minWidth: 300 }}>
-      <div className="absolute left-[-2px] top-0 bottom-0 w-[5px] cursor-col-resize z-20 group/drag flex items-center justify-center" onMouseDown={onDragStart}>
+      {/* Resize splitter: role=separator is the correct semantic, but jsx-a11y treats it as non-interactive; the mousedown drag is intrinsic to a resize handle. */}
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+      <div role="separator" aria-orientation="vertical" aria-label="Resize panel" className="absolute left-[-2px] top-0 bottom-0 w-[5px] cursor-col-resize z-20 group/drag flex items-center justify-center" onMouseDown={onDragStart}>
         <div className="w-[2px] h-full bg-transparent group-hover/drag:bg-accent group-active/drag:bg-accent-hover transition-colors duration-200" />
       </div>
       <div className="flex items-center justify-between px-5 py-4 border-b border-border">
@@ -347,17 +356,17 @@ function JobDetailPanel({ job, agents, defaultAgent, onClose, onSaved }: {
           <JobLogsView jobId={job.id} isRunning={job.is_running} runningSince={job.running_since} />
         ) : (
           <>
-            <JobForm job={job} agents={agents as any} defaultAgent={defaultAgent} onSaved={onSaved} layout="vertical" externalSubmit submitRef={submitRef} onSavingChange={setSaving} />
+            <JobForm job={job} agents={agents} defaultAgent={defaultAgent} onSaved={onSaved} layout="vertical" externalSubmit submitRef={submitRef} onSavingChange={setSaving} />
             {panelError && <div className="text-danger text-[13px]">{panelError}</div>}
             {job?.script && (job.last_result || job.last_error) && (
               <div className="flex flex-col gap-1.5">
-                <label className="text-[12px] text-muted font-medium">{job.last_error ? 'Last Error' : 'Last Output'}</label>
+                <div className="text-[12px] text-muted font-medium">{job.last_error ? 'Last Error' : 'Last Output'}</div>
                 <pre className={`text-[12px] font-mono whitespace-pre-wrap break-words rounded border px-2.5 py-2 max-h-[200px] overflow-y-auto ${job.last_error ? 'bg-danger/5 border-danger/20 text-danger' : 'bg-bg-elevated border-border text-text'}`}>{job.last_error || job.last_result}</pre>
               </div>
             )}
             {job?.last_run_ts && (
               <div className="flex flex-col gap-1.5">
-                <label className="text-[12px] text-muted font-medium">Last Run</label>
+                <div className="text-[12px] text-muted font-medium">Last Run</div>
                 <span className="text-sm text-text">{new Date(job.last_run_ts * 1000).toLocaleString()}</span>
               </div>
             )}
@@ -379,8 +388,17 @@ function JobDetailPanel({ job, agents, defaultAgent, onClose, onSaved }: {
         </SendBtn>
       </div>
       {confirmDelete && job && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setConfirmDelete(false)}>
-          <div className="bg-bg-elevated rounded-xl border border-border p-6 w-[360px] max-w-[90vw] shadow-xl animate-scale-in" onClick={e => e.stopPropagation()}>
+        <Clickable className="fixed inset-0 bg-black/50 flex items-center justify-center z-[100]" onClick={() => setConfirmDelete(false)}>
+          {/* Modal container; handlers only stop backdrop-dismiss from firing — a dialog role is non-interactive to jsx-a11y but these guards are idiomatic for a modal. */}
+          {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Delete ${job.name}`}
+            className="bg-bg-elevated rounded-xl border border-border p-6 w-[360px] max-w-[90vw] shadow-xl animate-scale-in"
+            onClick={e => e.stopPropagation()}
+            onKeyDown={e => e.stopPropagation()}
+          >
             <h3 className="text-base font-semibold text-text mb-2">Delete &quot;{job.name}&quot;?</h3>
             <p className="text-sm text-muted mb-4">This will permanently remove the scheduled job. This action cannot be undone.</p>
             <div className="flex gap-2 justify-end">
@@ -389,7 +407,7 @@ function JobDetailPanel({ job, agents, defaultAgent, onClose, onSaved }: {
             </div>
             {deleteError && <p className="text-danger text-[12px] mt-2">{deleteError}</p>}
           </div>
-        </div>
+        </Clickable>
       )}
     </div>
   )

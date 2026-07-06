@@ -1,6 +1,6 @@
 import React, { useState, useCallback, type RefObject } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useDispatch } from 'react-redux'
+import { useAppDispatch } from '../store'
 import { switchSlot } from '../store/chatSlice'
 
 /** Minimal agent shape for hit-testing — all scene agent types satisfy this */
@@ -36,7 +36,7 @@ export function useSceneInteraction(
   extraLine?: (agent: SceneAgent) => React.ReactNode,
 ) {
   const navigate = useNavigate()
-  const dispatch = useDispatch()
+  const dispatch = useAppDispatch()
   const [tooltip, setTooltip] = useState<TooltipState | null>(null)
 
   const getAgentAt = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -65,7 +65,7 @@ export function useSceneInteraction(
     const a = getAgentAt(e)
     if (a && a.kind === 'slot') {
       const slotKey = a.id.replace(/^slot-/, '')
-      dispatch(switchSlot(slotKey) as any)
+      dispatch(switchSlot(slotKey))
       navigate('/chat')
     }
   }, [getAgentAt, dispatch, navigate])

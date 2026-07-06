@@ -10,7 +10,7 @@
  */
 import { lazy, type ComponentType } from 'react'
 
-type LazyComponent = React.LazyExoticComponent<ComponentType<any>>
+type LazyComponent = React.LazyExoticComponent<ComponentType<Record<string, never>>>
 
 /**
  * Registry mapping route paths (from app manifest ui.pages[].route)

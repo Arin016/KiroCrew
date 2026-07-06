@@ -16,7 +16,7 @@ vi.mock('../store/chatSlice', () => ({
 }))
 
 vi.mock('../pages/ChatPage', () => ({
-  default: (props: any) => (
+  default: (props: { embedded?: boolean }) => (
     <div data-testid="chat-page" data-embedded={props.embedded ? 'true' : 'false'}>
       ChatPage
     </div>

@@ -579,7 +579,7 @@ export default function MissionControlScene({ agents, visible = true }: { agents
 
   return (
     <div style={SCENE_CONTAINER_STYLE(W, H)}>
-      <canvas ref={canvasRef} style={{ ...PIXEL_CANVAS_STYLE, ...canvasProps.style }}
+      <canvas ref={canvasRef} aria-label="Mission control scene" style={{ ...PIXEL_CANVAS_STYLE, ...canvasProps.style }}
         onMouseMove={canvasProps.onMouseMove} onMouseLeave={canvasProps.onMouseLeave} onClick={canvasProps.onClick} />
       {tooltipEl}
     </div>

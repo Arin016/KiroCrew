@@ -13,6 +13,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { createTestStore } from './helpers'
 import { ThemeProvider } from '../hooks/useTheme'
 import type { ChatSlot } from '../types'
+import type { RootState } from '../store'
 
 // --- Stub child components ---
 vi.mock('react-virtuoso', () => ({ Virtuoso: () => null }))
@@ -61,7 +62,7 @@ Object.defineProperty(window, 'matchMedia', {
     addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn(),
   })),
 })
-globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) }) as any
+globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) }) as unknown as typeof fetch
 
 import ChatPage from '../pages/ChatPage'
 
@@ -77,14 +78,14 @@ function renderChatPage(mode: string | undefined, activeSlot: string | null, slo
       channelTrusted: false, refreshTrigger: 0, unreadSlots: [], updateProgress: null,
       subagentRunning: {}, subagentDetails: {}, subagentText: {},
       sessionDefaultColor: null, sessionColorsMode: 'tint', sessionColorsPalette: 'horizon', sessionColorsIntensity: 'clear',
-    } as any,
+    } as unknown as RootState['dashboard'],
     chat: {
       activeSlot, messages: [], slotRunning: false, slotStopping: false, slotState: 'idle',
       slotStatusDetail: {}, slotHasMore: false, slotOldestIndex: 0, loadingOlder: false,
       lastChunkSeq: undefined, history: [], historyHasMore: false, historyOffset: 0,
       pendingInput: null, slotContextPct: {}, voicePlaying: false, voiceAudio: null,
       subagents: {}, toolLog: [], activityOpen: false, activityTab: 'tools', slotActivity: {}, slotHistory: [],
-    } as any,
+    } as unknown as RootState['chat'],
   })
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(

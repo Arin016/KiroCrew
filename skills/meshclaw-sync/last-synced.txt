@@ -16,12 +16,221 @@
 #                so frontend sync is by CONTENT within the post-snapshot window, not a
 #                clean SHA range. This SHA records the upstream tip last triaged.
 
-beta 59ec6e1d94a3df9ea597285dac97a53c0ed98959      # 2026-06-22 MeshClaw backend beta-braveheart tip (batch-21). KEEP at tip (fix(dashboard): same-origin loopback WS for embedded iframe — ported as 2092347).
-frontend-beta ca99bb4a6d352c7f1c73ac28fd8520e7c2c01c8b  # 2026-06-22 MeshClawWebsite beta-braveheart tip (batch-21). Picked up the batch-20 DEFER straggler ca99bb4 ("fix(voice): Pre-warm mic for instant recording") — ported as d6856a2. Boundary now == live frontend tip (no straggler this run).
-mainline 199d7853  # 2026-06-22 MeshClaw mainline tip (upstream). Unchanged from batch-19/20 — no NEW mainline-only delta this window (everything landed via beta-braveheart).
+beta 6cf3aae0ad1ec28e5e5d443a17d24daf99e33457      # 2026-07-03 MeshClaw backend triaged tip (batch-25). 13 candidates triaged; 8 ported (5 KEEP + 3 PARTIAL). This IS the live beta tip (no straggler) — the batch-24 stragglers (bf9663df/76cfc2e0/210baed2) were picked up this batch as designed.
+frontend-beta 9b512cab7597ec2b791da50921b10128099fff52  # 2026-07-03 MeshClawWebsite triaged tip (batch-25). 2 candidates triaged; 1 ported (0d9797e per-tab remote host). This IS the live frontend tip (no straggler).
+mainline 199d7853  # 2026-07-03 MeshClaw mainline tip (upstream). Unchanged since batch-24; fcee75b9 (v3.1.1 slack sliding-idle hotfix) remains the only mainline-only delta but == beta 7ae12831 content (SKIP_INTERNAL). No NEW mainline-only content to port.
 # NOTE: this 'mainline' SHA is the UPSTREAM MeshClaw mainline tip (for the mainline-only
 # candidate check), NOT the fork's mainline — batch-12 mistakenly recorded the fork SHA
 # (796e21c5) here, which broke the `$MAIN..origin/mainline` scan. Corrected in batch-13.
+
+# --- Batch-25 (dual-repo sync 2026-07-03, ultracode comprehensive) -----------
+# STACKED on the batch-22+23+24 worktree branch sync/beta-2026-06-27 AFTER rebasing all 141 commits
+# onto the advanced origin/mainline (55d0ccb = fork-native "Pentest round 3": fail-closed SEL audit,
+# REST input validation on /api/lessons+/api/crons, legacy dashboard.js XSS escaping). Rebase resolved
+# 2 conflict hunks, both in dashboard/handlers/cron.py (validation-import union + drop the redundant
+# unvalidated agent_id re-assignment, keep project_path); 233 collision-regression tests green. One
+# coherent CR for 22+23+24+25. Window since batch-24:
+#   backend  beta-braveheart bfa7b4e8..6cf3aae0  (13 candidates ; mainline unchanged 199d7853)
+#   frontend MeshClawWebsite  0f2c062..9b512ca    (2 candidates)
+# 15 candidates triaged via a 30-agent adversarial Workflow (analyzer + skeptic per commit + synthesis;
+# 1 frontend analyzer 0d9797e hit the StructuredOutput retry cap -> triaged by hand). Tally: 9 PORTED
+# (6 KEEP + 3 PARTIAL: 8 backend + 1 frontend) + 6 left out. ZERO skeptic verdict-flips (all confirmed
+# on the merits against post-rebase fork content).
+# KEEP (6): 4aba97e9 app-MCP registration health-gate (dead HTTP mcp url no longer poisons EVERY kiro-cli
+#   session via ~/.kiro/settings/mcp.json — the fork's SOLE provider path; new _live_port_for +
+#   _gate_mcp_registration + boot reconcile, applied ON TOP of fork-native governance re-vet); 284af3ea
+#   cookie-Secure via is_https_request (X-Forwarded-Proto:https from a loopback peer — any TLS-terminating
+#   proxy/tunnel; 4 cookie sites; de-Amazoned the tunnels.lab.aws.dev docstring); b0140b0c Permissions-Policy
+#   clipboard header at the no_cache_middleware chokepoint (Chrome 143+; extracted _apply_security_headers,
+#   DROPPED upstream's tunnels/cognito/RUM CSP endpoints); f4acf37e ACP tool-stall watchdog folds
+#   _last_activity (session-keepalive) into the clock (client.py:2375, mirrors the stale-turn check);
+#   210baed2 pytest-xdist worker cap min(cpu,32) (conftest hook; MESHCLAW_->KIROCLAW_MAX_TEST_WORKERS);
+#   0d9797e (FE) per-tab remote-host config keyed by port + per-tab token refresh (new electron/host-config.js
+#   + validation REMOTE_PORT_RE/REMOTE_PATH_RE + main.js per-port refactor; RESTORED the fork's OSS
+#   DEFAULT_REMOTE_BIN=~/.local/bin/kiroclaw vs upstream's ~/.toolbox default; kept toolbox as candidate).
+# PARTIAL (3): 99041753 (bulk pentest-r2+bg-reconnect ALREADY_PRESENT via fork-native 1c8f980+aef7a86;
+#   residual ported = the 2 edit-mode Slack preview sites still using the truncating throwaway
+#   StreamRedactor().feed(accumulated) -> redact(accumulated) at handler.py:2798/2893 + 1 regression test;
+#   DROPPED all ALREADY_PRESENT security.py/hooks.py/chat_runner.py/server.py hunks + the _SENSITIVE_STAGING_RE
+#   widening that collides with the fork's governance _EXTRACT_INTO_TRUST_ROOT_RE divergence); bf9663df
+#   (workspace_root() realpath-normalize for symlinked-home cold resume — new _resolve_workspace_root helper
+#   routes all 3 branches through os.path.realpath; DROPPED the _encode_cc_project_dir slug-parity test — the
+#   CC provider is deleted; MESHCLAW_->KIROCLAW_WORKSPACE); 76cfc2e0 (the 3900-line ACP session-multiplexing
+#   rewrite is DEFERRED for human review — it deletes _turn_lock + re-adds a claude_code|bedrock get_bg_session
+#   selector on the absent _resolve_agent_provider = SKIP_NONKIROACP; rescued ONLY the 2 generic subagent-path
+#   chokepoint fixes: redact sub-agent title+text via the existing redactors + read nested content.text via
+#   _extract_text_chunk at client.py:~2660-2688 + 1 test).
+# LEFT-OUT (6): SKIP_INTERNAL x5 = 6cf3aae0 (docs for the ABSENT mcp_gateway/ subsystem), 66c022fc + 9b512ca
+#   (AUTOSDE.yaml — absent Brazil/AutoSDE build tooling), 21087188 (MeshClawApp-Planning row — app-registry.json
+#   is [] by design), a4a35008 (Slack auth-window-expiry warning GATED on the fork-removed challenge_window
+#   subsystem). DEFER x1 = 2bbf2e0b (2231-line `meshclaw pod` test-harness — brazil-build/toolbox/~/.aim +
+#   Bedrock-shaped env-scrub couplings need re-architecture not rename; legitimate DEFER per SKILL cron rule).
+# Verify: backend flake8 clean (18 touched files) + FULL pytest suite [see CR]; frontend tsc -b clean +
+#   168 electron node --test pass (host-config/remote-token/validate). Step-6 de-Amazon: 0 live couplings
+#   (toolbox refs in electron remote-token are pre-existing fork convention, .local/bin default restored).
+#   KiroACP invariant HELD (enum ["acp"], no provider selector re-added, 76cfc2e0 provider-dispatch DEFERRED,
+#   ACP_BACKEND_CLAUDE seam untouched, CONTRACT_VERSION unchanged). Governance keystone intact; the app-MCP +
+#   cookie + ACP + slack ports re-ran test_governance_boot/self_protection green.
+# 151 commits on branch (141 rebased from 22+23+24 + 9 batch-25 + 1 boundary chore). DMG rebuild OWED (macOS-only).
+#   Safety refs: batch25-backup-prerebase (0cdc53a), batch25-postrebase, batch25-postport, batch25-postreview.
+#   Boundaries: beta bfa7b4e8->6cf3aae0 (live tip, stragglers cleared), frontend-beta 0f2c062->9b512ca (live tip),
+#   mainline unchanged 199d7853.
+# CODE-REVIEW (/code-review, 10-angle recall Workflow, 36 agents): 51 raw -> 23 deduped -> 21 surviving
+#   (16 CONFIRMED + 5 PLAUSIBLE). Disposition: the ONLY fork-introduced regressions were in the hand-written
+#   subagent bridge I wrote when DEFERRING 76cfc2e0's rewrite (client.py:2671-2688 + _extract_text_chunk):
+#   (1) empty nested content.text shadowed populated flat text -> use `or` fallback; (2) reasoning/thinking
+#   chunk surfaced as user-visible subagent output -> gate on `not _su_thinking`; (3) non-dict content raised
+#   AttributeError -> isinstance guard in _extract_text_chunk. All 3 FIXED + a regression test added, folded
+#   into 61b83b6 via fixup/autosquash; 394 acp+governance tests green. The other 18 findings all reproduce
+#   UPSTREAM VERBATIM (verified against 4aba97e9/f4acf37e/284af3ea/99041753/0d9797e post-images): the app-MCP
+#   over-broad `app:`-prefix scrub + disabled-only boot-reconcile (4aba97e9), the watchdog max(last_data_ts,
+#   _last_activity) clock (f4acf37e), is_https_request loopback-trust (284af3ea, documented threat model),
+#   redact(accumulated) edit-preview (99041753 — per-chunk redaction already runs), and the new URL().port==""
+#   coalescing (0d9797e). These are design observations for UPSTREAM to address; fork-diverging on an actively-
+#   maintained subsystem mid-sync would guarantee next-batch conflicts, so left as-ported (noted here + in CR).
+
+# --- Batch-24 (dual-repo sync 2026-07-02, ultracode comprehensive) -----------
+# STACKED on the batch-22+23 worktree branch sync/beta-2026-06-27 AFTER rebasing 22+23 onto the
+# advanced origin/mainline (aef7a86 = 9 fork-native commits: pentest auth incl. CWE-613 cookie
+# re-mint, CPP wave-3, slack challenge-gate REMOVED, instances auto-reconnect, default port 5476).
+# The rebase excised the orphaned send_channel_challenge port (182d101) + resolved ~7 conflicts;
+# see the batch-24 rebase note in the kiroclaw-meshclaw-sync memory. One coherent CR for 22+23+24.
+# Window since batch-23:
+#   backend  beta-braveheart 1926f16f..bfa7b4e8  (47 candidates ; live tip advanced past post-scan)
+#   frontend MeshClawWebsite  a6b1fc7..0f2c062    (31 candidates ; live tip 0d9797e post-scan)
+#   mainline fcee75b9 (v3.1.1 slack hotfix == beta 7ae12831 content, SKIP).
+# 78 candidates triaged via a 156-agent adversarial Workflow (analyzer + skeptic per commit +
+# synthesis) + 1 manual (8a6bfbc0 API-flake). Tally: 53 PORTED (36 KEEP + 17 PARTIAL: 32 backend +
+# 21 frontend) + 25 left out.
+# FORK-NATIVE-OVERLAP (the key win this batch — fork base already did these NATIVELY, so ALREADY_PRESENT):
+#   ed2f53b6/ef92034/d331022 (instances auto-reconnect, native c033f4a+aef7a86+8603ed7),
+#   2e3e7ed4 (pentest auth hardening, native 5700059+24e94b9). 8b1d5eb1 KEPT (only NEW tunables).
+# HEADLINE backend: 8b05b3e4 macOS event-loop wedge fix (new executors.subprocess_executor pool +
+#   SafeChildWatcher); 8a6bfbc0 keep ACP session alive on model-substitution advisory (adopt "Using X
+#   instead" + re-issue session/new; DROPPED absent new_conversation glue, rides dormant _is_claude
+#   seam); 829e96d8 gateway singleton flock (new gateway_lock.py); 68fd4f6c folder-PDF ingest +
+#   dedup better-recall (pdfplumber, builds on batch-23 dedup.py); e659ed45 auto-ingest artifacts
+#   into KB (new artifact_ingest.py); b9b5164a KB span/citations; a62133bc/7c50c24b/702ecac1 redaction;
+#   47c06ec7 queue-message edit (BE, pairs FE fcb3309); be1df3cf model-registry context window.
+# HEADLINE frontend: 9b3179e revert drag-reorder queue (dnd-kit->framer-motion); 6d8008a-adjacent
+#   Radix already present; c17a009 resizable browse mirror; fcb3309 queue-edit FE; 4ab933e storage
+#   Phase-0 GC (safeSetItem across ~28 files); 4af6c3b comment-highlight (self-contained, NOT the
+#   absent batch-23 comment-bridge); 0f2c062 sortable Name/Date file browser (pairs BE bfa7b4e8).
+# 17 PARTIALs dropped internal/absent hunks: mcp_gateway (e5210223, 9586ad6 MCP-Pool tab, 3da3f45-SKIP),
+#   .meshclaw-dev app manifests+hero assets (fd633154/0951476), tui/ (dd27186 Message.tsx), Brazil
+#   Config (b1edc01e), Java/Brazil doctor hints (372329d1), absent-file storage sites (4ab933e).
+# SKIP_INTERNAL (16): app-registry adds (247aa7d8 pensieve, ffee2086 standup-zen), mcp_gateway
+#   (da953198, 37aa5567, 3da3f45), code-review-sage (79868424, e8a1010b), secretary (328d704e, 2b91d0a),
+#   taskkeeper (e3641e2), tui (7c75dec), mwinit (744f5ad), slack session-ceiling (7ae12831), Midway/
+#   Taskei client (16c5375 challenge-handoff), toolbox docs (ca927a74), v3.1.1 bump (1f4ae9f7), 0cf627ea test.
+# SKIP_NONKIROACP (5): 3d466e6c+42ebd21 Auto approval mode (VERIFIED hard-gated on claude_code backend
+#   + native afk classifier), 79868424 code-review-sage selectable model (provider surface), a8224f18+
+#   056aa42 Miami Vice 2080 theme (cosmetic).
+# ALREADY_PRESENT (4): ed2f53b6, 2e3e7ed4, ef92034, d331022 (all fork-native overlaps above).
+# WORKFLOW-STALL: the backend port workflow stalled TWICE at wave-6 start (model-inference hang, not a
+#   shell hang — agent .jsonl flat, no python process). FIX: TaskStop (tree clean, waves 1-5 committed) +
+#   ported the last 8 backend keepers via a single general-purpose Agent subagent. Frontend workflow ran
+#   clean (5 waves). LESSON recorded in memory: stop+delegate-to-one-Agent beats fighting a stuck workflow.
+# Verify: backend flake8 clean (37 files) + pytest 10364 pass/34 skip (only the pre-existing test_skills
+#   mtime flake); frontend tsc -b clean + 2940 vitest pass (248 files). Step-6 de-Amazon: 0 live couplings
+#   (7 inert comment/docstring hits). KiroACP invariant HELD (enum ["acp"], ACP_BACKEND_CLAUDE seam 22 refs,
+#   no provider selector re-added, CONTRACT_VERSION=1 untouched == mainline base). Governance keystone intact.
+#   config-baseline.json regenerated (187 entries) for e659ed45 knowledge descriptors + instances tunables.
+# 140 commits on branch (87 from 22+23 + 32 backend + 21 frontend). DMG rebuild OWED (macOS-only).
+# pdfplumber + boto3 pip-installed into the verify venv. Boundaries: beta 1926f16f->bfa7b4e8 (last
+#   triaged), frontend-beta a6b1fc7->0f2c062, mainline 199d7853.
+
+# --- Batch-23 (dual-repo sync 2026-06-27, small-batch read-each-diff) --------
+# STACKED on the batch-22 worktree branch sync/beta-2026-06-27 (batch-22 not yet
+# merged; origin/mainline still dfa9559). Same branch, one coherent CR for 22+23.
+# Window since batch-22:
+#   backend  beta-braveheart 58e0abb0..1926f16f  (4 candidates ; mainline unchanged 199d7853)
+#   frontend MeshClawWebsite  0e1f442..a6b1fc7    (2 candidates)
+# 6 candidates triaged by reading each diff (small-batch path, no Workflow).
+# Tally: 4 PORTED (3 backend + 1 frontend) ; 2 SKIP_INTERNAL.
+# PORTED:
+#   eb32b8a2 -> e2d58b2  fix(dashboard): raise recent-projects cap 10->100 (_MAX_RECENT_PROJECTS).
+#   6eaab8cb -> cfadb4a  feat(prompt): require a self-contained final message — 4th _CRITICAL_RULES
+#     rule in context.py (decision context must live in the final message; UI collapses steps).
+#     Kept the fork's dormant ACP_BACKEND_CLAUDE test_cc_provider parity test (both assertions ported).
+#   c6fa6489 -> 72ef8df  feat(knowledge): auto-dedup documents across sources — new knowledge/dedup.py
+#     (524 lines, regenerated from post-image) + content_hash schema/index/add_item + ingest+folder
+#     triggers + knowledge_dedup MCP tool + `kiroclaw knowledge dedup [--apply]` CLI + spec doc + test.
+#     Inert "quip" PERSISTENT_SOURCE_TYPES literal kept verbatim (no quip source in OSS).
+#   384a5d1  -> c2eb9f6  feat(picker): ProjectPicker searchable Recent tab + browse drill-on-slash
+#     (pairs backend eb32b8a2). Regenerated ProjectPicker.tsx + test from post-image (byte-identical
+#     pre-image, no brand tokens). +9 tests (30 total pass).
+# SKIP_INTERNAL (2):
+#   1926f16f  fix(browser): detect Playwright MCP via aim JSON not substring — the fork's
+#     is_playwright_installed()/ensure_playwright_installed() are de-Amazoned OSS NO-OP STUBS
+#     (the `aim mcp` package manager doesn't exist in OSS — exactly the coupling the fork removed);
+#     the fix targets the `aim mcp list` substring check with NO fork anchor.
+#   a6b1fc7   fix: anchor widget comment to selected occurrence — the anchored-comment bridge
+#     (COMMENT_BRIDGE_BODY/selectionContext/FileArtifactComments) is ABSENT in the fork's diverged
+#     widgetSrcdoc.ts (332 vs 560 lines); same absent subsystem as the batch-22 DEFER 4685d34.
+#     ANTI-MISS LESSON: the file widgetSrcdoc.ts exists, but the CHANGED CODE does not — verify the
+#     hunk's anchor, not just the filename.
+# Verify: backend flake8 clean + pytest 9935 pass / 33 skip (only the pre-existing test_skills mtime
+#   flake fails, untouched). frontend tsc -b clean + ProjectPicker 30 vitest + context 56 backend pass.
+#   de-Amazon audit: 0 live couplings (2 inert quip literals). KiroACP invariant held; governance untouched.
+# Boundaries advanced: beta 58e0abb0->1926f16f, frontend-beta 0e1f442->a6b1fc7, mainline unchanged 199d7853.
+
+# --- Batch-22 (dual-repo sync 2026-06-27, ultracode comprehensive) -----------
+# Worktree branch sync/beta-2026-06-27 off origin/mainline (dfa9559 = governance CR-284272012
+# merged; tracks origin/mainline from creation). Built in a git worktree (/workplace/bolichen/
+# kiroclaw-wt/batch22) because another session was mid-work on feat/governance in the main checkout.
+# Window since batch-21:
+#   backend  beta-braveheart 59ec6e1d..58e0abb0  (68 candidates ; mainline unchanged 199d7853)
+#   frontend MeshClawWebsite  ca99bb4..0e1f442    (37 candidates)
+# 105 candidates triaged via a 211-agent adversarial Workflow (analyzer + skeptic per commit +
+# synthesis critic; build/meshclaw-triage-batch22.js, all 105 verdicts, 0 flaked). Ported via 2
+# wave-workflows (backend 10 waves, frontend 7 waves; <=5 commits/wave, sequential on one branch).
+# Tally: 80 keepers (68 KEEP + 12 PARTIAL: 49 backend + 31 frontend) + 25 left out.
+#   Left out: 16 SKIP_INTERNAL, 4 SKIP_NONKIROACP, 1 ALREADY_PRESENT, 4 DEFER. (full list: left-out.md)
+# DEFER handling: 8e24a0fc FOLDED into 4425bd52 ; 64599424 FOLDED into f8e5b36f (one commit each);
+#   cca1191 (FE project-agent UI) UNBLOCKED by BE 7519a5d9 and ported in the same batch;
+#   4685d34 truly HELD (prereq affffcff artifact-comments base absent in fork).
+# Cross-repo PAIRS ported BE-before-FE: e0d9577c<->cfdc19f (hide_in_chat), ae522641<->843cc81
+#   (tool_search), 7519a5d9<->cca1191 (project agents), b05944e4<->47169ba (KB rename).
+# HEADLINE backend: b40982aa OpenAI-compatible /v1/chat/completions (new openai_compat.py);
+#   a636b1ba set_project MCP tool; ce4f6c49 replace child-kill allowlist with per-spawn basename
+#   tracking (the inert b'builder'/b'aim'/b'arcc' tokens intentionally REMOVED — upstream replaced
+#   the mechanism); 38173673 natural-language search recall (FTS5 stopword+OR+weighted RRF);
+#   ca9d9bea event-loop wedge containment (new loop_watchdog.py); 4425bd52 background lesson
+#   contradiction resolution; 9787ead5 autonudge_stop user-token handshake.
+# HEADLINE frontend: 6d8008a Radix sidebar-menu migration (new ui/dropdown-menu+context-menu,
+#   npm deps); 8b6807c electron wedged-backend auto-recover (new gateway-liveness.js/pyspy-dump.js
+#   — ADDED to electron/package.json build.files[]); aeecc0b dnd-kit Apps-nav reorder; e66986c
+#   silent expired-session recovery; cca1191 project-agent discovery UI.
+# 11 PARTIALs (generic kept, internal/absent dropped): 5f782326 (drop usage_upload+_patch),
+#   4d260c01 (drop entire jail subsystem), f63dfe53 (drop the app, keep manifest/conftest bits),
+#   0e139747 (keep SecretaryConfig.auto_dismiss field only), a48502a7 (keep 4 generic guard fixes,
+#   drop the whole workflows subsystem), 92fa8ece (drop _patch hunk), ca9d9bea (drop rewrite_agents
+#   overlay-offload), 9a6e2a87 (docs: keep 5 generic backfills, drop all internal-subsystem prose),
+#   a59e892c (doc coupled to FE aeecc0b), ce4f6c49 (drop providers/claude_code.py hunk), edb11ea +
+#   e64b151 (frontend: drop absent-file hunks).
+# SKIP_INTERNAL (16): 54f01fc0+bc92b8b5 (writing-review), 25feb233 (artifact sync/Harmony),
+#   6ecb54d2 (code-review-sage), 3a1ea4d5+e08f3e4b+fc6a8c12+0d978546 (mcp_gateway), 16fa88d2 (jail),
+#   71ac5fcc (Taskei/Midway), 803af9de (Midway preflight), 938a147d (taskkeeper), 20ae2b81+cf093d08
+#   (internal app-registry), 48f9627e (toolbox), 9dca095 (workflows UI — generic fixes ride a48502a7).
+# SKIP_NONKIROACP (4): cdd68ecb (claude_code 1M-context), d5dc40e+186aeaa (Artifactory publish/sync UI),
+#   823ec07 (secretary UI — generic config rides BE 0e139747).
+# ALREADY_PRESENT (1): 4ff05ccf (revert of f63dfe53's app — fork already at post-revert state).
+# Verify: backend flake8 CLEAN (29 .py) + pytest 9915 pass/33 skip (3 non-batch fails: 2 botocore-
+#   absent, fixed by pip install boto3; 1 test_skills mtime flake in UNTOUCHED code, fails same at
+#   origin/mainline). frontend tsc -b CLEAN + 2867 vitest pass (245 files; +4 new SourcesList.rename).
+#   Step-6 de-Amazon audit: 0 LIVE couplings (7 inert hits: builder-mcp allowlist read in aim_agents
+#   _extract_skills, comments/docstrings, secretary config field). KiroACP invariant HELD: provider
+#   enum ["acp"], ACP_BACKEND_CLAUDE/_is_claude seam (19 refs) untouched, no provider selector/cc_*/
+#   bedrock_* re-added; model-id literals (claude_code map key, claude-opus-4-8[1m]) kept verbatim.
+#   Governance keystone intact (security_policy.json/profiles/admission_policy.json in
+#   _SENSITIVE_HOME_DIRS); CONTRACT_VERSION=2 not lowered; governance suites green where implicated.
+# config-baseline.json regenerated (186 entries) for new fields: agent.sandbox_allow_no_isolation,
+#   agent.tool_search, secretary.auto_dismiss_on_reply, slack_channels.*.project_path.
+# 81 commits on branch (49 backend incl baseline-regen + 32 frontend). DMG rebuild OWED (macOS-only;
+#   this ran on Linux). Artifacts in build/batch22-* (gitignored). CR not yet raised (stop-before-push
+#   per user directive — manual run, not the cron standing authorization).
+# Boundaries advanced: beta 59ec6e1d->58e0abb0, frontend-beta ca99bb4->0e1f442, mainline unchanged 199d7853.
 
 # --- Batch-21 (dual-repo sync 2026-06-22) ------------------------------------
 # Fresh branch sync/beta-2026-06-22 off origin/mainline (b10b070 = batch-20 MERGED).

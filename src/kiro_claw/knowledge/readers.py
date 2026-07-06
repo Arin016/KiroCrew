@@ -28,11 +28,12 @@ except ImportError:
 
 
 class FileReader:
-    # Note: .pdf/.pptx require optional runtime dependencies (pdfplumber, python-pptx)
-    # not declared in setup.cfg. .docx requires python-docx (pip install python-docx).
+    # Binary formats need optional runtime deps: .pdf -> pdfplumber and .docx ->
+    # python-docx (both declared in setup.cfg). .pptx -> python-pptx is NOT declared,
+    # so .pptx is intentionally kept out of SUPPORTED even though _read_pptx exists.
     SUPPORTED = {
         '', '.md', '.txt', '.py', '.java', '.ts', '.js', '.rs', '.go',
-        '.html', '.htm', '.docx',
+        '.html', '.htm', '.docx', '.pdf',
         '.csv', '.log', '.json', '.yaml', '.yml', '.sh', '.rb', '.c', '.cpp', '.h',
     }
 

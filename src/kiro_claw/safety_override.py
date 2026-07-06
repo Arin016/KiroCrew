@@ -385,6 +385,7 @@ class SafetyOverride:
                 outcome=outcome,
                 source="safety_override",
                 resources=resources,
+                critical=critical,
             )
         except Exception:
             if critical:

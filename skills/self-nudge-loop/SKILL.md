@@ -56,7 +56,7 @@ When disabled, the REST API returns 503 and the UI popover surfaces the error.
 ## How to start a loop
 
 **From the UI (preferred):**
-1. Click the `🔁 Repeat` icon in the chat composer toolbar (lit green when active, dim when off).
+1. Click the `🎯 Set a goal` (bullseye) icon in the chat composer toolbar (lit green when active, dim when off).
 2. In the popover: paste your nudge message, set idle seconds (min 15, default 60), set max cycles (0 = unlimited), click **Start loop**.
 3. Close the popover. Loop runs in the background. Icon stays lit across tab closes / logins.
 
@@ -203,7 +203,7 @@ EXECUTE (≤5 tool calls per cycle, hard cap):
 RECORD:
 11. Append progress to the claimed card (kanban-md edit --add-body) or to the anchor doc's Cycle Log section.
 12. **DM the owner a tick via `send_message`** (owner DM is default — no channel arg). Template:
-    `🔁 <PROJECT> cycle-<n> · <task-id>  Done: <1-line>  Next: <1-line>  Status: <col>`
+    `🎯 <PROJECT> cycle-<n> · <task-id>  Done: <1-line>  Next: <1-line>  Status: <col>`
     Exactly one DM per productive cycle. Skip on halted / no-op cycles.
 13. If task complete: handoff to Review (NOT Done — human approves Done).
 
@@ -218,7 +218,7 @@ One cycle = one step. Compound cycles build features.
 
 ### 5. Arming checklist (do not skip)
 
-Before clicking 🔁 → Start loop:
+Before clicking 🎯 "Set a goal" → Start loop:
 
 - [ ] Anchor doc (`LOOP.md`) exists with a Definition of Done section. (Run `scaffold.sh` in this skill dir to generate a hardened template in one command.)
 - [ ] STOP sentinel absent: `ls <STOP_PATH>` says "No such file".

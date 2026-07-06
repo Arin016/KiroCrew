@@ -27,6 +27,7 @@ _ensure_ssl_certs()
 
 import argparse
 import asyncio
+import faulthandler
 import importlib
 import logging
 import os
@@ -46,7 +47,10 @@ from kiro_claw.config.loader import (
     build_provider_factory,
 )
 from kiro_claw.constants import env_flag_enabled
+from kiro_claw.gateway_lock import GatewayLock, GatewayLockError
 from kiro_claw.history import ConversationLog, HistoryConsolidator
+from kiro_claw.knowledge.dedup import dedup_sweep
+from kiro_claw.knowledge.store import KnowledgeStore
 from kiro_claw.memory import MemoryStore
 from kiro_claw.platform import (
     PlatformCompositionError,
@@ -324,6 +328,89 @@ def _detect_project_dir() -> str | None:
     return None
 
 
+def _install_child_watcher() -> None:
+    """Install a non-thread-per-child asyncio child watcher (Linux: pidfd; macOS: SIGCHLD).
+
+    CPython 3.10's default ThreadedChildWatcher spawns a daemon thread per
+    subprocess that blocks on os.waitpid(pid, 0).  When many children die
+    simultaneously the resulting GIL contention starves the event-loop thread
+    for tens of seconds.  PidfdChildWatcher uses a single epoll fd (no extra
+    threads) and is immune to this.  On macOS (no pidfd syscall) we install
+    SafeChildWatcher instead -- a single SIGCHLD handler, also free of the
+    thread-per-child storm (the _node_version_manager_bins lru_cache only
+    shrank the surface; the reaper storm itself remained on the default
+    watcher).
+
+    Forward-compat note: ``set_child_watcher`` / ``PidfdChildWatcher`` /
+    ``SafeChildWatcher`` are deprecated in CPython 3.12 and removed in 3.14 (the
+    event loop reaps children directly).  This whole function should become a
+    no-op / be deleted when KiroClaw moves off 3.10; guard or drop it then.
+    ``set_child_watcher`` on a pre-run policy is attached to the loop by
+    ``asyncio.run`` -> ``set_event_loop`` (main thread), so installing before
+    ``asyncio.run`` here is correct on 3.10 for both watchers.
+
+    Main-thread dependency (macOS): unlike the default ThreadedChildWatcher
+    (whose ``is_active()`` is hard-coded True and whose ``attach_loop`` is a
+    no-op), SafeChildWatcher attaches a SIGCHLD handler via
+    ``loop.add_signal_handler`` -- which only runs when ``set_event_loop`` is
+    called on the MAIN thread, and is what makes ``is_active()`` True.  The
+    ``kiroclaw gateway`` path satisfies this (``asyncio.run`` on the main thread
+    before any subprocess spawns).  If a future caller ever drives this loop
+    from a non-main thread, ``is_active()`` stays False and the FIRST
+    ``create_subprocess_exec`` raises ``RuntimeError`` -- re-evaluate the install
+    point then.
+
+    Kernel probe (Linux): on 3.10 ``PidfdChildWatcher()`` does NOT validate
+    kernel support -- ``__init__`` only sets ``_loop``/``_callbacks``; the
+    ``pidfd_open`` syscall is first issued lazily inside ``add_child_handler``.
+    So a bare ``PidfdChildWatcher()`` succeeds on a < 5.3 kernel, gets
+    installed, and then the FIRST ``create_subprocess_exec`` raises
+    ``OSError(ENOSYS)`` -- breaking all subprocess management instead of falling
+    back.  Probe ``os.pidfd_open`` explicitly here and only install the watcher
+    when the syscall works.
+    """
+    if sys.platform == "linux":
+        try:
+            # Probe real kernel support (pidfd_open: Linux 5.3+) BEFORE installing,
+            # because PidfdChildWatcher.__init__ does not -- it would only fail later,
+            # per-subprocess, inside add_child_handler.
+            fd = os.pidfd_open(os.getpid())
+            os.close(fd)
+        except (OSError, AttributeError):
+            # Kernel too old for pidfd_open (< 5.3), or os.pidfd_open unavailable
+            # -- leave the default ThreadedChildWatcher in place.
+            return
+        asyncio.set_child_watcher(asyncio.PidfdChildWatcher())
+        return
+    # macOS / other non-Linux Unix: no pidfd syscall.  Replace the default
+    # thread-per-child ThreadedChildWatcher with the SIGCHLD-based
+    # SafeChildWatcher so a burst of simultaneously-dying kiro-cli/MCP children
+    # cannot spawn a thread storm that starves the event loop (the documented
+    # macOS wedge, captured 2026-06-27 as multiple _do_waitpid frames).
+    # SafeChildWatcher reaps only its own tracked children (unlike
+    # FastChildWatcher, which reaps every child and would clobber the manual
+    # killpg/_kill_escaped_children path) and attaches its SIGCHLD handler when
+    # the loop is set on the main thread -- same install point as the pidfd
+    # path above.  Guarded so an environment without it (Windows, or a future
+    # Python that removed it) silently keeps the default watcher.
+    watcher_cls = getattr(asyncio, "SafeChildWatcher", None)
+    if watcher_cls is None:
+        return
+    try:
+        asyncio.set_child_watcher(watcher_cls())
+    except Exception:
+        # Falling back here keeps the thread-per-child ThreadedChildWatcher —
+        # the exact thread-storm watcher this function exists to replace — so a
+        # silent revert must be visible in gateway.log to explain a recurring
+        # macOS wedge.
+        logger.warning(
+            "Could not install SafeChildWatcher; falling back to the default "
+            "ThreadedChildWatcher (macOS thread-storm wedge mitigation inactive)",
+            exc_info=True,
+        )
+        return
+
+
 def _resolve_gateway_args(args: argparse.Namespace) -> dict:
     """Resolve the kwargs for `_gateway()` from parsed CLI args.
 
@@ -405,6 +492,39 @@ def _resolve_gateway_args(args: argparse.Namespace) -> dict:
         "json_ready": json_ready,
         "approval_mode": approval,
     }
+
+
+def _knowledge(args) -> None:
+    """``kiroclaw knowledge dedup [--apply]`` -- collapse cross-source duplicate docs."""
+    if getattr(args, "knowledge_action", None) != "dedup":
+        print("Usage: kiroclaw knowledge dedup [--apply]")
+        return
+    apply = bool(getattr(args, "apply", False))
+    db_path = config_dir() / "workspace" / "knowledge" / "knowledge.db"
+    if not db_path.exists():
+        sel().log_tool_invocation(
+            session_key="cli", source="cli", tool_name="knowledge_dedup",
+            outcome="not_configured")
+        print("Knowledge Library is not configured (no knowledge.db). Ingest documents first.")
+        return
+    store = KnowledgeStore(str(db_path))
+    try:
+        results = dedup_sweep(store, apply=apply)
+    finally:
+        store.db.close()
+    sel().log_tool_invocation(
+        session_key="cli", source="cli", tool_name="knowledge_dedup",
+        outcome="applied" if apply else "preview",
+        metadata={"duplicate_count": len(results), "apply": apply})
+    mode = "APPLIED" if apply else "DRY RUN -- no changes; pass --apply to delete"
+    if not results:
+        print(f"[{mode}] No cross-source duplicate documents found.")
+        return
+    verb = "Deleted" if apply else "Would delete"
+    print(f"[{mode}] {len(results)} duplicate document(s):\n")
+    for r in results:
+        print(f"  {verb}: {r['loser']}  ({r['items_deleted']} chunks)")
+        print(f"      keep: {r['winner']}   [{r['reason']}]")
 
 
 def _consolidate_cmd(args) -> None:
@@ -920,6 +1040,14 @@ Examples:
     profile_show = policy_sub.add_parser("profile", help="Show a profile by name")
     profile_show.add_argument("name", help="Profile file stem (without .json)")
 
+    kn_parser = sub.add_parser("knowledge", help="Knowledge Base maintenance")
+    kn_sub = kn_parser.add_subparsers(dest="knowledge_action")
+    kn_dedup = kn_sub.add_parser(
+        "dedup", help="Collapse cross-source duplicate documents (dry-run unless --apply)")
+    kn_dedup.add_argument(
+        "--apply", action="store_true",
+        help="Apply the deletions (default: dry-run preview that changes nothing)")
+
     sub.add_parser("update", help="Update KiroClaw to the latest version")
 
     # stop
@@ -1128,8 +1256,8 @@ Examples:
     art_save.add_argument(
         "--kind",
         choices=["widget", "html", "markdown", "svg", "json", "text"],
-        default="widget",
-        help="Artifact kind (default: widget)",
+        default=None,
+        help="Artifact kind (default: inferred from content / file extension)",
     )
     art_save.add_argument("--content", help="Inline content")
     art_save.add_argument("--content-file", help="Path to file containing the content")
@@ -1194,6 +1322,14 @@ Examples:
     ws_update.add_argument("--dir", help="New directory path")
     ws_delete = ws_sub.add_parser("delete", help="Delete a workspace")
     ws_delete.add_argument("name", help="Workspace name to delete")
+
+    # scan
+    scan_parser = sub.add_parser(
+        "scan", help="Scan directories for project agents (.kiro/agents/)"
+    )
+    scan_parser.add_argument(
+        "paths", nargs="+", help="Directories to scan for .kiro/agents/"
+    )
 
     # app
     app_parser = sub.add_parser(
@@ -1403,8 +1539,26 @@ Examples:
     elif args.command == "tui":
         _tui(args)
     elif args.command == "gateway":
+        # Enable faulthandler for the long-lived gateway process: it makes
+        # `kill -ABRT <pid>` dump every thread's stack to stderr (the gateway
+        # log) on demand, and it is the signal the dashboard's stall watchdog
+        # keys off to decide whether to arm itself (see start_dashboard). Cheap
+        # and gateway-only — other CLI subcommands are short-lived and skip it.
+        faulthandler.enable()
         gw_kwargs = _resolve_gateway_args(args)
-        asyncio.run(_gateway(**gw_kwargs))
+        _install_child_watcher()
+        # Single-writer guard (Mesh-2386): refuse a second gateway bound to this
+        # KIROCLAW_HOME so two ConversationLog writers can never clobber the same
+        # session file. Held for the process lifetime; auto-released on death.
+        try:
+            _gw_lock = GatewayLock(config_dir()).acquire()
+        except GatewayLockError as exc:
+            print(f"🐾 {exc}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            asyncio.run(_gateway(**gw_kwargs))
+        finally:
+            _gw_lock.release()
     elif args.command == "setup":
         _setup(
             agent_only=getattr(args, "agent_only", False),
@@ -1452,6 +1606,8 @@ Examples:
         from kiro_claw.cli_commands import _policy
 
         _policy(args)
+    elif args.command == "knowledge":
+        _knowledge(args)
     elif args.command == "update":
         _update()
     elif args.command == "stop":
@@ -1488,6 +1644,8 @@ Examples:
         _handle_agent(args)
     elif args.command == "workspace":
         _handle_workspace(args)
+    elif args.command == "scan":
+        _handle_scan(args)
     elif args.command == "app":
         _handle_app(args)
     elif args.command == "aim":
@@ -1507,6 +1665,7 @@ from kiro_claw.cli_commands import (  # noqa: E402
     _handle_agent,
     _handle_aim,
     _handle_app,
+    _handle_scan,
     _handle_workspace,
     _learn,
     _memory_cmd,

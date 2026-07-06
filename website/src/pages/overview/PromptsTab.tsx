@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { ClipboardList, ScrollText } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -46,9 +46,9 @@ function SlotPicker({ prompt, onClose }: { prompt: Prompt; onClose: () => void }
   return (
     <div ref={ref} className="absolute right-0 top-full mt-1 z-50 bg-bg-elevated border border-border rounded-lg shadow-lg min-w-[220px] max-h-[240px] overflow-y-auto py-1 animate-slide-in-left">
       <div className="px-3 py-1.5 text-[11px] text-muted uppercase tracking-wider font-semibold">Send to…</div>
-      <div className="px-2 py-1 mx-1 rounded-md cursor-pointer text-[13px] text-accent font-medium hover:bg-bg-hover transition-colors" onClick={() => send()}>+ New Chat</div>
+      <div role="button" tabIndex={0} className="px-2 py-1 mx-1 rounded-md cursor-pointer text-[13px] text-accent font-medium hover:bg-bg-hover transition-colors" onClick={() => send()} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); send() } }}>+ New Chat</div>
       {slots.map(s => (
-        <div key={s.key} className="px-2 py-1.5 mx-1 rounded-md cursor-pointer text-[13px] hover:bg-bg-hover transition-colors flex items-center gap-2" onClick={() => send(s.key)}>
+        <div key={s.key} role="button" tabIndex={0} className="px-2 py-1.5 mx-1 rounded-md cursor-pointer text-[13px] hover:bg-bg-hover transition-colors flex items-center gap-2" onClick={() => send(s.key)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); send(s.key) } }}>
           {s.running && <span className="w-1.5 h-1.5 rounded-full bg-green-400 shrink-0" />}
           <span className="truncate">{s.title && s.title !== s.key ? s.title : s.agent || s.key}</span>
         </div>
@@ -89,12 +89,19 @@ export default function PromptsTab() {
     } catch { if (pendingRef.current === key) { setActiveKey(key); setContent('(failed to load)') } }
   }
 
-  const sf = (p: Prompt) => !filter || (p.name + ' ' + p.fullName + ' ' + p.description + ' ' + p.package).toLowerCase().includes(filter.toLowerCase())
+  const sf = useCallback(
+    (p: Prompt) =>
+      !filter ||
+      (p.name + ' ' + p.fullName + ' ' + p.description + ' ' + p.package)
+        .toLowerCase()
+        .includes(filter.toLowerCase()),
+    [filter],
+  )
 
   const aimPrompts = useMemo(() => prompts.filter(p => p.source === 'aim'), [prompts])
   const userPrompts = useMemo(() => prompts.filter(p => p.source !== 'aim'), [prompts])
-  const filteredUser = useMemo(() => userPrompts.filter(sf), [userPrompts, filter])
-  const filteredAim = useMemo(() => aimPrompts.filter(sf), [aimPrompts, filter])
+  const filteredUser = useMemo(() => userPrompts.filter(sf), [userPrompts, sf])
+  const filteredAim = useMemo(() => aimPrompts.filter(sf), [aimPrompts, sf])
 
   const grouped = useMemo(() => {
     const g: Record<string, Prompt[]> = {}
@@ -107,7 +114,7 @@ export default function PromptsTab() {
     const isPickerActive = pickerPrompt && promptKey(pickerPrompt) === pk
     return (
     <div key={pk} className="border-b border-border last:border-b-0">
-      <div className="flex items-start gap-2.5 px-3 py-2.5 cursor-pointer hover:bg-bg-hover transition-colors" onClick={() => toggle(p)}>
+      <div role="button" tabIndex={0} aria-expanded={activeKey === pk} className="flex items-start gap-2.5 px-3 py-2.5 cursor-pointer hover:bg-bg-hover transition-colors" onClick={() => toggle(p)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(p) } }}>
         <span className="text-muted text-[13px] mt-0.5 w-4 shrink-0">{activeKey === pk ? '▼' : '▶'}</span>
         <span className="font-semibold text-text-strong font-mono text-[13px] whitespace-nowrap">@{p.fullName}</span>
         {p.source === 'aim' ? <Badge variant="ok">AIM SOP</Badge>

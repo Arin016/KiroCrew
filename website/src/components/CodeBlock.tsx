@@ -58,7 +58,9 @@ export const CodeBlock = memo(function CodeBlock(
         </div>
       </div>
       {/* tabIndex=0 + role/label: a horizontally-scrollable region must be keyboard
-          focusable so keyboard-only users can scroll it (axe scrollable-region-focusable). */}
+          focusable so keyboard-only users can scroll it (axe scrollable-region-focusable).
+          The region role is a labelled landmark, so the tabIndex here is intentional. */}
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
       <pre className="overflow-x-auto scroll-fade px-3 py-2" tabIndex={0} role="region" aria-label={lang ? `${lang} code` : 'code'}>
         <HighlightedCode code={code} lang={lang} className={lang ? `language-${lang}` : ''} />
         {!complete && <span className="text-muted text-[12px] italic animate-pulse ml-2">generating…</span>}

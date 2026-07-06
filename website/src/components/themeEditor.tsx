@@ -196,14 +196,14 @@ export function ColorRow({ label, value, onChange }: { label: string; value: str
   const isSimpleColor = /^#[0-9a-fA-F]{3,8}$/.test(value) || /^[a-z]+$/i.test(value)
   return (
     <div className="flex items-center gap-2 py-1">
-      <label className="text-[13px] text-muted w-28 shrink-0 truncate" title={label}>{label}</label>
+      <span className="text-[13px] text-muted w-28 shrink-0 truncate" title={label}>{label}</span>
       {isSimpleColor ? (
-        <input type="color" value={toHex(value)} onChange={e => onChange(e.target.value)}
+        <input type="color" aria-label={`${label} color picker`} value={toHex(value)} onChange={e => onChange(e.target.value)}
           className="w-8 h-7 rounded border border-border cursor-pointer bg-transparent shrink-0" />
       ) : (
         <div className="w-8 h-7 rounded border border-border shrink-0" style={{ background: value }} />
       )}
-      <input type="text" value={value} onChange={e => onChange(e.target.value)}
+      <input type="text" aria-label={label} value={value} onChange={e => onChange(e.target.value)}
         className="flex-1 min-w-0 bg-bg-elevated border border-border rounded px-2 py-1 text-[13px] text-text font-mono outline-none focus-ring"
         spellCheck={false} />
     </div>
@@ -278,12 +278,21 @@ export function ThemeEditorPanel({ editor }: { editor: ReturnType<typeof useThem
         <div>
           <div className="flex gap-2 mb-3">
             <div className="flex-1">
-              <label className="text-[12px] text-muted uppercase tracking-[.04em] mb-1 block">Theme Name</label>
-              <Input value={themeName} onChange={e => setThemeName(e.target.value)} placeholder="My Custom Theme" />
+              {/* Control is the custom <Input> (a forwardRef <input>) nested here
+                  and linked via htmlFor+id; the deprecated label-has-for rule can't
+                  see through the component wrapper, so scope-disable it. */}
+              {/* eslint-disable-next-line jsx-a11y/label-has-for */}
+              <label htmlFor="theme-editor-name">
+                <span className="text-[12px] text-muted uppercase tracking-[.04em] mb-1 block">Theme Name</span>
+                <Input id="theme-editor-name" value={themeName} onChange={e => setThemeName(e.target.value)} placeholder="My Custom Theme" />
+              </label>
             </div>
             <div className="w-16 shrink-0">
-              <label className="text-[12px] text-muted uppercase tracking-[.04em] mb-1 block">Emoji</label>
-              <Input value={themeEmoji} onChange={e => setThemeEmoji(e.target.value)} placeholder="✨" className="text-center !flex-none w-full" />
+              {/* eslint-disable-next-line jsx-a11y/label-has-for */}
+              <label htmlFor="theme-editor-emoji">
+                <span className="text-[12px] text-muted uppercase tracking-[.04em] mb-1 block">Emoji</span>
+                <Input id="theme-editor-emoji" value={themeEmoji} onChange={e => setThemeEmoji(e.target.value)} placeholder="✨" className="text-center !flex-none w-full" />
+              </label>
             </div>
           </div>
           <ColorModeEditor label="Dark Mode Colors" vars={darkVars} onChange={updateDarkVar} />
@@ -293,14 +302,18 @@ export function ThemeEditorPanel({ editor }: { editor: ReturnType<typeof useThem
         </div>
       ) : (
         <div>
-          <label className="text-[12px] text-muted uppercase tracking-[.04em] mb-1 block">Theme JSON</label>
-          <textarea
-            value={jsonText} onChange={e => setJsonText(e.target.value)}
-            onBlur={() => syncJsonToPicker(jsonText)}
-            placeholder={'{\n  "name": "My Theme",\n  "emoji": "✨",\n  "dark": { "--bg": "#12141a", ... },\n  "light": { "--bg": "#fafafa", ... }\n}'}
-            className="w-full h-56 bg-bg-elevated border border-border rounded-md px-3 py-2 text-[13px] text-text font-mono outline-none resize-y focus-ring"
-            spellCheck={false}
-          />
+          <label htmlFor="theme-editor-json">
+            <span className="text-[12px] text-muted uppercase tracking-[.04em] mb-1 block">Theme JSON</span>
+            <textarea
+              id="theme-editor-json"
+              aria-label="Theme JSON"
+              value={jsonText} onChange={e => setJsonText(e.target.value)}
+              onBlur={() => syncJsonToPicker(jsonText)}
+              placeholder={'{\n  "name": "My Theme",\n  "emoji": "✨",\n  "dark": { "--bg": "#12141a", ... },\n  "light": { "--bg": "#fafafa", ... }\n}'}
+              className="w-full h-56 bg-bg-elevated border border-border rounded-md px-3 py-2 text-[13px] text-text font-mono outline-none resize-y focus-ring"
+              spellCheck={false}
+            />
+          </label>
         </div>
       )}
 

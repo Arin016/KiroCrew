@@ -4,32 +4,31 @@
 // Split out from main.js so the shell-construction logic can be unit-tested
 // without spinning up Electron.
 
-const DEFAULT_REMOTE_BIN = "$HOME/.local/bin/kiroclaw";
+const DEFAULT_REMOTE_BIN = "~/.local/bin/kiroclaw";
+const DEFAULT_REMOTE_PATH = "~/.toolbox/bin:/usr/bin:/bin";
 
 // Non-interactive SSH shells don't source ~/.zshrc, so PATH won't include
 // `~/.toolbox/bin`. Each candidate is a full path so the remote shell can
 // exec it directly without relying on PATH.
 const REMOTE_BIN_CANDIDATES = [
-  "$HOME/.toolbox/bin/kiroclaw",           // toolbox install (recommended per wiki)
-  "$HOME/.local/bin/kiroclaw",             // install.sh / source install
-  "$HOME/.kiroclaw-app/.venv/bin/kiroclaw", // one-liner installer venv
+  "~/.toolbox/bin/kiroclaw",           // toolbox install (recommended per wiki)
+  "~/.local/bin/kiroclaw",             // install.sh / source install
+  "~/.kiroclaw-app/.venv/bin/kiroclaw", // one-liner installer venv
 ];
 
 // Build a shell snippet that tries each candidate path in order and execs the
-// first one that's executable. PATH is prefixed so the toolbox wrapper can
-// find kiro-cli over non-interactive SSH.
+// first one that's executable.
 //
-// The `for b in "$HOME/a" "$HOME/b"` list expands $HOME at parse time (the
-// candidates are inside double quotes), so `$b` already holds the fully
-// resolved path — no `eval` needed for the -x test or the exec.
-//
-// Candidates are hard-coded literals (no user input) so double-quote embedding
-// is safe. User-supplied binPath goes through validateRemoteSettings() and is
-// handled separately in buildRemoteTokenCommand().
-function buildCandidateTokenCommand(candidates) {
-  const expanded = candidates.map((p) => `"${p}"`).join(" ");
+// Tilde (~) is left unquoted here so the remote shell expands it at parse time.
+// Candidates are hard-coded literals (no user input) so embedding without
+// quotes is safe. User-supplied binPath is double-quoted for injection safety
+// and uses $HOME expansion instead — see buildRemoteTokenCommand().
+function buildCandidateTokenCommand(candidates, { port, remotePath } = {}) {
+  const pathStr = remotePath || DEFAULT_REMOTE_PATH;
+  const portExport = port ? ` KIROCLAW_PORT=${port}` : "";
+  const expanded = candidates.join(" ");
   return [
-    'export PATH="$HOME/.toolbox/bin:$PATH";',
+    `export PATH=${pathStr}${portExport};`,
     `for b in ${expanded}; do`,
     '  if [ -x "$b" ]; then',
     '    exec "$b" token;',
@@ -42,15 +41,22 @@ function buildCandidateTokenCommand(candidates) {
 
 // Pick the right remote command given the user's stored binPath.
 //   - If binPath is the default sentinel, try every candidate in order.
-//   - Otherwise respect the user's customization and PATH-prefix the exec so
-//     the toolbox wrapper resolves kiro-cli correctly over SSH.
-function buildRemoteTokenCommand(binPath, candidates = REMOTE_BIN_CANDIDATES) {
+//   - Otherwise respect the user's customization.
+// Options: { port, remotePath, candidates }
+function buildRemoteTokenCommand(binPath, options = {}) {
+  const { port, remotePath, candidates = REMOTE_BIN_CANDIDATES } = options;
+  const pathStr = remotePath || DEFAULT_REMOTE_PATH;
+  const portExport = port ? ` KIROCLAW_PORT=${port}` : "";
   if (!binPath || binPath === DEFAULT_REMOTE_BIN) {
-    return buildCandidateTokenCommand(candidates);
+    return buildCandidateTokenCommand(candidates, { port, remotePath });
   }
-  // Rewrite leading `~/` to `$HOME/` since tilde doesn't expand inside double quotes.
+  // Double-quote binPath and PATH for injection safety (binPath is user input
+  // validated by regex, but quotes add defense-in-depth). Rewrite `~/` to
+  // `$HOME/` since tilde doesn't expand inside double quotes; $HOME is
+  // evaluated by the remote shell (execFile bypasses any local shell).
   const expanded = binPath.replace(/^~\//, "$HOME/");
-  return `export PATH="$HOME/.toolbox/bin:$PATH"; "${expanded}" token`;
+  const expandedPath = pathStr.replace(/~\//g, "$HOME/");
+  return `export PATH="${expandedPath}"${portExport}; "${expanded}" token`;
 }
 
 // Extract the JWT from a `kiroclaw token` URL. The command prints:
@@ -63,6 +69,7 @@ function parseTokenFromStdout(stdout) {
 
 module.exports = {
   DEFAULT_REMOTE_BIN,
+  DEFAULT_REMOTE_PATH,
   REMOTE_BIN_CANDIDATES,
   buildCandidateTokenCommand,
   buildRemoteTokenCommand,

@@ -49,7 +49,17 @@ def _sel():
 
 
 async def index(request: web.Request) -> web.Response:
-    """Serve the dashboard HTML — prefer React build if available."""
+    """Serve the dashboard HTML — prefer React build if available.
+
+    SECURITY CONTRACT — DO NOT inject server/user/session state into this
+    response. The auth middleware serves this handler UNAUTHENTICATED on the
+    cold-start path (no/expired token, GET/HEAD), including to remote clients
+    in non-local mode, so the SPA can boot and self-refresh. That bypass is
+    only safe while the body is a static, secret-free bundle. Inlining
+    bootstrap JSON, feature flags, a username, or any per-request state here
+    would leak it across the auth boundary. Keep dynamic data behind gated
+    ``/api/*`` routes. Pinned by test_served_shell_is_auth_independent.
+    """
     react_index = _DIST_DIR / "index.html"
     path = react_index if react_index.is_file() else _HTML_PATH
     try:

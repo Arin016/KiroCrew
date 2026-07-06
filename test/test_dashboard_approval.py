@@ -815,3 +815,174 @@ class TestBuildRefusalRecoveryPrompt:
         # The caller prepends REFUSAL_RECOVERY_PREFIX; the body must not.
         out = build_refusal_recovery_prompt([("bash", "reason")])
         assert REFUSAL_RECOVERY_PREFIX not in out
+
+
+class TestPendingProjectReset:
+    """Locks in the start-of-turn / end-of-turn dual-consume contract for
+    `slot._pending_reset_history_key`. See chat_runner._run_chat for context."""
+
+    @pytest.mark.asyncio
+    async def test_start_of_turn_resets_before_get_or_create(self, tmp_path):
+        state, client = _make_state(tmp_path, context_builder=_context_builder())
+        slot = _make_slot()
+        slot._pending_reset_history_key = "dashboard:chat-1-test"
+        state.sessions.reset = AsyncMock()
+        _set_stream(client, [_complete_event()])
+
+        with _patch_stats():
+            await _run_chat(state, slot, "hello")
+
+        state.sessions.reset.assert_any_await("dashboard:chat-1-test")
+        # reset() must appear before get_or_create() on the parent sessions mock.
+        sess_calls = state.sessions.mock_calls
+        reset_pos = next(i for i, c in enumerate(sess_calls) if c[0] == "reset")
+        goc_pos = next(i for i, c in enumerate(sess_calls) if c[0] == "get_or_create")
+        assert reset_pos < goc_pos
+        assert slot._pending_reset_history_key is None
+
+    @pytest.mark.asyncio
+    async def test_no_pending_flag_does_not_reset(self, tmp_path):
+        state, client = _make_state(tmp_path, context_builder=_context_builder())
+        slot = _make_slot()
+        state.sessions.reset = AsyncMock()
+        _set_stream(client, [_complete_event()])
+
+        with _patch_stats():
+            await _run_chat(state, slot, "hello")
+
+        state.sessions.reset.assert_not_awaited()
+        assert slot._pending_reset_history_key is None
+
+    @pytest.mark.asyncio
+    async def test_reset_failure_retains_flag_for_retry(self, tmp_path):
+        """If reset() raises, the flag stays set so the next turn can retry."""
+        state, client = _make_state(tmp_path, context_builder=_context_builder())
+        slot = _make_slot()
+        slot._pending_reset_history_key = "dashboard:chat-1-test"
+        state.sessions.reset = AsyncMock(side_effect=RuntimeError("reset failed"))
+        _set_stream(client, [_complete_event()])
+
+        with _patch_stats():
+            await _run_chat(state, slot, "hello")
+
+        assert slot._pending_reset_history_key == "dashboard:chat-1-test"
+
+    @pytest.mark.asyncio
+    async def test_end_of_turn_consumes_flag_set_mid_turn(self, tmp_path):
+        """Flag set mid-turn (by set_project MCP tool) is consumed in finally."""
+        state, client = _make_state(tmp_path, context_builder=_context_builder())
+        slot = _make_slot()
+        state.sessions.reset = AsyncMock()
+
+        def set_flag_mid_stream(*args, **kwargs):
+            slot._pending_reset_history_key = "dashboard:chat-1-test"
+            return _async_iter([_complete_event()])
+
+        client.stream = MagicMock(side_effect=set_flag_mid_stream)
+
+        with _patch_stats():
+            await _run_chat(state, slot, "hello")
+
+        state.sessions.reset.assert_any_await("dashboard:chat-1-test")
+        assert slot._pending_reset_history_key is None
+
+
+class TestInteractiveDenyDoesNotTriggerRecovery:
+    """Mesh-2344: an interactive user denial (clicking Reject in the dashboard)
+    must NOT populate _refusal_reasons or trigger refusal-recovery. Only
+    system-side blocks (hook deny at ~L1974) should trigger recovery."""
+
+    @pytest.mark.asyncio
+    async def test_interactive_reject_does_not_enqueue_recovery(self, tmp_path):
+        """User clicks Reject on a bash command that would fail the safety gate.
+        The turn should end cleanly with NO recovery continuation injected."""
+        # Use allow() so we reach the interactive approval path (not auto-deny).
+        cb = _context_builder(ToolHookResult.allow())
+        state, client = _make_state(tmp_path, context_builder=cb)
+        slot = _make_slot()
+
+        # Provide context-usage mock so post-stream bookkeeping doesn't raise.
+        client.context_usage_pct = MagicMock(return_value=0.0)
+        client._client = client
+        client.last_prompt_stats = None
+
+        # A bash command NOT on the read-only allowlist — triggers unsafe_bash_reason.
+        bash_event = LLMEvent(
+            kind=EVENT_PERMISSION_REQUEST,
+            title="execute_bash: python3 -c 'print(1)'",
+            tool_kind="bash",
+            request_id="req-1",
+            tool_input='{"command": "python3 -c \'print(1)\'"}',
+        )
+
+        # Multi-call stream: first call yields the permission event (triggers
+        # interactive approval flow + rejection). The empty-response retry
+        # re-queues and calls stream again; return a clean completion so the
+        # turn terminates without requesting another tool approval.
+        calls = {"n": 0}
+
+        def _stream(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _async_iter([bash_event, _complete_event()])
+            return _async_iter([_complete_event()])
+
+        client.stream = MagicMock(side_effect=_stream)
+
+        # Simulate the user clicking Reject after a short delay.
+        async def _auto_reject():
+            await asyncio.sleep(0.05)
+            fut = slot._approval_futures.get("req-1")
+            if fut and not fut.done():
+                fut.set_result("rejected")
+
+        asyncio.get_running_loop().create_task(_auto_reject())
+
+        with _patch_stats():
+            await _run_chat(state, slot, "hello")
+            if slot.task:
+                await slot.task
+
+        # The key assertion: no recovery continuation was injected.
+        assert not any(
+            REFUSAL_RECOVERY_PREFIX in m.get("content", "") for m in slot.messages
+        ), "Interactive user deny must NOT trigger refusal-recovery"
+        # The tool was rejected (not approved).
+        client.reject_tool.assert_called()
+        client.approve_tool.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_hook_deny_still_populates_refusal_recovery(self, tmp_path):
+        """Complementary check: a system-side hook deny DOES trigger recovery,
+        confirming the hook-deny path (L1974) is unaffected by the fix."""
+        cb = _context_builder(
+            ToolHookResult.deny("Blocked by security policy: rm -rf /")
+        )
+        state, client = _make_state(tmp_path, context_builder=cb)
+        slot = _make_slot()
+
+        client.context_usage_pct = MagicMock(return_value=0.0)
+        client._client = client
+        client.last_prompt_stats = None
+
+        calls = {"n": 0}
+
+        def _stream(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _async_iter([_permission_event(), _complete_event()])
+            return _async_iter([_complete_event()])
+
+        client.stream = MagicMock(side_effect=_stream)
+
+        with _patch_stats():
+            await _run_chat(state, slot, "hello")
+            if slot.task:
+                await slot.task
+
+        # Recovery continuation IS injected for system-side deny.
+        injects = [m for m in slot.messages if m.get("role") == "inject"]
+        assert injects, "Hook deny must trigger refusal-recovery"
+        recovery = injects[-1]["content"]
+        assert recovery.startswith(REFUSAL_RECOVERY_PREFIX)
+        assert "security policy" in recovery.lower()

@@ -761,3 +761,48 @@ class TestCachedParseSessions:
         # Empty dict is cached (sentinel is None, so {} is a hit) — parse once.
         assert calls["n"] == 1
         _reset_sessions_cache()
+
+
+class TestBuildTokenRecordCredits:
+    """_build_token_record persists per-turn credits (kiro) and defaults to 0."""
+
+    def test_record_includes_credits(self):
+        from types import SimpleNamespace
+
+        event = SimpleNamespace(
+            input_tokens=0,
+            output_tokens=0,
+            cost_usd=0.0,
+            credits=1.19,
+            num_turns=0,
+            duration_ms=0,
+            cache_creation_tokens=0,
+            cache_read_tokens=0,
+        )
+        rec = usage_mod._build_token_record(
+            "chat-1", "claude-opus-4-8", event, "acp", datetime.now(timezone.utc)
+        )
+        assert rec["_type"] == "tokens"
+        assert rec["credits"] == pytest.approx(1.19)
+        assert rec["slot"] == "chat-1"
+        assert rec["provider"] == "acp"
+
+    def test_record_defaults_credits_to_zero_when_absent(self):
+        from types import SimpleNamespace
+
+        event = SimpleNamespace(input_tokens=10, output_tokens=5)
+        rec = usage_mod._build_token_record(
+            "s", "m", event, "claude_code", datetime.now(timezone.utc)
+        )
+        assert rec["credits"] == 0.0
+
+    def test_record_coerces_non_numeric_credits_to_zero(self):
+        from types import SimpleNamespace
+
+        event = SimpleNamespace(
+            input_tokens=0, output_tokens=0, credits="not-a-number"
+        )
+        rec = usage_mod._build_token_record(
+            "s", "m", event, "acp", datetime.now(timezone.utc)
+        )
+        assert rec["credits"] == 0.0

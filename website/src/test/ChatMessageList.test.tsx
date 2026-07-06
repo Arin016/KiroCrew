@@ -1,12 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
-import React from 'react'
+import React, { type ReactNode } from 'react'
 import type { ChatMessage } from '../types'
+import type { TurnItem } from '../pages/chat/types'
 
 // ── Mocks for heavy child components ──
+// Each mock types only the props it actually reads.
 
 vi.mock('../pages/chat/AssistantMessage', () => ({
-  default: (props: any) => (
+  default: (props: { content: string; isStreaming?: boolean }) => (
     <div data-testid="assistant-message" data-streaming={String(props.isStreaming)}>
       {props.content}
     </div>
@@ -14,13 +16,15 @@ vi.mock('../pages/chat/AssistantMessage', () => ({
 }))
 
 vi.mock('../pages/chat/UserMessage', () => ({
-  default: (props: any) => (
+  default: (props: { content: string }) => (
     <div data-testid="user-message">{props.content}</div>
   ),
 }))
 
 vi.mock('../pages/chat/CollapsibleToolGroup', () => ({
-  default: ({ children, count, hasPermission, pendingPermCount, ...rest }: any) => (
+  default: ({ children, count, hasPermission, pendingPermCount }: {
+    children?: ReactNode; count?: number; hasPermission?: boolean; pendingPermCount?: number
+  }) => (
     <div
       data-testid="collapsible-tool-group"
       data-count={count}
@@ -33,9 +37,11 @@ vi.mock('../pages/chat/CollapsibleToolGroup', () => ({
 }))
 
 vi.mock('../pages/chat/TurnBlock', () => ({
-  default: ({ turn, renderItem }: any) => (
+  default: ({ turn, renderItem }: {
+    turn: { items: TurnItem[] }; renderItem: (item: TurnItem, i: number) => ReactNode
+  }) => (
     <div data-testid="turn-block">
-      {turn.items.map((item: any, i: number) => (
+      {turn.items.map((item: TurnItem, i: number) => (
         <div key={i}>{renderItem(item, i)}</div>
       ))}
     </div>
@@ -43,7 +49,7 @@ vi.mock('../pages/chat/TurnBlock', () => ({
 }))
 
 vi.mock('../components/MarkdownRenderer', () => ({
-  default: ({ content }: any) => <span data-testid="markdown">{content}</span>,
+  default: ({ content }: { content: string }) => <span data-testid="markdown">{content}</span>,
 }))
 
 import ChatMessageList from '../app-sdk/ChatMessageList'

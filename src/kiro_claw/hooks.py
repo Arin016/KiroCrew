@@ -450,14 +450,37 @@ def validate_file_path(raw: str) -> str | None:
 def safe_read_file(path: str) -> str:
     """Read a file after enforcing ``is_sensitive_path``.
 
-    Raises ``PermissionError`` if the path is sensitive.
-    """
-    from pathlib import Path
+    Canonicalizes the path (following every symlink), re-checks the RESOLVED
+    target against ``is_sensitive_path`` — so a symlink pointing into ``~/.aws``
+    etc. is refused through the link — then opens the canonical path with
+    ``O_NOFOLLOW`` as defense-in-depth against a TOCTOU swap of the final
+    component into a symlink after the check (AWS-33 / AWS-62).  Opening the
+    already-resolved canonical path never rejects a legitimate file (its final
+    component is not a symlink by construction), so this only closes the race.
 
-    resolved = str(Path(path).expanduser().resolve())
+    Raises ``PermissionError`` if the path is sensitive or a symlink race is
+    detected. Other read errors (missing file, permission denied) propagate
+    unchanged so callers surface accurate messages.
+    """
+    import errno
+    import os
+
+    resolved = os.path.realpath(os.path.expanduser(path))
     if is_sensitive_path(resolved):
         raise PermissionError(f"Blocked: access to sensitive path: {resolved}")
-    return Path(resolved).read_text(encoding="utf-8")
+    try:
+        fd = os.open(resolved, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        # ELOOP on the canonical (symlink-free) path means a concurrent TOCTOU
+        # swap of the final component into a symlink — refuse it. Any other
+        # OSError (ENOENT, EACCES) is a normal read error; re-raise as-is.
+        if exc.errno in (errno.ELOOP, getattr(errno, "EMLINK", -1)):
+            raise PermissionError(
+                f"Blocked: refusing to follow symlink at {resolved}"
+            ) from exc
+        raise
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+        return fh.read()
 
 
 MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MB safety cap
@@ -470,16 +493,26 @@ class FileTooLargeError(Exception):
 def safe_read_file_bytes(raw: str) -> bytes | None:
     """Read file bytes through centralized is_sensitive_path() enforcement.
 
+    ``validate_file_path`` already canonicalizes via ``realpath`` (following
+    symlinks) and rejects sensitive resolved targets, so a workspace symlink
+    into ``~/.aws`` etc. is refused before any read.  The final open uses
+    ``O_NOFOLLOW`` on the canonical path as defense-in-depth against a TOCTOU
+    swap of the final component into a symlink after the check (AWS-33).
+
     Returns file content as bytes, or None if path is rejected or unreadable.
     """
+    import os
+
     path = validate_file_path(raw)
     if path is None:
         return None
-    from pathlib import Path
 
-    p = Path(path)
     try:
-        with p.open("rb") as fh:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as fh:
             data = fh.read(MAX_FILE_BYTES + 1)
         if len(data) > MAX_FILE_BYTES:
             raise FileTooLargeError(f"File exceeds {MAX_FILE_BYTES // (1024 * 1024)} MB safety cap")

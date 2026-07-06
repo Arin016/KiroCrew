@@ -69,7 +69,7 @@ export default function SessionArchive() {
     <div className="flex gap-4 h-full text-sm">
       <div className="w-1/3 flex flex-col border border-border rounded p-2 overflow-hidden">
         <div className="flex gap-2 mb-2">
-          <input className="flex-1 bg-bg-2 border border-border rounded px-2 py-1 text-[13px]" placeholder="Fuzzy filter (substring match)" value={filterKey} onChange={e => setFilterKey(e.target.value)} />
+          <input aria-label="Fuzzy filter (substring match)" className="flex-1 bg-bg-2 border border-border rounded px-2 py-1 text-[13px]" placeholder="Fuzzy filter (substring match)" value={filterKey} onChange={e => setFilterKey(e.target.value)} />
           <button className="px-2 py-1 bg-accent text-white rounded text-[13px]" onClick={loadList}>Reload</button>
         </div>
         {loading && <div className="text-muted text-[13px]">Loading…</div>}
@@ -78,7 +78,14 @@ export default function SessionArchive() {
           {archives.length === 0 && !loading && !error && <div className="text-muted text-[13px] p-2">No archives. Archives are created when session files are rotated (&gt;2MB) or compacted.</div>}
           {archives.length > 0 && visible.length === 0 && !error && <div className="text-muted text-[13px] p-2">No matches for "{filterKey}".</div>}
           {visible.map(a => (
-            <div key={a.name} onClick={() => openArchive(a.name)} className={`cursor-pointer px-2 py-1 rounded hover:bg-bg-2 ${selected === a.name ? 'bg-bg-2' : ''}`}>
+            <div
+              key={a.name}
+              role="button"
+              tabIndex={0}
+              onClick={() => openArchive(a.name)}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openArchive(a.name) } }}
+              className={`cursor-pointer px-2 py-1 rounded hover:bg-bg-2 ${selected === a.name ? 'bg-bg-2' : ''}`}
+            >
               <div className="text-[13px] font-mono truncate" title={a.key}>{a.key}</div>
               <div className="text-[13px] text-muted flex justify-between"><span>{fmtStamp(a.stamp)}</span><span>{fmtSize(a.size)}</span></div>
             </div>

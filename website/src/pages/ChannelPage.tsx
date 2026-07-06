@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect, useCallback, useMemo, type ReactNode } from 'react'
+import Clickable from '../components/Clickable'
 import { Hourglass, Ear, Check, X, Wrench, Radio, VolumeX, User, MessageSquare, Users, Zap, AlertTriangle, RotateCcw } from 'lucide-react'
 import { useAppSelector } from '../store'
+import type { RootState } from '../store'
 import { api } from '../api/client'
 import ApprovalCard from '../components/ApprovalCard'
 import { Btn, Input, Badge, EmptyState, PageHeader } from '../components/ui'
@@ -105,7 +107,7 @@ function MessageBubble({ msg, agents, onReply, onOpenThread, onApprove }: {
   onReply?: () => void; onOpenThread?: () => void; onApprove?: (action: string) => void
 }) {
   const isHuman = msg.fromId === 'human'
-  const approvalMode = useAppSelector((s: any) => s.dashboard.approvalMode)
+  const approvalMode = useAppSelector((s: RootState) => s.dashboard.approvalMode)
   const agentIdx = agents.findIndex(a => a.id === msg.fromId)
   const c = isHuman ? null : agentColor(agentIdx >= 0 ? agentIdx : 0)
   const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -219,15 +221,21 @@ function NewChannelDialog({ onClose, onCreate, presets }: { onClose: () => void;
   }
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-bg-elevated border border-border rounded-xl p-5 w-96 shadow-xl" onClick={e => e.stopPropagation()}>
+    <Clickable className="fixed inset-0 bg-black/50 flex items-center justify-center z-[100]" onClick={onClose}>
+      {/* Handlers only stop propagation so clicks/keys inside the dialog don't
+          bubble to the backdrop's close handler — the dialog itself is not an
+          interactive control. label-has-for is deprecated and can't detect the
+          custom <Input> as a nested control; htmlFor+id (and aria-label) already
+          give a real programmatic association. */}
+      {/* eslint-disable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/label-has-for */}
+      <div role="dialog" aria-modal="true" aria-label="New channel" className="bg-bg-elevated border border-border rounded-xl p-5 w-96 shadow-xl" onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
         <h3 className="text-base font-semibold text-text-strong mb-4">New Channel</h3>
-        <label className="block text-[13px] font-medium text-muted mb-1">Topic</label>
-        <Input value={topic} onChange={e => setTopic(e.target.value)} autoFocus
+        <label htmlFor="new-channel-topic" className="block text-[13px] font-medium text-muted mb-1">Topic</label>
+        <Input id="new-channel-topic" aria-label="Topic" value={topic} onChange={e => setTopic(e.target.value)} autoFocus
           className="w-full mb-4"
           placeholder="e.g. Investigate Gamma deployment failure" />
-        <label className="block text-[13px] font-medium text-muted mb-1">Team Preset</label>
-        <div className="space-y-1.5 mb-4">
+        <span id="new-channel-preset-label" className="block text-[13px] font-medium text-muted mb-1">Team Preset</span>
+        <div role="radiogroup" aria-labelledby="new-channel-preset-label" className="space-y-1.5 mb-4">
           {presets.map(p => (
             <Btn key={p.id} onClick={() => setPreset(p.id)}
               className={`w-full text-left px-3 py-2 !rounded-lg text-sm ${preset === p.id ? '!border-accent bg-accent/10 text-text-strong' : '!border-border text-muted hover:bg-bg-hover'}`}>
@@ -241,7 +249,8 @@ function NewChannelDialog({ onClose, onCreate, presets }: { onClose: () => void;
           <Btn onClick={handleCreate} disabled={!topic.trim()} primary>Create</Btn>
         </div>
       </div>
-    </div>
+      {/* eslint-enable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/label-has-for */}
+    </Clickable>
   )
 }
 
@@ -293,6 +302,7 @@ function MentionInput({ agents, value, onChange, onSend }: {
       )}
       <textarea ref={ref} value={value} onChange={handleChange}
         rows={1}
+        aria-label="Message the channel"
         className="w-full bg-bg-elevated border border-border rounded-md px-3 py-2 text-text text-sm font-body outline-none flex-1 transition-colors focus-ring resize-none"
         placeholder="Message the channel... (type @ to mention)"
         onKeyDown={e => {
@@ -317,12 +327,12 @@ function AddAgentForm({ onAdd, onCancel }: { onAdd: (role: string, task: string,
   return (
     <div className="p-2 space-y-2 border-t border-border">
       <div>
-        <label className="text-[11px] text-muted font-medium mb-1 block">Agent</label>
+        <span className="text-[11px] text-muted font-medium mb-1 block">Agent</span>
         <AgentSelector agents={agents} defaultAgent={defaultAgent} value={agent || defaultAgent} onChange={setAgent} />
       </div>
-      <Input value={role} onChange={e => setRole(e.target.value)} placeholder="Role (e.g. Logs Agent)" autoFocus
+      <Input value={role} onChange={e => setRole(e.target.value)} placeholder="Role (e.g. Logs Agent)" aria-label="Role" autoFocus
         className="w-full text-[13px]" />
-      <Input value={task} onChange={e => setTask(e.target.value)} placeholder="Task (e.g. Search CloudWatch logs)"
+      <Input value={task} onChange={e => setTask(e.target.value)} placeholder="Task (e.g. Search CloudWatch logs)" aria-label="Task"
         className="w-full text-[13px]"
         onKeyDown={e => { if (e.key === 'Enter' && role.trim()) onAdd(role.trim(), task.trim(), agent || defaultAgent) }} />
       <div className="flex gap-1">
@@ -350,8 +360,9 @@ function ChannelListItem({ ch, active, onClick }: { ch: Channel; active: boolean
 
 // ── Main Page ──
 
-const apiError = (err: any, fallback: string) => {
-  try { return JSON.parse(err?.message)?.error || fallback } catch { return err?.message || fallback }
+const apiError = (err: unknown, fallback: string) => {
+  const message = err instanceof Error ? err.message : ''
+  try { return JSON.parse(message)?.error || fallback } catch { return message || fallback }
 }
 
 export default function ChannelPage() {
@@ -469,7 +480,7 @@ export default function ChannelPage() {
         setChannels(prev => prev.some(c => c.id === ch.id) ? prev : [ch, ...prev])
         setActiveId(res.channel.id)
       }
-    } catch (err: any) {
+    } catch (err) {
       setError(apiError(err, 'Failed to create channel'))
     }
   }
@@ -523,7 +534,7 @@ export default function ChannelPage() {
                   await api.channelClearContext(channel.id, 'all')
                   const res = await api.channelGet(channel.id)
                   setChannels(prev => prev.map(c => c.id === channel.id ? mapChannel(res) : c))
-                } catch (e: any) { alert('Failed to clear context: ' + (e?.message || 'unknown error')) }
+                } catch (e) { alert('Failed to clear context: ' + (e instanceof Error ? e.message : 'unknown error')) }
               }} title="Clear all context">
                 <RotateCcw className="lucide-inline" /> Clear Context
               </Btn>
@@ -606,7 +617,7 @@ export default function ChannelPage() {
                           await api.channelClearContext(channel.id, 'agent', agent.id)
                           const res = await api.channelGet(channel.id)
                           setChannels(prev => prev.map(c => c.id === channel.id ? mapChannel(res) : c))
-                        } catch (e: any) { alert('Failed to clear context: ' + (e?.message || 'unknown error')) }
+                        } catch (e) { alert('Failed to clear context: ' + (e instanceof Error ? e.message : 'unknown error')) }
                       }} />
                   ))}
                 </div>
@@ -615,7 +626,7 @@ export default function ChannelPage() {
                     <AddAgentForm onCancel={() => setShowAddAgent(false)} onAdd={async (role, task, agent) => {
                       if (!channel) return
                       setShowAddAgent(false)
-                      try { await api.channelAddAgent(channel.id, { role, task: task || channel.topic, agent }) } catch (err: any) { setError(apiError(err, 'Failed to add agent')) }
+                      try { await api.channelAddAgent(channel.id, { role, task: task || channel.topic, agent }) } catch (err) { setError(apiError(err, 'Failed to add agent')) }
                     }} />
                   ) : (
                     <Btn onClick={() => setShowAddAgent(true)} primary className="w-full">+ Add Agent</Btn>

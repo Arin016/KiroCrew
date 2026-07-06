@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Provider } from 'react-redux'
 import { MemoryRouter } from 'react-router-dom'
@@ -63,13 +63,23 @@ beforeEach(() => {
 
 /** Open the workspace StyledSelect dropdown in the create form and click
  *  the "+ New workspace…" action to open the modal. */
-async function openModalViaWorkspaceDropdown() {
-  // Scope to the Workspace label in the create form (it's inside a label element)
+/** Locate the "Workspace" field group's StyledSelect trigger button.
+ *  The field label is a <span> (it labels a StyledSelect, which has no native
+ *  form control to associate a <label> with), so we scope by the enclosing
+ *  ``.flex.flex-col`` group that actually contains a button trigger rather
+ *  than by the label's tag name. */
+function findWorkspaceTrigger(): HTMLElement {
   const wsLabels = screen.getAllByText('Workspace')
-  // The create-form label is a <label> element with the uppercase styling class
-  const wsLabel = wsLabels.find(el => el.tagName === 'LABEL') as HTMLElement
-  const wsGroup = wsLabel.closest('.flex.flex-col') as HTMLElement
-  const wsTrigger = within(wsGroup).getByRole('button')
+  for (const label of wsLabels) {
+    const group = label.closest('.flex.flex-col') as HTMLElement | null
+    const trigger = group?.querySelector('button')
+    if (trigger) return trigger as HTMLElement
+  }
+  throw new Error('Workspace StyledSelect trigger not found')
+}
+
+async function openModalViaWorkspaceDropdown() {
+  const wsTrigger = findWorkspaceTrigger()
   fireEvent.click(wsTrigger)
   // Now click the "+ New workspace…" action in the portal dropdown
   const newWsBtn = await screen.findByText('+ New workspace…')
@@ -82,10 +92,7 @@ describe('WorkspaceModal — StyledSelect trigger and modal lifecycle', () => {
     await waitFor(() => expect(mockApi.kiroclawAgents).toHaveBeenCalled())
     await waitFor(() => expect(mockApi.workspaces).toHaveBeenCalled())
     // Open the workspace StyledSelect
-    const wsLabels = screen.getAllByText('Workspace')
-    const wsLabel = wsLabels.find(el => el.tagName === 'LABEL') as HTMLElement
-    const wsGroup = wsLabel.closest('.flex.flex-col') as HTMLElement
-    const wsTrigger = within(wsGroup).getByRole('button')
+    const wsTrigger = findWorkspaceTrigger()
     expect(wsTrigger).toBeTruthy()
     fireEvent.click(wsTrigger)
     expect(await screen.findByText('+ New workspace…')).toBeInTheDocument()
@@ -112,9 +119,10 @@ describe('WorkspaceModal — StyledSelect trigger and modal lifecycle', () => {
     await waitFor(() => expect(mockApi.workspaces).toHaveBeenCalled())
     await openModalViaWorkspaceDropdown()
     expect(screen.getByText('Create Workspace')).toBeInTheDocument()
-    const backdrop = screen.getByText('Create Workspace').closest('.fixed')
-    expect(backdrop).toBeTruthy()
-    fireEvent.click(backdrop!)
+    // The dismiss backdrop is an accessible role="button" labelled "Close dialog"
+    // (a Clickable behind the dialog), not the outer positioning wrapper.
+    const backdrop = screen.getByRole('button', { name: 'Close dialog' })
+    fireEvent.click(backdrop)
     await waitFor(() => expect(screen.queryByText('Create Workspace')).not.toBeInTheDocument())
   })
 })

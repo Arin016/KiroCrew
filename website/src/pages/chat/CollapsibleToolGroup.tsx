@@ -70,6 +70,22 @@ const CollapsibleToolGroup = memo(function CollapsibleToolGroup({ count, autoExp
   const preview = needsAttention ? sanitizeLlmOutput(extractPreview(permissionMeta)) : ''
   const truncated = preview.length > 150 ? preview.slice(0, 150) + '…' : preview
 
+  // Dispatch an approval decision, optimistically reflecting it locally and rolling
+  // back on failure. Logs failures for diagnostics via the error console.
+  const submitDecision = (decision: string) => {
+    setSubmitting(true)
+    setLocalResolved(decision)
+    void Promise.resolve()
+      .then(() => onApprove?.(decision))
+      .catch((err) => {
+        // Intentional error diagnostic: surfaces a failed approval round-trip.
+        // eslint-disable-next-line no-console
+        console.error('Approval failed:', err)
+        setLocalResolved(null)
+        setSubmitting(false)
+      })
+  }
+
   return (
     <div className="my-1">
       <button
@@ -101,9 +117,9 @@ const CollapsibleToolGroup = memo(function CollapsibleToolGroup({ count, autoExp
       )}
       {needsAttention && !expanded && onApprove && (
         <div className="mt-1 ml-4 pl-3 flex gap-1.5 flex-wrap">
-          <button disabled={submitting} className="px-2.5 py-1 rounded-md border border-border bg-transparent text-muted text-[13px] cursor-pointer font-body hover:text-text hover:border-border-strong hover:bg-bg-hover transition-all disabled:opacity-50 disabled:cursor-not-allowed" onClick={e => { e.stopPropagation(); setSubmitting(true); setLocalResolved('approved'); void Promise.resolve().then(() => onApprove('approved')).catch(err => { console.error('Approval failed:', err); setLocalResolved(null); setSubmitting(false) }) }}><CheckCircle className="lucide-inline" /> Approve</button>
-          <button disabled={submitting} className="px-2.5 py-1 rounded-md border border-border bg-transparent text-muted text-[13px] cursor-pointer font-body hover:text-text hover:border-border-strong hover:bg-bg-hover transition-all disabled:opacity-50 disabled:cursor-not-allowed" onClick={e => { e.stopPropagation(); setSubmitting(true); setLocalResolved('trust'); void Promise.resolve().then(() => onApprove('trust')).catch(err => { console.error('Approval failed:', err); setLocalResolved(null); setSubmitting(false) }) }}><Handshake className="lucide-inline" /> Trust</button>
-          <button disabled={submitting} className="px-2.5 py-1 rounded-md border border-border bg-transparent text-muted text-[13px] cursor-pointer font-body hover:text-danger hover:border-danger transition-all disabled:opacity-50 disabled:cursor-not-allowed" onClick={e => { e.stopPropagation(); setSubmitting(true); setLocalResolved('rejected'); void Promise.resolve().then(() => onApprove('rejected')).catch(err => { console.error('Approval failed:', err); setLocalResolved(null); setSubmitting(false) }) }}><Ban className="lucide-inline" /> Reject</button>
+          <button disabled={submitting} className="px-2.5 py-1 rounded-md border border-border bg-transparent text-muted text-[13px] cursor-pointer font-body hover:text-text hover:border-border-strong hover:bg-bg-hover transition-all disabled:opacity-50 disabled:cursor-not-allowed" onClick={e => { e.stopPropagation(); submitDecision('approved') }}><CheckCircle className="lucide-inline" /> Approve</button>
+          <button disabled={submitting} className="px-2.5 py-1 rounded-md border border-border bg-transparent text-muted text-[13px] cursor-pointer font-body hover:text-text hover:border-border-strong hover:bg-bg-hover transition-all disabled:opacity-50 disabled:cursor-not-allowed" onClick={e => { e.stopPropagation(); submitDecision('trust') }}><Handshake className="lucide-inline" /> Trust</button>
+          <button disabled={submitting} className="px-2.5 py-1 rounded-md border border-border bg-transparent text-muted text-[13px] cursor-pointer font-body hover:text-danger hover:border-danger transition-all disabled:opacity-50 disabled:cursor-not-allowed" onClick={e => { e.stopPropagation(); submitDecision('rejected') }}><Ban className="lucide-inline" /> Reject</button>
         </div>
       )}
 

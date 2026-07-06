@@ -22,7 +22,7 @@ export function createTestStore(preloadedState?: Partial<RootState>) {
       terminal: terminalReducer,
       instances: instancesReducer,
     },
-    preloadedState: preloadedState as any,
+    preloadedState,
   })
 }
 

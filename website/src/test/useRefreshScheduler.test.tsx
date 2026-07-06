@@ -19,6 +19,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, cleanup } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { useRefreshScheduler, type UseRefreshSchedulerOptions } from '../hooks/useRefreshScheduler'
+import { __resetRefreshOnceForTests } from '../api/refreshOnce'
 
 const ProbeComponent = ({ opts }: { opts?: UseRefreshSchedulerOptions }): null => {
   useRefreshScheduler(opts)
@@ -71,6 +72,7 @@ describe('useRefreshScheduler', () => {
   let originalFetch: typeof fetch
 
   beforeEach(() => {
+    __resetRefreshOnceForTests()
     vi.useFakeTimers()
     fetchMock = vi.fn()
     originalFetch = globalThis.fetch
@@ -270,5 +272,57 @@ describe('useRefreshScheduler', () => {
     // Verify /api/auth/me was re-fetched after the refresh (cache invalidation worked)
     const meCalls = fetchMock.mock.calls.filter((c) => c[0] === '/api/auth/me')
     expect(meCalls.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('TR-F-11: 403 + X-Auth-Required on /api/auth/me triggers proactive refresh (cold-reopen banner fix)', async () => {
+    // The auth middleware denies an expired/absent access cookie
+    // with 403 + X-Auth-Required (KiroClaw token_auth._deny), NOT 401. The
+    // recovery MUST fire on this signal too — otherwise a cold reopen shows
+    // the red session-expired banner and never uses the still-valid 30-day
+    // refresh cookie (the daily-banner bug).
+    const nowSec = Math.floor(Date.now() / 1000)
+    // 1st call: GET /api/auth/me -> 403 + X-Auth-Required (cold reopen)
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'Token required' }), {
+        status: 403,
+        headers: { 'content-type': 'application/json', 'X-Auth-Required': 'true' },
+      }),
+    )
+    // 2nd call: POST /api/auth/refresh -> 200 (refresh cookie still valid)
+    fetchMock.mockResolvedValueOnce(status(200, { refreshed_at: nowSec, session_exp: nowSec + TWENTY_H, refresh_exp: nowSec + 30 * 86400 }))
+    // 3rd call: retry GET /api/auth/me -> 200 (new cookies attached by browser)
+    fetchMock.mockResolvedValueOnce(okJson({ user_id: 'alice', session_exp: nowSec + TWENTY_H, refresh_exp: nowSec + 30 * 86400 }))
+
+    renderProbe()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Verify the sequence: /me 403 -> /refresh 200 -> /me 200
+    const calls = fetchMock.mock.calls
+    expect(calls.length).toBeGreaterThanOrEqual(3)
+    expect(calls[0][0]).toBe('/api/auth/me')
+    expect(calls[1][0]).toBe('/api/auth/refresh')
+    expect((calls[1][1] as RequestInit).method).toBe('POST')
+    expect(calls[2][0]).toBe('/api/auth/me')
+
+    // No backoff timer — only the one proactive refresh.
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000)
+    expect(refreshCalls(fetchMock).length).toBe(1)
+  })
+
+  it('TR-F-12: plain 403 WITHOUT X-Auth-Required does NOT trigger a refresh', async () => {
+    // Precision guard: a genuine authorization 403 (e.g. a disabled feature
+    // endpoint) must NOT be mistaken for an expired-session signal — only
+    // 403 + X-Auth-Required is the auth-middleware deny. No refresh fires.
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'forbidden' }), {
+        status: 403,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+
+    renderProbe()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(refreshCalls(fetchMock).length).toBe(0)
   })
 })

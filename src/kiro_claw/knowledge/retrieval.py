@@ -17,6 +17,22 @@ from .store import KnowledgeStore
 
 logger = logging.getLogger(__name__)
 
+# Recall for natural-language queries (Mesh-1676).
+# Common English stopwords + connective phrasing are dropped before FTS5
+# matching so a query like "VoC related to Budget Planning" does not require the
+# literal tokens "related"/"to" to appear in a matching document.
+_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "about", "be", "been", "by", "do",
+    "does", "did", "for", "from", "how", "in", "into", "is", "it", "its", "of",
+    "on", "or", "related", "that", "the", "their", "them", "then", "there",
+    "these", "this", "those", "to", "was", "were", "what", "when", "where",
+    "which", "who", "why", "will", "with", "i", "we", "you",
+})
+
+# Weight applied to the vector leg in RRF fusion so semantically-strong matches
+# dominate when the keyword leg returns weak/literal junk (Mesh-1676).
+VECTOR_RRF_WEIGHT = 2.0
+
 
 class HybridRetriever:
     """FTS5 keyword + graph traversal + optional vector search, fused with RRF."""
@@ -32,7 +48,10 @@ class HybridRetriever:
         gr = self._graph_search(query, limit=limit * 2)
         vec = self._vector_search(query, limit=limit * 2)
 
-        fused = self._rrf_fuse(kw, gr, vec)
+        # Vector leg is weighted higher so semantic matches dominate when the
+        # keyword leg is weak (Mesh-1676). Weights align positionally
+        # with (kw, gr, vec).
+        fused = self._rrf_fuse(kw, gr, vec, weights=(1.0, 1.0, VECTOR_RRF_WEIGHT))
 
         # Batch-fetch all candidate items once
         all_ids = [item_id for item_id, _ in fused]
@@ -76,7 +95,128 @@ class HybridRetriever:
                 "source": item.get("source_id"),
                 "match_type": "+".join(types),
             })
+
+        self._attach_source_locations(results)
+        self._attach_citation_sources(results)
         return results
+
+    def _attach_source_locations(self, results: list[dict]) -> None:
+        """Enrich results in place with citation metadata (section + line range).
+
+        Batch-fetches ``source_locations`` for every result item_id in one query
+        (avoids N+1) and adds ``section_title``, ``chunk_range`` and ``anchor``.
+        Item == chunk is the norm, so the first location row per item_id is used.
+        Results without a stored location are left unchanged (degrade to
+        name-only display downstream).
+        """
+        if not results:
+            return
+        item_ids = [r["id"] for r in results]
+        placeholders = ",".join("?" for _ in item_ids)
+        try:
+            rows = self.store.db.execute(
+                "SELECT item_id, chunk_range, section_title, anchor "
+                f"FROM source_locations WHERE item_id IN ({placeholders})",  # noqa: S608
+                item_ids,
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return
+        loc_by_item: dict[str, sqlite3.Row] = {}
+        for row in rows:
+            loc_by_item.setdefault(row["item_id"], row)
+        for result in results:
+            loc = loc_by_item.get(result["id"])
+            if loc:
+                result["section_title"] = loc["section_title"]
+                result["chunk_range"] = loc["chunk_range"]
+                result["anchor"] = loc["anchor"]
+
+    def _attach_citation_sources(self, results: list[dict]) -> None:
+        """Enrich results in place with source identity + a per-document locator.
+
+        Adds ``source_type``, ``source_name`` and ``source_uri`` (resolved once
+        per distinct source id). Then attaches the most specific locator the
+        source type affords, reusing the ingest-time reverse maps:
+
+        - folder/vault sources -> ``file_path`` (the specific file within the
+          folder, from ``folder_file_state``), since the source uri is only the
+          folder root.
+        - the aggregate artifact source -> ``artifact_slug`` + ``artifact_name``
+          (from ``artifact_item_state``), so a citation can name the artifact
+          and deep-link to ``/artifacts/<slug>``.
+        - every other source type -> nothing extra; ``source_uri`` is already the
+          document locator (uploads, quip, etc.).
+
+        Results whose source is missing or unmapped degrade cleanly -- the extra
+        keys are simply absent.
+        """
+        if not results:
+            return
+        source_ids = {r["source"] for r in results if r.get("source")}
+        if not source_ids:
+            return
+        sid_list = list(source_ids)
+        placeholders = ",".join("?" for _ in sid_list)
+        meta: dict[str, sqlite3.Row] = {}
+        try:
+            for row in self.store.db.execute(
+                "SELECT id, name, source_type, uri "
+                f"FROM sources WHERE id IN ({placeholders})",  # noqa: S608
+                sid_list,
+            ).fetchall():
+                meta[row["id"]] = row
+        except sqlite3.OperationalError:
+            return
+
+        folder_sids = [
+            sid for sid in sid_list
+            if meta.get(sid) is not None
+            and meta[sid]["source_type"] in ("local_folder", "obsidian_vault")
+        ]
+        artifact_sids = [
+            sid for sid in sid_list
+            if meta.get(sid) is not None and meta[sid]["source_type"] == "artifact"
+        ]
+
+        item_to_file: dict[str, str] = {}
+        for sid in folder_sids:
+            for row in self.store.db.execute(
+                "SELECT file_path, item_ids FROM folder_file_state WHERE source_id = ?",
+                (sid,),
+            ).fetchall():
+                try:
+                    ids = json.loads(row["item_ids"]) if row["item_ids"] else []
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                for item_id in ids:
+                    item_to_file[item_id] = row["file_path"]
+
+        item_to_artifact: dict[str, tuple] = {}
+        for sid in artifact_sids:
+            for row in self.store.db.execute(
+                "SELECT slug, name, item_ids FROM artifact_item_state WHERE source_id = ?",
+                (sid,),
+            ).fetchall():
+                try:
+                    ids = json.loads(row["item_ids"]) if row["item_ids"] else []
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                for item_id in ids:
+                    item_to_artifact[item_id] = (row["slug"], row["name"])
+
+        for result in results:
+            sid = result.get("source")
+            row = meta.get(sid) if isinstance(sid, str) else None
+            if row is not None:
+                result["source_type"] = row["source_type"]
+                result["source_name"] = row["name"]
+                result["source_uri"] = row["uri"]
+            file_path = item_to_file.get(result["id"])
+            if file_path:
+                result["file_path"] = file_path
+            artifact = item_to_artifact.get(result["id"])
+            if artifact:
+                result["artifact_slug"], result["artifact_name"] = artifact
 
     def _keyword_search(self, query: str, limit: int = 20) -> list[tuple[str, int]]:
         """FTS5 search. Returns [(item_id, rank)] where rank is position (1=best)."""
@@ -96,9 +236,25 @@ class HybridRetriever:
 
     @staticmethod
     def _sanitize_fts5_query(query: str) -> str:
-        """Escape user input for safe FTS5 MATCH usage."""
-        tokens = query.split()
-        return " ".join('"' + t.replace('"', '""') + '"' for t in tokens if t)
+        """Escape user input for safe FTS5 MATCH usage.
+
+        Each token is individually double-quoted (with internal quotes doubled)
+        so it is treated as a literal FTS5 string -- the user's input never
+        contributes FTS5 operators (parameterized quoting; BSC1 Input
+        Validation). Stopwords are dropped and the remaining tokens OR-joined
+        (Mesh-1676) so natural-language queries no longer require every
+        literal token to appear in a matching document.
+        """
+        raw_tokens = [t for t in query.split() if t]
+        if not raw_tokens:
+            return ""
+        tokens = [t for t in raw_tokens if t.lower() not in _STOPWORDS]
+        # If the query is *all* stopwords, fall back to the raw tokens rather
+        # than returning an empty match (which would drop the keyword leg).
+        if not tokens:
+            tokens = raw_tokens
+        quoted = ['"' + t.replace('"', '""') + '"' for t in tokens]
+        return " OR ".join(quoted)
 
     def _graph_search(self, query: str, limit: int = 20) -> list[tuple[str, int]]:
         """Find entities matching query terms, traverse graph, rank items by mention count."""
@@ -183,14 +339,22 @@ class HybridRetriever:
         return [(item_id, rank + 1) for rank, (item_id, _) in enumerate(scored[:limit])]
 
     @staticmethod
-    def _rrf_fuse(*ranked_lists, k: int = 60) -> list[tuple[str, float]]:
-        """Reciprocal Rank Fusion across all non-None ranked lists."""
+    def _rrf_fuse(*ranked_lists, k: int = 60, weights=None) -> list[tuple[str, float]]:
+        """Reciprocal Rank Fusion across all non-None ranked lists.
+
+        Optional per-list ``weights`` (aligned positionally with
+        ``ranked_lists``) let a leg contribute more to the fused score. The
+        vector leg is weighted higher so semantic matches dominate when keyword
+        matches are weak (Mesh-1676). When ``weights`` is None every
+        leg is weighted 1.0 (original behaviour).
+        """
         scores: dict[str, float] = defaultdict(float)
-        for rlist in ranked_lists:
+        for i, rlist in enumerate(ranked_lists):
             if rlist is None:
                 continue
+            weight = 1.0 if weights is None else weights[i]
             for item_id, rank in rlist:
-                scores[item_id] += 1.0 / (k + rank)
+                scores[item_id] += weight * (1.0 / (k + rank))
         return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
     @staticmethod

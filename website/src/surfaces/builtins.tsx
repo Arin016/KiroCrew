@@ -84,14 +84,6 @@ registerBuiltinSurface({
 })
 
 registerBuiltinSurface({
-  navId: 'knowledge',
-  route: '/knowledge',
-  label: 'Knowledge',
-  icon: <BookOpen size={16} />,
-  group: 'Apps',
-})
-
-registerBuiltinSurface({
   navId: 'apps',
   route: '/apps',
   label: 'App Store',
@@ -125,6 +117,17 @@ registerBuiltinSurface({
   route: '/artifacts',
   label: 'Artifacts',
   icon: <Component size={16} />,
+  group: 'Main',
+})
+
+// Knowledge sits in the Main group directly below Artifacts (order in this file
+// = order in the rail within a group), keeping the two content surfaces
+// adjacent and always-visible rather than tucked into the collapsible Apps group.
+registerBuiltinSurface({
+  navId: 'knowledge',
+  route: '/knowledge',
+  label: 'Knowledge',
+  icon: <BookOpen size={16} />,
   group: 'Main',
 })
 

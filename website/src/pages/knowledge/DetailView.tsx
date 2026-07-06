@@ -79,7 +79,7 @@ function TagEditor({ itemId, currentTags }: { itemId: string; currentTags: strin
   return (
     <div className="flex items-center gap-2">
       <Tag size={11} className="text-muted shrink-0" />
-      <input value={value} onChange={e => setValue(e.target.value)} placeholder="tag1, tag2, tag3"
+      <input aria-label="Comma-separated tags" value={value} onChange={e => setValue(e.target.value)} placeholder="tag1, tag2, tag3"
         className="flex-1 px-2 py-1 text-[12px] bg-bg-elevated border border-border rounded outline-none"
         onKeyDown={e => { if (e.key === 'Enter') saveMutation.mutate(value); if (e.key === 'Escape') setEditing(false) }}
         autoFocus />

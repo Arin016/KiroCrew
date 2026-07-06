@@ -783,6 +783,7 @@ class TestPermissionEventCarriesRawParams:
         client = AcpClient.__new__(AcpClient)  # avoid spawning a real process
         client._tool_call_inputs = {}
         client._tool_call_params = {}
+        client._tool_call_is_shell = {}
         client._permission_options = {}
         # Simulate the ToolCall notification caching structured params...
         client._tool_call_params["tc-1"] = {"path": "/etc/passwd", "command": None}

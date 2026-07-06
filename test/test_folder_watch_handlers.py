@@ -14,6 +14,7 @@ from kiro_claw.dashboard.handlers.knowledge import (
     confirm_source,
     list_source_files,
     pause_source,
+    rename_source,
     resume_source,
     retry_file,
     skip_file,
@@ -49,6 +50,7 @@ def _make_app(store, watcher=None):
     app.router.add_get("/api/knowledge/sources/{id}/files", list_source_files)
     app.router.add_post("/api/knowledge/sources/{id}/files/retry", retry_file)
     app.router.add_post("/api/knowledge/sources/{id}/files/skip", skip_file)
+    app.router.add_patch("/api/knowledge/sources/{id}", rename_source)
     return app
 
 
@@ -239,3 +241,63 @@ class TestSkipFile:
             "SELECT status FROM folder_file_state WHERE source_id = ? AND file_path = ?",
             (sid, "/tmp/vault/a.md")).fetchone()
         assert row["status"] == "skipped"
+
+
+class TestRenameSource:
+    @pytest.mark.asyncio
+    async def test_rename_updates_name(self, store):
+        sid = store.add_source("Old Name", "local_file", "/tmp/doc.md")
+        async with TestClient(TestServer(_make_app(store))) as client:
+            resp = await client.patch(f"/api/knowledge/sources/{sid}", json={"name": "New Name"})
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["ok"] is True
+            assert data["name"] == "New Name"
+        row = store.db.execute("SELECT name FROM sources WHERE id = ?", (sid,)).fetchone()
+        assert row["name"] == "New Name"
+
+    @pytest.mark.asyncio
+    async def test_rename_trims_whitespace(self, store):
+        sid = store.add_source("Old", "local_file", "/tmp/doc.md")
+        async with TestClient(TestServer(_make_app(store))) as client:
+            resp = await client.patch(f"/api/knowledge/sources/{sid}", json={"name": "  Trimmed  "})
+            assert resp.status == 200
+        row = store.db.execute("SELECT name FROM sources WHERE id = ?", (sid,)).fetchone()
+        assert row["name"] == "Trimmed"
+
+    @pytest.mark.asyncio
+    async def test_rename_empty_name_rejected(self, store):
+        sid = store.add_source("Old", "local_file", "/tmp/doc.md")
+        async with TestClient(TestServer(_make_app(store))) as client:
+            resp = await client.patch(f"/api/knowledge/sources/{sid}", json={"name": "   "})
+            assert resp.status == 400
+        row = store.db.execute("SELECT name FROM sources WHERE id = ?", (sid,)).fetchone()
+        assert row["name"] == "Old"
+
+    @pytest.mark.asyncio
+    async def test_rename_non_string_rejected(self, store):
+        sid = store.add_source("Old", "local_file", "/tmp/doc.md")
+        async with TestClient(TestServer(_make_app(store))) as client:
+            resp = await client.patch(f"/api/knowledge/sources/{sid}", json={"name": 123})
+            assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_rename_too_long_rejected(self, store):
+        sid = store.add_source("Old", "local_file", "/tmp/doc.md")
+        async with TestClient(TestServer(_make_app(store))) as client:
+            resp = await client.patch(f"/api/knowledge/sources/{sid}", json={"name": "x" * 201})
+            assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_rename_unknown_id_404(self, store):
+        async with TestClient(TestServer(_make_app(store))) as client:
+            resp = await client.patch("/api/knowledge/sources/nonexistent", json={"name": "X"})
+            assert resp.status == 404
+
+    @pytest.mark.asyncio
+    async def test_rename_invalid_json_400(self, store):
+        sid = store.add_source("Old", "local_file", "/tmp/doc.md")
+        async with TestClient(TestServer(_make_app(store))) as client:
+            resp = await client.patch(f"/api/knowledge/sources/{sid}", data="not json",
+                                      headers={"Content-Type": "application/json"})
+            assert resp.status == 400

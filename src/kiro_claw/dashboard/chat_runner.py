@@ -77,6 +77,7 @@ from kiro_claw.dashboard.state import (
     _ChatSlot,
     build_refusal_recovery_prompt,
     is_read_only_bash,
+    should_queue_refusal_recovery,
     unsafe_bash_reason,
 )
 from kiro_claw.hooks import (
@@ -113,6 +114,7 @@ from kiro_claw.providers.base import (
 )
 from kiro_claw.security import (
     _EXFIL_PATTERNS,
+    StreamRedactor,
     is_sensitive_path,
     redact_and_truncate,
     redact_credentials,
@@ -146,6 +148,21 @@ def _pre_tool_hooks_should_block(pre_hook_results: Any) -> bool:
     )
 
 
+def _is_bedrock_profile_id(model: str) -> bool:
+    """True if *model* is a concrete Bedrock inference-profile id rather than a
+    portable model alias.
+
+    A region-routed inference profile (``global.anthropic.claude-opus-4-8[1m]``,
+    ``us.anthropic.…``) pins one specific Bedrock model + region. kiro-cli
+    resolves the picked alias to such an id internally and reports it on
+    ``client._model``; the portable forms the picker sets (``claude-opus-4.7``,
+    ``sonnet``, ``deepseek-3.2``) never carry the ``*.anthropic.*`` namespace or
+    the ``[1m]`` capability suffix.
+    """
+    m = model.lower()
+    return "anthropic." in m or "[1m]" in m
+
+
 def _backfill_canonical_model(client: Any, provider: str) -> str:
     """Read the provider's resolved model (``client.client._model``) and map it
     to its canonical registry key for the dropdown, or ``""`` if unavailable.
@@ -157,11 +174,29 @@ def _backfill_canonical_model(client: Any, provider: str) -> str:
     ``claude-haiku-4.5``) is NOT rewritten to a claude_code canonical key.
     Skips the ``"auto"`` sentinel. Single home for the slot.model backfill so the
     early (pre-turn) and late (mid-turn init) sites agree.
+
+    kiro-profile guard: on the kiro/acp path ``canonicalize_for_provider`` is a
+    no-op, so a backfilled value is stored into ``slot.model`` verbatim and
+    re-sent as a ``set_model`` override on every resume. kiro reports the
+    RESOLVED Bedrock inference-profile id (e.g.
+    ``global.anthropic.claude-opus-4-8[1m]``) — not the alias the user picked —
+    so backfilling it pins the slot to one profile + region. A session that once
+    resolved to the 1M Opus profile then stays nailed to it across resumes even
+    when that profile is capacity-throttled, and the picker can no longer
+    dislodge the poisoned value (observed: every "model unavailable" throttle hit
+    the profile-form id, never the dotted alias, which kiro routes with capacity
+    awareness). So for non-``claude_code`` providers we DROP a profile-form id
+    (return ``""``) to keep ``slot.model`` empty and let the next get_or_create
+    re-resolve; a portable alias (what the picker actually sets) is still kept.
+    claude_code is unaffected: its profile id canonicalizes to a dropdown key
+    that is the model the user explicitly chose.
     """
     prov_model = getattr(getattr(client, "client", None), "_model", "") or ""
-    if isinstance(prov_model, str) and prov_model and prov_model != "auto":
-        return model_registry.canonicalize_for_provider(prov_model, provider)
-    return ""
+    if not (isinstance(prov_model, str) and prov_model and prov_model != "auto"):
+        return ""
+    if provider != "claude_code" and _is_bedrock_profile_id(prov_model):
+        return ""
+    return model_registry.canonicalize_for_provider(prov_model, provider)
 
 
 def _context_usage_payload(slot_key: str, client: Any) -> dict[str, Any]:
@@ -1027,6 +1062,28 @@ def _should_suppress_requeue(slot) -> bool:
     return False
 
 
+async def _consume_pending_reset(state: DashboardState, slot: _ChatSlot) -> None:
+    """Reset the session for a deferred project change, if one is queued.
+
+    Called both before get_or_create (idle picker change) and at turn end
+    (mid-turn set_project). Clears the flag only after a successful reset, and
+    compare-and-clears so a key queued by a concurrent api_chat_slot_project
+    during the await isn't clobbered.
+    """
+    if not slot._pending_reset_history_key:
+        return
+    pending_key = slot._pending_reset_history_key
+    try:
+        await state.sessions.reset(pending_key)
+        if slot._pending_reset_history_key == pending_key:
+            slot._pending_reset_history_key = None
+    except Exception:
+        logger.warning(
+            "Failed to consume pending project-change reset for slot %s",
+            slot.key, exc_info=True,
+        )
+
+
 async def _run_chat(
     state: DashboardState,
     slot: _ChatSlot,
@@ -1115,6 +1172,38 @@ async def _run_chat(
     last_heartbeat = time.time()
     chunk_seq = 0
     in_tool_group = False
+    # Rolling-buffer redactor for the live chat_chunk wire stream. Per-chunk
+    # redaction misses a credential split across streaming boundaries (issue 3);
+    # this withholds the trailing credential-class run until it is confirmed safe
+    # so raw fragments never reach WS/SSE consumers. assistant_text (the source
+    # for the final _flush_segment redaction) is accumulated independently and is
+    # unaffected. Reset per segment via _flush_text_stream / _wsred.reset().
+    _wsred = StreamRedactor()
+
+    def _flush_text_stream() -> None:
+        """Emit the redactor's withheld tail as a final chat_chunk before a
+        segment is finalized, so WS/SSE viewers see the complete (redacted) text
+        and never a truncated stream. No-op when the buffer is empty."""
+        nonlocal chunk_seq
+        wire = _wsred.flush()
+        if not wire:
+            return
+        chunk_seq += 1
+        slot.append("chunk", wire, "chunk")
+        state.broadcast_ws(
+            "chat_chunk", {"slot": slot.key, "content": wire, "seq": chunk_seq}
+        )
+
+    # Same rolling-buffer protection for the separate chat_thinking wire stream
+    # (thinking is broadcast-only / ephemeral, but still real-time on the WS).
+    _thinkred = StreamRedactor()
+
+    def _flush_thinking_stream() -> None:
+        """Emit the thinking redactor's withheld tail when the thinking phase
+        ends (any non-thinking event) or the turn completes. No-op when empty."""
+        wire = _thinkred.flush()
+        if wire:
+            state.broadcast_ws("chat_thinking", {"slot": slot.key, "content": wire})
     # Partial-output guard for transient-5xx retry: flipped True once ANY
     # assistant token streams or a tool call fires this turn. A transient
     # backend 5xx is only retried while this is False, so a re-prompt can't
@@ -1317,6 +1406,10 @@ async def _run_chat(
             "activity_event", {"slot": slot.key, "kind": "status", "text": "Creating session…"}
         )
         slot.model = _normalize_model(slot.model or "") or ""
+        # Consume a deferred project-change reset queued while idle, before
+        # get_or_create or we'd reuse the stale session for one turn. Safe here:
+        # no session lock is held yet, so reset() can't self-kill.
+        await _consume_pending_reset(state, slot)
         client, is_new, resumed = await state.sessions.get_or_create(
             session_key,
             agent=kiro_agent or slot.agent or None,
@@ -1675,10 +1768,16 @@ async def _run_chat(
                 _tcid, _ = redact_credentials(_tcid)
                 event.tool_call_id = _tcid
 
+            # Leaving the thinking phase → flush any withheld thinking tail so a
+            # credential split across thinking chunks can't cross the wire raw.
+            if event.kind != EVENT_THINKING_CHUNK:
+                _flush_thinking_stream()
+
             if event.kind == EVENT_TEXT_CHUNK:
                 # If we just exited a tool group, finalize the streaming
                 # message so post-tool text starts a fresh message.
                 if in_tool_group:
+                    _flush_text_stream()
                     if assistant_text:
                         _flush_segment(state, slot, assistant_text)
                         assistant_text = ""
@@ -1701,34 +1800,38 @@ async def _run_chat(
                         elif m.get("role") not in ("tool", "permission", "chunk"):
                             break
                 in_tool_group = False
-                chunk_seq += 1
                 safe_chunk, _ = redact_exfiltration_urls(event.text)
                 safe_chunk, _ = redact_credentials(safe_chunk)
                 assistant_text += safe_chunk
                 _turn_emitted = True  # tokens delivered — transient retry now unsafe
-                slot.append("chunk", safe_chunk, "chunk")
-                # Push chunk to WS clients (HTTP SSE reader drains from slot._pending)
-                state.broadcast_ws(
-                    "chat_chunk",
-                    {"slot": slot.key, "content": safe_chunk, "seq": chunk_seq},
-                )
+                # Stream to the wire through the rolling buffer so a credential
+                # split across token boundaries can't cross a broadcast boundary
+                # unredacted (issue 3). Only the confirmed-safe prefix is emitted;
+                # the trailing (possibly-partial-credential) run is withheld until
+                # the next chunk or the segment flush. assistant_text above still
+                # accumulates the full text for the authoritative final redaction.
+                wire = _wsred.feed(event.text)
+                if wire:
+                    chunk_seq += 1
+                    slot.append("chunk", wire, "chunk")
+                    # Push chunk to WS clients (HTTP SSE reader drains from slot._pending)
+                    state.broadcast_ws(
+                        "chat_chunk",
+                        {"slot": slot.key, "content": wire, "seq": chunk_seq},
+                    )
             elif event.kind == EVENT_THINKING_CHUNK:
                 # Thinking content is not included in the main response text.
                 # Broadcast as a separate WS event for frontend rendering.
-                # Per-chunk redaction is best-effort (patterns spanning chunks
-                # could be missed); the Slack handler applies full-text
-                # redaction on the accumulated result before posting.
-                # This matches chat_chunk which also broadcasts raw text.
-                safe_text, exfil_warnings = redact_exfiltration_urls(event.text)
-                for w in exfil_warnings:
-                    logger.warning("Exfiltration URL redacted in thinking: %s", w)
-                safe_text, cred_warnings = redact_credentials(safe_text)
-                for w in cred_warnings:
-                    logger.warning("Credential redacted in thinking: %s", w)
-                state.broadcast_ws(
-                    "chat_thinking",
-                    {"slot": slot.key, "content": safe_text},
-                )
+                # Streamed through StreamRedactor so a credential split across
+                # thinking chunks can't cross the wire unredacted (issue 3);
+                # the withheld tail is flushed by _flush_thinking_stream when the
+                # thinking phase ends or the turn completes.
+                wire = _thinkred.feed(event.text)
+                if wire:
+                    state.broadcast_ws(
+                        "chat_thinking",
+                        {"slot": slot.key, "content": wire},
+                    )
                 # Deliberately NOT a turn-emit: do not flip _turn_emitted here.
                 # Thinking is ephemeral, broadcast-only (never persisted to
                 # slot.messages and never an irreversible side effect), so a
@@ -1742,6 +1845,7 @@ async def _run_chat(
             elif event.kind == EVENT_TOOL_CALL:
                 # Flush pre-tool text silently (no broadcast) so it persists,
                 # but keep the streaming message in place for correct tool ordering.
+                _flush_text_stream()
                 if not in_tool_group and assistant_text:
                     _flush_segment(state, slot, assistant_text, broadcast=False)
                     assistant_text = ""
@@ -2027,6 +2131,7 @@ async def _run_chat(
                 # call or message end.
                 # Flush accumulated text as a finalized segment before the
                 # permission flow so the frontend renders them in order.
+                _flush_text_stream()
                 if assistant_text:
                     _flush_segment(state, slot, assistant_text)
                     assistant_text = ""
@@ -2086,7 +2191,7 @@ async def _run_chat(
                         continue
                     if tool_result.action == TOOL_AUTO_APPROVE:
                         try:
-                            validated_tool = _validate_tool_name(event.title, event.tool_kind)
+                            validated_tool = _validate_tool_name(event.title, is_shell=event.is_shell)
                         except ValueError as e:
                             await client.reject_tool(event.request_id)
                             slot.append("tool", f"🚫 {event.title} (invalid: {e})", "msg msg-tool")
@@ -2172,7 +2277,7 @@ async def _run_chat(
                             )
                         continue
                     try:
-                        validated_tool = _validate_tool_name(event.title, event.tool_kind)
+                        validated_tool = _validate_tool_name(event.title, is_shell=event.is_shell)
                     except ValueError as e:
                         await client.reject_tool(event.request_id)
                         slot.append("tool", f"🚫 {event.title} (invalid: {e})", "msg msg-tool")
@@ -2248,7 +2353,7 @@ async def _run_chat(
                     )
                     if matched:
                         try:
-                            validated_tool = _validate_tool_name(event.title, event.tool_kind)
+                            validated_tool = _validate_tool_name(event.title, is_shell=event.is_shell)
                         except ValueError as e:
                             await client.reject_tool(event.request_id)
                             _safe, _ = redact_exfiltration_urls(event.title)
@@ -2308,7 +2413,7 @@ async def _run_chat(
                 if slot._trust_reads and not slot._trust and not yolo_active and cmd:
                     if is_read_only_bash(cmd):
                         try:
-                            validated_tool = _validate_tool_name(event.title, event.tool_kind)
+                            validated_tool = _validate_tool_name(event.title, is_shell=event.is_shell)
                         except ValueError as e:
                             await client.reject_tool(event.request_id)
                             slot.append(
@@ -2339,7 +2444,7 @@ async def _run_chat(
                 # Trust mode (per-slot) or YOLO mode (global) — auto-approve
                 if slot._trust or yolo_active:
                     try:
-                        validated_tool = _validate_tool_name(event.title, event.tool_kind)
+                        validated_tool = _validate_tool_name(event.title, is_shell=event.is_shell)
                     except ValueError as e:
                         await client.reject_tool(event.request_id)
                         slot.append("tool", f"🚫 {event.title} (invalid: {e})", "msg msg-tool")
@@ -2551,7 +2656,7 @@ async def _run_chat(
                     outcome = "approved"
                 if outcome == "approved":
                     try:
-                        validated_tool = _validate_tool_name(event.title, event.tool_kind)
+                        validated_tool = _validate_tool_name(event.title, is_shell=event.is_shell)
                     except ValueError as e:
                         await client.reject_tool(event.request_id)
                         slot.append("tool", f"🚫 {event.title} (invalid: {e})", "msg msg-tool")
@@ -2652,14 +2757,11 @@ async def _run_chat(
                         request_id=event.request_id,
                         metadata={"reason": _safety_reason or "interactive"},
                     )
-                    # Recoverable safety-gate refusal: record for auto-recovery.
-                    # _safe_reject_title/_safety_reason are ALREADY redacted just
-                    # above (redact_exfiltration_urls + redact_credentials) for the
-                    # pill and SEL metadata; reuse those sanitized values so the
-                    # model-bound recovery prompt never sees raw denied commands or
-                    # paths.
-                    if _safety_reason:
-                        _refusal_reasons.append((_safe_reject_title, _safety_reason))
+                    # NOTE: Do NOT append to _refusal_reasons here.
+                    # This is an interactive user denial — the user chose to reject
+                    # the tool. Refusal-recovery is only for system-side blocks —
+                    # the hook-deny (TOOL_DENY) path, which is the other site that
+                    # appends to _refusal_reasons. See Mesh-1952 design intent.
 
                 if outcome != "approved":
                     # mark batch_rejected as true and continue loop instead of breaking
@@ -2677,9 +2779,11 @@ async def _run_chat(
                     saw_compaction = True
                     _produced_visible_output = True
                     assistant_text = ""
+                    _wsred.reset()
             elif event.kind == EVENT_CLEAR_STATUS:
                 slot.messages.clear()
                 assistant_text = ""
+                _wsred.reset()
                 _produced_visible_output = True
                 slot.append("assistant", "🗑️ Conversation cleared.", "msg msg-a")
                 state.broadcast_ws("slot_clear", {"slot": slot.key})
@@ -2693,6 +2797,7 @@ async def _run_chat(
                 if new_agent:
                     slot.agent = new_agent
                     assistant_text = ""
+                    _wsred.reset()
                     _produced_visible_output = True
                     slot.append(
                         "assistant",
@@ -2754,7 +2859,7 @@ async def _run_chat(
                 # running at turn end (in case a terminal status was missed),
                 # so cards don't stay stuck "running".
                 _native_subagent_close_all(state, slot, _native_tracker, _native_card_output)
-                if event.input_tokens or event.output_tokens:
+                if event.input_tokens or event.output_tokens or event.credits:
                     stats = Stats()
                     stats.inc_input_tokens(event.input_tokens)
                     stats.inc_output_tokens(event.output_tokens)
@@ -2800,6 +2905,10 @@ async def _run_chat(
                     )
                 break
 
+        # Turn stream ended: flush any withheld thinking tail (a thinking-final
+        # turn never hit the loop-top flush for a following non-thinking event).
+        _flush_thinking_stream()
+
         # CC process died mid-turn: re-queue message for automatic retry
         # (mirrors AcpProcessDied handling). Eager reconnect in the provider
         # restores MCPs in background; re-queue ensures the user's message
@@ -2835,6 +2944,7 @@ async def _run_chat(
             # (claude-agent-acp doesn't stream that, but the cleanup is harmless).
             slot.messages = [m for m in slot.messages if m.get("role") != "chunk"]
             assistant_text = ""
+            _wsred.reset()
             _produced_visible_output = True
             state.broadcast_ws("chat_done", {"slot": slot.key})
 
@@ -2928,6 +3038,7 @@ async def _run_chat(
                     slot._stage_titles, slot._plan_goal, slot._stage_descriptions = (
                         _extract_and_redact_plan_metadata(assistant_text)
                     )
+            _flush_text_stream()
             _flush_segment(state, slot, assistant_text, broadcast=False)
         elif (
             _stop_reason != STOP_REASON_CANCELLED
@@ -3010,7 +3121,9 @@ async def _run_chat(
         # reset is already re-queuing. No turn cap by design: the model decides
         # when to stop, and the user's Stop button stays the hard breaker. The
         # finally block's dequeue loop picks this up and dispatches it.
-        if _refusal_reasons and not slot._stopping and not needs_session_reset:
+        if should_queue_refusal_recovery(
+            _refusal_reasons, slot._stopping, needs_session_reset, _stop_reason
+        ):
             _recovery_body = build_refusal_recovery_prompt(_refusal_reasons)
             if _recovery_body:
                 slot.queue_insert(0, f"{REFUSAL_RECOVERY_PREFIX}\n{_recovery_body}")
@@ -3281,6 +3394,9 @@ async def _run_chat(
                 except Exception:
                     logger.warning("Failed to reset session %s after agent switch", session_key)
             state.sessions.release(session_key)
+        # End-of-turn fallback: catches set_project calls that fired mid-turn,
+        # after the start-of-turn consume already ran.
+        await _consume_pending_reset(state, slot)
         # Process queued messages (FIFO) — keep SSE stream alive
         if slot._queue:
             if slot._stopping:

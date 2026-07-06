@@ -302,6 +302,54 @@ class TestTimerRestoreOnLoad:
         assert "Restored 2 cron timer(s) from disk" in caplog.text
 
 
+class TestUserPausedState:
+    """Verify user_paused separates user-controlled pause from execution state."""
+
+    def test_enable_job_sets_user_paused(self, tmp_path: Path) -> None:
+        svc = CronService(base_dir=tmp_path)
+        svc._load()
+        job = svc.add_job(name="test", message="hi", every_secs=300)
+        assert job.user_paused is False
+
+        svc.enable_job(job.id, enabled=False)
+        assert job.user_paused is True
+        assert job.enabled is False
+
+        svc.enable_job(job.id, enabled=True)
+        assert job.user_paused is False
+        assert job.enabled is True
+
+    def test_merge_result_preserves_enabled_for_recurring_jobs(self, tmp_path: Path) -> None:
+        """_merge_job_result must not propagate enabled=False for recurring jobs."""
+        svc = CronService(base_dir=tmp_path)
+        svc._load()
+        job = svc.add_job(name="recurring", message="go", every_secs=60)
+        # Simulate stale runtime state where enabled got corrupted
+        job.enabled = False
+        job.last_run_ts = time.time()
+        job.last_status = "ok"
+        svc._merge_job_result(job)
+        # Reload and verify enabled was NOT persisted as False
+        svc._load()
+        reloaded = [j for j in svc._jobs if j.id == job.id][0]
+        assert reloaded.enabled is True
+
+    def test_merge_result_disables_at_job_with_user_paused(self, tmp_path: Path) -> None:
+        """_merge_job_result sets user_paused=True when disabling at-jobs."""
+        svc = CronService(base_dir=tmp_path)
+        svc._load()
+        job = svc.add_job(name="once", message="fire", at_ts=time.time() + 9999)
+        job.enabled = False  # at-job fired
+        job.last_run_ts = time.time()
+        job.last_status = "ok"
+        svc._merge_job_result(job)
+        # Reload and verify both enabled=False AND user_paused=True persisted
+        svc._load()
+        reloaded = [j for j in svc._jobs if j.id == job.id][0]
+        assert reloaded.enabled is False
+        assert reloaded.user_paused is True
+
+
 class TestEffectiveDelay:
     """Tests for _effective_delay — the capped timer delay used by _arm_timer."""
 
@@ -771,3 +819,20 @@ class TestTimezoneScheduling:
             if CronService._is_due(job, window_start.timestamp() + i * 60)
         ]
         assert len(fires) == 1
+
+
+class TestGetJob:
+    """CronService.get_job(job_id) returns the CronJob by id (Mesh-2451)."""
+
+    def test_get_job_by_id(self, tmp_path: Path) -> None:
+        svc = CronService(base_dir=tmp_path)
+        job = svc.add_job(name="findme", message="go", every_secs=300)
+        found = svc.get_job(job.id)
+        assert found is not None
+        assert found.id == job.id
+        assert found.name == "findme"
+
+    def test_get_job_unknown_id_returns_none(self, tmp_path: Path) -> None:
+        svc = CronService(base_dir=tmp_path)
+        svc.add_job(name="other", message="go", every_secs=300)
+        assert svc.get_job("does-not-exist") is None

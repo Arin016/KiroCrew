@@ -60,11 +60,11 @@ export default function FileExplorerPage() {
     }
     const saved = loadState()
     if (saved && saved.folderTabs?.length) {
-      const ft = saved.folderTabs.map((t: any) => ({ ...newFolderTab(t.rootPath, t.label), id: t.id, expanded: t.expanded || { [t.rootPath]: true } }))
+      const ft = saved.folderTabs.map((t: Partial<FolderTab>) => ({ ...newFolderTab(t.rootPath, t.label), id: t.id!, expanded: t.expanded || { [t.rootPath!]: true } }))
       setFolderTabs(ft)
       setActiveFolderId(saved.activeFolderId || ft[0].id)
       if (saved.fileTabs?.length) {
-        setFileTabs(saved.fileTabs.map((f: any) => ({ ...newFileTab(f.path, f.folderId), id: f.id })))
+        setFileTabs(saved.fileTabs.map((f: Partial<FileTab>) => ({ ...newFileTab(f.path!, f.folderId!), id: f.id! })))
         setActiveFileId(saved.activeFileId || null)
       }
       if (saved.leftWidth) setLeftWidth(saved.leftWidth)
@@ -90,7 +90,7 @@ export default function FileExplorerPage() {
   }, [folderTabs, fileTabs, activeFolderId, activeFileId, leftWidth, initialized])
 
   // ── Tab updaters ──
-  const updateFolderTab = useCallback((id: string, patch: any) => {
+  const updateFolderTab = useCallback((id: string, patch: Partial<FolderTab> | ((t: FolderTab) => FolderTab)) => {
     setFolderTabs((tabs) => tabs.map((t) => (t.id === id ? (typeof patch === 'function' ? patch(t) : { ...t, ...patch }) : t)))
   }, [])
 
@@ -131,7 +131,7 @@ export default function FileExplorerPage() {
   })
 
   // Derive gitMap directly from query results (no useState)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   const gitQueryData = gitQueries.map(q => q.data)
   const tabGitMap = useMemo(() => {
     const map = new Map<string, GitInfo>()
@@ -315,6 +315,10 @@ export default function FileExplorerPage() {
       }
     }
     return best
+    // The memo only reads activeFolder.rootPath (and its null-ness, which
+    // rootPath being present implies); depending on the whole activeFolder
+    // object would recompute on unrelated tab-field changes with no effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabGitMap, activeFolder?.rootPath])
 
   // ── Render ──
@@ -364,7 +368,10 @@ export default function FileExplorerPage() {
             </div>
           ) : <div className="mc-fe-empty"><Skeleton className="h-full w-full" /></div>}
         </div>
-        <div className="mc-fe-resizer" onMouseDown={onResizeStart} role="separator" tabIndex={-1} />
+        {/* Pane splitter: mouse-drag-only resize affordance; role=separator is
+            correct for a window splitter but is non-interactive per jsx-a11y. */}
+        {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+        <div className="mc-fe-resizer" aria-label="Resize panel" onMouseDown={onResizeStart} role="separator" tabIndex={-1} />
         <div className="mc-fe-right">
           {showSearch ? (
             <SearchPanel
@@ -386,7 +393,10 @@ export default function FileExplorerPage() {
         </div>
       </div>
       {contextMenu && (
-        <div className="mc-fe-ctx" style={{ left: Math.min(contextMenu.x, window.innerWidth - 220), top: Math.min(contextMenu.y, window.innerHeight - 160) }} onMouseDown={(e) => e.stopPropagation()}>
+        // role=menu + tabIndex makes this context menu a focusable, labelled
+        // interactive container; onMouseDown only stops propagation so a click
+        // inside does not trip the document dismiss handler.
+        <div className="mc-fe-ctx" role="menu" aria-label="File actions" tabIndex={-1} style={{ left: Math.min(contextMenu.x, window.innerWidth - 220), top: Math.min(contextMenu.y, window.innerHeight - 160) }} onMouseDown={(e) => e.stopPropagation()}>
           <Clickable className="mc-fe-ctx-row" onClick={() => { chatAboutPath(contextMenu.node.path, contextMenu.node.type); setContextMenu(null) }}>
             <MessageSquare size={12} /> Chat about this {contextMenu.node.type === 'dir' ? 'folder' : 'file'}
           </Clickable>

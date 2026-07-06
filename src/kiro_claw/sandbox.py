@@ -583,7 +583,11 @@ def sandbox_exec_argv(
     profile file after the child exits.
     """
     profile = _build_seatbelt_profile(sandbox_level)
-    fd, path = tempfile.mkstemp(suffix=".sb", prefix="kiroclaw_sandbox_")
+    run_dir = os.path.join(os.path.expanduser("~"), ".kiroclaw", "run")
+    os.makedirs(run_dir, exist_ok=True)
+    fd, path = tempfile.mkstemp(
+        suffix=".sb", prefix=f"kiroclaw_sandbox_{os.getpid()}_", dir=run_dir
+    )
     os.write(fd, profile.encode())
     os.close(fd)
     # Build env -u flags for sensitive vars present in current env. cc/strict
@@ -599,6 +603,32 @@ def sandbox_exec_argv(
                 unset_args.extend(["-u", key])
                 break
     return ["env", *unset_args, "sandbox-exec", "-f", path, *argv], path
+
+
+def cleanup_stale_sandbox_profiles() -> None:
+    """Remove orphan .sb profiles whose owning process is dead from ~/.kiroclaw/run/.
+
+    Called at gateway startup to prevent accumulation after unclean shutdowns.
+    Filenames follow the pattern: kiroclaw_sandbox_{pid}_{random}.sb
+    """
+    run_dir = os.path.join(os.path.expanduser("~"), ".kiroclaw", "run")
+    if not os.path.isdir(run_dir):
+        return
+    for entry in os.listdir(run_dir):
+        if not entry.startswith("kiroclaw_sandbox_") or not entry.endswith(".sb"):
+            continue
+        # Extract PID from kiroclaw_sandbox_{pid}_{random}.sb
+        middle = entry[len("kiroclaw_sandbox_"):-len(".sb")]
+        pid_str = middle.split("_", 1)[0]
+        if not pid_str.isdigit():
+            continue
+        try:
+            os.kill(int(pid_str), 0)
+        except OSError:
+            try:
+                os.remove(os.path.join(run_dir, entry))
+            except OSError:
+                pass
 
 
 # ── Public API ──

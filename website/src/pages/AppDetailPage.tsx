@@ -6,10 +6,10 @@
  * Shows full description, features, screenshots, tags, and action buttons.
  */
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   ArrowLeft, Download, Check, Loader2, Power, PowerOff,
-  Trash2, RefreshCw, Bot, Zap,
+  Trash2, RefreshCw, Bot, Zap, ArrowUp,
   Clock, ChevronLeft, ChevronRight, X, Monitor, Copy, Terminal,
   Sparkles,
 } from 'lucide-react'
@@ -17,6 +17,7 @@ import { api } from '../api/client'
 import { PageHeader, Card, CardTitle, Badge, Btn } from '../components/ui'
 import AppIcon from '../components/AppIcon'
 import { recordEvent } from '../rum'
+import { useTheme } from '../hooks/useTheme'
 
 type AppInfo = {
   name: string
@@ -29,6 +30,7 @@ type AppInfo = {
   tags?: string[]
   highlights?: string[]
   screenshots?: string[]
+  screenshotsDark?: string[]
   repo?: string
   branch?: string
   // Installed state
@@ -38,6 +40,7 @@ type AppInfo = {
   managed?: string
   source?: string
   installedAt?: string
+  updateAvailable?: boolean
   // Three-axis classification
   origin?: string     // "builtin" | "registry" | "local" | "external"
   resources?: string  // "gateway" | "app"
@@ -45,14 +48,49 @@ type AppInfo = {
   // Platform
   platform?: { os?: string[]; installMode?: string; clientInstall?: { shell?: string; postInstall?: string } }
   // Manifest (from installed app)
-  manifest?: {
-    agents?: string[]
-    skills?: string[]
-    crons?: { name: string }[]
-    mcpServers?: Record<string, any>
-    permissions?: Record<string, any>
-    minKiroClawVersion?: string
-  }
+  manifest?: AppManifest
+}
+
+interface McpServerConfig {
+  url?: string
+  command?: string
+  autoApprove?: string[]
+  [key: string]: unknown
+}
+
+interface AppPermissions {
+  api?: string[]
+  events?: string[]
+  mcpTools?: string[]
+  storage?: boolean
+  cron?: boolean
+  network?: boolean
+  memory?: boolean | string
+  [key: string]: unknown
+}
+
+/** A registry app entry from /api/apps/registry — a superset of the fields we
+ *  read here, spread into AppInfo when there's no installed app. */
+interface RegistryEntry extends Partial<AppInfo> {
+  name: string
+  updateAvailable?: boolean
+}
+
+interface AppManifest {
+  displayName?: string
+  description?: string
+  version?: string
+  author?: string
+  tags?: string[]
+  highlights?: string[]
+  screenshots?: string[]
+  screenshotsDark?: string[]
+  agents?: string[]
+  skills?: string[]
+  crons?: { name: string }[]
+  mcpServers?: Record<string, McpServerConfig>
+  permissions?: AppPermissions
+  minKiroClawVersion?: string
 }
 
 function ScreenshotGallery({ screenshots }: { screenshots: string[] }) {
@@ -66,22 +104,34 @@ function ScreenshotGallery({ screenshots }: { screenshots: string[] }) {
         <div className="text-[12px] text-muted uppercase tracking-wider mb-3">Screenshots</div>
         <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-none">
           {screenshots.map((url, i) => (
-            <img
+            <button
               key={i}
-              src={url}
-              alt={`Screenshot ${i + 1}`}
-              className="h-40 rounded-lg border border-border cursor-pointer hover:border-accent/40 hover:shadow-md transition-all shrink-0 object-cover"
+              type="button"
+              aria-label={`Open screenshot ${i + 1}`}
+              className="p-0 border-none bg-transparent shrink-0 cursor-pointer"
               onClick={() => setSelected(i)}
-              onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
-            />
+            >
+              {/* onError is an image-load lifecycle handler (hide broken images), */}
+              {/* not a user interaction; the rule flags onError regardless. */}
+              {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+              <img
+                src={url}
+                alt={`Screenshot ${i + 1}`}
+                className="h-40 rounded-lg border border-border hover:border-accent/40 hover:shadow-md transition-all object-cover"
+                onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
+              />
+            </button>
           ))}
         </div>
       </div>
 
       {/* Lightbox */}
       {selected !== null && (
+        // Modal backdrop: click-to-dismiss is a mouse affordance; keyboard users
+        // dismiss/navigate via the onKeyDown handler (Escape / arrows) below.
+        // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-bg/80 backdrop-blur-sm"
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-bg/80 backdrop-blur-sm"
           onClick={() => setSelected(null)}
           onKeyDown={e => {
             if (e.key === 'Escape') setSelected(null)
@@ -93,6 +143,8 @@ function ScreenshotGallery({ screenshots }: { screenshots: string[] }) {
           role="dialog"
           aria-modal="true"
         >
+          {/* Presentational wrapper: stops backdrop-dismiss when clicking the image. */}
+          {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events */}
           <div className="relative max-w-4xl max-h-[80vh] mx-4" onClick={e => e.stopPropagation()}>
             <img src={screenshots[selected]} alt="" className="max-w-full max-h-[80vh] rounded-xl shadow-2xl" />
             <button className="absolute top-2 right-2 bg-bg/80 rounded-full p-1.5 text-muted hover:text-text" onClick={() => setSelected(null)} aria-label="Close"><X size={18} /></button>
@@ -113,6 +165,8 @@ function ScreenshotGallery({ screenshots }: { screenshots: string[] }) {
 export default function AppDetailPage() {
   const { name } = useParams<{ name: string }>()
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const { theme: resolvedMode } = useTheme()
   const [app, setApp] = useState<AppInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -130,7 +184,7 @@ export default function AppDetailPage() {
 
   // Helper: open chat with a pre-filled message (same mechanism as useChatLauncher from app-sdk)
   const openChatWithMessage = useCallback((message: string) => {
-    ;(window as any).__mc_chat_launch = { message, ts: Date.now() }
+    ;(window as Window & { __mc_chat_launch?: { message: string; ts: number } }).__mc_chat_launch = { message, ts: Date.now() }
     navigate('/chat')
   }, [navigate])
 
@@ -146,12 +200,12 @@ export default function AppDetailPage() {
       const installed = await api.getApp(name).catch(() => null)
       // Also check registry for richer metadata (screenshots, highlights)
       const registryData = await api.listRegistry().catch(() => ({ apps: [], serverPlatform: { os: '', arch: '' } }))
-      const registryList: any[] = registryData.apps || []
+      const registryList = (registryData.apps || []) as RegistryEntry[]
 
       // Fetch server hostname for client install template variables
       const sysInfo = await api.system().catch(() => ({ hostname: '' }))
       if (sysInfo.hostname) setServerHostname(sysInfo.hostname)
-      const registryEntry = registryList.find((r: any) => r.name === name)
+      const registryEntry = registryList.find((r) => r.name === name)
 
       if (installed) {
         const m = installed.manifest || {}
@@ -165,7 +219,8 @@ export default function AppDetailPage() {
           iconUrl: registryEntry?.iconUrl || '',
           tags: m.tags || registryEntry?.tags || [],
           highlights: m.highlights || registryEntry?.highlights || [],
-          screenshots: m.screenshots || registryEntry?.screenshots || [],
+          screenshots: registryEntry?.screenshots || m.screenshots || [],
+          screenshotsDark: registryEntry?.screenshotsDark || m.screenshotsDark || [],
           repo: registryEntry?.repo || '',
           installed: true,
           installedVersion: installed.version,
@@ -176,11 +231,19 @@ export default function AppDetailPage() {
           origin: installed.origin,
           resources: installed.resources,
           lifecycle: installed.lifecycle,
+          updateAvailable: registryEntry?.updateAvailable || false,
           manifest: m,
         })
       } else if (registryEntry) {
         setApp({
           ...registryEntry,
+          // Required AppInfo fields — registry entries normally carry these, but
+          // fall back so the object always satisfies AppInfo.
+          name: registryEntry.name,
+          displayName: registryEntry.displayName || registryEntry.name,
+          description: registryEntry.description || '',
+          version: registryEntry.version || '0.0.0',
+          author: registryEntry.author || '',
           // Preserve install status from registry (set by detectInstalled)
           installed: registryEntry.installed ?? false,
           platform: registryEntry.platform,
@@ -188,14 +251,25 @@ export default function AppDetailPage() {
       } else {
         setError(`App "${name}" not found`)
       }
-    } catch (e: any) {
-      setError(e.message || 'Failed to load app')
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to load app')
     } finally {
       setLoading(false)
     }
   }, [name])
 
   useEffect(() => { load() }, [load])
+
+  // Auto-trigger update when navigated with ?action=update
+  const autoUpdateTriggered = useRef(false)
+  useEffect(() => {
+    if (searchParams.get('action') === 'update' && app && !autoUpdateTriggered.current) {
+      autoUpdateTriggered.current = true
+      searchParams.delete('action')
+      setSearchParams(searchParams, { replace: true })
+      handleInstall()
+    }
+  }, [app, searchParams]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleInstall = async () => {
     if (!app) return
@@ -237,10 +311,10 @@ export default function AppDetailPage() {
       } else {
         setError(result.error || 'Install failed')
       }
-    } catch (e: any) {
-      if (e.name === 'AbortError') return
+    } catch (e: unknown) {
+      if (e instanceof Error && e.name === 'AbortError') return
       setInstallDone(true)
-      setError(e.message || 'Install failed')
+      setError(e instanceof Error ? e.message : 'Install failed')
     } finally {
       // Only clear loading if this is still the active install —
       // compare by identity to avoid the race where a second invocation
@@ -270,8 +344,8 @@ export default function AppDetailPage() {
       }
       await load()
       window.dispatchEvent(new Event('mc:apps-changed'))
-    } catch (e: any) {
-      setError(e.message || `Failed to ${action}`)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : `Failed to ${action}`)
     } finally {
       setActionLoading(null)
     }
@@ -287,8 +361,8 @@ export default function AppDetailPage() {
       recordEvent('app_uninstall', { app: app.name, version: app.installedVersion || app.version })
       window.dispatchEvent(new Event('mc:apps-changed'))
       navigate('/apps')
-    } catch (e: any) {
-      setError(e.message || 'Failed to uninstall')
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to uninstall')
     } finally {
       setActionLoading(null)
       setShowUninstallConfirm(false)
@@ -344,11 +418,16 @@ export default function AppDetailPage() {
 
         {/* Uninstall confirmation modal */}
         {showUninstallConfirm && app && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg/60 backdrop-blur-sm animate-rise"
+          // Modal backdrop: click-to-dismiss is a mouse affordance; keyboard
+          // users dismiss via the Escape handler in onKeyDown below.
+          // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-bg/60 backdrop-blur-sm animate-rise"
             onClick={() => setShowUninstallConfirm(false)}
             onKeyDown={e => { if (e.key === 'Escape') setShowUninstallConfirm(false) }}
             tabIndex={-1} ref={el => el?.focus()} role="dialog" aria-modal="true" aria-label="Confirm uninstall"
           >
+            {/* Presentational wrapper: stops backdrop-dismiss on inner clicks. */}
+            {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events */}
             <div className="bg-card border border-border rounded-xl p-6 max-w-sm w-full mx-4 shadow-xl" onClick={e => e.stopPropagation()}>
               <div className="flex items-center gap-3 mb-4">
                 <div className="w-10 h-10 rounded-xl bg-danger/10 flex items-center justify-center">
@@ -362,8 +441,8 @@ export default function AppDetailPage() {
 
               <p className="text-[13px] text-muted mb-4">This will remove the app and all its registered resources.</p>
 
-              <label className="flex items-center gap-2 text-[13px] text-muted mb-5 cursor-pointer select-none">
-                <input type="checkbox" checked={keepData} onChange={e => setKeepData(e.target.checked)} className="rounded" />
+              <label htmlFor="keep-app-data" className="flex items-center gap-2 text-[13px] text-muted mb-5 cursor-pointer select-none">
+                <input id="keep-app-data" type="checkbox" checked={keepData} onChange={e => setKeepData(e.target.checked)} className="rounded" aria-label="Keep app data" />
                 Keep app data
               </label>
 
@@ -413,6 +492,7 @@ export default function AppDetailPage() {
               {app.installed && isSelfManaged && !isBuiltin && (
                 <>
                   <div className="text-[13px] text-ok flex items-center gap-1.5"><Check size={14} /> Installed (v{app.installedVersion})</div>
+                  {app.updateAvailable && <Btn onClick={handleInstall} disabled={actionLoading === 'install'} className="!bg-[var(--info)] !text-white hover:!opacity-80">{actionLoading === 'install' ? <><Loader2 size={14} className="animate-spin" /> Updating…</> : <><ArrowUp size={14} /> Update</>}</Btn>}
                   {canUninstall && <Btn danger onClick={() => handleAction('uninstall')} disabled={actionLoading === 'uninstall'} title="Removes KiroClaw metadata only — the app itself is managed externally"><Trash2 size={14} /> Uninstall</Btn>}
                 </>
               )}
@@ -423,7 +503,8 @@ export default function AppDetailPage() {
                   ) : (
                     <Btn onClick={() => handleAction('enable')} disabled={actionLoading === 'enable'}><Power size={14} /> Enable</Btn>
                   )}
-                  {canUpdate && <Btn onClick={() => handleAction('update')} disabled={actionLoading === 'update'} title="Update app from its source directory"><RefreshCw size={14} /> Update</Btn>}
+                  {canUpdate && app.updateAvailable && <Btn onClick={handleInstall} disabled={actionLoading === 'install'} className="!bg-[var(--info)] !text-white hover:!opacity-80">{actionLoading === 'install' ? <><Loader2 size={14} className="animate-spin" /> Updating…</> : <><ArrowUp size={14} /> Update</>}</Btn>}
+                  {canUpdate && !app.updateAvailable && <Btn onClick={() => handleAction('update')} disabled={actionLoading === 'update'} title="Sync app from its source directory"><RefreshCw size={14} /> Sync</Btn>}
                   {canUninstall && <Btn danger onClick={() => handleAction('uninstall')} disabled={actionLoading === 'uninstall'}><Trash2 size={14} /> Uninstall</Btn>}
                 </>
               )}
@@ -532,7 +613,11 @@ export default function AppDetailPage() {
         </Card>
 
         {/* Screenshots */}
-        <ScreenshotGallery screenshots={app.screenshots || []} />
+        <ScreenshotGallery screenshots={(() => {
+          const dark = app.screenshotsDark || []
+          const light = app.screenshots || []
+          return resolvedMode === 'dark' && dark.length ? dark : light
+        })()} />
 
         {/* Features */}
         {(app.highlights || []).length > 0 && (
@@ -560,7 +645,7 @@ export default function AppDetailPage() {
                   <div>
                     <div className="text-muted text-[11px] uppercase tracking-wider mb-1">API Access</div>
                     <div className="flex flex-wrap gap-1">
-                      {app.manifest.permissions.api.map((p: string) => (
+                      {(app.manifest.permissions.api || []).map((p: string) => (
                         <code key={p} className="bg-bg-elevated border border-border px-1.5 py-0.5 rounded text-[11px] text-text">{p}</code>
                       ))}
                     </div>
@@ -570,7 +655,7 @@ export default function AppDetailPage() {
                   <div>
                     <div className="text-muted text-[11px] uppercase tracking-wider mb-1">WebSocket Events</div>
                     <div className="flex flex-wrap gap-1">
-                      {app.manifest.permissions.events.map((e: string) => (
+                      {(app.manifest.permissions.events || []).map((e: string) => (
                         <code key={e} className="bg-bg-elevated border border-border px-1.5 py-0.5 rounded text-[11px] text-text">{e}</code>
                       ))}
                     </div>
@@ -580,7 +665,7 @@ export default function AppDetailPage() {
                   <div>
                     <div className="text-muted text-[11px] uppercase tracking-wider mb-1">MCP Tools</div>
                     <div className="flex flex-wrap gap-1">
-                      {app.manifest.permissions.mcpTools.map((t: string) => (
+                      {(app.manifest.permissions.mcpTools || []).map((t: string) => (
                         <code key={t} className="bg-ok-subtle border border-ok/20 px-1.5 py-0.5 rounded text-[11px] text-ok">{t}</code>
                       ))}
                     </div>
@@ -601,14 +686,14 @@ export default function AppDetailPage() {
             <Card>
               <CardTitle>MCP Servers</CardTitle>
               <div className="grid gap-2 mt-2 text-[13px]">
-                {Object.entries(app.manifest.mcpServers).map(([sName, sConfig]: [string, any]) => (
+                {Object.entries(app.manifest.mcpServers).map(([sName, sConfig]) => (
                   <div key={sName} className="bg-bg-elevated border border-border rounded-md px-2.5 py-2">
                     <div className="font-mono font-medium text-text text-[12px]">{sName}</div>
                     {sConfig.url && <div className="text-muted text-[11px] mt-0.5">{sConfig.url}</div>}
                     {sConfig.command && <div className="text-muted text-[11px] mt-0.5">{sConfig.command}</div>}
                     {(sConfig.autoApprove || []).length > 0 && (
                       <div className="flex flex-wrap gap-1 mt-1.5">
-                        {sConfig.autoApprove.map((t: string) => (
+                        {(sConfig.autoApprove || []).map((t: string) => (
                           <span key={t} className="bg-ok-subtle border border-ok/20 px-1 py-0 rounded text-[10px] text-ok">{t}</span>
                         ))}
                       </div>
@@ -651,7 +736,7 @@ export default function AppDetailPage() {
                 {(app.manifest?.crons || []).length > 0 && (
                   <div className="flex items-start gap-2 text-muted">
                     <Clock size={13} className="mt-0.5 shrink-0" />
-                    <div>{app.manifest!.crons!.map((c: any) => c.name || c).join(', ')}</div>
+                    <div>{app.manifest!.crons!.map((c) => c.name).join(', ')}</div>
                   </div>
                 )}
               </div>

@@ -1,3 +1,4 @@
+import { safeSetItem } from '../utils/safeStorage'
 import { createSlice, createAsyncThunk, createSelector, type PayloadAction } from '@reduxjs/toolkit'
 import { api } from '../api/client'
 import { sanitizeLlmOutput } from '../utils/sanitize'
@@ -44,7 +45,7 @@ const _relayUnreadToParent = (slotsJson: string): void => {
   } catch { /* never let the relay break a state update */ }
 }
 const safeSet = (key: string, value: string) => {
-  try { localStorage.setItem(key, value) } catch { /* QuotaExceededError / SecurityError */ }
+  try { safeSetItem(key, value) } catch { /* QuotaExceededError / SecurityError */ }
   if (key === 'mc-unread-slots') _relayUnreadToParent(value)
 }
 

@@ -1,3 +1,4 @@
+import { safeSetItem } from '../utils/safeStorage'
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { Maximize2, Minimize2, ExternalLink, Download, Bookmark } from 'lucide-react'
 import { IconButton, IconButtonGroup } from './ui'
@@ -70,11 +71,12 @@ function persistHeightCache() {
   try {
     // Keep only last 200 entries to bound storage
     const entries = [...heightCache.entries()].slice(-200)
-    localStorage.setItem(CACHE_KEY, JSON.stringify(entries))
+    safeSetItem(CACHE_KEY, JSON.stringify(entries))
   } catch (e) {
     // Best-effort persistence (quota / private-mode / serialize failures).
     // Surface it in dev so a persistent failure isn't completely invisible;
     // there's no recovery to attempt, the next update retries the write.
+    // eslint-disable-next-line no-console -- intentional dev-only diagnostic
     if (import.meta.env.DEV) console.warn('widget height cache persist failed', e)
   }
 }
@@ -303,7 +305,7 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
     doc.body.style.margin = '0'
     doc.body.style.height = '100vh'
     const iframe = doc.createElement('iframe')
-    iframe.setAttribute('sandbox', 'allow-scripts')
+    iframe.setAttribute('sandbox', 'allow-scripts allow-popups allow-popups-to-escape-sandbox')
     iframe.setAttribute('srcdoc', srcdoc)
     iframe.style.width = '100%'
     iframe.style.height = '100%'
@@ -461,7 +463,7 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
   return (
     <div
       ref={containerRef}
-      className={`group my-2 transition-colors ${expanded ? 'fixed inset-4 z-50 rounded-xl border border-border bg-card overflow-hidden shadow-2xl' : ''}`}
+      className={`group my-2 transition-colors ${expanded ? 'fixed inset-4 z-[100] rounded-xl border border-border bg-card overflow-hidden shadow-2xl' : ''}`}
     >
       {!visible ? (
         /* Skeleton — mirrors the visible layout (same header bar + a reserved
@@ -519,17 +521,23 @@ export default function WidgetFrame({ html, title = 'Widget', slug, messageTs, w
         </IconButtonGroup>
       </div>
 
+      {/* onLoad is a frame-load lifecycle handler (fade the iframe in), not a */}
+      {/* user interaction; the rule flags onLoad regardless. */}
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
       {blobUrl && <iframe
         ref={iframeRef}
         src={blobUrl}
         onLoad={() => setIframeLoaded(true)}
-        sandbox="allow-scripts"
+        sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
         className="w-full border-none bg-card transition-opacity duration-200 ease-out motion-reduce:transition-none"
         style={{ height: expanded ? 'calc(100% - 36px)' : height, opacity: iframeLoaded ? 1 : 0 }}
         title={title}
       />}
 
       {expanded && (
+        // Click-outside backdrop to collapse; keyboard users collapse via the
+        // Minimize toolbar button above, which sets the same state.
+        // eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events
         <div className="fixed inset-0 bg-black/40 -z-10" onClick={() => setExpanded(false)} />
       )}
       </>)}

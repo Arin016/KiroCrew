@@ -118,6 +118,7 @@ const UserMessage = memo(function UserMessage({ content, meta, timestamp, render
           <textarea
             ref={taRef}
             rows={1}
+            aria-label="Edit message"
             className="bg-transparent text-card-fg resize-none overflow-hidden focus:outline-none text-sm leading-relaxed"
             value={draft}
             onChange={e => setDraft(e.target.value)}
@@ -140,7 +141,15 @@ const UserMessage = memo(function UserMessage({ content, meta, timestamp, render
 
   return (
     <div data-role="user" className="group/msg flex flex-col items-end">
-      <div ref={userRef} onCopy={handleCopy} className="msg-content px-4 py-1.5 text-sm leading-relaxed rounded-xl bg-card text-card-fg overflow-hidden min-w-0 max-w-[550px]" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+      {/* `whiteSpace: pre-wrap` preserves user-typed line breaks (Shift+Enter).
+          react-markdown renders a single source newline as a soft break — a
+          literal "\n" text node — which the default `white-space: normal`
+          collapses to a space, so multi-line input rendered as one run-on
+          paragraph (Mesh-2056). pre-wrap restores the breaks. Child <pre> code
+          blocks set their own `white-space`, so they override the inherited
+          value and are unaffected. Mirrors the pre-wrap spans renderInlineSegment
+          already uses on the paste-adjacent path. */}
+      <div ref={userRef} onCopy={handleCopy} className="msg-content px-4 py-1.5 text-sm leading-relaxed rounded-xl bg-card text-card-fg overflow-hidden min-w-0 max-w-[550px]" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
         {renderContent(content, meta)}
       </div>
       <div className="flex items-center gap-1.5 px-1 mt-1 opacity-0 transition-opacity duration-300 delay-100 group-hover/msg:opacity-100 group-hover/msg:delay-300 group-focus-within/msg:opacity-100 group-focus-within/msg:delay-300">

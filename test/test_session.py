@@ -1345,6 +1345,7 @@ class TestResetWithPid:
         with patch("os.kill", side_effect=ProcessLookupError), \
              patch("kiro_claw.acp.client._get_child_pids", return_value=[333]), \
              patch("kiro_claw.acp.client._get_start_time", return_value=3000), \
+             patch("kiro_claw.acp.client._read_basename", return_value=b"node"), \
              patch("kiro_claw.acp.client._kill_escaped_children") as mock_sweep:
             await mgr.reset("k1")
             mock_sweep.assert_called_once()
@@ -2814,16 +2815,24 @@ class TestCleanupLoopResilience:
         cfg.session.timeout_secs = 360
         call_count = 0
 
-        # Patch asyncio.wait_for to raise TimeoutError immediately (skip sleep),
-        # and limit iterations via _expire_idle setting shutdown after call 2.
+        # Collapse the loop's inter-sweep sleep to ~zero WITHOUT busy-spinning.
+        # The loop sleeps via ``asyncio.wait_for(shutdown_event.wait(), timeout=interval)``
+        # (interval >= 60s). We shrink only THAT call to a tiny real timeout so
+        # the wait actually runs: it returns immediately once shutdown_event is
+        # set, and otherwise times out in ~1ms. Previously this raised
+        # TimeoutError WITHOUT awaiting the wait(), which turned the loop into an
+        # unbounded busy-spin — if _expire_idle's shutdown_event.set() landed on
+        # a cross-loop-rebound event (after an earlier asyncio test in the same
+        # process), the top-of-loop is_set() check could miss it and the test
+        # would hang until its own outer deadline. Letting the real wait() run
+        # makes the stop deterministic regardless of prior event-loop binding.
+        # The ``timeout >= 60`` discriminator keeps this from clamping the outer
+        # ``wait_for(_cleanup_loop(), timeout=5)`` guard below.
         real_wait_for = asyncio.wait_for
 
         async def _fast_wait_for(coro, *, timeout):
-            # If it's the shutdown_event.wait() call (has a long timeout),
-            # skip it by raising TimeoutError immediately.
             if timeout >= 60:
-                coro.close()
-                raise asyncio.TimeoutError
+                return await real_wait_for(coro, timeout=0.001)
             return await real_wait_for(coro, timeout=timeout)
 
         async def _expire_then_stop(timeout):
@@ -2851,12 +2860,15 @@ class TestCleanupLoopResilience:
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
         cfg.session.timeout_secs = 360
 
+        # Shrink only the loop's inter-sweep sleep to a tiny REAL timeout (not a
+        # coro.close()+raise) so the loop observes shutdown_event deterministically
+        # instead of busy-spinning — see the note in
+        # test_cleanup_loop_continues_after_expire_idle_crash.
         real_wait_for = asyncio.wait_for
 
         async def _fast_wait_for(coro, *, timeout):
             if timeout >= 60:
-                coro.close()
-                raise asyncio.TimeoutError
+                return await real_wait_for(coro, timeout=0.001)
             return await real_wait_for(coro, timeout=timeout)
 
         async def _crash_and_stop(timeout):

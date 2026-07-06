@@ -1,3 +1,4 @@
+import { safeSetItem } from '../utils/safeStorage'
 import { useState, useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
@@ -5,6 +6,7 @@ import { useAppSelector, useAppDispatch } from '../store'
 import { deleteSlot, switchSlot } from '../store/chatSlice'
 import { api } from '../api/client'
 import { PageHeader, EmptyState } from '../components/ui'
+import { loadChatConfig } from './chat/ChatSettings'
 import type { ChatSlot, PendingApproval } from '../types'
 import { AlertTriangle, ArrowUpDown, Ban, Check, CheckCircle, Clock, LayoutGrid, Loader2, MessageSquareDot, X, Zap } from 'lucide-react'
 import TrustDropdown from '../components/TrustDropdown'
@@ -315,7 +317,7 @@ export default function BoardPage() {
   const byLane: Record<Lane, ChatSlot[]> = { approval: [], your_turn: [], working: [], idle: [] }
   for (const slot of slots) byLane[inferLane(slot, stalled)].push(slot)
   const [boardSort, setBoardSort] = useState<BoardSort>(() => (localStorage.getItem(BOARD_SORT_KEY) as BoardSort) || 'newest')
-  const changeSort = (s: BoardSort) => { setBoardSort(s); localStorage.setItem(BOARD_SORT_KEY, s) }
+  const changeSort = (s: BoardSort) => { setBoardSort(s); safeSetItem(BOARD_SORT_KEY, s) }
   const sortFn = (a: ChatSlot, b: ChatSlot) => {
     switch (boardSort) {
       case 'newest': return new Date(b.last_ts || 0).getTime() - new Date(a.last_ts || 0).getTime()
@@ -358,11 +360,15 @@ export default function BoardPage() {
     const id = window.setTimeout(() => unlockSlot(key), 3_000)
     lockTimers.current.set(key, id)
   }
-  // Fix #1: Clear all pending lock timeouts on unmount to prevent timer leaks
+  // Fix #1: Clear all pending lock timeouts on unmount to prevent timer leaks.
+  // Capture the Map instance up front so the cleanup operates on the same
+  // reference the effect saw (the ref itself is stable, but this satisfies the
+  // exhaustive-deps ref-in-cleanup guard and is robust if that ever changes).
   useEffect(() => {
+    const timers = lockTimers.current
     return () => {
-      lockTimers.current.forEach(id => clearTimeout(id))
-      lockTimers.current.clear()
+      timers.forEach(id => clearTimeout(id))
+      timers.clear()
     }
   }, [])
   // Clear locks reactively when SSE updates change slot state
@@ -407,7 +413,7 @@ export default function BoardPage() {
     void api.approveChatSlot(slotKey, action, extra).catch(() => unlockSlot(slotKey))
   }
   const closeSlot = (key: string, title: string) => {
-    if (window.confirm(`Close session "${title}"?\n\nThis will end the chat and remove it from the board.`)) {
+    if (!loadChatConfig().confirmCloseSession || window.confirm(`Close session "${title}"?\n\nThis will end the chat and remove it from the board.`)) {
       void dispatch(deleteSlot(key))
     }
   }

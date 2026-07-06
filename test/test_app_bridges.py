@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from hypothesis import HealthCheck, assume, given, settings
@@ -339,9 +340,13 @@ class TestRegistrationResult:
 
 class TestMCPRegistration:
     def test_register_mcp_servers(self, tmp_path, app_env, monkeypatch):
+        import kiro_claw.apps.backend as backend_mod
         import kiro_claw.apps.bridges as bmod
         mcp_path = tmp_path / "mcp.json"
         monkeypatch.setattr(bmod, "_MCP_JSON_PATH", mcp_path)
+        # Backend live → HTTP url server registers (the dead-port skip only fires when
+        # no backend is up; see test_http_mcp_server_skipped_when_backend_not_yet_up).
+        monkeypatch.setattr(backend_mod, "get_app_backend_port", lambda _n: 9000)
 
         src = _make_app_source(tmp_path, mcpServers={
             "my-mcp": {"url": "http://localhost:9000/mcp"},
@@ -380,9 +385,13 @@ class TestMCPRegistration:
         # Port rewritten 9100 -> 9101; scheme/host/path preserved.
         assert data["mcpServers"]["test-app:my-mcp"]["url"] == "http://localhost:9101/mcp"
 
-    def test_http_mcp_url_kept_when_backend_not_yet_up(self, tmp_path, app_env, monkeypatch):
-        # If the backend isn't running yet (port unknown), keep the manifest default —
-        # the enable flow re-registers once the backend is up.
+    def test_http_mcp_server_skipped_when_backend_not_yet_up(self, tmp_path, app_env, monkeypatch):
+        # REGRESSION (CR-281976055 / revert CR-284300496): if the backend isn't running
+        # (port unknown), an HTTP MCP server must NOT be registered at all — registering
+        # the manifest's illustrative dead port (:9100) into global ~/.kiro/settings/mcp.json
+        # makes kiro-cli try to connect on EVERY session → "backend hiccup" → 3 retries →
+        # hard error, breaking all requests. The enable/boot flow re-registers with the
+        # live port once the backend is up.
         import kiro_claw.apps.backend as backend_mod
         import kiro_claw.apps.bridges as bmod
         mcp_path = tmp_path / "mcp.json"
@@ -398,7 +407,55 @@ class TestMCPRegistration:
         )
         _register_mcp_servers("test-app", manifest)
         data = json.loads(mcp_path.read_text())
-        assert data["mcpServers"]["test-app:my-mcp"]["url"] == "http://localhost:9100/mcp"
+        # No dead-port entry written — nothing for kiro to fail to connect to.
+        assert "test-app:my-mcp" not in data.get("mcpServers", {})
+
+    def test_http_mcp_dead_entry_scrubbed_on_reregister_without_backend(
+        self, tmp_path, app_env, monkeypatch
+    ):
+        # A stale dead-port entry from a prior (now-down) registration must be SCRUBBED
+        # when we re-register and the backend still isn't up — so it can't keep poisoning
+        # every kiro session across reboots/disable.
+        import kiro_claw.apps.backend as backend_mod
+        import kiro_claw.apps.bridges as bmod
+        mcp_path = tmp_path / "mcp.json"
+        monkeypatch.setattr(bmod, "_MCP_JSON_PATH", mcp_path)
+
+        src = _make_app_source(tmp_path, mcpServers={
+            "my-mcp": {"url": "http://localhost:9100/mcp"},
+        })
+        install_app(src)
+        manifest = AppManifest.from_json_file(
+            app_env["home"] / "apps" / "test-app" / APP_MANIFEST_FILENAME
+        )
+        # Backend up → entry written with live port.
+        monkeypatch.setattr(backend_mod, "get_app_backend_port", lambda _n: 9101)
+        _register_mcp_servers("test-app", manifest)
+        assert "test-app:my-mcp" in json.loads(mcp_path.read_text())["mcpServers"]
+        # Backend now DOWN → a re-register must remove the now-dead entry.
+        monkeypatch.setattr(backend_mod, "get_app_backend_port", lambda _n: None)
+        _register_mcp_servers("test-app", manifest)
+        assert "test-app:my-mcp" not in json.loads(mcp_path.read_text()).get("mcpServers", {})
+
+    def test_stdio_mcp_server_always_registered_no_backend(self, tmp_path, app_env, monkeypatch):
+        # A command/stdio MCP server (no url) has no port to be dead — it must always be
+        # registered regardless of backend liveness (only HTTP url servers are gated).
+        import kiro_claw.apps.backend as backend_mod
+        import kiro_claw.apps.bridges as bmod
+        mcp_path = tmp_path / "mcp.json"
+        monkeypatch.setattr(bmod, "_MCP_JSON_PATH", mcp_path)
+        monkeypatch.setattr(backend_mod, "get_app_backend_port", lambda _n: None)
+
+        src = _make_app_source(tmp_path, mcpServers={
+            "my-stdio": {"command": "my-server", "args": ["--stdio"]},
+        })
+        install_app(src)
+        manifest = AppManifest.from_json_file(
+            app_env["home"] / "apps" / "test-app" / APP_MANIFEST_FILENAME
+        )
+        registered = _register_mcp_servers("test-app", manifest)
+        assert registered == ["test-app:my-stdio"]
+        assert "test-app:my-stdio" in json.loads(mcp_path.read_text())["mcpServers"]
 
     def test_reregister_app_mcp_servers_overwrites_with_live_port(self, tmp_path, app_env, monkeypatch):
         # reregister_app_mcp_servers (called after the backend starts) overwrites the
@@ -413,15 +470,15 @@ class TestMCPRegistration:
             "my-mcp": {"url": "http://localhost:9100/mcp"},
         })
         install_app(src)
-        # First registration BEFORE the backend is up: port stays 9100.
+        # First registration BEFORE the backend is up: HTTP server is skipped (no dead
+        # entry written — the fail-safe that keeps kiro from dialing a dead port).
         monkeypatch.setattr(backend_mod, "get_app_backend_port", lambda _n: None)
         manifest = AppManifest.from_json_file(
             app_env["home"] / "apps" / "test-app" / APP_MANIFEST_FILENAME
         )
         _register_mcp_servers("test-app", manifest)
-        assert json.loads(mcp_path.read_text())["mcpServers"]["test-app:my-mcp"]["url"] \
-            == "http://localhost:9100/mcp"
-        # Backend now up on 9101 → re-register rewrites it.
+        assert "test-app:my-mcp" not in json.loads(mcp_path.read_text()).get("mcpServers", {})
+        # Backend now up on 9101 → re-register writes it with the live port.
         monkeypatch.setattr(backend_mod, "get_app_backend_port", lambda _n: 9101)
         reregister_app_mcp_servers("test-app")
         assert json.loads(mcp_path.read_text())["mcpServers"]["test-app:my-mcp"]["url"] \
@@ -485,9 +542,12 @@ class TestMCPRegistration:
         assert _register_mcp_servers("test", manifest) == []
 
     def test_register_app_includes_mcp(self, tmp_path, app_env, monkeypatch):
+        import kiro_claw.apps.backend as backend_mod
         import kiro_claw.apps.bridges as bmod
         mcp_path = tmp_path / "mcp.json"
         monkeypatch.setattr(bmod, "_MCP_JSON_PATH", mcp_path)
+        # Backend live so the HTTP url server is registered (not dead-port-skipped).
+        monkeypatch.setattr(backend_mod, "get_app_backend_port", lambda _n: 8080)
 
         src = _make_app_source(tmp_path, mcpServers={
             "backend": {"url": "http://localhost:8080/mcp"},
@@ -521,9 +581,12 @@ class TestMCPProperties:
         """**Validates: Requirements 8.1, 8.2**"""
         import uuid
 
+        import kiro_claw.apps.backend as backend_mod
         import kiro_claw.apps.bridges as bmod
         mcp_path = tmp_path / f"mcp-{uuid.uuid4().hex[:8]}.json"
         monkeypatch.setattr(bmod, "_MCP_JSON_PATH", mcp_path)
+        # Backend live → HTTP url servers register (dead-port skip only with no backend).
+        monkeypatch.setattr(backend_mod, "get_app_backend_port", lambda _n: 9000)
 
         manifest = AppManifest(name=app_name, mcpServers=servers)
         registered = _register_mcp_servers(app_name, manifest)
@@ -557,9 +620,12 @@ class TestMCPProperties:
         assume(app_a != app_b)
         import uuid
 
+        import kiro_claw.apps.backend as backend_mod
         import kiro_claw.apps.bridges as bmod
         mcp_path = tmp_path / f"mcp-iso-{uuid.uuid4().hex[:8]}.json"
         monkeypatch.setattr(bmod, "_MCP_JSON_PATH", mcp_path)
+        # Backend live → HTTP url servers register (dead-port skip only with no backend).
+        monkeypatch.setattr(backend_mod, "get_app_backend_port", lambda _n: 9000)
 
         # Register both apps
         _register_mcp_servers(app_a, AppManifest(name=app_a, mcpServers=servers_a))
@@ -577,6 +643,114 @@ class TestMCPProperties:
         # app_b entries preserved
         for name in servers_b:
             assert f"{app_b}:{name}" in remaining
+
+
+class TestBootReconcile:
+    """Boot-time scrub of stale MCP entries for disabled apps (regression
+    CR-281976055 / revert CR-284300496)."""
+
+    def test_boot_scrubs_stale_mcp_entry_for_disabled_app(self, tmp_path, monkeypatch):
+        # A disabled app that left a (now-dead-port) MCP entry in global mcp.json must
+        # have it scrubbed at gateway boot — else kiro-cli dials the dead port on every
+        # session. start_enabled_app_backends() reconciles disabled apps before starting
+        # any backend.
+        import kiro_claw.apps.backend as backend_mod
+        import kiro_claw.apps.bridges as bmod
+
+        mcp_path = tmp_path / "mcp.json"
+        monkeypatch.setattr(bmod, "_MCP_JSON_PATH", mcp_path)
+        # Seed a stale entry as if a prior enable had registered it.
+        mcp_path.write_text(json.dumps({"mcpServers": {
+            "ai-app:backend": {"url": "http://localhost:9100/mcp"},
+            "other:keep": {"command": "x"},
+        }}) + "\n")
+
+        # One installed-but-DISABLED app that declares an MCP server. list_apps is imported
+        # inside start_enabled_app_backends from the manager module, so patch it there.
+        monkeypatch.setattr(backend_mod, "list_apps", lambda: [
+            {"name": "ai-app", "enabled": False,
+             "manifest": {"mcpServers": {"backend": {"url": "http://localhost:9100/mcp"}},
+                          "backend": {"entryPoint": "x"}}},
+        ])
+        # No backend should be started for a disabled app.
+        monkeypatch.setattr(backend_mod, "start_app_backend",
+                            lambda *_a, **_k: pytest.fail("must not start disabled app"))
+
+        backend_mod.start_enabled_app_backends()
+
+        remaining = json.loads(mcp_path.read_text())["mcpServers"]
+        assert "ai-app:backend" not in remaining   # stale dead entry scrubbed
+        assert "other:keep" in remaining            # unrelated entry untouched
+
+    def test_enabled_app_never_healthy_mcp_entry_scrubbed(self, tmp_path, app_env, monkeypatch):
+        # Review CR-284432051: an ENABLED port:"auto" app registered with an optimistic
+        # pre-health port whose backend never passes /health must NOT leave a dead HTTP MCP
+        # url behind — that's the exact shape that broke every kiro-cli session. The
+        # health-gated path calls _gate_mcp_registration(healthy=False) on health failure,
+        # which scrubs the entry. (Closes the disabled-only asymmetry the reviewer flagged.)
+        import kiro_claw.apps.backend as backend_mod
+        import kiro_claw.apps.bridges as bmod
+
+        mcp_path = tmp_path / "mcp.json"
+        monkeypatch.setattr(bmod, "_MCP_JSON_PATH", mcp_path)
+        # Seed an optimistic entry as if the pre-health register had written it.
+        mcp_path.write_text(json.dumps({"mcpServers": {
+            "test-app:backend": {"url": "http://localhost:9100/mcp"},
+            "other:keep": {"command": "x"},
+        }}) + "\n")
+
+        backend_mod._gate_mcp_registration("test-app", 9100, healthy=False)
+
+        remaining = json.loads(mcp_path.read_text())["mcpServers"]
+        assert "test-app:backend" not in remaining  # dead enabled-app entry scrubbed
+        assert "other:keep" in remaining            # unrelated entry untouched
+
+    def test_enabled_app_healthy_registers_with_live_port(self, tmp_path, app_env, monkeypatch):
+        # The complement: once /health passes, _gate_mcp_registration(healthy=True) writes the
+        # HTTP MCP url with the confirmed live port (rewriting the manifest's illustrative one).
+        import kiro_claw.apps.backend as backend_mod
+        import kiro_claw.apps.bridges as bmod
+
+        mcp_path = tmp_path / "mcp.json"
+        monkeypatch.setattr(bmod, "_MCP_JSON_PATH", mcp_path)
+        # Health-gated lookup returns None (port resolved from the explicit live_port instead).
+        monkeypatch.setattr(backend_mod, "get_app_backend_port", lambda _n: None)
+        src = _make_app_source(tmp_path, mcpServers={"my-mcp": {"url": "http://localhost:9100/mcp"}})
+        install_app(src)
+
+        backend_mod._gate_mcp_registration("test-app", 9101, healthy=True)
+
+        servers = json.loads(mcp_path.read_text())["mcpServers"]
+        assert "test-app:my-mcp" in servers
+        assert servers["test-app:my-mcp"]["url"] == "http://localhost:9101/mcp"  # live port
+
+    def test_boot_does_not_register_enabled_app_before_health(self, tmp_path, monkeypatch):
+        # Review CR-284432051: the boot loop must NOT register MCP servers for a freshly
+        # spawned (healthy=False) enabled app — registration is deferred to the health-check
+        # loop. Registering here is what could leave a dead url for a never-healthy app.
+        import kiro_claw.apps.backend as backend_mod
+        import kiro_claw.apps.bridges as bmod
+
+        mcp_path = tmp_path / "mcp.json"
+        monkeypatch.setattr(bmod, "_MCP_JSON_PATH", mcp_path)
+        mcp_path.write_text(json.dumps({"mcpServers": {}}) + "\n")
+
+        monkeypatch.setattr(backend_mod, "list_apps", lambda: [
+            {"name": "ai-app", "enabled": True,
+             "manifest": {"mcpServers": {"backend": {"url": "http://localhost:9100/mcp"}},
+                          "backend": {"entryPoint": "x"}}},
+        ])
+        # Spawn returns a not-yet-healthy process (the real pre-health state).
+        fake_ap = SimpleNamespace(port=9101, healthy=False)
+        monkeypatch.setattr(backend_mod, "start_app_backend", lambda *_a, **_k: fake_ap)
+        # If the boot loop tries to register before health, fail loudly.
+        monkeypatch.setattr(backend_mod, "_gate_mcp_registration",
+                            lambda *_a, **_k: pytest.fail("must not register before health"))
+
+        backend_mod.start_enabled_app_backends()
+
+        # Nothing registered synchronously; the health loop owns it.
+        assert json.loads(mcp_path.read_text())["mcpServers"] == {}
 
 
 # ---------------------------------------------------------------------------

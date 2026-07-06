@@ -6,6 +6,7 @@ tracking, and aiohttp middleware for Slack-gated dashboard access.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -17,11 +18,12 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from aiohttp import web
 
-from kiro_claw.dashboard.origin import is_loopback
+from kiro_claw.dashboard.origin import is_https_request, is_loopback
 from kiro_claw.dashboard.refresh_tokens import (
     MAX_REFRESH_TTL_SECS,
     REFRESH_COOKIE_PATH,
@@ -92,6 +94,140 @@ def _bump_revocation_gen() -> int:
 
 
 _REVOCATION_GEN = _load_revocation_gen()
+
+
+# -- Per-session access-cookie revocation -------------------------------------
+
+_REVOKED_NONCES_FILE = "token_revoked_nonces.json"
+
+
+class RevokedNonceStore:
+    """Persisted denylist of explicitly-revoked access-cookie nonces.
+
+    Enables PER-SESSION logout (CWE-613). The access cookie is a self-contained
+    HMAC-signed token, so clearing it client-side (``Set-Cookie max_age=0``)
+    does NOT stop a saved copy being replayed until its ``session_exp`` (up to
+    20h). ``POST /api/auth/logout`` records the caller's access-cookie ``nonce``
+    here; :func:`validate_token` (cookie path) then rejects any token whose
+    nonce is listed — killing exactly that one session WITHOUT bumping the
+    global generation counter (``revoke_all_sessions``), which would log out
+    every other user too.
+
+    Persisted to disk (mode ``0600``) so a revoked cookie stays dead across a
+    gateway restart — unlike the in-memory link-nonce set in
+    :class:`TokenStateManager`, which is restart-cleared and intentionally NOT
+    consulted for cookies. Each entry stores the token's own ``session_exp`` as
+    an eviction floor: once that passes, the expiry check rejects the token
+    anyway, so the record is dropped and the file cannot grow without bound.
+    """
+
+    def __init__(self, state_path: Path | None = None) -> None:
+        self._lock = threading.Lock()
+        self._revoked: dict[str, float] = {}  # nonce -> session_exp (eviction floor)
+        self._state_path = state_path
+        self._load()
+
+    def revoke(self, nonce: str, session_exp: float) -> None:
+        """Record *nonce* as revoked until *session_exp*, evicting expired entries."""
+        now = time.time()
+        with self._lock:
+            self._revoked[nonce] = session_exp
+            # Opportunistic eviction so a stream of logouts cannot grow the file.
+            expired = [n for n, exp in self._revoked.items() if exp < now]
+            for n in expired:
+                self._revoked.pop(n, None)
+        self._persist()
+
+    def is_revoked(self, nonce: str) -> bool:
+        """Return True if *nonce* is on the denylist and not yet past its floor."""
+        now = time.time()
+        with self._lock:
+            exp = self._revoked.get(nonce)
+            if exp is None:
+                return False
+            if exp < now:
+                # Stale entry — the token is already rejected by the expiry
+                # check, so drop it lazily (no persist on this hot read path).
+                self._revoked.pop(nonce, None)
+                return False
+            return True
+
+    def clear_all(self) -> None:
+        """Wipe all revoked-nonce records (used by tests)."""
+        with self._lock:
+            self._revoked.clear()
+        self._persist()
+
+    def _load(self) -> None:
+        if self._state_path is None or not self._state_path.exists():
+            return
+        try:
+            data = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.warning(
+                "could not read revoked-nonce store; starting empty", exc_info=True
+            )
+            return
+        now = time.time()
+        with self._lock:
+            for entry in data.get("revoked_nonces", []):
+                if isinstance(entry, dict) and "nonce" in entry and "exp" in entry:
+                    try:
+                        exp = float(entry["exp"])
+                    except (TypeError, ValueError):
+                        continue
+                    if exp >= now:  # skip already-expired records on load
+                        self._revoked[str(entry["nonce"])] = exp
+
+    def _persist(self) -> None:
+        if self._state_path is None:
+            return
+        with self._lock:
+            data = {
+                "revoked_nonces": [
+                    {"nonce": n, "exp": exp} for n, exp in self._revoked.items()
+                ]
+            }
+            try:
+                self._state_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
+                tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+                try:
+                    os.chmod(tmp, 0o600)
+                except OSError:
+                    # Security-sensitive state (revoked session nonces). A chmod
+                    # failure must be observable, matching token_secret.py.
+                    logger.warning(
+                        "could not set 0600 on revoked-nonce store %s; "
+                        "file may be readable by other users",
+                        tmp,
+                        exc_info=True,
+                    )
+                os.replace(tmp, self._state_path)
+            except OSError:
+                logger.warning("could not persist revoked-nonce store", exc_info=True)
+
+
+_revoked_store_singleton: RevokedNonceStore | None = None
+_revoked_store_lock = threading.Lock()
+
+
+def _get_revoked_store() -> RevokedNonceStore:
+    """Return the lazily-initialized revoked-nonce store singleton.
+
+    Lazy (not module-level) so merely importing token_auth never touches the
+    filesystem — the CLI imports this module for every subcommand.
+    """
+    global _revoked_store_singleton
+    if _revoked_store_singleton is None:
+        with _revoked_store_lock:
+            if _revoked_store_singleton is None:
+                from kiro_claw.config.loader import config_dir
+
+                _revoked_store_singleton = RevokedNonceStore(
+                    state_path=config_dir() / _REVOKED_NONCES_FILE
+                )
+    return _revoked_store_singleton
 
 
 class TokenStateManager:
@@ -220,6 +356,63 @@ _BYPASS_EXACT = {"/logo.png", "/manifest.json", "/sw.js", "/pcm-worklet.js", "/a
 # require a valid token. The bounded character class prevents ReDoS.
 _APPS_UI_BYPASS_RE = re.compile(r"^/apps/[a-z0-9][a-z0-9_-]*/ui/")
 
+# Single source of truth for "paths that are NEVER the SPA (Single-Page
+# Application) shell." One list, read by BOTH consumers below so they cannot
+# drift:
+#   1. the auth middleware — never serves these the shell on a cold start
+#   2. server.py's SPA fallback — never serves these index.html on a 404
+# Each entry owns its own response: gated JSON (/api/), the OpenAI-compat
+# data API (/v1/), and static bundles. Any GET/HEAD path NOT under one of
+# these is a client-side SPA navigation the server answers with index.html.
+#
+# NOTE: /apps/ is intentionally NOT in this tuple. /apps/ path handling is
+# governed solely by _APPS_SPA_EXCLUDED_RE in _is_spa_shell_request:
+#   - bare /apps/{name}           → SPA shell (browser refresh must work)
+#   - /apps/{name}/<sub-path>     → real server handler (proxy / static)
+# test_no_get_route_outside_shell_exclusions validates /apps/ routes against
+# _APPS_SPA_EXCLUDED_RE directly, not this tuple.
+SPA_FALLBACK_EXCLUDED_PREFIXES = (
+    "/api/",
+    "/v1/",
+    "/assets/",
+    "/static/",
+    "/sprites/",
+    "/vendor/",
+    "/fonts/",
+)
+
+# Regex that matches /apps/{name} sub-namespace paths that have real server-side
+# handlers and must NOT be shadowed by the SPA shell. Bare /apps/{name} (no
+# further slash) is excluded from this pattern so those paths *do* get the SPA
+# shell on a browser refresh.
+_APPS_SPA_EXCLUDED_RE = re.compile(r"^/apps/[a-z0-9][a-z0-9_-]*/")
+
+
+def _is_spa_shell_request(request: web.Request) -> bool:
+    """True if this GET/HEAD request should be answered with the SPA shell.
+
+    Why: lets the React app boot on a cold start (token expired) so it can run
+    its own ``/api/auth/me`` -> ``/api/auth/refresh`` recovery, instead of a
+    dead-end 403 whose recovery JS never loads. Safe because the shell is
+    static and secret-free and every data namespace is excluded.
+
+    Special case for ``/apps/``: bare ``/apps/{name}`` paths (no sub-path) are
+    React Router navigation entries that have no server-side route, so they must
+    fall through to the SPA shell.  Only ``/apps/{name}/<sub-path>`` URLs with
+    real handlers (``/api/``, ``/ui/``) are excluded.
+    """
+    if request.method not in ("GET", "HEAD"):
+        return False
+    path = request.path
+    # Fast-path: most paths don't start with /apps/
+    if not path.startswith("/apps/"):
+        return not path.startswith(SPA_FALLBACK_EXCLUDED_PREFIXES)
+    # /apps/ sub-namespace: only exclude paths that have real server-side
+    # handlers (i.e. the path has a sub-component after {name}/).
+    # Bare /apps/{name} with no trailing slash → SPA navigation → serve shell.
+    return not _APPS_SPA_EXCLUDED_RE.match(path)
+
+
 # Link click window — URL must be opened within this time
 LINK_WINDOW_SECS = 300  # 5 minutes
 # Maximum session TTL — cookie cannot exceed this
@@ -292,6 +485,7 @@ def generate_token(
     app: str = "",
     prompt: str = "",
     extra: dict[str, str] | None = None,
+    register_nonce: bool = True,
 ) -> str:
     """Return ``base64url(payload).base64url(signature)``.
 
@@ -321,15 +515,23 @@ def generate_token(
     nonce = os.urandom(8).hex()
     session_ttl = min(ttl_seconds, MAX_SESSION_TTL_SECS)
 
-    evicted = _state.register_nonce(nonce, now + session_ttl)
-    if evicted:
-        _sel_fn().log_api_access(
-            caller=user_id,
-            operation="nonce_evicted",
-            outcome="ok",
-            source="token_auth",
-            resources=f"evicted_nonce={evicted}",
-        )
+    # register_nonce=False: the token will only ever be validated on the COOKIE
+    # path (use_session_exp=True), which does not consult the link-nonce set.
+    # Skipping registration keeps the exchanged session token OUT of the bounded
+    # (50-slot) set so high-frequency link→session exchanges (self-nudge polling,
+    # instance-iframe re-navigation) don't churn/evict pending one-time link
+    # nonces (e.g. Slack challenge links). The nonce is still embedded in the
+    # payload so the token remains individually revocable (RevokedNonceStore).
+    if register_nonce:
+        evicted = _state.register_nonce(nonce, now + session_ttl)
+        if evicted:
+            _sel_fn().log_api_access(
+                caller=user_id,
+                operation="nonce_evicted",
+                outcome="ok",
+                source="token_auth",
+                resources=f"evicted_nonce={evicted}",
+            )
 
     payload_dict: dict[str, object] = {
         "sub": user_id,
@@ -396,8 +598,22 @@ def validate_token(token: str, *, use_session_exp: bool = False) -> tuple[bool, 
     # nonce there would invalidate every live cookie on each gateway restart
     # (the nonce store is per-process), locking users out for no security gain.
     # Cookie revocation is handled by the gen check above, not the nonce.
-    if not use_session_exp:
-        token_nonce = data.get("nonce", "")
+    token_nonce = data.get("nonce", "")
+    if use_session_exp:
+        # Per-session logout (CWE-613): POST /api/auth/logout adds THIS cookie's
+        # nonce to a persisted server-side denylist. Deny-by-default: a cookie
+        # with no nonce cannot be checked against the denylist, so it is
+        # rejected outright rather than silently skipping the revocation check.
+        # Every token minted by generate_token carries a nonce, so this rejects
+        # only malformed/forged cookies — without the nuclear
+        # revoke_all_sessions() gen bump that kills every other session. (The
+        # in-memory nonce *set* is still not consulted here — that would break
+        # all live cookies on restart; only the explicit denylist is.)
+        if not token_nonce:
+            return False, "", "missing nonce"
+        if _get_revoked_store().is_revoked(token_nonce):
+            return False, "", "session revoked"
+    else:
         valid, reason = _state.is_nonce_valid(token_nonce)
         if not valid:
             return False, "", reason
@@ -560,6 +776,39 @@ def try_consume(token: str, session_exp: float = 0.0) -> bool:
     return _state.try_consume(token, session_exp or time.time() + MAX_SESSION_TTL_SECS)
 
 
+def revoke_access_cookie(token: str) -> bool:
+    """Revoke a SINGLE access cookie by adding its nonce to the denylist.
+
+    Validates the token (signature + session_exp + gen) first — deny-by-default,
+    so attacker-controlled junk is never written into the persisted store. Then
+    extracts the per-token ``nonce`` and ``session_exp`` and records the nonce
+    as revoked until that expiry. Returns True if a nonce was revoked, False
+    otherwise (malformed / already-expired / nonce-less token — nothing to do).
+
+    This is the per-session counterpart to :func:`revoke_all_sessions`: logout
+    calls it so the caller's own cookie is rejected immediately, without the
+    global generation bump that would terminate every other active session.
+    """
+    valid, _uid, _reason = validate_token(token, use_session_exp=True)
+    if not valid:
+        return False
+    try:
+        data = json.loads(_b64url_decode(token.split(".")[0]))
+    except Exception:
+        return False
+    nonce = data.get("nonce", "")
+    if not nonce:
+        return False
+    try:
+        session_exp = float(data.get("session_exp", 0.0))
+    except (TypeError, ValueError):
+        return False
+    if session_exp <= time.time():
+        return False
+    _get_revoked_store().revoke(nonce, session_exp)
+    return True
+
+
 def revoke_all_sessions() -> None:
     """Revoke all active dashboard sessions (also used for test isolation).
 
@@ -611,6 +860,130 @@ def _cookie_port_from_host(request: web.Request, fallback: int) -> str:
     return str(fallback)
 
 
+# -- App-token scope enforcement (CWE-269, least privilege) -------------------
+#
+# An app token (payload carries a non-empty ``app`` claim, minted by the
+# X-App-Secret exchange at /api/apps/<name>/token) must NOT have the same
+# reach as a dashboard-user token. Deny-by-default: an app token may only
+# access (1) its own app namespace and (2) the API path prefixes the app
+# declared in its manifest ``permissions.api`` allowlist. Everything else is
+# rejected. Dashboard-user tokens (empty ``app`` claim) are never subject to
+# this — the gate is a no-op for them.
+
+# Short-TTL cache of each app's declared ``permissions.api`` allowlist so the
+# hot auth path doesn't read app.json on every request. Permissions change
+# rarely; a 30s TTL self-heals after enable/disable/update without any
+# invalidation wiring.
+_APP_PERMS_TTL = 30.0
+_app_perms_cache: dict[str, tuple[float, tuple[str, ...]]] = {}
+_app_perms_lock = threading.Lock()
+
+
+def _app_api_allowlist(app_name: str) -> tuple[str, ...]:
+    """Return the app's declared ``permissions.api`` prefixes (cached, deny-safe).
+
+    On any failure (app not installed, manifest unreadable) returns an empty
+    tuple — i.e. deny-by-default: the app is confined to its own namespace only.
+    """
+    now = time.time()
+    with _app_perms_lock:
+        entry = _app_perms_cache.get(app_name)
+        if entry is not None and now - entry[0] < _APP_PERMS_TTL:
+            return entry[1]
+    allow: tuple[str, ...] = ()
+    try:
+        # circular import: apps.manager imports generate_app_secret/
+        # write_app_secret from this module (token_auth), so a top-level
+        # `import` here would form a cycle. Kept function-local deliberately.
+        from kiro_claw.apps.manager import get_app_manifest
+
+        manifest = get_app_manifest(app_name)
+        if manifest is not None:
+            allow = tuple(p for p in manifest.permissions.api if p)
+    except Exception:
+        logger.warning(
+            "app scope: could not load permissions for %r; denying by default",
+            app_name,
+            exc_info=True,
+        )
+        allow = ()
+    with _app_perms_lock:
+        _app_perms_cache[app_name] = (now, allow)
+    return allow
+
+
+def _app_owns_path(app_name: str, path: str) -> bool:
+    """True if *path* is within *app_name*'s own namespace.
+
+    Covers the reverse-proxy + UI surface (``/apps/<name>/...``) and the
+    per-app management/config surface (``/api/apps/<name>/...``). Membership is
+    a path-boundary match so app ``foo`` cannot reach app ``foo-bar``.
+    """
+    for base in (f"/apps/{app_name}", f"/api/apps/{app_name}"):
+        if path == base or path.startswith(base + "/"):
+            return True
+    return False
+
+
+def _api_pattern_matches(pattern: str, path: str) -> bool:
+    """Match a ``permissions.api`` entry against a request path.
+
+    Supports trailing ``/*`` and ``*`` wildcards; a bare prefix matches the
+    exact path or any child under a path boundary (``/api/chat`` matches
+    ``/api/chat`` and ``/api/chat/slots`` but NOT ``/api/chatx``).
+    """
+    pattern = pattern.strip()
+    if not pattern:
+        return False
+    if pattern.endswith("/*"):
+        base = pattern[:-2]
+        return path == base or path.startswith(base + "/")
+    if pattern.endswith("*"):
+        return path.startswith(pattern[:-1])
+    return path == pattern or path.startswith(pattern + "/")
+
+
+def app_token_path_allowed(app_name: str, path: str) -> bool:
+    """Return True if an app token for *app_name* may access *path*.
+
+    Deny-by-default (CWE-269). Only call this for app tokens (non-empty
+    ``app_name``); dashboard-user tokens must bypass it entirely.
+    """
+    if not app_name:
+        # Defensive: a caller should never pass an empty app_name here, but if
+        # it does, do NOT silently grant — that would turn the gate into a
+        # no-op allow. Return False; the caller's non-empty guard is primary.
+        return False
+    if _app_owns_path(app_name, path):
+        return True
+    return any(_api_pattern_matches(p, path) for p in _app_api_allowlist(app_name))
+
+
+def _enforce_app_scope(
+    request: web.Request, app_name: str, path: str
+) -> web.Response | None:
+    """Return a 403 response if an app token is out of scope, else None.
+
+    No-op for dashboard-user tokens (empty *app_name*).
+    """
+    if not app_name:
+        return None
+    if app_token_path_allowed(app_name, path):
+        return None
+    # SEL audit for the permission decision (matches the sibling deny paths in
+    # the middleware, which log_api_access in addition to _log_auth).
+    _sel_fn().log_api_access(
+        caller=app_name,
+        operation="app_scope_check",
+        outcome="denied",
+        source="token_auth",
+        resources=path,
+        error="app token out of scope",
+    )
+    _log_auth(request, app_name, "denied", f"app token out of scope: {path}")
+    return _deny(request, "app token not permitted for this endpoint")
+
+
 def token_auth_middleware(
     *,
     internal_paths: frozenset[str] = frozenset(),
@@ -618,6 +991,7 @@ def token_auth_middleware(
     internal_secret: str = "",
     port: int = 5476,
     local_only: bool = True,
+    spa_shell_handler: Callable[..., Any] | None = None,
 ) -> Callable[..., Any]:
     """Factory returning aiohttp middleware for token-based dashboard auth.
 
@@ -639,18 +1013,29 @@ def token_auth_middleware(
 
     """
 
-    def _extract_and_validate_token(request: web.Request, _port: int) -> tuple[bool, str, str]:
+    # Warm the revoked-nonce store synchronously here, at middleware
+    # construction (server setup, before the event loop starts serving). Its
+    # first build runs RevokedNonceStore._load() which reads the persisted
+    # denylist file (blocking I/O); doing it now guarantees the later
+    # validate_token() calls on the event loop hit the already-built singleton
+    # and never block the loop. (no-blocking-call-on-event-loop)
+    _get_revoked_store()
+
+    def _extract_and_validate_token(
+        request: web.Request, _port: int
+    ) -> tuple[bool, str, str, str]:
         """Extract token from query param or cookie and validate it.
 
-        Used by internal-path browser auth (no secret header).  The main
-        auth flow has its own extraction with IP-binding and from_cookie
-        tracking that this helper intentionally does not replicate.
+        Returns ``(valid, user_id, reason, app_name)``. Used by internal-path
+        browser/app auth (no secret header). The main auth flow has its own
+        extraction with IP-binding and from_cookie tracking that this helper
+        intentionally does not replicate.
         """
         cookie_name = f"mc_token_{_cookie_port_from_host(request, _port)}"
         token = request.query.get("token") or request.cookies.get(cookie_name, "")
         if not token:
-            return False, "", "no token"
-        return validate_token(token, use_session_exp=True)
+            return False, "", "no token", ""
+        return validate_token_with_app(token, use_session_exp=True)
 
     @web.middleware
     async def middleware(request: web.Request, handler: object) -> web.StreamResponse:
@@ -717,7 +1102,7 @@ def token_auth_middleware(
             # at the decision point rather than deferring to downstream.
             # NOTE: uses _extract_and_validate_token helper (defined above)
             # for cookie/query-param validation.
-            _valid, _uid, _reason = _extract_and_validate_token(request, port)
+            _valid, _uid, _reason, _app = _extract_and_validate_token(request, port)
             if not _valid:
                 _sel = _sel_fn()
                 _sel.log_api_access(
@@ -730,6 +1115,16 @@ def token_auth_middleware(
                 )
                 _log_auth(request, "internal", "denied", f"cookie auth failed: {_reason}")
                 return _deny(request, "Forbidden")
+            # Expose identity so downstream handlers (and app-scope) see it.
+            request["user"] = _uid
+            request["app"] = _app
+            # App tokens are confined to their declared scope even on internal
+            # paths (e.g. /api/chat, /api/spawn are mixed_internal) — otherwise
+            # an app token would reach them on loopback with NO app identity set
+            # and be treated as the dashboard user (privilege escalation).
+            _scope_deny = _enforce_app_scope(request, _app, path)
+            if _scope_deny is not None:
+                return _scope_deny
             _sel = _sel_fn()
             _sel.log_api_access(
                 caller=request.remote or "",
@@ -767,7 +1162,7 @@ def token_auth_middleware(
                             request, "internal", "denied", "wrong secret (non-loopback mixed)"
                         )
                         return _deny(request, "Forbidden")
-                _valid, _uid, _reason = _extract_and_validate_token(request, port)
+                _valid, _uid, _reason, _app = _extract_and_validate_token(request, port)
                 if not _valid:
                     _sel = _sel_fn()
                     _sel.log_api_access(
@@ -785,6 +1180,13 @@ def token_auth_middleware(
                         f"mixed non-loopback cookie auth failed: {_reason}",
                     )
                     return _deny(request, "Forbidden")
+                # Expose identity + confine app tokens to their declared scope
+                # (same rationale as the loopback branch above).
+                request["user"] = _uid
+                request["app"] = _app
+                _scope_deny = _enforce_app_scope(request, _app, path)
+                if _scope_deny is not None:
+                    return _scope_deny
                 _sel = _sel_fn()
                 _sel.log_api_access(
                     caller=request.remote or "",
@@ -864,6 +1266,14 @@ def token_auth_middleware(
             from_cookie = bool(token)
 
         if not token:
+            # Cold-start (no token — e.g. the access cookie expired over a
+            # weekend). Serve the shell directly (not the matched handler) so
+            # the app boots and self-recovers via the refresh cookie. Default-
+            # deny: fires only when a shell handler is wired and the path is a
+            # non-data GET/HEAD nav; no cookie minted.
+            if spa_shell_handler is not None and _is_spa_shell_request(request):
+                _log_auth(request, "", "shell_unauth", "SPA shell served (no token, cold-start)")
+                return await spa_shell_handler(request)  # type: ignore[operator]
             _log_auth(request, "", "denied", "Token required")
             return _deny(request, "Token required")
 
@@ -871,6 +1281,15 @@ def token_auth_middleware(
             token, use_session_exp=from_cookie
         )
         if not valid:
+            # Cold-start variant: an expired/forged token is present (cookie
+            # survived but its token lapsed). Same rationale — serve the shell
+            # so the SPA can boot and silently refresh.
+            if spa_shell_handler is not None and _is_spa_shell_request(request):
+                # Distinct outcome (NOT "ok"): keep forged-token navigations
+                # detectable by SEL anomaly detection while still serving the
+                # secret-free shell.
+                _log_auth(request, "", "shell_unauth_invalid_token", f"SPA shell served (invalid token: {reason})")
+                return await spa_shell_handler(request)  # type: ignore[operator]
             _log_auth(request, "", "denied", reason)
             return _deny(request, reason)
 
@@ -882,18 +1301,72 @@ def token_auth_middleware(
 
         # Extract session_exp for cookie and IP binding on first query-param use
         session_exp = 0.0
+        session_token = token
         if not from_cookie:
+            _link_nonce = ""
             try:
                 payload_bytes = _b64url_decode(token.split(".")[0])
                 data = json.loads(payload_bytes)
-                session_exp = data.get("session_exp", 0.0)
+                session_exp = float(data.get("session_exp", 0.0))
+                _link_nonce = str(data.get("nonce", ""))
             except Exception:
-                pass
-            bind_token_ip(token, client_ip, session_exp)
+                session_exp = 0.0
+            # Token→session exchange (CWE-613 / secure token handling): NEVER
+            # reuse the one-time URL/link token string as the long-lived session
+            # cookie. The link token is exposed in URLs, Slack messages, terminal
+            # history, browser history and access/proxy logs. Minting a SEPARATE
+            # session token here (fresh nonce, same identity + remaining
+            # lifetime) means an observer of any of those channels obtains only
+            # the 5-minute link — not the 20-hour session credential. The link
+            # token stops being a bearer credential the moment its short ``exp``
+            # window closes; the cookie is an unrelated string. Per-session
+            # revocation still works because the minted token carries its own
+            # nonce (see RevokedNonceStore / api_auth_logout).
+            _remaining = (
+                int(session_exp - time.time()) if session_exp else MAX_SESSION_TTL_SECS
+            )
+            if _remaining > 0:
+                session_token = generate_token(
+                    user_id, ttl_seconds=_remaining, app=app_name, register_nonce=False
+                )
+            # Kill the link token AS A COOKIE. Exchange alone is not enough: the
+            # link token still carries the 20h ``session_exp``, so a captured
+            # copy (from a log/Slack/history) could otherwise be presented
+            # directly as ``mc_token_<port>`` and validate on the cookie path for
+            # the full session. Adding its nonce to the persisted denylist makes
+            # validate_token(use_session_exp=True) reject it. Crucially the
+            # query-param LINK path (use_session_exp=False) does NOT consult the
+            # denylist, so legitimate re-navigation of the same link URL — remote
+            # instance iframes re-deriving /?token=, self-nudge polling — keeps
+            # working within the 5-minute window (it just re-exchanges for a
+            # fresh session cookie each time). Guarded by is_revoked so repeated
+            # exchanges of the same link don't re-write the denylist file.
+            if (
+                _link_nonce
+                and session_exp
+                and not _get_revoked_store().is_revoked(_link_nonce)
+            ):
+                # revoke() does synchronous file I/O (mkdir/write/chmod/replace);
+                # offload so it never blocks the event loop. is_revoked above is
+                # an in-memory check and is cheap enough to run inline.
+                await asyncio.to_thread(
+                    _get_revoked_store().revoke, _link_nonce, session_exp
+                )
+            # Bind the SESSION token (what becomes the cookie) to the client IP,
+            # not the consumed URL token.
+            bind_token_ip(session_token, client_ip, session_exp)
 
         # Expose authenticated identity to handlers (deny-by-default)
         request["user"] = user_id
         request["app"] = app_name
+
+        # App-token least-privilege gate (CWE-269): an app token is confined to
+        # its own namespace + its manifest ``permissions.api`` allowlist. This
+        # is the primary enforcement point for the normal cookie/query-param
+        # flow (e.g. /api/sessions, /api/config/*, the /apps/<other>/api proxy).
+        _scope_deny = _enforce_app_scope(request, app_name, path)
+        if _scope_deny is not None:
+            return _scope_deny
 
         # Proceed to handler
         resp = await handler(request)  # type: ignore[operator]
@@ -907,12 +1380,14 @@ def token_auth_middleware(
                     cookie_max_age = remaining
             resp.set_cookie(
                 cookie_name,
-                token,
+                session_token,
                 httponly=True,
                 samesite="Lax",
-                # Secure only when over HTTPS — localhost HTTP must
-                # not set this or the browser refuses to send it back.
-                secure=(request.scheme == "https"),
+                # Secure only when over HTTPS (direct or via a
+                # TLS-terminating tunnel/proxy — see is_https_request).
+                # Localhost plain HTTP must not set it or the browser
+                # refuses to send it back.
+                secure=is_https_request(request),
                 path="/",
                 max_age=cookie_max_age,
             )
@@ -933,7 +1408,7 @@ def token_auth_middleware(
                         refresh_token,
                         httponly=True,
                         samesite="Lax",
-                        secure=(request.scheme == "https"),
+                        secure=is_https_request(request),
                         path=REFRESH_COOKIE_PATH,
                         max_age=min(refresh_remaining, MAX_REFRESH_TTL_SECS),
                     )

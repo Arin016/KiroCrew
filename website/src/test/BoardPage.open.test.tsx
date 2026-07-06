@@ -29,8 +29,8 @@ function stateWithIdleSlot(mode?: string): Partial<RootState> {
         mode,
         last_ts: new Date().toISOString(),
       }],
-    } as any,
-    chat: { activeSlot: null, messages: [], toolLog: [], slotStatusDetail: {} } as any,
+    } as unknown as RootState['dashboard'],
+    chat: { activeSlot: null, messages: [], toolLog: [], slotStatusDetail: {} } as unknown as RootState['chat'],
   }
 }
 

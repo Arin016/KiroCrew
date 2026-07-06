@@ -122,6 +122,39 @@ class TestIsHeartbeatSafeTool:
         assert not _is_heartbeat_safe_tool("mcp__builder-mcp__CodeReviewWriteActions")
         assert not _is_heartbeat_safe_tool("mcp__kiroclaw-core__cron_add")
 
+    def test_running_prefix_with_at_server_slash_tool(self) -> None:
+        """Runtime titles arrive as ``Running: @server/Tool`` — the status
+        prefix and @server/ must be stripped to reach the bare tool name.
+        Regression test for Mesh-2310."""
+        assert _is_heartbeat_safe_tool("Running: @builder-mcp/ReadInternalWebsites")
+        assert _is_heartbeat_safe_tool("Running: @builder-mcp/InternalSearch")
+        assert _is_heartbeat_safe_tool("Running: @builder-mcp/GetPipelineHealth")
+        assert _is_heartbeat_safe_tool("Running: @kiroclaw-core/learn_list")
+
+    def test_at_server_slash_tool_without_running_prefix(self) -> None:
+        """@server/Tool without a status prefix must also normalize."""
+        assert _is_heartbeat_safe_tool("@builder-mcp/ReadInternalWebsites")
+        assert _is_heartbeat_safe_tool("@builder-mcp/CodeReviewReadActions")
+
+    def test_running_prefix_bare_tool_name(self) -> None:
+        """Running: <bare tool> (no server prefix) must also match."""
+        assert _is_heartbeat_safe_tool("Running: WorkspaceSearch")
+        assert _is_heartbeat_safe_tool("Running: Read")
+        assert _is_heartbeat_safe_tool("Running: Grep")
+
+    def test_running_prefix_write_tool_still_rejected(self) -> None:
+        """Normalization must not widen the allowlist — write tools with
+        the runtime title format must still be rejected."""
+        assert not _is_heartbeat_safe_tool("Running: @kiroclaw-core/send_message")
+        assert not _is_heartbeat_safe_tool("Running: @builder-mcp/ToolReactivationTool")
+        assert not _is_heartbeat_safe_tool("Running: @builder-mcp/CodeReviewWriteActions")
+
+    def test_at_server_slash_write_tool_rejected(self) -> None:
+        """@server/WriteTool (no Running prefix) must still be rejected."""
+        assert not _is_heartbeat_safe_tool("@builder-mcp/get_all_credentials")
+        assert not _is_heartbeat_safe_tool("@kiroclaw-core/send_message")
+        assert not _is_heartbeat_safe_tool("@kiroclaw-core/cron_add")
+
 
 # ── HEARTBEAT_KEEP injection text ──
 
@@ -171,6 +204,10 @@ class TestHeartbeatApproval:
         assert kwargs["agent"] == "kiroclaw-heartbeat"
         assert kwargs["tool_name"] == "ReadInternalWebsites"
         assert kwargs["metadata"]["reason"] == "in_heartbeat_safe_tools"
+        # The approve-path audit MUST be a fail-closed (synchronous, raising)
+        # SEL write — otherwise the async queue swallows a write failure and the
+        # deny-by-default branch below becomes unreachable (pentest gap).
+        assert kwargs["critical"] is True
 
     @pytest.mark.asyncio
     async def test_rejects_unknown_read_shaped_tool(self, orchestrator, monkeypatch) -> None:
@@ -260,6 +297,44 @@ class TestHeartbeatApproval:
         monkeypatch.setattr("kiro_claw.slack.gateway.sel", lambda: sel_mock)
         approve_event = _make_event("ReadInternalWebsites")
         assert await orchestrator._heartbeat_approval(approve_event) is False
+
+    @pytest.mark.asyncio
+    async def test_approve_fails_closed_with_real_async_sel_unwritable(
+        self, orchestrator, monkeypatch, tmp_path
+    ) -> None:
+        """End-to-end regression for the pentest gap: with the REAL async SEL
+        (not a mock), an unwritable log file must make the approve path deny.
+
+        Before the fix, ``log_tool_invocation`` enqueued to the async writer
+        and returned without touching the filesystem, so the ``except`` on the
+        approve path was unreachable and the tool auto-approved unaudited. With
+        ``critical=True`` the write is synchronous and raises, so we deny.
+        """
+        from kiro_claw.sel import SecurityEventLog
+
+        SecurityEventLog._instance = None
+        SecurityEventLog._initialized = False
+        real_sel = SecurityEventLog(base_dir=tmp_path)
+        monkeypatch.setattr("kiro_claw.slack.gateway.sel", lambda: real_sel)
+
+        real_open = open
+
+        def _boom(path, *a, **k):
+            if str(path).endswith("security_events.jsonl") and "a" in (
+                a[0] if a else k.get("mode", "")
+            ):
+                raise PermissionError("SEL file unwritable (chmod 000)")
+            return real_open(path, *a, **k)
+
+        import builtins
+
+        monkeypatch.setattr(builtins, "open", _boom)
+        try:
+            event = _make_event("ReadInternalWebsites")
+            assert await orchestrator._heartbeat_approval(event) is False
+        finally:
+            SecurityEventLog._instance = None
+            SecurityEventLog._initialized = False
 
 
 # ── Heartbeat-scoped HookManager ──

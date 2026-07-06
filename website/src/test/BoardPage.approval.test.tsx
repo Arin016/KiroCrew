@@ -38,13 +38,13 @@ function stateWithApprovalSlot(): Partial<RootState> {
       refreshTrigger: 0,
       unreadSlots: [],
       updateProgress: null,
-    } as any,
+    } as RootState['dashboard'],
     chat: {
       activeSlot: null,
       messages: [],
       toolLog: [],
       slotStatusDetail: {},
-    } as any,
+    } as RootState['chat'],
   }
 }
 
@@ -148,8 +148,8 @@ describe('BoardPage approval', () => {
 
   it('shows empty state when no slots', () => {
     const store = createTestStore({
-      dashboard: { slots: [], approvalMode: 'normal', connected: true, channelTrusted: false, refreshTrigger: 0, unreadSlots: [], updateProgress: null } as any,
-      chat: { activeSlot: null, messages: [], toolLog: [], slotStatusDetail: {} } as any,
+      dashboard: { slots: [], approvalMode: 'normal', connected: true, channelTrusted: false, refreshTrigger: 0, unreadSlots: [], updateProgress: null } as RootState['dashboard'],
+      chat: { activeSlot: null, messages: [], toolLog: [], slotStatusDetail: {} } as RootState['chat'],
     })
     renderWithProviders(<BoardPage />, { store, route: '/board' })
     expect(screen.getByText(/No active sessions/)).toBeInTheDocument()

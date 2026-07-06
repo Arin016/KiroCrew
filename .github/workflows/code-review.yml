@@ -36,7 +36,14 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           echo "::group::use-lucide-icons — no inline SVGs"
-          if git diff "$BASE".."$HEAD" -- 'src/**/*.tsx' | grep -n '^\+.*<svg[^>]*viewBox'; then
+          # Brand-asset components (mascot / logo) are exempt: they render a
+          # bespoke brand SVG that has no lucide-react equivalent. The rule still
+          # blocks inline SVGs in every other component.
+          if git diff "$BASE".."$HEAD" -- 'src/**/*.tsx' \
+               ':(exclude)src/components/KiroGhost.tsx' \
+               ':(exclude)src/**/*Logo.tsx' \
+               ':(exclude)src/**/*Ghost.tsx' \
+             | grep -n '^\+.*<svg[^>]*viewBox'; then
             echo "::error::Use lucide-react icons instead of inline SVGs"
             exit 1
           fi

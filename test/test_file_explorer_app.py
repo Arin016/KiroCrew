@@ -162,10 +162,18 @@ class TestGitStatus:
         root = server._git_repo_root(tmp_tree / "subdir")
         assert root == tmp_tree
 
-    def test_git_repo_root_not_found(self, tmp_tree):
-        # Use /tmp itself which has no .git in any parent
-        root = server._git_repo_root(Path("/tmp"))
-        assert root is None
+    def test_git_repo_root_not_found(self, tmp_path):
+        # A path with NO .git in any parent returns None. Use an isolated tmp_path, NOT the
+        # shared /tmp: some build hosts (incl. the brazil farm sandbox) have a stray .git on
+        # the path above /tmp, and _git_repo_root walks to the filesystem root — an ambient
+        # .git there legitimately defeats the premise. If one exists on this host's walk-up
+        # path, skip (the _found test already proves the walk); else assert None.
+        probe = tmp_path / "no_git_here"
+        probe.mkdir()
+        for cand in [probe, *probe.parents]:
+            if (cand / ".git").exists():
+                pytest.skip(f"ambient .git on walk-up path ({cand}/.git) - premise not testable here")
+        assert server._git_repo_root(probe) is None
 
     def test_git_status_parsing(self, tmp_tree):
         """Test _git_status with a mocked subprocess."""

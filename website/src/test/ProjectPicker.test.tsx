@@ -5,12 +5,14 @@ import ProjectPicker from '../components/ProjectPicker'
 import { api } from '../api/client'
 import { useRef } from 'react'
 
-const mockBrowseDirs = (path = '/home/u', dirs: { name: string; path: string }[] = []) =>
+type BrowseDirsResult = Awaited<ReturnType<typeof api.browseDirs>>
+
+const mockBrowseDirs = (path = '/home/u', dirs: { name: string; path: string }[] = []): BrowseDirsResult =>
   ({ path, parent: '/home', dirs })
 
 beforeEach(() => {
-  vi.spyOn(api, 'recentProjects').mockResolvedValue({ dirs: ['/home/u/projA', '/home/u/projB'] } as any)
-  vi.spyOn(api, 'browseDirs').mockResolvedValue(mockBrowseDirs() as any)
+  vi.spyOn(api, 'recentProjects').mockResolvedValue({ dirs: ['/home/u/projA', '/home/u/projB'] })
+  vi.spyOn(api, 'browseDirs').mockResolvedValue(mockBrowseDirs())
 })
 
 afterEach(() => {
@@ -219,7 +221,7 @@ describe('ProjectPicker', () => {
     })
 
     it('shows "No recent projects" when user switches to Recent tab with empty list', async () => {
-      vi.mocked(api.recentProjects).mockResolvedValue({ dirs: [] } as any)
+      vi.mocked(api.recentProjects).mockResolvedValue({ dirs: [] })
       renderWithProviders(
         <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
       )
@@ -230,10 +232,10 @@ describe('ProjectPicker', () => {
     })
 
     it('switches to Browse tab when no recent projects exist', async () => {
-      vi.mocked(api.recentProjects).mockResolvedValue({ dirs: [] } as any)
+      vi.mocked(api.recentProjects).mockResolvedValue({ dirs: [] })
       vi.mocked(api.browseDirs).mockResolvedValue(mockBrowseDirs('/home/u', [
         { name: 'workplace', path: '/home/u/workplace' },
-      ]) as any)
+      ]))
       renderWithProviders(
         <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
       )
@@ -242,7 +244,7 @@ describe('ProjectPicker', () => {
     })
 
     it('selects typed path on Enter in Browse tab', async () => {
-      vi.mocked(api.recentProjects).mockResolvedValue({ dirs: [] } as any)
+      vi.mocked(api.recentProjects).mockResolvedValue({ dirs: [] })
       const onSelect = vi.fn()
       const onOpenChange = vi.fn()
       renderWithProviders(
@@ -256,7 +258,7 @@ describe('ProjectPicker', () => {
     })
 
     it('closes on Escape in Browse tab without calling onSelect', async () => {
-      vi.mocked(api.recentProjects).mockResolvedValue({ dirs: [] } as any)
+      vi.mocked(api.recentProjects).mockResolvedValue({ dirs: [] })
       const onSelect = vi.fn()
       const onOpenChange = vi.fn()
       renderWithProviders(
@@ -290,12 +292,12 @@ describe('ProjectPicker', () => {
     })
 
     it('Browse tab: ArrowDown highlights a subdir and Enter drills into it', async () => {
-      vi.mocked(api.recentProjects).mockResolvedValue({ dirs: [] } as any)
+      vi.mocked(api.recentProjects).mockResolvedValue({ dirs: [] })
       const browseSpy = vi.mocked(api.browseDirs)
       browseSpy.mockResolvedValue(mockBrowseDirs('/home/u', [
         { name: 'alpha', path: '/home/u/alpha' },
         { name: 'beta', path: '/home/u/beta' },
-      ]) as any)
+      ]))
       const onSelect = vi.fn()
       renderWithProviders(
         <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={onSelect} />
@@ -310,10 +312,10 @@ describe('ProjectPicker', () => {
     })
 
     it('Browse tab: Cmd+Enter commits the current directory', async () => {
-      vi.mocked(api.recentProjects).mockResolvedValue({ dirs: [] } as any)
+      vi.mocked(api.recentProjects).mockResolvedValue({ dirs: [] })
       vi.mocked(api.browseDirs).mockResolvedValue(mockBrowseDirs('/home/u', [
         { name: 'alpha', path: '/home/u/alpha' },
-      ]) as any)
+      ]))
       const onSelect = vi.fn()
       const onOpenChange = vi.fn()
       renderWithProviders(
@@ -324,6 +326,151 @@ describe('ProjectPicker', () => {
       fireEvent.keyDown(input, { key: 'Enter', metaKey: true }) // commit current dir, no drill
       expect(onSelect).toHaveBeenCalledWith('/home/u')
       expect(onOpenChange).toHaveBeenCalledWith(false)
+    })
+  })
+
+  describe('Recent tab search', () => {
+    it('renders a search box only when there are recent projects', async () => {
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      // Recent projects exist (projA/projB from the default beforeEach mock).
+      expect(await screen.findByPlaceholderText('Search recent projects…')).toBeInTheDocument()
+    })
+
+    it('does NOT render the search box when there are no recent projects', async () => {
+      vi.mocked(api.recentProjects).mockResolvedValue({ dirs: [] })
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      // Empty list lands on Browse; switch to Recent and confirm no search box.
+      const recentTab = await screen.findByText('Recent')
+      fireEvent.mouseDown(recentTab)
+      await screen.findByText('No recent projects')
+      expect(screen.queryByPlaceholderText('Search recent projects…')).not.toBeInTheDocument()
+    })
+
+    it('filters the recent list by case-insensitive substring on the full path', async () => {
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      await screen.findByText('projA')
+      const searchBox = screen.getByPlaceholderText('Search recent projects…')
+      // 'proja' (lowercase) matches '/home/u/projA' but not '/home/u/projB'.
+      fireEvent.change(searchBox, { target: { value: 'proja' } })
+      await waitFor(() => expect(screen.queryByText('projB')).not.toBeInTheDocument())
+      expect(screen.getByText('projA')).toBeInTheDocument()
+    })
+
+    it('shows "No matching projects" when the query matches nothing', async () => {
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      await screen.findByText('projA')
+      const searchBox = screen.getByPlaceholderText('Search recent projects…')
+      fireEvent.change(searchBox, { target: { value: 'zzz-no-match' } })
+      expect(await screen.findByText('No matching projects')).toBeInTheDocument()
+    })
+
+    it('keyboard nav + Enter selects from the filtered list, not the full list', async () => {
+      const onSelect = vi.fn()
+      const onOpenChange = vi.fn()
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={onOpenChange} anchorRect={rect(100, 50)} onSelect={onSelect} />
+      )
+      await screen.findByText('projA')
+      const searchBox = screen.getByPlaceholderText('Search recent projects…')
+      // Narrow to just projB. The document-level nav hook now sees count=1.
+      fireEvent.change(searchBox, { target: { value: 'projb' } })
+      await waitFor(() => expect(screen.queryByText('projA')).not.toBeInTheDocument())
+      // Index 0 of the filtered list is projB; Enter selects it.
+      fireEvent.keyDown(document, { key: 'Enter' })
+      expect(onSelect).toHaveBeenCalledWith('/home/u/projB')
+      expect(onOpenChange).toHaveBeenCalledWith(false)
+    })
+  })
+
+  describe('Browse tab trailing-slash auto-drill', () => {
+    beforeEach(() => {
+      vi.useFakeTimers()
+      vi.mocked(api.recentProjects).mockResolvedValue({ dirs: [] })
+    })
+    afterEach(() => {
+      vi.runOnlyPendingTimers()
+      vi.useRealTimers()
+    })
+
+    it('drills into the typed directory when the input ends with a slash', async () => {
+      const browseSpy = vi.mocked(api.browseDirs)
+      browseSpy.mockResolvedValue(mockBrowseDirs('/home/u', []))
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      // Drain the initial browse() + recentProjects() promises.
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      const input = screen.getByPlaceholderText('/path/to/project')
+      browseSpy.mockClear()
+      fireEvent.change(input, { target: { value: '/home/u/workplace/' } })
+      // Debounce is 250ms; nothing should fire before it elapses.
+      expect(browseSpy).not.toHaveBeenCalled()
+      await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+      // Trailing slash is stripped to the target dir for the API call. The
+      // preserveInput flag is internal to browse() and is NOT forwarded to
+      // api.browseDirs (a network call that only takes a path), so the spy
+      // sees just the path. Slash preservation is asserted in the next test.
+      expect(browseSpy).toHaveBeenCalledWith('/home/u/workplace')
+    })
+
+    it('preserves the typed trailing slash in the input after the drill resolves', async () => {
+      const browseSpy = vi.mocked(api.browseDirs)
+      // Initial mount resolves to /home/u so the drill target (/home/u/workplace)
+      // differs from browsePath — otherwise the `target === browsePath` guard
+      // early-returns and the drill never fires (making the assertion trivial).
+      browseSpy.mockResolvedValue(mockBrowseDirs('/home/u', []))
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      const input = screen.getByPlaceholderText('/path/to/project') as HTMLInputElement
+      // The drill response resolves with a canonical path WITHOUT the trailing slash.
+      browseSpy.mockResolvedValue(mockBrowseDirs('/home/u/workplace', []))
+      fireEvent.change(input, { target: { value: '/home/u/workplace/' } })
+      await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+      // The drill fired (target differed from browsePath)...
+      expect(browseSpy).toHaveBeenCalledWith('/home/u/workplace')
+      // ...but preserveInput=true means setInput is NOT called, so the user's
+      // text (including the trailing slash they just typed) is retained.
+      expect(input.value).toBe('/home/u/workplace/')
+    })
+
+    it('does NOT auto-drill for a non-slash-terminated path', async () => {
+      const browseSpy = vi.mocked(api.browseDirs)
+      browseSpy.mockResolvedValue(mockBrowseDirs('/home/u', []))
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      const input = screen.getByPlaceholderText('/path/to/project')
+      browseSpy.mockClear()
+      fireEvent.change(input, { target: { value: '/home/u/workpla' } })
+      await act(async () => { await vi.advanceTimersByTimeAsync(300) })
+      expect(browseSpy).not.toHaveBeenCalled()
+    })
+
+    it('does NOT re-drill when the slash target equals the already-loaded dir', async () => {
+      const browseSpy = vi.mocked(api.browseDirs)
+      // browsePath is '/home/u' after the initial load.
+      browseSpy.mockResolvedValue(mockBrowseDirs('/home/u', []))
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      const input = screen.getByPlaceholderText('/path/to/project')
+      browseSpy.mockClear()
+      // Typing '/home/u/' strips to '/home/u' which equals browsePath → no-op.
+      fireEvent.change(input, { target: { value: '/home/u/' } })
+      await act(async () => { await vi.advanceTimersByTimeAsync(300) })
+      expect(browseSpy).not.toHaveBeenCalled()
     })
   })
 })

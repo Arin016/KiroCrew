@@ -5,21 +5,35 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path as _Path
 from typing import Any
 from zoneinfo import available_timezones
 
 from aiohttp import web
 
+from kiro_claw.aim_agents import auto_register_project as _auto_register_project
+from kiro_claw.aim_agents import find_agent_file as _find_agent_file
 from kiro_claw.dashboard.cron_inject import (
     hydrate_slot_from_history,
     inject_cron_result_to_dashboard,
 )
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.llm_helpers import stream_and_collect
-from kiro_claw.security import redact_credentials, redact_exfiltration_urls
-from kiro_claw.validation import CHANNEL_ID_RE, CHANNEL_MAX_LEN
+from kiro_claw.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
+from kiro_claw.validation import (
+    CHANNEL_ID_RE,
+    CHANNEL_MAX_LEN,
+    LEARN_ADD_SCHEMA,
+    MAX_MEDIUM_STRING,
+    MAX_SHORT_STRING,
+    SLACK_THREAD_TS_RE,
+    ValidationError,
+    validate_string_field,
+    validate_tool_args,
+)
 
 from ._shared import (
     _blocks_reads_session,
@@ -78,6 +92,49 @@ async def _resolve_contradictions(
     return to_delete
 
 
+async def _resolve_and_supersede(
+    state: DashboardState, sk: str, rule: str, candidates: list[dict], vs: Any
+) -> None:
+    """Resolve contradictions and delete superseded lessons (runs in background).
+
+    Split out of ``api_lessons_create`` so the slow per-candidate LLM verdict
+    no longer blocks the HTTP response. Deletes are emitted with the same SEL
+    audit event as the former inline path. Exceptions are swallowed (logged) —
+    a failed background sweep must never crash the event loop, and the lesson
+    itself is already persisted.
+    """
+    try:
+        contradicted = await _resolve_contradictions(state, rule, candidates)
+    except Exception:
+        # Outer guard: this runs as a fire-and-forget background task, so an
+        # unhandled raise would surface only as a noisy "Task exception was never
+        # retrieved" — and the lesson is already persisted (not data loss). warning,
+        # not debug: a persistent sweep failure means contradicted lessons accumulate
+        # uncleaned, and backgrounding hid the signal the former inline path surfaced
+        # via the request timeout — operators need the visibility.
+        logger.warning("Background contradiction sweep failed", exc_info=True)
+        return
+    for key in contradicted:
+        try:
+            # Audit the supersede DECISION *before* the destructive delete: a
+            # lesson must never be deleted without a SEL record, so if the audit
+            # call itself raises (audit-service blip) we skip the delete for this
+            # key rather than deleting unaudited (security-controls rule).
+            _sel().log_api_access(
+                caller=sk, operation="lesson.contradiction_superseded",
+                outcome="allowed", source="dashboard", resources=key,
+            )
+            # delete_semantic is a sync FAISS op; off-load so this background
+            # sweep doesn't block concurrent dashboard/Slack requests on the loop.
+            await asyncio.to_thread(vs.delete_semantic, key, "contradiction_superseded")
+            logger.info("Deleted contradicted lesson: %s", key)
+        except Exception:
+            # per-key so one bad/already-deleted key doesn't abort the batch (a
+            # concurrent sweep may have deleted it — candidates are a write-time snapshot).
+            logger.warning("Failed to supersede contradicted lesson %s", key, exc_info=True)
+            continue
+
+
 # ── Cron / Lessons ──
 
 
@@ -88,24 +145,35 @@ async def api_crons_create(request: web.Request) -> web.Response:
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
-    name = body.get("name", "").strip()
-    message = body.get("message", "").strip()
-    schedule = body.get("schedule", "").strip()
+    if not isinstance(body, dict):
+        return web.json_response({"error": "request body must be a JSON object"}, status=400)
+    # Type-validate every string field BEFORE calling string methods on it.
+    # A JSON array/dict/int in these fields previously raised AttributeError
+    # (.strip() on a non-str) -> HTTP 500. validate_string_field enforces
+    # isinstance(str), sanitizes, and bounds length, mirroring the MCP
+    # CRON_ADD_SCHEMA so the REST + tool paths validate identically.
+    try:
+        name = validate_string_field(body, "name", required=True, max_len=MAX_SHORT_STRING)
+        message = validate_string_field(body, "message", max_len=MAX_MEDIUM_STRING)
+        schedule = validate_string_field(body, "schedule", max_len=100)
+        cron_expr = validate_string_field(body, "cron", max_len=100) or None
+        channel = validate_string_field(body, "channel", max_len=CHANNEL_MAX_LEN) or None
+        approval_mode = validate_string_field(body, "approval_mode", max_len=10)
+        timezone_val = validate_string_field(body, "timezone", max_len=50)
+        agent_id = validate_string_field(body, "agent", max_len=MAX_SHORT_STRING)
+    except ValidationError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
     if not name or not message:
         return web.json_response({"error": "name and message required"}, status=400)
     every = body.get("every")
-    cron_expr = body.get("cron")
     if not every and not cron_expr and schedule:
         # Treat schedule string as cron expr if 5-field, else as interval
         cron_expr = schedule if len(schedule.split()) == 5 else None
-    channel = body.get("channel", "").strip() or None
-    if channel and (len(channel) > CHANNEL_MAX_LEN or not CHANNEL_ID_RE.match(channel)):
+    if channel and not CHANNEL_ID_RE.match(channel):
         return web.json_response({"error": "invalid channel ID format"}, status=400)
-    approval_mode = body.get("approval_mode", "").strip()
     if approval_mode and approval_mode not in {"", "auto"}:
         return web.json_response({"error": "invalid approval_mode"}, status=400)
     silent = body.get("silent", False)
-    timezone_val = (body.get("timezone") or "").strip()
     if timezone_val and timezone_val not in available_timezones():
         safe_tz, _ = redact_credentials(redact_exfiltration_urls(timezone_val)[0])
         return web.json_response({"error": f"invalid timezone: {safe_tz!r}"}, status=400)
@@ -119,11 +187,68 @@ async def api_crons_create(request: web.Request) -> web.Response:
         job = state.crons.add_job(name, message, cron_expr=cron_expr, channel=channel)
     else:
         return web.json_response({"error": "schedule, every, or cron required"}, status=400)
-    agent_id = (body.get("agent") or "").strip()
+    project_path = (body.get("project_path") or "").strip()
     strict_schedule = body.get("strict_schedule", False)
-    if agent_id or approval_mode or silent or timezone_val or strict_schedule:
+    hide_in_chat = body.get("hide_in_chat", False)
+    # Validate: global agent + project_path is invalid (spec §10)
+    if project_path and not agent_id:
+        return web.json_response(
+            {"error": "project_path requires a non-empty agent"},
+            status=400,
+        )
+    if project_path and agent_id:
+        resolved = str(_Path(project_path).expanduser().resolve())
+        if not os.path.isdir(resolved):
+            _sel().log_api_access(
+                caller="dashboard",
+                operation="cron.create",
+                outcome="denied",
+                source="api_cron_create",
+                resources=project_path,
+                error="project_path is not a directory",
+            )
+            return web.json_response({"error": "project_path is not a directory"}, status=400)
+        if is_sensitive_path(resolved):
+            _sel().log_api_access(
+                caller="dashboard",
+                operation="cron.create",
+                outcome="denied",
+                source="api_cron_create",
+                resources=resolved,
+                error="sensitive project_path rejected",
+            )
+            return web.json_response({"error": "project_path rejected as sensitive"}, status=403)
+        agents_dir = _Path(resolved) / ".kiro" / "agents"
+        if not _find_agent_file(agents_dir, agent_id):
+            _sel().log_api_access(
+                caller="dashboard",
+                operation="cron.create",
+                outcome="denied",
+                source="api_cron_create",
+                resources=resolved,
+                error=f"agent {agent_id!r} not found in project",
+            )
+            return web.json_response(
+                {"error": f"agent {agent_id!r} not found in project {project_path!r}"},
+                status=404,
+            )
+        # Auto-register the project now that we've validated it
+        try:
+            _auto_register_project(resolved)
+        except Exception:
+            pass
+        _sel().log_api_access(
+            caller="dashboard",
+            operation="cron.create",
+            outcome="ok",
+            source="api_cron_create",
+            resources=resolved,
+        )
+    if agent_id or project_path or approval_mode or silent or timezone_val or strict_schedule or hide_in_chat:
         if agent_id:
             job.agent_id = agent_id
+        if project_path:
+            job.project_path = resolved
         if approval_mode:
             job.approval_mode = approval_mode
         if silent:
@@ -132,6 +257,8 @@ async def api_crons_create(request: web.Request) -> web.Response:
             job.timezone = timezone_val
         if strict_schedule:
             job.strict_schedule = True
+        if hide_in_chat:
+            job.hide_in_chat = True
         state.crons._save()
     state.push_refresh("crons")
     return web.json_response({"ok": True, "id": job.id})
@@ -157,7 +284,7 @@ async def api_cron_update(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
     kwargs: dict[str, Any] = {}
-    for key in ("name", "message", "channel", "approval_mode", "silent", "strict_schedule"):
+    for key in ("name", "message", "channel", "approval_mode", "silent", "strict_schedule", "hide_in_chat"):
         if key in body:
             kwargs[key] = body[key]
     # UI sends "agent"; internal kwarg is "agent_id". Accept "agent_id" for scripted callers.
@@ -166,6 +293,79 @@ async def api_cron_update(request: web.Request) -> web.Response:
         kwargs["agent_id"] = (body["agent"] or "").strip()
     elif "agent_id" in body:
         kwargs["agent_id"] = (body["agent_id"] or "").strip()
+    if "project_path" in body:
+        raw_pp = (body["project_path"] or "").strip()
+        resolved_pp = ""
+        if raw_pp:
+            # Validate: global agent + project_path is invalid (spec §10)
+            # Check new agent_id from this update, falling back to existing job agent_id
+            effective_agent = kwargs.get("agent_id", "").strip()
+            if not effective_agent:
+                # Try to get the existing job's agent_id via job_id
+                existing_job = next(
+                    (j for j in state.crons.list_jobs(include_disabled=True) if j.id == job_id),
+                    None,
+                )
+                if existing_job:
+                    effective_agent = existing_job.agent_id or ""
+            if not effective_agent:
+                _sel().log_api_access(
+                    caller="dashboard",
+                    operation="cron.update",
+                    outcome="denied",
+                    source="api_cron_update",
+                    resources=raw_pp,
+                    error="project_path requires a non-empty agent",
+                )
+                return web.json_response(
+                    {"error": "project_path requires a non-empty agent"},
+                    status=400,
+                )
+            resolved_pp = str(_Path(raw_pp).expanduser().resolve())
+            if not os.path.isdir(resolved_pp):
+                _sel().log_api_access(
+                    caller="dashboard",
+                    operation="cron.update",
+                    outcome="denied",
+                    source="api_cron_update",
+                    resources=raw_pp,
+                    error="project_path is not a directory",
+                )
+                return web.json_response({"error": "project_path is not a directory"}, status=400)
+            if is_sensitive_path(resolved_pp):
+                _sel().log_api_access(
+                    caller="dashboard",
+                    operation="cron.update",
+                    outcome="denied",
+                    source="api_cron_update",
+                    resources=resolved_pp,
+                    error="sensitive project_path rejected",
+                )
+                return web.json_response({"error": "project_path rejected as sensitive"}, status=403)
+            agent_id_for_pp = kwargs.get("agent_id", "").strip()
+            if agent_id_for_pp:
+                agents_dir_pp = _Path(resolved_pp) / ".kiro" / "agents"
+                if not _find_agent_file(agents_dir_pp, agent_id_for_pp):
+                    _sel().log_api_access(
+                        caller="dashboard",
+                        operation="cron.update",
+                        outcome="denied",
+                        source="api_cron_update",
+                        resources=resolved_pp,
+                        error=f"agent {agent_id_for_pp!r} not found in project",
+                    )
+                    return web.json_response(
+                        {"error": f"agent {agent_id_for_pp!r} not found in project {raw_pp!r}"},
+                        status=404,
+                    )
+            _sel().log_api_access(
+                caller="dashboard",
+                operation="cron.update",
+                outcome="ok",
+                source="api_cron_update",
+                resources=resolved_pp,
+            )
+        kwargs["project_path"] = resolved_pp
     # Validate channel if being updated
     if "channel" in kwargs:
         ch = (kwargs["channel"] or "").strip() or None
@@ -361,6 +561,8 @@ async def api_lessons_create(request: web.Request) -> web.Response:
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "request body must be a JSON object"}, status=400)
     # Block lesson writes from restricted (incognito/temporary/guest) sessions.
     sk = request.headers.get("X-Session-Key", "")
     if not sk:
@@ -373,7 +575,13 @@ async def api_lessons_create(request: web.Request) -> web.Response:
         slot_name = sk.split(":", 1)[-1] if ":" in sk else sk
         in_slots = slot_name in state._slots
         in_restricted = sk in state._restricted_keys
-        is_slack_ns = sk.startswith("slack:")
+        # A Slack thread keys its session off the bare thread_ts
+        # (e.g. "1781215864.487849"), not the "slack:<chan>:<ts>" delivery
+        # form, so recognise that shape as the Slack namespace too. Without
+        # this, the first learn_add in a fresh Slack thread races the JSONL
+        # flush (which only happens after the LLM turn completes) and is
+        # rejected with HTTP 400 until the transcript lands on disk.
+        is_slack_ns = sk.startswith("slack:") or bool(SLACK_THREAD_TS_RE.match(sk))
         # Only consult the on-disk JSONL when the cheaper in-memory
         # checks all fail. ``_session_has_persisted_history()`` performs
         # synchronous filesystem I/O (up to two ``Path.exists()`` calls),
@@ -443,11 +651,25 @@ async def api_lessons_create(request: web.Request) -> web.Response:
             {"error": "Memory writes are not allowed in this session mode."},
             status=403,
         )
-    rule = body.get("rule", "").strip()
+    # Validate body fields against the SAME schema the learn_add MCP tool uses
+    # (LEARN_ADD_SCHEMA), so REST and tool paths share one source of truth:
+    # rule must be a string (bounded to MAX_SHORT_STRING), category/scope are
+    # enum-restricted, workspace is pattern-checked. Previously a non-string
+    # rule (array/dict) raised AttributeError on .strip() -> HTTP 500, and
+    # category/length were unbounded. Only schema-known keys are validated so
+    # unrelated body fields don't trip unknown-field rejection.
+    known = {f.name for f in LEARN_ADD_SCHEMA.fields}
+    try:
+        cleaned = validate_tool_args(
+            {k: v for k, v in body.items() if k in known}, LEARN_ADD_SCHEMA
+        )
+    except ValidationError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    rule = cleaned["rule"]
     if not rule:
         return web.json_response({"error": "rule is required"}, status=400)
-    category = body.get("category", "knowledge")
-    scope = body.get("scope", "global")
+    category = cleaned.get("category", "knowledge")
+    scope = cleaned.get("scope", "global")
     # Write to vector store if available, else JSONL
     vs = _get_memory(state).vector_store
     if vs:
@@ -458,25 +680,32 @@ async def api_lessons_create(request: web.Request) -> web.Response:
         # (blocking embed + O(N) cosine scan), so run them via to_thread to
         # avoid stalling concurrent dashboard/Slack requests.
         rule_emb = await asyncio.to_thread(vs.embed_lesson, rule)
+        # Persist the lesson immediately so the request returns fast. The
+        # contradiction sweep below makes a per-candidate LLM call (observed
+        # ~27s each), which previously ran inline and blew the MCP client's
+        # 30s timeout — yet the write completed server-side anyway, so the
+        # caller saw a "timeout" for a lesson that was actually saved (and
+        # re-saved on every retry). Writing first, then sweeping in the
+        # background, removes the slow LLM call from the request path.
+        await asyncio.to_thread(vs.write_lesson, rule, category, None, "user_explicit", rule_emb)
         candidates = await asyncio.to_thread(
             vs.find_contradiction_candidates, rule, 0.4, 0.85, rule_emb
         )
         if candidates:
-            contradicted = await _resolve_contradictions(state, rule, candidates)
-            for key in contradicted:
-                vs.delete_semantic(key, "contradiction_superseded")
-                # Lesson deletion is a destructive action; emit a SEL audit
-                # event so the contradiction-supersede trail is traceable.
-                _sel().log_api_access(
-                    caller=sk, operation="lesson.contradiction_superseded",
-                    outcome="allowed", source="dashboard", resources=key,
-                )
-                logger.info("Deleted contradicted lesson: %s", key)
-        await asyncio.to_thread(vs.write_lesson, rule, category, None, "user_explicit", rule_emb)
+            # Fire-and-forget via this module's _background_tasks
+            # pattern. The sweep only supersedes OTHER (older) lessons, never
+            # the one just written (self-match scores ~1.0, above the 0.85
+            # candidate ceiling), so deferring it is safe. No retry/queue: a
+            # missed sweep self-heals on the next learn_add touching the topic.
+            task = asyncio.create_task(
+                _resolve_and_supersede(state, sk, rule, candidates, vs)
+            )
+            state._background_tasks.add(task)
+            task.add_done_callback(state._background_tasks.discard)
     else:
         lesson = Lesson(rule=rule, category=category, ts=datetime.now(timezone.utc).isoformat())
         if scope == "workspace":
-            ws = body.get("workspace")
+            ws = cleaned.get("workspace")
             _get_lessons(state, ws).save(lesson)
         else:
             state.lessons.save(lesson)
@@ -546,6 +775,7 @@ async def api_crons(request: web.Request) -> web.Response:
             or None,
             "silent": j.silent,
             "strict_schedule": j.strict_schedule,
+            "hide_in_chat": j.hide_in_chat,
             "last_run_ts": j.last_run_ts,
             "has_result": bool(j.last_result),
             "has_slot": state.has_slot(f"cron-{j.id}"),

@@ -170,6 +170,66 @@ class TestKillSession:
             await terminal._kill_session(sess)
         assert sess.master_fd == -1
 
+    @pytest.mark.asyncio
+    async def test_close_runs_on_subprocess_pool_off_loop(self):
+        """The PTY master close must run on subprocess_executor (off the loop),
+        never inline — a wedged close then costs one pool thread, not the loop."""
+        import threading
+
+        loop_thread = threading.current_thread()
+        close_threads = []
+
+        def _record_close(fd):
+            close_threads.append(threading.current_thread())
+
+        sess = _make_session()
+        sess.master_fd = 42
+        with patch("os.close", side_effect=_record_close), patch("os.killpg"):
+            await terminal._kill_session(sess)
+        assert close_threads, "os.close must have run"
+        assert close_threads[0] is not loop_thread, "close ran on the event-loop thread"
+        assert close_threads[0].name.startswith("mc-subproc"), (
+            f"close must run on subprocess_executor, got {close_threads[0].name!r}"
+        )
+        assert sess.master_fd == -1
+
+    @pytest.mark.asyncio
+    async def test_master_fd_cleared_before_await_survives_cancellation(self):
+        """If the coroutine is cancelled while suspended on the executor close,
+        master_fd must already be -1 so the fd is not left referenced."""
+
+        async def _hang(*_a, **_k):
+            await asyncio.sleep(3600)  # never completes; we cancel mid-await
+
+        sess = _make_session()
+        sess.master_fd = 42
+        with patch.object(
+            asyncio.get_event_loop(), "run_in_executor", side_effect=_hang
+        ), patch("os.killpg"):
+            task = asyncio.ensure_future(terminal._kill_session(sess))
+            await asyncio.sleep(0)  # let it reach the await
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        # Cleared BEFORE the await, so cancellation cannot leave a stale fd.
+        assert sess.master_fd == -1
+
+    @pytest.mark.asyncio
+    async def test_handles_runtime_error_on_close_when_pool_shutdown(self):
+        """If subprocess_executor was torn down, run_in_executor's submit raises
+        RuntimeError — _kill_session must swallow it, not abort teardown."""
+        sess = _make_session(alive=True)
+        sess.master_fd = 42
+        with patch.object(
+            asyncio.get_event_loop(),
+            "run_in_executor",
+            side_effect=RuntimeError("cannot schedule new futures after shutdown"),
+        ), patch("os.killpg") as mock_killpg:
+            await terminal._kill_session(sess)
+        # The close error was swallowed and teardown continued to the killpg step.
+        assert sess.master_fd == -1
+        mock_killpg.assert_any_call(12345, __import__("signal").SIGTERM)
+
 
 # ── api_terminal_create ──
 

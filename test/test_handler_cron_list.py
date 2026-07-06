@@ -95,3 +95,22 @@ class TestHandleCronListNextRun:
         assert result is not None
         assert "[REDACTED]" in result
         assert "AKIAIOSFODNN7EXAMPLE" not in result
+
+    def test_remove_all_redacts_name(self, cron_service: CronService) -> None:
+        # `cron remove all` echoes each removed job's name to Slack (and the
+        # persisted conversation log); j.name is free-form user/LLM-supplied,
+        # so it must be redacted like j.message is in the `cron list` branch.
+        job = _make_job()
+        job.name = "token=AKIAIOSFODNN7EXAMPLE"
+        cron_service._jobs = [job]
+        with patch("kiro_claw.slack.handler.redact_exfiltration_urls",
+                   return_value=("[URL_REDACTED]", True)) as mock_url, \
+             patch("kiro_claw.slack.handler.redact_credentials",
+                   return_value=("[REDACTED]", True)) as mock_cred:
+            result = _handle_cron_command("cron remove all", cron_service, "C123", "t123")
+        mock_url.assert_any_call(job.name)
+        mock_cred.assert_any_call("[URL_REDACTED]")
+        assert result is not None
+        assert "[REDACTED]" in result
+        assert "AKIAIOSFODNN7EXAMPLE" not in result
+        assert not cron_service.list_jobs(include_disabled=True)  # jobs still removed

@@ -17,6 +17,9 @@ export async function interceptSlashCommand(
     return { intercepted: false }
   }
   if (!slot) {
+    // Intentional diagnostic: the command was recognized but can't run
+    // without an active slot, which is otherwise silent to the user.
+    // eslint-disable-next-line no-console
     console.warn('[/side] no active slot — intercepted but not dispatched')
     return { intercepted: true }
   }
@@ -24,12 +27,16 @@ export async function interceptSlashCommand(
   try {
     await api.sideOpen(slot)
   } catch (e: unknown) {
+    // Intentional diagnostic breadcrumb for a silent side-open failure.
+    // eslint-disable-next-line no-console
     console.warn('[/side] sideOpen failed:', e)
     return { intercepted: true }
   }
   dispatch(openActivityToTab('side'))
   if (message) {
     await api.sideTurn(slot, message).catch((e: unknown) => {
+      // Intentional diagnostic breadcrumb for a silent side-turn failure.
+      // eslint-disable-next-line no-console
       console.warn('[/side] sideTurn failed:', e)
     })
   }

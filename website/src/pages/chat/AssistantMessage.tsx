@@ -11,28 +11,36 @@ import FileChangeChips, { type FileChangeEntry } from '../../components/FileChan
 import type { FileChipStyle } from './ChatSettings'
 import { loadChatConfig } from './ChatSettings'
 import { useSmoothStream } from '../../hooks/useSmoothStream'
+import type { PlanStepInput } from '../../api/client'
 
-const OPTION_RE = /\[OPTION:\s*(.+?)\]\s*$/
-const OPTIONS_RE = /\[OPTIONS:\s*(.+?)\]\s*$/
+// Match an [OPTION:] / [OPTIONS:] marker anywhere on a single line. We deliberately
+// do NOT anchor to end-of-string. The model frequently appends a closing line after
+// the marker — a follow-up question, a note, or an auto-inserted comment — and an
+// end-anchored regex then fails to match, leaving the raw "[OPTION: …]" text visible
+// with no buttons (the regression this fixes). The body is single-line ([^\]\n]) so
+// it can't swallow following paragraphs. Global so we can take the LAST marker, which
+// is the actionable gate. Capture group 1 = the optional trailing "S" (multi syntax).
+const OPTION_MARKER_RE = /\[OPTION(S)?:\s*([^\]\n]+?)\s*\]/gi
 const PLAN_HEADER_RE = /📋\s*Plan for:/i
 const STAGE_RE = /^Stage\s+\d+\s*:/m
 
 export function parseOptions(content: string): { text: string; options: string[]; multi: boolean; isPlan: boolean } {
-  const mSingle = content.match(OPTION_RE)
-  if (mSingle) {
-    const sep = mSingle[1].includes('|') ? '|' : ','
-    const opts = mSingle[1].split(sep).map(o => o.trim()).filter(Boolean)
-    const isPlan = PLAN_HEADER_RE.test(content) && STAGE_RE.test(content)
-    return { text: content.slice(0, mSingle.index).trimEnd(), options: opts, multi: false, isPlan }
-  }
-  const m = content.match(OPTIONS_RE)
-  if (!m) return { text: content, options: [], multi: true, isPlan: false }
-  const sep = m[1].includes('|') ? '|' : ','
-  const isPlanMulti = PLAN_HEADER_RE.test(content) && STAGE_RE.test(content)
-  return { text: content.slice(0, m.index).trimEnd(), options: m[1].split(sep).map(o => o.trim()).filter(Boolean), multi: true, isPlan: isPlanMulti }
+  let last: RegExpMatchArray | null = null
+  for (const m of content.matchAll(OPTION_MARKER_RE)) last = m
+  if (!last || last.index === undefined) return { text: content, options: [], multi: true, isPlan: false }
+  const multi = !!last[1] // [OPTIONS:] is the multi-select syntax; [OPTION:] is single
+  const sep = last[2].includes('|') ? '|' : ','
+  const options = last[2].split(sep).map(o => o.trim()).filter(Boolean)
+  const isPlan = PLAN_HEADER_RE.test(content) && STAGE_RE.test(content)
+  // Strip ALL markers from the displayed text (not just the last) so a stray earlier
+  // marker can't leak as raw "[OPTION: …]" syntax to the user; options still come from
+  // the LAST marker (computed above). OPTION_MARKER_RE is global, so replace removes
+  // every occurrence while preserving the prose around them.
+  const text = content.replace(OPTION_MARKER_RE, '').trim()
+  return { text, options, multi, isPlan }
 }
 
-const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, onFileOpen, planTaskId, onApplyPlan, slotRunning, onSpeak, timestamp, showFooter = true, onRegenerate, variants, variantIdx, onSwitchVariant, isRegenerating, onFork, onPlanFromHere, forkIndex, onQuote, messageTs, slotKey, slotTitle, mode, fileChanges, onOpenDiff, fileChipStyle }: { content: string; isStreaming: boolean; onFileOpen?: (path: string) => void; planTaskId?: string; onApplyPlan?: (steps: any[]) => Promise<boolean>; slotRunning?: boolean; onSpeak?: () => void; timestamp?: string; showFooter?: boolean; onRegenerate?: () => void; variants?: { content: string; ts?: string }[]; variantIdx?: number; onSwitchVariant?: (index: number) => void; isRegenerating?: boolean; onFork?: (index: number) => void | Promise<void>; onPlanFromHere?: (index: number) => void | Promise<void>; forkIndex?: number; onQuote?: (text: string, rect: DOMRect) => void; messageTs?: string; slotKey?: string; slotTitle?: string; mode?: string; fileChanges?: FileChangeEntry[]; onOpenDiff?: (path: string, modified: string, original: string) => void; fileChipStyle?: FileChipStyle }) {
+const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, onFileOpen, planTaskId, onApplyPlan, slotRunning, onSpeak, timestamp, showFooter = true, onRegenerate, variants, variantIdx, onSwitchVariant, isRegenerating, onFork, onPlanFromHere, forkIndex, onQuote, messageTs, slotKey, slotTitle, mode, fileChanges, onOpenDiff, fileChipStyle }: { content: string; isStreaming: boolean; onFileOpen?: (path: string) => void; planTaskId?: string; onApplyPlan?: (steps: PlanStepInput[]) => Promise<boolean>; slotRunning?: boolean; onSpeak?: () => void; timestamp?: string; showFooter?: boolean; onRegenerate?: () => void; variants?: { content: string; ts?: string }[]; variantIdx?: number; onSwitchVariant?: (index: number) => void; isRegenerating?: boolean; onFork?: (index: number) => void | Promise<void>; onPlanFromHere?: (index: number) => void | Promise<void>; forkIndex?: number; onQuote?: (text: string, rect: DOMRect) => void; messageTs?: string; slotKey?: string; slotTitle?: string; mode?: string; fileChanges?: FileChangeEntry[]; onOpenDiff?: (path: string, modified: string, original: string) => void; fileChipStyle?: FileChipStyle }) {
   const [applied, setApplied] = useState(false)
   const [copied, setCopied] = useState(false)
   const [linkCopied, setLinkCopied] = useState(false)
@@ -44,24 +52,30 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
   const hasVariants = variants && variants.length > 1
   const activeIdx = onSwitchVariant ? (typeof variantIdx === 'number' ? variantIdx : (variants?.length ?? 1) - 1) : (localIdx ?? (typeof variantIdx === 'number' ? variantIdx : (variants?.length ?? 1) - 1))
   const effectiveContent = hasVariants && localIdx !== null && !onSwitchVariant ? (variants[localIdx]?.content ?? content) : content
+  // Reset the "Applied to Tasks" flag only when the message content changes.
+  // `applied` is intentionally omitted: including it would re-run this effect
+  // the instant `applied` flips to true and immediately clear it, making the
+  // Applied state impossible to reach. setApplied is stable.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { if (applied) setApplied(false) }, [effectiveContent])
   const { text } = parseOptions(effectiveContent)
   const [smooth] = useState(() => loadChatConfig().streamMode !== 'immediate')
   const speed = 4 // force high speed smooth streaming to avoid lagging behind raw model output
   const smoothedText = useSmoothStream(text, isStreaming, smooth, speed)
 
-  const planSteps = useMemo(() => {
+  const planSteps = useMemo<PlanStepInput[] | null>(() => {
     if (isStreaming || !planTaskId || !effectiveContent) return null
     const jsonMatch = effectiveContent.match(/```json\s*\n([\s\S]*?)\n```/)
     if (!jsonMatch) return null
     try {
-      const parsed = JSON.parse(jsonMatch[1])
+      const parsed: unknown = JSON.parse(jsonMatch[1])
       if (!Array.isArray(parsed) || !parsed.length) return null
-      const valid = parsed.every((s: any) =>
-        typeof s?.title === 'string' && s.title.trim() &&
-        (!s.depends_on || (Array.isArray(s.depends_on) && s.depends_on.every((d: any) => typeof d === 'number')))
-      )
-      return valid ? parsed : null
+      const valid = parsed.every((s: unknown) => {
+        const step = s as { title?: unknown; depends_on?: unknown }
+        return typeof step?.title === 'string' && step.title.trim() &&
+          (!step.depends_on || (Array.isArray(step.depends_on) && step.depends_on.every((d: unknown) => typeof d === 'number')))
+      })
+      return valid ? (parsed as PlanStepInput[]) : null
     } catch {}
     return null
   }, [effectiveContent, isStreaming, planTaskId])

@@ -75,6 +75,7 @@ from kiro_claw.dashboard.origin import (
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.dashboard.token_auth import MAX_SESSION_TTL_SECS, generate_token
 from kiro_claw.embeddings import OllamaManager, _validate_url, make_sync_embed_fn
+from kiro_claw.executors import cron_executor
 from kiro_claw.frontend import build_frontend_async
 from kiro_claw.heartbeat import (
     HEARTBEAT_TASK_TIMEOUT_SECS,
@@ -95,7 +96,7 @@ from kiro_claw.memory import MemoryStore
 from kiro_claw.platform import boot_platform
 from kiro_claw.providers.base import LLMEvent
 from kiro_claw.safety_override import safety_override
-from kiro_claw.security import redact_credentials, redact_exfiltration_urls
+from kiro_claw.security import redact, redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
 from kiro_claw.session import HEARTBEAT_KEY, SessionManager
 from kiro_claw.skills import SkillsLoader
@@ -318,6 +319,9 @@ HEARTBEAT_SAFE_TOOLS = frozenset({
 })
 
 
+_HEARTBEAT_STATUS_PREFIXES = ("Running: ",)
+
+
 def _is_heartbeat_safe_tool(event_title: str) -> bool:
     """Return True if *event_title* is safe to auto-approve in a heartbeat task.
 
@@ -328,9 +332,14 @@ def _is_heartbeat_safe_tool(event_title: str) -> bool:
     ``list_env_secrets``, etc.).  Per security-controls deny-by-default:
     reject unless positively confirmed.
 
-    kiro-cli ACP sends MCP tool names with a ``mcp__<server>__`` prefix
-    (e.g. ``mcp__builder-mcp__CodeReviewReadActions``).  We strip that
-    prefix before matching so the allowlist can stay server-agnostic.
+    Title normalization (applied before the set lookup):
+
+    1. Strip leading status prefix (e.g. ``Running: ``).
+    2. Strip ACP ``mcp__<server>__<Tool>`` prefix.
+    3. Strip runtime ``@<server>/<Tool>`` prefix — kiro-cli titles arrive as
+       ``Running: @builder-mcp/ReadInternalWebsites`` at the gateway.
+
+    Only the **bare tool name** is tested against the frozenset.
 
     Returns False on empty / whitespace-only / unrecognised names.
     """
@@ -339,11 +348,19 @@ def _is_heartbeat_safe_tool(event_title: str) -> bool:
     name = event_title.strip()
     if not name:
         return False
+    # Strip leading status prefix: "Running: @builder-mcp/Tool" → "@builder-mcp/Tool"
+    for prefix in _HEARTBEAT_STATUS_PREFIXES:
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
     # Strip MCP server prefix: "mcp__builder-mcp__ToolName" → "ToolName"
     if name.startswith("mcp__"):
         parts = name.split("__", 2)
         if len(parts) == 3:
             name = parts[2]
+    # Strip @server/Tool prefix: "@builder-mcp/ReadInternalWebsites" → "ReadInternalWebsites"
+    if name.startswith("@") and "/" in name:
+        name = name.rsplit("/", 1)[-1]
     return name in HEARTBEAT_SAFE_TOOLS
 
 
@@ -532,7 +549,7 @@ class GatewayOrchestrator:
                     # mode auto-approved the tool. Downstream sites already
                     # log the invocation itself; this captures the decision.
                     try:
-                        _safe = redact_exfiltration_urls(redact_credentials(event.title or "")[0])[0]
+                        _safe = redact(event.title or "")
                         sel().log_api_access(
                             caller=f"cli:approval={self._approval_mode}",
                             operation=f"{source}.cli_approval_auto_approve",
@@ -555,13 +572,20 @@ class GatewayOrchestrator:
                 # fall back to the heuristic -- if the explicit resolver
                 # can't find the parent, guessing would widen trust scope.
 
-                def _sel_log(**kw: str) -> None:
+                def _sel_log(
+                    *, caller: str, operation: str, outcome: str, resources: str = ""
+                ) -> None:
                     try:
-                        sel().log_api_access(**kw)
+                        sel().log_api_access(
+                            caller=caller,
+                            operation=operation,
+                            outcome=outcome,
+                            resources=resources,
+                        )
                     except Exception:
                         logger.warning("SEL audit failed for trust check", exc_info=True)
 
-                _safe_title = redact_exfiltration_urls(redact_credentials(event.title)[0])[0]
+                _safe_title = redact(event.title)
 
                 if slot_resolver:
                     try:
@@ -775,14 +799,15 @@ class GatewayOrchestrator:
             redact_credentials(title)[0]
         )[0]
 
-        def _audit(outcome: str, **metadata: str) -> None:
+        def _audit(outcome: str, *, critical: bool = False, **metadata: str) -> None:
             """Emit a SEL ``log_tool_invocation`` event.
 
-            Raises on failure — callers must decide whether the underlying
-            permission decision can proceed without an audit trail. The
-            approve path treats SEL failure as fatal (deny-by-default,
-            preserve audit invariant). The deny path tolerates SEL failure
-            because the tool is rejected regardless.
+            With ``critical=True`` the write is synchronous and raises on
+            failure — callers must decide whether the underlying permission
+            decision can proceed without an audit trail. The approve path
+            passes ``critical=True`` and treats SEL failure as fatal
+            (deny-by-default, preserve audit invariant). The deny path
+            tolerates SEL failure because the tool is rejected regardless.
             """
             sel().log_tool_invocation(
                 session_key=HEARTBEAT_KEY,
@@ -793,15 +818,18 @@ class GatewayOrchestrator:
                 outcome=outcome,
                 request_id=event.request_id,
                 metadata=metadata or None,
+                critical=critical,
             )
 
         if _is_heartbeat_safe_tool(title):
             # Fail-closed: if SEL is down we cannot record the auto-approve
             # decision, and unattended sessions must not run tools without
             # an auditable permission record. Deny rather than approve
-            # silently (security-controls deny-by-default).
+            # silently (security-controls deny-by-default). critical=True
+            # forces a synchronous SEL write so a filesystem failure reaches
+            # this except instead of being swallowed by the async writer.
             try:
-                _audit("auto_approved", reason="in_heartbeat_safe_tools")
+                _audit("auto_approved", critical=True, reason="in_heartbeat_safe_tools")
             except Exception:
                 logger.warning(
                     "SEL audit failed on heartbeat approve path — "
@@ -929,6 +957,17 @@ class GatewayOrchestrator:
             run_first_run_setup()
         except Exception:
             logger.warning("Agent config install failed", exc_info=True)
+
+        # Gateway startup pass: refresh registry state + agent_name cache
+        try:
+            from kiro_claw.aim_agents import (
+                refresh_registry_startup,  # deferred import to avoid an import-time cycle (aim_agents -> config.loader)
+            )
+
+            refresh_registry_startup()
+            logger.debug("Project agent registry refreshed")
+        except Exception:
+            logger.warning("Project agent registry refresh failed", exc_info=True)
 
         self.slack = RealSlackClient(self._bot_token) if self._slack_enabled else None
         factory = build_provider_factory(self._cfg)
@@ -1068,6 +1107,26 @@ class GatewayOrchestrator:
             await self.slack.post_message(channel, part, thread_ts)
         return True
 
+    def _cron_job_is_silent(self, parent_key: str) -> bool:
+        """Return True if *parent_key* maps to a cron job marked silent.
+
+        Mesh-2451: ``_deliver_cron_response`` (Mesh-1892) routes a cron
+        session's post-subagent-completion turn to Slack, gated on
+        ``info.silent`` — the *sub-agent's* flag. That flag is never set from
+        the parent cron's ``silent`` setting (``spawn`` defaults it False and
+        the spawn queue tuple doesn't carry it), so a silent cron's subagent
+        completions still reached Slack. The cron job's own ``silent`` flag is
+        the source of truth, so resolve it here. ``parent_key`` is
+        ``cron:{job_id}`` or ``cron:{job_id}:{run_id}``.
+        """
+        if not parent_key.startswith("cron:") or self.cron_svc is None:
+            return False
+        parts = parent_key.split(":", 2)
+        if len(parts) < 2:
+            return False
+        job = self.cron_svc.get_job(parts[1])
+        return bool(job and job.silent)
+
     async def _init_cron(self) -> None:
         """Initialize and start the cron service."""
 
@@ -1080,7 +1139,7 @@ class GatewayOrchestrator:
                     slot = self.dashboard_state.get_slot(slot_key)
                     if slot is None:
                         slot = _rehydrate_slot_from_history(self.dashboard_state, slot_key)
-                    label = redact_exfiltration_urls(redact_credentials(job.name)[0])[0]
+                    label = redact(job.name)
                     if slot:
                         wrapped = f'[Cron notification: "{label}"]\n{message}\n[/Cron notification]'
                         inject_cls = json.dumps({"cronLabel": label})
@@ -1104,7 +1163,7 @@ class GatewayOrchestrator:
                     else:
                         self.dashboard_state.notify("cron", f"⚡ {label}", message, meta={"job_id": job.id})
                 elif message and not job.silent and self.dashboard_state:
-                    label = redact_exfiltration_urls(redact_credentials(job.name)[0])[0]
+                    label = redact(job.name)
                     self.dashboard_state.notify("cron", f"⚡ {label}", message, meta={"job_id": job.id})
                 delivered = True
             except Exception as notify_exc:
@@ -1136,7 +1195,10 @@ class GatewayOrchestrator:
                     cmd_timeout = job.timeout or 300
                     result = await asyncio.wait_for(
                         asyncio.get_running_loop().run_in_executor(
-                            None, run_command_sandboxed, job.command, cmd_timeout
+                            cron_executor(),
+                            run_command_sandboxed,
+                            job.command,
+                            cmd_timeout,
                         ),
                         timeout=cmd_timeout + 5,
                     )
@@ -1153,7 +1215,7 @@ class GatewayOrchestrator:
                             if job.consecutive_failures >= 5:
                                 job.enabled = False
                         return None  # no output = no delivery
-                    job.last_result = redact_exfiltration_urls(redact_credentials(output)[0])[0]
+                    job.last_result = redact(output)
                     job.last_error = ""
                     if result.get("status") == "ok":
                         job.last_status = "ok"
@@ -1188,7 +1250,7 @@ class GatewayOrchestrator:
                     return None
                 except Exception as exc:
                     logger.exception("Command cron '%s' failed: %s", job.name, exc)
-                    err_str = redact_exfiltration_urls(redact_credentials(str(exc))[0])[0]
+                    err_str = redact(str(exc))
                     job.last_error = err_str[:200]
                     job.last_status = "error"
                     job.consecutive_failures += 1
@@ -1222,7 +1284,12 @@ class GatewayOrchestrator:
                     script_timeout = job.timeout or 30
                     result = await asyncio.wait_for(
                         asyncio.get_running_loop().run_in_executor(
-                            None, run_script_sandboxed, job.script, job.id, job.message, script_timeout
+                            cron_executor(),
+                            run_script_sandboxed,
+                            job.script,
+                            job.id,
+                            job.message,
+                            script_timeout,
                         ),
                         timeout=script_timeout + 5,
                     )
@@ -1251,7 +1318,7 @@ class GatewayOrchestrator:
                         return None
                     elif status == "done":
                         msg = result.get("message", "")
-                        job.last_result = redact_exfiltration_urls(redact_credentials(msg)[0])[0] if msg else ""
+                        job.last_result = redact(msg) if msg else ""
                         job.last_error = ""
                         job.last_status = "ok"
                         job.consecutive_failures = 0
@@ -1267,7 +1334,7 @@ class GatewayOrchestrator:
                         return job.last_result or "done"
                     elif status == "report":
                         msg = result.get("message", "")
-                        job.last_result = redact_exfiltration_urls(redact_credentials(msg)[0])[0] if msg else ""
+                        job.last_result = redact(msg) if msg else ""
                         job.last_error = ""
                         job.last_status = "ok"
                         job.consecutive_failures = 0
@@ -1302,7 +1369,7 @@ class GatewayOrchestrator:
                     return None
                 except Exception as exc:
                     logger.exception("Script cron '%s' failed: %s", job.name, exc)
-                    err_str = redact_exfiltration_urls(redact_credentials(str(exc))[0])[0]
+                    err_str = redact(str(exc))
                     job.last_error = err_str
                     job.last_status = "error"
                     job.consecutive_failures += 1
@@ -1470,7 +1537,7 @@ class GatewayOrchestrator:
                             downstream_service="none",
                         )
                         # Still inject into dashboard slot even when Slack is suppressed
-                        if self.dashboard_state and job.persistent_session and self.dashboard_state.has_slot(f"cron-{job.id}"):
+                        if self.dashboard_state and job.persistent_session and not job.hide_in_chat and self.dashboard_state.has_slot(f"cron-{job.id}"):
                             inject_cron_result_to_dashboard(self.dashboard_state, job, result_text)
                         return result_text
 
@@ -1484,13 +1551,25 @@ class GatewayOrchestrator:
                         downstream_service="none",
                     )
                     # Still inject into dashboard slot even when silent
-                    if self.dashboard_state and job.persistent_session and self.dashboard_state.has_slot(f"cron-{job.id}"):
+                    if self.dashboard_state and job.persistent_session and not job.hide_in_chat and self.dashboard_state.has_slot(f"cron-{job.id}"):
                         inject_cron_result_to_dashboard(self.dashboard_state, job, result_text)
                     return result_text
 
                 if self.dashboard_state:
-                    # Inject into slot BEFORE notification so has_slot() is true for notify_meta
-                    if job.persistent_session:
+                    # Inject into slot BEFORE notification so has_slot() is true for notify_meta.
+                    # hide_in_chat=True keeps the cron out of the active session list — the
+                    # result still reaches Slack/bell below, and the run stays visible in the
+                    # History tab via the cron execution-history store (CronHistoryStore, written
+                    # unconditionally by the executor and surfaced at GET /api/crons/{id}/history).
+                    # NOTE: the cron:{id} dashboard conversation_log is written ONLY by
+                    # inject_cron_result_to_dashboard (gated off here for hidden crons), so it is
+                    # intentionally empty for a hidden cron — it exists solely to feed a dashboard
+                    # follow-up turn, which a no-slot cron never has. Do NOT rely on cron:{id} for
+                    # hidden-cron result persistence; get_history() is the source of truth.
+                    # This is the only slot *creator* site (get_or_create_slot); the dedup/silent
+                    # paths above only re-inject into an already-existing slot via has_slot(), so
+                    # they self-no-op when hide_in_chat is True.
+                    if job.persistent_session and not job.hide_in_chat:
                         history = await asyncio.to_thread(
                             self.dashboard_state.conversation_log.read_messages, f"cron:{job.id}"
                         ) if self.dashboard_state.conversation_log else []
@@ -1500,7 +1579,18 @@ class GatewayOrchestrator:
                     safe_name, _ = redact_exfiltration_urls(job.name)
                     safe_name, _ = redact_credentials(safe_name)
                     notify_meta: dict[str, str] = {"job_id": job.id}
-                    if job.persistent_session and self.dashboard_state.has_slot(f"cron-{job.id}"):
+                    # Gate the slot linkage on not hide_in_chat for parity with the
+                    # three inject sites above. Without this, a job flipped to
+                    # hide_in_chat=True that still owns an older cron-{id} slot would
+                    # keep emitting meta.slot (has_slot stays True) → the notification
+                    # CTA shows "Continue session" pointing at a slot no longer
+                    # receiving results. Gating here forces the no-slot "View last
+                    # result" CTA, which lazily rebuilds from CronHistoryStore.
+                    if (
+                        job.persistent_session
+                        and not job.hide_in_chat
+                        and self.dashboard_state.has_slot(f"cron-{job.id}")
+                    ):
                         notify_meta["slot"] = f"cron-{job.id}"
                     self.dashboard_state.notify(
                         "cron",
@@ -2789,9 +2879,15 @@ class GatewayOrchestrator:
                     logger.info("Subagent %s → cron session %s", info.id, parent_key)
                     # Mesh-1892: also deliver the synthesized response to Slack.
                     # Previously it only reached the dashboard notification body.
+                    # Mesh-2451: honor the parent cron job's silent flag too —
+                    # info.silent is never set from the cron's silent setting for
+                    # spawn_run sub-agents, so a silent cron would otherwise still
+                    # post every subagent-completion turn to Slack.
                     try:
                         await self._deliver_cron_response(
-                            parent_key, cron_response, silent=info.silent
+                            parent_key,
+                            cron_response,
+                            silent=info.silent or self._cron_job_is_silent(parent_key),
                         )
                     except Exception:
                         logger.exception(
@@ -3162,6 +3258,23 @@ class GatewayOrchestrator:
 
     async def _shutdown(self) -> None:
         """Graceful cleanup of all services."""
+        # Disarm the loop-stall watchdog FIRST, before any of the teardown below.
+        # close_all()/cancel_all() deliberately kill every kiro-cli child, which
+        # is exactly the os.waitpid reaping burst that can wedge the loop for
+        # >exit_after seconds. If the armed faulthandler dump-then-exit timer is
+        # still live, that wedge would _exit(1) the process mid-shutdown — a clean
+        # quit would look like a crash. The watchdog's own on_cleanup hook only
+        # runs inside _dashboard_runner.cleanup(), which is gathered concurrently
+        # with the reaping burst (too late), so we stop it explicitly here and
+        # cancel the heartbeat that keeps re-arming it.
+        if self.dashboard_state:
+            wd = getattr(self.dashboard_state, "_loop_watchdog", None)
+            if wd is not None:
+                wd.stop()
+            hb = getattr(self.dashboard_state, "_loop_heartbeat", None)
+            if hb is not None:
+                hb.cancel()
+
         # Save all active chat slots to history before shutdown
         if self.dashboard_state:
             from kiro_claw.dashboard.chat import save_all_slots_to_history
@@ -3445,6 +3558,35 @@ class GatewayOrchestrator:
     # Main run loop
     # ------------------------------------------------------------------
 
+    async def _connect_slack(self) -> bool:
+        """Connect the Slack socket-mode client. Non-fatal on failure.
+
+        Returns ``True`` if connected, ``False`` if Slack is disabled or the
+        connect failed. A failure (network/proxy/timeout — e.g. a stale
+        ``HTTPS_PROXY`` in the environment) must NOT crash the gateway: the
+        dashboard, cron, and task runner keep running in dashboard-only mode.
+
+        ponytail: no background retry of the initial connect — Slack DM stays
+        disabled until the next gateway restart.
+        """
+        if not self._socket_client:
+            return False
+        try:
+            await self._socket_client.connect()
+            print("🐾 KiroClaw gateway connected to Slack")
+            return True
+        except Exception:
+            logger.warning(
+                "Slack socket-mode connect failed — continuing in "
+                "dashboard-only mode (Slack DM disabled this session)",
+                exc_info=True,
+            )
+            print(
+                "⚠️  Slack connect failed — running dashboard-only "
+                "(check network/proxy; details in gateway.log)"
+            )
+            return False
+
     async def run(self) -> None:
         """Start all services and block until shutdown signal."""
         # Raise FD limit — each kiro-cli session uses ~6 FDs (3 pipes)
@@ -3551,8 +3693,6 @@ class GatewayOrchestrator:
             print("🐾 MCP probe timed out — continuing without full probe")
 
         # ── Start background session and print URLs ──
-        _has_slack = self._socket_client is not None
-
         async def _start_bg_session() -> None:
             try:
                 assert self.sessions is not None
@@ -3563,7 +3703,11 @@ class GatewayOrchestrator:
 
             if not self._no_dashboard:
                 host = resolve_dashboard_host(self._local_only, self._configured_host)
-                base_url = f"http://{host}:{self._dashboard_port}"
+                _cfg_url = self._cfg.dashboard.url
+                if _cfg_url and "://" in _cfg_url:
+                    base_url = _cfg_url.rstrip("/")
+                else:
+                    base_url = f"http://{host}:{self._dashboard_port}"
                 startup_token = generate_token("local-startup", ttl_seconds=MAX_SESSION_TTL_SECS)
                 dashboard_url = build_dashboard_url(
                     base_url, startup_token, local_only=self._local_only
@@ -3588,15 +3732,12 @@ class GatewayOrchestrator:
                     import webbrowser
 
                     webbrowser.open(dashboard_url)
-            if _has_slack:
-                print("🐾 KiroClaw gateway connected to Slack")
 
         asyncio.create_task(_start_bg_session())
         print("🐾 KiroClaw gateway starting…")
         print(f"\n{DATA_WARNING}\n")
 
-        if self._socket_client:
-            await self._socket_client.connect()
+        await self._connect_slack()
 
         # Block until shutdown
         await shutdown_event.wait()

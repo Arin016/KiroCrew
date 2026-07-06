@@ -122,6 +122,7 @@ export default function SkillForm({ data, onChange, hideIdentity, allowRaw = tru
           <button className="text-[12px] text-accent hover:text-accent-hover cursor-pointer transition-colors" onClick={switchToStructured}>Switch to structured editor</button>
         </div>
         <textarea
+          aria-label="Raw YAML and Markdown"
           className="w-full bg-bg-elevated border border-border rounded-md p-3 text-text font-mono text-[13px] outline-none resize-y leading-normal transition-colors focus-ring"
           rows={20}
           value={data.raw || ''}
@@ -140,36 +141,50 @@ export default function SkillForm({ data, onChange, hideIdentity, allowRaw = tru
       )}
       {!hideIdentity && <>
         <div>
-          <label className="text-[13px] font-semibold text-text mb-1 block">Name</label>
-          <Input placeholder="e.g. my-tool" value={data.name} onChange={e => set('name', e.target.value)} className="w-full" />
+          {/* label-has-for can't resolve the control through the custom <Input>
+              component; the runtime association via htmlFor + id + aria-label is correct. */}
+          {/* eslint-disable-next-line jsx-a11y/label-has-for */}
+          <label htmlFor="skill-name" className="text-[13px] font-semibold text-text mb-1 block">Name</label>
+          <Input id="skill-name" aria-label="Name" placeholder="e.g. my-tool" value={data.name} onChange={e => set('name', e.target.value)} className="w-full" />
         </div>
         <div>
-          <label className="text-[13px] font-semibold text-text mb-1 block">Category <span className="text-muted font-normal">(optional)</span></label>
-          <Input placeholder="e.g. utils, code" value={data.category} onChange={e => set('category', e.target.value)} className="w-full" />
+          {/* eslint-disable-next-line jsx-a11y/label-has-for -- control resolved at runtime via htmlFor + id */}
+          <label htmlFor="skill-category" className="text-[13px] font-semibold text-text mb-1 block">Category <span className="text-muted font-normal">(optional)</span></label>
+          <Input id="skill-category" aria-label="Category" placeholder="e.g. utils, code" value={data.category} onChange={e => set('category', e.target.value)} className="w-full" />
           <div className="text-[11px] text-muted mt-1">Groups the skill in the list. Leave empty for the general category.</div>
         </div>
       </>}
       <div>
-        <label className="text-[13px] font-semibold text-text mb-1 block">Description</label>
-        <textarea className="w-full bg-bg-elevated border border-border rounded-md px-3 py-2 text-text text-sm font-body outline-none resize-y leading-relaxed transition-colors focus-ring" rows={3} placeholder="What this skill does and when the agent should use it" value={data.description} onChange={e => set('description', e.target.value)} />
+        <label htmlFor="skill-description" className="text-[13px] font-semibold text-text mb-1 block">
+          <span className="block mb-1">Description</span>
+          <textarea id="skill-description" aria-label="Description" className="w-full bg-bg-elevated border border-border rounded-md px-3 py-2 text-text text-sm font-body outline-none resize-y leading-relaxed transition-colors focus-ring" rows={3} placeholder="What this skill does and when the agent should use it" value={data.description} onChange={e => set('description', e.target.value)} />
+        </label>
       </div>
       <div>
-        <label className="text-[13px] font-semibold text-text mb-1 block">Triggers</label>
-        <Input placeholder="keyword1, keyword2, keyword3" value={data.triggers} onChange={e => set('triggers', e.target.value)} className="w-full" />
+        {/* label-has-for can't resolve the control through the custom <Input>
+            component; the runtime association via htmlFor + id + aria-label is correct. */}
+        {/* eslint-disable-next-line jsx-a11y/label-has-for */}
+        <label htmlFor="skill-triggers" className="text-[13px] font-semibold text-text mb-1 block">Triggers</label>
+        <Input id="skill-triggers" aria-label="Triggers" placeholder="keyword1, keyword2, keyword3" value={data.triggers} onChange={e => set('triggers', e.target.value)} className="w-full" />
         <div className="text-[11px] text-muted mt-1">Comma-separated keywords that activate this skill. Prefix with ! to exclude.</div>
       </div>
       <div>
-        <label className="text-[13px] font-semibold text-text mb-1 block">Tags <span className="text-muted font-normal">(optional)</span></label>
-        <Input placeholder="skill, tool, aws" value={data.tags} onChange={e => set('tags', e.target.value)} className="w-full" />
+        {/* eslint-disable-next-line jsx-a11y/label-has-for -- control resolved at runtime via htmlFor + id */}
+        <label htmlFor="skill-tags" className="text-[13px] font-semibold text-text mb-1 block">Tags <span className="text-muted font-normal">(optional)</span></label>
+        <Input id="skill-tags" aria-label="Tags" placeholder="skill, tool, aws" value={data.tags} onChange={e => set('tags', e.target.value)} className="w-full" />
         <div className="text-[11px] text-muted mt-1">Comma-separated labels for categorization. Metadata only — not used for matching.</div>
       </div>
       <div className="flex items-center gap-2">
-        <input type="checkbox" id="skill-always" checked={data.always} onChange={e => set('always', e.target.checked)} className="accent-accent" />
-        <label htmlFor="skill-always" className="text-[13px] text-text cursor-pointer">Always loaded <span className="text-muted">(inject full content into every session)</span></label>
+        <label htmlFor="skill-always" className="flex items-center gap-2 text-[13px] text-text cursor-pointer">
+          <input type="checkbox" id="skill-always" aria-label="Always loaded" checked={data.always} onChange={e => set('always', e.target.checked)} className="accent-accent" />
+          <span>Always loaded <span className="text-muted">(inject full content into every session)</span></span>
+        </label>
       </div>
       <div>
-        <label className="text-[13px] font-semibold text-text mb-1 block">Instructions</label>
-        <textarea className="w-full bg-bg-elevated border border-border rounded-md p-3 text-text font-mono text-[13px] outline-none resize-y leading-normal transition-colors focus-ring" rows={10} placeholder={"# My Skill\n\nStep-by-step instructions for the agent...\n\n## When to use\n- Scenario 1\n- Scenario 2"} value={data.body} onChange={e => set('body', e.target.value)} />
+        <label htmlFor="skill-instructions" className="text-[13px] font-semibold text-text mb-1 block">
+          <span className="block mb-1">Instructions</span>
+          <textarea id="skill-instructions" aria-label="Instructions" className="w-full bg-bg-elevated border border-border rounded-md p-3 text-text font-mono text-[13px] outline-none resize-y leading-normal transition-colors focus-ring" rows={10} placeholder={"# My Skill\n\nStep-by-step instructions for the agent...\n\n## When to use\n- Scenario 1\n- Scenario 2"} value={data.body} onChange={e => set('body', e.target.value)} />
+        </label>
       </div>
     </div>
   )

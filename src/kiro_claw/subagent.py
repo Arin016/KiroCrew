@@ -1116,11 +1116,13 @@ class SubagentManager:
         escaped children in different PGIDs (MCP servers).
         """
         try:
+            # circular import: subagent → acp.client → session → subagent
             from kiro_claw.acp.client import (
                 _get_child_pids,
                 _get_start_time,
                 _is_our_child,
                 _kill_escaped_children,
+                _read_basename,
             )
 
             session = self._sessions._sessions.get(session_key)
@@ -1134,12 +1136,12 @@ class SubagentManager:
             # Snapshot child tree before killing — children in different
             # PGIDs survive killpg.
             raw_children = getattr(client, "_child_pids", None)
-            child_pids: dict[int, int | None] = (
+            child_pids: dict = (
                 dict(raw_children) if isinstance(raw_children, dict) else {}
             )
             for p in _get_child_pids(pid):
                 if p not in child_pids:
-                    child_pids[p] = _get_start_time(p)
+                    child_pids[p] = (_get_start_time(p), _read_basename(p))
             # Validate PID hasn't been recycled before killing.
             original_start = getattr(client, "_start_time", None)
             if original_start is None:

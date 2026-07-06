@@ -61,6 +61,21 @@ CHANNEL_MAX_LEN = 20
 USER_ID_RE = re.compile(r"^[UW][A-Z0-9]{1,19}$")
 USER_MAX_LEN = 20
 
+# Slack thread/message timestamp used verbatim as a session key for Slack
+# threads (e.g. "1781215864.487849"): a 10+ digit epoch seconds component, a
+# dot, then 6+ digits of sub-second precision. Slack threads key their session
+# off the bare thread_ts (see slack/handler.py), unlike the "slack:<chan>:<ts>"
+# delivery-target form, so callers that authorize by session key must accept
+# this shape too.
+#
+# Use the explicit ASCII class ``[0-9]`` (not ``\d``): in Python 3 ``\d`` also
+# matches non-ASCII Unicode decimal digits (Arabic-Indic ٠-٩, Devanagari ०-९,
+# etc.). Because this pattern gates an authorization decision (``is_slack_ns``
+# in ``api_lessons_create``), ``\d`` would let a crafted key built from Unicode
+# digits pass as a Slack thread_ts, matching the ASCII-only intent of the other
+# patterns in this file (e.g. ``CHANNEL_ID_RE``).
+SLACK_THREAD_TS_RE = re.compile(r"^[0-9]{10,}\.[0-9]{6,}$")
+
 # Valid Jira project key pattern (e.g. PROJ, TEAM_X)
 JIRA_PROJECT_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 # Valid Jira site ID pattern (UUID or alphanumeric with hyphens)
@@ -146,6 +161,17 @@ def validate_field(value: Any, spec: FieldSpec) -> Any:
 
     # Type check
     if not isinstance(value, spec.type):
+        raise ValidationError(
+            spec.name,
+            f"expected {spec.type.__name__ if isinstance(spec.type, type) else spec.type}, "
+            f"got {type(value).__name__}",
+        )
+
+    # bool is a subclass of int, so isinstance(True, int) is True — a bool
+    # would otherwise slip through an int field (and pass min/max range checks
+    # since True == 1). Reject bool unless it is an explicitly allowed type.
+    allowed_types = spec.type if isinstance(spec.type, tuple) else (spec.type,)
+    if isinstance(value, bool) and bool not in allowed_types:
         raise ValidationError(
             spec.name,
             f"expected {spec.type.__name__ if isinstance(spec.type, type) else spec.type}, "
@@ -390,6 +416,33 @@ TASKKEEPER_COMPLETE_SCHEMA = ToolSchema(
     ],
 )
 
+# Absolute filesystem path. Empty string is allowed (clears the project) —
+# the validator skips the pattern check on empty values, so the regex only
+# needs to cover the non-empty case.
+_ABSOLUTE_PATH_RE = re.compile(r"^/")
+
+# 4096 = Linux PATH_MAX. The gateway endpoint enforces realpath and
+# sensitive-path checks; this schema is the MCP-layer shape gate.
+
+
+def _validate_set_project(args: dict[str, Any]) -> None:
+    clear = args.get("clear", False)
+    path = args.get("path", "")
+    if clear and path:
+        raise ValidationError("path", "path must be empty when clear=true")
+    if not clear and not path:
+        raise ValidationError("path", "required (use clear=true to unset project)")
+
+
+SET_PROJECT_SCHEMA = ToolSchema(
+    tool_name="set_project",
+    fields=[
+        FieldSpec("path", str, max_len=4096, pattern=_ABSOLUTE_PATH_RE),
+        FieldSpec("clear", bool),
+    ],
+    custom_validator=_validate_set_project,
+)
+
 # Artifact tools — slug pattern matches kiro_claw.artifacts._SLUG_RE.
 _ARTIFACT_SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
 _ARTIFACT_TAG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_:.-]{0,63}$")
@@ -503,6 +556,7 @@ CRON_ADD_SCHEMA = ToolSchema(
         FieldSpec("timezone", str, max_len=50, pattern=re.compile(r"^[A-Za-z0-9_/+-]+$")),
         FieldSpec("persistent_session", bool),
         FieldSpec("minimal_context", bool),
+        FieldSpec("hide_in_chat", bool),
         FieldSpec("strict_schedule", bool),
         # SECURITY NOTE: the patterns below are input-SHAPE checks, NOT security
         # sanitizers. The "command" regex only rejects control bytes and the
@@ -617,7 +671,7 @@ SEND_MESSAGE_SCHEMA = ToolSchema(
         FieldSpec("thread_ts", str, max_len=30, pattern=re.compile(r"^\d+\.\d+$")),
         FieldSpec("reply_broadcast", bool),
         FieldSpec("session", str, max_len=MAX_SHORT_STRING, pattern=re.compile(r"^(origin|slack)$")),
-        FieldSpec("caller_session", str, max_len=MAX_SHORT_STRING, pattern=re.compile(r"^(cron:[a-zA-Z0-9]+)?$")),
+        FieldSpec("caller_session", str, max_len=MAX_SHORT_STRING, pattern=CRON_SESSION_RE),
     ],
 )
 
@@ -668,6 +722,13 @@ LOCAL_KNOWLEDGE_SEARCH_SCHEMA = ToolSchema(
     ],
 )
 
+KNOWLEDGE_DEDUP_SCHEMA = ToolSchema(
+    tool_name="knowledge_dedup",
+    fields=[
+        FieldSpec("apply", bool, required=False, default=False),
+    ],
+)
+
 # ISO calendar date (YYYY-MM-DD) for the chat-history date filters.
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -708,9 +769,11 @@ MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
     "file_send": FILE_SEND_SCHEMA,
     "autonudge_stop": AUTONUDGE_STOP_SCHEMA,
     "local_knowledge_search": LOCAL_KNOWLEDGE_SEARCH_SCHEMA,
+    "knowledge_dedup": KNOWLEDGE_DEDUP_SCHEMA,
     "search_chat_history": SEARCH_CHAT_HISTORY_SCHEMA,
     "get_chat_session": GET_CHAT_SESSION_SCHEMA,
     "taskkeeper_complete": TASKKEEPER_COMPLETE_SCHEMA,
+    "set_project": SET_PROJECT_SCHEMA,
     "artifact_save": ARTIFACT_SAVE_SCHEMA,
     "artifact_get": ARTIFACT_GET_SCHEMA,
     "artifact_update": ARTIFACT_UPDATE_SCHEMA,
@@ -741,6 +804,7 @@ MCP_CRON_SCHEMAS: dict[str, ToolSchema] = {
             FieldSpec("timezone", str, max_len=50, pattern=re.compile(r"^[A-Za-z0-9_/+-]+$")),
             FieldSpec("persistent_session", bool),
             FieldSpec("minimal_context", bool),
+            FieldSpec("hide_in_chat", bool),
         ],
     ),
     "cron_remove": CRON_REMOVE_SCHEMA,

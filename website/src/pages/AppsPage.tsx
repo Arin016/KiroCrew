@@ -11,7 +11,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   Package, Power, PowerOff, Trash2, RefreshCw, FolderOpen,
   Download, Bot, Tag, Users, Zap, ChevronRight,
-  ExternalLink, Clock, ShoppingBag, Lock, X,
+  ExternalLink, Clock, ShoppingBag, Lock, X, ArrowUp,
 } from 'lucide-react'
 import { api } from '../api/client'
 import {
@@ -23,6 +23,7 @@ import { recordEvent } from '../rum'
 import SegmentedControl from '../components/SegmentedControl'
 import AppIcon from '../components/AppIcon'
 import RegistryManager from '../components/RegistryManager'
+import { useTheme } from '../hooks/useTheme'
 
 type InstalledApp = {
   name: string
@@ -38,6 +39,7 @@ type InstalledApp = {
   // Migration fields
   migratedTo?: string  // "registry:{name}" or "standalone:{name}"
   orphaned?: boolean
+  updateAvailable?: boolean
   manifest: {
     name: string
     version: string
@@ -56,8 +58,20 @@ type InstalledApp = {
     minKiroClawVersion?: string
     iconPath?: string
     repo?: string
+    // Store-listing metadata (also present on RegistryApp; optional here)
+    screenshots?: string[]
+    heroImage?: string
+    heroImageDark?: string
+    iconUrl?: string
+    openCommand?: string
   }
 }
+
+/** Uninstall preview payload (mirrors ``api.uninstallPreview`` return shape). */
+type UninstallPreview = Awaited<ReturnType<typeof api.uninstallPreview>>
+type RemovableDep = UninstallPreview['dependencies']['removable'][number]
+type SharedDep = UninstallPreview['dependencies']['shared'][number]
+type UserInstalledDep = UninstallPreview['dependencies']['userInstalled'][number]
 
 /**
  * Registry app entry — mirrors backend ``app-registry.json`` schema
@@ -74,6 +88,8 @@ type RegistryApp = {
   tags?: string[]
   highlights?: string[]
   screenshots?: string[]
+  heroImage?: string
+  heroImageDark?: string
   repo?: string
   branch?: string
   installed: boolean
@@ -92,8 +108,10 @@ export default function AppsPage() {
   const [filter, setFilter] = useState('')
   const [error, setError] = useState('')
   const [actionLoading, setActionLoading] = useState<string | null>(null)
-  const [tab, setTab] = useState<'installed' | 'browse'>('installed')
+  const [tab, setTab] = useState<'installed' | 'browse'>((sessionStorage.getItem('appstore-tab') as 'installed' | 'browse') || 'installed')
+  useEffect(() => { sessionStorage.setItem('appstore-tab', tab) }, [tab])
   const tabInitializedRef = useRef(false)
+  const { theme: resolvedMode } = useTheme()
   const [installPath, setInstallPath] = useState('')
   const [showInstall, setShowInstall] = useState(false)
   const [successMsg, setSuccessMsg] = useState('')
@@ -106,7 +124,7 @@ export default function AppsPage() {
   // Uninstall confirmation state
   const [uninstallTarget, setUninstallTarget] = useState<InstalledApp | null>(null)
   const [keepData, setKeepData] = useState(false)
-  const [uninstallPreview, setUninstallPreview] = useState<any>(null)
+  const [uninstallPreview, setUninstallPreview] = useState<UninstallPreview | null>(null)
   const [keepSpecific, setKeepSpecific] = useState<Set<string>>(new Set())
 
   // React Query: fetch installed apps
@@ -118,26 +136,34 @@ export default function AppsPage() {
   // Auto-switch to browse tab when no visible installed apps on first load
   useEffect(() => {
     if (!tabInitializedRef.current && !loading) {
-      const visibleInstalled = apps.filter((a: any) => !(a.origin === 'builtin' && !a.enabled))
+      const visibleInstalled = apps.filter((a) => !(a.origin === 'builtin' && !a.enabled))
       if (visibleInstalled.length === 0) { setTab('browse') }
       tabInitializedRef.current = true
     }
   }, [apps, loading])
 
-  // React Query: fetch registry (only when browse tab is active)
+  // React Query: fetch registry (cached so the Installed tab can show update availability)
   const { data: registryData, isLoading: registryLoading, error: registryError } = useQuery<{ apps: RegistryApp[] }>({
     queryKey: ['registry'],
-    queryFn: () => api.listRegistry(),
-    enabled: tab === 'browse',
+    // api.listRegistry() types `apps` as unknown[]; the backend payload matches
+    // RegistryApp, so narrow it here at the single fetch boundary.
+    queryFn: async () => {
+      const res = await api.listRegistry()
+      return { apps: res.apps as RegistryApp[] }
+    },
+    staleTime: 5 * 60_000, // cache for 5min to avoid re-fetching on tab switch
   })
   const registry: RegistryApp[] = registryData?.apps || []
+
+  // Build a map of updateAvailable from registry for installed apps
+  const updateMap = new Map(registry.filter(r => r.updateAvailable).map(r => [r.name, r.version]))
 
   // Display error: action errors take priority, then query errors
   useEffect(() => { if (appsError) setDismissedQueryError(false) }, [appsError])
   useEffect(() => { if (registryError) setDismissedRegistryError(false) }, [registryError])
   const displayError = error
-    || (!dismissedQueryError && appsError ? (appsError as any)?.message || 'Failed to load apps' : '')
-    || (tab === 'browse' && !dismissedRegistryError && registryError ? (registryError as any)?.message || 'Failed to load registry' : '')
+    || (!dismissedQueryError && appsError ? (appsError as Error)?.message || 'Failed to load apps' : '')
+    || (tab === 'browse' && !dismissedRegistryError && registryError ? (registryError as Error)?.message || 'Failed to load registry' : '')
 
   const handleAction = async (name: string, action: 'enable' | 'disable' | 'uninstall' | 'update') => {
     // Intercept uninstall to show confirmation modal with preview
@@ -157,12 +183,16 @@ export default function AppsPage() {
       }
       return
     }
+    // Update navigates to detail page (streaming install UI)
+    if (action === 'update') {
+      navigate(`/apps/detail/${name}?action=update`)
+      return
+    }
     setActionLoading(`${name}:${action}`)
     setError('')
     try {
       if (action === 'enable') await api.enableApp(name)
       else if (action === 'disable') await api.disableApp(name)
-      else if (action === 'update') await api.updateApp(name)
       queryClient.invalidateQueries({ queryKey: ['apps'] })
       window.dispatchEvent(new Event('mc:apps-changed'))
       // Show toast when hiding a builtin app
@@ -173,8 +203,8 @@ export default function AppsPage() {
           setTimeout(() => setSuccessMsg(''), 4000)
         }
       }
-    } catch (e: any) {
-      setError(e.message || `Failed to ${action} ${name}`)
+    } catch (e) {
+      setError((e as Error)?.message || `Failed to ${action} ${name}`)
     } finally {
       setActionLoading(null)
     }
@@ -190,8 +220,8 @@ export default function AppsPage() {
       recordEvent('app_uninstall', { app: name, version: uninstallTarget.version })
       queryClient.invalidateQueries({ queryKey: ['apps'] })
       window.dispatchEvent(new Event('mc:apps-changed'))
-    } catch (e: any) {
-      setError(e.message || `Failed to uninstall ${name}`)
+    } catch (e) {
+      setError((e as Error)?.message || `Failed to uninstall ${name}`)
     } finally {
       setActionLoading(null)
       setUninstallTarget(null)
@@ -210,8 +240,8 @@ export default function AppsPage() {
       setShowInstall(false)
       queryClient.invalidateQueries({ queryKey: ['apps'] })
       window.dispatchEvent(new Event('mc:apps-changed'))
-    } catch (e: any) {
-      setError(e.message || 'Install failed')
+    } catch (e) {
+      setError((e as Error)?.message || 'Install failed')
     } finally {
       setActionLoading(null)
     }
@@ -265,13 +295,19 @@ export default function AppsPage() {
           </div>
         )}
 
-        {/* Uninstall confirmation modal */}
+        {/* Uninstall confirmation modal. The backdrop closes on click (mouse
+            convenience); keyboard users press Escape (handled) or the Cancel
+            button inside. The inner card's onClick only stops propagation so a
+            click inside doesn't bubble to the backdrop-close — it is not a user
+            interaction, hence the scoped disables. */}
         {uninstallTarget && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg/60 backdrop-blur-sm animate-rise"
+          // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-bg/60 backdrop-blur-sm animate-rise"
             onClick={() => { setUninstallTarget(null); setUninstallPreview(null) }}
             onKeyDown={e => { if (e.key === 'Escape') { setUninstallTarget(null); setUninstallPreview(null) } }}
             tabIndex={-1} ref={el => el?.focus()} role="dialog" aria-modal="true" aria-label="Confirm uninstall"
           >
+            {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events */}
             <div className="bg-card border border-border rounded-xl p-6 max-w-md w-full mx-4 shadow-xl" onClick={e => e.stopPropagation()}>
               <div className="flex items-center gap-3 mb-4">
                 <div className="w-10 h-10 rounded-xl bg-danger/10 flex items-center justify-center">
@@ -328,15 +364,17 @@ export default function AppsPage() {
                     <div className="mb-4">
                       <p className="text-[13px] text-muted mb-2">Dependencies:</p>
                       <div className="space-y-2 text-[13px]">
-                        {(deps.removable || []).map((d: any) => (
-                          <label key={d.id} className="flex items-start gap-2 cursor-pointer select-none">
+                        {(deps.removable || []).map((d: RemovableDep) => (
+                          <div key={d.id} className="flex items-start gap-2">
                             <Trash2 size={12} className="text-danger mt-0.5 shrink-0" />
                             <div className="flex-1">
                               <div className="text-text">{d.id.split('/').pop()}</div>
                               <div className="text-[11px] text-muted">{d.reason}</div>
-                              <label className="flex items-center gap-1.5 mt-1 text-[11px] text-muted cursor-pointer">
+                              <label htmlFor={`keep-dep-${d.id}`} className="flex items-center gap-1.5 mt-1 text-[11px] text-muted cursor-pointer">
                                 <input
+                                  id={`keep-dep-${d.id}`}
                                   type="checkbox"
+                                  aria-label={`Keep dependency ${d.id.split('/').pop()}`}
                                   checked={keepSpecific.has(d.id)}
                                   onChange={e => {
                                     const next = new Set(keepSpecific)
@@ -348,9 +386,9 @@ export default function AppsPage() {
                                 Keep this dependency
                               </label>
                             </div>
-                          </label>
+                          </div>
                         ))}
-                        {(deps.shared || []).map((d: any) => (
+                        {(deps.shared || []).map((d: SharedDep) => (
                           <div key={d.id} className="flex items-start gap-2">
                             <Lock size={12} className="text-muted mt-0.5 shrink-0" />
                             <div>
@@ -359,7 +397,7 @@ export default function AppsPage() {
                             </div>
                           </div>
                         ))}
-                        {(deps.userInstalled || []).map((d: any) => (
+                        {(deps.userInstalled || []).map((d: UserInstalledDep) => (
                           <div key={d.id} className="flex items-start gap-2">
                             <Lock size={12} className="text-muted mt-0.5 shrink-0" />
                             <div>
@@ -374,8 +412,8 @@ export default function AppsPage() {
                 })()
               )}
 
-              <label className="flex items-center gap-2 text-[13px] text-muted mb-5 cursor-pointer select-none">
-                <input type="checkbox" checked={keepData} onChange={e => setKeepData(e.target.checked)} className="rounded" />
+              <label htmlFor="uninstall-keep-data" className="flex items-center gap-2 text-[13px] text-muted mb-5 cursor-pointer select-none">
+                <input id="uninstall-keep-data" type="checkbox" aria-label="Keep app data" checked={keepData} onChange={e => setKeepData(e.target.checked)} className="rounded" />
                 Keep app data
               </label>
 
@@ -404,7 +442,7 @@ export default function AppsPage() {
             <Btn onClick={() => setShowInstall(!showInstall)}>
               <Download size={14} /> Install from Path
             </Btn>
-            <Btn aria-label="Refresh apps" onClick={() => queryClient.invalidateQueries({ queryKey: ['apps'] })}><RefreshCw size={14} /></Btn>
+            <Btn aria-label="Refresh apps" onClick={() => queryClient.invalidateQueries({ queryKey: ['apps'] })}><RefreshCw size={14} /> Refresh</Btn>
           </div>
         </div>
 
@@ -416,8 +454,8 @@ export default function AppsPage() {
               <Input
                 placeholder="Local path to app directory (e.g. /path/to/oncall-watchtower)"
                 value={installPath}
-                onChange={(e: any) => setInstallPath(e.target.value)}
-                onKeyDown={(e: any) => e.key === 'Enter' && handleInstall()}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setInstallPath(e.target.value)}
+                onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => e.key === 'Enter' && handleInstall()}
                 className="flex-1"
               />
               <Btn
@@ -437,7 +475,7 @@ export default function AppsPage() {
               Installed Apps
               <InfoTip text="Apps contribute agents, skills, and cron jobs to KiroClaw. Enable an app to activate its resources." />
             </CardTitle>
-            <SearchInput placeholder="Filter apps…" value={filter} onChange={(e: any) => setFilter(e.target.value)} />
+            <SearchInput placeholder="Filter apps…" value={filter} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setFilter(e.target.value)} />
 
             {loading ? (
               <div className="text-center py-12 text-muted text-sm">Loading apps…</div>
@@ -454,7 +492,7 @@ export default function AppsPage() {
                 {filtered.map(app => (
                   <AppCard
                     key={app.name}
-                    app={app}
+                    app={{...app, updateAvailable: updateMap.has(app.name), _newVersion: updateMap.get(app.name)}}
                     actionLoading={actionLoading}
                     onAction={handleAction}
                     onOpen={() => navigate(app.manifest?.ui?.pages?.[0]?.route || `/apps/${app.name}`)}
@@ -473,7 +511,7 @@ export default function AppsPage() {
               Browse Apps
               <InfoTip text="Discover and install apps from the KiroClaw registry." />
             </CardTitle>
-            <SearchInput placeholder="Search apps…" value={registryFilter} onChange={(e: any) => setRegistryFilter(e.target.value)} />
+            <SearchInput placeholder="Search apps…" value={registryFilter} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setRegistryFilter(e.target.value)} />
 
             {registryLoading ? (
               <div className="text-center py-12 text-muted text-sm">Loading registry…</div>
@@ -488,20 +526,31 @@ export default function AppsPage() {
                   version: a.version,
                   author: a.manifest?.author || 'kiroclaw',
                   tags: a.manifest?.tags,
+                  screenshots: a.manifest?.screenshots,
+                  heroImage: a.manifest?.heroImage,
+                  heroImageDark: a.manifest?.heroImageDark,
                   icon: a.manifest?.ui?.pages?.[0]?.icon || '',
-                  iconUrl: (a.manifest as any)?.iconUrl || '',
+                  iconUrl: a.manifest?.iconUrl || '',
                   installed: true,
                   enabled: false,
                   origin: 'builtin',
                   lifecycle: 'locked',
                 }))
               const disabledBuiltinNames = new Set(disabledBuiltins.map(a => a.name))
-              const browseApps = [...disabledBuiltins, ...registry.filter(r => !disabledBuiltinNames.has(r.name))]
+              // Enrich registry entries with heroImage from locally installed app manifests
+              const enrichedRegistry = registry.filter(r => !disabledBuiltinNames.has(r.name)).map(r => {
+                const installed = apps.find(a => a.name === r.name)
+                if (installed) {
+                  return { ...r, heroImage: r.heroImage || installed.manifest?.heroImage, heroImageDark: r.heroImageDark || installed.manifest?.heroImageDark, screenshots: r.screenshots || installed.manifest?.screenshots }
+                }
+                return r
+              })
+              const browseApps = [...disabledBuiltins, ...enrichedRegistry]
 
               return browseApps.length === 0 ? (
                 <EmptyState icon={<ShoppingBag size={36} />} title="No apps available" subtitle="Check back later or install from a local path." />
               ) : (
-              <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4 mt-4">
+              <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-4 mt-4">
                 {browseApps
                   .filter(a => {
                     if (!registryFilter) return true
@@ -513,7 +562,10 @@ export default function AppsPage() {
                   .map(app => (
                     <div
                       key={app.name}
-                      className="border border-border rounded-xl p-4 hover:border-accent/40 hover:shadow-md transition-all cursor-pointer group"
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`View details for ${app.displayName}`}
+                      className="border border-border rounded-xl overflow-hidden hover:border-accent/40 hover:shadow-md transition-all cursor-pointer group"
                       onClick={(e) => {
                         if (e.metaKey || e.ctrlKey) {
                           window.open(`/apps/detail/${app.name}`, '_blank')
@@ -521,39 +573,72 @@ export default function AppsPage() {
                           navigate(`/apps/detail/${app.name}`)
                         }
                       }}
+                      onKeyDown={(e) => {
+                        if (e.target !== e.currentTarget) return
+                        if (e.key !== 'Enter' && e.key !== ' ') return
+                        e.preventDefault()
+                        if (e.metaKey || e.ctrlKey) {
+                          window.open(`/apps/detail/${app.name}`, '_blank')
+                        } else {
+                          navigate(`/apps/detail/${app.name}`)
+                        }
+                      }}
                     >
-                      <div className="flex items-center gap-3 mb-3">
-                        <div className="w-12 h-12 rounded-xl bg-accent/10 flex items-center justify-center group-hover:bg-accent/20 transition-colors overflow-hidden shrink-0">
-                          <AppIcon icon={app.icon} iconUrl={app.iconUrl} size={36} />
+                      {/* Hero image */}
+                      {(() => {
+                        const hero = resolvedMode === 'dark'
+                          ? (app.heroImageDark || app.heroImage || app.screenshots?.[0])
+                          : (app.heroImage || app.heroImageDark || app.screenshots?.[0])
+                        return (
+                          <div className="w-full aspect-video bg-[var(--card)] overflow-hidden relative">
+                            {hero ? (
+                              <img
+                                src={hero}
+                                alt=""
+                                className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-300"
+                              />
+                            ) : (
+                              <div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-elevated)]">
+                                <span className="text-2xl font-bold text-[var(--text)] opacity-10 tracking-widest">KIROCLAW</span>
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })()}
+                      <div className="p-4">
+                        <div className="flex items-center gap-3 mb-3">
+                          <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center group-hover:bg-accent/20 transition-colors overflow-hidden shrink-0">
+                            <AppIcon icon={app.icon} iconUrl={app.iconUrl} size={28} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="font-bold text-text text-[14px] truncate">{app.displayName}</div>
+                            <div className="text-[11px] text-muted">{app.author}</div>
+                          </div>
                         </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="font-medium text-text text-[14px] truncate">{app.displayName}</div>
-                          <div className="text-[11px] text-muted">{app.author}</div>
+                        <p className="text-[12px] text-muted line-clamp-2 mb-3 leading-relaxed">{app.description}</p>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[11px] text-muted">v{app.installedVersion || app.version}</span>
+                            {app.origin === 'builtin' && (
+                              <span className="text-[11px] text-aim bg-aim/10 border border-aim/20 px-1.5 py-0.5 rounded">Built-in</span>
+                            )}
+                            {app.platform?.os?.length === 1 && app.platform.os[0] === 'macos' && (
+                              <span className="text-[11px] text-muted bg-bg-elevated border border-border px-1.5 py-0.5 rounded">macOS</span>
+                            )}
+                            {app.platform?.os?.length === 1 && app.platform.os[0] === 'linux' && (
+                              <span className="text-[11px] text-muted bg-bg-elevated border border-border px-1.5 py-0.5 rounded">Linux</span>
+                            )}
+                          </div>
+                          {app.origin === 'builtin' && !app.enabled ? (
+                            <Btn onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleAction(app.name, 'enable') }}>
+                              <Power size={14} /> Enable
+                            </Btn>
+                          ) : app.installed ? (
+                            <Badge variant="ok">Installed</Badge>
+                          ) : (
+                            <span className="text-[13px] text-accent font-medium">Get</span>
+                          )}
                         </div>
-                      </div>
-                      <p className="text-[12px] text-muted line-clamp-2 mb-3 leading-relaxed">{app.description}</p>
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-[11px] text-muted">v{app.installedVersion || app.version}</span>
-                          {app.origin === 'builtin' && (
-                            <span className="text-[11px] text-aim bg-aim/10 border border-aim/20 px-1.5 py-0.5 rounded">Built-in</span>
-                          )}
-                          {app.platform?.os?.length === 1 && app.platform.os[0] === 'macos' && (
-                            <span className="text-[11px] text-muted bg-bg-elevated border border-border px-1.5 py-0.5 rounded">macOS</span>
-                          )}
-                          {app.platform?.os?.length === 1 && app.platform.os[0] === 'linux' && (
-                            <span className="text-[11px] text-muted bg-bg-elevated border border-border px-1.5 py-0.5 rounded">Linux</span>
-                          )}
-                        </div>
-                        {app.origin === 'builtin' && !app.enabled ? (
-                          <Btn onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleAction(app.name, 'enable') }}>
-                            <Power size={14} /> Enable
-                          </Btn>
-                        ) : app.installed ? (
-                          <Badge variant="ok">Installed</Badge>
-                        ) : (
-                          <span className="text-[13px] text-accent font-medium">Get</span>
-                        )}
                       </div>
                     </div>
                   ))}
@@ -579,7 +664,7 @@ function AppCard({
   onOpen,
   onDetail,
 }: {
-  app: InstalledApp
+  app: InstalledApp & { _newVersion?: string }
   actionLoading: string | null
   onAction: (name: string, action: 'enable' | 'disable' | 'uninstall' | 'update') => void
   onOpen: () => void
@@ -598,7 +683,7 @@ function AppCard({
   const isBuiltin = app.origin === 'builtin'
   const canUpdate = app.lifecycle === 'gateway'
   const canUninstall = app.lifecycle !== 'locked'
-  const hasOpenCommand = !!(m as any)?.openCommand
+  const hasOpenCommand = !!m?.openCommand
   // Derive icon URL from manifest iconPath via blob proxy
   const iconUrl = m?.iconPath && m?.repo
     ? `/api/apps/blob?repo=${encodeURIComponent(m.repo)}&path=${encodeURIComponent(m.iconPath)}`
@@ -628,8 +713,8 @@ function AppCard({
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-1 flex-wrap">
-                <span className="font-medium text-text cursor-pointer hover:text-accent transition-colors" onClick={onDetail}>{app.displayName || app.name}</span>
-                <span className="text-[11px] text-muted bg-bg-elevated px-1.5 py-0.5 rounded">v{app.version}</span>
+                <button type="button" className="font-medium text-text cursor-pointer hover:text-accent transition-colors bg-transparent border-0 p-0 text-left" onClick={onDetail}>{app.displayName || app.name}</button>
+                <span className="text-[11px] text-muted bg-bg-elevated px-1.5 py-0.5 rounded">v{app.version}{app.updateAvailable && ` (v${app._newVersion} available)`}</span>
                 {isBuiltin ? (
                   <Badge variant="aim">Built-in</Badge>
                 ) : isSelfManaged ? (
@@ -665,7 +750,7 @@ function AppCard({
           <div className="flex items-center gap-2 shrink-0">
             {/* Open button — all app types */}
             {hasOpenCommand && (
-              <Btn primary onClick={() => api.openApp(app.name).then((res: any) => {
+              <Btn primary onClick={() => api.openApp(app.name).then((res: { remote?: boolean; command?: string; message?: string } | null) => {
                 if (res?.remote) setRemoteCmd(res.command || res.message || 'App cannot be opened — KiroClaw is running in a headless environment.')
               }).catch(() => {})}>
                 <ExternalLink size={14} /> Open
@@ -694,14 +779,25 @@ function AppCard({
               </Btn>
             )}
 
-            {/* Update — only for lifecycle=gateway */}
-            {canUpdate && (
+            {/* Update — show accent button when new version available (any installed app) */}
+            {app.updateAvailable && (
               <Btn
                 onClick={() => onAction(app.name, 'update')}
                 disabled={actionLoading === `${app.name}:update`}
-                title="Update app from its source directory"
+                title={`Update to v${app.version}`}
+                className="!bg-[var(--info)] !text-white hover:!opacity-80"
               >
-                <RefreshCw size={14} />
+                <ArrowUp size={14} /> Update
+              </Btn>
+            )}
+            {/* Sync — always available for gateway apps */}
+            {canUpdate && !app.updateAvailable && (
+              <Btn
+                onClick={() => onAction(app.name, 'update')}
+                disabled={actionLoading === `${app.name}:update`}
+                title="Sync app from its source directory"
+              >
+                <RefreshCw size={14} /> Sync
               </Btn>
             )}
 
@@ -712,7 +808,7 @@ function AppCard({
                 onClick={() => onAction(app.name, 'uninstall')}
                 disabled={actionLoading === `${app.name}:uninstall`}
               >
-                <Trash2 size={14} />
+                <Trash2 size={14} /> Uninstall
               </Btn>
             )}
 

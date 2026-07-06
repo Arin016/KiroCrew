@@ -122,7 +122,7 @@ function CommentRow({ comment, onEdit, onRemove }: {
   useEffect(() => { if (editing) { committedRef.current = false; inputRef.current?.focus() } }, [editing])
 
   return (
-    <div className="flex items-start gap-2 text-[13px] bg-bg-elevated rounded-md px-2.5 py-1.5">
+    <div data-comment-id={comment.id} className="flex items-start gap-2 text-[13px] bg-bg-elevated rounded-md px-2.5 py-1.5">
       <span className="text-muted shrink-0"><MessageSquare className="lucide-inline" /></span>
       <div className="flex-1 min-w-0">
         <div className="text-muted text-[11px] font-mono truncate" title={comment.anchor}>"{comment.anchor.slice(0, 60)}{comment.anchor.length > 60 ? '…' : ''}"</div>
@@ -136,7 +136,13 @@ function CommentRow({ comment, onEdit, onRemove }: {
             onBlur={commitEdit}
             className="bg-bg border border-border rounded px-1.5 py-0.5 text-text text-[13px] w-full outline-none focus-ring" />
         ) : (
-          <div className="text-text cursor-pointer" onClick={() => { setDraft(comment.text); setEditing(true) }}>{comment.text}</div>
+          <div
+            role="button"
+            tabIndex={0}
+            className="text-text cursor-pointer"
+            onClick={() => { setDraft(comment.text); setEditing(true) }}
+            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setDraft(comment.text); setEditing(true) } }}
+          >{comment.text}</div>
         )}
       </div>
       {editing ? (

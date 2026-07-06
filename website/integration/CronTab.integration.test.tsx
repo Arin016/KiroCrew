@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { screen, waitFor, within } from '@testing-library/react'
+import { screen, waitFor, within, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createTestStore, renderWithProviders } from './helpers'
 import CronTab from '../src/pages/overview/CronTab'
@@ -67,10 +67,10 @@ describe('CronTab Integration Tests', () => {
 
     // Fill in job details
     const nameInput = screen.getByPlaceholderText(/job name/i)
-    await user.type(nameInput, 'Test Job')
+    fireEvent.change(nameInput, { target: { value: 'Test Job' } })
 
     const messageInput = screen.getByPlaceholderText(/message.*task/i)
-    await user.type(messageInput, 'Run system tests')
+    fireEvent.change(messageInput, { target: { value: 'Run system tests' } })
 
     // Select interval input and set value to 5
     const intervalInput = screen.getByDisplayValue('1') as HTMLInputElement
@@ -109,10 +109,10 @@ describe('CronTab Integration Tests', () => {
 
     // Fill in job details
     const nameInput = screen.getByPlaceholderText(/job name/i)
-    await user.type(nameInput, 'Weekly Report')
+    fireEvent.change(nameInput, { target: { value: 'Weekly Report' } })
 
     const messageInput = screen.getByPlaceholderText(/message.*task/i)
-    await user.type(messageInput, 'Generate weekly report')
+    fireEvent.change(messageInput, { target: { value: 'Generate weekly report' } })
 
     // Switch to weekly mode
     const modeSelect = screen.getByDisplayValue(/every interval/i)
@@ -165,10 +165,10 @@ describe('CronTab Integration Tests', () => {
 
     // Fill in required fields
     const nameInput = screen.getByPlaceholderText(/job name/i)
-    await user.type(nameInput, 'Weekly Job')
+    fireEvent.change(nameInput, { target: { value: 'Weekly Job' } })
 
     const messageInput = screen.getByPlaceholderText(/message.*task/i)
-    await user.type(messageInput, 'Weekly task')
+    fireEvent.change(messageInput, { target: { value: 'Weekly task' } })
 
     // Switch to weekly mode
     const modeSelect = screen.getByDisplayValue(/every interval/i)
@@ -229,7 +229,6 @@ describe('CronTab Integration Tests', () => {
   })
 
   it('filters cron jobs by search term', async () => {
-    const user = userEvent.setup()
     renderWithProviders(<CronTab refreshTrigger={0} />)
 
     await waitFor(() => {
@@ -239,7 +238,7 @@ describe('CronTab Integration Tests', () => {
 
     // Type in the search filter
     const filterInput = screen.getByPlaceholderText(/filter jobs/i)
-    await user.type(filterInput, 'backup')
+    fireEvent.change(filterInput, { target: { value: 'backup' } })
 
     // Should still see Backup database
     expect(screen.getByText('Backup database')).toBeInTheDocument()

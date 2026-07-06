@@ -1,3 +1,4 @@
+import { safeSetItem } from '../utils/safeStorage'
 import { useState } from 'react'
 
 export type ReadingWidth = 'md' | 'full'
@@ -13,7 +14,7 @@ export function useReadingWidth() {
   const toggle = () => {
     const next: ReadingWidth = readingWidth === 'md' ? 'full' : 'md'
     setReadingWidth(next)
-    localStorage.setItem(LS_KEY, next)
+    safeSetItem(LS_KEY, next)
   }
 
   const previewStyle: React.CSSProperties | undefined = readingWidth === 'md'

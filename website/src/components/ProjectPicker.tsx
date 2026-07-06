@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, RefObject } from 'react'
 import { createPortal } from 'react-dom'
-import { FolderOpen, ChevronRight, ChevronLeft, Clock } from 'lucide-react'
+import { FolderOpen, ChevronRight, ChevronLeft, Clock, Search } from 'lucide-react'
 import { api } from '../api/client'
 import { useListKeyboardNav } from '../hooks/useListKeyboardNav'
 
@@ -19,10 +19,12 @@ export default function ProjectPicker({ open, onOpenChange, anchorRef, anchorRec
   const [browseParent, setBrowseParent] = useState('')
   const [browseDirs, setBrowseDirs] = useState<{ name: string; path: string }[]>([])
   const [recentDirs, setRecentDirs] = useState<string[]>([])
+  const [recentQuery, setRecentQuery] = useState('')
   const [browseSel, setBrowseSel] = useState(0)
   const btnRef = anchorRef
   const dropRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const recentSearchRef = useRef<HTMLInputElement>(null)
   const browseItemRefs = useRef<(HTMLElement | null)[]>([])
   const anchorRectRef = useRef<DOMRect | null>(anchorRect ?? null)
   anchorRectRef.current = anchorRect ?? null
@@ -33,9 +35,10 @@ export default function ProjectPicker({ open, onOpenChange, anchorRef, anchorRec
     return anchorRectRef.current
   }, [btnRef])
 
-  const browse = useCallback((path?: string) => {
+  const browse = useCallback((path?: string, preserveInput = false) => {
     api.browseDirs(path).then(d => {
-      setBrowsePath(d.path); setBrowseParent(d.parent); setBrowseDirs(d.dirs); setInput(d.path); setBrowseSel(0)
+      setBrowsePath(d.path); setBrowseParent(d.parent); setBrowseDirs(d.dirs); setBrowseSel(0)
+      if (!preserveInput) setInput(d.path)
       // Keep the combobox input focused so arrow/Enter nav continues after a drill.
       requestAnimationFrame(() => inputRef.current?.focus())
     }).catch(() => {})
@@ -43,6 +46,7 @@ export default function ProjectPicker({ open, onOpenChange, anchorRef, anchorRec
 
   useEffect(() => {
     if (!open) return
+    setRecentQuery('')
     api.recentProjects().then(d => {
       setRecentDirs(d.dirs || [])
       setTab(d.dirs?.length ? 'recent' : 'browse')
@@ -70,20 +74,41 @@ export default function ProjectPicker({ open, onOpenChange, anchorRef, anchorRec
   }, [open, onOpenChange, btnRef, getAnchorRect])
 
   const select = (path: string) => { onSelect(path); onOpenChange(false) }
+  const rq = recentQuery.trim().toLowerCase()
+  const filteredRecent = rq ? recentDirs.filter(d => d.toLowerCase().includes(rq)) : recentDirs
 
   // Recent tab uses the shared selected-index keyboard nav (same model as the
   // Skill/File pickers). The Browse tab has its own combobox input handler
   // below, so the hook is only armed on Recent to avoid double-handling keys.
   const recentNav = useListKeyboardNav({
     open: open && tab === 'recent',
-    count: recentDirs.length,
-    onChoose: i => { const d = recentDirs[i]; if (d) select(d) },
+    count: filteredRecent.length,
+    onChoose: i => { const d = filteredRecent[i]; if (d) select(d) },
     onClose: () => onOpenChange(false),
   })
+
+  // Reset the Recent highlight whenever the filtered list changes.
+  useEffect(() => { recentNav.setSelected(0) }, [recentQuery]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reset the Browse highlight whenever the visible list changes (tab switch,
   // drill into a new dir, or filter edit).
   useEffect(() => { setBrowseSel(0) }, [tab, input, browsePath])
+
+  // Auto-drill on a typed trailing slash. Without this, typing "/foo/bar/" only
+  // filters the *current* directory's children by the last segment — the list
+  // never descends into the typed subdirectory. When the input ends with "/"
+  // (and differs from the dir we've already loaded), browse into it. Debounced
+  // so intermediate keystrokes before the slash don't each fire a request.
+  useEffect(() => {
+    if (!open || tab !== 'browse') return
+    const trimmed = input.trim()
+    if (!trimmed.endsWith('/') || trimmed.length <= 1) return
+    // Strip the trailing slash to get the target dir; skip if it's already loaded.
+    const target = trimmed.replace(/\/+$/, '') || '/'
+    if (target === browsePath) return
+    const t = setTimeout(() => browse(target, true), 250)
+    return () => clearTimeout(t)
+  }, [input, open, tab, browsePath, browse])
 
   // Keep the highlighted Browse subdir scrolled into view.
   useEffect(() => {
@@ -121,29 +146,51 @@ export default function ProjectPicker({ open, onOpenChange, anchorRef, anchorRec
       </div>
 
       {tab === 'recent' ? (
-        <div role="listbox" aria-label="Recent projects" className="overflow-y-auto flex-1 min-h-0">
-          {recentDirs.length === 0 ? (
-            <div className="px-3 py-6 text-[12px] text-muted text-center">No recent projects</div>
-          ) : recentDirs.map((d, i) => (
-            <button
-              key={d}
-              role="option"
-              aria-selected={i === recentNav.selected}
-              id={`pp-recent-${i}`}
-              tabIndex={-1}
-              ref={el => { recentNav.itemRefs.current[i] = el }}
-              className={`w-full text-left px-3 py-2 flex items-center gap-2 cursor-pointer transition-colors ${i === recentNav.selected ? 'bg-bg-hover' : 'hover:bg-bg-hover'}`}
-              onMouseEnter={() => recentNav.setSelected(i)}
-              onMouseDown={e => { e.preventDefault(); select(d) }}
-            >
-              <FolderOpen size={12} className="text-accent shrink-0" />
-              <div className="flex-1 min-w-0">
-                <div className="text-[13px] font-mono font-semibold text-text truncate">{d.split('/').pop()}</div>
-                <div className="text-[11px] text-muted truncate">{d}</div>
+        <>
+          {recentDirs.length > 0 && (
+            <div className="p-2 border-b border-border">
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted pointer-events-none" />
+                <input
+                  ref={recentSearchRef}
+                  autoFocus
+                  type="text"
+                  aria-label="Search recent projects"
+                  aria-controls="pp-recent-list"
+                  placeholder="Search recent projects…"
+                  value={recentQuery}
+                  onChange={e => setRecentQuery(e.target.value)}
+                  className="w-full bg-bg-elevated border border-border rounded pl-7 pr-3 py-1.5 text-[13px] text-text placeholder:text-muted focus:outline-none focus:border-accent"
+                />
               </div>
-            </button>
-          ))}
-        </div>
+            </div>
+          )}
+          <div id="pp-recent-list" role="listbox" aria-label="Recent projects" className="overflow-y-auto flex-1 min-h-0">
+            {recentDirs.length === 0 ? (
+              <div className="px-3 py-6 text-[12px] text-muted text-center">No recent projects</div>
+            ) : filteredRecent.length === 0 ? (
+              <div className="px-3 py-6 text-[12px] text-muted text-center">No matching projects</div>
+            ) : filteredRecent.map((d, i) => (
+              <button
+                key={d}
+                role="option"
+                aria-selected={i === recentNav.selected}
+                id={`pp-recent-${i}`}
+                tabIndex={-1}
+                ref={el => { recentNav.itemRefs.current[i] = el }}
+                className={`w-full text-left px-3 py-2 flex items-center gap-2 cursor-pointer transition-colors ${i === recentNav.selected ? 'bg-bg-hover' : 'hover:bg-bg-hover'}`}
+                onMouseEnter={() => recentNav.setSelected(i)}
+                onMouseDown={e => { e.preventDefault(); select(d) }}
+              >
+                <FolderOpen size={12} className="text-accent shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-[13px] font-mono font-semibold text-text truncate">{d.split('/').pop()}</div>
+                  <div className="text-[11px] text-muted truncate">{d}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </>
       ) : (
         <>
           <div className="p-2 border-b border-border flex gap-1 items-center">

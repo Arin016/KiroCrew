@@ -4,7 +4,7 @@ import { useAppDispatch } from '../store'
 import { store } from '../store'
 import { sseStatus, sseConnected, sseDisconnected, sseSlots, setChannelTrusted, sseSlotTitle, triggerRefresh, fetchSlots, markSlotUnread, setUpdateProgress, sseSubagentStatus, sseSubagentText, type SubagentDetail } from '../store/dashboardSlice'
 import { addNotification, ackNotificationByTs, unackNotificationByTs, removeNotificationByTs, fetchNotifications } from '../store/notificationsSlice'
-import { fetchHistory, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, refreshSlot, sseContextUsage, clearMessages, setVoicePlaying, setVoiceAudio, resolveByApprovalId, sseSubagentPending, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentDone, sseSubagentSnapshot, sseToolActivity, sseToolResult, sseActivityEvent, sseSideResult, setSlotStatusDetail, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, reorderQueuedMessages, setQuestionCard } from '../store/chatSlice'
+import { fetchHistory, missedChunkMarker, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, refreshSlot, warmSlotCache, sseContextUsage, clearMessages, setVoicePlaying, setVoiceAudio, resolveByApprovalId, sseSubagentPending, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentDone, sseSubagentSnapshot, sseToolActivity, sseToolResult, sseActivityEvent, sseSideResult, setSlotStatusDetail, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage, setQuestionCard } from '../store/chatSlice'
 import { api } from '../api/client'
 import { sanitizeLlmOutput } from '../utils/sanitize'
 import type { StatusData, ChatSlot, Notification } from '../types'
@@ -31,6 +31,15 @@ export function useWebSocket() {
   const spokenLenRef = useRef(0)  // chars already sent to TTS during streaming
   const voiceMutedRef = useRef(false)  // suppress incoming chunks after interrupt
   const synthChainRef = useRef<Promise<unknown>>(Promise.resolve())  // serialize TTS calls
+  // #1 streaming-chunk coalescing: accumulate per-slot chunk text and flush
+  // once per animation frame, so the store updates (and the O(N) displayItems /
+  // index-map recomputes each dispatch triggers) happen ~per frame instead of
+  // ~per token. lastSeq is carried across flushes so cross-batch gap detection
+  // mirrors the reducer's per-chunk "N chunk(s) missed" marker.
+  const chunkBufRef = useRef<Map<string, { content: string; lastSeq: number | undefined }>>(new Map())
+  const chunkFlushScheduledRef = useRef(false)
+  const chunkRafRef = useRef<number | null>(null)
+  const chunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const stopVoice = useCallback(() => {
     voiceMutedRef.current = true
@@ -100,6 +109,64 @@ export function useWebSocket() {
     } catch { /* ignore */ }
   }, [dispatch])
 
+  /** Flush all buffered streaming chunks into the store: one batched dispatch
+   *  per slot. Runs once per animation frame (see scheduleChunkFlush) and
+   *  synchronously before any finalize/segment/message for ordering. */
+  const flushChunks = useCallback(() => {
+    // Cancel any pending scheduled frame first: when flushChunks is invoked
+    // synchronously (finalize/segment/message paths) an earlier scheduleChunkFlush
+    // rAF/timer may still be pending; nulling the refs without cancelling would
+    // orphan it (uncancellable by unmount/reconnect cleanup, fires a stale flush).
+    // From the rAF callback itself the id has already fired, so cancel is a no-op.
+    if (chunkRafRef.current != null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(chunkRafRef.current)
+    if (chunkTimerRef.current != null) clearTimeout(chunkTimerRef.current)
+    chunkFlushScheduledRef.current = false
+    chunkRafRef.current = null
+    chunkTimerRef.current = null
+    const buf = chunkBufRef.current
+    const activeSlot = store.getState().chat.activeSlot
+    let dispatchedActive = false
+    for (const [slot, entry] of buf) {
+      if (!entry.content) continue
+      dispatch(sseChatMessage({ slot, role: 'chunk', content: entry.content, seq: entry.lastSeq, batched: true }))
+      entry.content = ''
+      if (slot === activeSlot) dispatchedActive = true
+    }
+    // Auto-speak the active slot's newly-streamed sentences once per flush,
+    // after the batched content has landed in the store. (Moved here from the
+    // per-chunk path so it reads the post-dispatch streaming content.)
+    if (dispatchedActive && autoSpeakRef.current && activeSlot) {
+      if (spokenLenRef.current === 0) voiceMutedRef.current = false
+      const msgs = store.getState().chat.messages
+      const streaming = [...msgs].reverse().find(m => m.role === 'streaming')
+      if (streaming) {
+        const full = streaming.content
+        let lastBound = -1
+        const re = /[.!?](?:\s|$)/g
+        let match
+        while ((match = re.exec(full)) !== null) {
+          if (match.index + 1 > spokenLenRef.current) lastBound = match.index + 1
+        }
+        if (lastBound > spokenLenRef.current) {
+          const newText = full.slice(spokenLenRef.current, lastBound).trim()
+          if (newText.length >= 10) {
+            spokenLenRef.current = lastBound
+            synthChainRef.current = synthChainRef.current
+              .then(() => api.voiceSynthesize(activeSlot, newText))
+              .catch(() => {})
+          }
+        }
+      }
+    }
+  }, [dispatch])
+
+  const scheduleChunkFlush = useCallback(() => {
+    if (chunkFlushScheduledRef.current) return
+    chunkFlushScheduledRef.current = true
+    if (typeof requestAnimationFrame === 'function') chunkRafRef.current = requestAnimationFrame(() => flushChunks())
+    else chunkTimerRef.current = setTimeout(() => flushChunks(), 16)
+  }, [flushChunks])
+
   const connect = useCallback(() => {
     // Guard against double-connect in StrictMode (dev) — if we already
     // have a WS that's open OR still connecting, reuse it.
@@ -130,6 +197,15 @@ export function useWebSocket() {
         // suppressed (false-negative-over-false-positive for the "just reconnected,
         // user is looking at the screen" scenario).
         reconnectingRef.current = true
+        // Cancel any in-flight flush before dropping the buffer, so a chunk
+        // arriving right after reconnect can't race a stale scheduled frame
+        // into a second concurrent flush (mirrors the unmount cleanup).
+        if (chunkRafRef.current != null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(chunkRafRef.current)
+        if (chunkTimerRef.current != null) clearTimeout(chunkTimerRef.current)
+        chunkRafRef.current = null
+        chunkTimerRef.current = null
+        chunkFlushScheduledRef.current = false
+        chunkBufRef.current.clear()  // drop pre-disconnect partial chunks; refreshSlot recovers state
         dispatch(sseConnected())
         dispatch(fetchSlots()).finally(() => { reconnectingRef.current = false })
         dispatch(fetchNotifications()).then(() => syncPendingApprovals())
@@ -250,8 +326,6 @@ export function useWebSocket() {
                   dispatch(sseSubagentDone({ slot: targetSlot, id: agentId, elapsed: 0, error: 'rejected' }))
                 }
               }
-            } else {
-              console.warn('[ws] approval_resolved: no targetSlot for', data.id)
             }
             break
           }
@@ -273,6 +347,7 @@ export function useWebSocket() {
             break
           }
           case 'chat_message':
+            flushChunks()
             dispatch(sseChatMessage(data))
             if (data.slot && data.slot !== store.getState().chat.activeSlot && !reconnectingRef.current) dispatch(markSlotUnread(data.slot))
             if (data.role === 'user' || data.role === 'inject' || data.role === 'subagent') { stopVoice(); spokenLenRef.current = 0; synthChainRef.current = Promise.resolve() }
@@ -300,41 +375,32 @@ export function useWebSocket() {
           case 'queue_cancel':
             dispatch(cancelQueuedMessage(data))
             break
-          case 'queue_reorder':
-            dispatch(reorderQueuedMessages(data))
+          case 'queue_edit':
+            dispatch(editQueuedMessage(data))
             break
-          case 'chat_chunk':
-            dispatch(sseChatMessage({ ...data, role: 'chunk', seq: data.seq }))
-            if (data.slot && store.getState().chat.slotStatusDetail[data.slot]?.kind !== 'streaming') {
-              dispatch(setSlotStatusDetail({ slot: data.slot, kind: 'streaming', text: 'Streaming', ts: Date.now() }))
-            }
-            // Streaming auto-speak: detect new complete sentences and synthesize
-            if (autoSpeakRef.current && data.slot === store.getState().chat.activeSlot) {
-              if (spokenLenRef.current === 0) voiceMutedRef.current = false
-              const msgs = store.getState().chat.messages
-              const streaming = [...msgs].reverse().find(m => m.role === 'streaming')
-              if (streaming) {
-                const full = streaming.content
-                // Find the furthest sentence boundary past what we've already spoken.
-                // Run regex on the ORIGINAL string so offsets stay aligned with slice().
-                let lastBound = -1
-                const re = /[.!?](?:\s|$)/g
-                let match
-                while ((match = re.exec(full)) !== null) {
-                  if (match.index + 1 > spokenLenRef.current) lastBound = match.index + 1
-                }
-                if (lastBound > spokenLenRef.current) {
-                  const newText = full.slice(spokenLenRef.current, lastBound).trim()
-                  if (newText.length >= 10) {
-                    spokenLenRef.current = lastBound
-                    synthChainRef.current = synthChainRef.current
-                      .then(() => api.voiceSynthesize(data.slot, newText))
-                      .catch(() => {})
-                  }
-                }
+          case 'chat_chunk': {
+            // #1: buffer the chunk and flush once per frame (see flushChunks),
+            // instead of dispatching — and recomputing the O(N) displayItems /
+            // index maps — on every token.
+            const cs = data.slot
+            if (cs) {
+              const buf = chunkBufRef.current
+              let entry = buf.get(cs)
+              if (!entry) { entry = { content: '', lastSeq: undefined }; buf.set(cs, entry) }
+              // Cross-chunk gap detection via the shared missedChunkMarker,
+              // single-sourced with the reducer so the two copies can't drift.
+              if (entry.lastSeq !== undefined && data.seq !== undefined) {
+                entry.content += missedChunkMarker(entry.lastSeq, data.seq)
               }
+              entry.content += data.content ?? ''
+              if (data.seq !== undefined) entry.lastSeq = data.seq
+              if (store.getState().chat.slotStatusDetail[cs]?.kind !== 'streaming') {
+                dispatch(setSlotStatusDetail({ slot: cs, kind: 'streaming', text: 'Streaming', ts: Date.now() }))
+              }
+              scheduleChunkFlush()
             }
             break
+          }
           case 'tool_call':
             dispatch(sseToolActivity({ ...data as { slot: string; tool: string; kind: string; purpose: string; input_preview: string }, auto: (data as Record<string, unknown>).auto === true, tool_call_id: (data as Record<string, unknown>).tool_call_id as string | undefined, is_update: (data as Record<string, unknown>).is_update === true }))
             if (data.slot) {
@@ -386,6 +452,7 @@ export function useWebSocket() {
             }
             break
           case 'chat_segment':
+            flushChunks()
             dispatch(sseChatMessage({ ...data, role: '_segment' }))
             spokenLenRef.current = 0
             break
@@ -398,8 +465,15 @@ export function useWebSocket() {
             if (data.slot) dispatch(refreshSlot(data.slot))
             break
           case 'chat_done':
+            flushChunks()
+            if (data.slot) chunkBufRef.current.delete(data.slot)
             dispatch(sseChatMessage({ ...data, role: '_done' }))
-            if (data.slot && data.slot !== store.getState().chat.activeSlot && !reconnectingRef.current) dispatch(markSlotUnread(data.slot))
+            if (data.slot && data.slot !== store.getState().chat.activeSlot && !reconnectingRef.current) {
+              dispatch(markSlotUnread(data.slot))
+              // #2: warm the per-slot cache so switching to this background
+              // session renders the finished answer instantly (no on-switch fetch).
+              dispatch(warmSlotCache(data.slot))
+            }
             if (data.slot) {
               dispatch(setSlotStatusDetail({ slot: data.slot, kind: 'idle', text: 'Ready', ts: Date.now() }))
             }
@@ -511,7 +585,7 @@ export function useWebSocket() {
     }
 
     ws.onerror = () => { /* onclose will fire */ }
-  }, [dispatch])
+  }, [dispatch, flushChunks, scheduleChunkFlush, playNextVoiceChunk, queryClient, stopVoice, syncPendingApprovals])
 
   /**
    * Force an immediate reconnect: cancels any pending backoff timer, closes
@@ -557,6 +631,8 @@ export function useWebSocket() {
     return () => {
       closingRef.current = true
       clearTimeout(reconnectTimerRef.current)
+      if (chunkRafRef.current != null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(chunkRafRef.current)
+      if (chunkTimerRef.current != null) clearTimeout(chunkTimerRef.current)
       wsRef.current?.close()
       wsRef.current = null
       window.removeEventListener('voice-stop', onVoiceStop)

@@ -13,6 +13,244 @@ from unittest.mock import patch
 
 from kiro_claw.mcp_core import _call_tool_inner
 
+# Expected clickable-reference form the MCP layer emits for non-widget
+# artifacts so the frontend renderer can linkify it into an openable anchor.
+# Declared locally (not imported from source) so the test asserts the
+# contract rather than tracking whatever the code happens to produce.
+ARTIFACT_ROUTE_PREFIX = "/artifacts/"
+
+
+class TestArtifactReferenceLink:
+    """The MCP layer surfaces a clickable ``[<name>](/artifacts/<slug>)``
+    markdown link for non-widget artifacts (markdown/html/text) so they can
+    be opened from the chat transcript. Widget artifacts already round-trip
+    via ``<mcwidget>`` and intentionally do NOT get the link.
+    """
+
+    def test_save_non_widget_emits_markdown_link(self) -> None:
+        # given a saved markdown artifact
+        with patch(
+            "kiro_claw.mcp_core._post",
+            return_value={
+                "slug": "release-notes",
+                "version": 1,
+                "name": "Release Notes",
+                "kind": "markdown",
+            },
+        ):
+            # when the save tool result is rendered
+            result = _call_tool_inner(
+                "artifact_save",
+                {"name": "Release Notes", "content": "# notes", "kind": "markdown"},
+            )
+        # then it carries the clickable link form: [<name>](/artifacts/<slug>)
+        assert "[Release Notes](/artifacts/release-notes)" in result
+
+    def test_save_widget_omits_markdown_link(self) -> None:
+        # given a saved widget artifact (round-trips via <mcwidget>)
+        with patch(
+            "kiro_claw.mcp_core._post",
+            return_value={
+                "slug": "dash",
+                "version": 1,
+                "name": "Dash",
+                "kind": "widget",
+            },
+        ):
+            # when the save tool result is rendered
+            result = _call_tool_inner(
+                "artifact_save",
+                {"name": "Dash", "content": "<div/>", "kind": "widget"},
+            )
+        # then no /artifacts/<slug> link is emitted — the widget re-emit hint
+        # is the artifact's surfacing mechanism instead.
+        assert ARTIFACT_ROUTE_PREFIX not in result
+        assert "<mcwidget" in result
+
+    def test_get_non_widget_emits_markdown_link(self) -> None:
+        # given a fetched markdown artifact
+        with patch(
+            "kiro_claw.mcp_core._get",
+            return_value={
+                "slug": "doc",
+                "name": "My Doc",
+                "kind": "markdown",
+                "version": 2,
+                "content": "# hi",
+            },
+        ):
+            # when the get tool result is rendered
+            result = _call_tool_inner("artifact_get", {"slug": "doc"})
+        # then the clickable reference is appended
+        assert "[My Doc](/artifacts/doc)" in result
+
+    def test_get_widget_omits_markdown_link(self) -> None:
+        # given a fetched widget artifact
+        with patch(
+            "kiro_claw.mcp_core._get",
+            return_value={
+                "slug": "w",
+                "name": "W",
+                "kind": "widget",
+                "version": 1,
+                "content": "<div/>",
+            },
+        ):
+            # when the get tool result is rendered
+            result = _call_tool_inner("artifact_get", {"slug": "w"})
+        # then no link form — widget round-trips via the re-emit tag
+        assert ARTIFACT_ROUTE_PREFIX not in result
+        assert "<mcwidget" in result
+
+    def test_update_non_widget_emits_markdown_link(self) -> None:
+        # given an updated text artifact
+        with patch("kiro_claw.mcp_core.urllib.request.urlopen") as urlopen_mock:
+            urlopen_mock.return_value.__enter__.return_value.read.return_value = (
+                b'{"slug": "log", "version": 5, "name": "Run Log", "kind": "text"}'
+            )
+            # when the update tool result is rendered
+            result = _call_tool_inner(
+                "artifact_update", {"slug": "log", "content": "new"}
+            )
+        # then the clickable reference is appended
+        assert "[Run Log](/artifacts/log)" in result
+
+    def test_link_falls_back_to_slug_when_name_missing(self) -> None:
+        # given an updated non-widget artifact whose response omits 'name'
+        with patch("kiro_claw.mcp_core.urllib.request.urlopen") as urlopen_mock:
+            urlopen_mock.return_value.__enter__.return_value.read.return_value = (
+                b'{"slug": "anon-doc", "version": 1, "kind": "markdown"}'
+            )
+            # when the update tool result is rendered
+            result = _call_tool_inner(
+                "artifact_update", {"slug": "anon-doc", "content": "x"}
+            )
+        # then the slug is used as the link text so the link is never empty
+        assert "[anon-doc](/artifacts/anon-doc)" in result
+
+    def test_link_label_redacts_credential_in_name(self) -> None:
+        # given a non-widget artifact whose LLM-provided name embeds a
+        # credential pattern (the name becomes the visible link text)
+        leaked_credential = "AKIAIOSFODNN7EXAMPLE"
+        with patch(
+            "kiro_claw.mcp_core._post",
+            return_value={
+                "slug": "doc",
+                "name": f"My {leaked_credential} Doc",
+                "kind": "markdown",
+                "version": 1,
+            },
+        ):
+            # when the save tool result is rendered
+            result = _call_tool_inner(
+                "artifact_save",
+                {
+                    "name": f"My {leaked_credential} Doc",
+                    "content": "# notes",
+                    "kind": "markdown",
+                },
+            )
+        # then the clickable reference is emitted to the system-generated slug
+        # with the credential scrubbed out of the visible label
+        link_start = result.index("[")
+        link_end = result.index(")", result.index(ARTIFACT_ROUTE_PREFIX)) + 1
+        link = result[link_start:link_end]
+        assert link.endswith(f"]({ARTIFACT_ROUTE_PREFIX}doc)")
+        assert leaked_credential not in link
+
+    def test_link_url_sanitizes_markdown_breaking_slug(self) -> None:
+        # given a save whose server-returned slug carries markdown-breaking
+        # characters that could close the link and inject arbitrary markdown
+        # (the slug is reflected from the API response into the link URL)
+        crafted_slug = "evil)[x](http://attacker.test"
+        with patch(
+            "kiro_claw.mcp_core._post",
+            return_value={
+                "slug": crafted_slug,
+                "name": "Doc",
+                "kind": "markdown",
+                "version": 1,
+            },
+        ):
+            # when the save tool result is rendered
+            result = _call_tool_inner(
+                "artifact_save",
+                {"name": "Doc", "content": "# notes", "kind": "markdown"},
+            )
+        # then the slug embedded in the URL is constrained to the safe slug
+        # charset, so the crafted ')'/'[' can't break out of the link
+        assert f"[Doc]({ARTIFACT_ROUTE_PREFIX}evilxhttpattackertest)" in result
+
+    def test_link_url_redacts_credential_in_slug(self) -> None:
+        # given a save whose server-returned slug carries a credential pattern
+        leaked_credential = "AKIAIOSFODNN7EXAMPLE"
+        with patch(
+            "kiro_claw.mcp_core._post",
+            return_value={
+                "slug": leaked_credential,
+                "name": "Doc",
+                "kind": "markdown",
+                "version": 1,
+            },
+        ):
+            # when the save tool result is rendered
+            result = _call_tool_inner(
+                "artifact_save",
+                {"name": "Doc", "content": "# notes", "kind": "markdown"},
+            )
+        # then the credential is scrubbed out of the link URL before the
+        # charset filter (redaction runs first, same as the label)
+        link_start = result.index("[Doc](")
+        link = result[link_start:result.index(")", link_start) + 1]
+        assert leaked_credential.lower() not in link
+
+    def test_empty_slug_after_sanitize_emits_plain_text(self) -> None:
+        # given a non-widget artifact whose slug reduces to nothing once the
+        # slug charset filter runs (here a slug of only filtered-out chars) —
+        # an empty slug would otherwise produce a dangling /artifacts/ href
+        all_filtered_slug = "???"
+        with patch(
+            "kiro_claw.mcp_core._get",
+            return_value={
+                "slug": all_filtered_slug,
+                "name": "Orphan Doc",
+                "kind": "markdown",
+                "version": 1,
+                "content": "# hi",
+            },
+        ):
+            # when the get tool result is rendered
+            result = _call_tool_inner("artifact_get", {"slug": "doc"})
+        # then it degrades to plain text: the name surfaces with no broken link
+        assert "Orphan Doc" in result
+        assert f"]({ARTIFACT_ROUTE_PREFIX}" not in result
+
+    def test_name_with_newline_collapses_to_single_line_link(self) -> None:
+        # given a non-widget artifact whose name carries a literal newline (a
+        # newline in the label would split the markdown anchor across lines and
+        # break the clickable link)
+        newline_name = "Quarterly\nReport"
+        with patch(
+            "kiro_claw.mcp_core._get",
+            return_value={
+                "slug": "q-report",
+                "name": newline_name,
+                "kind": "markdown",
+                "version": 1,
+                "content": "# hi",
+            },
+        ):
+            # when the get tool result is rendered
+            result = _call_tool_inner("artifact_get", {"slug": "q-report"})
+        # then the link label has the newline collapsed to a space, keeping the
+        # whole anchor on a single line so it linkifies correctly
+        assert "[Quarterly Report](/artifacts/q-report)" in result
+        # and no link label spans two lines: the raw newline form must never
+        # appear inside a markdown link's bracket text (the artifact metadata
+        # echo elsewhere in the result may still carry the verbatim name, so we
+        # scope this assertion to the bracketed link label only)
+        assert "[Quarterly\nReport]" not in result
+
 
 class TestArtifactSave:
     def test_minimal_save(self) -> None:

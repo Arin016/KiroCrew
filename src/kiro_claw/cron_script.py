@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from kiro_claw.config.loader import read_local_secret
 from kiro_claw.sandbox import _AGENT_DENIED_ENV_KEYS, wrap_argv
-from kiro_claw.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
+from kiro_claw.security import is_sensitive_path, redact
 from kiro_claw.sel import sel
 
 # Env vars stripped from EVERY cron subprocess (command and script), regardless
@@ -123,10 +123,10 @@ class ScriptContext:
 
         Raises RuntimeError if delivery fails.
         """
-        safe_text = redact_exfiltration_urls(redact_credentials(text)[0])[0]
+        safe_text = redact(text)
         # Redact kwargs values
         kwargs_str = json.dumps(kwargs) if kwargs else "{}"
-        kwargs_str = redact_exfiltration_urls(redact_credentials(kwargs_str)[0])[0]
+        kwargs_str = redact(kwargs_str)
         safe_kwargs = json.loads(kwargs_str) if kwargs else {}
         payload: dict[str, Any] = {"text": safe_text, **safe_kwargs}
         # caller_session lets session="origin" resolve to the chat that created this
@@ -145,7 +145,7 @@ class ScriptContext:
         """
         # Scan serialized args for credential patterns
         args_str = json.dumps(args)
-        args_str = redact_exfiltration_urls(redact_credentials(args_str)[0])[0]
+        args_str = redact(args_str)
         safe_args = json.loads(args_str)
         client = None
         try:
@@ -209,19 +209,29 @@ class McpToolClient:
     """Minimal MCP JSON-RPC client. Spawns server subprocess, calls tool, closes."""
 
     def __init__(self, server_name: str):
+        self._server_name = server_name
         argv = _resolve_mcp_server(server_name)
         if not argv:
             raise RuntimeError(f"MCP server '{server_name}' not found in agent config")
         sandboxed_argv, self._sandbox_cleanup = wrap_argv(list(argv), mode="standard")
+        # Capture stderr to a tempfile instead of DEVNULL so spawn/handshake
+        # failures are legible (Mesh-2370). DEVNULL hid the real cause -- wrong
+        # Node version, expired Midway cookies, OOM kill, sandbox failure -- behind
+        # a generic "disconnected during 'initialize'" RuntimeError.
+        self._stderr_file = tempfile.NamedTemporaryFile(
+            mode="w+", prefix="mcp-stderr-", suffix=".log", delete=False
+        )
         try:
             self._proc = subprocess.Popen(
                 sandboxed_argv,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=self._stderr_file,
                 text=True,
             )
         except Exception:
+            self._stderr_file.close()
+            Path(self._stderr_file.name).unlink(missing_ok=True)
             if self._sandbox_cleanup:
                 Path(self._sandbox_cleanup).unlink(missing_ok=True)
             raise
@@ -256,17 +266,50 @@ class McpToolClient:
             if line.strip():
                 return json.loads(line)
 
+    def _stderr_tail(self, limit: int = 1024) -> str:
+        """Return the last `limit` bytes of the subprocess's captured stderr.
+
+        Credentials and exfiltration URLs are redacted before the tail is
+        surfaced in an error so a failing spawn (e.g. an auth dump or an
+        attacker-controlled MCP server) can't leak secrets or beacon URLs
+        into logs, Slack, or the dashboard.
+        """
+        path = getattr(self, "_stderr_file", None)
+        if path is None:
+            return ""
+        try:
+            with open(path.name, errors="replace") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                fh.seek(max(0, size - limit))
+                return redact(fh.read().strip())
+        except Exception as exc:
+            # Defensive — _stderr_tail runs inside error reporting itself, so we
+            # never raise here. We DO log the exception type at debug so that a
+            # silently broken tail (disk/encoding error, missing tempfile) is
+            # diagnosable when investigating MCP spawn failures.
+            logger.debug("_stderr_tail failed: %s", type(exc).__name__)
+            return ""
+
     def _rpc(self, method: str, params: dict | None = None) -> dict:
         self._req_id += 1
         req_id = self._req_id
+        name = getattr(self, "_server_name", "?")
         self._send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params or {}})
         for _ in range(1000):
             msg = self._recv()
             if msg is None:
-                raise RuntimeError(f"MCP server disconnected during '{method}' call")
+                rc = self._proc.poll()
+                tail = self._stderr_tail()
+                raise RuntimeError(
+                    f"MCP server '{name}' disconnected during '{method}' "
+                    f"(rc={rc}); stderr tail: {tail or '(empty)'}"
+                )
             if msg.get("id") == req_id:
                 return msg
-        raise RuntimeError(f"MCP server did not respond to '{method}' within 1000 messages")
+        raise RuntimeError(
+            f"MCP server '{name}' did not respond to '{method}' within 1000 messages"
+        )
 
     def call_tool(self, name: str, arguments: dict) -> str:
         r = self._rpc("tools/call", {"name": name, "arguments": arguments})
@@ -290,6 +333,13 @@ class McpToolClient:
         except Exception:
             pass
         finally:
+            stderr_file = getattr(self, "_stderr_file", None)
+            if stderr_file is not None:
+                try:
+                    stderr_file.close()
+                except Exception:
+                    pass
+                Path(stderr_file.name).unlink(missing_ok=True)
             if self._sandbox_cleanup:
                 Path(self._sandbox_cleanup).unlink(missing_ok=True)
 
@@ -423,7 +473,7 @@ def run_script_sandboxed(
 
         if proc.returncode != 0 and not proc.stdout.strip():
             error_text = proc.stderr[:500] or f"exit {proc.returncode}"
-            error_text = redact_exfiltration_urls(redact_credentials(error_text)[0])[0]
+            error_text = redact(error_text)
             return {"status": "error", "error": error_text}
 
         try:
@@ -431,7 +481,7 @@ def run_script_sandboxed(
         except (json.JSONDecodeError, IndexError):
             return {
                 "status": "error",
-                "error": f"Bad output: {redact_exfiltration_urls(redact_credentials(proc.stdout[:200])[0])[0]}",
+                "error": f"Bad output: {redact(proc.stdout[:200])}",
             }
     except subprocess.TimeoutExpired:
         return {"status": "error", "error": f"Script timed out after {timeout}s"}

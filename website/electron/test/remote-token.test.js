@@ -2,6 +2,7 @@ const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 const {
   DEFAULT_REMOTE_BIN,
+  DEFAULT_REMOTE_PATH,
   REMOTE_BIN_CANDIDATES,
   buildCandidateTokenCommand,
   buildRemoteTokenCommand,
@@ -10,18 +11,18 @@ const {
 
 describe("REMOTE_BIN_CANDIDATES", () => {
   it("lists the toolbox path first (most common install)", () => {
-    assert.equal(REMOTE_BIN_CANDIDATES[0], "$HOME/.toolbox/bin/kiroclaw");
+    assert.equal(REMOTE_BIN_CANDIDATES[0], "~/.toolbox/bin/kiroclaw");
   });
 
   it("includes the legacy default path", () => {
     assert.ok(REMOTE_BIN_CANDIDATES.includes(DEFAULT_REMOTE_BIN));
   });
 
-  it("uses only $HOME-prefixed paths (no PATH reliance)", () => {
+  it("uses only ~-prefixed or absolute paths (no PATH reliance)", () => {
     for (const c of REMOTE_BIN_CANDIDATES) {
       assert.ok(
-        c.startsWith("$HOME/") || c.startsWith("/"),
-        `candidate ${c} must be absolute or $HOME-prefixed`,
+        c.startsWith("~/") || c.startsWith("/"),
+        `candidate ${c} must be absolute or ~-prefixed`,
       );
     }
   });
@@ -29,37 +30,45 @@ describe("REMOTE_BIN_CANDIDATES", () => {
 
 describe("buildCandidateTokenCommand", () => {
   it("produces a shell command that tries each candidate in order", () => {
-    const cmd = buildCandidateTokenCommand(["$HOME/a", "$HOME/b"]);
-    const aIdx = cmd.indexOf('"$HOME/a"');
-    const bIdx = cmd.indexOf('"$HOME/b"');
+    const cmd = buildCandidateTokenCommand(["~/a", "~/b"]);
+    const aIdx = cmd.indexOf("~/a");
+    const bIdx = cmd.indexOf("~/b");
     assert.ok(aIdx !== -1 && bIdx !== -1);
     assert.ok(aIdx < bIdx, "first candidate must appear before second");
   });
 
-  it("prefixes PATH so toolbox wrapper can find kiro-cli", () => {
+  it("sets PATH without referencing $PATH", () => {
     const cmd = buildCandidateTokenCommand(REMOTE_BIN_CANDIDATES);
-    assert.match(cmd, /export PATH="\$HOME\/\.toolbox\/bin:\$PATH"/);
+    assert.match(cmd, /export PATH=/);
+    assert.doesNotMatch(cmd, /:\$PATH/, "must not reference existing $PATH (spaces cause remote shell errors)");
   });
 
-  it("tests -x directly on $b (for-list already expands $HOME at parse time)", () => {
+  it("includes KIROCLAW_PORT when port option is provided", () => {
+    const cmd = buildCandidateTokenCommand(REMOTE_BIN_CANDIDATES, { port: "7778" });
+    assert.match(cmd, /KIROCLAW_PORT=7778/);
+  });
+
+  it("uses custom remotePath when provided", () => {
+    const cmd = buildCandidateTokenCommand(REMOTE_BIN_CANDIDATES, { remotePath: "~/custom/bin:/usr/bin" });
+    assert.match(cmd, /export PATH=~\/custom\/bin:\/usr\/bin/);
+  });
+
+  it("tests -x directly on $b", () => {
     const cmd = buildCandidateTokenCommand(REMOTE_BIN_CANDIDATES);
     assert.match(cmd, /\[ -x "\$b" \]/);
-    assert.match(cmd, /exec "\$b" token/);
-    // Guard against regressing to the needlessly-complex eval form.
     assert.doesNotMatch(cmd, /eval echo/);
   });
 
   it("exits with 127 and prints all candidates when none are executable", () => {
-    const cmd = buildCandidateTokenCommand(["$HOME/a", "$HOME/b"]);
+    const cmd = buildCandidateTokenCommand(["~/a", "~/b"]);
     assert.match(cmd, /exit 127/);
-    assert.match(cmd, /\$HOME\/a, \$HOME\/b/);
+    assert.match(cmd, /~\/a, ~\/b/);
   });
 });
 
 describe("buildRemoteTokenCommand", () => {
   it("uses candidate list when binPath is the default sentinel", () => {
     const cmd = buildRemoteTokenCommand(DEFAULT_REMOTE_BIN);
-    // candidate command has a for-loop; custom-path command does not
     assert.match(cmd, /for b in /);
   });
 
@@ -74,14 +83,17 @@ describe("buildRemoteTokenCommand", () => {
     assert.match(cmd, /"\/opt\/custom\/kiroclaw" token/);
   });
 
-  it("PATH-prefixes the user-customized path so toolbox wrapper works", () => {
-    const cmd = buildRemoteTokenCommand("$HOME/.toolbox/bin/kiroclaw");
-    assert.match(cmd, /export PATH="\$HOME\/\.toolbox\/bin:\$PATH"/);
+  it("includes KIROCLAW_PORT for custom binPath", () => {
+    const cmd = buildRemoteTokenCommand("/opt/custom/kiroclaw", { port: "7778" });
+    assert.match(cmd, /KIROCLAW_PORT=7778/);
+    assert.match(cmd, /"\/opt\/custom\/kiroclaw" token/);
   });
 
   it("rewrites a leading ~/ to $HOME/ so it expands inside double quotes", () => {
-    const cmd = buildRemoteTokenCommand("~/.local/bin/kiroclaw");
-    assert.match(cmd, /"\$HOME\/\.local\/bin\/kiroclaw" token/);
+    // Use a non-default custom path so this takes the user-binPath branch
+    // (the default sentinel would take the candidate-sweep branch instead).
+    const cmd = buildRemoteTokenCommand("~/apps/kiroclaw");
+    assert.match(cmd, /"\$HOME\/apps\/kiroclaw" token/);
     assert.doesNotMatch(cmd, /"~\//);
   });
 
@@ -90,10 +102,14 @@ describe("buildRemoteTokenCommand", () => {
     assert.match(buildRemoteTokenCommand("$HOME/x/kiroclaw"), /"\$HOME\/x\/kiroclaw" token/);
   });
 
-  it("accepts a custom candidate list for testing/extension", () => {
-    const cmd = buildRemoteTokenCommand(DEFAULT_REMOTE_BIN, ["$HOME/x"]);
-    assert.match(cmd, /"\$HOME\/x"/);
-    assert.doesNotMatch(cmd, /\.toolbox\/bin\/kiroclaw"/);
+  it("passes port through to candidate command", () => {
+    const cmd = buildRemoteTokenCommand(DEFAULT_REMOTE_BIN, { port: "8080" });
+    assert.match(cmd, /KIROCLAW_PORT=8080/);
+  });
+
+  it("accepts a custom candidate list via options", () => {
+    const cmd = buildRemoteTokenCommand(DEFAULT_REMOTE_BIN, { candidates: ["~/x"] });
+    assert.match(cmd, /~\/x/);
   });
 });
 

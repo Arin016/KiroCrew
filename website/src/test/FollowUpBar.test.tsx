@@ -5,7 +5,11 @@ import FollowUpBar from '../components/FollowUpBar'
 // jsdom polyfill: scroll-layout uses ResizeObserver to track when the chip
 // strip can scroll left/right.
 if (typeof globalThis.ResizeObserver === 'undefined') {
-  ;(globalThis as any).ResizeObserver = class { observe() {}; unobserve() {}; disconnect() {} }
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver
 }
 
 describe('FollowUpBar', () => {

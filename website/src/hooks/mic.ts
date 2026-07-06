@@ -1,3 +1,4 @@
+import { safeSetItem } from '../utils/safeStorage'
 // Shared microphone helpers for voice input.
 //
 // Centralizes the bits both capture paths (batch `useVoiceInput` and streaming
@@ -18,7 +19,7 @@ export function getPreferredMicId(): string {
 
 export function setPreferredMicId(id: string): void {
   try {
-    if (id) localStorage.setItem(MIC_DEVICE_KEY, id)
+    if (id) safeSetItem(MIC_DEVICE_KEY, id)
     else localStorage.removeItem(MIC_DEVICE_KEY)
   } catch {
     /* localStorage unavailable — fall back to default device */

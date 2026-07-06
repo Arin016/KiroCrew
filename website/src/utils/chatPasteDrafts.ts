@@ -35,6 +35,7 @@
  * worst case the slot's blocks are dropped and the token degrades to literal
  * text — i.e. the pre-fix behavior, never worse.
  */
+import { safeSetItem } from './safeStorage'
 import type { PasteBlock } from './pasteTokens'
 import { DRAFT_MAX_ENTRIES, DRAFT_TTL_MS } from './chatDrafts'
 
@@ -113,6 +114,7 @@ export function loadPasteDrafts(): PasteDrafts {
     if (pruned || stamped) persistNow(fresh)
     return fresh
   } catch (e) {
+    // eslint-disable-next-line no-console
     if (import.meta.env.DEV) console.warn('chatPasteDrafts: load failed', e)
     return {}
   }
@@ -159,6 +161,7 @@ function persistNow(drafts: PasteDrafts): void {
         // breadcrumb so "why did my huge paste become a literal token?" is
         // diagnosable. (Mesh-1909 will replace the hard per-slot cap with a
         // store-level byte-aware LRU so the newest paste is never the casualty.)
+        // eslint-disable-next-line no-console
         console.warn(`chatPasteDrafts: dropping slot ${k} — serialized blocks exceed ${PASTE_DRAFT_MAX_BYTES} bytes`)
         delete drafts[k]
         delete timestamps[k]
@@ -170,9 +173,10 @@ function persistNow(drafts: PasteDrafts): void {
     if (!(k in drafts)) delete timestamps[k]
   }
   try {
-    localStorage.setItem(PASTE_DRAFTS_TS_KEY, JSON.stringify(timestamps))
-    localStorage.setItem(PASTE_DRAFTS_KEY, JSON.stringify(drafts))
+    safeSetItem(PASTE_DRAFTS_TS_KEY, JSON.stringify(timestamps))
+    safeSetItem(PASTE_DRAFTS_KEY, JSON.stringify(drafts))
   } catch (e) {
+    // eslint-disable-next-line no-console
     if (import.meta.env.DEV) console.warn('chatPasteDrafts: save failed', e)
   }
 }

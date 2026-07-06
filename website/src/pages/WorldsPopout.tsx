@@ -1,3 +1,4 @@
+import { safeSetItem } from '../utils/safeStorage'
 import { useState, useEffect } from 'react'
 import { useAgentSync } from '../hooks/useAgentSync'
 import { usePopoutSync } from '../hooks/usePopoutSync'
@@ -19,7 +20,7 @@ export default function WorldsPopout() {
     return () => clearInterval(iv)
   }, [dispatch])
 
-  useEffect(() => { localStorage.setItem(SCENE_STORAGE_KEY, scene) }, [scene])
+  useEffect(() => { safeSetItem(SCENE_STORAGE_KEY, scene) }, [scene])
 
   const changeScene = (key: SceneKey) => { setScene(key); broadcastScene(key) }
 
@@ -34,7 +35,7 @@ export default function WorldsPopout() {
           transition: 'grid-template-rows 0.5s ease, opacity 0.3s ease',
           flexShrink: 0,
         }}
-        {...(collapsed ? { inert: true as any } : {})}
+        {...(collapsed ? { inert: '' } : {})}
       >
         <div style={{ overflow: 'hidden' }}>
           <div style={{ display: 'flex', gap: 4, padding: '8px 12px', flexWrap: 'wrap', alignItems: 'center' }}>

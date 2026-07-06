@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { screen, fireEvent } from '@testing-library/react'
 import { renderWithProviders, createTestStore } from './helpers'
 import OverviewPage from '../pages/OverviewPage'
+import type { RootState } from '../store'
 
 // Mock all tab components to isolate OverviewPage shell logic
 vi.mock('../pages/overview', () => ({
@@ -37,7 +38,7 @@ describe('OverviewPage', () => {
         status: { uptime: '2h', sessions: 3, messages: 42, cron_jobs: 1, subagents: 0, lessons: 5 },
         slots: [],
         refreshTrigger: 0,
-      } as any,
+      } as RootState['dashboard'],
     })
     renderWithProviders(<OverviewPage />, { store })
     expect(screen.getByText('Uptime')).toBeInTheDocument()

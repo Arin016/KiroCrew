@@ -155,7 +155,7 @@ Full-featured React SPA at `localhost:5476` (or `http://kiroclaw.localhost:5476`
 - **Branding** — custom bot name and avatar via `dashboard.bot_name` / `dashboard.avatar` config
 - **14-theme color system** — dark/light variants with Color Theme picker in Overview > Display tab
 - **Session restore** — optionally restore active sessions on gateway restart
-- **Token-based auth** — optional dashboard URL token for remote access
+- **Token-based auth** — optional dashboard URL token for remote access; token sessions auto-renew via OAuth-style refresh tokens (`POST /api/auth/refresh`, `GET /api/auth/me`, 30-day max TTL) so long-lived dashboards stay signed in without re-pasting the URL token
 - **Memory Graph Explorer** — vis.js visualization of semantic memory relationships
 - **Context usage ring** — real-time token usage indicator in chat header
 - **Configurable display** — zoom level, font family, and theme in Overview > Display tab

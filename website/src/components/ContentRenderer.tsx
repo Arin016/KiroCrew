@@ -15,7 +15,7 @@
  */
 import { memo, lazy, Suspense, useMemo } from 'react'
 import DOMPurify from 'dompurify'
-import MarkdownRenderer from './MarkdownRenderer'
+import MarkdownRenderer, { BasePathCtx } from './MarkdownRenderer'
 import { ImageViewer, CsvViewer, JsonViewer, JsonlViewer, HtmlViewer, PdfViewer, SvgViewer } from './FileRenderers'
 import { monacoLang, useIsDark } from './MonacoCodeBlock'
 import { kiroclawDark, kiroclawLight } from './monacoTheme'
@@ -163,7 +163,9 @@ export const ContentRenderer = memo(function ContentRenderer({
       )}
       {!isRichType && !editing && isMarkdown && (
         <div ref={previewRef as React.RefObject<HTMLDivElement>} className={markdownClassName ?? 'msg-content text-sm leading-relaxed'}>
-          <MarkdownRenderer content={displayContent} sourcePos />
+          <BasePathCtx.Provider value={filePath || null}>
+            <MarkdownRenderer content={displayContent} sourcePos />
+          </BasePathCtx.Provider>
         </div>
       )}
       {!isRichType && !editing && !isMarkdown && (

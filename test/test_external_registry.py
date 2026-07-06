@@ -12,6 +12,7 @@ import pytest
 from kiro_claw.apps.registry import (
     _clone_sandbox_mode,
     _external_registry_cache_path,
+    _external_registry_repos,
     _fetch_external_registry_index,
     _git_url_host,
     _is_ssh_git_url,
@@ -19,6 +20,7 @@ from kiro_claw.apps.registry import (
     _read_external_registry_cache,
     _write_external_registry_cache,
     get_registry_app,
+    known_registry_repos,
 )
 
 # ---------------------------------------------------------------------------
@@ -439,3 +441,120 @@ class TestCloneSandboxMode:
     def test_no_trusted_hosts_defaults_to_public_only(self):
         assert _clone_sandbox_mode("git@bitbucket.org:org/app.git") == "standard"
         assert _clone_sandbox_mode("git@selfhosted.example:org/app.git") == "strict"
+
+
+# ---------------------------------------------------------------------------
+# known_registry_repos — blob-proxy SSRF allowlist (bundled + external union)
+# ---------------------------------------------------------------------------
+
+
+class TestKnownRegistryRepos:
+    def test_includes_bundled_repos_when_no_external(self, cache_dir, monkeypatch):
+        monkeypatch.setattr(
+            "kiro_claw.apps.registry._load_registry_file",
+            lambda: [{"name": "core", "repo": "CoreRepo"}],
+        )
+        mock_config = MagicMock()
+        mock_config.registries = []
+        monkeypatch.setattr(
+            "kiro_claw.config.loader.KiroClawConfig.load",
+            lambda: mock_config,
+        )
+        assert known_registry_repos() == {"CoreRepo"}
+
+    def test_unions_external_registry_app_repos(self, cache_dir, monkeypatch):
+        # External registry "PCN" lists app pcn-radar whose repo is PCNRadar.
+        _write_external_registry_cache(
+            "PCN", [{"name": "pcn-radar", "repo": "PCNRadar", "branch": "mainline"}]
+        )
+        mock_reg = MagicMock()
+        mock_reg.name = "PCN"
+        mock_reg.repo = "PCNAppRegistry"
+        mock_reg.branch = "mainline"
+        mock_config = MagicMock()
+        mock_config.registries = [mock_reg]
+        monkeypatch.setattr(
+            "kiro_claw.apps.registry._load_registry_file",
+            lambda: [{"name": "core", "repo": "CoreRepo"}],
+        )
+        monkeypatch.setattr(
+            "kiro_claw.config.loader.KiroClawConfig.load",
+            lambda: mock_config,
+        )
+        repos = known_registry_repos()
+        assert "CoreRepo" in repos  # bundled repos preserved
+        assert "PCNRadar" in repos  # external-registry app repo now trusted
+
+    def test_trusts_stale_cache_via_ignore_ttl(self, cache_dir, monkeypatch):
+        # Age the cache past the 1h TTL; ignore_ttl must still trust the repo
+        # so icons don't 403 between list_registry refreshes.
+        _write_external_registry_cache(
+            "PCN", [{"name": "pcn-radar", "repo": "PCNRadar", "branch": "mainline"}]
+        )
+        stale = time.time() - 7200
+        os.utime(_external_registry_cache_path("PCN"), (stale, stale))
+        mock_reg = MagicMock()
+        mock_reg.name = "PCN"
+        mock_reg.repo = "PCNAppRegistry"
+        mock_config = MagicMock()
+        mock_config.registries = [mock_reg]
+        monkeypatch.setattr(
+            "kiro_claw.apps.registry._load_registry_file",
+            lambda: [],
+        )
+        monkeypatch.setattr(
+            "kiro_claw.config.loader.KiroClawConfig.load",
+            lambda: mock_config,
+        )
+        assert "PCNRadar" in known_registry_repos()
+
+    def test_fails_open_to_bundled_when_config_raises(self, cache_dir, monkeypatch):
+        monkeypatch.setattr(
+            "kiro_claw.apps.registry._load_registry_file",
+            lambda: [{"name": "core", "repo": "CoreRepo"}],
+        )
+
+        def _boom():
+            raise RuntimeError("config blew up")
+
+        monkeypatch.setattr(
+            "kiro_claw.config.loader.KiroClawConfig.load",
+            _boom,
+        )
+        # Must not raise — the allowlist falls open to the bundled set.
+        assert known_registry_repos() == {"CoreRepo"}
+
+
+# ---------------------------------------------------------------------------
+# _external_registry_repos — external-only set; fails open to EMPTY (not bundled)
+# ---------------------------------------------------------------------------
+
+
+class TestExternalRegistryRepos:
+    def test_returns_external_repos_only(self, cache_dir, monkeypatch):
+        _write_external_registry_cache(
+            "PCN", [{"name": "pcn-radar", "repo": "PCNRadar", "branch": "mainline"}]
+        )
+        mock_reg = MagicMock()
+        mock_reg.name = "PCN"
+        mock_reg.repo = "PCNAppRegistry"
+        mock_config = MagicMock()
+        mock_config.registries = [mock_reg]
+        monkeypatch.setattr(
+            "kiro_claw.config.loader.KiroClawConfig.load",
+            lambda: mock_config,
+        )
+        # No bundled lookup here — helper returns ONLY external repos.
+        assert _external_registry_repos() == {"PCNRadar"}
+
+    def test_fails_open_to_empty_set(self, cache_dir, monkeypatch):
+        def _boom():
+            raise RuntimeError("config blew up")
+
+        monkeypatch.setattr(
+            "kiro_claw.config.loader.KiroClawConfig.load",
+            _boom,
+        )
+        # Distinct from known_registry_repos: the helper falls open to EMPTY,
+        # leaving the bundled set as the caller's sole source of truth.
+        assert _external_registry_repos() == set()

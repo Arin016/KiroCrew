@@ -39,8 +39,15 @@ Starts the Socket Mode listener. Blocks until SIGINT/SIGTERM. When `no_crons=Tru
 
 1. First Ctrl+C sets `shutdown_event` → graceful shutdown begins (10s deadline)
 2. Second Ctrl+C calls `os._exit(0)` immediately (force exit)
-3. `_shutdown()` saves active chat slots, cancels handler tasks, stops cron/heartbeat, closes sessions
+3. `_shutdown()` **first disarms the loop-stall watchdog** (`dashboard_state._loop_watchdog.stop()` + cancels `_loop_heartbeat`), then saves active chat slots, cancels handler tasks, stops cron/heartbeat, closes sessions. The watchdog MUST be disarmed before `close_all()`/`cancel_all()` because that teardown deliberately kills every kiro-cli child — the same `os.waitpid` reaping burst the watchdog guards against — and a slow teardown would otherwise let the armed `faulthandler.dump_traceback_later(exit=True)` timer `_exit(1)` the process mid-shutdown (a clean quit would look like a crash). The watchdog's own `on_cleanup` hook fires too late (inside `AppRunner.cleanup()`, gathered concurrently with the reaping).
 4. Before `os._exit(0)`, `cleanup_orphaned_sessions()` kills any kiro-cli PIDs tracked in the PID file
+
+### Event-loop stall watchdog & blocking-work executors
+
+The gateway runs a single asyncio loop, so any blocking call on the loop thread freezes the whole backend. Two mechanisms contain this (see `dashboard/loop_watchdog.py`, `executors.py`):
+
+- **`LoopStallWatchdog`** — armed only when `faulthandler.is_enabled()` (the real `gateway` entrypoint; not `chat`/`tui`). The async heartbeat (`dashboard/server.py`, 5s interval) `beat()`s it each tick, re-arming a C-level `dump_traceback_later(exit_after=25s, exit=True)` timer that dumps all thread stacks and `_exit()`s if the loop goes silent — kept just under the Electron liveness probe's kill window so the in-process dump wins. A daemon-thread soft dump at `stall_after=30s` is a fallback for when the armed timer is disabled/unarmable.
+- **Bounded executors** — blocking maintenance work is offloaded off the default executor (which the loop uses for DNS) into two separate bounded pools: `maintenance_executor()` (`mc-maint`, fast orphan-reaping sweeps + agent-overlay rewrites) and `cron_executor()` (`mc-cron`, long/concurrent cron command & script jobs). Kept separate so a burst of cron jobs cannot starve the orphan sweeps. MCP `probe_all()` fan-out is bounded by `asyncio.Semaphore(5)`.
 
 ### `handle_message(slack, sessions, channel, text, thread_ts, msg_ts, user_id, approval_mode, ..., subagent_manager) -> None`
 Processes a single incoming message with streaming:
@@ -381,6 +388,18 @@ approval would stall cron/heartbeat/taskrunner turns for hours.
 - The Slack and dashboard windows reference `DashboardState._BACKGROUND_APPROVAL_TIMEOUT_SECS`
   / `DashboardState._APPROVAL_TIMEOUT` as the single source of truth.
 
+### Heartbeat Tool Allowlist (`HEARTBEAT_SAFE_TOOLS`)
+
+Heartbeat sessions run unattended and cannot prompt a human for tool approval. `_is_heartbeat_safe_tool(event_title)` checks whether a tool is safe to auto-approve using a strict **exact-match** against the `HEARTBEAT_SAFE_TOOLS` frozenset — no verb/heuristic fallback (deny-by-default, per security-controls).
+
+**Title normalization** (applied before the set lookup):
+
+1. Strip leading status prefix (`Running: `) via `_HEARTBEAT_STATUS_PREFIXES`.
+2. Strip ACP `mcp__<server>__<Tool>` prefix.
+3. Strip runtime `@<server>/<Tool>` prefix (kiro-cli titles arrive as `Running: @builder-mcp/ReadInternalWebsites`).
+
+Only the **bare tool name** (e.g. `ReadInternalWebsites`) is tested against the frozenset. Unknown tools are denied and a SEL audit event (`outcome: denied`, `reason: not_in_heartbeat_safe_tools`) is emitted so operators can tune the list. SEL failure on the approve path fails closed (denies the tool).
+
 ## Dashboard Token Authentication
 
 ### `!dashboard [duration]` Command (deprecated → `/kiroclaw dashboard`)
@@ -441,6 +460,26 @@ tunnel URL is used when building dashboard links posted to Slack:
 The setting is independent of `tunnel.enabled` (which controls whether the
 tunnel itself runs). A user may run a tunnel for direct browser access while
 keeping Slack links pointed at the local origin.
+
+**Slack connect is non-fatal** (`GatewayOrchestrator._connect_slack`): the
+initial socket-mode `connect()` is wrapped so a network/proxy/timeout failure
+(e.g. a stale `HTTPS_PROXY` in the launching shell — slack_sdk's aiohttp client
+honours proxy env vars via `trust_env`) logs a warning and the gateway
+continues in **dashboard-only mode** instead of crashing the whole process.
+Only ordinary `Exception`s are swallowed; `CancelledError` (BaseException)
+still propagates so real task cancellation is not masked. There is no
+background retry of the initial connect — Slack DM stays disabled until the
+next gateway restart. The "connected to Slack" banner prints only after a
+confirmed connect.
+
+Config example (remote access via URL):
+```json
+{
+  "dashboard": {
+    "url": "http://my-host.corp.amazon.com:8080"
+  }
+}
+```
 
 ## Security
 

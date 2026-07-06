@@ -40,5 +40,10 @@ export default function TypewriterText({ text, speed = 30, className, title, onD
     return () => { if (timerRef.current) clearInterval(timerRef.current) }
   }, [text, speed])
 
+  // Presentational text label; onDoubleClick is an optional mouse-only
+  // enhancement layered over a keyboard-reachable parent control (the real
+  // interactive target). A role/tabIndex here would misrepresent the label as
+  // a primary control, so the a11y affordance stays on the parent.
+  // eslint-disable-next-line jsx-a11y/no-static-element-interactions
   return <span className={className} title={title} onDoubleClick={onDoubleClick}>{displayed}</span>
 }

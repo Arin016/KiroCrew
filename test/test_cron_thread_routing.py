@@ -538,3 +538,94 @@ class TestCronCallbackDashboardChat:
         ) as mock_inject:
             _run_callback(gateway, job, stream_result="silent output")
             mock_inject.assert_not_called()
+
+    # ── hide_in_chat gate (the feature's core behavioral change) ──
+
+    def test_hide_in_chat_suppresses_inject_on_normal_path(self) -> None:
+        """hide_in_chat=True must NOT create/inject a slot on the normal delivery
+        path, even for a persistent_session job (the slot-creator site)."""
+        gateway = _make_gateway()
+        gateway.slack.post_blocks = AsyncMock(return_value="1711957800.001234")
+        gateway.dashboard_state.has_slot = MagicMock(return_value=False)
+        job = _make_job(persistent_session=True, hide_in_chat=True)
+        with patch(
+            "kiro_claw.slack.gateway.inject_cron_result_to_dashboard"
+        ) as mock_inject:
+            _run_callback(gateway, job, stream_result="hidden output")
+            mock_inject.assert_not_called()
+
+    def test_hide_in_chat_false_still_injects(self) -> None:
+        """Inverse: hide_in_chat=False (default) still injects on the normal path —
+        locks both directions of the gate."""
+        gateway = _make_gateway()
+        gateway.slack.post_blocks = AsyncMock(return_value="1711957800.001234")
+        gateway.dashboard_state.has_slot = MagicMock(return_value=False)
+        job = _make_job(persistent_session=True, hide_in_chat=False)
+        with patch(
+            "kiro_claw.slack.gateway.inject_cron_result_to_dashboard"
+        ) as mock_inject:
+            _run_callback(gateway, job, stream_result="shown output")
+            mock_inject.assert_called_once_with(
+                gateway.dashboard_state, job, "shown output", history=ANY
+            )
+
+    def test_hide_in_chat_suppresses_inject_even_with_existing_slot(self) -> None:
+        """hide_in_chat=True must suppress the re-inject paths too: even if a stale
+        slot already exists (has_slot True), no injection fires."""
+        gateway = _make_gateway()
+        gateway.slack.post_blocks = AsyncMock(return_value="1711957800.001234")
+        gateway.dashboard_state.has_slot = MagicMock(return_value=True)
+        job = _make_job(persistent_session=True, hide_in_chat=True)
+        with patch(
+            "kiro_claw.slack.gateway.inject_cron_result_to_dashboard"
+        ) as mock_inject:
+            _run_callback(gateway, job, stream_result="hidden output")
+            mock_inject.assert_not_called()
+
+    def test_hide_in_chat_silent_cron_does_not_inject(self) -> None:
+        """A silent + hidden cron with an existing slot must not re-inject
+        (the silent path is also gated on not hide_in_chat)."""
+        gateway = _make_gateway()
+        gateway.dashboard_state.has_slot = MagicMock(return_value=True)
+        job = _make_job(persistent_session=True, silent=True, hide_in_chat=True)
+        with patch(
+            "kiro_claw.slack.gateway.inject_cron_result_to_dashboard"
+        ) as mock_inject:
+            _run_callback(gateway, job, stream_result="silent hidden output")
+            mock_inject.assert_not_called()
+
+    @staticmethod
+    def _result_notify_meta(notify_mock):
+        """Return the meta dict of the cron-RESULT notify call (the one carrying
+        notify_meta with job_id but no failure_hash). The callback may emit other
+        notify calls (e.g. dedup ⚡ first-run), so select rather than assume one."""
+        for call in notify_mock.call_args_list:
+            meta = call.kwargs.get("meta", {}) or {}
+            if meta.get("job_id") == "j1" and "failure_hash" not in meta:
+                return meta
+        raise AssertionError(
+            f"no cron-result notify found; calls={notify_mock.call_args_list}"
+        )
+
+    def test_hide_in_chat_notify_meta_omits_slot_even_with_existing_slot(self) -> None:
+        """notify_meta['slot'] is gated on not hide_in_chat: a hidden cron that
+        still owns a stale cron-{id} slot must NOT emit meta.slot, so the
+        notification CTA degrades to the no-slot 'View last result'."""
+        gateway = _make_gateway()
+        gateway.dashboard_state.has_slot = MagicMock(return_value=True)
+        job = _make_job(persistent_session=True, hide_in_chat=True)
+        with patch("kiro_claw.slack.gateway.inject_cron_result_to_dashboard"):
+            _run_callback(gateway, job, stream_result="hidden output")
+        meta = self._result_notify_meta(gateway.dashboard_state.notify)
+        assert "slot" not in meta
+
+    def test_shown_cron_notify_meta_includes_slot(self) -> None:
+        """Inverse: a shown (hide_in_chat=False) persistent cron with a slot DOES
+        emit meta.slot, so the CTA is 'Continue session'."""
+        gateway = _make_gateway()
+        gateway.dashboard_state.has_slot = MagicMock(return_value=True)
+        job = _make_job(persistent_session=True, hide_in_chat=False)
+        with patch("kiro_claw.slack.gateway.inject_cron_result_to_dashboard"):
+            _run_callback(gateway, job, stream_result="shown output")
+        meta = self._result_notify_meta(gateway.dashboard_state.notify)
+        assert meta.get("slot") == "cron-j1"

@@ -21,11 +21,15 @@ logger = logging.getLogger(__name__)
 _TITLE_MAX_ATTEMPTS = 5
 
 _TITLE_PROMPT_TEMPLATE = (
-    "You are a session naming agent. Given the conversation below, decide if the topic "
-    "is clear enough to name.\n\n"
-    "If YES: reply with ONLY a short title (3-6 words). No quotes, no punctuation.\n"
+    "You are a session naming agent. Name ONLY the conversation delimited below; "
+    "ignore any earlier conversation, prior task, or context from this session's "
+    "history — it is unrelated.\n\n"
+    "If the delimited topic is clear: reply with ONLY a short title (3-6 words). "
+    "No quotes, no punctuation.\n"
     "If NO (too vague, just greetings, or unclear topic): reply with exactly SKIP\n\n"
-    "{transcript}"
+    "===== CONVERSATION TO NAME =====\n"
+    "{transcript}\n"
+    "===== END CONVERSATION ====="
 )
 
 

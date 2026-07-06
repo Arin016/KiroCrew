@@ -25,6 +25,7 @@ import aiohttp
 
 from kiro_claw.env import augmented_path
 from kiro_claw.hooks import safe_read_file
+from kiro_claw.mcp_utils import mcp_server_alias
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 
 logger = logging.getLogger(__name__)
@@ -407,6 +408,32 @@ def list_servers() -> list[McpServerInfo]:
             SCOPE_CC_GLOBAL: name in by_source.get(SCOPE_CC_GLOBAL, {}),
         }
 
+    # 3b. Canonicalize: fold a server keyed by a slash/colon name into its
+    #     mcp_server_alias() form so a server registered under BOTH its raw key
+    #     (e.g. "npm:@playwright/mcp") and its alias ("playwright-mcp") is
+    #     reported as one logical server instead of two rows / two probes. This
+    #     is read-only canonicalization — no config file is modified. Slash-free
+    #     names alias to themselves, so non-scoped servers are unaffected. When
+    #     both forms are present, presence flags are unioned and the entry whose
+    #     own key is already the canonical alias is kept as the representative.
+    canonical_servers: dict[str, McpServerInfo] = {}
+    for name, server in servers.items():
+        canon = mcp_server_alias(name)
+        rep = canonical_servers.get(canon)
+        if rep is None:
+            server.name = canon
+            canonical_servers[canon] = server
+            continue
+        union = {
+            scope: bool(rep.presence.get(scope)) or bool(server.presence.get(scope))
+            for scope in rep.presence
+        }
+        chosen = server if name == canon else rep
+        chosen.name = canon
+        chosen.presence = union
+        canonical_servers[canon] = chosen
+    servers = canonical_servers
+
     # 4. Merge cached probe results
     for s in servers.values():
         status, tools, error = _get_cached(s.name)
@@ -674,13 +701,28 @@ async def probe_server(server: McpServerInfo) -> McpServerInfo:
     return server
 
 
+# Cap how many MCP servers we probe concurrently.  Each probe spawns a
+# subprocess (or opens a remote connection) and resolves DNS on the event
+# loop's default executor; an unbounded fan-out across 25+ servers floods that
+# pool during a network blip and stalls the loop (Mesh-1968).
+_PROBE_MAX_CONCURRENCY = 5
+
+
 async def probe_all() -> list[McpServerInfo]:
-    """Discover and probe all configured MCP servers."""
+    """Discover and probe all configured MCP servers (bounded concurrency)."""
     servers = list_servers()
     if not servers:
         return []
+    # Per-call semaphore: bounds the fan-out within this discovery pass while
+    # binding to the currently-running loop (avoids import-time loop capture).
+    sem = asyncio.Semaphore(_PROBE_MAX_CONCURRENCY)
+
+    async def _guarded(s: McpServerInfo) -> McpServerInfo:
+        async with sem:
+            return await probe_server(s)
+
     results = await asyncio.gather(
-        *(probe_server(s) for s in servers),
+        *(_guarded(s) for s in servers),
         return_exceptions=True,
     )
     out: list[McpServerInfo] = []
@@ -693,6 +735,24 @@ async def probe_all() -> list[McpServerInfo]:
         else:
             out.append(r)  # type: ignore[arg-type]
     return out
+
+
+def _commands_diverged(source_cmd: str, agent_cmd: str) -> bool:
+    """Compare MCP commands accounting for path resolution.
+
+    The agent config stores resolved absolute paths (e.g.
+    /home/user/.toolbox/bin/deep-research) while mcp.json stores the
+    short name (deep-research). These refer to the same binary and
+    should not trigger a sync.
+    """
+    if source_cmd == agent_cmd:
+        return False
+    # If one is an absolute resolved path of the other, they match.
+    if os.path.isabs(agent_cmd) and os.path.basename(agent_cmd) == source_cmd:
+        return False
+    if os.path.isabs(source_cmd) and os.path.basename(source_cmd) == agent_cmd:
+        return False
+    return True
 
 
 def discover_servers_to_sync() -> list[McpServerInfo]:
@@ -709,6 +769,8 @@ def discover_servers_to_sync() -> list[McpServerInfo]:
     out: list[McpServerInfo] = []
     for name, spec in mcp_servers.items():
         if not isinstance(spec, dict):
+            continue
+        if spec.get("disabled"):
             continue
         info = McpServerInfo(
             name=name,
@@ -733,7 +795,7 @@ def discover_servers_to_sync() -> list[McpServerInfo]:
                 existing_env = {}
             if not all(
                 existing_env.get(k) == v for k, v in info.env.items()
-            ) or info.command != existing.get("command", ""):
+            ) or _commands_diverged(info.command, existing.get("command", "")):
                 out.append(info)
     return out
 
@@ -771,10 +833,21 @@ def sync_to_agent_config(servers: list[McpServerInfo]) -> bool:
     # makes them visible in `kiro-cli mcp list`).  No-op when kiro-cli is
     # absent (public machines): kiro_bin is None and this block is skipped.
     added = False
+    # Load source specs to check disabled state (defense-in-depth:
+    # discover_servers_to_sync already skips disabled, but guard here too)
+    _source_specs = _load_mcp_json()
     if kiro_bin and new_servers:
         procs: list[tuple[McpServerInfo, subprocess.Popen[bytes]]] = []
         for s in new_servers:
             if s.is_remote:
+                continue
+            src_spec = _source_specs.get(s.name)
+            if isinstance(src_spec, dict) and src_spec.get("disabled"):
+                logger.warning(
+                    "Skipping disabled server %r in sync (defense-in-depth; "
+                    "discover_servers_to_sync should have excluded it)",
+                    s.name,
+                )
                 continue
             cmd: list[str] = [
                 kiro_bin,

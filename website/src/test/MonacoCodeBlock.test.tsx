@@ -1,13 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, act } from '@testing-library/react'
+import { screen, fireEvent, act } from '@testing-library/react'
 import { lineCount, monacoLang, useIsDark } from '../components/MonacoCodeBlock'
 import { renderHook, act as actHook } from '@testing-library/react'
 import { renderWithProviders } from './helpers'
 
 // Mock Monaco editor — it's lazy-loaded and heavy
 vi.mock('@monaco-editor/react', () => ({
-  default: ({ value, onChange }: any) => (
-    <textarea data-testid="monaco-editor" value={value} onChange={e => onChange(e.target.value)} />
+  default: ({ value, onChange }: { value?: string; onChange?: (value: string) => void }) => (
+    <textarea aria-label="monaco-editor" data-testid="monaco-editor" value={value} onChange={e => onChange?.(e.target.value)} />
   ),
   loader: { config: () => {} },
 }))

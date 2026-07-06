@@ -99,6 +99,11 @@ glue or a provider selector (see the repo-root `CLAUDE.md`).
 
 **Reasoning effort** (Opus/Sonnet only — shared vocabulary in `effort.py`: levels `low|medium|high|xhigh|max`, capability via `model_supports_effort`, resolution via `resolve_effort_for_model` with priority slot-override > workspace default > None): applied via a workspace `cli.json` overlay at `<work_dir>/.kiro/settings/cli.json` → `chat.modelDefaults.<model>.output_config.effort`, written before every spawn (`_write_cli_overlay`) and recovered on init (`_read_cli_overlay`) for server-restart resilience. Live change pushes `/effort` with the TuiCommand args form (`send_command(args={"level": …})`). The factory threads `reasoning_effort_override` → `effort_per_model[current_model]`; the dashboard handler routes through `change_effort`/`clear_effort` and only resets the session when there is no live provider. Non-effort-capable models persist the slot value without a live apply or reset.
 
+**MCP Tool Search** (kiro backend only — see https://kiro.dev/docs/cli/mcp/tool-search/): loads MCP tool specs on demand ("search-and-call") instead of sending every tool definition each turn, keeping the context window clear when many MCP servers are configured. Gated by the `agent.tool_search` config toggle (default **on**; auto-surfaces as a Settings toggle since the schema is generated from the dataclass).
+- Applied via the **same** workspace `cli.json` overlay used for effort (`<work_dir>/.kiro/settings/cli.json`), written deterministically before every spawn and on each restart by `_write_tool_search_overlay` (called from `AcpProvider.__init__` and `start()`). When enabled it writes the flat keys `toolSearch.enabled=true` plus `toolSearch.minPct=0`/`toolSearch.minTokens=0` to force deferral always-on (KiroClaw sessions always carry several MCP servers); when disabled it writes `toolSearch.enabled=false` and drops the zeroed thresholds.
+- Writing both `true` and `false` makes the KiroClaw toggle authoritative over any value in the user's global `~/.kiro/settings/cli.json`. The write is merge-safe with the effort `chat.modelDefaults` keys in the same file.
+- **claude backend** — no-op. Tool Search is a kiro-cli feature; `_apply_tool_search_overlay` returns early for the claude backend and when no toggle value was threaded in (`tool_search is None`).
+
 - **Resume guard:** `session/load` (resume) is only attempted when the prior session transcript exists on disk (`~/.kiro/sessions/cli/<sid>.json`). A stale persisted sid with no transcript falls back to `session/new`, preventing a fresh conversation from replaying old turns (which inflated base context).
 - **Working dir:** `AcpProvider.cwd` overrides the `LLMProvider` ABC default so `session_map` persists the real workspace path. AcpProvider's work_dir lives on the inner client (`_client._work_dir`), so the prior `getattr(provider, "_work_dir", "")` persisted `""` for all ACP sessions — `provider.cwd` fixes resume-cwd-override.
 
@@ -136,6 +141,12 @@ Subagents inherit the global `approval_mode=auto` config as a final fallback whe
 2. Parent session key exists but the session is no longer in the store (garbage-collected)
 
 If the parent session is alive but returned no policy, deny-by-default applies — the session is intentionally non-auto. This ensures subagents spawned from dashboard sessions still get auto-approval even if the parent session is GC'd before the subagent executes.
+
+### Automatic recovery
+
+Provider-level recovery mechanisms that fire automatically without user intervention:
+
+**Interactive transient-5xx retry** (a270bd1f, Mesh-1157): The interactive dashboard/Slack `chat_runner` stream loop retries a transient backend 5xx (InternalServerError / DispatchFailure / ConnectionReset, JSON-RPC `-32603`) through the shared `llm_helpers` transient classifier + backoff, **without** resetting the still-alive session. A `_turn_emitted` partial-output guard prevents a re-prompt from double-streaming tokens or re-running a side-effecting tool. Auth/validation errors are excluded (fail-fast); on retry-budget exhaustion a clean error surfaces on a still-resumable session. This extends the unattended `stream_and_collect` retry path (previously deferred for the interactive loop) to interactive callers.
 
 ### Installation
 

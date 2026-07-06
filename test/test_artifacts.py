@@ -15,6 +15,7 @@ from kiro_claw.artifacts import (
     ArtifactNotFoundError,
     ArtifactStore,
     ArtifactValidationError,
+    _infer_kind,
     slugify,
 )
 
@@ -1134,3 +1135,90 @@ class TestRecordImpression:
         ref = [e for e in store.get("x").events if e["type"] == "referenced"]
         assert len(ref) == 1
         assert ref[0]["session_id"] == "s2"
+
+
+# ── Kind inference (CR-1) ─────────────────────────────────────────────────────
+
+
+class TestInferKind:
+    """Resolution order of the standalone ``_infer_kind`` helper."""
+
+    def test_explicit_wins(self) -> None:
+        # A non-empty explicit kind is returned untouched, even when the
+        # content / source_path would infer something else.
+        assert _infer_kind("# heading", "doc.html", explicit="json") == "json"
+        assert _infer_kind("<div/>", "", explicit="markdown") == "markdown"
+
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            ("plan.md", "markdown"),
+            ("plan.markdown", "markdown"),
+            ("page.html", "html"),
+            ("page.htm", "html"),
+            ("icon.svg", "svg"),
+            ("data.json", "json"),
+            ("notes.txt", "text"),
+            ("Makefile", "text"),  # no extension → text
+            ("archive.tar.gz", "text"),  # unknown extension → text
+            ("UPPER.MD", "markdown"),  # case-insensitive
+        ],
+    )
+    def test_extension_matrix(self, path: str, expected: str) -> None:
+        # The source_path extension drives the kind regardless of the body.
+        assert _infer_kind("any body at all", source_path=path) == expected
+
+    @pytest.mark.parametrize(
+        "content,expected",
+        [
+            ("<div>x</div>", "widget"),
+            ("<table><tr></tr></table>", "widget"),
+            ("<span>hi</span>", "widget"),
+            ("<style>.a{}</style>", "widget"),
+            ("<mcwidget>body</mcwidget>", "widget"),
+            ("<!DOCTYPE html><html></html>", "widget"),
+            ("# Plan\n\nbody", "markdown"),
+            ("###### deep heading", "markdown"),
+            ("just plain prose with no tags", "markdown"),
+            ("  \n# leading whitespace then heading", "markdown"),
+            ("<p>hello</p>", "widget"),  # a tag, but not a known marker → fallback
+            ("a < b but no real tag", "widget"),  # stray '<' → fallback widget
+            ("", "widget"),  # empty → legacy default
+            ("   \n  ", "widget"),  # whitespace-only → legacy default
+        ],
+    )
+    def test_content_sniff_matrix(self, content: str, expected: str) -> None:
+        assert _infer_kind(content, source_path="") == expected
+
+    def test_extension_beats_content_sniff(self) -> None:
+        # A .md file whose body contains HTML is still markdown (extension wins).
+        assert _infer_kind("<div>x</div>", source_path="notes.md") == "markdown"
+
+
+class TestCreateKindInference:
+    """``create()`` infers the kind when the caller omits it."""
+
+    def test_create_infers_markdown_from_heading(self, store: ArtifactStore) -> None:
+        art = store.create(name="Plan", content="# Title\n\nbody")
+        assert art.kind == "markdown"
+
+    def test_create_infers_widget_from_html(self, store: ArtifactStore) -> None:
+        art = store.create(name="Dash", content="<div>x</div><table></table>")
+        assert art.kind == "widget"
+
+    def test_create_infers_from_source_path(
+        self, store: ArtifactStore, tmp_path: Path
+    ) -> None:
+        src = tmp_path / "plan.md"
+        src.write_text("# live", encoding="utf-8")
+        art = store.create(name="P", content="# live", source_path=str(src))
+        assert art.kind == "markdown"
+
+    def test_explicit_kind_overrides_inference(self, store: ArtifactStore) -> None:
+        # Plain markdown content but the caller pins widget → widget wins.
+        art = store.create(name="P", content="# Title", kind="widget")
+        assert art.kind == "widget"
+
+    def test_create_persists_inferred_kind(self, store: ArtifactStore) -> None:
+        store.create(name="P", content="plain prose, no tags here", slug="p")
+        assert store.get("p").kind == "markdown"

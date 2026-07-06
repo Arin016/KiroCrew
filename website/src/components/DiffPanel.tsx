@@ -40,8 +40,8 @@ export default memo(function DiffPanel({ filePath, original, modified, sideBySid
             language={lang}
             theme={isDark ? 'kiroclaw-dark' : 'kiroclaw-light'}
             beforeMount={(monaco) => {
-              monaco.editor.defineTheme('kiroclaw-dark', kiroclawDark as any)
-              monaco.editor.defineTheme('kiroclaw-light', kiroclawLight as any)
+              monaco.editor.defineTheme('kiroclaw-dark', kiroclawDark)
+              monaco.editor.defineTheme('kiroclaw-light', kiroclawLight)
             }}
             options={{
               readOnly: true,

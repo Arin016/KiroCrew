@@ -78,6 +78,11 @@ export default function StyledSelect({ options, value, onChange, action, placeho
         <span className="text-muted text-[11px] ml-2 shrink-0">▾</span>
       </button>
       {open && btnRef.current && createPortal(
+        // Presentational positioning wrapper: the interactive semantics live on
+        // the inner role="listbox" and its option buttons. This element only
+        // hosts the roving-focus keydown handler for the composite widget, so it
+        // has no ARIA role of its own.
+        // eslint-disable-next-line jsx-a11y/no-static-element-interactions
         <div
           ref={dropdownRef}
           tabIndex={-1}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import sys
 
 import pytest
 from hypothesis import HealthCheck, settings
@@ -55,6 +56,34 @@ def pytest_configure(config: pytest.Config) -> None:
     assert hasattr(tracemalloc, "get_object_traceback")
 
 
+def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
+    """Cap the worker count used by ``-n auto`` (and ``-n logical``).
+
+    The optimal worker count for this suite plateaus around 24-32 and then
+    *regresses*: every extra xdist worker pays a fixed cost -- it re-imports the
+    full app (aiohttp/boto3/numpy/pdfplumber/transcribe) and writes its own
+    ``.coverage.*`` data file that must be combined at the end. Past ~32 that
+    fixed cost outweighs the added parallelism. Measured on a 64-core host:
+    156s @ 64 workers vs 92s @ 32 workers (-41%).
+
+    ``min(cpu, CAP)`` stays optimal on every machine and is architecture-
+    agnostic -- the cap addresses fixed per-worker serialization cost, not
+    per-core speed, so it holds across Intel / ARM / Apple silicon. An 8-core
+    laptop gets 8 workers (the cap never binds, so no oversubscription), a
+    16-core build host gets 16 (unchanged from today), while 64/128-core
+    desktops are held at 32 instead of stampeding. Override the ceiling with
+    ``KIROCLAW_MAX_TEST_WORKERS`` for a host that profiles differently. An
+    explicit ``-n <N>`` on the command line always wins; this hook only fires
+    for ``auto`` / ``logical``.
+    """
+    cpu = os.cpu_count() or 1
+    try:
+        cap = int(os.environ.get("KIROCLAW_MAX_TEST_WORKERS", "32"))
+    except ValueError:
+        cap = 32
+    return min(cpu, max(1, cap))
+
+
 @pytest.fixture(autouse=True)
 def _reset_safety_override_between_tests():
     """Reset the SafetyOverride singleton between tests to prevent state leaking."""
@@ -102,11 +131,58 @@ def _isolate_agent_state_sidecar(tmp_path_factory, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _ensure_event_loop():
-    """Ensure an event loop exists for asyncio.Semaphore default_factory (Python 3.9)."""
+    """Ensure a USABLE (open) event loop exists for tests that call
+    ``asyncio.get_event_loop().run_until_complete(...)`` (e.g. test_knowledge).
+
+    Two failure modes this guards, both seen on the loaded CI farm under xdist:
+      * no current loop set (``RuntimeError``) — Python 3.9 Semaphore default_factory; and
+      * a current loop that is set but CLOSED — left behind by a prior test in the same
+        worker that ran ``asyncio.run(...)`` (which on 3.12 closes its loop at teardown).
+        ``get_event_loop()`` returns that closed loop WITHOUT raising, so the next
+        ``run_until_complete`` blows up with ``RuntimeError: Event loop is closed``. We
+        detect a closed/absent loop and install a fresh open one so each test starts clean.
+    """
     try:
-        asyncio.get_event_loop()
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            asyncio.set_event_loop(asyncio.new_event_loop())
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+@pytest.fixture(autouse=True)
+def _restore_default_child_watcher():
+    """Restore the always-active ThreadedChildWatcher after every test (Python 3.10).
+
+    Some tests install a real, non-default asyncio child watcher via the
+    gateway's ``_install_child_watcher()`` -- notably
+    ``test_cli.py::test_real_subprocess_works_after_install_on_linux``, which on
+    Linux installs a ``PidfdChildWatcher`` and runs ``asyncio.run``. On exit,
+    ``asyncio.run`` detaches the watcher's loop, leaving a loop-less watcher in
+    the global policy. On Python 3.10 that watcher's ``is_active()`` is then
+    False, so the NEXT subprocess-spawning test scheduled on the same
+    pytest-xdist worker (``test_taskrunner::TestGitCoord``, the code_reviewer git
+    routes) fails with "asyncio.get_child_watcher() is not activated, subprocess
+    support is not available". Whether the leak bites depends purely on xdist
+    sharding, so adding or removing unrelated tests can flip a green run red with
+    no production-code change. Resetting to ``ThreadedChildWatcher`` (whose
+    ``is_active()`` is always True) after each test removes the cross-test
+    coupling. No-op on 3.12+, where child watchers were removed and the event
+    loop reaps children directly.
+    """
+    yield
+    if sys.version_info >= (3, 12):
+        return
+    threaded = getattr(asyncio, "ThreadedChildWatcher", None)
+    if threaded is None:  # non-Unix (no child watchers) -- nothing to restore
+        return
+    try:
+        if not isinstance(asyncio.get_child_watcher(), threaded):
+            asyncio.set_child_watcher(threaded())
+    except Exception:  # noqa: BLE001 -- isolation cleanup must never fail a test
+        # Test-isolation cleanup must never fail a test; worst case is the
+        # pre-existing leak, which the next test's loop setup also tolerates.
+        pass
 
 
 @pytest.fixture(autouse=True)

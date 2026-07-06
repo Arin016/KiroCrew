@@ -402,6 +402,9 @@ describe('ChatInput', () => {
       const childOnDrop = vi.fn()
       const parentOnDrop = vi.fn()
       renderWithProviders(
+        // Intentionally-plain parent drop zone; only exists to assert the child
+        // stops drop propagation. No a11y role needed for this test harness.
+        // eslint-disable-next-line jsx-a11y/no-static-element-interactions
         <div onDrop={parentOnDrop}>
           <ChatInput {...defaultProps} onDrop={childOnDrop} />
         </div>
@@ -935,7 +938,7 @@ describe('ChatInput', () => {
     it('does not steal focus from another input element', () => {
       const { rerender } = renderWithProviders(
         <>
-          <input data-testid="other" />
+          <input data-testid="other" aria-label="Other input" />
           <ChatInput {...defaultProps} autoFocusKey="A" />
         </>,
       )
@@ -944,7 +947,7 @@ describe('ChatInput', () => {
       expect(other).toHaveFocus()
       rerender(
         <>
-          <input data-testid="other" />
+          <input data-testid="other" aria-label="Other input" />
           <ChatInput {...defaultProps} autoFocusKey="B" />
         </>,
       )

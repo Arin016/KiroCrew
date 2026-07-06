@@ -12,7 +12,9 @@ from kiro_claw.hooks import AutoReplyHook, HookManager, HooksConfig
 from kiro_claw.providers.base import LLMEvent
 from kiro_claw.slack.format import CONTINUATION, SLACK_MSG_LIMIT, split_message
 from kiro_claw.slack.handler import (
+    _THINKING_PLACEHOLDER,
     _build_phase_emojis,
+    _condense_thinking,
     _pending_approvals,
     _thread_agents,
     _trusted_sessions,
@@ -189,6 +191,70 @@ class TestHandleMessage:
         assert any("42" in u[1]["text"] for u in updates)
 
     @pytest.mark.asyncio
+    async def test_streaming_credential_split_across_chunks_not_leaked(self, monkeypatch):
+        """A credential split across streaming chunks must never reach the Slack
+        wire raw — not on any append_stream frame, nor reassembled across them
+        (pentest issue 3, Slack parity). The final message shows the redaction."""
+        import kiro_claw.slack.handler as _h
+
+        # Force a flush on every chunk so the split is exercised through
+        # _append_stream (which routes through the rolling StreamRedactor).
+        monkeypatch.setattr(_h, "_EDIT_INTERVAL", 0.0)
+
+        slack = MockSlackClient()
+        slack._stream_enabled = True  # use the Slack streaming API path
+        provider = FakeProvider(
+            [
+                LLMEvent(kind="text_chunk", text="The access key is AKIA"),
+                LLMEvent(kind="text_chunk", text="IOSFODNN7"),
+                LLMEvent(kind="text_chunk", text="EXAMPLE"),
+            ]
+        )
+        sessions = FakeSessionManager(provider)
+        await handle_message(slack, sessions, "C1", "echo the key", None, "msg1", "U1")
+
+        # Every text-bearing action (append_stream deltas + stop_stream final).
+        texts = [
+            a[1].get("text") or ""
+            for a in slack.actions
+            if a[0] in ("append_stream", "stop_stream", "update", "post")
+        ]
+        wire = "".join(texts)
+        # No single frame and no reassembly across frames leaks the key.
+        for t in texts:
+            assert "AKIAIOSFODNN7EXAMPLE" not in t
+        assert "AKIAIOSFODNN7EXAMPLE" not in wire
+        assert "AKIA" not in wire.replace("[REDACTED: credential]", "")
+        # The final message shows the redaction.
+        assert "[REDACTED: credential]" in wire
+
+    @pytest.mark.asyncio
+    async def test_edit_mode_snapshot_not_truncated(self, monkeypatch):
+        """Edit-mode live previews must show the complete accumulated text, not a
+        trailing-token-truncated snapshot (CR-286287441): the complete tail (`42`)
+        must appear in an intermediate snapshot, not only in the final message.
+        A throwaway StreamRedactor().feed() would withhold the trailing token;
+        redact(accumulated) on the complete snapshot is lossless."""
+        import kiro_claw.slack.handler as _h
+
+        monkeypatch.setattr(_h, "_EDIT_INTERVAL", 0.0)  # force per-chunk edit
+        slack = MockSlackClient()  # streaming disabled -> edit mode (_safe_update)
+        provider = FakeProvider(
+            [
+                LLMEvent(kind="text_chunk", text="The answer is "),
+                LLMEvent(kind="text_chunk", text="42"),
+            ]
+        )
+        sessions = FakeSessionManager(provider)
+        await handle_message(slack, sessions, "C1", "q", None, "msg1", "U1")
+
+        updates = [a[1].get("text") or "" for a in slack.actions if a[0] == "update"]
+        # With the bug (throwaway StreamRedactor().feed drops "42"), the complete
+        # text appears only in the final message (count == 1). The fix redacts the
+        # complete snapshot, so an intermediate snapshot also carries it (>= 2).
+        assert sum("The answer is 42" in u for u in updates) >= 2, updates
+
+    @pytest.mark.asyncio
     async def test_adds_eyes_reaction(self):
         slack = MockSlackClient()
         sessions = FakeSessionManager()
@@ -243,6 +309,212 @@ class TestHandleMessage:
         thinking = [p for p in posts if "Thinking" in p[1]["text"]]
         assert thinking
         assert thinking[0][1]["thread_ts"] == "thread1"
+
+    @staticmethod
+    def _force_show_thinking(monkeypatch):
+        """Patch config so both reactions and show_thinking are enabled."""
+        import dataclasses
+
+        from kiro_claw.config.loader import KiroClawConfig
+
+        _real_load = KiroClawConfig.load
+
+        def _patched():
+            cfg = _real_load()
+            return dataclasses.replace(
+                cfg,
+                slack=dataclasses.replace(
+                    cfg.slack, reactions_enabled=True, show_thinking=True
+                ),
+            )
+
+        monkeypatch.setattr(KiroClawConfig, "load", _patched)
+
+    @pytest.mark.asyncio
+    async def test_reasoning_placeholder_posted_above_answer(self, monkeypatch):
+        """Reasoning chunk before text → 💭 placeholder posts above the answer
+        and is updated in place at the end (Mesh-1805 ordering fix)."""
+        self._force_show_thinking(monkeypatch)
+        slack = MockSlackClient()
+        provider = FakeProvider(
+            [
+                LLMEvent(kind="thinking_chunk", text="Let me reason about this first."),
+                LLMEvent(kind="text_chunk", text="The answer is 42"),
+            ]
+        )
+        sessions = FakeSessionManager(provider)
+        await handle_message(slack, sessions, "C1", "q?", None, "msg1", "U1")
+
+        # The 💭 placeholder is posted (claims the slot above the answer).
+        reasoning_posts = [
+            a for a in slack.actions if a[0] == "post" and a[1]["text"] == _THINKING_PLACEHOLDER
+        ]
+        assert len(reasoning_posts) == 1
+        thinking_ts = reasoning_posts[0][1]["ts"]
+
+        # The response fallback placeholder ("_Thinking…_") is posted afterwards.
+        answer_posts = [
+            a for a in slack.actions if a[0] == "post" and a[1]["text"] == "_Thinking…_"
+        ]
+        assert answer_posts, "expected the response stream placeholder"
+        # Ordering: reasoning placeholder timestamp precedes the answer message.
+        assert float(thinking_ts) < float(answer_posts[0][1]["ts"])
+
+        # The placeholder is updated in place with the condensed reasoning block.
+        reasoning_updates = [
+            a
+            for a in slack.actions
+            if a[0] == "update"
+            and a[1]["ts"] == thinking_ts
+            and a[1]["text"].startswith("💭 *Thinking*")
+        ]
+        assert len(reasoning_updates) == 1
+        assert "Let me reason" in reasoning_updates[0][1]["text"]
+
+    @pytest.mark.asyncio
+    async def test_reasoning_reserved_above_answer_when_text_first(self, monkeypatch):
+        """Even when a text event arrives BEFORE the first reasoning chunk,
+        _ensure_stream_started reserves the 💭 slot above the answer so reasoning
+        still reads before the answer (Mesh-1805 hardening — no order dependence)."""
+        self._force_show_thinking(monkeypatch)
+        slack = MockSlackClient()
+        provider = FakeProvider(
+            [
+                LLMEvent(kind="text_chunk", text="The answer is 42"),
+                LLMEvent(kind="thinking_chunk", text="Reasoning that arrived late."),
+            ]
+        )
+        sessions = FakeSessionManager(provider)
+        await handle_message(slack, sessions, "C1", "q?", None, "msg1", "U1")
+
+        # The 💭 placeholder is reserved (by _ensure_stream_started) above the answer.
+        reasoning_posts = [
+            a for a in slack.actions if a[0] == "post" and a[1]["text"] == _THINKING_PLACEHOLDER
+        ]
+        assert len(reasoning_posts) == 1
+        thinking_ts = reasoning_posts[0][1]["ts"]
+        answer_posts = [
+            a for a in slack.actions if a[0] == "post" and a[1]["text"] == "_Thinking…_"
+        ]
+        assert answer_posts, "expected the response stream placeholder"
+        # Ordering holds despite text arriving first.
+        assert float(thinking_ts) < float(answer_posts[0][1]["ts"])
+        # Placeholder updated in place with the condensed reasoning (not posted after).
+        reasoning_updates = [
+            a
+            for a in slack.actions
+            if a[0] == "update"
+            and a[1]["ts"] == thinking_ts
+            and a[1]["text"].startswith("💭 *Thinking*")
+        ]
+        assert len(reasoning_updates) == 1
+        assert "arrived late" in reasoning_updates[0][1]["text"]
+
+    @pytest.mark.asyncio
+    async def test_no_reasoning_reserved_slot_deleted(self, monkeypatch):
+        """A text-only turn with no reasoning at all reserves a slot in
+        _ensure_stream_started, then deletes the empty placeholder at end."""
+        self._force_show_thinking(monkeypatch)
+        slack = MockSlackClient()
+        provider = FakeProvider([LLMEvent(kind="text_chunk", text="just an answer")])
+        sessions = FakeSessionManager(provider)
+        await handle_message(slack, sessions, "C1", "q?", None, "msg1", "U1")
+
+        placeholder_posts = [
+            a for a in slack.actions if a[0] == "post" and a[1]["text"] == _THINKING_PLACEHOLDER
+        ]
+        assert len(placeholder_posts) == 1
+        thinking_ts = placeholder_posts[0][1]["ts"]
+        # No reasoning → empty placeholder deleted, never updated.
+        assert [a for a in slack.actions if a[0] == "delete" and a[1]["ts"] == thinking_ts]
+        assert not [
+            a for a in slack.actions if a[0] == "update" and a[1]["ts"] == thinking_ts
+        ]
+
+    @pytest.mark.asyncio
+    async def test_empty_reasoning_placeholder_cleaned_up(self, monkeypatch):
+        """A placeholder posted for an empty reasoning chunk is deleted at end
+        of turn (Mesh-1805 cleanup branch)."""
+        self._force_show_thinking(monkeypatch)
+        slack = MockSlackClient()
+        provider = FakeProvider(
+            [
+                LLMEvent(kind="thinking_chunk", text=""),
+                LLMEvent(kind="text_chunk", text="answer"),
+            ]
+        )
+        sessions = FakeSessionManager(provider)
+        await handle_message(slack, sessions, "C1", "q?", None, "msg1", "U1")
+
+        placeholder_posts = [
+            a for a in slack.actions if a[0] == "post" and a[1]["text"] == _THINKING_PLACEHOLDER
+        ]
+        assert len(placeholder_posts) == 1
+        thinking_ts = placeholder_posts[0][1]["ts"]
+        # No reasoning text captured → placeholder is deleted, not updated.
+        assert [a for a in slack.actions if a[0] == "delete" and a[1]["ts"] == thinking_ts]
+        assert not [
+            a
+            for a in slack.actions
+            if a[0] == "update" and a[1]["ts"] == thinking_ts
+        ]
+
+    @pytest.mark.asyncio
+    async def test_cancelled_turn_deletes_thinking_placeholder(self, monkeypatch):
+        """If the message is cancelled (deleted) mid-flight, the reserved 💭
+        placeholder is cleaned up alongside the suppressed response
+        (Mesh-1805 cancel-path cleanup branch)."""
+        self._force_show_thinking(monkeypatch)
+        slack = MockSlackClient()
+        provider = FakeProvider(
+            [
+                LLMEvent(kind="thinking_chunk", text="reasoning before cancel"),
+                LLMEvent(kind="text_chunk", text="answer that gets suppressed"),
+            ]
+        )
+        sessions = FakeSessionManager(provider)
+        # Simulate the user deleting the source message mid-turn: the early
+        # pre-LLM check passes (turn runs, placeholder posts) and only the final
+        # post-turn cancellation check trips, suppressing the response.
+        _calls = {"n": 0}
+
+        def _cancel_after_turn(key, msg_ts):
+            _calls["n"] += 1
+            return _calls["n"] >= 2  # 1st = early check (False), 2nd = final (True)
+
+        monkeypatch.setattr(sessions, "is_cancelled", _cancel_after_turn)
+        await handle_message(slack, sessions, "C1", "q?", None, "msg1", "U1")
+
+        placeholder_posts = [
+            a for a in slack.actions if a[0] == "post" and a[1]["text"] == _THINKING_PLACEHOLDER
+        ]
+        assert len(placeholder_posts) == 1
+        thinking_ts = placeholder_posts[0][1]["ts"]
+        # The reserved placeholder is deleted as part of cancel suppression.
+        assert [a for a in slack.actions if a[0] == "delete" and a[1]["ts"] == thinking_ts]
+
+    @pytest.mark.asyncio
+    async def test_thinking_update_failure_is_logged(self, monkeypatch):
+        """A failure updating the 💭 placeholder in place is swallowed (logged),
+        not propagated (Mesh-1805 update-failure guard)."""
+        self._force_show_thinking(monkeypatch)
+        slack = MockSlackClient()
+
+        async def _boom(channel, ts, text):
+            slack.actions.append(("update_failed", {"ts": ts}))
+            raise RuntimeError("slack update rate limited")
+
+        monkeypatch.setattr(slack, "update_message", _boom)
+        provider = FakeProvider(
+            [
+                LLMEvent(kind="thinking_chunk", text="reasoning that fails to render"),
+                LLMEvent(kind="text_chunk", text="the answer"),
+            ]
+        )
+        sessions = FakeSessionManager(provider)
+        # Must not raise even though update_message raises.
+        await handle_message(slack, sessions, "C1", "q?", None, "msg1", "U1")
+        assert [a for a in slack.actions if a[0] == "update_failed"]
 
     @pytest.mark.asyncio
     async def test_tool_call_shown_in_message(self):
@@ -2656,3 +2928,145 @@ class TestToolElapsedTimer:
         # Regression guard: elapsed never leaks into details
         details_list = [str(t[1].get("details", "")) for t in complete_tasks]
         assert all("⏱" not in d for d in details_list), f"⏱ leaked into details: {details_list}"
+
+
+class TestCondenseThinking:
+    """Unit tests for the _condense_thinking blockquote/truncation helper."""
+
+    def test_short_text_blockquoted_no_truncation(self):
+        out = _condense_thinking("first line\nsecond line", limit=600)
+        assert out.startswith("💭 *Thinking*\n")
+        assert "> first line" in out
+        assert "> second line" in out
+        assert "full reasoning in dashboard" not in out
+
+    def test_long_text_truncated_with_pointer(self):
+        text = "word " * 400  # ~2000 chars, well over the limit
+        out = _condense_thinking(text, limit=600)
+        assert "full reasoning in dashboard Activity" in out
+        # Body stays near the limit (plus header/quote/suffix overhead).
+        assert len(out) < 800
+
+    def test_truncates_on_word_boundary(self):
+        text = "alpha beta gamma delta epsilon zeta"
+        out = _condense_thinking(text, limit=18)
+        # Should not cut in the middle of a word.
+        body = out.split("\n", 1)[1].replace("> ", "").replace(
+            "_…full reasoning in dashboard Activity_", ""
+        ).strip()
+        assert not body.endswith("gam")
+        assert "alpha" in body
+
+    def test_blank_lines_become_bare_quote_markers(self):
+        out = _condense_thinking("a\n\nb", limit=600)
+        lines = out.splitlines()
+        assert ">" in lines  # the blank middle line renders as a bare ">"
+
+    def test_hard_cut_when_no_word_boundary(self):
+        """A long run with no early whitespace falls back to a hard cut at the
+        limit (Mesh-1805 — the `cut < limit // 2` guard)."""
+        text = "x" * 700  # 700 chars, no spaces → rfind returns -1 → hard cut
+        out = _condense_thinking(text, limit=600)
+        assert "full reasoning in dashboard Activity" in out
+        body = out.split("\n", 1)[1]
+        # Hard-cut keeps exactly `limit` chars of the run (quoted).
+        assert body.count("x") == 600
+
+    def test_truncates_on_newline_when_no_space_in_window(self):
+        """When the only whitespace in the truncation window is a newline (no
+        literal space), the cut still breaks cleanly at the line rather than
+        falling through to the hard cut (quansea review — match any \\s)."""
+        text = "a" * 300 + "\n" + "b" * 400  # only break in window is the \n at 300
+        out = _condense_thinking(text, limit=600)
+        # The reasoning quote line is the line after the header, before the
+        # truncation-pointer suffix (which itself contains a/b letters).
+        reasoning_line = out.splitlines()[1]
+        assert reasoning_line == "> " + "a" * 300  # broke cleanly at the newline
+        assert "b" not in reasoning_line  # nothing past the boundary leaked in
+        assert "full reasoning in dashboard Activity" in out
+
+
+class _RecordingSessions:
+    """Minimal session store recording approval-policy writes (Mesh-2247)."""
+
+    def __init__(self) -> None:
+        self.policies: dict[str, str] = {}
+
+    def set_approval_policy(self, key: str, policy: str) -> None:
+        self.policies[key] = policy
+
+    def get_approval_policy(self, key: str) -> str:
+        return self.policies.get(key, "")
+
+
+class _ApprovingProvider:
+    def __init__(self) -> None:
+        self.approved: list[str] = []
+
+    async def approve_tool(self, request_id: str) -> None:
+        self.approved.append(request_id)
+
+
+class TestSlackTrustSubagentPropagation:
+    """Slack Trust must set the session approval policy so subagents inherit it (Mesh-2247)."""
+
+    @pytest.mark.asyncio
+    async def test_trust_sets_session_approval_policy_auto(self):
+        from kiro_claw.slack.handler import _PendingApproval
+
+        set_owner_id("U1")
+        set_allowed_users({"U1"})
+        prov = _ApprovingProvider()
+        sessions = _RecordingSessions()
+        _pending_approvals["C1:ts1"] = _PendingApproval(prov, "req-1", session_key="chat-1-trust")
+
+        result = await handle_interaction(
+            "C1", "ts1", "trust_tool", user_id="U1", sessions=sessions
+        )
+
+        assert result == "trust_tool"
+        # The fix: subagents read get_approval_policy(parent)=="auto".
+        assert sessions.get_approval_policy("chat-1-trust") == "auto"
+        assert "chat-1-trust" in _trusted_sessions
+        assert "req-1" in prov.approved
+
+    @pytest.mark.asyncio
+    async def test_trust_without_sessions_does_not_raise(self):
+        from kiro_claw.slack.handler import _PendingApproval
+
+        set_owner_id("U1")
+        set_allowed_users({"U1"})
+        prov = _ApprovingProvider()
+        _pending_approvals["C2:ts2"] = _PendingApproval(prov, "req-2", session_key="chat-2-trust")
+
+        # sessions omitted (e.g. orchestrator not ready) — must stay safe.
+        result = await handle_interaction("C2", "ts2", "trust_tool", user_id="U1")
+
+        assert result == "trust_tool"
+        assert "chat-2-trust" in _trusted_sessions
+
+    @pytest.mark.asyncio
+    async def test_late_trust_click_sets_session_approval_policy_auto(self):
+        """Late-click trust path (no pending approval) also propagates the
+        policy so subagents inherit it (Mesh-2247, covers the late-click site)."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        set_owner_id("U1")
+        set_allowed_users({"U1"})
+        sessions = _RecordingSessions()
+
+        slack = MagicMock()
+        slack.fetch_thread_replies = AsyncMock(return_value=[{"user": "U1"}])
+
+        fake_map = MagicMock()
+        fake_map.get_session_for_thread.return_value = ""  # no override → key is thread_ts
+
+        with patch("kiro_claw.session.SessionMap", return_value=fake_map):
+            result = await handle_interaction(
+                "C9", "ts9", "trust_tool", user_id="U1",
+                thread_ts="thread-9", slack=slack, sessions=sessions,
+            )
+
+        assert result == "trust_tool"
+        assert sessions.get_approval_policy("thread-9") == "auto"
+        assert "thread-9" in _trusted_sessions

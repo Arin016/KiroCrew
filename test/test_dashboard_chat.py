@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1809,6 +1810,86 @@ class TestRunChatSegmentFlush:
         return state
 
     @pytest.mark.asyncio
+    async def test_credential_split_across_chunks_never_streamed_raw(self, tmp_path, monkeypatch):
+        """A credential split across streaming chunks must never appear raw in
+        any chat_chunk broadcast (pentest issue 3), while the reassembled stream
+        stays lossless and shows the redaction.
+        """
+        from kiro_claw.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK, LLMEvent
+
+        # AKIAIOSFODNN7EXAMPLE split exactly as in the pentest reproduction.
+        events = [
+            LLMEvent(kind=EVENT_TEXT_CHUNK, text="The access key is AKIA"),
+            LLMEvent(kind=EVENT_TEXT_CHUNK, text="IOSFODNN7"),
+            LLMEvent(kind=EVENT_TEXT_CHUNK, text="EXAMPLE"),
+            LLMEvent(kind=EVENT_COMPLETE),
+        ]
+        state = self._make_state_for_run_chat(tmp_path, monkeypatch)
+        slot = state.get_or_create_slot("s1")
+        client = self._make_mock_client(events)
+        state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
+
+        from kiro_claw.dashboard.chat import _run_chat
+
+        await _run_chat(state, slot, "echo the key")
+
+        contents = [
+            call.args[1]["content"]
+            for call in state.broadcast_ws.call_args_list
+            if call.args[0] == "chat_chunk"
+        ]
+        wire = "".join(contents)
+        # No individual frame — and not the reassembled wire — leaks the key.
+        for frame in contents:
+            assert "AKIAIOSFODNN7EXAMPLE" not in frame
+        assert "AKIAIOSFODNN7EXAMPLE" not in wire
+        # The credential fragments must not be recoverable across frames.
+        assert "AKIA" not in wire.replace("[REDACTED: credential]", "")
+        assert "[REDACTED: credential]" in wire
+        assert wire == "The access key is [REDACTED: credential]"
+
+    @pytest.mark.asyncio
+    async def test_credential_split_across_thinking_chunks_not_streamed_raw(
+        self, tmp_path, monkeypatch
+    ):
+        """A credential split across thinking chunks must not appear raw on any
+        chat_thinking broadcast (issue 3 parity for the thinking stream)."""
+        from kiro_claw.providers.base import (
+            EVENT_COMPLETE,
+            EVENT_TEXT_CHUNK,
+            EVENT_THINKING_CHUNK,
+            LLMEvent,
+        )
+
+        events = [
+            LLMEvent(kind=EVENT_THINKING_CHUNK, text="the key looks like AKIA"),
+            LLMEvent(kind=EVENT_THINKING_CHUNK, text="IOSFODNN7"),
+            LLMEvent(kind=EVENT_THINKING_CHUNK, text="EXAMPLE"),
+            LLMEvent(kind=EVENT_TEXT_CHUNK, text="done"),
+            LLMEvent(kind=EVENT_COMPLETE),
+        ]
+        state = self._make_state_for_run_chat(tmp_path, monkeypatch)
+        slot = state.get_or_create_slot("s1")
+        client = self._make_mock_client(events)
+        state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
+
+        from kiro_claw.dashboard.chat import _run_chat
+
+        await _run_chat(state, slot, "think about it")
+
+        thinking = [
+            call.args[1]["content"]
+            for call in state.broadcast_ws.call_args_list
+            if call.args[0] == "chat_thinking"
+        ]
+        wire = "".join(thinking)
+        for frame in thinking:
+            assert "AKIAIOSFODNN7EXAMPLE" not in frame
+        assert "AKIAIOSFODNN7EXAMPLE" not in wire
+        assert "AKIA" not in wire.replace("[REDACTED: credential]", "")
+        assert "[REDACTED: credential]" in wire
+
+    @pytest.mark.asyncio
     async def test_text_tool_text_complete_produces_two_segments(self, tmp_path, monkeypatch):
         """Mock event stream: text → tool_call → text → complete produces
         two assistant messages and one tool message.
@@ -1964,16 +2045,23 @@ class TestRunChatSegmentFlush:
 
         await _run_chat(state, slot, "hello")
 
-        # Collect all seq values from chat_chunk broadcasts
+        # Collect all seq values + content from chat_chunk broadcasts
         seq_values: list[int] = []
+        contents: list[str] = []
         for call in state.broadcast_ws.call_args_list:
             if call.args[0] == "chat_chunk":
                 seq_values.append(call.args[1]["seq"])
+                contents.append(call.args[1]["content"])
 
-        assert len(seq_values) == 4  # 4 text chunks
-        # Verify strict monotonic increase
+        # The streaming redaction buffer (issue 3) withholds trailing
+        # credential-class runs, so contiguous chars ("a"+"b", "c"+"d") are
+        # coalesced and flushed at the segment boundary rather than emitted
+        # one-per-input-chunk. What must hold: seq is strictly monotonic and no
+        # content is lost across the buffering.
+        assert seq_values, "no chat_chunk broadcasts"
         for i in range(1, len(seq_values)):
             assert seq_values[i] > seq_values[i - 1], f"seq not monotonic: {seq_values}"
+        assert "".join(contents) == "abcd", f"content lost in stream buffer: {contents}"
 
 
 class TestRunChatNativeSubagentAttribution:
@@ -2385,6 +2473,125 @@ class TestTokenPersistenceBackfill:
         assert len(captured) == 1
         assert captured[0][1] == "claude-opus-4.6"
         assert slot.model == "claude-opus-4.6"
+
+
+class TestKiroBackfillProfileGuard:
+    """Regression tests for Mesh-2376: the kiro/acp backfill must NOT store a
+    resolved Bedrock inference-profile id into slot.model.
+
+    kiro-cli reports the RESOLVED profile id (e.g.
+    ``global.anthropic.claude-opus-4-8[1m]``) on ``client._model`` — not the
+    alias the user picked. Because ``canonicalize_for_provider`` is a no-op for
+    kiro, an un-guarded backfill stores that profile id verbatim and re-sends it
+    as a ``set_model`` override on every resume, pinning the slot to one
+    profile+region. When that profile is capacity-throttled the session is stuck
+    and the picker can't dislodge it. The guard drops a profile-form id for
+    non-claude_code providers so the slot re-resolves; portable aliases are kept.
+    """
+
+    @staticmethod
+    def _client_with_model(prov_model):
+        client = MagicMock()
+        inner = MagicMock()
+        inner._model = prov_model
+        client.client = inner
+        return client
+
+    def test_predicate_flags_bedrock_profile_ids(self):
+        from kiro_claw.dashboard.chat_runner import _is_bedrock_profile_id
+
+        assert _is_bedrock_profile_id("global.anthropic.claude-opus-4-8[1m]")
+        assert _is_bedrock_profile_id("us.anthropic.claude-opus-4-7")
+        assert _is_bedrock_profile_id("global.anthropic.claude-sonnet-4-6[1m]")
+        # Portable aliases the picker actually sets — NOT profile ids.
+        assert not _is_bedrock_profile_id("claude-opus-4.7")
+        assert not _is_bedrock_profile_id("claude-opus-4.8")
+        assert not _is_bedrock_profile_id("sonnet")
+        assert not _is_bedrock_profile_id("deepseek-3.2")
+
+    def test_kiro_profile_id_is_dropped(self):
+        from kiro_claw.dashboard.chat_runner import _backfill_canonical_model
+
+        client = self._client_with_model("global.anthropic.claude-opus-4-8[1m]")
+        # acp/kiro provider: the throttled profile id must NOT be backfilled.
+        assert _backfill_canonical_model(client, "acp") == ""
+        assert _backfill_canonical_model(client, "kiro") == ""
+
+    def test_kiro_portable_alias_is_kept(self):
+        from kiro_claw.dashboard.chat_runner import _backfill_canonical_model
+
+        # A dotted alias is the picker's value and routes with capacity
+        # awareness — keep it so the header/dropdown still reflect the model.
+        client = self._client_with_model("claude-opus-4.7")
+        assert _backfill_canonical_model(client, "acp") == "claude-opus-4.7"
+
+    def test_claude_code_profile_id_still_canonicalizes(self):
+        from kiro_claw.dashboard.chat_runner import _backfill_canonical_model
+
+        # claude_code is unaffected: its profile id maps to the dropdown key the
+        # user explicitly chose, so the guard must not strip it.
+        client = self._client_with_model("global.anthropic.claude-opus-4-8[1m]")
+        out = _backfill_canonical_model(client, "claude_code")
+        assert out == "opus-4.8-1m"
+
+    def test_auto_sentinel_still_skipped(self):
+        from kiro_claw.dashboard.chat_runner import _backfill_canonical_model
+
+        client = self._client_with_model("auto")
+        assert _backfill_canonical_model(client, "acp") == ""
+        assert _backfill_canonical_model(client, "claude_code") == ""
+
+    @pytest.mark.asyncio
+    async def test_run_chat_kiro_resolved_profile_not_pinned(self, tmp_path, monkeypatch):
+        """End-to-end: a kiro session whose backend resolves to the 1M Opus
+        profile mid-turn must leave slot.model EMPTY (not pinned to the profile
+        id), so the next resume re-resolves rather than re-sending the throttled
+        profile as a set_model override.
+        """
+        from kiro_claw.providers.base import EVENT_COMPLETE, LLMEvent
+
+        events = [LLMEvent(kind=EVENT_COMPLETE, input_tokens=3, output_tokens=4)]
+
+        state = TestTokenPersistenceBackfill._make_state_for_run_chat(
+            tmp_path, monkeypatch
+        )
+        slot = state.get_or_create_slot("s1")
+        slot.model = ""  # user picked nothing explicit on this turn
+
+        # Default test config provider is acp/kiro — exercise that path.
+        client = AsyncMock()
+        client.context_usage_pct = MagicMock(return_value=10.0)
+        inner = MagicMock()
+        inner._model = ""  # empty at create; kiro learns the profile mid-turn
+        client.client = inner
+
+        async def _stream(msg):
+            # kiro resolves the picked alias to a concrete Bedrock profile id.
+            inner._model = "global.anthropic.claude-opus-4-8[1m]"
+            for ev in events:
+                yield ev
+
+        client.stream = _stream
+        client.stream_command = _stream
+        state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
+
+        captured: list[tuple] = []
+
+        async def _fake_persist(k, m, e, provider=""):
+            captured.append((k, m, provider))
+
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_runner.persist_token_record_async", _fake_persist
+        )
+
+        from kiro_claw.dashboard.chat import _run_chat
+
+        await _run_chat(state, slot, "hello")
+
+        # slot.model must NOT be pinned to the throttled profile id.
+        assert slot.model == "", "kiro profile id must not poison slot.model"
+        assert len(captured) == 1
+        assert captured[0][1] == "", "token record must not carry the profile id"
 
 
 class TestPrepareMessagesInterleaved:
@@ -8660,10 +8867,408 @@ class TestRunChatTransientRetry:
 
         # Thinking did NOT block the retry: initial transient + one retry.
         assert call_count == 2
-        assert thinking_seen == 2  # reasoning re-streamed on the retry
+        # Reasoning re-streamed on the retry. The streaming redaction buffer
+        # (issue 3) may split/coalesce a thinking chunk across broadcasts, so
+        # assert "streamed on both attempts" rather than an exact per-chunk count.
+        assert thinking_seen >= 2
         # Recovered cleanly on the live session (no reset, no ❌).
         assert any("ok-result" in t for t in self._assistant_texts(slot))
         assert not any(t.startswith("❌") for t in self._err_texts(slot))
         assert any("Backend hiccup" in t for t in self._err_texts(slot))
         state.sessions.reset.assert_not_awaited()
         assert slot._transient_5xx_retries == 0
+
+
+class TestChatSlotAgentContextualLaunch:
+    """Tests for project_path contextual launch when switching to a project agent."""
+
+    @pytest.mark.asyncio
+    async def test_explicit_project_path_sets_slot_project(self, tmp_path, monkeypatch):
+        """Explicit project_path in request body takes precedence and sets slot.project."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        state.sessions.reset = AsyncMock()
+
+        mock_cfg = MagicMock()
+        mock_cfg.agents = {}
+        mock_cfg.workspaces = {}
+        mock_cfg.default_workspace = "default"
+        mock_cfg.default_memory_store = "default"
+        mock_cfg.memory_stores = {"default": MagicMock()}
+        mock_cfg.memory = MagicMock()
+
+        monkeypatch.setattr("kiro_claw.dashboard.chat.KiroClawConfig.load", lambda: mock_cfg)
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.KiroClawConfig.load", lambda: mock_cfg
+        )
+        # No bindings for unknown agent name
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat.resolve_agent_bindings",
+            MagicMock(side_effect=Exception("not found")),
+        )
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.resolve_agent_bindings",
+            MagicMock(side_effect=Exception("not found")),
+        )
+
+        project_dir = tmp_path / "myproj"
+        project_dir.mkdir()
+        # Create the agent file so the existence check passes
+        agent_dir = project_dir / ".kiro" / "agents"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "project-dev.json").write_text('{"name":"project-dev"}', encoding="utf-8")
+
+        async with TestClient(TestServer(_make_app_with_agent_routes(state))) as client:
+            resp = await client.post(
+                "/api/chat/slots/s1/agent",
+                json={"agent": "project-dev", "project_path": str(project_dir)},
+            )
+            assert resp.status == 200
+            assert slot.project == str(project_dir)
+
+    @pytest.mark.asyncio
+    async def test_sensitive_explicit_path_rejected(self, tmp_path, monkeypatch):
+        """A sensitive explicit project_path must NOT set slot.project."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        state.sessions.reset = AsyncMock()
+        original_project = slot.project
+
+        mock_cfg = MagicMock()
+        mock_cfg.agents = {}
+        mock_cfg.workspaces = {}
+        mock_cfg.default_workspace = "default"
+        mock_cfg.default_memory_store = "default"
+        mock_cfg.memory_stores = {"default": MagicMock()}
+        mock_cfg.memory = MagicMock()
+
+        monkeypatch.setattr("kiro_claw.dashboard.chat.KiroClawConfig.load", lambda: mock_cfg)
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.KiroClawConfig.load", lambda: mock_cfg
+        )
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat.resolve_agent_bindings",
+            MagicMock(side_effect=Exception("not found")),
+        )
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.resolve_agent_bindings",
+            MagicMock(side_effect=Exception("not found")),
+        )
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.is_sensitive_path", lambda p: True
+        )
+
+        async with TestClient(TestServer(_make_app_with_agent_routes(state))) as client:
+            resp = await client.post(
+                "/api/chat/slots/s1/agent",
+                json={"agent": "project-dev", "project_path": str(tmp_path)},
+            )
+            assert resp.status == 403
+            # Sensitive path must not have been applied
+            assert slot.project == original_project
+
+    @pytest.mark.asyncio
+    async def test_no_project_path_does_not_modify_slot_project(self, tmp_path, monkeypatch):
+        """When no project_path is provided, slot.project is not modified (global agent intent).
+
+        New design: no project_path in request = caller wants global agent.
+        The registry is not consulted; slot.project is left unchanged.
+        """
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        state.sessions.reset = AsyncMock()
+        original_project = slot.project
+
+        mock_cfg = MagicMock()
+        mock_cfg.agents = {}
+        mock_cfg.workspaces = {}
+        mock_cfg.default_workspace = "default"
+        mock_cfg.default_memory_store = "default"
+        mock_cfg.memory_stores = {"default": MagicMock()}
+        mock_cfg.memory = MagicMock()
+
+        monkeypatch.setattr("kiro_claw.dashboard.chat.KiroClawConfig.load", lambda: mock_cfg)
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.KiroClawConfig.load", lambda: mock_cfg
+        )
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat.resolve_agent_bindings",
+            MagicMock(side_effect=Exception("not found")),
+        )
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.resolve_agent_bindings",
+            MagicMock(side_effect=Exception("not found")),
+        )
+
+        async with TestClient(TestServer(_make_app_with_agent_routes(state))) as client:
+            resp = await client.post(
+                "/api/chat/slots/s1/agent",
+                json={"agent": "global-dev"},  # no project_path — global intent
+            )
+            assert resp.status == 200
+            assert slot.project == original_project, "slot.project must not be modified without project_path"
+
+    @pytest.mark.asyncio
+    async def test_no_project_path_returns_200_even_with_multiple_project_agents(self, tmp_path, monkeypatch):
+        """Without project_path, the request always targets the global agent — no 409.
+
+        Old behavior: 409 when multiple project agents share the same name.
+        New behavior: no project_path = global intent, registry not consulted, 200.
+        """
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        state.sessions.reset = AsyncMock()
+        state._background_tasks = set()
+        original_project = slot.project
+
+        mock_cfg = MagicMock()
+        mock_cfg.agents = {}
+        mock_cfg.workspaces = {}
+        mock_cfg.default_workspace = "default"
+        mock_cfg.default_memory_store = "default"
+        mock_cfg.memory_stores = {"default": MagicMock()}
+        mock_cfg.memory = MagicMock()
+
+        monkeypatch.setattr("kiro_claw.dashboard.chat.KiroClawConfig.load", lambda: mock_cfg)
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.KiroClawConfig.load", lambda: mock_cfg
+        )
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat.resolve_agent_bindings",
+            MagicMock(side_effect=Exception("not found")),
+        )
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.resolve_agent_bindings",
+            MagicMock(side_effect=Exception("not found")),
+        )
+
+        async with TestClient(TestServer(_make_app_with_agent_routes(state))) as client:
+            resp = await client.post(
+                "/api/chat/slots/s1/agent",
+                json={"agent": "dev"},  # no project_path — global intent, no ambiguity check
+            )
+            assert resp.status == 200
+            assert slot.project == original_project, "slot.project must be unchanged without project_path"
+
+    @pytest.mark.asyncio
+    async def test_agent_file_not_found_returns_404(self, tmp_path, monkeypatch):
+        """project_path is valid but agent json doesn't exist there → 404, slot unchanged."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        state.sessions.reset = AsyncMock()
+        original_agent = slot.agent
+        original_project = slot.project
+
+        mock_cfg = MagicMock()
+        mock_cfg.agents = {}
+        mock_cfg.workspaces = {}
+        mock_cfg.default_workspace = "default"
+        mock_cfg.default_memory_store = "default"
+        mock_cfg.memory_stores = {"default": MagicMock()}
+        mock_cfg.memory = MagicMock()
+
+        monkeypatch.setattr("kiro_claw.dashboard.chat.KiroClawConfig.load", lambda: mock_cfg)
+        monkeypatch.setattr("kiro_claw.dashboard.chat_handlers.KiroClawConfig.load", lambda: mock_cfg)
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat.resolve_agent_bindings",
+            MagicMock(side_effect=Exception("not found")),
+        )
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.resolve_agent_bindings",
+            MagicMock(side_effect=Exception("not found")),
+        )
+        monkeypatch.setattr("kiro_claw.dashboard.chat_handlers.is_sensitive_path", lambda p: False)
+
+        project_dir = tmp_path / "myproj"
+        project_dir.mkdir()
+        # .kiro/agents/ exists but does NOT contain ghost-agent.json
+
+        async with TestClient(TestServer(_make_app_with_agent_routes(state))) as client:
+            resp = await client.post(
+                "/api/chat/slots/s1/agent",
+                json={"agent": "ghost-agent", "project_path": str(project_dir)},
+            )
+            assert resp.status == 404
+            data = await resp.json()
+            assert "ghost-agent" in data["error"]
+            # Slot must be fully rolled back
+            assert slot.agent == original_agent
+            assert slot.project == original_project
+
+    @pytest.mark.asyncio
+    async def test_project_path_must_be_directory(self, tmp_path, monkeypatch):
+        """project_path pointing to a file or nonexistent path returns 400."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.get_or_create_slot("s1")
+        state.sessions.reset = AsyncMock()
+
+        mock_cfg = MagicMock()
+        mock_cfg.agents = {}
+        mock_cfg.workspaces = {}
+        mock_cfg.default_workspace = "default"
+        mock_cfg.default_memory_store = "default"
+        mock_cfg.memory_stores = {"default": MagicMock()}
+        mock_cfg.memory = MagicMock()
+
+        monkeypatch.setattr("kiro_claw.dashboard.chat.KiroClawConfig.load", lambda: mock_cfg)
+        monkeypatch.setattr("kiro_claw.dashboard.chat_handlers.KiroClawConfig.load", lambda: mock_cfg)
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat.resolve_agent_bindings",
+            MagicMock(side_effect=Exception("not found")),
+        )
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers.resolve_agent_bindings",
+            MagicMock(side_effect=Exception("not found")),
+        )
+        monkeypatch.setattr("kiro_claw.dashboard.chat_handlers.is_sensitive_path", lambda p: False)
+
+        # Point at a file, not a directory
+        a_file = tmp_path / "notadir.txt"
+        a_file.write_text("x", encoding="utf-8")
+
+        async with TestClient(TestServer(_make_app_with_agent_routes(state))) as client:
+            resp = await client.post(
+                "/api/chat/slots/s1/agent",
+                json={"agent": "dev", "project_path": str(a_file)},
+            )
+            assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_empty_agent_with_project_path_rejected(self, tmp_path, monkeypatch):
+        """project_path without an agent name returns 400."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.get_or_create_slot("s1")
+        state.sessions.reset = AsyncMock()
+
+        mock_cfg = MagicMock()
+        mock_cfg.agents = {}
+        mock_cfg.workspaces = {}
+        mock_cfg.default_workspace = "default"
+        mock_cfg.default_memory_store = "default"
+        mock_cfg.memory_stores = {"default": MagicMock()}
+        mock_cfg.memory = MagicMock()
+
+        monkeypatch.setattr("kiro_claw.dashboard.chat.KiroClawConfig.load", lambda: mock_cfg)
+        monkeypatch.setattr("kiro_claw.dashboard.chat_handlers.KiroClawConfig.load", lambda: mock_cfg)
+
+        project_dir = tmp_path / "myproj"
+        project_dir.mkdir()
+
+        async with TestClient(TestServer(_make_app_with_agent_routes(state))) as client:
+            resp = await client.post(
+                "/api/chat/slots/s1/agent",
+                json={"agent": "", "project_path": str(project_dir)},
+            )
+            assert resp.status == 400
+
+
+class TestChatSlotProjectAutoRegister:
+    """Tests for auto_register_project background task dispatch on project set."""
+
+    @pytest.mark.asyncio
+    async def test_auto_register_task_added_to_background_tasks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Setting a project path dispatches auto_register_project as a tracked background task."""
+        from kiro_claw.dashboard.chat_handlers import api_chat_slot_project
+
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_claw.dashboard.chat_handlers.is_sensitive_path", lambda p: False)
+        registered: list[str] = []
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.chat_handlers._auto_register_project",
+            lambda p: registered.append(p),
+        )
+
+        state = _make_state(tmp_path)
+        state.sessions.reset = AsyncMock()
+        slot = state.get_or_create_slot("s1")
+
+        project_dir = tmp_path / "myproj"
+        project_dir.mkdir()
+
+        app = web.Application()
+        app["state"] = state
+        app.router.add_post("/api/chat/slots/{slot}/project", api_chat_slot_project)
+
+        async with TestClient(TestServer(app)) as client:
+            initial_task_count = len(state._background_tasks)
+            resp = await client.post(
+                "/api/chat/slots/s1/project",
+                json={"project": str(project_dir)},
+            )
+            assert resp.status == 200
+            assert slot.project == str(project_dir)
+            # Background task should be tracked in state._background_tasks
+            assert len(state._background_tasks) >= initial_task_count
+
+
+class TestAgentDetailProjectPathFirst:
+    """Post 13: api_agent_detail must use project_path query param before global glob."""
+
+    @pytest.mark.asyncio
+    async def test_project_path_query_param_takes_priority(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /api/agents/detail/dev?project_path=/proj_a must return the PROJECT agent,
+        not the global agent with the same name.
+
+        Before fix: global glob runs first, returns global 'dev' ignoring project_path.
+        After fix: project_path query param is checked first.
+        """
+        from kiro_claw.dashboard.handlers.agents import api_agent_detail
+
+        # Global agent with name "dev"
+        global_agents_dir = tmp_path / "global_kiro" / "agents"
+        global_agents_dir.mkdir(parents=True)
+        (global_agents_dir / "dev.json").write_text(
+            json.dumps({"name": "dev", "description": "GLOBAL-dev", "model": "auto"}),
+            encoding="utf-8",
+        )
+
+        # Project agent with same name "dev" but different description
+        proj_path = tmp_path / "proj_a"
+        proj_agents_dir = proj_path / ".kiro" / "agents"
+        proj_agents_dir.mkdir(parents=True)
+        (proj_agents_dir / "dev.json").write_text(
+            json.dumps({"name": "dev", "description": "PROJECT-dev", "model": "auto"}),
+            encoding="utf-8",
+        )
+
+        # Patch KIRO_AGENTS_DIR to the fake global dir
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.handlers.agents.KIRO_AGENTS_DIR",
+            global_agents_dir,
+            raising=False,
+        )
+        # Patch load_registry to return the project agent
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.handlers.agents.load_registry",
+            lambda: {str(proj_path): ["dev.json"]},
+        )
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.handlers.agents.is_sensitive_path",
+            lambda p: False,
+        )
+
+        state = _make_state(tmp_path)
+        app = web.Application()
+        app["state"] = state
+        app.router.add_get("/api/agents/detail/{name}", api_agent_detail)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get(
+                f"/api/agents/detail/dev?project_path={proj_path}"
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data.get("description") == "PROJECT-dev", (
+                f"project_path query param must take priority; got: {data.get('description')}"
+            )

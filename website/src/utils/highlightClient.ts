@@ -42,6 +42,9 @@ function getWorker(): Worker | null {
       // everything to plain text so callers fall back gracefully. Log in dev so
       // a silent "no code is ever highlighted" isn't a mystery.
       if (import.meta.env.DEV) {
+        // Intentional dev-only diagnostic so a silent "no code highlighted"
+        // failure isn't a mystery; stripped from production builds by the guard.
+        // eslint-disable-next-line no-console
         console.warn('[highlightClient] worker disabled; falling back to plain text')
       }
       workerFailed = true

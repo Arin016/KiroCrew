@@ -108,7 +108,15 @@ export function useVirtualChat<T>(
 
   // ---- DOM refs ----
   const internalScrollerRef = useRef<HTMLDivElement | null>(null)
-  const scrollerRef = (externalScrollerRef ?? internalScrollerRef) as React.RefObject<HTMLDivElement | null>
+  // Stable RefObject identity: memoized on `externalScrollerRef` so it only
+  // changes when the caller swaps the external ref (never on ordinary
+  // re-renders). Keeping the identity stable lets the callbacks/effects below
+  // list `scrollerRef` in their deps without recreating on every render (which
+  // would re-attach the scroll/Resize/Intersection observers each frame).
+  const scrollerRef = useMemo(
+    () => (externalScrollerRef ?? internalScrollerRef) as React.RefObject<HTMLDivElement | null>,
+    [externalScrollerRef],
+  )
   const contentRef = useRef<HTMLDivElement>(null)
   const topSentinelRef = useRef<HTMLDivElement>(null)
   const bottomSentinelRef = useRef<HTMLDivElement>(null)
@@ -320,7 +328,7 @@ export function useVirtualChat<T>(
       if (prev.start === merged.start && prev.end === merged.end) return prev
       return merged
     })
-  }, [getH, overscan])
+  }, [getH, overscan, scrollerRef])
 
   // ---- Pin helpers (the only code that writes el.scrollTop for follow) ----
 
@@ -347,7 +355,7 @@ export function useVirtualChat<T>(
     } else {
       lastWriteTopRef.current = target
     }
-  }, [])
+  }, [scrollerRef])
 
   // Forced pin: explicit jump-to-bottom (slot entry, scrollToBottom API,
   // jump-to-latest pill). Always lands at the bottom and (re-)arms follow.
@@ -358,7 +366,7 @@ export function useVirtualChat<T>(
     const target = bottomTarget({ scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight })
     el.scrollTop = target
     lastWriteTopRef.current = target
-  }, [followOutput])
+  }, [followOutput, scrollerRef])
 
   // Keep the tracked scroller element in sync after every commit, so the
   // observer effects below re-attach the moment the node appears (or changes).
@@ -498,7 +506,7 @@ export function useVirtualChat<T>(
       if (rafId) cancelAnimationFrame(rafId)
       resizeObserverRef.current = null
     }
-  }, [recomputeWindow, pinAuto, scheduleHeightSync])
+  }, [recomputeWindow, pinAuto, scheduleHeightSync, scrollerRef])
 
   // ---- IntersectionObserver: top/bottom sentinels for window expansion ----
   useEffect(() => {
@@ -542,7 +550,7 @@ export function useVirtualChat<T>(
       pinAuto()
     })
     return () => cancelAnimationFrame(id)
-  }, [itemCount, pinAuto])
+  }, [itemCount, pinAuto, scrollerRef])
 
   // ---- Slot entry: force the scroller to the true bottom ----
   // Runs after the new session's tail window has committed (windowRange reset
@@ -550,15 +558,32 @@ export function useVirtualChat<T>(
   // previous session's scrollTop (fixes the "second visit lands in the middle"
   // bug). Subsequent async widget growth is then followed by the RO via
   // pinAuto. A follow-up rAF settles after first-frame measurement.
+  //
+  // ALSO re-runs when items first arrive for a freshly-entered slot
+  // (`sessionId` flips synchronously on slot switch, BEFORE the messages
+  // HTTP fetch resolves — without the itemCount trigger forcePin would only
+  // run against an empty list, leaving pinAuto to smooth-animate the
+  // viewport down once content lands. That smooth scroll is the visible
+  // "content scrolls from top to bottom" CX bug — and a late widget/image
+  // measurement during the animation can land it short of the true bottom).
+  // `slotPinDoneRef` guarantees the instant re-pin fires at most once per
+  // slot entry; subsequent streaming appends still go through pinAuto.
+  const slotPinDoneRef = useRef<string | null>(null)
   useLayoutEffect(() => {
+    if (slotPinDoneRef.current && slotPinDoneRef.current !== sessionId) {
+      slotPinDoneRef.current = null
+    }
+    if (slotPinDoneRef.current === sessionId) return
     forcePin()
+    if (itemCount === 0) return  // wait for content; effect re-runs when items arrive
+    slotPinDoneRef.current = sessionId
     const id = requestAnimationFrame(() => {
       const el = scrollerRef.current
       if (el && el.isConnected) forcePin()
     })
     return () => cancelAnimationFrame(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, scrollerEl])
+  }, [sessionId, scrollerEl, itemCount])
 
   // ---- Recompute window when item count changes ----
   useEffect(() => {
@@ -641,7 +666,7 @@ export function useVirtualChat<T>(
         lastWriteTopRef.current = -1
       })
     },
-    [overscan, getH],
+    [overscan, getH, scrollerRef],
   )
 
   // "Human-like" smooth scroll to a (possibly off-window) index. UNLIKE
@@ -692,7 +717,7 @@ export function useVirtualChat<T>(
       if (typeof el.scrollTo === 'function') el.scrollTo({ top, behavior: 'smooth' })
       else el.scrollTop = top
     },
-    [getH],
+    [getH, scrollerRef],
   )
 
   const scrollToBottom = useCallback(
@@ -732,7 +757,7 @@ export function useVirtualChat<T>(
         requestAnimationFrame(settle)
       })
     },
-    [overscan, followOutput],
+    [overscan, followOutput, scrollerRef],
   )
 
   // Ensure `index` is mounted (in the window) so callers can scroll to an

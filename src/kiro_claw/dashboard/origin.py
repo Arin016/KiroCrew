@@ -27,6 +27,16 @@ _DEFAULT_PORT = 5476
 _BIND_LOCAL = "127.0.0.1"
 _BIND_ALL = "0.0.0.0"
 
+# Loopback hostnames that all resolve to the same machine but are *distinct
+# browser origins* (origin = scheme://host:port). The dashboard SPA stores user
+# settings (theme, zoom, layout, ...) in per-origin localStorage, so a user who
+# reaches the dashboard on more than one of these names gets a separate, empty
+# settings bucket each time — settings appear to "reset". We canonicalize
+# navigations among this set onto a single host (see should_canonicalize_host).
+_CANONICALIZABLE_LOOPBACK_HOSTS = frozenset(
+    {"127.0.0.1", "::1", "localhost", "kiroclaw.localhost"}
+)
+
 
 # ---------------------------------------------------------------------------
 # Hostname / IP helpers
@@ -49,6 +59,35 @@ def is_loopback(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def is_https_request(request: web.Request) -> bool:
+    """Return ``True`` when the browser reached the dashboard over HTTPS.
+
+    ``request.scheme`` alone is insufficient behind a TLS-terminating reverse
+    proxy or tunnel: the proxy terminates HTTPS at its edge and forwards **plain
+    HTTP to the loopback-bound gateway**, so ``request.scheme`` reads ``"http"``
+    even though the browser's connection — and therefore the ``wss://`` dashboard
+    WebSocket — is secure. When that happens the auth cookie is set WITHOUT
+    ``Secure`` and modern mobile browsers withhold it from the ``wss://`` upgrade,
+    so the live WebSocket 403s and the dashboard flaps online/offline.
+
+    We therefore also honour ``X-Forwarded-Proto: https`` — but ONLY when the
+    immediate peer is loopback. The gateway binds ``127.0.0.1``, so a loopback
+    peer is the local tunnel/reverse-proxy; a remote attacker cannot reach the
+    socket to forge the header. (Even if the header were spoofed over plain
+    HTTP, the only effect is a ``Secure`` cookie the spoofer's own HTTP client
+    then refuses to send back — a self-inflicted no-op, never a downgrade.)
+    """
+    if request.scheme == "https":
+        return True
+    xfp = request.headers.get("X-Forwarded-Proto", "")
+    # X-Forwarded-Proto may be a comma-separated chain (proxy1, proxy2); the
+    # left-most value is the original client-facing scheme.
+    proto = xfp.split(",")[0].strip().lower()
+    if proto == "https" and is_loopback(request.remote or ""):
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -174,12 +213,75 @@ def resolve_dashboard_host(local_only: bool, configured_host: str = "") -> str:
     if configured_host:
         return configured_host
     if local_only:
-        try:
-            socket.getaddrinfo("kiroclaw.localhost", None)
-            return "kiroclaw.localhost"
-        except socket.gaierror:
-            return "localhost"
+        # Canonical loopback host is plain ``localhost``. It resolves in every
+        # browser and through SSH port-forwards, so a dev who tunnels into a
+        # Linux devdesk and opens the dashboard in Safari can always reach it.
+        # ``kiroclaw.localhost`` (and other ``*.localhost`` names) are NOT
+        # resolved by Safari / the macOS system resolver — RFC 6761's loopback
+        # rule is a SHOULD that only Chrome/Firefox and the Linux stub resolver
+        # honor — so canonicalizing onto ``kiroclaw.localhost`` would 302 those
+        # users to a host their browser can't resolve. ``*.localhost`` stays
+        # trusted in build_allowed_origins() for the multi-instance embedded-pane
+        # iframes; it is just not the single host the emitters + 302 converge on.
+        return "localhost"
     return machine_hostname() or "localhost"
+
+
+def _host_without_port(host_header: str) -> str:
+    """Return the host from a ``Host`` header value, IPv6-bracket aware.
+
+    Mirrors the rest of this file's IPv6 handling (``is_loopback``,
+    ``dashboard_origin``, ``build_allowed_origins`` all treat ``::1`` as
+    first-class). A naive ``split(":")[0]`` would yield ``"["`` for an
+    ``[::1]:7777`` Host and silently defeat the loopback match.
+
+        ``[::1]:7777`` -> ``::1``   ``localhost:7777`` -> ``localhost``
+        ``[::1]``      -> ``::1``   ``127.0.0.1``      -> ``127.0.0.1``
+    """
+    h = (host_header or "").strip()
+    if h.startswith("["):
+        end = h.find("]")
+        return h[1:end] if end != -1 else h[1:]
+    return h.split(":")[0]
+
+
+def should_canonicalize_host(
+    request_host: str,
+    canonical_host: str,
+    *,
+    method: str,
+    sec_fetch_dest: str | None,
+) -> bool:
+    """Return True if a request should be 302-redirected to *canonical_host*.
+
+    Converges loopback aliases (127.0.0.1 / localhost / kiroclaw.localhost) onto
+    a single origin so the SPA's per-origin localStorage settings are not split
+    across hostnames (see _CANONICALIZABLE_LOOPBACK_HOSTS). Conservative on every
+    axis so it can never touch a request that isn't a same-machine top-level
+    page navigation:
+
+    * only GET/HEAD (never a mutating request),
+    * only true top-level document navigations (``Sec-Fetch-Dest: document`` —
+      absent/empty/websocket/XHR are left alone, so APIs and WebSockets and
+      sub-resource fetches are never redirected),
+    * only when both the request host and the canonical host are in the
+      canonicalizable loopback set (real hostnames / reverse-proxy vhosts are
+      never redirected),
+    * only when they actually differ.
+
+    The caller passes the port-stripped comparison via *request_host*'s host part;
+    this helper strips any ``:port`` itself for safety.
+    """
+    if method not in ("GET", "HEAD"):
+        return False
+    if sec_fetch_dest != "document":
+        return False
+    host = _host_without_port(request_host or "")
+    if host not in _CANONICALIZABLE_LOOPBACK_HOSTS:
+        return False
+    if canonical_host not in _CANONICALIZABLE_LOOPBACK_HOSTS:
+        return False
+    return host != canonical_host
 
 
 def build_dashboard_url(base_url: str, token: str = "", *, local_only: bool = True) -> str:

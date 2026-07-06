@@ -4,6 +4,7 @@ import { api } from '../../api/client'
 import { useAppDispatch } from '../../store'
 import { sseSlotColor } from '../../store/dashboardSlice'
 import { useSessionPalette } from '../../hooks/useSessionPalette'
+import { colorName } from '../../utils/sessionColors'
 
 export default function SessionColorPicker({ slotKey, colorIndex }: { slotKey?: string; colorIndex?: number | null }) {
   const [open, setOpen] = useState(false)
@@ -49,7 +50,7 @@ export default function SessionColorPicker({ slotKey, colorIndex }: { slotKey?: 
           <div className="flex flex-wrap items-center gap-1.5">
           <button type="button" aria-label="No color" aria-pressed={colorIndex == null} className={`w-6 h-6 rounded-full border-2 cursor-pointer transition-transform hover:scale-110 ${colorIndex == null ? 'border-text-strong scale-110' : 'border-transparent'}`} style={{ background: 'var(--bg-accent)', backgroundImage: 'linear-gradient(135deg, transparent 45%, var(--danger) 45%, var(--danger) 55%, transparent 55%)' }} onClick={() => { dispatch(sseSlotColor({ key: slotKey, color_index: null })); api.setSlotColor(slotKey, null).catch(() => {}); setOpen(false) }} title="No color" />
           {paletteColors.map((c, i) => (
-            <button type="button" key={i} aria-label={`Color ${i + 1}`} aria-pressed={colorIndex === i} className={`w-6 h-6 rounded-full border-2 cursor-pointer transition-transform hover:scale-110 ${colorIndex === i ? 'border-text-strong scale-110' : 'border-transparent'}`} style={{ background: c }} onClick={() => { dispatch(sseSlotColor({ key: slotKey, color_index: i })); api.setSlotColor(slotKey, i).catch(() => {}); setOpen(false) }} title={`Color ${i + 1}`} />
+            <button type="button" key={i} aria-label={colorName(c)} aria-pressed={colorIndex === i} className={`w-6 h-6 rounded-full border-2 cursor-pointer transition-transform hover:scale-110 ${colorIndex === i ? 'border-text-strong scale-110' : 'border-transparent'}`} style={{ background: c }} onClick={() => { dispatch(sseSlotColor({ key: slotKey, color_index: i })); api.setSlotColor(slotKey, i).catch(() => {}); setOpen(false) }} title={colorName(c)} />
           ))}
           </div>
           <div className="text-[11px] text-muted mt-1.5">Change your color palette in Display settings</div>

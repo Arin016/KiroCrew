@@ -1,7 +1,8 @@
 import { useEffect, useCallback, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAppDispatch, useAppSelector } from '../store'
-import { switchSlot } from '../store/chatSlice'
+import { switchSlot, deleteSlot } from '../store/chatSlice'
+import { loadChatConfig } from '../pages/chat/ChatSettings'
 
 export const SHORTCUTS_ENABLED_KEY = 'mc-keyboard-shortcuts'
 export const SHORTCUTS_ENABLED_EVENT = 'mc-keyboard-shortcuts-changed'
@@ -49,6 +50,7 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
   // Actions
   { id: 'focus-input', key: 'Enter', alt: true, label: 'Focus text input', group: 'Actions' },
   { id: 'new-chat', key: 'n', alt: true, shift: true, label: 'New chat', group: 'Actions' },
+  { id: 'close-chat', key: 'w', alt: true, shift: true, label: 'Close session', group: 'Actions' },
   { id: 'shortcuts-modal', key: 'k', alt: true, label: 'Open shortcuts help', group: 'Actions' },
   { id: 'open-settings', key: ',', alt: true, label: 'Open settings', group: 'Actions' },
   { id: 'cycle-agent', key: 'a', alt: true, shift: true, label: 'Cycle agent', group: 'Actions' },
@@ -97,6 +99,11 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
   const activeSlot = useAppSelector(s => s.chat.activeSlot)
   const slotHistory = useAppSelector(s => s.chat.slotHistory)
   const mruIndexRef = useRef(-1)
+  // Set true right after a char-producing Alt shortcut (Alt+`) fires inside a
+  // text field. On macOS those combos are dead keys (Option+` = grave accent),
+  // and keydown.preventDefault() cannot cancel the composed character — it
+  // arrives via beforeinput. The guard below eats it.
+  const suppressNextInputRef = useRef(false)
   const [enabled, setEnabled] = useState(() => localStorage.getItem(SHORTCUTS_ENABLED_KEY) !== '0')
   const [ctrlDigits, setCtrlDigits] = useState(() => getCtrlDigitsEnabled())
 
@@ -117,6 +124,21 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
     }
     document.addEventListener('keyup', onKeyUp)
     return () => document.removeEventListener('keyup', onKeyUp)
+  }, [])
+
+  // Cancel the stray character a macOS dead-key Alt shortcut would otherwise
+  // insert (e.g. Alt+` switching the slot AND typing a backtick). Capture phase
+  // so it runs before the focused field handles the input. No-op on
+  // Linux/Windows where keydown.preventDefault() already suppresses it.
+  useEffect(() => {
+    const onBeforeInput = (e: Event) => {
+      if (suppressNextInputRef.current) {
+        suppressNextInputRef.current = false
+        e.preventDefault()
+      }
+    }
+    document.addEventListener('beforeinput', onBeforeInput, true)
+    return () => document.removeEventListener('beforeinput', onBeforeInput, true)
   }, [])
 
   const handler = useCallback((e: KeyboardEvent) => {
@@ -203,9 +225,21 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
       return
     }
 
+    // Alt+Shift+W: Close current session (same semantics as the header-menu
+    // close — gated by confirmCloseSession, dispatches deleteSlot)
+    if (e.shiftKey && code === 'KeyW') {
+      e.preventDefault()
+      if (activeSlot && (!loadChatConfig().confirmCloseSession || confirm('Close this session?'))) {
+        dispatch(deleteSlot(activeSlot))
+      }
+      return
+    }
+
     // Alt+Shift+`: Walk back MRU history
     if (e.shiftKey && code === 'Backquote') {
       e.preventDefault()
+      suppressNextInputRef.current = true
+      setTimeout(() => { suppressNextInputRef.current = false }, 0)
       if (slotHistory.length === 0) return
       mruIndexRef.current = Math.min(mruIndexRef.current + 1, slotHistory.length - 1)
       const target = slotHistory[slotHistory.length - 1 - mruIndexRef.current]
@@ -216,6 +250,8 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
     // Alt+`: MRU toggle (last visited)
     if (code === 'Backquote' && !e.shiftKey) {
       e.preventDefault()
+      suppressNextInputRef.current = true
+      setTimeout(() => { suppressNextInputRef.current = false }, 0)
       const prev = slotHistory.length > 0 ? slotHistory[slotHistory.length - 1] : null
       if (prev && prev !== activeSlot) { dispatch(switchSlot(prev)); navigate('/chat') }
       return

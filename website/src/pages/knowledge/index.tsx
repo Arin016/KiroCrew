@@ -14,6 +14,10 @@ const KnowledgeGraph = lazy(() => import('./KnowledgeGraph'))
 
 const TABS = ['list', 'graph', 'sources'] as const
 type Tab = typeof TABS[number]
+
+// Backend list_items() hard-caps page size at 100 (dashboard/handlers/knowledge.py).
+// The unfiltered list must request exactly that so totalPages math and Prev/Next stay correct.
+const MAX_PAGE_SIZE = 100
 const TAB_META: Record<Tab, { label: string; icon: React.ReactNode }> = {
   list: { label: 'List View', icon: <FileText size={14} /> },
   graph: { label: 'Graph View', icon: <Network size={14} /> },
@@ -55,7 +59,7 @@ function ItemCard({ item, onClick, selected, onSelect }: { item: KnowledgeItem; 
   const { copied, copy } = useCopy()
   return (
     <div className="flex items-start gap-2 animate-rise">
-      <input type="checkbox" checked={selected} onChange={e => onSelect(e.target.checked)}
+      <input type="checkbox" aria-label={`Select ${item.title || 'Untitled'}`} checked={selected} onChange={e => onSelect(e.target.checked)}
         className="mt-3.5 shrink-0 accent-accent" onClick={e => e.stopPropagation()} />
       <Clickable onClick={onClick} className="flex-1 border border-border rounded-lg p-3.5 hover:border-border-strong hover:bg-bg-hover cursor-pointer transition-all">
         <div className="flex items-start justify-between gap-2">
@@ -185,18 +189,25 @@ interface SourceGroupProps {
   selectedItems: Set<string>
   onSelect: (id: string, checked: boolean) => void
   defaultOpen?: boolean
+  // When true, the badge shows the source's true total (source.item_count) rather than the
+  // count of items on the current page, which is capped at MAX_PAGE_SIZE by the backend.
+  showSourceTotal?: boolean
 }
 
-function SourceGroup({ source, items, onItemClick, selectedItems, onSelect, defaultOpen = false }: SourceGroupProps) {
+function SourceGroup({ source, items, onItemClick, selectedItems, onSelect, defaultOpen = false, showSourceTotal = false }: SourceGroupProps) {
   const [open, setOpen] = useState(defaultOpen)
   const name = source?.name || 'Unknown source'
   const subtitle = source?.uri || ''
   const isFolder = source?.source_type === 'local_folder' || source?.source_type === 'obsidian_vault'
+  const isArtifact = source?.source_type === 'artifact'
+  // Sub-group items: folder/vault sources group by file path; the aggregate
+  // "artifact" source groups per-artifact (label = artifact name).
+  const isGrouped = isFolder || isArtifact
   const Icon = isFolder ? FolderOpen : FileText
 
-  // Sub-group by file for folder sources
+  // Sub-group by file/artifact for grouped sources
   const fileGroups = useMemo(() => {
-    if (!isFolder) return null
+    if (!isGrouped) return null
     const groups = new Map<string, KnowledgeItem[]>()
     for (const item of items) {
       const key = item._file_path || '__ungrouped__'
@@ -204,7 +215,7 @@ function SourceGroup({ source, items, onItemClick, selectedItems, onSelect, defa
       groups.get(key)!.push(item)
     }
     return groups.size > 0 ? groups : null
-  }, [items, isFolder])
+  }, [items, isGrouped])
 
   return (
     <div className="border border-border rounded-lg overflow-hidden">
@@ -215,7 +226,7 @@ function SourceGroup({ source, items, onItemClick, selectedItems, onSelect, defa
         {open ? <ChevronDown size={14} className="text-muted shrink-0" /> : <ChevronRight size={14} className="text-muted shrink-0" />}
         <Icon size={14} className={isFolder ? "text-amber-500 shrink-0" : "text-accent shrink-0"} />
         <span className="text-[13px] font-medium text-text-strong truncate">{name}</span>
-        <Badge variant="ok">{items.length}</Badge>
+        <Badge variant="ok">{showSourceTotal ? (source?.item_count ?? items.length) : items.length}</Badge>
         {source?.summary_topic && <span className="text-[11px] text-muted truncate max-w-[300px]">{source.summary_topic}</span>}
         {subtitle && <span className="text-[11px] text-muted truncate ml-auto max-w-[200px]">{subtitle}</span>}
       </button>
@@ -259,7 +270,7 @@ export default function KnowledgePage() {
   const searchRef = useRef<HTMLDivElement>(null)
   const entitySectionRef = useRef<HTMLDivElement>(null)
   const listContainerRef = useRef<HTMLDivElement>(null)
-  const limit = query ? 20 : 500
+  const limit = query ? 20 : MAX_PAGE_SIZE
 
   const { data: itemsData, isLoading: loading } = useQuery({
     queryKey: ['knowledge-items', { page, query, typeFilter, statusFilter, namespaceFilter, limit }],
@@ -272,8 +283,16 @@ export default function KnowledgePage() {
       return knowledgeApi<{ items: KnowledgeItem[]; total: number }>(`/items?${params}`)
     },
   })
-  const items = itemsData?.items ?? []
+  // Memoize so the `?? []` fallback doesn't create a new array reference on
+  // every render — that reference feeds the groupedItems useMemo and the
+  // keyboard-shortcut useEffect below, and an unstable identity would make them
+  // recompute/re-subscribe each render.
+  const items = useMemo(() => itemsData?.items ?? [], [itemsData])
   const total = itemsData?.total ?? 0
+  // Source-group badges show the source's true item_count only when the list is unfiltered.
+  // Under a search/type/namespace filter the badge falls back to the matched count on the page,
+  // since item_count (from /sources) is the source's unfiltered, all-namespace total.
+  const showSourceTotals = !query && !typeFilter && !namespaceFilter
 
   const { data: stats } = useQuery({
     queryKey: ['knowledge-stats'],
@@ -339,7 +358,7 @@ export default function KnowledgePage() {
         try {
           await knowledgeApi<{ job_id: string }>(`/ingest?namespace=${encodeURIComponent(namespace)}`, { method: 'POST', body: fd })
           jobs[i].status = 'done'
-        } catch (e: any) { jobs[i].status = `error: ${e?.message || 'unknown'}` }
+        } catch (e: unknown) { jobs[i].status = `error: ${e instanceof Error ? e.message : 'unknown'}` }
         setIngestionJobs([...jobs])
         // Refresh sources/items after each file so they appear immediately
         queryClient.invalidateQueries({ queryKey: ['knowledge-sources'] })
@@ -427,8 +446,8 @@ export default function KnowledgePage() {
       </div>
 
       {showHelp && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowHelp(false)}>
-          <div role="dialog" aria-modal="true" aria-labelledby="help-title" className="bg-bg-elevated border border-border rounded-xl p-6 max-w-md w-full mx-4 animate-rise" onClick={e => e.stopPropagation()}>
+        <Clickable className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50" onClick={e => { if (!e || e.target === e.currentTarget) setShowHelp(false) }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="help-title" className="bg-bg-elevated border border-border rounded-xl p-6 max-w-md w-full mx-4 animate-rise">
             <div className="flex items-center justify-between mb-3">
               <h3 id="help-title" className="text-lg font-bold text-text-strong">{ONBOARDING.title}</h3>
               <button aria-label="Close" onClick={() => setShowHelp(false)} className="text-muted hover:text-text bg-transparent border-none cursor-pointer"><X size={18} /></button>
@@ -447,7 +466,7 @@ export default function KnowledgePage() {
               </div>
             </div>
           </div>
-        </div>
+        </Clickable>
       )}
 
       {/* Tabs */}
@@ -514,6 +533,7 @@ export default function KnowledgePage() {
                       key={sourceId}
                       source={sourcesMap.get(sourceId)}
                       items={groupItems}
+                      showSourceTotal={showSourceTotals}
                       onItemClick={(id) => setSelectedId(id)}
                       selectedItems={selectedItems}
                       onSelect={(id, checked) => {

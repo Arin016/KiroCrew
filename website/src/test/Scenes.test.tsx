@@ -24,7 +24,7 @@ function createMockCtx(): CanvasRenderingContext2D {
     imageSmoothingEnabled: false,
     canvas: { width: 800, height: 600 },
   }
-  return new Proxy(overrides as any, {
+  return new Proxy(overrides, {
     get(target, prop) {
       if (prop in target) return target[prop as string]
       // Return a no-op fn for any method, 0/'' for unknown props
@@ -35,7 +35,7 @@ function createMockCtx(): CanvasRenderingContext2D {
       target[prop as string] = value
       return true
     },
-  }) as CanvasRenderingContext2D
+  }) as unknown as CanvasRenderingContext2D
 }
 
 const mockAgents: AgentSource[] = [

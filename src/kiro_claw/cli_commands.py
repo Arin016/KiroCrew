@@ -21,6 +21,7 @@ from pathlib import Path
 from kiro_claw.aim_agents import (
     install_cc_plugin,
     installed_kiro_packages_missing_from_cc,
+    scan_directory,
 )
 from kiro_claw.apps.bridges import (
     deregister_app,
@@ -55,6 +56,7 @@ from kiro_claw.learn import Lesson, LessonStore
 from kiro_claw.security import (
     BUILTIN_DENY_PATTERNS,
     is_sensitive_path,
+    redact,
     redact_credentials,
     redact_exfiltration_urls,
     scan_history,
@@ -448,6 +450,28 @@ def _cleanup_app_crons_from_scheduler(app_name: str) -> int:
     if removed:
         print(f"  removed {removed} cron job(s) from scheduler")
     return removed
+
+
+def _handle_scan(args: argparse.Namespace) -> None:
+    """Scan directories for project agents (.kiro/agents/)."""
+    total: list[str] = []
+    for path in args.paths:
+        agents = scan_directory(path)
+        for a in agents:
+            total.append(f"  {a.name} ({a.project_path})")
+    sel().log_api_access(
+        caller="cli",
+        operation="scan_directory",
+        outcome="ok",
+        source="cli",
+        resources=", ".join(args.paths),
+    )
+    if total:
+        print(f"Discovered {len(total)} project agent(s):")
+        for line in total:
+            print(line)
+    else:
+        print("No project agents found.")
 
 
 def _handle_app(args: argparse.Namespace) -> None:
@@ -847,7 +871,7 @@ def _cron_preview(args: argparse.Namespace) -> None:
         def call_tool(self, server: str, tool: str, tool_args: dict) -> str:
             # Redact credentials/exfiltration URLs (same as production ScriptContext.call_tool)
             args_str = json.dumps(tool_args)
-            args_str = redact_exfiltration_urls(redact_credentials(args_str)[0])[0]
+            args_str = redact(args_str)
             safe_args = json.loads(args_str)
             # Per-call spawn + close (same lifecycle as production ScriptContext.call_tool)
             client = McpToolClient(server)

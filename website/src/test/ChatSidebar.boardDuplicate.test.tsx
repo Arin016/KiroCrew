@@ -19,6 +19,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { createTestStore } from './helpers'
 import { ThemeProvider } from '../hooks/useTheme'
 import type { ChatTag, TagColumn, ChatFolder } from '../types'
+import type { RootState } from '../store'
 
 // Render motion elements as plain DOM, surfacing layoutId as data-layout-id so
 // the test can assert id uniqueness. Strips framer-only props to avoid React
@@ -31,21 +32,22 @@ vi.mock('framer-motion', async () => {
     'drag', 'dragConstraints', 'dragElastic', 'onAnimationComplete',
   ])
   const make = (tag: string) =>
-    React.forwardRef((props: any, ref: any) => {
-      const clean: any = {}
-      for (const k of Object.keys(props)) {
-        if (k === 'children') continue
-        if (k === 'layoutId') { clean['data-layout-id'] = props[k]; continue }
-        if (FRAMER_PROPS.has(k)) continue
-        clean[k] = props[k]
-      }
-      return React.createElement(tag, { ...clean, ref }, props.children)
-    })
+    React.forwardRef<HTMLElement, Record<string, unknown> & { children?: React.ReactNode }>(
+      (props, ref) => {
+        const clean: Record<string, unknown> = {}
+        for (const k of Object.keys(props)) {
+          if (k === 'children') continue
+          if (k === 'layoutId') { clean['data-layout-id'] = props[k]; continue }
+          if (FRAMER_PROPS.has(k)) continue
+          clean[k] = props[k]
+        }
+        return React.createElement(tag, { ...clean, ref }, props.children)
+      })
   const motion = new Proxy({}, { get: (_t, tag: string) => make(tag) })
   return {
     motion,
-    AnimatePresence: ({ children }: any) => React.createElement(React.Fragment, null, children),
-    LayoutGroup: ({ children }: any) => React.createElement(React.Fragment, null, children),
+    AnimatePresence: ({ children }: { children?: React.ReactNode }) => React.createElement(React.Fragment, null, children),
+    LayoutGroup: ({ children }: { children?: React.ReactNode }) => React.createElement(React.Fragment, null, children),
   }
 })
 
@@ -108,8 +110,8 @@ function renderSidebar(activeSlot: string | null = null, opts: { foldered?: bool
       channelTrusted: false, refreshTrigger: 0, unreadSlots: [], updateProgress: null,
       subagentRunning: {}, subagentDetails: {}, subagentText: {},
       sessionDefaultColor: null, sessionColorsMode: 'tint', sessionColorsPalette: 'horizon', sessionColorsIntensity: 'clear',
-    } as any,
-    chat: { activeSlot } as any,
+    } as RootState['dashboard'],
+    chat: { activeSlot } as RootState['chat'],
   })
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   // Seed board config directly so no api round-trip is needed.

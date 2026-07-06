@@ -42,6 +42,8 @@ describe('CollapsibleMessage', () => {
   it('stops click propagation on pre so row handler does not fire', () => {
     let bubbled = false
     const { container } = render(
+      // Test-only wrapper that records click bubbling; not a real UI control.
+      // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
       <div onClick={() => { bubbled = true }}>
         <CollapsibleMessage message="hello" />
       </div>

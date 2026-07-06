@@ -79,6 +79,25 @@ def test_save_load_roundtrip_secretary_retention(cfg_file):
     assert loaded.secretary.channel_retention_days == 90
 
 
+def test_save_load_roundtrip_secretary_auto_dismiss(cfg_file):
+    """secretary.auto_dismiss_on_reply must survive a save/LOAD cycle.
+
+    Opt-in default is False; flipping it on must persist to config.json AND
+    read back through the SecretaryConfig loader constructor (same drop-on-read
+    class of bug as the retention fields).
+    """
+    cfg = KiroClawConfig()
+    assert cfg.secretary.auto_dismiss_on_reply is False  # opt-in default
+    cfg.secretary.auto_dismiss_on_reply = True
+    cfg.save()
+
+    raw = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert raw["secretary"]["auto_dismiss_on_reply"] is True
+
+    loaded = KiroClawConfig.load()
+    assert loaded.secretary.auto_dismiss_on_reply is True
+
+
 def test_save_load_roundtrip_taskrunner(cfg_file):
     """TaskRunner config must survive a save/load cycle."""
     cfg = KiroClawConfig()

@@ -8,6 +8,16 @@ import type { SubagentActivity } from '../../types'
 
 const EMPTY_SUBAGENTS: Record<string, SubagentActivity> = {}
 
+/** Minimal shape of the `/api/spawn` list response consumed for reconciliation. */
+interface SpawnListAgent {
+  id: string
+  done?: boolean
+  parent?: string
+}
+interface SpawnListResponse {
+  agents?: SpawnListAgent[]
+}
+
 /** Compact subagent activity indicator above the chat input. */
 const SubagentProgressBar = memo(function SubagentProgressBar({ slot }: { slot: string | null }) {
   // Use chatSlice.subagents — populated by subagent_spawn/tool/done WS events
@@ -27,9 +37,9 @@ const SubagentProgressBar = memo(function SubagentProgressBar({ slot }: { slot: 
     let cancelled = false
     const t = setInterval(() => setTick(n => 1 - n), 1000)
     const reconcile = setInterval(() => {
-      api.spawnList().then((d: any) => {
+      api.spawnList().then((d: SpawnListResponse) => {
         if (cancelled) return
-        const backendIds = new Set((d.agents || []).filter((a: any) => !a.done && a.parent === `dashboard:${slot}`).map((a: any) => a.id))
+        const backendIds = new Set((d.agents || []).filter((a) => !a.done && a.parent === `dashboard:${slot}`).map((a) => a.id))
         activeListRef.current.forEach(a => {
           if (!backendIds.has(a.id)) dispatch(sseSubagentDone({ slot, id: a.id, elapsed: Math.round((Date.now() - a.startedAt) / 1000), error: 'reconciliation: agent no longer tracked by backend' }))
         })

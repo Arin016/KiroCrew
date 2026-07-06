@@ -35,10 +35,17 @@ function TaskGroup({ icon, label, items, onTaskClick, color, opacity, showError,
     <div style={{ marginTop: 12, background: bg, borderRadius: 8, padding: 12, opacity: opacity ?? 1, border }}>
       <div style={{ fontSize: 12, color: color ? `rgb(${color})` : 'var(--text-muted, #888)', marginBottom: 8, fontWeight: 600 }}>{icon} {label} ({items.length})</div>
       {items.map(t => (
-        <div key={t.index} onClick={() => onTaskClick?.(t.index)} style={{
-          ...CARD_STYLE,
-          ...(t.index === selectedIndex ? { boxShadow: '0 0 0 2px var(--accent, #6366f1)' } : {}),
-        }}>
+        <div
+          key={t.index}
+          role="button"
+          tabIndex={0}
+          onClick={() => onTaskClick?.(t.index)}
+          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onTaskClick?.(t.index) } }}
+          style={{
+            ...CARD_STYLE,
+            ...(t.index === selectedIndex ? { boxShadow: '0 0 0 2px var(--accent, #6366f1)' } : {}),
+          }}
+        >
           <span>{icon}</span>
           <span style={{ flex: 1, fontSize: 13, opacity: opacity ?? 1 }}>Task {t.index}: {t.title}</span>
           {pendingEditIndexes?.has(t.index) && <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#f59e32', flexShrink: 0 }} />}
@@ -63,10 +70,17 @@ export default function PhasedView({ tasks, onTaskClick, selectedIndex, pendingE
               {items.map(t => {
                 const icon = t.task_type === 'fix' ? <Wrench className="lucide-inline" /> : t.task_type === 'checkpoint' ? <Shield className="lucide-inline" /> : statusIcon[t.status] ?? <Hourglass className="lucide-inline" />;
                 return (
-                  <div key={t.index} onClick={() => onTaskClick?.(t.index)} style={{
-                    ...CARD_STYLE,
-                    ...(t.index === selectedIndex ? { boxShadow: '0 0 0 2px var(--accent, #6366f1)' } : {}),
-                  }}>
+                  <div
+                    key={t.index}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => onTaskClick?.(t.index)}
+                    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onTaskClick?.(t.index) } }}
+                    style={{
+                      ...CARD_STYLE,
+                      ...(t.index === selectedIndex ? { boxShadow: '0 0 0 2px var(--accent, #6366f1)' } : {}),
+                    }}
+                  >
                     <span>{icon}</span>
                     <span style={{ flex: 1, fontSize: 13 }}>Task {t.index}: {t.title}</span>
                     {pendingEditIndexes?.has(t.index) && <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#f59e32', flexShrink: 0 }} />}

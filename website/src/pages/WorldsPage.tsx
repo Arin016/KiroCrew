@@ -1,3 +1,4 @@
+import { safeSetItem } from '../utils/safeStorage'
 import { useState, useEffect } from 'react'
 import { Sparkles, PictureInPicture2 } from 'lucide-react'
 import { useAgentSync } from '../hooks/useAgentSync'
@@ -16,7 +17,7 @@ export default function WorldsPage() {
   const activeCount = agents.filter(a => a.running).length
 
   useEffect(() => {
-    localStorage.setItem(SCENE_STORAGE_KEY, scene)
+    safeSetItem(SCENE_STORAGE_KEY, scene)
   }, [scene])
 
   const changeScene = (key: SceneKey) => { setScene(key); broadcastScene(key) }
@@ -36,7 +37,7 @@ export default function WorldsPage() {
           position: 'relative',
           zIndex: 10,
         }}
-        {...(collapsed ? { inert: true as any } : {})}
+        {...(collapsed ? { inert: '' } : {})}
       >
         <div style={{ overflow: 'hidden' }}>
         <div className="px-5 pt-4 pb-2">

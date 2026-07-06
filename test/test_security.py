@@ -64,6 +64,84 @@ class TestRedactCredentials:
         result, _ = redact_credentials(text)
         assert "xoxb-" not in result
 
+    # ── Third-party developer credentials (pentest issue 2) ──
+
+    # NOTE: each fixture below is written as two adjacent string literals that
+    # Python concatenates at parse time, so the runtime secret value is exactly
+    # the intended token (the redaction test is unchanged). The split keeps any
+    # single source literal from being a complete provider token, so GitHub
+    # push-protection / secret scanners don't flag these synthetic fixtures.
+    @pytest.mark.parametrize(
+        "secret",
+        [
+            "ghp_" "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef12",  # GitHub classic PAT
+            "gho_" "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef1234",  # GitHub OAuth
+            "github_pat_" "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij1234567890ABCDEFGHIJ",  # fine-grained
+            "glpat-" "xxxx1234xxxx5678xxxx",  # GitLab PAT
+            "sk_live_" "51HG7aBcDeFgHiJkLmNoPqRsTuVwXyZ",  # Stripe live
+            "sk_test_" "51HG7aBcDeFgHiJkLmNoPqRsTuVwXyZ",  # Stripe test
+            "rk_live_" "51HG7aBcDeFgHiJkLmNoPqRsTuVwXyZ",  # Stripe restricted
+            "SG." "abcdefghijklmnop.qrstuvwxyz1234567890ABCDEFGHIJKLMNOPQR",  # SendGrid
+            "sk-proj-" "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234",  # OpenAI
+            "sk-ant-api03-" "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP",  # Anthropic
+            "npm_" "abcdefghijklmnopqrstuvwxyz123456",  # npm
+            "pypi-" "AgEIcHlwaS5vcmcCJGI2YzRlYjYwLWExYmUtNDgxZi04",  # PyPI
+            "dop_v1_" "abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopqrst",  # DigitalOcean
+            "GOCSPX-" "abcdefghijklmnopqrstuvwx",  # Google OAuth
+        ],
+    )
+    def test_redacts_third_party_credentials(self, secret: str) -> None:
+        text = f"KEY={secret}"
+        result, warnings = redact_credentials(text)
+        assert secret not in result
+        assert "[REDACTED: credential]" in result
+        assert len(warnings) == 1
+
+    def test_redacts_db_uri_with_embedded_password(self) -> None:
+        text = "DATABASE_URL=postgres://admin:SuperSecret123@db.example.com:5432/prod"
+        result, _ = redact_credentials(text)
+        assert "SuperSecret123" not in result
+        assert "admin" not in result
+        # host after @ may remain — only the credential prefix is redacted
+        assert "[REDACTED: credential]" in result
+
+    @pytest.mark.parametrize(
+        "mongo",
+        [
+            "mongodb://user:p%40ss@cluster0.example.com",
+            "mongodb+srv://user:pw@cluster0.example.com",
+            "mysql://root:toor@localhost:3306/db",
+            "redis://default:secret@redis.example.com:6379",
+        ],
+    )
+    def test_redacts_various_db_uris(self, mongo: str) -> None:
+        result, _ = redact_credentials(mongo)
+        assert "[REDACTED: credential]" in result
+
+    def test_no_false_positive_on_benign_strings(self) -> None:
+        """Non-credential strings that superficially resemble prefixes stay intact."""
+        for benign in [
+            "npm_config_cache=/home/u/.npm",  # npm_ env var, too short + underscores
+            "git sha 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",  # 40-hex git SHA
+            "postgresql://localhost:5432/db",  # no user:pass@
+            "SG.short.x",  # segments too short
+            "the ghp_ prefix on its own",  # no token body
+        ]:
+            result, warnings = redact_credentials(benign)
+            assert result == benign, f"false positive on {benign!r}"
+            assert warnings == []
+
+    def test_bare_hex_not_redacted_by_design(self) -> None:
+        """A bare 32-hex token (e.g. Twilio) is intentionally NOT redacted.
+
+        A generic 32-hex string collides with MD5 hashes, git object ids, and
+        dash-less UUIDs, so redacting it would be high false-positive. Matches
+        the pentest recommendation, which omitted Twilio from the pattern set.
+        """
+        text = "TWILIO_AUTH=a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+        result, _ = redact_credentials(text)
+        assert result == text
+
     def test_preserves_normal_text(self) -> None:
         text = "The deployment succeeded. 42 pods running."
         result, warnings = redact_credentials(text)
@@ -1010,6 +1088,60 @@ class TestIsSensitivePath:
     def test_unrelated_dotfile(self) -> None:
         assert is_sensitive_path("~/.bashrc") is False
 
+    # ── Symlink bypass (pentest AWS-345 / AWS-62) ──
+
+    def test_absolute_symlink_to_aws_credentials(self, tmp_path, monkeypatch) -> None:
+        """A symlink whose target resolves into ~/.aws must be caught."""
+        home = tmp_path / "home"
+        (home / ".aws").mkdir(parents=True)
+        cred = home / ".aws" / "credentials"
+        cred.write_text("[default]\n")
+        monkeypatch.setenv("HOME", str(home))
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        link = ws / "cfg.ini"
+        link.symlink_to(cred)  # absolute target
+        assert is_sensitive_path(str(link)) is True
+
+    def test_relative_symlink_to_aws_credentials(self, tmp_path, monkeypatch) -> None:
+        """A relative-traversal symlink target must resolve and be caught."""
+        home = tmp_path / "home"
+        (home / ".aws").mkdir(parents=True)
+        cred = home / ".aws" / "credentials"
+        cred.write_text("[default]\n")
+        monkeypatch.setenv("HOME", str(home))
+        ws = tmp_path / "workspace" / "sub"
+        ws.mkdir(parents=True)
+        link = ws / "alt.txt"
+        import os as _os
+
+        link.symlink_to(_os.path.relpath(str(cred), start=str(ws)))
+        assert is_sensitive_path(str(link)) is True
+
+    def test_base_dir_anchors_relative_path(self, tmp_path, monkeypatch) -> None:
+        """A relative input is anchored against base_dir, not the process CWD."""
+        home = tmp_path / "home"
+        (home / ".aws").mkdir(parents=True)
+        cred = home / ".aws" / "credentials"
+        cred.write_text("[default]\n")
+        monkeypatch.setenv("HOME", str(home))
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        (ws / "cfg.ini").symlink_to(cred)
+        # Relative path only resolves to the symlink when anchored at ws.
+        assert is_sensitive_path("cfg.ini", base_dir=str(ws)) is True
+        assert is_sensitive_path("Documents/notes.md", base_dir=str(ws)) is False
+
+    def test_lexical_fallback_when_unresolvable(self, monkeypatch, tmp_path) -> None:
+        """A path that textually names ~/.aws is caught even if it does not exist."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        assert is_sensitive_path("~/.aws/does-not-exist-yet") is True
+
+    def test_empty_path(self) -> None:
+        assert is_sensitive_path("") is False
+
 
 class TestIsSensitiveBashCommand:
     """Tests for is_sensitive_bash_command()."""
@@ -1024,6 +1156,23 @@ class TestIsSensitiveBashCommand:
 
     def test_safe_command(self) -> None:
         assert is_sensitive_bash_command("cat ~/readme.md") is None
+
+    # ── Symlink-staging (pentest recommendation item 3) ──
+
+    def test_ln_home_anchored_sensitive_blocked(self) -> None:
+        assert is_sensitive_bash_command("ln -sf ~/.aws/credentials ws/cfg.ini") is not None
+        assert is_sensitive_bash_command("ln -s /Users/x/.aws/credentials cfg") is not None
+
+    def test_ln_relative_traversal_to_sensitive_blocked(self) -> None:
+        # The relative-traversal form has no home anchor — the dedicated
+        # symlink-staging guard must catch it.
+        assert is_sensitive_bash_command("ln -sf ../../../.aws/credentials cfg.ini") is not None
+        assert is_sensitive_bash_command("ln -s ../.ssh/id_rsa key") is not None
+        assert is_sensitive_bash_command("cp -s ../../.gnupg/secring.gpg g") is not None
+
+    def test_ln_benign_allowed(self) -> None:
+        assert is_sensitive_bash_command("ln -sf ./dist/app ./app") is None
+        assert is_sensitive_bash_command("ln -s ../src/main.py main.py") is None
 
     def test_base64_gnupg(self) -> None:
         result = is_sensitive_bash_command("base64 ~/.gnupg/secring.gpg")
@@ -1154,3 +1303,76 @@ class TestScanHistory:
         history_file.write_text("\n".join(entries))
         findings = scan_history(tmp_path, last_n=5)
         assert len(findings) == 5
+
+
+class TestStreamRedactor:
+    """Tests for StreamRedactor (cross-chunk streaming redaction, issue 3)."""
+
+    @staticmethod
+    def _run(chunks):
+        from kiro_claw.security import StreamRedactor
+
+        r = StreamRedactor()
+        emits = [r.feed(c) for c in chunks]
+        emits.append(r.flush())
+        return emits
+
+    def test_credential_split_across_chunks(self) -> None:
+        emits = self._run(["The access key is AKIA", "IOSFODNN7", "EXAMPLE"])
+        # No single emit leaks a raw fragment
+        for e in emits:
+            assert "AKIAIOSFODNN7EXAMPLE" not in e
+            assert not ("AKIA" in e and "REDACTED" not in e)
+        joined = "".join(emits)
+        assert joined == "The access key is [REDACTED: credential]"
+
+    def test_char_by_char_stream(self) -> None:
+        from kiro_claw.security import StreamRedactor
+
+        r = StreamRedactor()
+        out = "".join(r.feed(c) for c in "x AKIAIOSFODNN7EXAMPLE y") + r.flush()
+        assert "AKIAIOSFODNN7EXAMPLE" not in out
+        assert "[REDACTED: credential]" in out
+
+    def test_no_data_loss_benign(self) -> None:
+        joined = "".join(self._run(["Hello ", "world, ", "this is ", "fine."]))
+        assert joined == "Hello world, this is fine."
+
+    def test_single_chunk_credential(self) -> None:
+        joined = "".join(self._run(["key=AKIAIOSFODNN7EXAMPLE done"]))
+        assert "AKIAIOSFODNN7EXAMPLE" not in joined
+        assert "REDACTED" in joined
+
+    def test_github_token_split(self) -> None:
+        joined = "".join(
+            self._run(["use ghp_ABCDEFGHIJ", "KLMNOPQRSTUVWXYZ", "abcdef1234567890"])
+        )
+        assert "ghp_" "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef" not in joined
+        assert "REDACTED" in joined
+
+    def test_reset_discards_buffer(self) -> None:
+        from kiro_claw.security import StreamRedactor
+
+        r = StreamRedactor()
+        assert r.feed("AKIA") == ""  # held
+        r.reset()
+        assert r.flush() == ""  # nothing left after reset
+
+    def test_flush_empty(self) -> None:
+        from kiro_claw.security import StreamRedactor
+
+        assert StreamRedactor().flush() == ""
+
+    def test_long_unbroken_run_is_capped_no_data_loss(self) -> None:
+        """A pathologically long unbroken credential-class run does not grow the
+        held buffer without bound: the excess beyond the cap is committed, and
+        no content is lost across feed+flush."""
+        from kiro_claw.security import _STREAM_HOLDBACK_MAX, StreamRedactor
+
+        r = StreamRedactor()
+        blob = "a" * (_STREAM_HOLDBACK_MAX + 300)  # no terminator, all cred-class
+        emitted = r.feed(blob)
+        # Some of the run was committed (not held forever) — held tail is capped.
+        assert emitted, "cap did not release any of the oversized run"
+        emitted += r.flush()
+        assert emitted == blob, "content lost/altered across cap+flush"

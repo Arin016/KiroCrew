@@ -65,7 +65,7 @@ Planning rules:
 1. Start with `📋 Plan for: "<description>"`
 2. Use `Stage N: <Title>` with sequential numbering (1, 2, 3...) — each stage MUST start on its own line
 3. Each stage has indented `- <task>` bullet points on separate lines below it
-4. End with `[OPTION: Go | Go All | Cancel]`
+4. End with `[OPTION: Go | Go All | Cancel]` as the very last line — it must appear **exactly once** with **nothing after it**. Put any clarifying questions, notes, or context BEFORE this line, never after it.
 Never combine multiple stages on a single line. Each `Stage N:` is a block with its title and bullets.
 If the format cannot be corrected, the plan will be treated as a simple task and executed directly without stage gates.
 

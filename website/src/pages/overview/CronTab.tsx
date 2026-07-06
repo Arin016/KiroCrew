@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react'
+import Clickable from '../../components/Clickable'
 import { useQuery } from '@tanstack/react-query'
 import { AlertTriangle, Pencil, Hourglass, Play, MessageSquare, VolumeX } from 'lucide-react'
 import { useAppSelector } from '../../store'
@@ -32,6 +33,7 @@ export default function CronTab({ refreshTrigger }: { refreshTrigger: number }) 
   const [tz, setTz] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone)
   const [error, setError] = useState('')
   const [agent, setAgent] = useState('')
+  const [projectPath, setProjectPath] = useState('')
   const [channel, setChannel] = useState('')
   const [approvalMode, setApprovalMode] = useState('')
   const [silent, setSilent] = useState(false)
@@ -43,6 +45,7 @@ export default function CronTab({ refreshTrigger }: { refreshTrigger: number }) 
   const [editSchedule, setEditSchedule] = useState('')
   const [editTz, setEditTz] = useState('')
   const [editAgent, setEditAgent] = useState('')
+  const [editProjectPath, setEditProjectPath] = useState('')
   const [editChannel, setEditChannel] = useState('')
   const [editError, setEditError] = useState('')
   const { running, actionError, runNow, openInChat } = useCronActions(load)
@@ -61,7 +64,7 @@ export default function CronTab({ refreshTrigger }: { refreshTrigger: number }) 
   const toggleDay = (d: number) => setDays(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d].sort())
   const openEdit = (j: CronJob) => {
     setEditing(j); setEditName(j.name); setEditMsg(j.message)
-    setEditSchedule(j.schedule || ''); setEditTz(j.timezone || 'UTC'); setEditAgent(j.agent || ''); setEditChannel(j.channel || ''); setEditError('')
+    setEditSchedule(j.schedule || ''); setEditTz(j.timezone || 'UTC'); setEditAgent(j.agent || ''); setEditProjectPath(j.project_path || ''); setEditChannel(j.channel || ''); setEditError('')
   }
   const saveEdit = async () => {
     if (!editing) return
@@ -70,6 +73,7 @@ export default function CronTab({ refreshTrigger }: { refreshTrigger: number }) 
     if (editName !== editing.name) body.name = editName
     if (editMsg !== editing.message) body.message = editMsg
     if (editAgent !== (editing.agent || '')) body.agent_id = editAgent
+    if (editProjectPath !== (editing.project_path || '')) body.project_path = editProjectPath
     if (editChannel !== (editing.channel || '')) body.channel = editChannel
     if (editSchedule !== (editing.schedule || '')) {
       const parts = editSchedule.trim().split(/\s+/)
@@ -90,6 +94,7 @@ export default function CronTab({ refreshTrigger }: { refreshTrigger: number }) 
     setError('')
     if (!name || !msg) { setError('Name and message are required'); return }
     const body: Record<string, string | number | boolean> = { name, message: msg, agent }
+    if (projectPath) body.project_path = projectPath
     if (channel) body.channel = channel
     if (approvalMode) body.approval_mode = approvalMode
     if (silent) body.silent = true
@@ -105,7 +110,7 @@ export default function CronTab({ refreshTrigger }: { refreshTrigger: number }) 
     }
     const res = await api.createCron(body)
     if (res.error) { setError(res.error); return }
-    setName(''); setMsg(''); setDays([]); setIntervalVal(1); setError(''); setChannel(''); setApprovalMode(''); setSilent(false); load()
+    setName(''); setMsg(''); setDays([]); setIntervalVal(1); setError(''); setChannel(''); setApprovalMode(''); setSilent(false); setProjectPath(''); load()
   }
   return (<>
     {noCrons && <div className="bg-yellow-900/30 border border-yellow-700/50 text-yellow-200 px-4 py-2 rounded-lg mb-3 text-sm"><AlertTriangle className="lucide-inline" /> Cron execution disabled (<code className="text-yellow-300">--no-crons</code>) — jobs are managed by another instance</div>}
@@ -115,11 +120,11 @@ export default function CronTab({ refreshTrigger }: { refreshTrigger: number }) 
         <div className="flex gap-2 items-center flex-wrap">
           <Input placeholder="Job name" value={name} onChange={e => setName(e.target.value)} />
           <Input placeholder="Message / task" style={{ flex: 2 }} value={msg} onChange={e => setMsg(e.target.value)} />
-          <AgentSelector agents={agents} defaultAgent={defaultAgent} value={agent} onChange={setAgent} />
+          <AgentSelector agents={agents} defaultAgent={defaultAgent} value={agent} activeProjectPath={projectPath} onChange={(name, pp) => { setAgent(name); setProjectPath(pp || '') }} />
         </div>
         <div className="flex gap-2 items-center flex-wrap">
           <Input placeholder="Channel ID (optional)" style={{ flex: '0 0 170px' }} value={channel} onChange={e => setChannel(e.target.value)} />
-          <label className="flex items-center gap-1.5 text-muted text-[13px] cursor-pointer"><input type="checkbox" checked={silent} onChange={e => setSilent(e.target.checked)} /> Silent</label>
+          <label htmlFor="cron-silent" className="flex items-center gap-1.5 text-muted text-[13px] cursor-pointer"><input id="cron-silent" type="checkbox" aria-label="Silent" checked={silent} onChange={e => setSilent(e.target.checked)} /> Silent</label>
           <select className={CRON_SEL} value={approvalMode} onChange={e => setApprovalMode(e.target.value)}>
             <option value="">Approval: default</option><option value="auto">auto</option>
           </select>
@@ -166,24 +171,34 @@ export default function CronTab({ refreshTrigger }: { refreshTrigger: number }) 
             </td></tr>
         ))}</tbody></table></div></Card>
     {editing && (
-      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setEditing(null)}>
-        <div className="bg-bg-elevated rounded-xl border border-border p-6 w-[500px] max-w-[90vw] shadow-xl" onClick={e => e.stopPropagation()}>
+      <Clickable className="fixed inset-0 bg-black/50 flex items-center justify-center z-[100]" onClick={() => setEditing(null)}>
+        {/* Handlers only stop propagation so a click/keypress inside the dialog
+            doesn't bubble to the backdrop's close handler — the dialog itself is
+            not an interactive control. */}
+        {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+        <div role="dialog" aria-modal="true" aria-label="Edit cron job" className="bg-bg-elevated rounded-xl border border-border p-6 w-[500px] max-w-[90vw] shadow-xl" onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
           <h3 className="text-lg font-semibold text-text mb-4">Edit Job: {editing.id}</h3>
+          {/* label-has-for is deprecated and requires physical nesting; the custom
+              <Input> forwardRef can't be seen as a nested control by the linter, so
+              we pair each caption <label htmlFor> with an id-matched control for a
+              real programmatic association (label-has-associated-control passes). */}
+          {/* eslint-disable jsx-a11y/label-has-for */}
           <div className="flex flex-col gap-3">
-            <label className="text-sm text-muted">Name</label>
-            <Input value={editName} onChange={e => setEditName(e.target.value)} />
-            <label className="text-sm text-muted">Message</label>
-            <textarea className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-text text-sm font-body outline-none resize-y min-h-[80px] focus-ring" value={editMsg} onChange={e => setEditMsg(e.target.value)} />
-            <label className="text-sm text-muted">Schedule (cron expr or seconds)</label>
-            <Input value={editSchedule} onChange={e => setEditSchedule(e.target.value)} placeholder="0 9 * * 1-5 or 3600" />
-            <label className="text-sm text-muted">Timezone</label>
-            <select className={CRON_SEL} value={editTz} onChange={e => setEditTz(e.target.value)}>
+            <label htmlFor="cron-edit-name" className="text-sm text-muted">Name</label>
+            <Input id="cron-edit-name" aria-label="Name" value={editName} onChange={e => setEditName(e.target.value)} />
+            <label htmlFor="cron-edit-message" className="text-sm text-muted">Message</label>
+            <textarea id="cron-edit-message" aria-label="Message" className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-text text-sm font-body outline-none resize-y min-h-[80px] focus-ring" value={editMsg} onChange={e => setEditMsg(e.target.value)} />
+            <label htmlFor="cron-edit-schedule" className="text-sm text-muted">Schedule (cron expr or seconds)</label>
+            <Input id="cron-edit-schedule" aria-label="Schedule" value={editSchedule} onChange={e => setEditSchedule(e.target.value)} placeholder="0 9 * * 1-5 or 3600" />
+            <label htmlFor="cron-edit-tz" className="text-sm text-muted">Timezone</label>
+            <select id="cron-edit-tz" aria-label="Timezone" className={CRON_SEL} value={editTz} onChange={e => setEditTz(e.target.value)}>
               {(editing?.timezone && !TIMEZONES.includes(editing.timezone) ? [editing.timezone, ...TIMEZONES] : TIMEZONES).map(z => <option key={z} value={z}>{z.replace(/_/g, ' ')}</option>)}
             </select>
-            <label className="text-sm text-muted">Agent</label>
-            <AgentSelector agents={agents} defaultAgent={defaultAgent} value={editAgent} onChange={setEditAgent} />
-            <label className="text-sm text-muted">Channel ID</label>
-            <Input value={editChannel} onChange={e => setEditChannel(e.target.value)} placeholder="Optional" />
+            <span className="text-sm text-muted">Agent</span>
+            <AgentSelector agents={agents} defaultAgent={defaultAgent} value={editAgent} activeProjectPath={editProjectPath} onChange={(name, pp) => { setEditAgent(name); setEditProjectPath(pp || '') }} />
+            <label htmlFor="cron-edit-channel" className="text-sm text-muted">Channel ID</label>
+            <Input id="cron-edit-channel" aria-label="Channel ID" value={editChannel} onChange={e => setEditChannel(e.target.value)} placeholder="Optional" />
+            {/* eslint-enable jsx-a11y/label-has-for */}
             {editError && <div className="text-danger text-[13px]">{editError}</div>}
             <div className="flex gap-2 justify-end mt-2">
               <Btn onClick={() => setEditing(null)}>Cancel</Btn>
@@ -191,7 +206,7 @@ export default function CronTab({ refreshTrigger }: { refreshTrigger: number }) 
             </div>
           </div>
         </div>
-      </div>
+      </Clickable>
     )}
   </>)
 }

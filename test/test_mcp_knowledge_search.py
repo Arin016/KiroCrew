@@ -96,11 +96,11 @@ class TestKnowledgeSearchResults:
                 "content": "JWT tokens with 15min expiry.",
                 "score": 0.035,
                 "source": "src-1",
+                "source_type": "upload",
+                "source_name": "design-docs/auth.md",
+                "source_uri": "/uploads/design-docs/auth.md",
             }
         ]
-        mock_store_cls.return_value.db.execute.return_value.fetchone.return_value = {
-            "name": "design-docs/auth.md"
-        }
 
         from kiro_claw.mcp_core import _call_tool_inner
 
@@ -108,6 +108,7 @@ class TestKnowledgeSearchResults:
 
         assert "Auth Design" in result
         assert "design-docs/auth.md" in result
+        assert "[upload]" in result
         assert "JWT tokens" in result
         assert "Knowledge Library" in result
         # No score or relevance metadata exposed
@@ -128,6 +129,110 @@ class TestKnowledgeSearchResults:
 
         _call_tool_inner("local_knowledge_search", {"query": "test"})
         mock_retriever_cls.return_value.search.assert_called_once_with("test", limit=3)
+
+    @patch("kiro_claw.mcp_core.config_dir")
+    @patch("kiro_claw.mcp_core.HybridRetriever")
+    @patch("kiro_claw.mcp_core.KnowledgeStore")
+    @patch("kiro_claw.mcp_core.create_embedder_from_config")
+    def test_citation_with_section_and_uri(
+        self, mock_embedder, mock_store_cls, mock_retriever_cls, mock_config_dir, mock_db_exists
+    ):
+        # A folder result surfaces [source_type] name + section + line range,
+        # and the per-file path as the File locator (not the folder root).
+        mock_config_dir.return_value = mock_db_exists
+        mock_embedder.return_value = None
+        mock_retriever_cls.return_value.search.return_value = [
+            {
+                "title": "Auth Design",
+                "content": "JWT tokens with 15min expiry.",
+                "score": 0.035,
+                "source": "src-1",
+                "source_type": "local_folder",
+                "source_name": "Opportunity Planner",
+                "source_uri": "/home/nrb/projects/op/src/",
+                "section_title": "Token Lifecycle",
+                "chunk_range": "10-25",
+                "file_path": "/home/nrb/projects/op/src/auth.md",
+            }
+        ]
+
+        from kiro_claw.mcp_core import _call_tool_inner
+
+        result = _call_tool_inner("local_knowledge_search", {"query": "auth"})
+
+        assert "[local_folder] Opportunity Planner" in result
+        assert "Token Lifecycle" in result
+        assert "lines 10-25" in result
+        assert "**File:** /home/nrb/projects/op/src/auth.md" in result
+        # A specific file path supersedes the folder-root uri Link.
+        assert "**Link:**" not in result
+
+    @patch("kiro_claw.mcp_core.config_dir")
+    @patch("kiro_claw.mcp_core.HybridRetriever")
+    @patch("kiro_claw.mcp_core.KnowledgeStore")
+    @patch("kiro_claw.mcp_core.create_embedder_from_config")
+    def test_artifact_citation_uses_slug(
+        self, mock_embedder, mock_store_cls, mock_retriever_cls, mock_config_dir, mock_db_exists
+    ):
+        # An artifact result names the artifact and surfaces its slug (for a
+        # /artifacts/<slug> deep link) rather than the aggregate source name.
+        mock_config_dir.return_value = mock_db_exists
+        mock_embedder.return_value = None
+        mock_retriever_cls.return_value.search.return_value = [
+            {
+                "title": "OP Vision",
+                "content": "vision content",
+                "score": 0.05,
+                "source": "art-src",
+                "source_type": "artifact",
+                "source_name": "Artifacts",
+                "source_uri": "artifact://aggregate",
+                "artifact_slug": "op-vision",
+                "artifact_name": "OP Vision Plan",
+            }
+        ]
+
+        from kiro_claw.mcp_core import _call_tool_inner
+
+        result = _call_tool_inner("local_knowledge_search", {"query": "vision"})
+
+        # Artifact name sits in the name slot (before the section), mirroring the
+        # folder citation; the slug is the standalone locator line.
+        assert "[artifact] OP Vision Plan" in result
+        assert "**Artifact:** op-vision" in result
+        assert "(slug:" not in result
+        assert "Artifacts \u2014" not in result
+        assert "artifact://aggregate" not in result
+
+    @patch("kiro_claw.mcp_core.config_dir")
+    @patch("kiro_claw.mcp_core.HybridRetriever")
+    @patch("kiro_claw.mcp_core.KnowledgeStore")
+    @patch("kiro_claw.mcp_core.create_embedder_from_config")
+    def test_internal_uri_survives_redaction(
+        self, mock_embedder, mock_store_cls, mock_retriever_cls, mock_config_dir, mock_db_exists
+    ):
+        # Citations must survive redact_exfiltration_urls/redact_credentials --
+        # ordinary internal links (wiki/quip/folder paths) are not exfil blobs.
+        mock_config_dir.return_value = mock_db_exists
+        mock_embedder.return_value = None
+        mock_retriever_cls.return_value.search.return_value = [
+            {
+                "title": "Plan",
+                "content": "body",
+                "score": 0.05,
+                "source": "s1",
+                "source_type": "quip",
+                "source_name": "OP Vision",
+                "source_uri": "https://quip-amazon.com/AbCdEfGhIjKl",
+            }
+        ]
+
+        from kiro_claw.mcp_core import _call_tool_inner
+
+        result = _call_tool_inner("local_knowledge_search", {"query": "vision"})
+
+        assert "https://quip-amazon.com/AbCdEfGhIjKl" in result
+        assert "[REDACTED_URL]" not in result
 
 
 class TestKnowledgeSearchToolDefinition:

@@ -1,6 +1,6 @@
 # Config Module
 
-Last Updated: 2026-06-12 (agent_model_state.json sidecar: model_managed/cc_model moved out of kiro agent specs so kiro-cli deny_unknown_fields no longer drops KiroClaw agents)
+Last Updated: 2026-06-22 (AgentConfig: added sandbox_allow_no_isolation (SEC-009) field; agent_model_state.json sidecar: model_managed/cc_model moved out of kiro agent specs so kiro-cli deny_unknown_fields no longer drops KiroClaw agents)
 
 ## Overview
 
@@ -160,6 +160,7 @@ class AgentConfig:
     model: str = "auto"            # resolved from agent config
     provider: str = "acp"          # fixed to "acp" (kiro-cli) — the only provider
     sandbox: str = "auto"          # "auto" (namespace on Linux, seatbelt on macOS), "strict", or "off"
+    sandbox_allow_no_isolation: bool = False  # SEC-009: acknowledge running un-isolated when no sandbox backend exists; false = loud SECURITY warning, true = info-level
     enforce_denied_commands: str = "all"  # "all" or "kiroclaw"
     soft_stop_budget_secs: float = 10.0  # seconds to wait for cooperative cancel before hard kill [0.5, 60.0]
     yolo: bool = False             # permanent YOLO mode (skip tool approval); tracked via _yolo_from_config flag
@@ -177,6 +178,13 @@ class TaskRunnerConfig:
 class MemoryConfig:
     history_idle_hours: float = 3.0  # consolidate history after N hours idle
     history_max_days: int = 365      # prune daily history files older than this
+
+@dataclass
+class KnowledgeConfig:
+    # Knowledge Library ingestion toggles. Embedding/retrieval settings live
+    # under MemoryConfig (shared via create_embedder_from_config).
+    auto_ingest_artifacts: bool = True                  # on by default; ingest local artifacts into the KB (aggregate "Artifacts" source)
+    auto_ingest_artifact_kinds: list[str] = ["markdown", "text", "html", "json"]  # reader-extractable kinds (widget/svg excluded)
 
 @dataclass
 class ChannelConfig:
@@ -207,6 +215,7 @@ class KiroClawConfig:
     session: SessionConfig
     taskrunner: TaskRunnerConfig
     memory: MemoryConfig
+    knowledge: KnowledgeConfig
     stt: SttConfig
     secretary: SecretaryConfig
     hooks_data: dict               # raw hooks from config.json
@@ -254,6 +263,10 @@ Returns the effective config for a channel:
   "memory": {
     "history_idle_hours": 3.0,
     "history_max_days": 365
+  },
+  "knowledge": {
+    "auto_ingest_artifacts": true,
+    "auto_ingest_artifact_kinds": ["markdown", "text", "html", "json"]
   },
   "hooks": {},
   "slack": {

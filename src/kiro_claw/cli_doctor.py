@@ -36,6 +36,12 @@ from kiro_claw.transcribe import _find_whisper, ensure_ffmpeg_in_path
 
 _MIN_NODE_VERSION = 16
 
+
+def _os_fix_hint(mac: str, linux: str) -> str:
+    """Return the OS-appropriate Fix hint (brew on macOS, else Linux guidance)."""
+    return mac if _plat.system() == "Darwin" else linux
+
+
 # KiroClaw's agent backend is kiro-cli (the sole public ACP backend). The
 # claude-agent-acp binary below is only the dormant protocol seam an internal
 # companion re-registers (see acp/client.py) — report it, when present, as that
@@ -156,20 +162,29 @@ def _doctor_ollama_install(issues: list[str]) -> None:
     if system == "Darwin":
         brew = shutil.which("brew")
         if brew:
-            result = subprocess.run(
-                [brew, "info", "ollama"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode == 0:
-                print(
-                    "  brew info:   ✅ formula available" " (enable will run: brew install ollama)"
+            try:
+                result = subprocess.run(
+                    [brew, "info", "ollama"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
                 )
+            except subprocess.TimeoutExpired:
+                # Homebrew can exceed the timeout during its periodic
+                # auto-update (a network tap fetch on the first brew call).
+                # Ollama is optional, so degrade to a warning instead of
+                # crashing doctor (mirrors the Linux branch below).
+                print("  brew info:   ⚠️  timed out checking formula")
             else:
-                err = result.stderr.strip()[:200]
-                print(f"  brew info:   ❌ {err}")
-                issues.append("ollama (brew cannot resolve formula)")
+                if result.returncode == 0:
+                    print(
+                        "  brew info:   ✅ formula available"
+                        " (enable will run: brew install ollama)"
+                    )
+                else:
+                    err = result.stderr.strip()[:200]
+                    print(f"  brew info:   ❌ {err}")
+                    issues.append("ollama (brew cannot resolve formula)")
         else:
             print("  brew:        ⚠️  not found" " — enable will try direct download")
         print("               Install: brew install ollama")
@@ -505,7 +520,10 @@ def _doctor(platform_boot_error: "Exception | None" = None) -> None:
         print(f"  whisper:     ✅ {whisper_bin}")
     elif needs_whisper:
         print("  whisper:     ❌ not found")
-        print("               Fix: brew install openai-whisper")
+        print("               Fix: " + _os_fix_hint(
+            "brew install openai-whisper",
+            "pipx install openai-whisper  (or pip install --user openai-whisper)",
+        ))
         issues.append("whisper")
     else:
         print("  whisper:     ⏭  not installed (not needed)")
@@ -516,7 +534,11 @@ def _doctor(platform_boot_error: "Exception | None" = None) -> None:
         print(f"  ffmpeg:      ✅ {ffmpeg_bin}")
     elif needs_ffmpeg:
         print("  ffmpeg:      ❌ not found")
-        print("               Fix: brew install ffmpeg")
+        print("               Fix: " + _os_fix_hint(
+            "brew install ffmpeg",
+            "drop a static ffmpeg build into ~/.local/bin "
+            "(not in AL2023 repos; KiroClaw auto-detects it)",
+        ))
         issues.append("ffmpeg")
     else:
         print("  ffmpeg:      ⏭  not installed (not needed)")

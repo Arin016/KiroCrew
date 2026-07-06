@@ -62,6 +62,52 @@ def _write_cli_overlay(work_dir: Path, model: str, effort: str) -> None:
     cli_json.write_text(json.dumps(existing, indent=2), encoding="utf-8")
 
 
+def _write_tool_search_overlay(work_dir: Path, enabled: bool) -> None:
+    """Write kiro Tool Search settings into the workspace cli.json overlay.
+
+    Path: ``<work_dir>/.kiro/settings/cli.json`` — the SAME per-session overlay
+    used for effort. Workspace settings override the global
+    ``~/.kiro/settings/cli.json`` so this only affects this slot's own kiro-cli
+    session and never mutates the user's global kiro settings.
+
+    Tool Search (https://kiro.dev/docs/cli/mcp/tool-search/) loads MCP tool
+    specs on demand ("search-and-call") instead of sending every spec each
+    turn. When *enabled* we also zero ``minPct``/``minTokens`` so deferral is
+    always active whenever MCP tools are present — KiroClaw sessions always
+    carry several MCP servers (well past kiro's default 50k-token trigger), but
+    zeroing guarantees the search-and-call behavior rather than relying on the
+    spec size crossing a threshold. The flag is written deterministically for
+    BOTH true and false so the KiroClaw toggle stays authoritative regardless
+    of any value in the user's global kiro settings.
+
+    Merge-safe and idempotent — preserves the effort ``chat.modelDefaults`` keys
+    and any other settings already present. kiro cli.json uses flat dotted keys
+    (e.g. ``"chat.modelDefaults"``), so the Tool Search keys are written flat to
+    match.
+    """
+    settings_dir = work_dir / ".kiro" / "settings"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    cli_json = settings_dir / "cli.json"
+    try:
+        existing = json.loads(cli_json.read_text(encoding="utf-8")) if cli_json.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+    existing["toolSearch.enabled"] = bool(enabled)
+    if enabled:
+        # Force always-on deferral regardless of tool-spec size.
+        existing["toolSearch.minPct"] = 0
+        existing["toolSearch.minTokens"] = 0
+    else:
+        # Drop the forced-on thresholds when disabling so we don't leave zeroed
+        # thresholds behind that would silently force-activate Tool Search if a
+        # later build flips the global default on.
+        existing.pop("toolSearch.minPct", None)
+        existing.pop("toolSearch.minTokens", None)
+    cli_json.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+
+
 def _clear_cli_overlay_effort(work_dir: Path, model: str) -> None:
     """Remove the effort entry for *model* from the workspace cli.json overlay.
 
@@ -142,6 +188,7 @@ class AcpProvider(LLMProvider):
         acp_backend: str = "",
         effort_per_model: dict[str, str] | None = None,
         effort_defaults: object = None,
+        tool_search: bool | None = None,
     ) -> None:
         kwargs: dict[str, Any] = {
             "work_dir": work_dir,
@@ -161,6 +208,11 @@ class AcpProvider(LLMProvider):
         # backend applies it live via session/set_config_option (no overlay).
         self._effort_per_model: dict[str, str] = dict(effort_per_model or {})
         self._effort_defaults = effort_defaults
+        # MCP Tool Search toggle (kiro-cli backend only). None = caller did not
+        # specify (e.g. claude_code factory), so leave the overlay untouched.
+        # True/False = write the kiro settings overlay deterministically so the
+        # KiroClaw toggle is authoritative over any global kiro setting.
+        self._tool_search = tool_search
         if not self.is_claude_backend:
             # Recover overlay-persisted levels (server-restart resilience) and
             # write the overlay BEFORE the first spawn so kiro-cli reads it on
@@ -171,6 +223,7 @@ class AcpProvider(LLMProvider):
             except Exception:
                 logger.debug("ACP effort overlay recovery failed", exc_info=True)
             self._apply_effort_overlay()
+            self._apply_tool_search_overlay()
 
     @property
     def client(self) -> AcpClient:
@@ -246,6 +299,25 @@ class AcpProvider(LLMProvider):
             logger.debug("ACP effort overlay applied: model=%s effort=%s", model, level)
         except Exception:
             logger.warning("ACP effort overlay write failed", exc_info=True)
+
+    def _apply_tool_search_overlay(self) -> None:
+        """Write the kiro Tool Search setting into the workspace cli.json overlay.
+
+        No-op for the claude backend (Tool Search is a kiro-cli feature) and
+        when no toggle value was supplied (``self._tool_search is None``).
+        Called before every (re)spawn so resume/restart keeps the same setting.
+        """
+        if self.is_claude_backend or self._tool_search is None:
+            return
+        try:
+            _write_tool_search_overlay(self._client._work_dir, self._tool_search)
+            logger.debug(
+                "ACP MCP Tool Search overlay applied: enabled=%s (%s)",
+                self._tool_search,
+                self._client._work_dir / ".kiro" / "settings" / "cli.json",
+            )
+        except Exception:
+            logger.warning("ACP tool-search overlay write failed", exc_info=True)
 
     async def _set_claude_effort(self, level: str) -> None:
         """Push an effort level to the claude backend, stepping down on reject.
@@ -405,6 +477,7 @@ class AcpProvider(LLMProvider):
         # Re-apply the overlay on every (re)start to cover resume / model swap.
         # (no-op for claude backend — that path applies effort live below.)
         self._apply_effort_overlay()
+        self._apply_tool_search_overlay()
         await self._client.ensure_ready()
         await self._apply_initial_effort()
 
@@ -456,6 +529,7 @@ class AcpProvider(LLMProvider):
             oauth_url=e.oauth_url,
             subagents=e.subagents,
             sub_session_id=e.sub_session_id,
+            is_shell=e.is_shell,
         )
 
     async def stream(self, message: str) -> AsyncIterator[LLMEvent]:

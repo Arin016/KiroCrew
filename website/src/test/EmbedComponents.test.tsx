@@ -10,6 +10,14 @@ import { Provider } from 'react-redux'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createTestStore } from './helpers'
+import type { RootState } from '../store'
+
+// Tests preload intentionally-incomplete slices; reducers fill in the rest.
+type StoreOverrides = { dashboard?: Partial<RootState['dashboard']>; chat?: Partial<RootState['chat']> }
+
+// Plugin bridge global installed on window (mirrors KiroClawNavBridge.tsx).
+type BridgeWindow = { __kiroclawReportSlotTitle?: (slug: string, title: string) => void }
+const bridgeWindow = window as unknown as BridgeWindow
 
 // --- Mocks ---
 const mockNavigate = vi.fn()
@@ -34,11 +42,11 @@ import EmbedSettingsPage from '../pages/EmbedSettingsPage'
 
 let queryClient: QueryClient
 
-function wrap(ui: React.ReactElement, storeOverrides?: any) {
+function wrap(ui: React.ReactElement, storeOverrides?: StoreOverrides) {
   const store = createTestStore({
     dashboard: { slots: [{ key: 'chat-1', title: 'First Chat' }, { key: 'chat-2', title: 'Second Chat' }], unreadSlots: [], ...storeOverrides?.dashboard },
     chat: { activeSlot: 'chat-1', ...storeOverrides?.chat },
-  } as any)
+  } as Partial<RootState>)
   return render(
     <Provider store={store}>
       <QueryClientProvider client={queryClient}>
@@ -246,16 +254,16 @@ describe('KiroClawNavBridge', () => {
   })
 
   it('reports slot titles to plugin bridge function', () => {
-    const reportFn = vi.fn();
-    (window as any).__kiroclawReportSlotTitle = reportFn
+    const reportFn = vi.fn()
+    bridgeWindow.__kiroclawReportSlotTitle = reportFn
     wrap(<KiroClawNavBridge />)
     expect(reportFn).toHaveBeenCalledWith('chat-1', 'First Chat')
     expect(reportFn).toHaveBeenCalledWith('chat-2', 'Second Chat')
-    delete (window as any).__kiroclawReportSlotTitle
+    delete bridgeWindow.__kiroclawReportSlotTitle
   })
 
   it('does not throw if bridge function is missing', () => {
-    delete (window as any).__kiroclawReportSlotTitle
+    delete bridgeWindow.__kiroclawReportSlotTitle
     expect(() => wrap(<KiroClawNavBridge />)).not.toThrow()
   })
 })

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from kiro_claw.cli_commands import _cron
-from kiro_claw.cli_doctor import _doctor
+from kiro_claw.cli_doctor import _doctor, _doctor_ollama_install
 from kiro_claw.cli_server import _update
 
 
@@ -1307,6 +1307,20 @@ class TestIsKiroclawProcess:
         with patch("subprocess.check_output", return_value="/usr/bin/kiroclaw start\n"):
             assert _is_kiroclaw_process(1234) is True
 
+    def test_returns_true_for_module_gateway_form(self):
+        """Regression: the real service launch form
+        ``python -m kiro_claw gateway`` must be recognized. Previously the
+        matcher only accepted the dotted ``kiro_claw.gateway`` form, so
+        ``kiroclaw stop`` no-op'd on service installs (P459471197)."""
+        from kiro_claw.cli_server import _is_kiroclaw_process
+
+        real = (
+            "/Users/x/.toolbox/tools/kiroclaw/3.1.0/bin/../python3.10/bin/"
+            "python3.10 -m kiro_claw gateway\n"
+        )
+        with patch("subprocess.check_output", return_value=real):
+            assert _is_kiroclaw_process(54842) is True
+
     def test_returns_false_for_unrelated(self):
         from kiro_claw.cli_server import _is_kiroclaw_process
 
@@ -1332,6 +1346,75 @@ class TestIsKiroclawProcess:
         with patch("subprocess.check_output", side_effect=FileNotFoundError):
             with pytest.raises(FileNotFoundError):
                 _is_kiroclaw_process(1234)
+
+
+class TestArgsLookLikeKiroclaw:
+    """Rigorous tests for the pure command-line classifier ``_args_look_like_kiroclaw``.
+
+    These exercise the structural parser directly (no ``subprocess`` mock needed),
+    covering every real launch form plus adversarial near-misses that must NOT be
+    matched — a false positive would let ``kiroclaw stop`` SIGTERM an unrelated
+    process bound to the port.
+    """
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            # Module-invocation form (service spawn) — the regression fix.
+            "/Users/x/.toolbox/tools/kiroclaw/3.1.0/bin/../python3.10/bin/python3.10 -m kiro_claw gateway",
+            "python3 -m kiro_claw gateway",
+            "python -m kiro_claw dashboard",
+            "python3.10 -m kiro_claw start",
+            # Subcommand followed by trailing flags.
+            "python -m kiro_claw gateway --no-open --port 7777",
+            # Legacy dotted-submodule form.
+            "python3 -m kiro_claw.gateway",
+            "python3 -m kiro_claw.dashboard",
+            # Console-script wrapper form.
+            "/usr/local/bin/kiroclaw gateway",
+            "/Users/x/.toolbox/bin/kiroclaw start",
+            "kiroclaw dashboard",
+        ],
+    )
+    def test_matches_server_launch_forms(self, args):
+        from kiro_claw.cli_server import _args_look_like_kiroclaw
+
+        assert _args_look_like_kiroclaw(args) is True
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            "",                                       # empty command line
+            "nginx: worker process",                  # unrelated daemon on the port
+            "vim /tmp/kiroclaw-notes.txt",            # editing a file named kiroclaw*
+            "cat /var/log/kiro_claw_gateway.log",     # reading a kiroclaw log file
+            "python -m kiro_claw",                    # bare module, no server subcommand
+            "python -m kiro_claw run /tmp/spec.md",   # task runner — NOT a port-bound server
+            "python -m kiro_claw run gateway",        # "gateway" is a file arg to run, not the subcommand
+            "python -m kiro_claw run start",          # "start" is a file arg to run, not the subcommand
+            "python -m kiro_claw_other gateway",      # different package named kiro_claw_other
+            "/usr/bin/kiroclaw",                      # wrapper with no subcommand
+            "grep -m kiro_claw gateway somefile",     # "-m" is grep's flag (no python interpreter)
+        ],
+    )
+    def test_rejects_non_server_processes(self, args):
+        from kiro_claw.cli_server import _args_look_like_kiroclaw
+
+        assert _args_look_like_kiroclaw(args) is False
+
+    def test_unbalanced_quotes_do_not_raise(self):
+        """A malformed args string (odd quote) must not raise: ``shlex.split``
+        falls back to ``str.split`` and the command is still classified."""
+        from kiro_claw.cli_server import _args_look_like_kiroclaw
+
+        assert _args_look_like_kiroclaw('python -m kiro_claw gateway "') is True
+
+    def test_subcommand_match_is_exact_case(self):
+        """Subcommands are matched exactly (lower-case), mirroring how the CLI
+        dispatches them; ``ps`` preserves argv case so this stays precise."""
+        from kiro_claw.cli_server import _args_look_like_kiroclaw
+
+        assert _args_look_like_kiroclaw("python -m kiro_claw GATEWAY") is False
 
 
 class TestStop:
@@ -2753,6 +2836,62 @@ class TestDoctorOllamaDocker:
         out = capsys.readouterr().out
         assert "not installed" in out
 
+    def test_doctor_ollama_brew_info_timeout_macos(self, capsys):
+        """macOS: a slow ``brew info ollama`` must warn, not crash doctor.
+
+        Regression for the unhandled ``subprocess.TimeoutExpired`` on the Darwin
+        branch of ``_doctor_ollama_install`` (Homebrew auto-update can push
+        ``brew info`` past the 30s timeout). Ollama is optional, so this must
+        degrade to a warning like the Linux branch already does.
+        """
+        with (
+            patch("kiro_claw.cli_doctor._plat.system", return_value="Darwin"),
+            patch("kiro_claw.cli_doctor.shutil.which", return_value="/opt/homebrew/bin/brew"),
+            patch(
+                "kiro_claw.cli_doctor.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["brew", "info", "ollama"], 30),
+            ),
+        ):
+            issues: list[str] = []
+            # Must not raise — the bug let TimeoutExpired abort the whole run.
+            _doctor_ollama_install(issues)
+        out = capsys.readouterr().out
+        assert "timed out checking formula" in out
+        # A slow optional-dependency probe must not be flagged as a hard issue.
+        assert issues == []
+
+    def test_doctor_ollama_brew_info_macos_formula_available(self, capsys):
+        # macOS: brew resolves the formula -> report available, no hard issue.
+        with (
+            patch("kiro_claw.cli_doctor._plat.system", return_value="Darwin"),
+            patch("kiro_claw.cli_doctor.shutil.which", return_value="/opt/homebrew/bin/brew"),
+            patch(
+                "kiro_claw.cli_doctor.subprocess.run",
+                return_value=MagicMock(returncode=0, stdout="", stderr=""),
+            ),
+        ):
+            issues: list[str] = []
+            _doctor_ollama_install(issues)
+        out = capsys.readouterr().out
+        assert "formula available" in out
+        assert issues == []
+
+    def test_doctor_ollama_brew_info_macos_formula_missing(self, capsys):
+        # macOS: brew cannot resolve the formula -> flag a hard issue.
+        with (
+            patch("kiro_claw.cli_doctor._plat.system", return_value="Darwin"),
+            patch("kiro_claw.cli_doctor.shutil.which", return_value="/opt/homebrew/bin/brew"),
+            patch(
+                "kiro_claw.cli_doctor.subprocess.run",
+                return_value=MagicMock(returncode=1, stdout="", stderr="No formula"),
+            ),
+        ):
+            issues: list[str] = []
+            _doctor_ollama_install(issues)
+        out = capsys.readouterr().out
+        assert "brew info" in out
+        assert issues == ["ollama (brew cannot resolve formula)"]
+
 
 class TestPrintTokenUrl:
     """Tests for _print_token_url (auto-token after restart)."""
@@ -2767,6 +2906,15 @@ class TestPrintTokenUrl:
             "kiro_claw.cli_server.KiroClawConfig.load",
             lambda: MagicMock(dashboard=MagicMock(url="")),
         )
+        # Mock resolve_dashboard_host to an obviously-fake sentinel host (RFC 2606
+        # .invalid, never resolvable) so the assertion proves _print_token_url builds
+        # the URL from resolve_dashboard_host's output rather than hardcoding a host.
+        # A sentinel distinct from the real default ("localhost") is deliberate: it
+        # would catch a regression that hardcodes "localhost" back into the URL.
+        monkeypatch.setattr(
+            "kiro_claw.cli_server.resolve_dashboard_host",
+            lambda local_only=True: "canonical-host.invalid",
+        )
 
         mock_resp = MagicMock()
         mock_resp.read.return_value = b'{"token": "abc123"}'
@@ -2777,7 +2925,7 @@ class TestPrintTokenUrl:
             _print_token_url(7777)
 
         out = capsys.readouterr().out
-        assert "http://localhost:7777?token=abc123" in out
+        assert "http://canonical-host.invalid:7777?token=abc123" in out
 
     def test_prints_custom_origin(self, tmp_path, capsys, monkeypatch):
         from kiro_claw.cli_server import _print_token_url
@@ -2827,3 +2975,218 @@ class TestPrintTokenUrl:
 
         out = capsys.readouterr().out
         assert "kiroclaw token" in out
+
+
+class TestInstallPidfdChildWatcher:
+    """Verify _install_child_watcher's platform behavior."""
+
+    def test_installs_safe_watcher_on_macos(self, monkeypatch) -> None:
+        import asyncio
+
+        from kiro_claw.cli import _install_child_watcher
+
+        monkeypatch.setattr("kiro_claw.cli.sys.platform", "darwin")
+        # On macOS (no pidfd) we install the SIGCHLD-based SafeChildWatcher to
+        # eliminate the thread-per-child reaper storm, and must NOT touch the
+        # Linux pidfd path. Spy on set_child_watcher; make the pidfd probe and
+        # the PidfdChildWatcher ctor explode so reaching them fails the test.
+        called = []
+        monkeypatch.setattr(asyncio, "set_child_watcher", lambda w: called.append(w))
+        monkeypatch.setattr(asyncio, "SafeChildWatcher", lambda: "fake-safe-watcher")
+
+        def _boom(*_a) -> object:
+            raise AssertionError("Linux pidfd path must not be reached on macOS")
+
+        monkeypatch.setattr("kiro_claw.cli.os.pidfd_open", _boom, raising=False)
+        monkeypatch.setattr(asyncio, "PidfdChildWatcher", _boom)
+        _install_child_watcher()
+        assert called == ["fake-safe-watcher"], "macOS must install SafeChildWatcher"
+
+    def test_noop_when_safe_watcher_unavailable(self, monkeypatch) -> None:
+        import asyncio
+
+        from kiro_claw.cli import _install_child_watcher
+
+        monkeypatch.setattr("kiro_claw.cli.sys.platform", "darwin")
+        # Simulate a runtime where SafeChildWatcher was removed (3.14+) or never
+        # existed (Windows): the installer must leave the default watcher in
+        # place rather than raise.
+        monkeypatch.delattr(asyncio, "SafeChildWatcher", raising=False)
+        called = []
+        monkeypatch.setattr(asyncio, "set_child_watcher", lambda w: called.append(w))
+        _install_child_watcher()  # must not raise
+        assert called == [], "no watcher installed when SafeChildWatcher is unavailable"
+
+    def test_sets_watcher_on_linux(self, monkeypatch) -> None:
+        import asyncio
+
+        from kiro_claw.cli import _install_child_watcher
+
+        monkeypatch.setattr("kiro_claw.cli.sys.platform", "linux")
+        # Kernel supports pidfd_open -> probe succeeds -> watcher installed.
+        # Fully fake the probe (sentinel fd + no-op close) so no real fd is used.
+        opened = []
+        closed = []
+        monkeypatch.setattr("kiro_claw.cli.os.pidfd_open", lambda pid: opened.append(pid) or 4242, raising=False)
+        monkeypatch.setattr("kiro_claw.cli.os.close", lambda fd: closed.append(fd))
+        called_with = []
+        monkeypatch.setattr(asyncio, "set_child_watcher", lambda w: called_with.append(w))
+        monkeypatch.setattr(asyncio, "PidfdChildWatcher", lambda: "fake-pidfd-watcher")
+        _install_child_watcher()
+        assert opened, "pidfd_open must be probed before installing"
+        assert closed == [4242], "the probe fd must be closed"
+        assert called_with == ["fake-pidfd-watcher"]
+
+    def test_graceful_fallback_on_old_kernel(self, monkeypatch) -> None:
+        import asyncio
+
+        from kiro_claw.cli import _install_child_watcher
+
+        monkeypatch.setattr("kiro_claw.cli.sys.platform", "linux")
+        # Real 3.10 failure mode: PidfdChildWatcher.__init__ does NOT probe the
+        # kernel, so the < 5.3 failure surfaces as os.pidfd_open raising OSError.
+        # The watcher must NEVER be installed (else the first create_subprocess_exec
+        # would raise ENOSYS and break all subprocess management).
+
+        def _no_pidfd(_pid):
+            raise OSError(38, "Function not implemented")  # ENOSYS
+
+        monkeypatch.setattr("kiro_claw.cli.os.pidfd_open", _no_pidfd, raising=False)
+        installed = []
+        monkeypatch.setattr(asyncio, "set_child_watcher", lambda w: installed.append(w))
+
+        def _ctor_must_not_run() -> object:
+            raise AssertionError("PidfdChildWatcher must not be constructed when pidfd_open fails")
+
+        monkeypatch.setattr(asyncio, "PidfdChildWatcher", _ctor_must_not_run)
+        _install_child_watcher()  # must not raise
+        assert installed == [], "watcher must not be installed on a < 5.3 kernel"
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="pidfd watcher is Linux-only")
+    def test_real_subprocess_works_after_install_on_linux(self) -> None:
+        """End-to-end: after installing the watcher the way the gateway does
+        (before asyncio.run, on the main thread), asyncio subprocess support must
+        still work. This is the property the mocked test above cannot prove — it
+        guards against the watcher being installed but never attached to the loop
+        (which would make every create_subprocess_exec raise RuntimeError).
+        """
+        import asyncio
+
+        from kiro_claw.cli import _install_child_watcher
+
+        async def _spawn_true() -> int:
+            proc = await asyncio.create_subprocess_exec(
+                "true",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            return proc.returncode
+
+        _install_child_watcher()  # mirror the gateway: install BEFORE run
+        rc = asyncio.run(_spawn_true())
+        assert rc == 0
+
+    @pytest.mark.skipif(
+        sys.platform == "linux" or not hasattr(__import__("asyncio"), "SafeChildWatcher"),
+        reason="exercises the real macOS SafeChildWatcher install (non-Linux Unix, 3.10-3.13)",
+    )
+    def test_real_subprocess_works_after_safe_watcher_install_on_macos(self) -> None:
+        """End-to-end on macOS: after the REAL _install_child_watcher() installs
+        SafeChildWatcher the way the gateway does (before asyncio.run, on the main
+        thread), asyncio subprocess support must still work.
+
+        This is the macOS counterpart to the Linux end-to-end test and the
+        property the fully-mocked test_installs_safe_watcher_on_macos cannot
+        prove: that SafeChildWatcher actually ATTACHES to the loop (its SIGCHLD
+        handler) rather than being installed but inert — which would make every
+        create_subprocess_exec raise RuntimeError('...not activated...').
+        """
+        import asyncio
+
+        from kiro_claw.cli import _install_child_watcher
+
+        async def _spawn_true() -> int:
+            proc = await asyncio.create_subprocess_exec(
+                "true",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            return proc.returncode
+
+        _install_child_watcher()  # real install, no mocks — mirror the gateway
+        watcher = asyncio.get_child_watcher()
+        assert isinstance(watcher, asyncio.SafeChildWatcher), (
+            "macOS must install the SIGCHLD-based SafeChildWatcher"
+        )
+        rc = asyncio.run(_spawn_true())
+        assert rc == 0
+
+
+class TestTokenCommand:
+    """Tests for the ``kiroclaw token`` command handler (``_token``)."""
+
+    def _mock_token_response(self, token: str) -> MagicMock:
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = f'{{"token": "{token}"}}'.encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return mock_resp
+
+    def test_prints_loopback_only(self, tmp_path, capsys, monkeypatch):
+        from kiro_claw.cli_server import _token
+
+        (tmp_path / ".local_secret").write_text("test-secret")
+        monkeypatch.setattr("kiro_claw.cli_server.config_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            "kiro_claw.cli_server.KiroClawConfig.load",
+            lambda: MagicMock(dashboard=MagicMock(url="")),
+        )
+        monkeypatch.setattr("kiro_claw.cli_server.dashboard_origin", lambda u: "")
+        # Sentinel canonical host (RFC 2606 .invalid) — proves the URL is built
+        # from resolve_dashboard_host's output, not a hardcoded host.
+        monkeypatch.setattr(
+            "kiro_claw.cli_server.resolve_dashboard_host",
+            lambda local_only=True: "canonical-host.invalid",
+        )
+
+        args = argparse.Namespace(ttl="1h", port=7777)
+        with patch("urllib.request.urlopen", return_value=self._mock_token_response("abc123")):
+            _token(args)
+
+        out = capsys.readouterr().out
+        assert "http://canonical-host.invalid:7777?token=abc123" in out
+        # No custom-domain URL, so no separating blank line is emitted. The
+        # loopback URL has no '/' before '?token=...', so '/?token=...' would
+        # only appear if the custom-origin URL had been printed.
+        assert "/?token=abc123" not in out
+
+    def test_separates_custom_origin_with_blank_line(self, tmp_path, capsys, monkeypatch):
+        from kiro_claw.cli_server import _token
+
+        (tmp_path / ".local_secret").write_text("test-secret")
+        monkeypatch.setattr("kiro_claw.cli_server.config_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            "kiro_claw.cli_server.KiroClawConfig.load",
+            lambda: MagicMock(dashboard=MagicMock(url="https://kiroclaw.dev:7777")),
+        )
+        monkeypatch.setattr(
+            "kiro_claw.cli_server.dashboard_origin", lambda u: "https://kiroclaw.dev:7777"
+        )
+        monkeypatch.setattr(
+            "kiro_claw.cli_server.resolve_dashboard_host",
+            lambda local_only=True: "canonical-host.invalid",
+        )
+
+        args = argparse.Namespace(ttl="1h", port=7777)
+        with patch("urllib.request.urlopen", return_value=self._mock_token_response("xyz789")):
+            _token(args)
+
+        out = capsys.readouterr().out
+        loopback_line = "http://canonical-host.invalid:7777?token=xyz789"
+        custom_line = "https://kiroclaw.dev:7777/?token=xyz789"
+        assert loopback_line in out
+        assert custom_line in out
+        # The two URLs must be separated by a blank line.
+        assert f"{loopback_line}\n\n{custom_line}" in out

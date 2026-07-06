@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Upload, FolderSync, FolderOpen, X, RefreshCw, AlertCircle, CheckCircle, ChevronDown, ChevronRight, Pause, Play } from 'lucide-react'
+import { Upload, FolderSync, FolderOpen, X, RefreshCw, AlertCircle, CheckCircle, ChevronDown, ChevronRight, Pause, Play, Pencil, Check } from 'lucide-react'
 import { Badge, EmptyState, ContentSkeleton } from '../../components/ui'
 import Clickable from '../../components/Clickable'
 import { knowledgeApi } from './api'
@@ -28,6 +28,7 @@ function NamespacePicker({ value, onChange, namespaces }: { value: string; onCha
     <div className="flex items-center gap-2">
       <span className="text-[12px] text-muted shrink-0">Namespace:</span>
       <input value={value} onChange={e => onChange(e.target.value)} placeholder="default"
+        aria-label="Namespace"
         className="bg-bg-elevated border border-border rounded-md px-2 py-1 text-[13px] text-text outline-none w-36"
         list="ns-picker-list" />
       <datalist id="ns-picker-list">
@@ -52,7 +53,7 @@ function DropZone({ onFiles, accept }: { onFiles: (files: File[]) => void; accep
       <Upload size={28} className="mx-auto mb-2 text-muted" />
       <div className="text-sm text-muted">Drop files here or click to upload</div>
       <div className="text-[11px] text-muted/50 mt-1">{SUPPORTED_FORMATS}</div>
-      <input ref={inputRef} type="file" multiple accept={accept} className="hidden" onChange={e => e.target.files && onFiles(Array.from(e.target.files))} />
+      <input ref={inputRef} type="file" multiple accept={accept} aria-label="Upload files" className="hidden" onChange={e => e.target.files && onFiles(Array.from(e.target.files))} />
     </Clickable>
   )
 }
@@ -213,6 +214,8 @@ export default function SourcesList({ onIngest, uploadNamespace, setUploadNamesp
   const [addRecursive, setAddRecursive] = useState(true)
   const [pendingConfirm, setPendingConfirm] = useState<{ id: string; uri: string; fileCount: number } | null>(null)
   const [expandedSource, setExpandedSource] = useState<string | null>(null)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editDraft, setEditDraft] = useState('')
 
   const { data: sources = [], isLoading: loading } = useQuery({
     queryKey: ['knowledge-sources'],
@@ -283,6 +286,24 @@ export default function SourcesList({ onIngest, uploadNamespace, setUploadNamesp
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['knowledge-sources'] }),
   })
 
+  const renameMutation = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) =>
+      knowledgeApi(`/sources/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }),
+    onSuccess: () => {
+      setEditingId(null)
+      queryClient.invalidateQueries({ queryKey: ['knowledge-sources'] })
+    },
+  })
+
+  const startRename = (s: Source) => { setEditingId(s.id); setEditDraft(s.name) }
+  const submitRename = () => {
+    if (!editingId) return
+    const name = editDraft.trim()
+    const current = sources.find(s => s.id === editingId)
+    if (!name || (current && name === current.name)) { setEditingId(null); return }
+    renameMutation.mutate({ id: editingId, name })
+  }
+
   const deleteMutation = useMutation({
     mutationFn: (id: string) => knowledgeApi(`/sources/${id}`, { method: 'DELETE' }),
     onMutate: async (id) => {
@@ -344,16 +365,19 @@ export default function SourcesList({ onIngest, uploadNamespace, setUploadNamesp
           ) : (
             <>
               <input value={addName} onChange={e => setAddName(e.target.value)} placeholder="Name (optional)"
+                aria-label="Source name (optional)"
                 className="w-full px-3 py-1.5 text-sm bg-bg rounded border border-border text-text" />
               <input value={addUri} onChange={e => setAddUri(e.target.value)}
                 placeholder="Folder path (e.g., /home/user/notes)"
+                aria-label="Folder path"
                 className="w-full px-3 py-1.5 text-sm bg-bg rounded border border-border text-text" />
               <textarea value={addIgnorePatterns} onChange={e => setAddIgnorePatterns(e.target.value)}
                 placeholder="Ignore patterns (one per line, e.g. .trash/*)&#10;Templates/*"
+                aria-label="Ignore patterns"
                 rows={3} className="w-full px-3 py-1.5 text-sm bg-bg rounded border border-border text-text resize-none" />
               <div className="text-[11px] text-muted">Watches folder recursively. Supported files auto-ingested. Max 5,000 files per source.</div>
-              <label className="flex items-center gap-2 text-[12px] text-muted cursor-pointer">
-                <input type="checkbox" checked={addRecursive} onChange={e => setAddRecursive(e.target.checked)} className="accent-accent" />
+              <label htmlFor="sources-recursive" className="flex items-center gap-2 text-[12px] text-muted cursor-pointer">
+                <input id="sources-recursive" aria-label="Include subdirectories (recursive)" type="checkbox" checked={addRecursive} onChange={e => setAddRecursive(e.target.checked)} className="accent-accent" />
                 Include subdirectories (recursive)
               </label>
               <div className="flex gap-2 justify-end">
@@ -402,7 +426,24 @@ export default function SourcesList({ onIngest, uploadNamespace, setUploadNamesp
                 <FolderSync size={16} className="text-muted shrink-0" />
               )}
               <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium text-text-strong truncate">{s.name}</div>
+                {editingId === s.id ? (
+                  <div className="flex items-center gap-1">
+                    <input autoFocus value={editDraft} onChange={e => setEditDraft(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter' && !renameMutation.isPending) submitRename(); else if (e.key === 'Escape') setEditingId(null) }}
+                      maxLength={200} aria-label="Source name"
+                      className="bg-bg-elevated border border-border rounded-md px-2 py-1 text-[13px] text-text outline-none w-full max-w-xs" />
+                    <button aria-label="Save name" onClick={submitRename} disabled={renameMutation.isPending}
+                      className="text-ok shrink-0 p-1 rounded hover:bg-bg-elevated disabled:opacity-50"><Check size={14} /></button>
+                    <button aria-label="Cancel rename" onClick={() => setEditingId(null)}
+                      className="text-muted shrink-0 p-1 rounded hover:bg-bg-elevated"><X size={14} /></button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1 min-w-0 group/name">
+                    <span className="text-sm font-medium text-text-strong truncate">{s.name}</span>
+                    <button aria-label="Rename source" onClick={() => startRename(s)}
+                      className="text-muted shrink-0 p-0.5 rounded opacity-0 group-hover/name:opacity-100 hover:text-text transition-opacity"><Pencil size={12} /></button>
+                  </div>
+                )}
                 <div className="text-[11px] text-muted flex items-center gap-1.5">
                   {s.source_type}{s.uri ? ` · ${s.uri}` : ''}
                   {s.source_type === 'local_file'

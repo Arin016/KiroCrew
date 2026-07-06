@@ -26,7 +26,7 @@ export function useCronActions(load: () => void) {
       if (res.error) { setActionError({ id, msg: res.error }); return }
       if (res.slot) navigate('/chat?slot=' + res.slot)
     } catch { setActionError({ id, msg: 'Failed to open in chat' }) }
-  }, [navigate, load])
+  }, [navigate])
 
   return { running, setRunning, actionError, setActionError, runNow, openInChat }
 }

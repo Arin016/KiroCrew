@@ -52,6 +52,9 @@ class TestConfig:
             "warm_set_cap": 5,
             "tunnel_base_port": 7778,
             "ssh_compression": True,
+            "max_recovery_attempts": 8,
+            "recover_backoff_max_secs": 30.0,
+            "probe_failure_threshold": 3,
         }
         paths = {e.path for e in SCHEMA_REGISTRY}
         for p in (
@@ -60,8 +63,78 @@ class TestConfig:
             "instances.warm_set_cap",
             "instances.tunnel_base_port",
             "instances.ssh_compression",
+            "instances.max_recovery_attempts",
+            "instances.recover_backoff_max_secs",
+            "instances.probe_failure_threshold",
         ):
             assert p in paths
+
+    def test_recovery_knobs_parse_from_config_file(self, tmp_path, monkeypatch):
+        import json
+
+        from kiro_claw.config.loader import KiroClawConfig
+
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(
+            json.dumps(
+                {
+                    "instances": {
+                        "max_recovery_attempts": 12,
+                        "recover_backoff_max_secs": 45.0,
+                        "probe_failure_threshold": 5,
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr("kiro_claw.config.loader.config_path", lambda: cfg_file)
+        cfg = KiroClawConfig.load()
+        assert cfg.instances.max_recovery_attempts == 12
+        assert cfg.instances.recover_backoff_max_secs == 45.0
+        assert cfg.instances.probe_failure_threshold == 5
+
+    def test_recovery_knob_clamps(self):
+        from kiro_claw.config.loader import InstancesConfig
+
+        c = InstancesConfig(
+            max_recovery_attempts=0, recover_backoff_max_secs=0, probe_failure_threshold=0
+        )
+        assert c.max_recovery_attempts == 8
+        assert c.recover_backoff_max_secs == 30.0
+        assert c.probe_failure_threshold == 3
+
+        # Upper bound: a pathological max_recovery_attempts is clamped down to the
+        # ceiling (warned, not silently dropped) so it can't spin a near-infinite
+        # self-heal loop. The boundary value itself is left untouched.
+        from kiro_claw.instances.constants import MAX_RECOVERY_ATTEMPTS_CEILING
+
+        assert MAX_RECOVERY_ATTEMPTS_CEILING == 100
+        assert (
+            InstancesConfig(max_recovery_attempts=10_000).max_recovery_attempts
+            == MAX_RECOVERY_ATTEMPTS_CEILING
+        )
+        assert (
+            InstancesConfig(
+                max_recovery_attempts=MAX_RECOVERY_ATTEMPTS_CEILING
+            ).max_recovery_attempts
+            == MAX_RECOVERY_ATTEMPTS_CEILING
+        )
+
+        # recover_backoff_max_secs has the same two-sided guard: a pathological
+        # pacing is clamped down to the ceiling so the attempt cap can't be stretched
+        # into a multi-day wall-clock window; the boundary value is left untouched.
+        from kiro_claw.instances.constants import RECOVER_BACKOFF_MAX_CEILING_SECS
+
+        assert RECOVER_BACKOFF_MAX_CEILING_SECS == 300.0
+        assert (
+            InstancesConfig(recover_backoff_max_secs=86_400.0).recover_backoff_max_secs
+            == RECOVER_BACKOFF_MAX_CEILING_SECS
+        )
+        assert (
+            InstancesConfig(
+                recover_backoff_max_secs=RECOVER_BACKOFF_MAX_CEILING_SECS
+            ).recover_backoff_max_secs
+            == RECOVER_BACKOFF_MAX_CEILING_SECS
+        )
 
 
 # ── PortAllocator ───────────────────────────────────────────────────────────
@@ -262,7 +335,7 @@ class TestRegistry:
 
 
 class _FakeTunnel:
-    def __init__(self, iid, ssh_host, lp, rp, *, connect_timeout_secs=0, compression=True, on_exit=None):
+    def __init__(self, iid, ssh_host, lp, rp, *, connect_timeout_secs=0, compression=True, probe_failure_threshold=0, on_exit=None):
         from kiro_claw.instances.ssh_tunnel_manager import TunnelState, TunnelStatus
 
         self.iid = iid
@@ -378,6 +451,17 @@ class TestSshTunnelManager:
         # idempotent
         assert (await mgr.connect("cd-1")).state == TunnelState.CONNECTED
 
+    @pytest.mark.asyncio
+    async def test_connect_resets_recover_attempts(self, tmp_path):
+        reg, mgr = self._mgr(tmp_path)
+        reg.add(name="CD", ssh_host="cd-1-alias", instance_id="cd-1")
+        # Simulate a prior give-up that left the counter past the cap.
+        mgr._recover_attempts["cd-1"] = 99
+        await mgr.connect("cd-1")
+        # A successful (re)connect clears the stale give-up counter so the next
+        # unexpected drop gets a full fresh recovery budget.
+        assert "cd-1" not in mgr._recover_attempts
+
     def test_unknown_instance_raises(self, tmp_path):
         _reg, mgr = self._mgr(tmp_path)
         with pytest.raises(KeyError):
@@ -431,6 +515,41 @@ class TestSshTunnelManager:
         await mgr.shutdown()
         assert mgr.status_all() == {}
         assert reg.get("cd-1").was_connected is True
+
+    @pytest.mark.asyncio
+    async def test_disconnect_clears_local_port(self, tmp_path):
+        # Regression: connect() records local_port (== remote_port under the
+        # SEC-016 mirror), but disconnect() must reset it to the unallocated
+        # sentinel. Otherwise the freed port stays recorded and reads as
+        # reserved forever, blocking reconnect.
+        from kiro_claw.instances.registry import _UNALLOCATED_PORT
+
+        reg, mgr = self._mgr(tmp_path)
+        reg.add(name="CD", ssh_host="cd-1", instance_id="cd-1")
+
+        await mgr.connect("cd-1")
+        assert reg.get("cd-1").local_port == reg.get("cd-1").remote_port == 7777
+
+        await mgr.disconnect("cd-1")
+        inst = reg.get("cd-1")
+        assert inst.local_port == _UNALLOCATED_PORT  # port hint cleared
+        assert inst.was_connected is False
+        # the cleared port is no longer counted as reserved
+        assert 7777 not in mgr._reserved_ports()
+
+    @pytest.mark.asyncio
+    async def test_disconnect_clears_stale_port_without_live_tunnel(self, tmp_path):
+        # A port left recorded by an unclean prior exit (no live tunnel tracked)
+        # must still be clearable via disconnect, so the user can recover.
+        from kiro_claw.instances.registry import _UNALLOCATED_PORT
+
+        reg, mgr = self._mgr(tmp_path)
+        reg.add(name="CD", ssh_host="cd-1", instance_id="cd-1")
+        reg.update("cd-1", local_port=7777, was_connected=True)  # simulate stale hint
+
+        assert await mgr.disconnect("cd-1") is False  # no live tunnel existed
+        inst = reg.get("cd-1")
+        assert inst.local_port == _UNALLOCATED_PORT and inst.was_connected is False
 
     @pytest.mark.asyncio
     async def test_token_validates_status_mapping(self, tmp_path, monkeypatch):
@@ -978,6 +1097,26 @@ class TestTokenMintGeneric:
         rc, err = asyncio.run(tm.run_remote_kiroclaw("cd-1", "restart"))
         assert rc == 0 and err == ""
 
+    def test_run_remote_kiroclaw_redacts_stderr(self, monkeypatch):
+        # Proxy-controlled stderr carrying a credential is redacted before return,
+        # so a caller logging the tail cannot leak it.
+        from kiro_claw.instances import token_mint as tm
+
+        class FakeProc:
+            returncode = 255
+
+            async def communicate(self):
+                return b"", b"WSSH error AKIAIOSFODNN7EXAMPLE banner"
+
+        async def fake_exec(*a, **k):
+            return FakeProc()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        rc, err = asyncio.run(tm.run_remote_kiroclaw("cd-1", "restart"))
+        assert rc == 255
+        assert "AKIAIOSFODNN7EXAMPLE" not in err
+        assert "[REDACTED: credential]" in err
+
 
 class TestDiagnostics:
     def _set_probes(self, monkeypatch, ssh, remote, local):
@@ -1090,7 +1229,7 @@ class TestDiagnostics:
 class _ResilTunnel:
     """Controllable fake tunnel for self-heal tests."""
 
-    def __init__(self, iid, ssh_host, lp, rp, *, connect_timeout_secs=0, compression=True, on_exit=None):
+    def __init__(self, iid, ssh_host, lp, rp, *, connect_timeout_secs=0, compression=True, probe_failure_threshold=0, on_exit=None):
         from kiro_claw.instances.ssh_tunnel_manager import TunnelState, TunnelStatus
 
         self._S = TunnelState
@@ -1178,10 +1317,7 @@ class TestSelfHealRefreshRestart:
 
     @pytest.mark.asyncio
     async def test_recover_attempt_cap_then_diagnose(self, tmp_path, monkeypatch):
-        from kiro_claw.instances import ssh_tunnel_manager as stm
         from kiro_claw.instances.ssh_tunnel_manager import TunnelState
-
-        monkeypatch.setattr(stm, "_MAX_RECOVERY", 2)
 
         def failing(*a, **k):
             t = _ResilTunnel(*a, **k)
@@ -1189,13 +1325,14 @@ class TestSelfHealRefreshRestart:
             return t
 
         reg, mgr = self._mgr(tmp_path, factory=failing)
+        mgr._max_recovery = 2
         reg.add(name="CD", ssh_host="cd-1-alias", instance_id="cd-1")
         # seed a live ERROR tunnel
         mgr._tunnels["cd-1"] = _ResilTunnel("cd-1", "cd-1-alias", 53999, 7777)
         mgr._tunnels["cd-1"].status.state = TunnelState.ERROR
         diag_calls = []
         monkeypatch.setattr(mgr, "_schedule_diagnosis", lambda i: diag_calls.append(i))
-        for _ in range(stm._MAX_RECOVERY + 1):
+        for _ in range(mgr._max_recovery + 1):
             mgr._tunnels["cd-1"].status.state = TunnelState.ERROR
             await mgr._recover("cd-1")
         assert diag_calls == ["cd-1"], diag_calls  # diagnosis scheduled once cap exceeded
@@ -1275,6 +1412,37 @@ class TestSelfHealRefreshRestart:
         # Pure-noise stderr falls back to the bare exit code (no false detail).
         t._stderr_buf = "** WARNING: connection is not using a post-quantum key exchange algorithm.\n"
         assert t._exit_error(255) == "ssh exited with code 255"
+
+    def test_exit_error_classifies_wssh_transport_vs_auth(self):
+        from kiro_claw.instances.ssh_tunnel_manager import _SshTunnel
+
+        t = _SshTunnel("cd-1", "h", 1, 2)
+
+        # WSSH transport drop carrying ANSI + passthrough "midway/mwinit" prose is
+        # NOT an auth verdict — it classifies as a transport drop, and the ANSI is
+        # stripped from the surfaced detail (never reflected raw).
+        t._stderr_buf = (
+            "\x1b[1G\x1b[31m[Message from WSSH Proxy Service] "
+            "Your SSH session ended unexpectedly. Run mwinit if midway expired.\x1b[0m\n"
+        )
+        err = t._exit_error(255)
+        assert "transport drop" in err.lower()
+        assert "auth failed" not in err.lower()
+        assert "\x1b" not in err  # ANSI stripped
+
+        # Banner-exchange timeout (the re-mint failure case) is also transport.
+        t._stderr_buf = "Connection timed out during banner exchange\n"
+        assert "transport drop" in t._exit_error(255).lower()
+
+        # A genuine ssh auth failure IS reported as auth.
+        t._stderr_buf = "host: Permission denied (publickey).\n"
+        auth = t._exit_error(255)
+        assert "auth failed" in auth.lower()
+        assert "transport drop" not in auth.lower()
+
+        # A real certificate-expiry message stays an auth verdict.
+        t._stderr_buf = "Certificate has expired\n"
+        assert "auth failed" in t._exit_error(255).lower()
 
     def test_recover_backoff_grows_and_caps(self):
         from kiro_claw.instances.ssh_tunnel_manager import (
@@ -1369,7 +1537,6 @@ class TestSelfHealRefreshRestart:
         from kiro_claw.instances.ssh_tunnel_manager import TunnelState, _SshTunnel
 
         monkeypatch.setattr(stm, "_PROBE_INTERVAL", 0.01)
-        monkeypatch.setattr(stm, "_PROBE_FAILS", 2)
 
         class FakeProc:
             def __init__(self):
@@ -1391,7 +1558,7 @@ class TestSelfHealRefreshRestart:
             stderr = None
 
         async def main():
-            t = _SshTunnel("cd-1", "h", 7778, 7777)
+            t = _SshTunnel("cd-1", "h", 7778, 7777, probe_failure_threshold=2)
             t._proc = FakeProc()
             t.status.state = TunnelState.CONNECTED
 
@@ -1848,3 +2015,62 @@ class TestStartupRevive:
 
         await server._revive_intended_instances(reg, mgr)  # returns early, no raise
         assert mgr.status("a") is None
+
+    @pytest.mark.asyncio
+    async def test_instances_startup_schedules_revive_in_background(self, monkeypatch):
+        """_instances_startup must NOT await the reconnect.
+
+        on_startup handlers run during runner.setup(), before the HTTP port
+        binds, so awaiting serial SSH-tunnel connects (each of which can hang
+        for its full timeout when the network is down) delays the port bind
+        past the desktop app's 30s gateway-wait window. Revive must be a
+        tracked background task so the handler returns promptly.
+        """
+        import asyncio
+        import types
+
+        from aiohttp import web
+
+        import kiro_claw.dashboard.server as server
+
+        cfg = types.SimpleNamespace(
+            instances=types.SimpleNamespace(
+                enabled=True,
+                tunnel_base_port=53400,
+                ssh_compression=False,
+                max_recovery_attempts=8,
+                recover_backoff_max_secs=30.0,
+                probe_failure_threshold=3,
+            )
+        )
+        monkeypatch.setattr(server, "KiroClawConfig", types.SimpleNamespace(load=lambda: cfg))
+        monkeypatch.setattr(server, "InstancesRegistry", lambda: object())
+        monkeypatch.setattr(server, "SshTunnelManager", lambda *a, **k: object())
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _blocking_revive(registry, manager):
+            started.set()
+            await release.wait()  # simulate a hung SSH connect that never returns
+
+        monkeypatch.setattr(server, "_revive_intended_instances", _blocking_revive)
+
+        app = web.Application()
+        state = types.SimpleNamespace(
+            _background_tasks=set(), instances_registry=None, instances_manager=None
+        )
+        server._register_instances_hooks(app, state, 5476)
+        startup_handler = list(app.on_startup)[-1]
+
+        # Must return promptly even though revive never completes.
+        await asyncio.wait_for(startup_handler(app), timeout=2.0)
+
+        # Revive was scheduled as a tracked background task, not awaited.
+        assert len(state._background_tasks) == 1
+        await asyncio.wait_for(started.wait(), timeout=2.0)  # it did start in the bg
+
+        # Cleanup: release the hung revive and drain the task.
+        release.set()
+        for t in list(state._background_tasks):
+            await asyncio.wait_for(t, timeout=2.0)

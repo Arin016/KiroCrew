@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import socket
 import string
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,16 +14,22 @@ from aiohttp import web
 from kiro_claw.dashboard.token_auth import (
     MAX_CONCURRENT_NONCES,
     MAX_SESSION_TTL_SECS,
+    RevokedNonceStore,
+    _api_pattern_matches,
+    _app_owns_path,
+    app_token_path_allowed,
     bind_token_ip,
     check_token_ip,
     generate_token,
     is_consumed,
     mark_consumed,
     parse_duration,
+    revoke_access_cookie,
     revoke_all_sessions,
     token_auth_middleware,
     try_consume,
     validate_token,
+    validate_token_with_app,
 )
 
 
@@ -39,10 +46,17 @@ def clear_nonces(tmp_path, monkeypatch):
 
     monkeypatch.setattr("kiro_claw.config.loader.config_dir", lambda: tmp_path)
     monkeypatch.setattr(_ta, "_REVOCATION_GEN", 0)
+    # Reset the per-session revoked-nonce store so each test gets a fresh store
+    # bound to its own tmp_path config_dir (the singleton would otherwise pin
+    # the first test's path and leak revocations across tests).
+    monkeypatch.setattr(_ta, "_revoked_store_singleton", None)
     _ta._state.clear_all()
+    _ta._app_perms_cache.clear()
     yield
     monkeypatch.setattr(_ta, "_REVOCATION_GEN", 0)
+    monkeypatch.setattr(_ta, "_revoked_store_singleton", None)
     _ta._state.clear_all()
+    _ta._app_perms_cache.clear()
 
 
 URL_SAFE_B64_CHARS = set(string.ascii_letters + string.digits + "-_.")
@@ -259,7 +273,13 @@ async def test_cookie_set_on_query_param_auth() -> None:
 
     cookie_header = resp.cookies.get("mc_token_5476")
     assert cookie_header is not None
-    assert cookie_header.value == token
+    # Token→session exchange (CWE-613): the cookie must NOT be the raw URL
+    # token — it's a distinct, freshly-minted session credential …
+    assert cookie_header.value != token
+    # … that is nonetheless valid for the same user on the cookie path.
+    _ok, _uid, _ = validate_token(cookie_header.value, use_session_exp=True)
+    assert _ok is True
+    assert _uid == "cookieuser"
     assert cookie_header["httponly"] is True or "httponly" in str(cookie_header).lower()
     assert cookie_header["samesite"] == "Lax"
     assert cookie_header["path"] == "/"
@@ -328,6 +348,7 @@ async def test_cookie_server_port_name_denied_when_host_differs() -> None:
     mark_consumed(token)
 
     req = _make_request(
+        path="/api/status",
         cookies={"mc_token_5476": token}, headers={"Host": "localhost:7778"}
     )
     resp = await mw(req, _ok_handler)
@@ -453,12 +474,68 @@ async def test_apps_ui_bypass_blocks_unsafe_methods(method: str) -> None:
     assert resp.status == 403
 
 
+# -- Property 8e: bare /apps/{name} paths are SPA navigations, not data routes --
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/apps/code-review-sage",
+        "/apps/mochi-pet",
+        "/apps/system-monitor",
+        "/apps/some-app-with-dashes",
+    ],
+)
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+async def test_bare_app_path_is_spa_shell_request(path: str, method: str) -> None:
+    """Bare /apps/{name} paths (no sub-path) are React Router navigation
+    entries that must be treated as SPA shell requests so that a browser
+    refresh (which issues a direct GET to the gateway) returns index.html
+    rather than 404.
+
+    Regression for: GET /apps/code-review-sage on refresh returned 404 because
+    SPA_FALLBACK_EXCLUDED_PREFIXES included '/apps/' wholesale, causing the
+    spa_fallback middleware to re-raise HTTPNotFound instead of serving shell.
+    """
+    import kiro_claw.dashboard.token_auth as ta
+
+    req = _make_request(path=path, method=method)
+    assert ta._is_spa_shell_request(req), (
+        f"{method} {path} should be a SPA shell request (browser refresh must work)"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/apps/some-app/api/things",
+        "/apps/some-app/ui/index.mjs",
+        "/apps/some-app/ui/chunks/lazy.mjs",
+        "/apps/some-app/api/data/sensitive",
+    ],
+)
+def test_apps_sub_paths_are_not_spa_shell(path: str) -> None:
+    """/apps/{name}/api/* and /apps/{name}/ui/* have real server-side handlers
+    and must NOT be treated as SPA shell requests."""
+    import kiro_claw.dashboard.token_auth as ta
+
+    req = _make_request(path=path, method="GET")
+    assert not ta._is_spa_shell_request(req), (
+        f"GET {path} should NOT be a SPA shell request (has a real server-side handler)"
+    )
+
+
 # -- Property 9: Loopback no longer bypasses auth (port-forward fix) --
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/", "/api/status", "/some/page"])
+@pytest.mark.parametrize("path", ["/api/status", "/api/agents"])
 async def test_loopback_requires_token(path: str) -> None:
+    # Being on loopback (127.0.0.1) does NOT grant access to data APIs — the
+    # port-forward fix. (Non-API GET navigations now serve the public SPA
+    # shell instead of 403; see test_spa_shell_served_without_token.)
     mw = token_auth_middleware()
     req = _make_request(path=path)  # No token, loopback
     resp = await mw(req, _ok_handler)
@@ -791,7 +868,7 @@ def test_active_nonce_survives_eviction_via_refresh() -> None:
     assert valid_after, f"actively-used token should survive eviction, got: {reason}"
 
 
-# -- Property 12: /api/* paths get JSON 403, non-API GET paths get HTML 403 --
+# -- Property 12: /api/* paths get JSON 403, non-API non-GET paths get HTML 403 --
 
 
 @pytest.mark.asyncio
@@ -805,11 +882,206 @@ async def test_api_path_gets_json_403() -> None:
 
 @pytest.mark.asyncio
 async def test_non_api_path_gets_html_403() -> None:
+    # Non-API GET navigations now serve the SPA shell (see
+    # test_spa_shell_served_without_token). A non-API request with a
+    # state-changing method still hits the deny path and gets HTML 403.
     mw = token_auth_middleware()
-    req = _make_request(path="/dashboard", remote="10.0.0.1")  # No token
+    req = _make_request(path="/dashboard", method="POST", remote="10.0.0.1")  # No token
     resp = await mw(req, _ok_handler)
     assert resp.status == 403
     assert resp.content_type == "text/html"
+
+
+# -- Property 12b: SPA shell is public so the app can cold-start refresh --
+
+
+async def _shell_handler(request: web.Request) -> web.Response:
+    """Stand-in for handlers.index — returns a distinguishable body so tests
+    can prove the SHELL was served (default-deny) rather than the matched
+    route handler (_ok_handler)."""
+    return web.Response(text="SHELL", status=200)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path", ["/", "/index.html", "/dashboard", "/chat/abc123", "/some/deep/route"]
+)
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+async def test_spa_shell_served_without_token(path: str, method: str) -> None:
+    """GET/HEAD to a non-API SPA route with no token serves the shell (200),
+    not a 403 — so the React app boots and self-recovers via the refresh
+    cookie. The shell handler serves DIRECTLY (default-deny: the matched route
+    handler `_ok_handler` is never invoked for an unauthenticated request)."""
+    mw = token_auth_middleware(spa_shell_handler=_shell_handler)
+    req = _make_request(path=path, method=method, remote="10.0.0.1")  # No token
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 200
+    assert resp.text == "SHELL"  # shell served, NOT the route handler
+
+
+@pytest.mark.asyncio
+async def test_spa_shell_served_with_expired_cookie() -> None:
+    """Cold-start variant: an expired/invalid access cookie is still present
+    (browser hasn't dropped it yet). The shell still serves so the SPA can
+    boot and refresh."""
+    mw = token_auth_middleware(spa_shell_handler=_shell_handler)
+    req = _make_request(
+        path="/", cookies={"mc_token_5476": "garbage.invalid.token"}, remote="10.0.0.1"
+    )
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 200
+    assert resp.text == "SHELL"
+
+
+@pytest.mark.asyncio
+async def test_shell_not_served_when_handler_unconfigured() -> None:
+    """Default-deny: with no spa_shell_handler wired, a shell GET with no token
+    is DENIED (403), not served. The bypass never fails open."""
+    mw = token_auth_middleware()  # no shell handler
+    req = _make_request(path="/", remote="10.0.0.1")  # No token
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path", ["/api/status", "/api/agents", "/apps/some-app/api/things"]
+)
+async def test_data_paths_still_gated_when_shell_public(path: str) -> None:
+    """The shell bypass MUST NOT leak to data paths: /api/* and the
+    /apps/{name}/api/* reverse proxy still require a valid token even with the
+    shell handler wired."""
+    mw = token_auth_middleware(spa_shell_handler=_shell_handler)
+    req = _make_request(path=path, remote="10.0.0.1")  # No token
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "PATCH"])
+async def test_shell_bypass_restricted_to_safe_methods(method: str) -> None:
+    """Only GET/HEAD serve the shell. A state-changing method to a shell path
+    still requires auth — no write ever bypasses."""
+    mw = token_auth_middleware(spa_shell_handler=_shell_handler)
+    req = _make_request(path="/", method=method, remote="10.0.0.1")  # No token
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 403
+
+
+@pytest.mark.asyncio
+async def test_valid_token_on_shell_still_mints_cookie() -> None:
+    """A valid ?token= on the shell path is NOT short-circuited by the shell
+    bypass — it flows through the normal exchange and mints the access cookie
+    (URL-mint flow preserved)."""
+    mw = token_auth_middleware(spa_shell_handler=_shell_handler)
+    token = generate_token("shell_user", ttl_seconds=300)
+    req = _make_request(query={"token": token}, remote="10.0.0.1")  # path="/" default
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 200
+    assert resp.text == "ok"  # routed to the real handler, not the shell
+    cookie_header = resp.cookies.get("mc_token_5476")
+    assert cookie_header is not None
+    # CWE-613: the URL/link token is NEVER reused verbatim as the session cookie;
+    # a SEPARATE session token is minted (fresh nonce, same identity). The cookie
+    # must therefore differ from the link token but still validate.
+    assert cookie_header.value != token
+    ok, uid, _ = validate_token(cookie_header.value, use_session_exp=True)
+    assert ok is True and uid == "shell_user"
+
+
+def test_no_get_route_outside_shell_exclusions() -> None:
+    """Robust drift guard: every statically-registered GET route in server.py
+    must be shell-safe — the index/shell route, a known public PWA/static file,
+    under a SPA_FALLBACK_EXCLUDED_PREFIXES data/static prefix, or under the
+    /apps/ sub-namespace handled by _APPS_SPA_EXCLUDED_RE. A new GET added
+    under a data namespace NOT covered by either guard (e.g. a future
+    `GET /v1/models`) fails this test, forcing the exclusion set to be updated
+    so the shell bypass can never serve that route unauthenticated.
+
+    Note: /apps/ routes are validated against _APPS_SPA_EXCLUDED_RE (which
+    requires a sub-path after {name}/), NOT against SPA_FALLBACK_EXCLUDED_PREFIXES
+    (which no longer contains "/apps/" since that entry was dead code after
+    _is_spa_shell_request gained its own /apps/ early-return branch).
+    (Reads source rather than importing server.py to avoid heavy import side effects.)
+    """
+    import os
+    import re as _re
+
+    import kiro_claw.dashboard.token_auth as ta
+
+    server_path = os.path.join(os.path.dirname(ta.__file__), "server.py")
+    source = open(server_path, encoding="utf-8").read()
+    get_paths = _re.findall(r'add_get\(\s*["\']([^"\']+)["\']', source)
+    assert get_paths, "expected add_get route literals in server.py"
+
+    nonshell = tuple(ta.SPA_FALLBACK_EXCLUDED_PREFIXES)
+    bypass_exact = ta._BYPASS_EXACT
+
+    def shell_safe(p: str) -> bool:
+        return (
+            p == "/"  # the SPA shell itself
+            or p in bypass_exact  # explicit public files (logo, etc.)
+            or p.startswith("/{")  # pattern route (PWA: manifest/sw/icon/worklet)
+            or p.startswith(nonshell)  # data/static namespaces (/api/, /v1/, etc.)
+            # /apps/ routes: safe when they have a sub-path after {name}/ (real
+            # handler) OR when they are aiohttp pattern routes (contain "{" in
+            # the path, e.g. /apps/{name}/ui/{path:.*}). _APPS_SPA_EXCLUDED_RE
+            # matches concrete /apps/{lower-name}/<sub-path> from the live router;
+            # pattern-literal routes (with { placeholders) are always real handlers.
+            or (p.startswith("/apps/") and (ta._APPS_SPA_EXCLUDED_RE.match(p) or "{" in p))
+        )
+
+    offenders = [p for p in get_paths if not shell_safe(p)]
+    assert not offenders, (
+        f"GET route(s) outside the shell-exclusion set would be served the SPA "
+        f"shell unauthenticated: {offenders}. Add their namespace to "
+        f"SPA_FALLBACK_EXCLUDED_PREFIXES (or _APPS_SPA_EXCLUDED_RE for /apps/ "
+        f"sub-paths) in token_auth.py."
+    )
+
+
+@pytest.mark.asyncio
+async def test_shell_bypass_does_not_preempt_ip_mismatch() -> None:
+    """A VALID token from the wrong IP on a shell path is still a hard 403 —
+    the shell bypass lives only in the no-token / invalid-token branches, so a
+    valid token flows through to the IP-binding check. Pins the 'IP mismatch
+    stays 403' invariant: this test fails if the bypass is ever moved above
+    validation/IP-binding."""
+    mw = token_auth_middleware(spa_shell_handler=_shell_handler)
+    token = generate_token("ipuser", ttl_seconds=300)
+    bind_token_ip(token, "10.0.0.1")
+    mark_consumed(token)
+    req = _make_request(
+        path="/", cookies={"mc_token_5476": token}, remote="10.0.0.99"
+    )  # valid token, different IP, shell path
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 403  # IP mismatch wins; shell bypass does NOT fire
+
+
+@pytest.mark.asyncio
+async def test_invalid_token_shell_serve_emits_distinct_sel_outcome(monkeypatch) -> None:
+    """The invalid/forged-token shell serve MUST log a distinct, non-"ok" SEL
+    outcome so anomaly detection still flags credential-forgery probing on GET
+    navigations. Pins the observability signal: fails if the outcome reverts
+    to "ok"."""
+    import kiro_claw.dashboard.token_auth as ta
+
+    calls: list[dict] = []
+
+    class _FakeSel:
+        def log_api_access(self, **kw):
+            calls.append(kw)
+
+    monkeypatch.setattr(ta, "_sel_fn", lambda: _FakeSel())
+    mw = ta.token_auth_middleware(spa_shell_handler=_shell_handler)
+    req = _make_request(
+        path="/", cookies={"mc_token_5476": "garbage.invalid.token"}, remote="10.0.0.1"
+    )
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 200
+    outcomes = [c.get("outcome") for c in calls]
+    assert "shell_unauth_invalid_token" in outcomes  # forgery signal preserved
+    assert "ok" not in outcomes  # NOT logged as an authenticated success
 
 
 # -- Property 15: non-local mode forces token auth for all requests --
@@ -834,9 +1106,10 @@ async def test_query_param_token_reusable_across_requests() -> None:
 
 @pytest.mark.asyncio
 async def test_non_local_requires_auth() -> None:
-    """Non-loopback clients require auth."""
+    """Non-loopback clients require auth (data paths; non-API GET serves the
+    public SPA shell — see test_spa_shell_served_without_token)."""
     mw = token_auth_middleware()
-    req = _make_request(path="/", remote="10.0.0.1")  # No token
+    req = _make_request(path="/api/status", remote="10.0.0.1")  # No token
     resp = await mw(req, _ok_handler)
     assert resp.status == 403
 
@@ -1079,7 +1352,9 @@ async def test_wrong_port_cookie_rejected() -> None:
     mark_consumed(token_b)
 
     # Send server B's cookie to server A — wrong cookie name
-    req = _make_request(cookies={"mc_token_6777": token_b}, remote="127.0.0.1")
+    req = _make_request(
+        path="/api/status", cookies={"mc_token_6777": token_b}, remote="127.0.0.1"
+    )
     resp = await mw_a(req, _ok_handler)
     assert resp.status == 403
 
@@ -1096,9 +1371,382 @@ async def test_non_default_port_full_cycle() -> None:
     assert resp1.status == 200
     cookie = resp1.cookies.get("mc_token_6777")
     assert cookie is not None
-    assert cookie.value == token
+    # Token→session exchange: cookie is a distinct valid session token.
+    assert cookie.value != token
+    _ok, _uid, _ = validate_token(cookie.value, use_session_exp=True)
+    assert _ok is True and _uid == "user_6777"
 
-    # Step 2: cookie-based auth on subsequent request
-    req2 = _make_request(cookies={"mc_token_6777": token}, remote="10.0.0.1")
+    # Step 2: cookie-based auth on subsequent request uses the EXCHANGED cookie
+    req2 = _make_request(cookies={"mc_token_6777": cookie.value}, remote="10.0.0.1")
     resp2 = await mw(req2, _ok_handler)
     assert resp2.status == 200
+
+
+# -- Per-session access-cookie revocation (CWE-613) --------------------------
+
+
+def test_revoke_access_cookie_kills_only_that_cookie() -> None:
+    """revoke_access_cookie must reject the revoked cookie on the cookie path
+    while a DIFFERENT session minted separately keeps working — i.e. it is NOT
+    the nuclear revoke_all_sessions().
+    """
+    victim = generate_token("alice", ttl_seconds=3600)
+    other = generate_token("bob", ttl_seconds=3600)
+
+    # Both valid as cookies before logout.
+    assert validate_token(victim, use_session_exp=True)[0] is True
+    assert validate_token(other, use_session_exp=True)[0] is True
+
+    assert revoke_access_cookie(victim) is True
+
+    ok, _uid, reason = validate_token(victim, use_session_exp=True)
+    assert ok is False
+    assert reason == "session revoked"
+
+    # The other session is untouched.
+    assert validate_token(other, use_session_exp=True)[0] is True
+
+
+def test_revoke_access_cookie_rejects_invalid_token() -> None:
+    """A malformed/garbage token writes nothing to the denylist (deny-by-default)."""
+    assert revoke_access_cookie("not.a.real.token") is False
+    assert revoke_access_cookie("") is False
+
+
+def test_revoked_cookie_survives_store_reload(tmp_path) -> None:
+    """The denylist is persisted, so a revoked cookie stays dead across a
+    gateway restart (new store instance reading the same file)."""
+    token = generate_token("alice", ttl_seconds=3600)
+    assert revoke_access_cookie(token) is True
+
+    # Simulate restart: fresh store reading the persisted file.
+    reloaded = RevokedNonceStore(state_path=tmp_path / "token_revoked_nonces.json")
+    import json
+
+    from kiro_claw.dashboard.token_auth import _b64url_decode
+
+    nonce = json.loads(_b64url_decode(token.split(".")[0]))["nonce"]
+    assert reloaded.is_revoked(nonce) is True
+
+
+def test_revoked_store_evicts_expired_entry() -> None:
+    """An entry whose session_exp has passed is treated as not-revoked (the
+    token is rejected by the expiry check anyway) and dropped lazily."""
+    store = RevokedNonceStore(state_path=None)  # in-memory only
+    store.revoke("nonce-past", time.time() - 1)
+    assert store.is_revoked("nonce-past") is False
+
+
+def test_revoke_access_cookie_no_op_on_link_path() -> None:
+    """The denylist only gates the cookie path (use_session_exp=True). The
+    one-time LINK validation has its own nonce-set semantics and never consults
+    the denylist, so cookie revocation does not change link-path behaviour."""
+    token = generate_token("alice", ttl_seconds=3600)
+    # Link path is valid before revocation (nonce still in the active set).
+    assert validate_token(token, use_session_exp=False)[0] is True
+    assert revoke_access_cookie(token) is True
+    # Cookie path now rejected, link path unchanged (still valid).
+    assert validate_token(token, use_session_exp=True)[2] == "session revoked"
+    assert validate_token(token, use_session_exp=False)[0] is True
+
+
+# -- App-token least-privilege scope (CWE-269) -------------------------------
+
+
+def test_api_pattern_matches_boundaries() -> None:
+    # Bare prefix: exact + child under a path boundary, but not a longer name.
+    assert _api_pattern_matches("/api/chat", "/api/chat")
+    assert _api_pattern_matches("/api/chat", "/api/chat/slots")
+    assert not _api_pattern_matches("/api/chat", "/api/chatx")
+    # Trailing /* — inclusive of the base and its children.
+    assert _api_pattern_matches("/api/chat/*", "/api/chat")
+    assert _api_pattern_matches("/api/chat/*", "/api/chat/slots/1")
+    # Bare * — raw prefix.
+    assert _api_pattern_matches("/api/status*", "/api/status-page")
+    assert not _api_pattern_matches("", "/anything")
+
+
+def test_app_owns_path_boundaries() -> None:
+    assert _app_owns_path("foo", "/apps/foo/api/x")
+    assert _app_owns_path("foo", "/apps/foo/ui/index.js")
+    assert _app_owns_path("foo", "/api/apps/foo/config")
+    # Path boundary: foo must not match foo-bar.
+    assert not _app_owns_path("foo", "/apps/foo-bar/api/x")
+    assert not _app_owns_path("foo", "/api/apps/foo-bar/config")
+    # Unrelated dashboard endpoints are never owned.
+    assert not _app_owns_path("foo", "/api/sessions")
+    assert not _app_owns_path("foo", "/api/config/kiroclaw")
+
+
+def test_app_token_path_allowed_empty_name_denies() -> None:
+    # Defensive: an empty app_name must never be treated as "allow all".
+    assert app_token_path_allowed("", "/api/sessions") is False
+
+
+@pytest.mark.asyncio
+async def test_app_token_denied_on_unscoped_endpoint(monkeypatch) -> None:
+    """The pentest scenario: an app token hitting /api/sessions must be 403."""
+    import kiro_claw.dashboard.token_auth as _ta
+
+    monkeypatch.setattr(_ta, "_app_api_allowlist", lambda name: ())
+    mw = token_auth_middleware()
+    token = generate_token("file-explorer", ttl_seconds=300, app="file-explorer")
+    req = _make_request(path="/api/sessions", query={"token": token})
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 403
+
+
+@pytest.mark.asyncio
+async def test_app_token_allowed_on_own_namespace(monkeypatch) -> None:
+    import kiro_claw.dashboard.token_auth as _ta
+
+    monkeypatch.setattr(_ta, "_app_api_allowlist", lambda name: ())
+    mw = token_auth_middleware()
+    token = generate_token("file-explorer", ttl_seconds=300, app="file-explorer")
+    req = _make_request(path="/apps/file-explorer/api/list", query={"token": token})
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 200
+
+
+@pytest.mark.asyncio
+async def test_app_token_allowed_on_declared_api(monkeypatch) -> None:
+    import kiro_claw.dashboard.token_auth as _ta
+
+    monkeypatch.setattr(_ta, "_app_api_allowlist", lambda name: ("/api/widgets/*",))
+    mw = token_auth_middleware()
+    token = generate_token("file-explorer", ttl_seconds=300, app="file-explorer")
+    req = _make_request(path="/api/widgets/abc", query={"token": token})
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 200
+
+
+@pytest.mark.asyncio
+async def test_user_token_unaffected_by_app_scope() -> None:
+    """A dashboard-user token (no app claim) still reaches /api/sessions."""
+    mw = token_auth_middleware()
+    token = generate_token("alice", ttl_seconds=300)
+    req = _make_request(path="/api/sessions", query={"token": token})
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 200
+
+
+@pytest.mark.asyncio
+async def test_app_token_denied_on_mixed_internal_path(monkeypatch) -> None:
+    """Escalation guard: an app token on a mixed_internal path (e.g. /api/chat)
+    over loopback must NOT be silently treated as the dashboard user. Before the
+    fix this branch never set request['app'] and granted unconditionally."""
+    import kiro_claw.dashboard.token_auth as _ta
+
+    monkeypatch.setattr(_ta, "_app_api_allowlist", lambda name: ())
+    mw = token_auth_middleware(mixed_internal_paths=frozenset({"/api/chat"}))
+    token = generate_token("file-explorer", ttl_seconds=300, app="file-explorer")
+    req = _make_request(
+        path="/api/chat",
+        cookies={"mc_token_5476": token},
+        remote="127.0.0.1",
+        method="POST",
+    )
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 403
+
+
+@pytest.mark.asyncio
+async def test_app_token_denied_on_strict_internal_path(monkeypatch) -> None:
+    """Impersonation guard: an app token hitting a strict-internal path such as
+    /api/send-message over loopback (no secret header) must be scope-denied —
+    otherwise a compromised app could send notifications impersonating the
+    system (app-sandbox-roadmap threat)."""
+    import kiro_claw.dashboard.token_auth as _ta
+
+    monkeypatch.setattr(_ta, "_app_api_allowlist", lambda name: ())
+    mw = token_auth_middleware(internal_paths=frozenset({"/api/send-message"}))
+    token = generate_token("file-explorer", ttl_seconds=300, app="file-explorer")
+    req = _make_request(
+        path="/api/send-message",
+        cookies={"mc_token_5476": token},
+        remote="127.0.0.1",
+        method="POST",
+    )
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 403
+
+
+# -- Token→session exchange (CWE-613, decouple URL token from cookie) ---------
+
+
+@pytest.mark.asyncio
+async def test_url_token_exchanged_for_distinct_session_cookie() -> None:
+    """The cookie set on link-click auth must be a fresh session token, NOT the
+    raw URL token — so leaking the link (URL/Slack/logs) does not hand over the
+    long-lived session credential."""
+    mw = token_auth_middleware()
+    url_token = generate_token("linkuser", ttl_seconds=MAX_SESSION_TTL_SECS)
+
+    req = _make_request(query={"token": url_token}, remote="10.0.0.2")
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 200
+
+    cookie = resp.cookies.get("mc_token_5476")
+    assert cookie is not None
+    # Distinct credential …
+    assert cookie.value != url_token
+    # … valid on the cookie path for the same identity …
+    ok, uid, _ = validate_token(cookie.value, use_session_exp=True)
+    assert ok is True and uid == "linkuser"
+    # … and the two tokens carry different nonces (independent sessions).
+    import json as _json
+
+    from kiro_claw.dashboard.token_auth import _b64url_decode
+
+    url_nonce = _json.loads(_b64url_decode(url_token.split(".")[0]))["nonce"]
+    cookie_nonce = _json.loads(_b64url_decode(cookie.value.split(".")[0]))["nonce"]
+    assert url_nonce != cookie_nonce
+
+
+@pytest.mark.asyncio
+async def test_exchanged_cookie_preserves_app_claim() -> None:
+    """If an app token ever arrives via the URL flow, the exchanged cookie must
+    keep the ``app`` claim so app-scope enforcement continues to apply."""
+    import kiro_claw.dashboard.token_auth as _ta
+
+    monkeypatch_allow = lambda name: ("/api/anything/*",)  # noqa: E731
+    _ta._app_perms_cache.clear()
+    orig = _ta._app_api_allowlist
+    _ta._app_api_allowlist = monkeypatch_allow  # type: ignore[assignment]
+    try:
+        mw = token_auth_middleware()
+        url_token = generate_token(
+            "some-app", ttl_seconds=MAX_SESSION_TTL_SECS, app="some-app"
+        )
+        req = _make_request(
+            path="/apps/some-app/api/x", query={"token": url_token}, remote="10.0.0.3"
+        )
+        resp = await mw(req, _ok_handler)
+        assert resp.status == 200
+        cookie = resp.cookies.get("mc_token_5476")
+        assert cookie is not None
+        _valid, _uid, _reason, app_name = validate_token_with_app(
+            cookie.value, use_session_exp=True
+        )
+        assert _valid is True
+        assert app_name == "some-app"
+    finally:
+        _ta._app_api_allowlist = orig  # type: ignore[assignment]
+
+
+@pytest.mark.asyncio
+async def test_leaked_link_token_rejected_as_cookie_after_exchange() -> None:
+    """After the link→session exchange, a captured copy of the URL token must
+    NOT be replayable as a session cookie (CWE-613). The exchange revokes the
+    link token's nonce on the cookie path."""
+    mw = token_auth_middleware()
+    url_token = generate_token("linkuser2", ttl_seconds=MAX_SESSION_TTL_SECS)
+
+    # First click over the query-param path performs the exchange.
+    req1 = _make_request(query={"token": url_token}, remote="10.0.0.9")
+    resp1 = await mw(req1, _ok_handler)
+    assert resp1.status == 200
+
+    # Attacker replays the SAME url token directly as a cookie → rejected.
+    req2 = _make_request(cookies={"mc_token_5476": url_token}, remote="10.0.0.9")
+    resp2 = await mw(req2, _ok_handler)
+    assert resp2.status == 403
+
+    # …but validate_token confirms the denial reason is the cookie denylist.
+    ok, _uid, reason = validate_token(url_token, use_session_exp=True)
+    assert ok is False
+    assert reason == "session revoked"
+
+
+@pytest.mark.asyncio
+async def test_link_token_still_reusable_via_query_param_after_exchange() -> None:
+    """The denylist is cookie-path only: re-navigating the same /?token= URL
+    (e.g. remote-instance iframes, self-nudge polling) must still work within
+    the 5-minute link window and re-exchange for a fresh cookie."""
+    mw = token_auth_middleware()
+    url_token = generate_token("linkuser3", ttl_seconds=MAX_SESSION_TTL_SECS)
+
+    req1 = _make_request(query={"token": url_token}, remote="10.0.1.1")
+    resp1 = await mw(req1, _ok_handler)
+    assert resp1.status == 200
+    first_cookie = resp1.cookies.get("mc_token_5476").value
+
+    # Second navigation with the SAME url token via query param — still 200,
+    # re-exchanged to another fresh session cookie.
+    req2 = _make_request(query={"token": url_token}, remote="10.0.1.1")
+    resp2 = await mw(req2, _ok_handler)
+    assert resp2.status == 200
+    second_cookie = resp2.cookies.get("mc_token_5476").value
+    assert first_cookie != url_token and second_cookie != url_token
+
+
+@pytest.mark.asyncio
+async def test_repeated_query_param_exchange_does_not_evict_link_nonces() -> None:
+    """Tool-usage guard: repeated /?token= exchanges (self-nudge polling,
+    instance-iframe re-navigation) must NOT churn the bounded link-nonce set
+    and evict a pending one-time link (e.g. a Slack dashboard link). The
+    exchanged session token is minted with register_nonce=False for exactly
+    this reason."""
+    mw = token_auth_middleware()
+    # A pending Slack-style link token, registered and awaiting its click.
+    pending_link = generate_token("slackuser", ttl_seconds=MAX_SESSION_TTL_SECS)
+    # A local-app token repeatedly presented as ?token= by a background tool.
+    local_token = generate_token("local-app", ttl_seconds=MAX_SESSION_TTL_SECS)
+
+    for _ in range(120):  # well beyond MAX_CONCURRENT_NONCES (50)
+        req = _make_request(
+            path="/api/autonudge",
+            query={"token": local_token},
+            remote="127.0.0.1",
+            method="POST",
+        )
+        resp = await mw(req, _ok_handler)
+        assert resp.status == 200
+
+    # The pending link must still validate on its (query-param) link path —
+    # i.e. it was NOT evicted by the 120 exchanges.
+    ok, uid, reason = validate_token(pending_link, use_session_exp=False)
+    assert ok is True, f"pending link nonce was evicted: {reason!r}"
+    assert uid == "slackuser"
+
+
+@pytest.mark.asyncio
+async def test_served_shell_is_auth_independent() -> None:
+    """Load-bearing invariant for the cold-start bypass: the SPA shell that
+    the middleware serves UNAUTHENTICATED must be byte-identical to the shell
+    an authenticated client gets, and must carry no injected server/user state.
+
+    The bypass is only safe while index.html is a static, secret-free bundle
+    (see the SECURITY CONTRACT on handlers.core.index). If a future change
+    inlines bootstrap state (a username, token, feature flags, session blob)
+    into the shell, an unauthenticated GET / would leak it across the auth
+    boundary. This test fails if the served body becomes request-dependent or
+    starts carrying credential/state markers.
+    """
+    import kiro_claw.dashboard.handlers.core as core
+
+    # Unauthenticated cold-start request vs an "authenticated-looking" one
+    # (cookies + remote set). index() must ignore request state entirely.
+    anon = _make_request(path="/", remote="10.0.0.1")
+    authed = _make_request(
+        path="/",
+        cookies={"mc_token_5476": "someminted.token.value"},
+        remote="10.0.0.1",
+    )
+    resp_anon = await core.index(anon)
+    resp_authed = await core.index(authed)
+
+    # 1. Request-independent: the unauth shell == the authed shell.
+    assert resp_anon.text == resp_authed.text
+
+    # 2. No credential/server-state markers leaked into the served shell.
+    body = resp_anon.text
+    for marker in (
+        "mc_token",
+        "mc_refresh",
+        "refresh_chains",
+        "security_events",
+        "BEGIN PRIVATE",
+        "someminted.token.value",
+    ):
+        assert marker not in body, f"shell leaked state marker: {marker!r}"

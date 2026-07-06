@@ -63,6 +63,7 @@ from kiro_claw.apps.registry import (
 from kiro_claw.apps.version import check_min_version as _check_min_version_str
 from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import KiroClawConfig, config_dir, config_path
+from kiro_claw.executors import subprocess_executor
 from kiro_claw.sel import sel
 
 logger = logging.getLogger(__name__)
@@ -326,7 +327,7 @@ async def _start_backend_after_install(name: str) -> None:
     next gateway boot via ``start_enabled_app_backends``.
     """
     try:
-        await asyncio.to_thread(start_app_backend, name)
+        await asyncio.get_running_loop().run_in_executor(subprocess_executor(), start_app_backend, name)
     except Exception:
         logger.warning("Backend auto-start after install failed for app %s", name, exc_info=True)
 
@@ -405,10 +406,10 @@ async def handle_update_app(request: web.Request) -> web.Response:
             return web.json_response(reg_install, status=400)
         # Install succeeded — now safe to swap resources
         deregister_app(name)
-        await asyncio.to_thread(stop_app_backend, name)
+        await asyncio.get_running_loop().run_in_executor(subprocess_executor(), stop_app_backend, name)
         if info.get("enabled"):
             reg_result = register_app(name)
-            start_app_backend(name)
+            await asyncio.get_running_loop().run_in_executor(subprocess_executor(), start_app_backend, name)
             reg_install["registration"] = reg_result.to_dict()
         sel().log_api_access(caller="dashboard", operation="app_update", outcome="completed", resources=name)
         return web.json_response(reg_install)
@@ -420,14 +421,14 @@ async def handle_update_app(request: web.Request) -> web.Response:
 
     # Deregister old resources before update
     deregister_app(name)
-    await asyncio.to_thread(stop_app_backend, name)
+    await asyncio.get_running_loop().run_in_executor(subprocess_executor(), stop_app_backend, name)
 
     up_result = update_app(source)
     if not up_result.ok:
         # Re-register old resources on failure
         register_app(name)
         if info.get("enabled"):
-            start_app_backend(name)
+            await asyncio.get_running_loop().run_in_executor(subprocess_executor(), start_app_backend, name)
         sel().log_api_access(caller="dashboard", operation="app_update", outcome="failed", resources=name, error=up_result.error)
         return web.json_response(up_result.to_dict(), status=400)
 
@@ -435,7 +436,7 @@ async def handle_update_app(request: web.Request) -> web.Response:
     up_reg = None
     if info.get("enabled"):
         up_reg = register_app(name)
-        start_app_backend(name)
+        await asyncio.get_running_loop().run_in_executor(subprocess_executor(), start_app_backend, name)
 
     sel().log_api_access(caller="dashboard", operation="app_update", outcome="completed", resources=name)
     resp: dict[str, Any] = up_result.to_dict()
@@ -587,7 +588,7 @@ async def handle_uninstall_app(request: web.Request) -> web.Response:
 
     # Step 2: Deregister resources (gateway-managed only)
     if resources == "gateway":
-        await asyncio.to_thread(stop_app_backend, name)
+        await asyncio.get_running_loop().run_in_executor(subprocess_executor(), stop_app_backend, name)
         # Clean up app-declared cron jobs from the scheduler before the
         # per-app cron manifest is removed by deregister_app(). Mirrors the
         # cleanup that on_app_disable performs on the disable path.
@@ -694,13 +695,15 @@ async def handle_enable_app(request: web.Request) -> web.Response:
     # Register resources if gateway-managed
     if resources == "gateway":
         reg = register_app(name)
-        backend = start_app_backend(name)
-        # The first register_app ran BEFORE the backend was up, so an HTTP MCP server
-        # with backend.port:"auto" was registered with the manifest's illustrative port
-        # (the live port wasn't known yet). Now that the backend is running on its real
-        # allocated port, re-register the MCP servers so the url matches — otherwise
-        # agents call the wrong port and every app tool call silently fails.
-        if backend is not None:
+        backend = await asyncio.get_running_loop().run_in_executor(subprocess_executor(), start_app_backend, name)
+        # MCP re-registration is HEALTH-GATED (review CR-284432051). register_app ran before
+        # the backend was up, so an HTTP MCP server with backend.port:"auto" carries the
+        # manifest's illustrative port. The backend's health-check loop calls
+        # _gate_mcp_registration once /health passes, rewriting the url to the real allocated
+        # port (and scrubbing it if the backend never becomes healthy — the dead-url shape
+        # that broke kiro-cli). EXCEPTION: an adopted already-healthy instance runs no health
+        # loop, so register it synchronously here.
+        if backend is not None and getattr(backend, "healthy", False):
             try:
                 reregister_app_mcp_servers(name, live_port=getattr(backend, "port", None))
             except Exception as exc:  # noqa: BLE001
@@ -737,7 +740,7 @@ async def handle_enable_app(request: web.Request) -> web.Response:
         if script_output.get("failed"):
             # Rollback: disable the app again
             if resources == "gateway":
-                await asyncio.to_thread(stop_app_backend, name)
+                await asyncio.get_running_loop().run_in_executor(subprocess_executor(), stop_app_backend, name)
                 deregister_app(name)
             disable_app(name)
             sel().log_api_access(caller="dashboard", operation="app_enable", outcome="failed", resources=name, error="onEnable script failed")
@@ -836,7 +839,7 @@ async def handle_disable_app(request: web.Request) -> web.Response:
 
     # Deregister resources if gateway-managed
     if resources == "gateway":
-        await asyncio.to_thread(stop_app_backend, name)
+        await asyncio.get_running_loop().run_in_executor(subprocess_executor(), stop_app_backend, name)
         deregister_app(name)
 
     result = disable_app(name)
@@ -1610,9 +1613,32 @@ async def handle_app_api_proxy(request: web.Request) -> web.StreamResponse:
     name = request.match_info["name"]
     path = request.match_info.get("path", "")
 
-    # Path traversal guard
+    # Path traversal guard (input validation first)
     if ".." in path:
         return web.json_response({"error": "invalid path"}, status=400)
+
+    # Cross-app guard (CWE-269): if the caller authenticated with an APP token
+    # (``request["app"]`` set by token_auth_middleware), it may only proxy into
+    # its OWN backend. Dashboard-user requests (empty app identity) are allowed
+    # to any app's proxy — that's the in-dashboard app UI calling same-origin.
+    # The middleware's app-scope gate already blocks this, but the proxy is a
+    # trust boundary (it signs the request with the target app's secret), so we
+    # re-check here rather than rely solely on upstream.
+    token_app = request.get("app", "")
+    if token_app and token_app != name:
+        # SEL audit for the permission decision (cross-app escalation attempt),
+        # matching the sibling deny paths that emit log_api_access.
+        sel().log_api_access(
+            caller=token_app,
+            operation="app_proxy_cross_app",
+            outcome="denied",
+            source="app_routes",
+            resources=f"/apps/{name}/{path}",
+            error="app token cannot access another app's backend",
+        )
+        return web.json_response(
+            {"error": "app token cannot access another app's backend"}, status=403
+        )
 
     # Resolve backend URL
     backend_url = _resolve_app_backend_url(name)

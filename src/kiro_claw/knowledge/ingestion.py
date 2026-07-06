@@ -14,6 +14,7 @@ from uuid import uuid4
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 
 from .chunker import CHUNK_OVERLAP, CHUNK_TOKEN_SIZE, HeadingAwareChunker
+from .dedup import dedup_document
 from .embedder import embed_signature, floats_to_bytes
 from .extractor import EntityExtractor
 from .readers import FileReader
@@ -59,12 +60,29 @@ class IngestionPipeline:
     """Orchestrates: read file -> chunk -> extract entities -> store."""
 
     def __init__(self, store: KnowledgeStore, extractor: EntityExtractor,
-                 chunker: HeadingAwareChunker, reader: FileReader, embedder=None):
+                 chunker: HeadingAwareChunker, reader: FileReader, embedder=None,
+                 dedup_enabled: bool = True):
         self.store = store
         self.extractor = extractor
         self.chunker = chunker
         self.reader = reader
         self.embedder = embedder
+        self._dedup_enabled = dedup_enabled
+
+    def _maybe_dedup(self, source_id: str) -> None:
+        """Collapse cross-source duplicates of the just-ingested document.
+
+        Targeted (O(n)) -- compares only the new document against the corpus, not the
+        whole corpus against itself. Best-effort: a dedup failure must never fail an
+        ingestion that already succeeded, so errors are swallowed (logged at debug).
+        No-op when disabled.
+        """
+        if not self._dedup_enabled:
+            return
+        try:
+            dedup_document(self.store, source_id, apply=True)
+        except Exception:
+            logger.debug("Post-ingest dedup skipped", exc_info=True)
 
     async def ingest_file(self, path: str, on_progress=None, original_name: str = "", namespace: str = "default", source_id: str = "", old_item_ids: list[str] | None = None) -> str | None:
         """Full pipeline. Returns job_id, or None if content hash unchanged.
@@ -78,10 +96,11 @@ class IngestionPipeline:
         display_name = original_name or p.name
         ext = (Path(original_name).suffix if original_name else p.suffix).lower()
 
-        # 1. Read
+        # 1. Read (offloaded: readers do synchronous whole-file parsing -- pdfplumber,
+        # python-docx, etc. -- which must not block the event loop on a large file)
         if on_progress:
             on_progress('reading', 0, 1)
-        text, meta = self.reader.read(path)
+        text, meta = await asyncio.to_thread(self.reader.read, path)
         if meta.get('format') == 'error':
             raise RuntimeError(f"Failed to read {path}: {meta.get('error')}")
 
@@ -178,6 +197,7 @@ class IngestionPipeline:
                     summary=extraction.get('summary'),
                     namespace=namespace,
                     tags=item_tags,
+                    content_hash=content_hash,
                 )
                 self.store.add_source_location(
                     item_id=item_id, source_id=source_id,
@@ -219,33 +239,52 @@ class IngestionPipeline:
             "UPDATE ingestion_jobs SET status = ?, items_processed = ?, updated_at = ? WHERE id = ?",
             (_job_status(processed, total), processed, now, job_id))
         self.store.db.commit()
+        # Cross-source dedup for whole-source ingests (upload / remote / chat). Folder-file
+        # ingests (old_item_ids is a list) are swept by FolderWatcher at end of scan.
+        if processed == total and old_item_ids is None:
+            self._maybe_dedup(source_id)
         return job_id
 
     async def ingest_text(self, text: str, title: str, source_type: str = 'manual',
-                          source_id: str | None = None) -> str | None:
-        """Ingest raw text (dashboard drop or chat). Skips file reading."""
-        content_hash = hashlib.sha256(text.encode()).hexdigest()
-        uri = f"{source_type}://{content_hash[:16]}"
+                          source_id: str | None = None,
+                          old_item_ids: list[str] | None = None) -> str | None:
+        """Ingest raw text (dashboard drop, chat, or a shared aggregate source).
 
-        # Dedup: check if source already exists
-        old_item_ids: list[str] = []
+        Without ``source_id`` the source is found-or-created by a
+        content-hash-derived URI (legacy dashboard-drop behaviour: each
+        distinct body is its own source). With ``source_id`` the text is
+        ingested into that existing source:
+
+        * ``old_item_ids is None`` -> replace *all* items for the source
+          (single-text / remote-sync source).
+        * ``old_item_ids`` provided -> replace only that item group, leaving
+          the source's other item groups untouched. This is what lets one
+          source hold many independently-replaceable documents -- the
+          aggregate "Artifacts" source keys a group per artifact slug, exactly
+          as a folder source keys a group per file.
+        """
+        content_hash = hashlib.sha256(text.encode()).hexdigest()
+
+        # Resolve the source and the prior item ids this call should replace.
+        _old_item_ids: list[str] = old_item_ids if old_item_ids is not None else []
         if source_id is None:
+            uri = f"{source_type}://{content_hash[:16]}"
             existing = self.store.get_source_by_uri(uri)
             if existing:
                 props = json.loads(existing.get('properties', '{}')) if isinstance(existing.get('properties'), str) else existing.get('properties', {})
                 if props.get('content_hash') == content_hash:
                     return None  # unchanged
                 source_id = existing['id']
-                old_item_ids = [row['id'] for row in self.store.db.execute(
+                _old_item_ids = [row['id'] for row in self.store.db.execute(
                     "SELECT id FROM items WHERE source_id = ?", (source_id,)).fetchall()]
             else:
                 source_id = self.store.add_source(
                     name=title, source_type=source_type, uri=uri,
                     properties={'content_hash': content_hash},
                 )
-        else:
-            # source_id provided externally (e.g. sync) — collect old items for replacement
-            old_item_ids = [row['id'] for row in self.store.db.execute(
+        elif old_item_ids is None:
+            # Existing source, replace-all (single-text / remote-sync source).
+            _old_item_ids = [row['id'] for row in self.store.db.execute(
                 "SELECT id FROM items WHERE source_id = ?", (source_id,)).fetchall()]
 
         job_id = uuid4().hex[:12]
@@ -257,6 +296,12 @@ class IngestionPipeline:
 
         chunks = self.chunker.chunk(text)
         total = len(chunks)
+
+        # Snapshot items present before this call so a partial failure removes
+        # only what THIS call created -- never another item group that shares
+        # the same source_id (critical for the aggregate Artifacts source).
+        _before_ids = {r["id"] for r in self.store.db.execute(
+            "SELECT id FROM items WHERE source_id = ?", (source_id,)).fetchall()}
 
         chunk_contents = [chunk['content'] for chunk in chunks]
         extractions = await self.extractor.extract_batch(chunk_contents)
@@ -275,6 +320,7 @@ class IngestionPipeline:
                     source_id=source_id,
                     chunk_index=chunk.get('chunk_index', i),
                     summary=extraction.get('summary'),
+                    content_hash=content_hash,
                 )
                 self.store.add_source_location(
                     item_id=item_id, source_id=source_id,
@@ -294,7 +340,7 @@ class IngestionPipeline:
 
         now = datetime.now().isoformat()
         if processed == total:
-            self.store.delete_items_batch(old_item_ids)
+            self.store.delete_items_batch(_old_item_ids)
             self.store.db.execute("UPDATE sources SET sync_status = 'synced' WHERE id = ?", (source_id,))
             self.store.update_source(source_id, last_synced=now)
             try:
@@ -302,16 +348,24 @@ class IngestionPipeline:
             except Exception:
                 logger.debug("Source summary generation skipped for %s", source_id, exc_info=True)
         elif processed < total:
-            # Partial failure: remove newly created items to avoid duplicates
-            new_ids = [r["id"] for r in self.store.db.execute(
+            # Partial failure: remove only items created during THIS call so we
+            # never delete another item group sharing this source_id.
+            after_ids = {r["id"] for r in self.store.db.execute(
                 "SELECT id FROM items WHERE source_id = ?", (source_id,),
-            ).fetchall() if r["id"] not in set(old_item_ids)]
-            self.store.delete_items_batch(new_ids)
+            ).fetchall()}
+            self.store.delete_items_batch(list(after_ids - _before_ids))
             self.store.db.execute("UPDATE sources SET sync_status = 'error' WHERE id = ?", (source_id,))
         self.store.db.execute(
             "UPDATE ingestion_jobs SET status = ?, items_total = ?, items_processed = ?, updated_at = ? WHERE id = ?",
             (_job_status(processed, total), total, processed, now, job_id))
         self.store.db.commit()
+        # Cross-source dedup for whole-source ingests (upload / remote / chat).
+        # Group-level replaces (old_item_ids provided -- e.g. a single artifact's
+        # group within the aggregate Artifacts source) defer to the folder-scan
+        # dedup sweep, mirroring ingest_file, so one artifact edit doesn't rescan
+        # the entire aggregate source.
+        if processed == total and old_item_ids is None:
+            self._maybe_dedup(source_id)
         return job_id
 
     def get_job_status(self, job_id: str) -> dict | None:

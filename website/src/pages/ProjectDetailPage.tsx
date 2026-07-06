@@ -15,6 +15,14 @@ import { AlertTriangle } from 'lucide-react';
 type Tab = 'idea' | 'tasks';
 type ViewMode = 'dag' | 'phased';
 
+/** Minimal shape of a step returned by api.updatePlan (subset of TaskDetail). */
+interface SavedStep {
+  index: number;
+  title: string;
+  description: string;
+  depends_on: number[];
+}
+
 interface Props {
   run: ProjectRun;
   onRetry?: (index: number) => void;
@@ -131,16 +139,18 @@ export default function ProjectDetailPage({ run, onRetry, onRefresh }: Props) {
       const res = await api.updatePlan(run.task_id, updatedSteps.map(t => ({
         title: t.title, description: t.description, depends_on: t.depends_on, requires_approval: t.requires_approval,
       })));
-      const saved = (res.steps || []).find((s: any) => s.index === index);
+      const savedSteps: SavedStep[] = res.steps || [];
+      const saved = savedSteps.find((s) => s.index === index);
       const override = saved ? { title: saved.title, description: saved.description, depends_on: saved.depends_on } : updates;
       setSavedOverrides(prev => ({ ...prev, [index]: override }));
       setPendingEdits(prev => { const next = { ...prev }; delete next[index]; return next; });
       return override;
     } catch (e) {
+      // eslint-disable-next-line no-console -- surface plan-update failures for debugging
       console.error('Failed to update plan:', e);
       throw e;
     }
-  }, [run.task_details, run.task_id]);
+  }, [run.task_details, run.task_id, run.status, updateSingleTask]);
 
   return (
     <div className="flex flex-1 min-h-0 overflow-hidden">

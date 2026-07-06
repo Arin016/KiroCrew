@@ -12,11 +12,19 @@ import { useQuery, useMutation } from '@tanstack/react-query'
 import { ArrowUp, Loader2 } from 'lucide-react'
 import ChatMessageList from './ChatMessageList'
 import { useAppApi } from './index'
+import type { ChatMessage } from '../types'
 
 export interface ChatEmbedProps {
   slotKey: string
   agent?: string
   placeholder?: string
+}
+
+/** Minimal shape of the chat-slot payload consumed by this embed. */
+interface ChatSlotData {
+  messages?: ChatMessage[]
+  running?: boolean
+  title?: string
 }
 
 function ChatEmbed({ slotKey, agent, placeholder }: ChatEmbedProps) {
@@ -27,7 +35,7 @@ function ChatEmbed({ slotKey, agent, placeholder }: ChatEmbedProps) {
 
   const { data: slotData } = useQuery({
     queryKey: ['app-sdk-embed', slotKey],
-    queryFn: () => api.get<any>('/api/chat/slots/' + encodeURIComponent(slotKey)),
+    queryFn: () => api.get<ChatSlotData>('/api/chat/slots/' + encodeURIComponent(slotKey)),
     refetchInterval: (query) => {
       const running = query.state.data?.running ?? false
       return running ? 1000 : 5000

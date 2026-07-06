@@ -5,6 +5,8 @@ import { createPortal } from 'react-dom'
 import { useAppSelector } from '../store'
 import { api } from '../api/client'
 import type { SubagentInfo } from '../types'
+import Clickable from '../components/Clickable'
+import ScanProjectsModal from '../components/ScanProjectsModal'
 import { AimBadge, StatCard, PageHeader, EmptyState, Btn, Input } from '../components/ui'
 import ModelDropdownList from '../components/ModelDropdownList'
 import { LAYOUT } from '../components/layout'
@@ -31,6 +33,34 @@ function barGlow(pct: number): string {
 
 interface CtxSession { key: string; name: string; model: string; agent?: string; context_pct: number; context_window_tokens?: number; prompts: number }
 
+/** Shape of an installed-agent list item (also the `api.agentsInstalled` element). */
+interface InstalledAgent {
+  name: string
+  description: string
+  source: string
+  model: string
+  skills: string[]
+  mcp_servers: string[]
+  package?: string
+  filename?: string
+  project_path?: string
+}
+
+/**
+ * Fields the detail panel reads off the selected agent. It's populated from
+ * `api.agentDetail` (rich, dynamic backend payload) or, as a fallback, from an
+ * installed-list item — so detail-only fields are optional and the installed
+ * item's fields are folded in.
+ */
+interface AgentDetail extends Partial<InstalledAgent> {
+  name: string
+  prompt?: string
+  tools?: string[]
+  allowedTools?: string[]
+  mcpServers?: Record<string, { args?: string[] }>
+  toolsSettings?: { execute_bash?: { deniedCommands?: string[] } }
+}
+
 function AgentMetadataEditor({ name }: { name: string }) {
   const [content, setContent] = useState('')
   const [original, setOriginal] = useState('')
@@ -47,7 +77,7 @@ function AgentMetadataEditor({ name }: { name: string }) {
       await api.agentMetadataSave(name, content)
       setOriginal(content); setMsg(<><Check className="lucide-inline" /> Saved</>); setMsgOk(true)
       setTimeout(() => setMsg(''), 2000)
-    } catch (e: any) { setMsg(e.message); setMsgOk(false) }
+    } catch (e) { setMsg(e instanceof Error ? e.message : String(e)); setMsgOk(false) }
     finally { setSaving(false) }
   }
   return (
@@ -56,7 +86,7 @@ function AgentMetadataEditor({ name }: { name: string }) {
         <span className="text-[12px] text-muted font-medium uppercase tracking-wider">Routing Metadata</span>
         <InfoTip text="Describes when to delegate tasks to this agent. Used by the conductor skill to route tasks to the right specialist. Markdown format." />
       </div>
-      <textarea className="w-full bg-bg-elevated border border-border rounded-md p-2.5 text-text font-mono text-[12px] outline-none resize-y leading-relaxed transition-colors focus-ring" rows={4} value={content} onChange={e => setContent(e.target.value)} placeholder="Describe when to use this agent…" />
+      <textarea aria-label="Routing metadata" className="w-full bg-bg-elevated border border-border rounded-md p-2.5 text-text font-mono text-[12px] outline-none resize-y leading-relaxed transition-colors focus-ring" rows={4} value={content} onChange={e => setContent(e.target.value)} placeholder="Describe when to use this agent…" />
       <div className="flex items-center gap-2 mt-1">
         <Btn primary onClick={save} disabled={!dirty || saving}>{saving ? 'Saving…' : 'Save Metadata'}</Btn>
         {msg && <span className={`text-[12px] ${msgOk ? 'text-ok' : 'text-danger'}`}>{msg}</span>}
@@ -87,17 +117,17 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
     queryFn: () => api.sessionsUsage().then(d => d.usage?.raw ? d.usage : null).catch(() => null),
   })
 
-  const { data: installed = [], refetch: refetchInstalled } = useQuery({
+  const { data: installed = [], isPending: installedLoading, refetch: refetchInstalled } = useQuery({
     queryKey: ['agents-installed', refreshTrigger],
     queryFn: async () => {
       const a = await api.agentsInstalled()
       if (!Array.isArray(a)) return []
-      a.sort((x: any, y: any) => {
+      ;(a as InstalledAgent[]).sort((x, y) => {
         if (x.name === 'kiroclaw') return -1; if (y.name === 'kiroclaw') return 1
         if (x.name === 'kiroclaw-lite') return -1; if (y.name === 'kiroclaw-lite') return 1
         return x.name.localeCompare(y.name)
       })
-      return a as {name: string; description: string; source: string; model: string; skills: string[]; mcp_servers: string[]; package?: string; filename?: string}[]
+      return a as InstalledAgent[]
     },
   })
 
@@ -118,7 +148,7 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
   })
   const defaultAgent = defaultAgentData ?? ''
 
-  const [selectedAgent, setSelectedAgent] = useState<any>(null)
+  const [selectedAgent, setSelectedAgent] = useState<AgentDetail | null>(null)
   const { data: modelOptionsData } = useQuery({
     queryKey: ['available-models', provider.id],
     queryFn: async () => {
@@ -147,7 +177,7 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
   const modelBtnRef = useRef<HTMLButtonElement>(null)
   const patchModelMut = useMutation({
     mutationFn: ({ name, model }: { name: string; model: string }) => api.agentPatch(name, { model }),
-    onSuccess: (_r, { model }) => { setSelectedAgent((prev: any) => ({ ...prev, model })); refetchInstalled() },
+    onSuccess: (_r, { model }) => { setSelectedAgent(prev => (prev ? { ...prev, model } : prev)); refetchInstalled() },
   })
   const [pkgError, setPkgError] = useState<{ pkg: string; msg: string } | null>(null)
   const deleteAgentMut = useMutation({
@@ -166,6 +196,8 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
   })
   const spawnClearMut = useMutation({ mutationFn: () => api.spawnClear(), onSuccess: () => refetchSpawn() })
   const spawnDeleteMut = useMutation({ mutationFn: (id: string) => api.spawnDelete(id), onSuccess: () => refetchSpawn() })
+
+  const [scanOpen, setScanOpen] = useState(false)
 
   const toggleDefaultMut = useMutation({
     mutationFn: (next: string) => api.setDefaultAgent(next),
@@ -192,9 +224,13 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
           <StatCard label="Subagents" value={status?.subagents} accent />
         </div>
         {/* Installed Agents — fixed left list, fixed right detail */}
-        {installed.length > 0 && (
-          <div className="card-glow border border-border bg-card rounded-lg mb-4 animate-rise shadow-sm transition-all overflow-hidden">
-            <div className="px-5 pt-5 pb-3"><h3 className="text-sm font-semibold text-text-strong flex items-center gap-1.5">Installed Agents <InfoTip text={`Agent templates grouped by package. Update and uninstall at package level. Individual agents can be deleted (removes config file).`} /></h3></div>
+        {installedLoading ? (
+          <div className="card-glow border border-border bg-card rounded-lg mb-4 shadow-sm flex items-center justify-center py-10 gap-2 text-muted text-sm">
+            <Hourglass className="lucide-inline animate-pulse" /> Loading agents…
+          </div>
+        ) : installed.length > 0 && (
+          <div className="card-glow border border-border bg-card rounded-lg mb-4 animate-rise shadow-sm hover:border-border-strong hover:shadow-md transition-all overflow-hidden">
+            <div className="px-5 pt-5 pb-3"><h3 className="text-sm font-semibold text-text-strong flex items-center gap-1.5">Installed Agents <InfoTip text={`Agent templates grouped by package. Update and uninstall at package level. Individual agents can be deleted (removes config file).`} /> <Btn primary onClick={() => setScanOpen(true)} className="ml-auto text-[11px]">Scan Projects</Btn></h3></div>
             <div className="flex" style={{ height: `${LAYOUT.AGENT_LIST_HEIGHT}px` }}>
               {/* Agent list — scrollable */}
               <div className="w-[260px] shrink-0 border-r border-border overflow-y-auto p-2">
@@ -205,13 +241,22 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
                     const key = a.package || a.name; (g[key] ||= []).push(a); return g
                   }, {})
                   const renderAgent = (a: typeof installed[0], showDelete?: boolean) => (
-                    <div key={a.name} className={`flex items-center gap-2 px-3 py-2.5 rounded-md border transition-all cursor-pointer mb-1 ${selectedAgent?.name === a.name ? 'bg-accent-subtle border-accent/40' : 'bg-bg-elevated border-transparent hover:border-border-strong'}`} onClick={async () => { try { const d = await api.agentDetail(a.name); setSelectedAgent(d) } catch { setSelectedAgent(a) } }}>
-                      <span className={`text-[13px] cursor-pointer shrink-0 transition-colors ${defaultAgent === a.name ? 'text-warn' : 'text-muted hover:text-warn'}`} title={defaultAgent === a.name ? 'Remove default agent' : 'Set as default agent'} onClick={e => { e.stopPropagation(); toggleDefault(a.name) }}>{defaultAgent === a.name ? <Star className="lucide-inline" /> : <StarOff className="lucide-inline" />}</span>
+                    <Clickable key={`${a.name}-${a.project_path || ''}`} className={`flex items-center gap-2 px-3 py-2.5 rounded-md border transition-all cursor-pointer mb-1 ${selectedAgent?.name === a.name ? 'bg-accent-subtle border-accent/40' : 'bg-bg-elevated border-transparent hover:border-border-strong'}`} onClick={async () => { try { const d = await api.agentDetail(a.name, a.project_path); setSelectedAgent(d) } catch { setSelectedAgent(a) } }}>
+                      <span
+                        role="button"
+                        tabIndex={a.source === 'project' ? -1 : 0}
+                        aria-label={a.source === 'project' ? 'Project agents cannot be set as the global default. Set per-folder defaults in folder settings.' : defaultAgent === a.name ? 'Remove default agent' : 'Set as default agent'}
+                        className={`text-[13px] shrink-0 transition-colors ${a.source === 'project' ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer'} ${defaultAgent === a.name ? 'text-warn' : 'text-muted hover:text-warn'}`}
+                        title={a.source === 'project' ? 'Project agents cannot be set as the global default. Set per-folder defaults in folder settings.' : defaultAgent === a.name ? 'Remove default agent' : 'Set as default agent'}
+                        onClick={e => { e.stopPropagation(); if (a.source !== 'project') toggleDefault(a.name) }}
+                        onKeyDown={e => { if ((e.key === 'Enter' || e.key === ' ') && a.source !== 'project') { e.preventDefault(); e.stopPropagation(); toggleDefault(a.name) } }}
+                      >{defaultAgent === a.name ? <Star className="lucide-inline" /> : <StarOff className="lucide-inline" />}</span>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-1.5 mb-0.5">
                           <span className="text-[13px] font-mono font-semibold text-text truncate">{a.name}</span>
                           <AimBadge source={a.source} />
                         </div>
+                        {a.project_path && <div className="text-[11px] text-muted truncate mb-0.5" title={a.project_path}>{a.project_path}</div>}
                         <div className="flex gap-2 mt-0.5">
                           {a.skills.length > 0 && <span className="text-[11px] text-muted"><Brain className="lucide-inline" />{a.skills.length}</span>}
                           {a.mcp_servers.length > 0 && <span className="text-[11px] text-muted"><Plug className="lucide-inline" />{a.mcp_servers.length}</span>}
@@ -219,7 +264,7 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
                         </div>
                       </div>
                       {showDelete && <button className="text-[10px] text-danger/50 hover:text-danger-fg hover:bg-danger px-1 py-0.5 rounded border border-danger/20 hover:border-danger/30 transition-all shrink-0" title={`Delete ${a.name}`} aria-label={`Delete ${a.name}`} onClick={e => { e.stopPropagation(); if (confirm(`Delete agent "${a.name}"? This removes the config file.`)) deleteAgentMut.mutate(a.name) }}><X className="lucide-inline" /></button>}
-                    </div>
+                    </Clickable>
                   )
                   return (<>
                     {nonAim.map(a => renderAgent(a, a.source !== 'kiroclaw'))}
@@ -253,6 +298,11 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
                           <span><Brain className="lucide-inline" /></span> {selectedAgent.model || 'auto'} <span className="text-muted text-[10px]"><ChevronDown className="lucide-inline" /></span>
                         </Btn>
                         {modelDropOpen && modelBtnRef.current && createPortal(
+                          // Presentational positioning wrapper: the interactive semantics live
+                          // on the inner role="listbox" and its option buttons. This element only
+                          // hosts the roving-focus keydown handler for the composite widget, so it
+                          // has no ARIA role of its own (mirrors AgentSelector's dropdown).
+                          // eslint-disable-next-line jsx-a11y/no-static-element-interactions
                           <div ref={modelDropRef} tabIndex={-1} onKeyDown={onModelListKeyDown} className="fixed z-[9999] bg-card border border-border rounded-lg shadow-lg min-w-[260px] max-w-[340px] max-h-[320px] flex flex-col overflow-hidden animate-slide-up" style={(() => { const r = modelBtnRef.current!.getBoundingClientRect(); const dropH = 320; const top = r.bottom + 4 + dropH > window.innerHeight ? r.top - dropH - 4 : r.bottom + 4; const left = Math.max(8, Math.min(r.left, window.innerWidth - 348)); return { top, left } })()}>
                             <div className="p-2 border-b border-border">
                               <Input ref={modelInputRef} type="text" aria-label="Filter models" placeholder="Type to filter…" value={modelFilter} onChange={e => setModelFilter(e.target.value)} className="w-full px-2 py-1 text-[13px] font-mono" />
@@ -289,6 +339,8 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
             </div>
           </div>
         )}
+        {/* Scan Projects Modal */}
+        <ScanProjectsModal open={scanOpen} onClose={() => setScanOpen(false)} onSuccess={refetchInstalled} />
         {/* Context Window Usage */}
         <div className="card-glow border border-border bg-card rounded-lg p-5 mb-4 animate-rise shadow-sm transition-all">
           <h3 className="text-sm font-semibold text-text-strong mb-3.5 flex items-center gap-1.5">Context Window Usage <InfoTip text={`Live context window utilization per active ${provider.labels.sessionProcess} session. Custom agents show their configured model. Compaction triggers at 90%.`} /></h3>

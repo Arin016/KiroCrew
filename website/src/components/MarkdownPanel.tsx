@@ -1,4 +1,5 @@
-import { memo, useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react'
+import { safeSetItem } from '../utils/safeStorage'
+import { memo, useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import { RefreshCw, ExternalLink, MoreVertical, Hash, WrapText, Zap, Maximize2, Minimize2, MessageSquare, MessageSquarePlus, Copy, BookOpen, BookmarkPlus, Camera, Check, X, GitBranch, CaseSensitive, ChevronUp, ChevronDown } from 'lucide-react'
@@ -155,6 +156,7 @@ interface Props {
 
 import { monacoLang, useIsDark } from './MonacoCodeBlock'
 import { kiroclawDark, kiroclawLight } from './monacoTheme'
+import type { IDisposable } from 'monaco-editor'
 const MonacoDiffEditor = lazy(async () => {
   const { ensureMonacoLocal } = await import('../utils/monacoLocal')
   await ensureMonacoLocal()
@@ -182,6 +184,7 @@ const DOWNLOAD_FAILED = 'Download failed'
 async function downloadFile(filePath: string) {
   try {
     const res = await fetch(fileDownloadUrl(filePath))
+    // eslint-disable-next-line no-console -- surface download failures for diagnostics
     if (!res.ok) { console.error('downloadFile failed', res.status, res.statusText); alert(DOWNLOAD_FAILED); return }
     const blob = await res.blob()
     const a = document.createElement('a')
@@ -192,6 +195,7 @@ async function downloadFile(filePath: string) {
     a.click()
     document.body.removeChild(a)
     setTimeout(() => URL.revokeObjectURL(url), 2_000)
+    // eslint-disable-next-line no-console -- surface download failures for diagnostics
   } catch (err) { console.error('downloadFile failed', err); alert(DOWNLOAD_FAILED) }
 }
 
@@ -464,15 +468,15 @@ function DiffEditorBlock({ diffMode, lang, originalContent, content, dark, diffA
 }) {
   const handleChangeRef = useRef(handleChange); handleChangeRef.current = handleChange
   const onSelectRef = useRef(onSelect); onSelectRef.current = onSelect
-  const disposableRef = useRef<any>(null)
-  const selDisposableRef = useRef<any>(null)
+  const disposableRef = useRef<IDisposable | null>(null)
+  const selDisposableRef = useRef<IDisposable | null>(null)
   useEffect(() => () => { disposableRef.current?.dispose(); selDisposableRef.current?.dispose() }, [])
   if (!diffMode) return null
   return (
     <div className="w-full h-full border border-border rounded-md overflow-hidden">
       <Suspense fallback={<div className="p-3 text-muted text-[12px] animate-pulse">Loading diff…</div>}>
         <MonacoDiffEditor height="100%" language={monacoLang(lang)} original={originalContent} modified={content}
-          beforeMount={(monaco) => { if (!diffThemesRegistered) { monaco.editor.defineTheme('kiroclaw-dark', kiroclawDark as any); monaco.editor.defineTheme('kiroclaw-light', kiroclawLight as any); diffThemesRegistered = true } }}
+          beforeMount={(monaco) => { if (!diffThemesRegistered) { monaco.editor.defineTheme('kiroclaw-dark', kiroclawDark); monaco.editor.defineTheme('kiroclaw-light', kiroclawLight); diffThemesRegistered = true } }}
           theme={dark ? 'kiroclaw-dark' : 'kiroclaw-light'} onMount={(editor) => {
             const mod = editor.getModifiedEditor()
             disposableRef.current = mod.onDidChangeModelContent(() => { if (!diffActiveRef.current) return; handleChangeRef.current(mod.getValue()) })
@@ -909,7 +913,7 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
 
   const dismissHint = useCallback(() => {
     setHintDismissed(true)
-    localStorage.setItem(HINT_KEY, '1')
+    safeSetItem(HINT_KEY, '1')
   }, [])
 
   useEffect(() => {
@@ -925,12 +929,180 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
     saveCommentDrafts(draftsRef.current)
   }, [comments, filePath])
 
+  // ── Inline comment anchor highlights (CSS Custom Highlight API) ─────────
+  // The markdown preview is react-markdown-reconciled, so we must NOT inject
+  // <mark> nodes into it (that corrupts React's DOM on the next re-render and
+  // produces phantom nodes, e.g. an extra empty list bullet). Instead we paint
+  // highlights via the CSS Custom Highlight API — the ranges live entirely
+  // outside the DOM — and detect hover / click by hit-testing the pointer
+  // against those ranges with caretRangeFromPoint.
+  const commentTooltipRef = useRef<HTMLDivElement | null>(null)
+  const removeCommentTooltip = useCallback(() => {
+    commentTooltipRef.current?.remove()
+    commentTooltipRef.current = null
+  }, [])
+  // Tracks the currently-flashing sidebar comment row so a new click cancels
+  // the previous flash immediately (instead of leaving two rows highlighted
+  // until the first one's timeout fires).
+  const commentFlashRef = useRef<{ row: HTMLElement; timers: number[] } | null>(null)
+  const flashCommentRow = useCallback((row: HTMLElement) => {
+    const prev = commentFlashRef.current
+    if (prev) {
+      prev.timers.forEach(clearTimeout)
+      prev.row.style.background = ''
+      prev.row.style.transition = ''
+    }
+    row.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    row.style.transition = 'background 0.3s ease'
+    row.style.background = 'var(--accent-subtle, rgba(99, 102, 241, 0.25))'
+    const t1 = window.setTimeout(() => { row.style.background = '' }, 2800)
+    const t2 = window.setTimeout(() => { row.style.transition = ''; commentFlashRef.current = null }, 3100)
+    commentFlashRef.current = { row, timers: [t1, t2] }
+  }, [])
+
+  useLayoutEffect(() => {
+    const HL = 'mc-comment'
+    const clear = () => { try { cssHighlights?.delete(HL) } catch { /* */ } }
+    if (!FIND_HL_SUPPORTED || comments.length === 0 || editing) { clear(); return }
+    // Bind the observer + pointer listeners to the STABLE scroll container.
+    // The markdown text div (previewRef) is briefly null when react-markdown
+    // lazy-mounts on a file switch — binding to it and bailing on null meant a
+    // switched-to document never re-highlighted (regression). The scroll
+    // container outlives the lazy content; apply() re-queries the text root.
+    const scrollRoot = fullscreen ? fullscreenBodyRef.current : sidePanelScrollRef.current
+    if (!scrollRoot) { clear(); return }
+
+    // Inject the highlight paint rule once (background + accent underline).
+    if (!document.getElementById('mc-comment-hl-style')) {
+      const style = document.createElement('style')
+      style.id = 'mc-comment-hl-style'
+      style.textContent = `::highlight(${HL}){background-color:var(--accent-subtle,rgba(99,102,241,0.18));text-decoration-line:underline;text-decoration-color:var(--accent,#6366f1);text-decoration-thickness:2px;text-decoration-skip-ink:none;text-underline-offset:2px;}`
+      document.head.appendChild(style)
+    }
+
+    // Recompute ranges + repaint. Called once now, then again whenever the
+    // preview DOM settles — code-block syntax highlighting swaps text nodes
+    // AFTER first paint, which strips a just-created highlight range (symptom:
+    // the first comment in a code block doesn't underline until a second
+    // comment forces a re-run). A MutationObserver + rAF re-apply fixes it.
+    // `activeHits` is read by the pointer handlers below.
+    let activeHits: { range: Range; comment: InlineComment }[] = []
+    const apply = () => {
+      const textRoot = previewRef.current ?? fullscreenPreviewRef.current
+      if (!textRoot) { activeHits = []; clear(); return }
+      const walker = document.createTreeWalker(textRoot, NodeFilter.SHOW_TEXT)
+      const textNodes: { node: Text; start: number }[] = []
+      let fullText = ''
+      let node: Node | null
+      while ((node = walker.nextNode())) {
+        textNodes.push({ node: node as Text, start: fullText.length })
+        fullText += (node as Text).nodeValue ?? ''
+      }
+      const locate = (off: number): { node: Text; offset: number } | null => {
+        for (const tn of textNodes) {
+          const len = tn.node.nodeValue?.length ?? 0
+          if (off <= tn.start + len) return { node: tn.node, offset: off - tn.start }
+        }
+        return null
+      }
+      const ranges: Range[] = []
+      const hits: { range: Range; comment: InlineComment }[] = []
+      for (const comment of comments) {
+        if (!comment.anchor) continue
+        const idx = fullText.indexOf(comment.anchor)
+        if (idx < 0) continue
+        const s = locate(idx)
+        const e = locate(idx + comment.anchor.length)
+        if (!s || !e) continue
+        try {
+          const r = document.createRange()
+          r.setStart(s.node, s.offset)
+          r.setEnd(e.node, e.offset)
+          ranges.push(r)
+          hits.push({ range: r, comment })
+        } catch { /* skip */ }
+      }
+      activeHits = hits
+      if (ranges.length === 0) { clear(); return }
+      try { cssHighlights!.set(HL, new FindHighlightCtor!(...ranges)) } catch { clear() }
+    }
+    apply()
+
+    // Re-apply after async DOM mutations (syntax highlighting, lazy content).
+    let raf1 = 0, raf2 = 0, timer = 0
+    raf1 = requestAnimationFrame(() => { raf2 = requestAnimationFrame(apply) })
+    const observer = new MutationObserver(() => {
+      clearTimeout(timer)
+      timer = window.setTimeout(apply, 60)
+    })
+    observer.observe(scrollRoot, { childList: true, subtree: true, characterData: true })
+
+    // Hit-test the pointer against the comment ranges (no DOM elements exist).
+    const hitAt = (x: number, y: number): { range: Range; comment: InlineComment } | null => {
+      const caret = (document as unknown as { caretRangeFromPoint?: (x: number, y: number) => Range | null }).caretRangeFromPoint?.(x, y)
+      if (!caret) return null
+      for (const h of activeHits) {
+        try { if (h.range.comparePoint(caret.startContainer, caret.startOffset) === 0) return h } catch { /* */ }
+      }
+      return null
+    }
+
+    const onMove = (ev: MouseEvent) => {
+      const hit = hitAt(ev.clientX, ev.clientY)
+      if (!hit) { scrollRoot.style.cursor = ''; removeCommentTooltip(); return }
+      scrollRoot.style.cursor = 'pointer'
+      let tip = commentTooltipRef.current
+      if (!tip) {
+        tip = document.createElement('div')
+        tip.className = 'mc-comment-tooltip'
+        tip.style.cssText = 'position:fixed;z-index:9999;background:var(--bg-elevated,#1e1e2e);color:var(--text,#e0e0e0);border:1px solid var(--border,#333);border-radius:6px;padding:6px 10px;font-size:12px;line-height:1.4;max-width:300px;word-wrap:break-word;box-shadow:0 4px 12px rgba(0,0,0,0.25);pointer-events:none;'
+        document.body.appendChild(tip)
+        commentTooltipRef.current = tip
+      }
+      tip.textContent = hit.comment.text
+      // Follow the pointer.
+      const w = tip.offsetWidth
+      let left = ev.clientX + 12
+      if (left + w > window.innerWidth - 6) left = ev.clientX - w - 12
+      let top = ev.clientY - tip.offsetHeight - 12
+      if (top < 6) top = ev.clientY + 16
+      tip.style.left = left + 'px'
+      tip.style.top = top + 'px'
+    }
+    const onLeave = () => { scrollRoot.style.cursor = ''; removeCommentTooltip() }
+    const onClick = (ev: MouseEvent) => {
+      const hit = hitAt(ev.clientX, ev.clientY)
+      if (!hit) return
+      ev.preventDefault(); ev.stopPropagation()
+      window.getSelection()?.removeAllRanges()
+      removeCommentTooltip()
+      const row = document.querySelector(`[data-comment-id="${hit.comment.id}"]`) as HTMLElement | null
+      if (row) flashCommentRow(row)
+    }
+
+    scrollRoot.addEventListener('mousemove', onMove)
+    scrollRoot.addEventListener('mouseleave', onLeave)
+    scrollRoot.addEventListener('click', onClick)
+    return () => {
+      clear()
+      cancelAnimationFrame(raf1)
+      cancelAnimationFrame(raf2)
+      clearTimeout(timer)
+      observer.disconnect()
+      scrollRoot.style.cursor = ''
+      scrollRoot.removeEventListener('mousemove', onMove)
+      scrollRoot.removeEventListener('mouseleave', onLeave)
+      scrollRoot.removeEventListener('click', onClick)
+      removeCommentTooltip()
+    }
+  }, [comments, displayContent, editing, fullscreen, removeCommentTooltip, flashCommentRow])
+
   const handleSave = useCallback(async () => {
     setSaving(true); setSaveError(null)
     try { await onSave(filePath, content); setDirty(false); qc.invalidateQueries({ queryKey: ['file-diff', filePath] }) }
     catch (err) { setSaveError(err instanceof Error ? err.message : 'Save failed') }
     finally { setSaving(false) }
-  }, [filePath, content, onSave])
+  }, [filePath, content, onSave, qc])
 
   const handleSaveRef = useRef(handleSave)
   useEffect(() => { handleSaveRef.current = handleSave }, [handleSave])
@@ -1144,6 +1316,9 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
       {!fullscreen && <CommentOverlayBlock popover={popover} addComment={addComment} setPopover={clearPopover} onSubmitComments={onSubmitComments} comments={comments} editComment={editComment} removeComment={removeComment} submitAllComments={submitAllComments} />}
     </DetailPanel>
     {fullscreen && createPortal(
+      // The onKeyDown here implements a focus trap for the modal dialog; a
+      // role="dialog"/aria-modal container legitimately owns keyboard handling.
+      // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
       <div className="fixed inset-0 z-[9999] bg-bg flex flex-col" role="dialog" aria-modal="true" aria-label="Full screen file preview"
         ref={el => { if (el && !el.dataset.focused) { el.dataset.focused = '1'; const first = el.querySelector<HTMLElement>('button:not([disabled]),textarea,input,a[href],select,[tabindex]:not([tabindex="-1"])'); first?.focus() } }}
         onKeyDown={e => { if (e.key === 'Tab') { if ((document.activeElement as HTMLElement)?.closest('.monaco-editor')) return; const focusable = e.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]),textarea,input,a[href],select,[tabindex]:not([tabindex="-1"])'); if (focusable.length === 0) return; const first = focusable[0], last = focusable[focusable.length - 1]; if (e.shiftKey) { if (document.activeElement === first) { e.preventDefault(); last.focus() } } else { if (document.activeElement === last) { e.preventDefault(); first.focus() } } } }}>

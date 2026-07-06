@@ -32,6 +32,7 @@ from contextlib import aclosing
 from pathlib import Path
 from typing import AsyncGenerator, AsyncIterator
 
+from kiro_claw import model_registry
 from kiro_claw.acp.types import (
     ACP_BACKEND_CLAUDE,
     EVENT_AGENT_SWITCHED,
@@ -85,6 +86,7 @@ from kiro_claw.acp.types import (
     JsonRpcRequest,
 )
 from kiro_claw.env import augmented_path, resolve_krb5_ccname
+from kiro_claw.executors import subprocess_executor
 from kiro_claw.sandbox import wrap_argv
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 
@@ -520,6 +522,17 @@ _LEGACY_OPTION_KIND: dict[str, str] = {
     "reject_always": "reject_always",
 }
 
+# Canonical ACP tool-kind value for shell/exec tools. kiro-cli and
+# claude-agent-acp both report shell commands with kind="execute". This is the
+# ONE place the ACP shell literal lives — _is_shell_kind() maps it to the
+# provider-agnostic AcpEvent.is_shell flag the dashboard validates against.
+_ACP_SHELL_KIND = "execute"
+
+
+def _is_shell_kind(kind: str | None) -> bool:
+    """True when an ACP tool_kind denotes a shell/exec command."""
+    return kind == _ACP_SHELL_KIND
+
 
 class AcpError(Exception):
     """Base ACP error."""
@@ -677,6 +690,88 @@ def _format_acp_error(error: object) -> str:
     return redacted
 
 
+# Matches claude-agent-acp policy-substitution advisories:
+#   Model "X" is restricted by your organization's settings. Using Y instead.
+# Emitted when admin-tier policy (managed-settings / policyHelper) or the
+# Bedrock headless tier substitutes the requested model. The substitute is
+# already in effect and the session is live; claude-agent-acp wraps it as a
+# JSON-RPC -32603 error frame only because requested != applied. Informational,
+# not fatal -- so we keep the session instead of raising.
+_MODEL_SUBSTITUTION_ADVISORY_RE = re.compile(
+    r"is\s+restricted\b.+\bUsing\s+\S+\s+instead",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _extract_advisory_detail(error: object) -> str:
+    """Pull the ``data.details`` (or plain string ``data``) out of an ACP error.
+
+    Centralizes the shape-handling for the model-substitution advisory so the
+    detector, the substitute-extractor, and the runtime advisory handler all
+    move in lockstep when the advisory format evolves. Returns an empty string
+    if the error is not a dict, has no data, or carries no details.
+    """
+    if not isinstance(error, dict):
+        return ""
+    data = error.get("data")
+    if isinstance(data, dict):
+        return str(data.get("details", "") or "")
+    if isinstance(data, str):
+        return data
+    return ""
+
+
+def _is_model_substitution_advisory(error: object) -> bool:
+    """True iff *error* is a claude-agent-acp model-substitution advisory.
+
+    The adapter emits this on session/new (and session/load /
+    set_config_option) when policy substitutes the requested model. The
+    substitution is already applied -- the session is live on the substitute
+    -- but the response carries an error frame rather than a warning. Treat it
+    as non-fatal: log and continue. The match is deliberately narrow (code
+    -32603 AND a detail string containing BOTH 'is restricted' and 'Using X
+    instead') so genuine -32603 internal errors, invalid params, malformed
+    sessions, throttles, etc. still raise.
+    """
+    if not isinstance(error, dict):
+        return False
+    if error.get("code") != -32603:
+        return False
+    detail = _extract_advisory_detail(error)
+    if not detail:
+        return False
+    return bool(_MODEL_SUBSTITUTION_ADVISORY_RE.search(detail))
+
+
+# Captures the model id the backend says it will serve instead, from the same
+# advisory: "... Using <model-id> instead." The substitute id is whitespace-free
+# (e.g. ``global.anthropic.claude-sonnet-4-6[1m]``), so ``\S+`` lifts it cleanly.
+_MODEL_SUBSTITUTE_RE = re.compile(
+    r"\bUsing\s+(?P<model>\S+)\s+instead\b",
+    re.IGNORECASE,
+)
+
+
+def _substitute_model_from_advisory(error: object) -> str | None:
+    """Return the model id the gateway substituted to, or None.
+
+    Parses the ``-32603`` advisory ("Model X is restricted ... Using Y
+    instead.") and returns ``Y`` -- the model the gateway will actually serve.
+    The caller adopts it and re-issues ``session/new`` so a real session is
+    created (the advisory itself returns no sessionId). Returns None when the
+    error is not a substitution advisory or the substitute can't be parsed.
+    """
+    if not _is_model_substitution_advisory(error):
+        return None
+    detail = _extract_advisory_detail(error)
+    match = _MODEL_SUBSTITUTE_RE.search(detail)
+    if not match:
+        return None
+    # Strip surrounding quotes/trailing punctuation a variant phrasing might add.
+    model = match.group("model").strip().strip("\"'").rstrip(".,;")
+    return model or None
+
+
 def _get_child_pids(parent_pid: int | None, _visited: set[int] | None = None) -> list[int]:
     """Return PIDs of all descendants recursively (best-effort).
 
@@ -717,7 +812,12 @@ def _direct_children(pid: int) -> list[int]:
         except Exception:
             pass  # fall through to pgrep
     try:
-        out = subprocess_mod.check_output(["pgrep", "-P", str(pid)], stderr=subprocess_mod.DEVNULL)
+        # timeout so a hung pgrep cannot occupy a subprocess_executor worker
+        # indefinitely (the ps spawns in _get_start_time/_read_basename already
+        # cap at 2s; this path must match or a wedged pgrep starves the pool).
+        out = subprocess_mod.check_output(
+            ["pgrep", "-P", str(pid)], stderr=subprocess_mod.DEVNULL, timeout=2
+        )
         return [int(p) for p in out.decode().split() if p.strip()]
     except Exception:
         return []
@@ -739,45 +839,55 @@ def _get_start_time(pid: int) -> int | None:
         return None
 
 
-def _is_our_child(pid: int, expected_start: int | None = None) -> bool:
-    """Verify a PID still belongs to an ACP-related process (deny-by-default).
-
-    Uses allowlist on executable basename — only kills processes whose binary
-    matches known ACP adapter/MCP runtime names. Returns False for anything else,
-    including recycled PIDs.
-    """
-    allowed_prefixes = (
-        b"kiro",
-        b"claude",
-        b"node",
-        b"npx",
-        b"python",
-        b"ruby",
-        b"builder",
-        b"aim",
-        b"arcc",
-        b"deep-research",
-    )
-    allowed_exact = (b"uv",)
+def _read_basename(pid: int) -> bytes | None:
+    """Read the executable basename for a PID (platform-aware)."""
     try:
         if sys.platform == "linux":
             cmdline_path = Path(f"/proc/{pid}/cmdline")
             if not cmdline_path.exists():
-                return False
+                return None
             cmdline = cmdline_path.read_bytes()
-            exe = cmdline.split(b"\x00", 1)[0].rsplit(b"/", 1)[-1]
+            if not cmdline:
+                return None
+            return cmdline.split(b"\x00", 1)[0].rsplit(b"/", 1)[-1]
         else:
             out = subprocess_mod.check_output(
                 ["ps", "-o", "comm=", "-p", str(pid)], stderr=subprocess_mod.DEVNULL, timeout=2
             )
-            exe = out.strip().rsplit(b"/", 1)[-1]
-        # Match runtime prefixes, exact names, or any binary with "mcp" in the name
-        if not (
-            any(exe.startswith(tok) for tok in allowed_prefixes)
-            or exe in allowed_exact
-            or b"mcp" in exe
-        ):
-            return False
+            name = out.strip()
+            if not name:
+                return None
+            return name.rsplit(b"/", 1)[-1]
+    except Exception:
+        return None
+
+
+# Type alias for child PID records: (start_time, recorded_basename)
+ChildRecord = tuple[int | None, bytes | None]
+
+
+def _capture_child_records(pids: list[int]) -> dict[int, ChildRecord]:
+    """Capture (start_time, basename) for each pid as a ChildRecord map.
+
+    On macOS ``_get_start_time`` / ``_read_basename`` shell out to ``ps`` (and
+    ``_get_child_pids`` to ``pgrep``), which can block during the subprocess
+    spawn (fork/exec). Callers running on the event loop MUST invoke this via
+    ``run_in_executor(subprocess_executor(), ...)`` so the spawns happen on a
+    worker thread and never wedge the loop (the macOS wedge captured 2026-06-26).
+    """
+    return {p: (_get_start_time(p), _read_basename(p)) for p in pids}
+
+
+def _is_our_child(
+    pid: int, expected_start: int | None = None, expected_basename: bytes | None = None
+) -> bool:
+    """Verify a PID still belongs to a process we spawned (deny-by-default).
+
+    Compares recorded basename and start_time against live values. No hardcoded
+    allowlist — any binary recorded at spawn time is automatically supervised.
+    Returns False for recycled PIDs or unreadable processes.
+    """
+    try:
         # Start-time check: definitive PID recycling detection (always required)
         actual_start = _get_start_time(pid)
         if expected_start is None or actual_start is None:
@@ -786,18 +896,49 @@ def _is_our_child(pid: int, expected_start: int | None = None) -> bool:
         if actual_start != expected_start:
             logger.debug("PID %d start time mismatch (recycled)", pid)
             return False
+        # Basename check: catches recycling to a different binary with same start slot.
+        # Deny-by-default: if no basename was recorded (legacy record from before
+        # this change), we deny rather than skip the check. Returning False here
+        # causes the caller (_kill_escaped_children) to SKIP the kill — we won't
+        # SIGKILL a process we can't positively confirm is ours. This is the safe
+        # direction: avoids killing a recycled PID that belongs to another user.
+        # Trade-off: legacy in-memory records (no basename) are left alive until
+        # the session restarts and re-records them with basenames.
+        if expected_basename is None:
+            logger.debug("PID %d has no recorded basename — denying (fail-closed)", pid)
+            return False
+        actual_basename = _read_basename(pid)
+        if actual_basename is None:
+            return False  # process gone
+        if actual_basename != expected_basename:
+            logger.debug(
+                "PID %d basename mismatch (recorded=%r, actual=%r)",
+                pid,
+                expected_basename,
+                actual_basename,
+            )
+            return False
         return True
     except Exception:
         return False
 
 
-def _kill_escaped_children(child_pids: dict[int, int | None]) -> None:
+def _kill_escaped_children(child_pids: dict[int, int | None] | dict[int, ChildRecord]) -> None:
     """SIGKILL descendants that survived killpg (different PGID). Kills leaf-first."""
     for cpid in reversed(list(child_pids.keys())):
         try:
             os.kill(cpid, 0)  # still alive?
-            if not _is_our_child(cpid, expected_start=child_pids.get(cpid)):
-                logger.debug("Skipping PID %d — not an ACP/MCP process (recycled?)", cpid)
+            record = child_pids.get(cpid)
+            # Support both old (int|None) and new (tuple) record shapes
+            if isinstance(record, tuple):
+                expected_start, expected_basename = record
+            else:
+                expected_start = record
+                expected_basename = None
+            if not _is_our_child(
+                cpid, expected_start=expected_start, expected_basename=expected_basename
+            ):
+                logger.debug("Skipping PID %d — not our process (recycled?)", cpid)
                 continue
             os.kill(cpid, signal.SIGKILL)
             logger.debug("Killed escaped child PID %d", cpid)
@@ -891,9 +1032,23 @@ class AcpClient:
         # offers rather than a hardcoded guess. Each entry: {modelId, name,
         # description}.
         self._available_models: list[dict[str, str]] = []
-        self._child_pids: dict[int, int | None] = {}  # pid → start_time snapshot
+        # Model kiro-cli/claude-agent-acp actually resolved to (may differ
+        # from self._model when that's the "auto" sentinel). Used to look up
+        # the context window when usage_update isn't sent (see _track_metadata).
+        self._resolved_model_id: str | None = None
+        # Model the backend last substituted to via the -32603 admin-tier policy
+        # advisory ("Using X instead"). Set by _wait_for_response when it sees the
+        # advisory; consumed by the session/new path to re-issue creation on the
+        # model the gateway will actually serve (the advisory carries no
+        # sessionId, so the first attempt creates nothing). None = no substitution.
+        self._last_substitution_model: str | None = None
+        self._child_pids: dict[int, ChildRecord] = {}  # pid → (start_time, basename)
         self.last_prompt_stats = AcpPromptStats()
         self._tool_call_inputs: dict[str, str] = {}
+        # Map toolCallId → is_shell, cached from the tool_call notification so
+        # the later permission_request event (which carries no kind) can inherit
+        # the canonical shell signal. Mirrors _tool_call_inputs lifecycle.
+        self._tool_call_is_shell: dict[str, bool] = {}
         # Structured raw tool params (rawInput dict) keyed by toolCallId, cached
         # from the ToolCall notification so the later request_permission event —
         # which carries only a truncated title — can recover the real path/url
@@ -1009,6 +1164,7 @@ class AcpClient:
                 {"sessionId": self._session_id, "modelId": model_id},
             )
         self._model = model_id
+        self._resolved_model_id = model_id
 
     def _capture_available_models(self, session_resp: dict) -> None:
         """Record the model list the backend advertised in a session response.
@@ -1019,10 +1175,16 @@ class AcpClient:
         real backend models (e.g. the versioned Claude list from
         claude-agent-acp) instead of a hardcoded guess. Best-effort and never
         raises — a backend that omits ``models`` simply leaves the list empty.
+
+        Also records ``currentModelId`` for ``_track_metadata``'s context
+        window lookup.
         """
         models = session_resp.get("models")
         if not isinstance(models, dict):
             return
+        current_model_id = models.get("currentModelId")
+        if isinstance(current_model_id, str) and current_model_id:
+            self._resolved_model_id = current_model_id
         advertised = models.get("availableModels")
         if not isinstance(advertised, list):
             return
@@ -1235,7 +1397,9 @@ class AcpClient:
             **kwargs,
         )
         self._pid = self._process.pid
-        self._start_time = _get_start_time(self._pid)
+        self._start_time = await asyncio.get_running_loop().run_in_executor(
+            subprocess_executor(), _get_start_time, self._pid
+        )
         _spawn_label = (
             "claude-agent-acp" if self._is_claude else f"{KIRO_CLI_BIN} {KIRO_CLI_SUBCMD}"
         )
@@ -1252,9 +1416,14 @@ class AcpClient:
         _track_pid(self._pid)
         _track_session_pid(self._pid)  # separate file for startup cleanup
         await asyncio.sleep(0.3)
-        early_descendants = _get_child_pids(self._pid)
+        _loop = asyncio.get_running_loop()
+        early_descendants = await _loop.run_in_executor(
+            subprocess_executor(), _get_child_pids, self._pid
+        )
         if early_descendants:
-            self._child_pids = {p: _get_start_time(p) for p in early_descendants}
+            self._child_pids = await _loop.run_in_executor(
+                subprocess_executor(), _capture_child_records, early_descendants
+            )
             _track_child_pids(self._child_pids, parent_pid=self._pid or 0)
             logger.info("Early tracking %d descendants of PID %d", len(self._child_pids), self._pid)
 
@@ -1307,15 +1476,24 @@ class AcpClient:
         Merges with any early snapshot taken in _spawn().  MCP servers
         (builder-mcp, node) may not exist until after _initialize_session().
         """
-        descendants = _get_child_pids(self._pid)
+        _loop = asyncio.get_running_loop()
+        descendants = await _loop.run_in_executor(
+            subprocess_executor(), _get_child_pids, self._pid
+        )
         if not descendants:
             # Retry once — children may not have forked yet
             await asyncio.sleep(0.5)
-            descendants = _get_child_pids(self._pid)
+            descendants = await _loop.run_in_executor(
+                subprocess_executor(), _get_child_pids, self._pid
+            )
 
-        for p in descendants:
-            if p not in self._child_pids:
-                self._child_pids[p] = _get_start_time(p)
+        new_pids = [p for p in descendants if p not in self._child_pids]
+        if new_pids:
+            self._child_pids.update(
+                await _loop.run_in_executor(
+                    subprocess_executor(), _capture_child_records, new_pids
+                )
+            )
 
         if self._child_pids:
             from kiro_claw.session import _track_child_pids
@@ -1347,13 +1525,19 @@ class AcpClient:
         # process groups survive killpg (kiro-cli-chat acp leak).
         # Merge stored snapshot (from init, catches reparented-to-init PIDs)
         # with fresh scan (catches children spawned after init).
-        fresh = _get_child_pids(pid)
+        _loop = asyncio.get_running_loop()
+        fresh = await _loop.run_in_executor(subprocess_executor(), _get_child_pids, pid)
         stored = self._child_pids
-        # Build merged dict: pid → start_time (stored has start times, fresh doesn't)
-        merged: dict[int, int | None] = dict(stored)
-        for p in fresh:
-            if p not in merged:
-                merged[p] = _get_start_time(p)
+        # Build merged dict: pid → (start_time, basename) (stored has both, fresh needs capture)
+        merged: dict[int, ChildRecord] = dict(stored)
+        new_pids = [p for p in fresh if p not in merged]
+        if new_pids:
+            # capture (start_time, basename) off-loop — on macOS these spawn `ps`
+            merged.update(
+                await _loop.run_in_executor(
+                    subprocess_executor(), _capture_child_records, new_pids
+                )
+            )
 
         if not force:
             try:
@@ -1362,7 +1546,11 @@ class AcpClient:
                 pass
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=3.0)
-                _kill_escaped_children(merged)
+                # _kill_escaped_children -> _is_our_child -> _get_start_time/
+                # _read_basename spawn `ps` on macOS; run it off the loop.
+                await _loop.run_in_executor(
+                    subprocess_executor(), _kill_escaped_children, merged
+                )
                 return
             except asyncio.TimeoutError:
                 pass
@@ -1374,7 +1562,9 @@ class AcpClient:
                 self._process.kill()
             except (ProcessLookupError, OSError):
                 pass
-        _kill_escaped_children(merged)
+        await _loop.run_in_executor(
+            subprocess_executor(), _kill_escaped_children, merged
+        )
         try:
             await asyncio.wait_for(self._process.wait(), timeout=1.0)
         except asyncio.TimeoutError:
@@ -1445,6 +1635,84 @@ class AcpClient:
             except Exception:
                 pass
         self._child_pids = {}
+
+    async def _new_session_following_substitution(self) -> dict:
+        """Issue ``session/new``; if the gateway substitutes the model, adopt it
+        and re-issue once so a real session is actually created.
+
+        The admin-tier policy advisory ("Model X is restricted ... Using Y
+        instead.") comes back as a ``-32603`` *error frame with no sessionId* --
+        the first attempt creates nothing. ``_wait_for_response`` records the
+        substitute model in ``self._last_substitution_model``; here we pin
+        ``self._model`` to it, re-seed ``settings.local.json`` (the claude
+        backend builds a fresh SettingsManager per session/new, so the new model
+        takes effect), and re-issue. Idempotent and bounded to ONE retry -- if the
+        gateway substitutes again to the same/another restricted id we stop
+        rather than loop. Returns the session/new response dict (possibly still
+        without a sessionId, which the caller treats as a hard failure).
+
+        The claude-backed substitution retry path is the dormant ``_is_claude``
+        seam (kiro-cli never emits this advisory); the public core drives only
+        kiro-cli, so ``mcpServers`` stays ``[]`` and the settings re-seed is
+        best-effort via ``getattr`` — the deleted cc_agent glue is re-added by
+        the internal companion, not the public core.
+        """
+        new_params: dict = {
+            "cwd": str(self._work_dir),
+            # kiro-cli loads servers from --agent; claude-agent-acp must be
+            # told here -- it does not read kiroclaw.mcp.json on its own.
+            "mcpServers": [],
+        }
+        if self._is_claude:
+            new_params["_meta"] = {"claudeCode": {"options": {}}}
+
+        self._last_substitution_model = None
+        session_id = await self._send_request(METHOD_SESSION_NEW, new_params)
+        session_resp = await self._wait_for_response(session_id, timeout=_INIT_TIMEOUT)
+
+        # Happy path: a real session came back.
+        if session_resp.get("sessionId"):
+            return session_resp
+
+        # Substitution path: the gateway named a model it WILL serve. Adopt it,
+        # re-seed settings so the backend resolves to it, and re-issue once.
+        substitute = self._last_substitution_model
+        if self._is_claude and substitute and substitute != self._model:
+            # Redact the substitute name before logging. It is parsed straight
+            # from the untrusted ACP backend advisory (data.details "Using X
+            # instead") and the gateway log fans out to the dashboard activity
+            # feed and Slack -- mirror the dual-redaction discipline applied
+            # to the source advisory in _wait_for_response.
+            _sub_log, _ = redact_exfiltration_urls(str(substitute))
+            _sub_log, _ = redact_credentials(_sub_log)
+            logger.warning(
+                "ACP session/new returned a substitution advisory with no session; "
+                "adopting gateway-served model %r and retrying session creation.",
+                _sub_log,
+            )
+            self._model = substitute
+            # Re-seed settings.local.json so the fresh SettingsManager the adapter
+            # builds for the retry resolves the substitute model (it merges
+            # settings sources each session/new). The re-seed helper lives in the
+            # internal companion's cc_agent glue; guard so the public core (which
+            # never reaches this dormant _is_claude branch) does not AttributeError.
+            _reseed = getattr(self, "_write_claude_local_settings", None)
+            if callable(_reseed):
+                try:
+                    _reseed()
+                except (OSError, ValueError, TypeError):
+                    # Narrow to realistic re-seed failure modes: OSError covers
+                    # disk / permission errors on the atomic write; ValueError
+                    # and TypeError cover registry / json shape surprises.
+                    # Never let re-seed failure mask the retry -- worst case, the
+                    # adapter resolves to whatever it had cached and we still
+                    # retry session/new on the substitute path.
+                    logger.warning("re-seed of settings.local.json failed", exc_info=True)
+            self._last_substitution_model = None
+            retry_id = await self._send_request(METHOD_SESSION_NEW, new_params)
+            session_resp = await self._wait_for_response(retry_id, timeout=_INIT_TIMEOUT)
+
+        return session_resp
 
     async def _initialize_session(self) -> None:
         """Handshake: initialize → session/load or session/new → set_mode → set_model."""
@@ -1520,22 +1788,50 @@ class AcpClient:
             else:
                 logger.info("Session file missing for %s, skipping load", resume_sid)
 
-        # 3. Create new session if load didn't succeed
+        # 3. Create new session if load didn't succeed. On the claude backend a
+        # model-substitution advisory comes back as an error frame with NO
+        # sessionId; _new_session_following_substitution adopts the substitute
+        # model and re-issues once so a real session is actually created.
         if not self._session_id:
-            new_params: dict = {
-                "cwd": str(self._work_dir),
-                # kiro-cli loads servers from --agent; claude-agent-acp must be
-                # told here — it does not read kiroclaw.mcp.json on its own.
-                "mcpServers": [],
-            }
-            if self._is_claude:
-                new_params["_meta"] = {"claudeCode": {"options": {}}}
-            session_id = await self._send_request(METHOD_SESSION_NEW, new_params)
-            session_resp = await self._wait_for_response(session_id, timeout=_INIT_TIMEOUT)
+            # Capture the requested model before the helper runs. The helper resets
+            # self._last_substitution_model = None on every return path, so we can't
+            # use it to detect whether substitution happened. Comparing self._model
+            # before vs after is the reliable signal.
+            model_before = self._model
+            session_resp = await self._new_session_following_substitution()
             self._session_id = session_resp.get("sessionId")
             self._capture_available_models(session_resp)
             self._store_session_config(session_resp)
-            logger.info("ACP session created: %s", self._session_id)
+            if not self._session_id:
+                # Both the initial attempt and the substitution retry failed to
+                # yield a session. Raise a clear, actionable error instead of
+                # letting the next step die on the opaque "Cannot set config
+                # option before session is initialized" guard.
+                # self._model can be backend-derived (the substitute adopted
+                # by _new_session_following_substitution from the ACP advisory),
+                # and AcpError chains through to the dashboard activity feed
+                # and Slack. Dual-redact before interpolating, same discipline
+                # as the logger paths.
+                # Standardize redacted-local naming across this file: the
+                # convention is _<source>_log so the reader sees what was redacted.
+                _model_for_error_log, _ = redact_exfiltration_urls(str(self._model))
+                _model_for_error_log, _ = redact_credentials(_model_for_error_log)
+                raise AcpError(
+                    "session/new returned no sessionId"
+                    + (
+                        f" even after adopting substitute model {_model_for_error_log!r}"
+                        if self._model != model_before
+                        else ""
+                    )
+                    + "; the backend did not create a session."
+                )
+            # self._model can be backend-derived if _new_session_following_substitution
+            # adopted the gateway substitute. Redact it consistently with the
+            # warning-log path so any URL / credential-shaped substitute id never
+            # reaches the dashboard activity feed or Slack unredacted.
+            _model_log, _ = redact_exfiltration_urls(str(self._model))
+            _model_log, _ = redact_credentials(_model_log)
+            logger.info("ACP session created: %s (model=%s)", self._session_id, _model_log)
         self._last_activity = time.monotonic()
 
         # Seek to end of JSONL so we only read new tool results.
@@ -1786,7 +2082,34 @@ class AcpClient:
             if msg.is_response_for(req_id):
                 _reinject()
                 if msg.error:
-                    raise AcpError(f"JSON-RPC error: {msg.error}")
+                    if _is_model_substitution_advisory(msg.error):
+                        # Admin-tier / headless-tier policy substituted the
+                        # requested model. The session is already live on the
+                        # substitute -- keep going; log loudly so operators see it.
+                        detail = _extract_advisory_detail(msg.error)
+                        self._last_substitution_model = _substitute_model_from_advisory(
+                            msg.error
+                        )
+                        # Redact before logging. The advisory payload originates
+                        # from the ACP backend and flows to the dashboard activity
+                        # feed and Slack via the gateway log. Match the existing
+                        # _format_acp_error pattern in this file.
+                        _payload_log = detail if detail else str(msg.error)
+                        _payload_log, _ = redact_exfiltration_urls(_payload_log)
+                        _payload_log, _ = redact_credentials(_payload_log)
+                        logger.warning(
+                            "ACP backend substituted model (policy): %s",
+                            _payload_log,
+                        )
+                        return msg.result or {}
+                    # Dual-redact msg.error before interpolating into the AcpError.
+                    # msg.error is the wire-derived JSON-RPC error frame from the ACP
+                    # backend; AcpError propagates to the dashboard activity feed and
+                    # Slack via the same path as the logger sinks. Same redaction
+                    # discipline as the substitution-advisory log site above.
+                    _err_log, _ = redact_exfiltration_urls(str(msg.error))
+                    _err_log, _ = redact_credentials(_err_log)
+                    raise AcpError(f"JSON-RPC error: {_err_log}")
                 return msg.result or {}
             # Notification (has method, no id) — buffer for drain.
             if msg.method and msg.id is None:
@@ -2046,31 +2369,21 @@ class AcpClient:
                     # come back (no result, no progress, no permission) for the
                     # stall window.  This is the silent-hang case where
                     # _stale_eligible is False (cleared on tool_call) so the
-                    # check above never fires.
-                    #
-                    # Recovery (not just detection): the original bare ``return``
-                    # abandoned the turn but left the kiro-cli child ALIVE
-                    # mid-prompt, so the slot wedged and every later prompt hit
-                    # "Prompt already in progress" until the whole backend was
-                    # killed by hand.  Instead, kill the wedged child so the next
-                    # prompt cold-starts, and raise AcpProcessDied so the existing
-                    # recovery path takes over: the dashboard resets the session
-                    # and re-queues the message (bounded by _acp_pipe_death_retries
-                    # → "Session stuck" after 3), and cron/other callers surface a
-                    # clean error instead of a hung turn.  _kill_process only
-                    # touches the subprocess/pipes (never _turn_lock), so it is
-                    # safe to call here — the finally still releases the lock.
-                    if self._tool_dispatched and (time.monotonic() - last_data_ts) > _TOOL_STALL_TIMEOUT:
-                        _stall_idle = time.monotonic() - last_data_ts
+                    # check above never fires.  Treat as a dead turn and exit so
+                    # the caller raises/escalates instead of waiting out the full
+                    # prompt timeout (or, for crons, the job timeout).
+                    # Use max(last_data_ts, _last_activity) so that MCP tools
+                    # which ping /api/session-keepalive (wait, spawn_sub_agents)
+                    # keep the watchdog satisfied even though no JSON-RPC frames
+                    # arrive on stdout during their execution.
+                    _tool_last_seen = max(last_data_ts, self._last_activity)
+                    if self._tool_dispatched and (time.monotonic() - _tool_last_seen) > _TOOL_STALL_TIMEOUT:
                         logger.warning(
                             "Tool stall detected for req %d — tool dispatched but no data for %.0fs. "
-                            "Killing agent to recover the slot.",
-                            req_id, _stall_idle,
+                            "Treating turn as dead.",
+                            req_id, time.monotonic() - _tool_last_seen,
                         )
-                        await self._kill_process(force=True)
-                        raise AcpProcessDied(
-                            f"tool stalled — no data for {_stall_idle:.0f}s; agent killed to recover"
-                        )
+                        return
                     continue
 
                 consecutive_empty = 0
@@ -2206,6 +2519,7 @@ class AcpClient:
             context_window_tokens=_prev_window,
         )
         self._tool_call_inputs.clear()
+        self._tool_call_is_shell.clear()
         self._tool_call_params.clear()
         # Clear stale permission options so an aborted/cancelled request from
         # a prior turn cannot leak into this one (memory + correctness).
@@ -2255,7 +2569,7 @@ class AcpClient:
                 self._tool_dispatched = False
                 self._last_stop_reason = reason
                 self._turn_done.set()
-                yield AcpEvent(kind=EVENT_COMPLETE, stop_reason=reason)
+                yield AcpEvent(kind=EVENT_COMPLETE, stop_reason=reason, credits=self.last_prompt_stats.credits)
                 return
             if action == "error":
                 raise AcpError(_format_acp_error(msg.error))
@@ -2284,7 +2598,7 @@ class AcpClient:
                         got_complete = True
                         for tr_event in await asyncio.to_thread(self._read_new_tool_results_sync):
                             yield tr_event
-                        yield AcpEvent(kind=EVENT_COMPLETE)
+                        yield AcpEvent(kind=EVENT_COMPLETE, credits=self.last_prompt_stats.credits)
                         return
                 tool_event = self._extract_tool_event(msg)
                 if tool_event:
@@ -2351,16 +2665,32 @@ class AcpClient:
                 _upd = _upd_raw if isinstance(_upd_raw, dict) else {}
                 _su_kind = str(_upd.get("sessionUpdate") or "")
                 _tcid = str(_upd.get("toolCallId") or "")
-                _su_text = str(_upd.get("text") or "")
+                # Prefer the nested ``content.text`` shape kiro-cli 2.10.0 emits
+                # (via the shared chunk extractor); fall back to the flat
+                # top-level ``text`` for older payloads. Fall back on a falsy
+                # chunk (None OR empty string) so an empty nested content.text
+                # does not shadow a populated flat ``text``.
+                _su_chunk, _su_thinking = self._extract_text_chunk(msg)
+                _su_text = str(_su_chunk or (_upd.get("text") or ""))
                 if _ssid and _tcid:
+                    # Sub-agent output is LLM-influenced — redact the title before
+                    # it reaches the dashboard/persisted message.
+                    _su_title, _ = redact_exfiltration_urls(str(_upd.get("title") or ""))
+                    _su_title, _ = redact_credentials(_su_title)
                     yield AcpEvent(
                         kind=EVENT_SUBAGENT_ACTIVITY,
                         sub_session_id=_ssid,
                         tool_call_id=_tcid,
-                        title=str(_upd.get("title") or ""),
+                        title=_su_title,
                     )
-                elif _ssid and _su_text and _su_kind == "agent_message_chunk":
-                    # Sub-agent's streamed text output — the real content.
+                elif _ssid and _su_text and _su_kind == "agent_message_chunk" and not _su_thinking:
+                    # Sub-agent's streamed text output — the real content; redact
+                    # exfil URLs + credentials the sub-agent may have emitted.
+                    # Skip reasoning/thinking blocks (is_thinking) — those are the
+                    # sub-agent's internal reasoning, not user-visible output, and
+                    # the flat pre-port read never surfaced them.
+                    _su_text, _ = redact_exfiltration_urls(_su_text)
+                    _su_text, _ = redact_credentials(_su_text)
                     yield AcpEvent(
                         kind=EVENT_SUBAGENT_ACTIVITY,
                         sub_session_id=_ssid,
@@ -2444,7 +2774,7 @@ class AcpClient:
                     "Synthesizing EVENT_COMPLETE after stale turn (chunks=%d)",
                     self.last_prompt_stats.text_chunks,
                 )
-                yield AcpEvent(kind=EVENT_COMPLETE, stop_reason=STOP_REASON_END_TURN)
+                yield AcpEvent(kind=EVENT_COMPLETE, stop_reason=STOP_REASON_END_TURN, credits=self.last_prompt_stats.credits)
                 return
             raise AcpTimeoutError()
 
@@ -2758,12 +3088,16 @@ class AcpClient:
         kind = update.get("sessionUpdate")
         if kind == UPDATE_AGENT_MESSAGE_CHUNK:
             content = update.get("content", {})
+            if not isinstance(content, dict):
+                return None, False
             text = content.get("text")
             content_type = content.get("type", "text")
             is_thinking = content_type in ("thinking", "reasoning")
             return text, is_thinking
         if kind == UPDATE_AGENT_THOUGHT_CHUNK:
             content = update.get("content", {})
+            if not isinstance(content, dict):
+                return None, True
             text = content.get("text")
             return text, True
         return None, False
@@ -2898,6 +3232,12 @@ class AcpClient:
             # fires here because the initial tool_call has empty rawInput —
             # the refinement path in `_extract_tool_call_refinement` is what
             # the user actually sees. Same helper is used in both places.
+            # Capture the canonical shell signal from the raw kind BEFORE
+            # redaction so the later permission_request event (which carries no
+            # kind) can inherit it via the toolCallId cache below.
+            is_shell = _is_shell_kind(kind)
+            if tool_call_id:
+                self._tool_call_is_shell[tool_call_id] = is_shell
             title = _select_tool_title(title, raw_input) or ""
             if title:
                 title, _ = redact_exfiltration_urls(title)
@@ -2914,6 +3254,7 @@ class AcpClient:
                 tool_input=input_str,
                 tool_call_id=tool_call_id,
                 raw_tool_params=raw_input if isinstance(raw_input, dict) else None,
+                is_shell=is_shell,
             )
         return None
 
@@ -3059,6 +3400,13 @@ class AcpClient:
         if isinstance(kind, str) and kind:
             kind_str, _ = redact_exfiltration_urls(kind)
             kind_str, _ = redact_credentials(kind_str)
+        # Refresh the cached shell signal only when this refinement carries a
+        # kind. A refinement that omits kind must NOT clobber a True cached by
+        # the initial tool_call notification (kind is optional on updates).
+        # Cache off the RAW kind, not the redacted kind_str.
+        if isinstance(kind, str) and kind:
+            self._tool_call_is_shell[tool_use_id] = _is_shell_kind(kind)
+        is_shell = self._tool_call_is_shell.get(tool_use_id, False)
         return AcpEvent(
             kind=EVENT_TOOL_CALL_UPDATE,
             title=title_str,
@@ -3066,6 +3414,7 @@ class AcpClient:
             tool_input=input_str,
             tool_call_id=tool_use_id,
             raw_tool_params=raw_input if isinstance(raw_input, dict) else None,
+            is_shell=is_shell,
         )
 
     def _read_new_tool_results_sync(self) -> list[AcpEvent]:
@@ -3133,9 +3482,10 @@ class AcpClient:
         tool_call = params.get("toolCall", {})
         title = tool_call.get("title", "unknown")
         # The ACP toolCall carries a `kind` ("execute" for Bash, "read"/"edit"/
-        # …). Carry it onto the event so downstream validation can apply the
-        # execute-tool exemptions — notably the display-name length gate, which
-        # is meaningless for a full shell command string. Missing/empty stays "".
+        # …). Carry it onto the event as display/telemetry metadata. NOTE: the
+        # tool-name length-cap exemption does NOT key off this value — it uses
+        # the is_shell flag resolved below from the trusted tool_call cache, not
+        # the agent-influenced permission payload. Missing/empty stays "".
         tool_kind = tool_call.get("kind", "")
         # ACP spec uses optionId/name + kind ("allow_once"|"allow_always"|
         # "reject_once"|"reject_always"); kiro-cli historically uses id/label
@@ -3219,6 +3569,32 @@ class AcpClient:
             if isinstance(inline, dict):
                 raw_params = inline
 
+        # Resolve the canonical shell signal. SECURITY (deny-by-default): the
+        # ONLY trusted source is the value cached from the preceding tool_call
+        # notification (keyed by toolCallId). We deliberately do NOT fall back
+        # to the permission payload's own `kind`: that field is agent/LLM-
+        # influenced, and trusting it to waive the tool-name length cap on the
+        # very name being validated would let a malicious agent set
+        # kind="execute" on the permission payload to bypass the check. On a
+        # cache miss is_shell stays False and the length cap is enforced.
+        #
+        # Use .get() (not .pop()): a later tool_call_update refinement for the
+        # same toolCallId reads this same cache, so popping here would make that
+        # refinement wrongly report is_shell=False if it arrives after the
+        # permission event. The per-turn dispatch-loop .clear() handles cleanup.
+        cached_shell = (
+            self._tool_call_is_shell.get(tool_call_id) if tool_call_id else None
+        )
+        is_shell = bool(cached_shell)
+        if cached_shell is None and tool_input:
+            # Input resolved but the shell signal did not — the cache invariant
+            # (tool_call precedes permission) did not hold. Surface it so the
+            # miss is observable rather than silently enforcing the length cap.
+            logger.info(
+                "Permission event resolved tool_input but missed is_shell cache "
+                "(req=%s tool_call_id=%s)", request_id, tool_call_id,
+            )
+
         logger.info("Permission requested for tool: %s (req=%s)", title, request_id)
         logger.debug("Permission toolCall payload: %s", tool_call)
         return AcpEvent(
@@ -3230,13 +3606,44 @@ class AcpClient:
             tool_input=tool_input,
             tool_call_id=tool_call_id,
             raw_tool_params=raw_params,
+            is_shell=is_shell,
         )
+
+    def _backfill_context_window(self, pct: float) -> None:
+        """Derive window/used tokens from the model registry when kiro-cli
+        2.10+ metadata gives only a percentage (no usage_update {used, size})."""
+        if self.last_prompt_stats.context_window_tokens > 0:
+            return  # a real usage_update already set it
+        model_id = self._resolved_model_id or self._model
+        if not model_id:
+            return
+        window = model_registry.window(model_id)
+        if window <= 0:
+            return
+        self.last_prompt_stats.context_window_tokens = window
+        self.last_prompt_stats.context_used_tokens = round(window * pct / 100.0)
 
     def _track_metadata(self, msg: JsonRpcMessage) -> None:
         params = msg.params or {}
         pct = params.get("contextUsagePercentage")
         if pct is not None:
-            self.last_prompt_stats.context_pct = float(pct)
+            try:
+                pct_f = float(pct)
+                self.last_prompt_stats.context_pct = pct_f
+                self._backfill_context_window(pct_f)
+            except (TypeError, ValueError):
+                pass
+        # kiro streams per-turn billing as meteringUsage entries (unit="credit").
+        # Accumulate across the turn's metadata notifications; reset per turn by
+        # the AcpPromptStats re-init in _dispatch_events/send_message_stream.
+        metering = params.get("meteringUsage")
+        if isinstance(metering, list):
+            for entry in metering:
+                if isinstance(entry, dict) and entry.get("unit") == "credit":
+                    try:
+                        self.last_prompt_stats.credits += float(entry.get("value", 0) or 0)
+                    except (TypeError, ValueError):
+                        pass
 
     def _log_compaction_status(self, msg: JsonRpcMessage) -> None:
         params = msg.params or {}

@@ -1,10 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import {
   generatePalette, generateContrastRamp, generateHarmony,
-  parseColor, computePaletteBoost, resolveDefaultColor,
+  parseColor, computePaletteBoost, resolveDefaultColor, colorName,
   PALETTE_NAMES, PALETTE_SIZE, INTENSITY_NAMES, INTENSITY_THRESHOLDS,
 } from '../utils/sessionColors'
-import type { PaletteName } from '../utils/sessionColors'
 
 const SEED = '#10b981'
 const DARK_BG = '#12141a'
@@ -114,6 +113,33 @@ describe('parseColor', () => {
   it('parses 3-digit hex', () => { expect(parseColor('#f00')).toEqual([255, 0, 0]) })
   it('parses rgba', () => { expect(parseColor('rgba(10, 20, 30, 0.5)')).toEqual([10, 20, 30]) })
   it('returns null for invalid', () => { expect(parseColor('')).toBeNull() })
+})
+
+describe('colorName', () => {
+  it('names primary hues', () => {
+    expect(colorName('#ff0000')).toBe('Red')
+    expect(colorName('#00ff00')).toBe('Green')
+    expect(colorName('#0000ff')).toBe('Blue')
+    expect(colorName('#ffd700')).toBe('Yellow')
+  })
+  it('names neutrals by lightness', () => {
+    expect(colorName('#ffffff')).toBe('White')
+    expect(colorName('#000000')).toBe('Black')
+    expect(colorName('#808080')).toBe('Gray')
+  })
+  it('qualifies very light / very dark hues', () => {
+    expect(colorName('#220000')).toBe('Dark red')
+    expect(colorName('#ffe0e0')).toBe('Light red')
+  })
+  it('treats near-white / near-black as neutral despite a 1-bit channel delta', () => {
+    // HSL saturation is singular near l=0/l=1; a chroma floor avoids false hue labels.
+    expect(colorName('#fefefd')).toBe('White')
+    expect(colorName('#010100')).toBe('Black')
+    expect(colorName('#fffbff')).toBe('White')
+  })
+  it('falls back to the raw string for unparseable input', () => {
+    expect(colorName('not-a-color')).toBe('not-a-color')
+  })
 })
 
 describe('resolveDefaultColor', () => {

@@ -61,6 +61,7 @@ class AppErrorBoundary extends React.Component<EBProps, EBState> {
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
+    // eslint-disable-next-line no-console -- surface app crashes for debugging
     console.error(`[AppHost] ${this.props.appName} crashed:`, error, info.componentStack)
   }
 
@@ -208,6 +209,7 @@ function AppHostInner({ app }: AppHostProps) {
   const LazyApp = useMemo(
     () => lazy(() =>
       import(/* @vite-ignore */ bundlePath).catch(err => {
+        // eslint-disable-next-line no-console -- surface bundle load failures for debugging
         console.error(`[AppHost] Failed to load ${app.name} from ${bundlePath}:`, err)
         // Return a module with a default export that shows the error
         return {
@@ -229,7 +231,7 @@ function AppHostInner({ app }: AppHostProps) {
 
   // WebSocket event subscription bridge
   // TODO: Apps currently only receive CustomEvents; integrate WebSocket subscription when app event forwarding is implemented.
-  const subscribeFn = useCallback((event: string, cb: (data: any) => void) => {
+  const subscribeFn = useCallback((event: string, cb: (data: unknown) => void) => {
     // For now, use a simple CustomEvent bridge.
     // Apps subscribe to events, and the host's WebSocket handler dispatches them.
     const handler = (e: Event) => cb((e as CustomEvent).detail)

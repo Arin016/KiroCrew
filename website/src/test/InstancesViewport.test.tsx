@@ -39,15 +39,15 @@ import { api } from '../api/client'
 
 beforeEach(() => {
   vi.clearAllMocks()
-  ;(isEmbeddedPane as any).mockReturnValue(false)
+  vi.mocked(isEmbeddedPane).mockReturnValue(false)
 })
 
 describe('InstancesViewport', () => {
   it('renders nothing when embedded (a pane never hosts nested panes)', () => {
-    ;(isEmbeddedPane as any).mockReturnValue(true)
+    vi.mocked(isEmbeddedPane).mockReturnValue(true)
     const store = createTestStore({
       instances: { warm: { 'cd-1': { port: 7778, token: 'tok' } }, activeId: 'cd-1', mru: ['cd-1'], unread: {} },
-    } as any)
+    })
     const { container } = renderWithProviders(<InstancesViewport />, { store })
     expect(container.querySelector('iframe')).toBeNull()
   })
@@ -66,7 +66,7 @@ describe('InstancesViewport', () => {
   })
 
   it('does not auto-warm an instance whose tunnel is down', async () => {
-    ;(api.listInstances as any).mockResolvedValue({
+    vi.mocked(api.listInstances).mockResolvedValue({
       instances: [
         {
           id: 'cd-1',
@@ -93,7 +93,7 @@ describe('InstancesViewport', () => {
   it('keeps warm iframes mounted but hidden while on the Local tab', async () => {
     const store = createTestStore({
       instances: { warm: { 'cd-1': { port: 7778, token: 'tok' } }, activeId: null, mru: ['cd-1'], unread: {} },
-    } as any)
+    })
     renderWithProviders(<InstancesViewport />, { store })
     const frame = await waitFor(() => {
       const f = document.querySelector('iframe')
@@ -109,7 +109,7 @@ describe('InstancesViewport', () => {
   it('renders the active instance iframe with the loopback token URL', async () => {
     const store = createTestStore({
       instances: { warm: { 'cd-1': { port: 7778, token: 'tok' } }, activeId: 'cd-1', mru: ['cd-1'], unread: {} },
-    } as any)
+    })
     renderWithProviders(<InstancesViewport />, { store })
     const frame = await waitFor(() => {
       const f = document.querySelector('iframe')
@@ -122,7 +122,7 @@ describe('InstancesViewport', () => {
   })
 
   it('shows an in-pane error panel with Retry for an active non-warm instance', async () => {
-    ;(api.listInstances as any).mockResolvedValue({
+    vi.mocked(api.listInstances).mockResolvedValue({
       instances: [
         {
           id: 'cd-1',
@@ -140,7 +140,7 @@ describe('InstancesViewport', () => {
     })
     const store = createTestStore({
       instances: { warm: {}, activeId: 'cd-1', mru: ['cd-1'], unread: {} },
-    } as any)
+    })
     renderWithProviders(<InstancesViewport />, { store })
 
     expect(await screen.findByText(/Connection error/i)).toBeInTheDocument()
@@ -150,8 +150,39 @@ describe('InstancesViewport', () => {
     expect(document.querySelector('iframe')).toBeNull()
   })
 
+  it('surfaces the error panel for an active warm-but-disconnected tab (stale warm)', async () => {
+    // A tunnel dropped mid-session: status flips to error but the `warm` entry
+    // lingers. The panel must show over the (now dead) iframe so the user gets
+    // an error message + Retry instead of a silently-blank pane.
+    vi.mocked(api.listInstances).mockResolvedValue({
+      instances: [
+        {
+          id: 'cd-1',
+          name: 'Cloud One',
+          ssh_host: 'cd-1-alias',
+          remote_port: 7777,
+          local_port: 7778,
+          ttl: '20h',
+          remote_bin: '',
+          was_connected: true,
+          status: { instance_id: 'cd-1', state: 'error', error: 'ssh unreachable', remote_port: 7777 },
+        },
+      ],
+      warm_set_cap: 5,
+    })
+    const store = createTestStore({
+      instances: { warm: { 'cd-1': { port: 7778, token: 'stale' } }, activeId: 'cd-1', mru: ['cd-1'], unread: {} },
+    })
+    renderWithProviders(<InstancesViewport />, { store })
+
+    // Panel shows despite the lingering warm entry.
+    expect(await screen.findByText(/Connection error/i)).toBeInTheDocument()
+    expect(screen.getByText('ssh unreachable')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Retry/i })).toBeInTheDocument()
+  })
+
   it('Retry re-mints a token and warms the instance', async () => {
-    ;(api.listInstances as any).mockResolvedValue({
+    vi.mocked(api.listInstances).mockResolvedValue({
       instances: [
         {
           id: 'cd-1',
@@ -169,7 +200,7 @@ describe('InstancesViewport', () => {
     })
     const store = createTestStore({
       instances: { warm: {}, activeId: 'cd-1', mru: ['cd-1'], unread: {} },
-    } as any)
+    })
     const u = userEvent.setup()
     renderWithProviders(<InstancesViewport />, { store })
 
@@ -180,8 +211,28 @@ describe('InstancesViewport', () => {
     )
   })
 
+  it('does NOT flash the panel over a healthy warm iframe while the query has no entry yet (activeInst undefined)', async () => {
+    // Regression (AutoSDE CR-285905697): a warm+connected active tab whose
+    // instance is momentarily absent from the query results (initial load /
+    // refetch) must keep showing its live iframe, NOT overlay the error panel.
+    vi.mocked(api.listInstances).mockResolvedValue({ instances: [], warm_set_cap: 5 })
+    const store = createTestStore({
+      instances: { warm: { 'cd-1': { port: 7778, token: 'tok' } }, activeId: 'cd-1', mru: ['cd-1'], unread: {} },
+    })
+    renderWithProviders(<InstancesViewport />, { store })
+    const frame = await waitFor(() => {
+      const f = document.querySelector('iframe')
+      if (!f) throw new Error('no iframe yet')
+      return f as HTMLIFrameElement
+    })
+    // Live iframe is shown; the error/connecting panel is NOT mounted.
+    expect(frame.style.display).toBe('block')
+    expect(screen.queryByText(/Connection error/i)).toBeNull()
+    expect(screen.queryByRole('button', { name: /Retry/i })).toBeNull()
+  })
+
   it('K-cap eviction drops only the warm iframe, never disconnecting the tunnel', async () => {
-    ;(api.listInstances as any).mockResolvedValue({ instances: [], warm_set_cap: 1 })
+    vi.mocked(api.listInstances).mockResolvedValue({ instances: [], warm_set_cap: 1 })
     const store = createTestStore({
       instances: {
         warm: { 'cd-1': { port: 7778, token: 'a' }, 'cd-2': { port: 7779, token: 'b' } },
@@ -189,7 +240,7 @@ describe('InstancesViewport', () => {
         mru: ['cd-2', 'cd-1'],
         unread: {},
       },
-    } as any)
+    })
     renderWithProviders(<InstancesViewport />, { store })
 
     // cap=1 with 2 warm -> evict the LRU non-active one (cd-1) by dropping its

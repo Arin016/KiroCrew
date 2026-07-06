@@ -18,7 +18,7 @@ import signal
 import struct
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -594,7 +594,7 @@ def _track_pid(pid: int) -> None:
             f.write(f"{pid}\n")
 
 
-def _track_child_pids(pids: dict[int, int | None], parent_pid: int = 0) -> None:
+def _track_child_pids(pids: Mapping[int, object], parent_pid: int = 0) -> None:
     """Append descendant PIDs to the tracking file as ``child:parent`` pairs."""
     if not pids:
         return
@@ -610,7 +610,7 @@ def _track_child_pids(pids: dict[int, int | None], parent_pid: int = 0) -> None:
                     existing.add(entry)
 
 
-def _untrack_child_pids(pids: dict[int, int | None]) -> None:
+def _untrack_child_pids(pids: Mapping[int, object]) -> None:
     """Remove descendant PIDs from the tracking file."""
     if not pids:
         return
