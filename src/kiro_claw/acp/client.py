@@ -2046,16 +2046,31 @@ class AcpClient:
                     # come back (no result, no progress, no permission) for the
                     # stall window.  This is the silent-hang case where
                     # _stale_eligible is False (cleared on tool_call) so the
-                    # check above never fires.  Treat as a dead turn and exit so
-                    # the caller raises/escalates instead of waiting out the full
-                    # prompt timeout (or, for crons, the job timeout).
+                    # check above never fires.
+                    #
+                    # Recovery (not just detection): the original bare ``return``
+                    # abandoned the turn but left the kiro-cli child ALIVE
+                    # mid-prompt, so the slot wedged and every later prompt hit
+                    # "Prompt already in progress" until the whole backend was
+                    # killed by hand.  Instead, kill the wedged child so the next
+                    # prompt cold-starts, and raise AcpProcessDied so the existing
+                    # recovery path takes over: the dashboard resets the session
+                    # and re-queues the message (bounded by _acp_pipe_death_retries
+                    # → "Session stuck" after 3), and cron/other callers surface a
+                    # clean error instead of a hung turn.  _kill_process only
+                    # touches the subprocess/pipes (never _turn_lock), so it is
+                    # safe to call here — the finally still releases the lock.
                     if self._tool_dispatched and (time.monotonic() - last_data_ts) > _TOOL_STALL_TIMEOUT:
+                        _stall_idle = time.monotonic() - last_data_ts
                         logger.warning(
                             "Tool stall detected for req %d — tool dispatched but no data for %.0fs. "
-                            "Treating turn as dead.",
-                            req_id, time.monotonic() - last_data_ts,
+                            "Killing agent to recover the slot.",
+                            req_id, _stall_idle,
                         )
-                        return
+                        await self._kill_process(force=True)
+                        raise AcpProcessDied(
+                            f"tool stalled — no data for {_stall_idle:.0f}s; agent killed to recover"
+                        )
                     continue
 
                 consecutive_empty = 0

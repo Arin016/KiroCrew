@@ -4372,16 +4372,22 @@ class TestToolStallWatchdog:
         # Process is alive but silent: _read_message always returns None.
         client._read_message = AsyncMock(return_value=None)
         client._is_process_alive = lambda: True
+        # Recovery kills the wedged child; stub it so the test doesn't touch a
+        # real process (there is none — AcpClient was not spawned).
+        client._kill_process = AsyncMock()
 
         actions = []
         # Generous outer timeout; the watchdog must end the loop well before it.
         t0 = time.monotonic()
-        async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
-            actions.append(action)
+        with pytest.raises(AcpProcessDied, match="tool stalled"):
+            async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
+                actions.append(action)
         elapsed = time.monotonic() - t0
 
-        # Loop returned (did not hang) and emitted no spurious actions.
+        # No spurious actions, the wedged child was killed, and the turn-done
+        # waiter was released via the finally so no cooperative-stop hangs.
         assert actions == []
+        client._kill_process.assert_awaited_once()
         assert client._turn_done.is_set()
         # Prove it was the watchdog (stall window 0.2s) that ended the loop,
         # not the outer 30s deadline — guards against the watchdog branch being
@@ -4437,6 +4443,7 @@ class TestToolStallWatchdog:
         client._turn_done.clear()
         client._tool_dispatched = True  # a tool was dispatched this turn
         client._stale_eligible = False
+        client._kill_process = AsyncMock()
 
         # One progress frame, then silence forever.
         frames = [JsonRpcMessage(method="session/update", params={})]
@@ -4450,12 +4457,14 @@ class TestToolStallWatchdog:
         actions = []
         # The single frame is yielded as an action; then the watchdog must end
         # the loop well before this generous outer timeout.
-        async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
-            actions.append(action)
+        with pytest.raises(AcpProcessDied, match="tool stalled"):
+            async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
+                actions.append(action)
 
         # The flag was NOT cleared by the inbound frame (that's _dispatch_events'
-        # job), so the watchdog still fired and the loop returned.
+        # job), so the watchdog still fired, killed the child, and raised.
         assert client._tool_dispatched is True
+        client._kill_process.assert_awaited_once()
         assert client._turn_done.is_set()
 
     @pytest.mark.asyncio
