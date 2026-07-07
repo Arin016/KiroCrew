@@ -2396,3 +2396,222 @@ class TestDynamicSubagentSizingFields:
         assert a.subagent_cpu_cost_cores == 0.9
         assert a.subagent_auto_max == 12
         assert a.subagent_spawn_stagger_secs == 3.0
+
+
+# ---------------------------------------------------------------------------
+# Security: load-time clamping of resource-limit knobs (config-loader bound
+# bypass pentest). A direct edit of config.json must not exceed the same
+# ceilings the dashboard API enforces at write time.
+# ---------------------------------------------------------------------------
+
+
+class TestSecurityBoundClamping:
+    """The loader clamps out-of-range resource-limit knobs read from disk."""
+
+    def test_subagent_auto_max_clamped_to_ceiling(self) -> None:
+        from kiro_claw.config.loader import SUBAGENT_AUTO_MAX_CEILING
+
+        with unittest.mock.patch("kiro_claw.config.loader._log_config_clamp_event"):
+            cfg = _load_from_dict({"agent": {"subagent_auto_max": 200}})
+        assert cfg.agent.subagent_auto_max == SUBAGENT_AUTO_MAX_CEILING == 64
+
+    def test_max_subagents_clamped_to_ceiling(self) -> None:
+        from kiro_claw.config.loader import SUBAGENT_AUTO_MAX_CEILING
+
+        with unittest.mock.patch("kiro_claw.config.loader._log_config_clamp_event"):
+            cfg = _load_from_dict({"agent": {"max_subagents": 200}})
+        assert cfg.agent.max_subagents == SUBAGENT_AUTO_MAX_CEILING == 64
+
+    def test_subagent_max_turns_clamped_to_ceiling(self) -> None:
+        from kiro_claw.config.loader import SUBAGENT_MAX_TURNS_CEILING
+
+        with unittest.mock.patch("kiro_claw.config.loader._log_config_clamp_event"):
+            cfg = _load_from_dict({"agent": {"subagent_max_turns": 99999}})
+        assert cfg.agent.subagent_max_turns == SUBAGENT_MAX_TURNS_CEILING == 200
+
+    def test_pool_size_clamped_to_max(self) -> None:
+        from kiro_claw.config.loader import POOL_SIZE_MAX
+
+        with unittest.mock.patch("kiro_claw.config.loader._log_config_clamp_event"):
+            cfg = _load_from_dict({"session": {"pool_size": 1000}})
+        assert cfg.session.pool_size == POOL_SIZE_MAX == 10
+
+    def test_full_pentest_reproduction_clamped(self) -> None:
+        """The exact tester payload is clamped, and to_dict() (what the GET API
+        serializes) reports the clamped values, not the inflated ones."""
+        with unittest.mock.patch("kiro_claw.config.loader._log_config_clamp_event"):
+            cfg = _load_from_dict(
+                {
+                    "agent": {
+                        "subagent_auto_max": 200,
+                        "max_subagents": 200,
+                        "subagent_max_turns": 99999,
+                    },
+                    "session": {"pool_size": 1000},
+                }
+            )
+        assert cfg.agent.subagent_auto_max == 64
+        assert cfg.agent.max_subagents == 64
+        assert cfg.agent.subagent_max_turns == 200
+        assert cfg.session.pool_size == 10
+
+        d = cfg.to_dict()
+        assert d["agent"]["subagent_auto_max"] == 64
+        assert d["agent"]["max_subagents"] == 64
+        assert d["agent"]["subagent_max_turns"] == 200
+        assert d["session"]["pool_size"] == 10
+
+    def test_in_range_values_unchanged(self) -> None:
+        with unittest.mock.patch(
+            "kiro_claw.config.loader._log_config_clamp_event"
+        ) as mock_event:
+            cfg = _load_from_dict(
+                {
+                    "agent": {
+                        "subagent_auto_max": 32,
+                        "max_subagents": 8,
+                        "subagent_max_turns": 150,
+                    },
+                    "session": {"pool_size": 4},
+                }
+            )
+        assert cfg.agent.subagent_auto_max == 32
+        assert cfg.agent.max_subagents == 8
+        assert cfg.agent.subagent_max_turns == 150
+        assert cfg.session.pool_size == 4
+        mock_event.assert_not_called()
+
+    def test_boundary_values_not_clamped(self) -> None:
+        with unittest.mock.patch(
+            "kiro_claw.config.loader._log_config_clamp_event"
+        ) as mock_event:
+            cfg = _load_from_dict(
+                {
+                    "agent": {"subagent_auto_max": 64, "subagent_max_turns": 200},
+                    "session": {"pool_size": 10},
+                }
+            )
+        assert cfg.agent.subagent_auto_max == 64
+        assert cfg.agent.subagent_max_turns == 200
+        assert cfg.session.pool_size == 10
+        mock_event.assert_not_called()
+
+    def test_clamp_logs_warning(self) -> None:
+        with unittest.mock.patch("kiro_claw.config.loader._log_config_clamp_event"):
+            _, logs = _load_from_dict_with_logs({"agent": {"subagent_auto_max": 200}})
+        assert any(
+            "subagent_auto_max" in m and "out of range" in m for m in logs
+        ), f"expected clamp warning, got: {logs}"
+
+    def test_clamp_emits_security_event(self) -> None:
+        with unittest.mock.patch(
+            "kiro_claw.config.loader._log_config_clamp_event"
+        ) as mock_event:
+            _load_from_dict({"agent": {"subagent_auto_max": 200}})
+        mock_event.assert_called_once()
+        args = mock_event.call_args.args
+        assert args[0] == "agent.subagent_auto_max"
+        assert args[1] == 200
+        assert args[2] == 64
+
+    def test_non_int_value_not_clamped(self) -> None:
+        """The clamp skips non-int values, leaving them exactly as-is. Asserted
+        against ``_clamp_security_bounds`` directly so the outcome is
+        deterministic regardless of jsonschema availability."""
+        from kiro_claw.config.loader import _clamp_security_bounds
+
+        data = {"agent": {"subagent_max_turns": "lots"}}
+        with unittest.mock.patch(
+            "kiro_claw.config.loader._log_config_clamp_event"
+        ) as mock_event:
+            _clamp_security_bounds(data)
+        assert data["agent"]["subagent_max_turns"] == "lots"
+        mock_event.assert_not_called()
+
+    def test_bool_value_not_clamped(self) -> None:
+        """A JSON true/false (bool is an int subclass) is not a numeric bound
+        value: the clamp leaves it untouched and fires no event."""
+        from kiro_claw.config.loader import _clamp_security_bounds
+
+        data = {"agent": {"max_subagents": True}}
+        with unittest.mock.patch(
+            "kiro_claw.config.loader._log_config_clamp_event"
+        ) as mock_event:
+            _clamp_security_bounds(data)
+        assert data["agent"]["max_subagents"] is True
+        mock_event.assert_not_called()
+
+    def test_log_config_clamp_event_is_best_effort(self) -> None:
+        from kiro_claw.config.loader import _log_config_clamp_event
+
+        with unittest.mock.patch("kiro_claw.sel.sel", side_effect=RuntimeError("SEL down")):
+            _log_config_clamp_event("agent.subagent_auto_max", 200, 64, 1, 64)
+
+
+class TestConfigWriteProtection:
+    """config.json / config.local.json are WRITE-protected (reads allowed)."""
+
+    def test_config_json_is_write_protected(self) -> None:
+        from kiro_claw.security import is_sensitive_write_path
+
+        assert is_sensitive_write_path("~/.kiroclaw/config.json")
+        assert is_sensitive_write_path(str(Path.home() / ".kiroclaw" / "config.json"))
+
+    def test_config_local_json_is_write_protected(self) -> None:
+        from kiro_claw.security import is_sensitive_write_path
+
+        assert is_sensitive_write_path("~/.kiroclaw/config.local.json")
+        assert is_sensitive_write_path(
+            str(Path.home() / ".kiroclaw" / "config.local.json")
+        )
+
+    def test_config_json_reads_still_allowed(self) -> None:
+        from kiro_claw.security import is_sensitive_bash_command, is_sensitive_path
+
+        assert is_sensitive_path("~/.kiroclaw/config.json") is False
+        assert is_sensitive_bash_command("cat ~/.kiroclaw/config.json") is None
+
+    def test_write_protection_superset_of_sensitive(self) -> None:
+        from kiro_claw.security import is_sensitive_write_path
+
+        assert is_sensitive_write_path("~/.aws/credentials")
+        assert is_sensitive_write_path("~/.kiroclaw/security_policy.json")
+
+    def test_non_config_kiroclaw_file_not_write_protected(self) -> None:
+        from kiro_claw.security import is_sensitive_write_path
+
+        assert is_sensitive_write_path("~/.kiroclaw/sessions.db") is False
+
+
+class TestConfigEditToolBlocked:
+    """The file-edit tool gate (HookManager.on_tool_call) denies edits to config."""
+
+    def _hooks(self):
+        from kiro_claw.hooks import HookManager, HooksConfig
+
+        return HookManager(HooksConfig())
+
+    def test_edit_config_json_denied(self) -> None:
+        result = self._hooks().on_tool_call(
+            "Editing config.json",
+            tool_kind="edit",
+            raw_params={"path": "~/.kiroclaw/config.json"},
+        )
+        assert result.action == "deny"
+        assert "write-protected config" in (result.reason or "")
+
+    def test_read_config_json_not_denied_by_edit_gate(self) -> None:
+        result = self._hooks().on_tool_call(
+            "config.json",
+            tool_kind="read",
+            raw_params={"path": "~/.kiroclaw/config.json"},
+        )
+        assert result.action != "deny"
+
+    def test_edit_normal_workspace_file_allowed(self) -> None:
+        result = self._hooks().on_tool_call(
+            "Editing notes.md",
+            tool_kind="edit",
+            raw_params={"path": "~/.kiroclaw/workspace/notes.md"},
+        )
+        assert result.action != "deny"

@@ -21,6 +21,8 @@ import kiro_claw.validation as _validation_mod
 from kiro_claw.agent import build_agent_config
 from kiro_claw.config.loader import (
     _VALID_STT_PROVIDERS,
+    SUBAGENT_AUTO_MAX_CEILING,
+    SUBAGENT_MAX_TURNS_CEILING,
     KiroClawConfig,
     config_path,
 )
@@ -648,11 +650,13 @@ async def api_security_stats(_request: web.Request) -> web.Response:
 
 
 # ── KiroClaw Config API ──
-# Absolute ceiling for agent.subagent_auto_max. Because subagent_auto_max is the
-# security cap that bounds max_subagents, it needs its own hard upper bound so a
-# caller cannot raise it arbitrarily (e.g. {"subagent_auto_max": 9999}) to bypass
+# The security-relevant ceilings (SUBAGENT_AUTO_MAX_CEILING,
+# SUBAGENT_MAX_TURNS_CEILING) are imported from ``config.loader`` — the single
+# source of truth shared by this API-write gate and the loader's load-time
+# clamp, so the two cannot drift apart. subagent_auto_max is the security cap
+# that bounds max_subagents, so it needs its own hard upper bound to stop a
+# caller raising it arbitrarily (e.g. {"subagent_auto_max": 9999}) to bypass
 # the concurrency limit.
-SUBAGENT_AUTO_MAX_CEILING = 64
 
 
 async def api_kiroclaw_config(request: web.Request) -> web.Response:
@@ -695,7 +699,7 @@ async def api_kiroclaw_config(request: web.Request) -> web.Response:
         # subagent_max_turns keeps the generic 1..N validation; max_subagents is
         # special — 0 is the "auto-size" sentinel and its upper bound is the
         # configured hard cap (dynamic-subagent-sizing.md §5.5/§6).
-        limits = {"subagent_max_turns": 200}
+        limits = {"subagent_max_turns": SUBAGENT_MAX_TURNS_CEILING}
         applied: list[str] = []
         for key, upper in limits.items():
             if key in agent_settings:

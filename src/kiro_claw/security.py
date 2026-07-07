@@ -158,6 +158,27 @@ _SENSITIVE_HOME_DIRS: list[str] = [
     ".kiroclaw/admission_policy.json",
 ]
 
+# ── Write-protected paths (block modification, allow reads) ──
+# Runtime config files carry security-relevant resource ceilings (concurrent
+# subagents, per-agent turn budget, warm-pool size). A prompt-injected agent
+# with file-write access must not be able to rewrite these to inflate its own
+# limits and drive host resource exhaustion (pentest — config-loader bound
+# bypass, recommendation: block agent tools from modifying config files).
+#
+# They are DELIBERATELY NOT in ``_SENSITIVE_HOME_DIRS`` above: that list is the
+# shared read+write gate, and reading config.json is routine and intended (the
+# dashboard file viewer, ``cat``, and knowledge indexing all read it). We
+# instead block only WRITES, at the agent file-edit tool gate
+# (hooks.on_tool_call), via ``is_sensitive_write_path``. This is defense in
+# depth on top of the loader's load-time clamp, which already neutralizes any
+# inflated on-disk value no matter how it was written. The operator edits config
+# out-of-band (dashboard config API / CLI), which do NOT route through this
+# gate, so legitimate config changes still work.
+_WRITE_PROTECTED_HOME_PATHS: list[str] = [
+    ".kiroclaw/config.json",
+    ".kiroclaw/config.local.json",
+]
+
 # Regex for bash commands that read sensitive paths.
 # Matches: cat, head, tail, less, more, strings, xxd, base64, cp, scp, open
 # followed by a path containing any sensitive dir.
@@ -241,19 +262,22 @@ def _get_sensitive_re() -> re.Pattern[str]:
     return _SENSITIVE_RE
 
 
-def is_sensitive_path(path_str: str, base_dir: str | None = None) -> bool:
-    """Return True if the path points to a sensitive location.
+def _path_in_home_dirs(
+    path_str: str, home_dirs: list[str], base_dir: str | None = None
+) -> bool:
+    """Return True if *path_str* resolves under any of *home_dirs* (``$HOME``-relative).
 
-    Works for both absolute paths and ``~``/relative paths.  Used across every
-    file-access surface (hooks.on_tool_call, validate_file_path, artifacts,
-    dashboard file I/O, knowledge indexing) to block reads/writes of credential
-    files and the governance trust-root.
+    Shared matching core for :func:`is_sensitive_path` (read+write gate,
+    ``_SENSITIVE_HOME_DIRS``) and :func:`is_sensitive_write_path` (write-only
+    gate, the read+write set PLUS ``_WRITE_PROTECTED_HOME_PATHS``). Keeping one
+    implementation means the symlink/casefold hardening below cannot drift
+    between the two gates.
 
     ── Symlink robustness (pentest AWS-345 / AWS-62) ──
     A workspace symlink pointing at ``~/.aws/credentials`` (absolute OR relative
     ``../../.aws/credentials`` traversal) must NOT be readable through the link.
     We therefore check MULTIPLE candidate forms of the input and return True if
-    ANY of them lands in a sensitive location:
+    ANY of them lands in a matched location:
 
       1. the fully symlink-RESOLVED canonical target (``realpath`` /
          ``Path.resolve`` — follows every symlink in the chain, including
@@ -261,7 +285,7 @@ def is_sensitive_path(path_str: str, base_dir: str | None = None) -> bool:
          defeats the symlink bypass: the resolved target of the link is
          ``~/.aws/credentials`` even though the link's own name is benign.
       2. the LEXICALLY-normalized path (no symlink following) and the raw
-         expanded string — so a path that *textually* names a sensitive dir is
+         expanded string — so a path that *textually* names a matched dir is
          still caught when resolution fails (dangling link, permission error).
 
     ``base_dir`` anchors a *relative* input against the caller's known working
@@ -305,12 +329,12 @@ def is_sensitive_path(path_str: str, base_dir: str | None = None) -> bool:
     # reached via OS symlinks (``/var`` → ``/private/var``); folding both roots
     # in means a resolved candidate under either spelling is still matched.
     sensitive_targets: set[str] = {
-        os.path.join(home, d).casefold() for d in _SENSITIVE_HOME_DIRS
+        os.path.join(home, d).casefold() for d in home_dirs
     }
     home_real = os.path.realpath(home)
     if home_real.casefold() != home.casefold():
         sensitive_targets |= {
-            os.path.join(home_real, d).casefold() for d in _SENSITIVE_HOME_DIRS
+            os.path.join(home_real, d).casefold() for d in home_dirs
         }
 
     # Case-fold both sides for the membership test.  On a case-insensitive
@@ -327,6 +351,33 @@ def is_sensitive_path(path_str: str, base_dir: str | None = None) -> bool:
             if cand_cf == sensitive_path or cand_cf.startswith(sensitive_path + os.sep):
                 return True
     return False
+
+
+def is_sensitive_path(path_str: str, base_dir: str | None = None) -> bool:
+    """Return True if the path points to a read+write-sensitive location.
+
+    Used across every file-access surface (hooks.on_tool_call, validate_file_path,
+    artifacts, dashboard file I/O, knowledge indexing) to block BOTH reads and
+    writes of credential files and the governance trust-root
+    (:data:`_SENSITIVE_HOME_DIRS`). See :func:`_path_in_home_dirs` for the
+    symlink/casefold matching contract.
+    """
+    return _path_in_home_dirs(path_str, _SENSITIVE_HOME_DIRS, base_dir)
+
+
+def is_sensitive_write_path(path_str: str, base_dir: str | None = None) -> bool:
+    """Return True if the path must not be MODIFIED by an agent tool.
+
+    Superset of :func:`is_sensitive_path`: everything that is read+write blocked
+    PLUS the write-only-protected runtime config files
+    (:data:`_WRITE_PROTECTED_HOME_PATHS`), which stay readable but must not be
+    written by the agent. Enforced at the file-edit tool gate
+    (``hooks.on_tool_call`` on the ACP ``edit`` kind) — see
+    :data:`_WRITE_PROTECTED_HOME_PATHS` for the rationale.
+    """
+    return _path_in_home_dirs(
+        path_str, _SENSITIVE_HOME_DIRS + _WRITE_PROTECTED_HOME_PATHS, base_dir
+    )
 
 
 # Archive/extraction destination flags (tar -C, unzip -d, rsync dest) pointing

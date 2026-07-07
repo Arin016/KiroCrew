@@ -80,7 +80,7 @@ from typing import Any, Literal, Protocol
 from kiro_claw import model_registry, shutdown_event
 from kiro_claw.agent import _enforce_denied_commands
 from kiro_claw.config import KiroClawConfig
-from kiro_claw.config.loader import build_provider_factory, default_project_dir
+from kiro_claw.config.loader import POOL_SIZE_MAX, build_provider_factory, default_project_dir
 from kiro_claw.executors import maintenance_executor
 from kiro_claw.providers.base import CancelOutcome, LLMProvider
 from kiro_claw.sel import sel
@@ -194,7 +194,10 @@ def detect_provider_switch(session_map: "SessionMap", session_key: str, new_prov
     return True
 
 
-_MAX_POOL = 10
+# Pre-warmed session pool ceiling. Aliased to the loader's POOL_SIZE_MAX (the
+# single source of truth shared with the config API + load-time clamp) so the
+# runtime pool cap, the API-write gate, and the loader clamp cannot drift apart.
+_MAX_POOL = POOL_SIZE_MAX
 
 # Cap on how many provider.shutdown() calls close_all runs concurrently. Each
 # shutdown fans out 2-3 (potentially wedged) subprocess_executor tasks; matching

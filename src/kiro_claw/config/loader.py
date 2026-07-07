@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re as _re
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1151,6 +1152,121 @@ _JSON_TYPE_LABELS: dict[str, str] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Security-relevant resource-limit ceilings
+# ---------------------------------------------------------------------------
+# SINGLE SOURCE OF TRUTH for the upper bounds on the config knobs that govern
+# host resource consumption. These same ceilings are enforced by the dashboard
+# config API (``dashboard/handlers/core.py`` for the agent knobs,
+# ``session.py`` for ``pool_size``); they live HERE so the API-write gate and
+# the load-time clamp below cannot drift apart.
+#
+# Why the loader must also clamp (pentest — config-loader bound bypass): the
+# REST API rejects out-of-range writes, but a direct edit of ``config.json``
+# (any process running as the same OS user — including a prompt-injected agent
+# with file-write access) bypassed that gate entirely. Each of these knobs
+# controls a resource-consumption dimension — concurrent subagent processes
+# (each a separate kiro-cli process), per-agent turn budget (unbounded LLM
+# calls + context growth), and pre-warmed pool processes spawned at startup —
+# so an inflated on-disk value can exhaust host memory / CPU / the process
+# table (denial of service). Clamping at load time makes the on-disk value
+# untrusted above range no matter which consumer reads it, and also means the
+# GET /api/config/kiroclaw response (which serializes a freshly loaded config)
+# reports the clamped value rather than the tampered one.
+SUBAGENT_AUTO_MAX_CEILING = 64  # agent.subagent_auto_max — concurrent subagent ceiling
+SUBAGENT_MAX_TURNS_CEILING = 200  # agent.subagent_max_turns — per-subagent turn budget
+POOL_SIZE_MAX = 10  # session.pool_size — pre-warmed process pool
+
+# (section, key, min, max) for each bounded field clamped at load time. The
+# mins match the existing runtime floors (0 / 1) so a legitimate in-range value
+# is never altered — only out-of-range (tampered) values are clamped.
+_SECURITY_BOUNDED_FIELDS: tuple[tuple[str, str, int, int], ...] = (
+    ("agent", "subagent_auto_max", 1, SUBAGENT_AUTO_MAX_CEILING),
+    ("agent", "max_subagents", 0, SUBAGENT_AUTO_MAX_CEILING),
+    ("agent", "subagent_max_turns", 1, SUBAGENT_MAX_TURNS_CEILING),
+    ("session", "pool_size", 0, POOL_SIZE_MAX),
+)
+
+
+def _log_config_clamp_event(
+    field: str, file_value: int, clamped: int, lo: int, hi: int
+) -> None:
+    """Emit a best-effort SEL security event for a clamped (tampered) config value.
+
+    Recorded so tampering is detectable after the fact even though the loader
+    self-heals by clamping. Lazily imports the SEL to avoid an import cycle and
+    to keep the hot load() path free of SEL cost on the normal (in-range) path —
+    this only fires when a value was actually out of range. Wrapped so a SEL
+    failure can never make config loading raise.
+    """
+    try:
+        from kiro_claw.sel import SecurityEvent, sel
+
+        sel().log(
+            SecurityEvent(
+                event_id=uuid.uuid4().hex[:16],
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                event_type="config_bounds_clamped",
+                caller_identity="config_loader",
+                agent="",
+                source="background",
+                operation="config.load",
+                outcome="clamped",
+                resources=field,
+                metadata={
+                    "file_value": file_value,
+                    "clamped_to": clamped,
+                    "min": lo,
+                    "max": hi,
+                },
+            )
+        )
+    except Exception:
+        logger.debug("SEL config-clamp event failed", exc_info=True)
+
+
+def _clamp_security_bounds(data: dict) -> None:
+    """Clamp security-relevant bounded integers in *data* in place.
+
+    Applies the same ceilings the dashboard API enforces at write time to the
+    values read from disk (see ``_SECURITY_BOUNDED_FIELDS`` and the module-level
+    ceiling constants for the rationale). Called once on the actual disk-read
+    path (cache miss) BEFORE the validated dict is cached, so:
+
+    * subsequent cache hits already serve clamped values (consistent), and
+    * the tamper warning / SEL event fires once per file change — enough to
+      detect tampering without spamming the hot load() path.
+
+    Only real integers are clamped; ``bool`` (a JSON ``true``/``false``) and any
+    non-int are left untouched for the dataclass construction path to
+    coerce/default. A clamp is logged at WARNING and recorded as a SEL security
+    event; both are best-effort and never fatal (config loading must not raise).
+    """
+    for section, key, lo, hi in _SECURITY_BOUNDED_FIELDS:
+        sect = data.get(section)
+        if not isinstance(sect, dict) or key not in sect:
+            continue
+        val = sect[key]
+        # bool is an int subclass; a JSON true/false is not a real bound value.
+        if isinstance(val, bool) or not isinstance(val, int):
+            continue
+        if val < lo or val > hi:
+            clamped = max(lo, min(hi, val))
+            sect[key] = clamped
+            logger.warning(
+                "config %s.%s=%d out of range [%d, %d]; clamped to %d "
+                "(possible config tampering — a direct file edit cannot exceed "
+                "the API-enforced ceiling)",
+                section,
+                key,
+                val,
+                lo,
+                hi,
+                clamped,
+            )
+            _log_config_clamp_event(f"{section}.{key}", val, clamped, lo, hi)
+
+
 def _config_fingerprint() -> tuple:
     """Cheap signature of the config files — changes whenever either is edited.
 
@@ -1961,6 +2077,11 @@ class KiroClawConfig:
 
             # Validate against JSON Schema (advisory — never fatal)
             _validate_config_data(data)
+            # Clamp security-relevant resource-limit knobs to their API ceilings
+            # BEFORE caching, so a hand-edited/prompt-injected config.json that
+            # exceeds a ceiling cannot drive resource exhaustion (DoS). Runs only
+            # on the disk-read path; cache hits below already serve clamped values.
+            _clamp_security_bounds(data)
             # Cache the validated, merged dict under the PRE-read fingerprint so
             # a mid-read write self-heals (next load misses and re-reads).
             _store_validated_data(data, pre_read_fp)

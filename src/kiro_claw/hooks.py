@@ -16,7 +16,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from kiro_claw.platform import current_context
-from kiro_claw.security import is_sensitive_bash_command, is_sensitive_path
+from kiro_claw.security import (
+    is_sensitive_bash_command,
+    is_sensitive_path,
+    is_sensitive_write_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +295,35 @@ class HookManager:
             real_path = raw_params.get("path") or raw_params.get("file_path")
             if isinstance(real_path, str) and real_path and is_sensitive_path(real_path):
                 return ToolHookResult.deny(f"Blocked: access to sensitive path: {real_path}")
+        # Config files are WRITE-protected (reads stay allowed): block the agent's
+        # file-EDIT tool from modifying config.json / config.local.json so a
+        # prompt-injected agent cannot rewrite its own resource ceilings
+        # (concurrent subagents, turn budget, warm-pool size) to drive host
+        # resource exhaustion — pentest: config-loader bound bypass,
+        # recommendation to block agent tools from modifying config files. Gated
+        # on the ACP ``edit`` kind (the fs_write/code tool) so a plain read of
+        # config is unaffected — the dashboard file viewer, ``cat``, and knowledge
+        # indexing legitimately read config.json. Defense in depth on top of the
+        # loader's load-time clamp, which already neutralizes any inflated value.
+        #
+        # Empty/unknown ``tool_kind`` (the ACP kind field is spec-optional; some
+        # backends omit it) is DELIBERATELY left to the clamp rather than mirrored
+        # here. ``governance._scopes_for_call`` (platform/governance.py) infers
+        # BOTH filesystem.read AND filesystem.write from a lone ``path`` when the
+        # kind is empty, because it is a *policy intersection* where an ungoverned
+        # scope permits. This gate is a HARD deny, so applying that same shape
+        # inference would also block legitimate config READS that arrive without a
+        # kind — regressing the read-allowance that is the whole point of the
+        # write-only tier. The load-time clamp is the authoritative backstop for
+        # the empty-kind edit vector (and for bash writes like ``tee``/``>``),
+        # so intentionally not hard-denying empty-kind keeps the two write-gates
+        # from drifting into a read regression.
+        if tool_kind == _EDIT_TOOL_KIND and raw_params:
+            wpath = raw_params.get("path") or raw_params.get("file_path")
+            if isinstance(wpath, str) and wpath and is_sensitive_write_path(wpath):
+                return ToolHookResult.deny(
+                    f"Blocked: modification of write-protected config path: {wpath}"
+                )
         # execute_bash (prefixed or bare) — check for reads of sensitive paths.
         reason = is_sensitive_bash_command(normalized)
         if reason:
@@ -410,6 +443,12 @@ def _audit_governance(session_key: str, agent: str, tool_name: str, decision: ob
 
 # Display prefixes that kiro-cli ACP adds to tool titles
 _TOOL_TITLE_PREFIXES = ("Running: ", "Reading ")
+
+# ACP semantic tool kind for a file write/edit (fs_write / code). The kind that
+# carries a real target path in ``raw_params['path']`` and maps to the
+# ``filesystem.write`` scope. Used to gate the write-only config-file protection
+# so reads are not affected.
+_EDIT_TOOL_KIND = "edit"
 
 
 def _normalize_tool_name(tool_name: str) -> str:
