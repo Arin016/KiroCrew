@@ -228,5 +228,55 @@ class TestSettingsModelValidation(unittest.TestCase):
         self.assertIsNone(review["model"])
 
 
+class TestLearningsEndpoint(unittest.IsolatedAsyncioTestCase):
+    """GET /learnings surfaces a namespace's consolidated patterns AND the pending
+    candidate (staged-but-not-yet-consolidated) learnings, so the dashboard can
+    render the self-learning state. Read-only: it must never mutate on-disk files."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._old_home = os.environ.get("KIROCLAW_HOME")
+        os.environ["KIROCLAW_HOME"] = self.tmp
+        self.mod = _load_routes_module()
+        store.ensure_layout()
+        from sage_lib import learning
+        self.learning = learning
+
+    def tearDown(self):
+        if self._old_home is None:
+            os.environ.pop("KIROCLAW_HOME", None)
+        else:
+            os.environ["KIROCLAW_HOME"] = self._old_home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _req(self, namespace=None):
+        class _Req:
+            query = {"namespace": namespace} if namespace else {}
+        return _Req()
+
+    async def test_returns_patterns_and_candidate(self):
+        # A consolidated pattern (what reviews load) + a pending candidate.
+        self.learning.consolidate_apply(
+            "### Guard null tokens <!-- scope:common --> <!-- impact:high -->\n"
+            "Reject requests whose auth token is absent before touching state.\n")
+        self.learning.stage_learning(
+            {"title": "Bound list sizes", "guidance": "Cap unbounded growth.",
+             "impact": "medium"}, source="human_comment")
+
+        resp = await self.mod._handle_learnings(self._req())
+        data = json.loads(resp.body)
+        self.assertEqual(data["namespace"], "default")
+        titles = [p["title"] for p in data["patterns"]]
+        self.assertIn("Guard null tokens", titles)
+        cand_titles = [c["title"] for c in data["candidate"]]
+        self.assertIn("Bound list sizes", cand_titles)
+
+    async def test_empty_namespace_is_empty_lists(self):
+        resp = await self.mod._handle_learnings(self._req())
+        data = json.loads(resp.body)
+        self.assertEqual(data["patterns"], [])
+        self.assertEqual(data["candidate"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,9 +6,10 @@
 // run. Findings post as a PENDING (draft) review the human submits on GitHub.
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ScanSearch, GitPullRequest, ExternalLink, Circle, Settings } from 'lucide-react'
+import { ScanSearch, GitPullRequest, ExternalLink, Circle, Settings, Brain, Plus, Trash2 } from 'lucide-react'
 
 import { SendBtn } from '../../components/ui'
+import Clickable from '../../components/Clickable'
 
 const API = '/api/apps/code-review-sage'
 
@@ -25,6 +26,11 @@ interface Run {
 }
 interface Settings { model: string | null; effort: string; active_namespaces: string[] }
 interface SettingsResp { settings: Settings; models: string[]; efforts: string[]; namespaces: string[] }
+
+interface NamespaceInfo { name: string; patterns: number; candidate: number; active: boolean }
+interface NamespacesResp { namespaces: NamespaceInfo[]; active: string[] }
+interface Pattern { id: string; title: string; scope: string; impact: string; guidance: string }
+interface LearningsResp { namespace: string; patterns: Pattern[]; candidate: Pattern[] }
 
 // Human label for a GH-<owner>-<repo>-<n> change id (mirrors the backend id).
 function changeLabel(id: string): string {
@@ -82,6 +88,46 @@ export default function CodeReviewSagePage() {
     mutationFn: (patch: Partial<Settings>) => sendJSON(`${API}/settings`, patch, 'PUT'),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['code-review-sage-settings'] }),
   })
+
+  // ── Self-learning: namespaces + the patterns/candidates each has learned ──
+  const [nsInput, setNsInput] = useState('')
+  const [openNs, setOpenNs] = useState<string | null>(null)
+  const [showNsInput, setShowNsInput] = useState(false)
+
+  const { data: nsData } = useQuery({
+    queryKey: ['code-review-sage-namespaces'],
+    queryFn: () => getJSON<NamespacesResp>(`${API}/namespaces`),
+  })
+
+  // Patterns/candidates for the expanded namespace (only fetched when one is open).
+  const { data: learnings } = useQuery({
+    queryKey: ['code-review-sage-learnings', openNs],
+    queryFn: () => getJSON<LearningsResp>(`${API}/learnings?namespace=${encodeURIComponent(openNs || 'default')}`),
+    enabled: !!openNs,
+  })
+
+  const invalidateNs = () => {
+    qc.invalidateQueries({ queryKey: ['code-review-sage-namespaces'] })
+    qc.invalidateQueries({ queryKey: ['code-review-sage-settings'] })
+  }
+  const createNsMut = useMutation({
+    mutationFn: (name: string) => sendJSON(`${API}/namespaces`, { name }),
+    onSuccess: () => { setNsInput(''); setShowNsInput(false); invalidateNs() },
+  })
+  const deleteNsMut = useMutation({
+    mutationFn: (name: string) => sendJSON(`${API}/namespaces`, { name }, 'DELETE'),
+    onSuccess: (_d, name) => { if (openNs === name) setOpenNs(null); invalidateNs() },
+  })
+
+  // Active namespaces are persisted in review settings; toggling one rewrites
+  // the whole active list (the backend clamps it to at least ["default"]).
+  const activeSet = new Set(settings?.settings?.active_namespaces ?? nsData?.active ?? ['default'])
+  const toggleActive = (name: string, on: boolean) => {
+    const next = on ? [...activeSet, name] : [...activeSet].filter(n => n !== name)
+    saveMut.mutate({ active_namespaces: next.length ? next : ['default'] })
+  }
+  const nsErr = (createNsMut.error || deleteNsMut.error) instanceof Error
+    ? (createNsMut.error || deleteNsMut.error as Error).message : ''
 
   const s = settings?.settings
   const changes = run?.changes ?? []
@@ -200,6 +246,122 @@ export default function CodeReviewSagePage() {
               </select>
             </label>
           </div>
+        </details>
+      )}
+
+      {/* Self-learning — the reviewer mines misses into forward-looking patterns,
+          grouped by namespace. Reviews load patterns from the ACTIVE namespaces;
+          pending candidates are staged during reviews and merged into the ruleset
+          by the human-triggered `learn-from-sage` skill (an AI merge, not a blind
+          overwrite), so this panel curates but never auto-consolidates. */}
+      {nsData && (
+        <details className="mt-[22px]" open>
+          <summary className="cursor-pointer text-[13px] flex items-center gap-1.5">
+            <Brain size={13} /> Self-learning
+          </summary>
+          <p className="text-[11px] text-muted mt-2 leading-relaxed">
+            Reviews load learned patterns from the <strong>active</strong> namespaces. New
+            learnings accrue as <em>pending candidates</em>; run the{' '}
+            <code>learn-from-sage</code> skill to consolidate them into the ruleset.
+          </p>
+
+          {/* At-a-glance: which namespaces reviews actually load right now. */}
+          <div className="text-[11px] mt-2.5">
+            <span className="text-muted">Loaded during reviews: </span>
+            <span className="text-accent font-medium">{[...activeSet].sort().join(', ')}</span>
+          </div>
+
+          <ul className="list-none p-0 mt-3">
+            {nsData.namespaces.map(ns => {
+              const isOpen = openNs === ns.name
+              const isActive = activeSet.has(ns.name)
+              return (
+                <li key={ns.name} className="border-b border-border">
+                  <div className="flex items-center gap-2.5 text-xs py-2">
+                    <input type="checkbox" checked={isActive}
+                      aria-label={`Load namespace ${ns.name} during reviews`}
+                      title={isActive ? 'Active — loaded during reviews (uncheck to disable)' : 'Inactive — check to load during reviews'}
+                      onChange={e => toggleActive(ns.name, e.target.checked)}
+                      className="cursor-pointer" />
+                    <button onClick={() => setOpenNs(isOpen ? null : ns.name)}
+                      className={`font-mono bg-transparent border-none cursor-pointer p-0 hover:text-accent ${isActive ? 'text-accent font-medium' : 'text-muted'}`}>
+                      {ns.name}
+                    </button>
+                    {isActive
+                      ? <span className="text-accent text-[10px]">active</span>
+                      : <span className="text-muted text-[10px]">inactive</span>}
+                    <span className="ml-auto flex items-center gap-3 text-muted">
+                      <span title="Consolidated patterns loaded during reviews">{ns.patterns} pattern{ns.patterns === 1 ? '' : 's'}</span>
+                      {ns.candidate > 0 && (
+                        <span className="text-warn" title="Pending candidates awaiting consolidation">{ns.candidate} pending</span>
+                      )}
+                      {ns.name !== 'default' && (
+                        <Clickable aria-label={`Delete namespace ${ns.name} and all its learnings`}
+                          className="cursor-pointer hover:text-danger inline-flex"
+                          onClick={() => { if (confirm(`Delete namespace "${ns.name}" and all its learnings?`)) deleteNsMut.mutate(ns.name) }}>
+                          <Trash2 size={12} />
+                        </Clickable>
+                      )}
+                    </span>
+                  </div>
+
+                  {isOpen && (
+                    <div className="pb-3 pl-6">
+                      {(learnings?.patterns?.length ?? 0) === 0 && (learnings?.candidate?.length ?? 0) === 0 && (
+                        <div className="text-[11px] text-muted italic">No learnings yet — patterns appear here after reviews stage them and you consolidate.</div>
+                      )}
+                      {learnings?.patterns?.map(p => (
+                        <div key={p.id} className="text-[11px] mb-2">
+                          <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] mr-1.5 ${
+                            p.impact === 'high' ? 'text-danger border border-danger' : 'text-muted border border-border'}`}>{p.impact}</span>
+                          <strong className="text-text">{p.title}</strong>
+                          <div className="text-muted mt-0.5">{p.guidance}</div>
+                        </div>
+                      ))}
+                      {(learnings?.candidate?.length ?? 0) > 0 && (
+                        <div className="mt-2 pt-2 border-t border-border">
+                          <div className="text-[10px] text-warn uppercase tracking-wide mb-1">Pending consolidation</div>
+                          {learnings?.candidate?.map(c => (
+                            <div key={c.id} className="text-[11px] mb-1.5 text-muted">
+                              <strong className="text-text">{c.title}</strong> — {c.guidance}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+
+          {/* Namespace creation stays out of the way until asked for. */}
+          {showNsInput ? (
+            <div className="flex items-center gap-2 mt-3">
+              <input value={nsInput} autoFocus onChange={e => setNsInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && nsInput.trim()) createNsMut.mutate(nsInput.trim())
+                  if (e.key === 'Escape') { setShowNsInput(false); setNsInput('') }
+                }}
+                placeholder="new-namespace"
+                className="text-xs px-2 py-1 rounded-md bg-bg text-text border border-border" />
+              <button onClick={() => nsInput.trim() && createNsMut.mutate(nsInput.trim())}
+                disabled={!nsInput.trim() || createNsMut.isPending}
+                className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-border text-muted hover:text-text hover:border-border-strong disabled:opacity-30 cursor-pointer bg-transparent">
+                <Plus size={12} /> Add
+              </button>
+              <button onClick={() => { setShowNsInput(false); setNsInput('') }}
+                className="text-[11px] text-muted hover:text-text bg-transparent border-none cursor-pointer">
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button onClick={() => setShowNsInput(true)}
+              className="inline-flex items-center gap-1 text-[11px] text-muted hover:text-accent bg-transparent border-none cursor-pointer mt-3 p-0">
+              <Plus size={12} /> New namespace
+            </button>
+          )}
+          {nsErr && <div className="text-danger text-xs mt-2">{nsErr}</div>}
         </details>
       )}
     </div>

@@ -247,16 +247,33 @@ async def _handle_runs(request: web.Request) -> web.Response:
 # exposes the full config (read), so this route is the WRITE path plus a focused
 # settings view that also enumerates available models, efforts, and namespaces.
 
-def _known_models() -> list[str]:
-    """Selectable models for the review-settings dropdown — sourced from the OSS
-    model registry (config-driven), NOT a hardcoded model list. Empty on failure;
-    the UI still offers the 'Default (agent config)' choice, which inherits the
-    system default model."""
+def _load_known_models() -> list[str]:
+    """Selectable models for the review-settings dropdown — the registry's
+    CANONICAL keys (e.g. ``opus-4.8-1m``), which are the wire/persisted format
+    the review worker consumes, NOT the provider ids from ``available_models``.
+
+    Provider ids carry a ``[1m]`` capability suffix (e.g.
+    ``global.anthropic.claude-opus-4-8[1m]``); the brackets fail ``_valid_model``'s
+    safe-token check, so sourcing the dropdown from provider ids made every 1M
+    variant unselectable (the PUT 400'd and the dropdown snapped back — only the
+    bracket-free plain ids survived). Canonical keys are bracket-free tokens that
+    both pass validation AND match what ``review_pool`` writes into the worker's
+    cli.json overlay. Empty on failure; the UI still offers 'Default (agent config)'."""
     try:
         from kiro_claw import model_registry
-        return list(model_registry.available_models("claude_code"))
+        return [row["model_name"] for row in model_registry.display_list("claude_code")]
     except Exception:  # pragma: no cover - defensive
         return []
+
+
+# Computed once at import (the registry is immutable after load). A module-level
+# constant so the settings validator and the /settings enumerator share one list.
+_KNOWN_MODELS: list[str] = _load_known_models()
+
+
+def _known_models() -> list[str]:
+    """Back-compat accessor for the known-model allowlist (the constant above)."""
+    return _KNOWN_MODELS
 
 
 def _valid_model(m: str) -> bool:
@@ -265,7 +282,7 @@ def _valid_model(m: str) -> bool:
     is one it knows."""
     if not m or len(m) > 64 or not all(c.isalnum() or c in "._-" for c in m):
         return False
-    known = _known_models()
+    known = _KNOWN_MODELS
     return (m in known) if known else True
 
 
@@ -475,6 +492,39 @@ async def _handle_namespaces(request: web.Request) -> web.Response:
     return web.json_response({"error": "method not allowed"}, status=405)
 
 
+async def _handle_learnings(request: web.Request) -> web.Response:
+    """GET /api/apps/code-review-sage/learnings?namespace=<ns>
+
+    Read-only view of a namespace's self-learning state so the dashboard can show
+    what the reviewer has actually learned:
+      - ``patterns``   — the consolidated heuristics reviews load (learned-patterns.md)
+      - ``candidate``  — pending learnings staged during reviews, awaiting the
+                         human-triggered ``learn-from-sage`` consolidation
+    Both come from on-disk markdown; consolidation itself is an AI merge run via
+    the skill (never a blind REST overwrite), so this endpoint deliberately does
+    not mutate anything. ``?namespace=`` defaults to 'default'."""
+    ns = request.query.get("namespace") or learning.DEFAULT_NAMESPACE
+
+    def _build() -> dict:
+        try:
+            patterns = learning.list_patterns(namespace=ns)
+        except Exception:
+            patterns = []
+        try:
+            candidate = learning.list_candidate(namespace=ns)
+        except Exception:
+            candidate = []
+        return {"namespace": ns, "patterns": patterns, "candidate": candidate}
+
+    try:
+        # Namespace-scoped file reads + markdown parse are synchronous IO — keep
+        # them off the shared gateway event loop.
+        return web.json_response(await asyncio.to_thread(_build))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("learnings view failed for ns=%s: %s", ns, exc, exc_info=True)
+        return web.json_response({"namespace": ns, "patterns": [], "candidate": []})
+
+
 def register_routes(app: web.Application) -> None:
     """Register the deterministic review routes on the gateway app."""
     # Self-heal: ensure the data layout (dirs + config.json with resolved_paths)
@@ -493,6 +543,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/apps/code-review-sage/namespaces", _handle_namespaces)
     app.router.add_post("/api/apps/code-review-sage/namespaces", _handle_namespaces)
     app.router.add_delete("/api/apps/code-review-sage/namespaces", _handle_namespaces)
+    app.router.add_get("/api/apps/code-review-sage/learnings", _handle_learnings)
 
     async def _shutdown_pool(_app: web.Application) -> None:
         """Retire the reusable review workers when the gateway shuts down."""
