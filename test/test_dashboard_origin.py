@@ -546,3 +546,127 @@ class TestBuildHostCanonicalRedirect:
                 allow_redirects=False,
             )
             assert resp.status == 200
+
+
+class TestBuildAllowedHosts:
+    """build_allowed_hosts derives the DNS-rebinding Host allowlist from the
+    same allowed_origins set the CSRF check uses (AVP-23427)."""
+
+    def test_loopback_floor_always_present(self) -> None:
+        from kiro_claw.dashboard.origin import build_allowed_hosts
+
+        hosts = build_allowed_hosts(set())
+        assert {"localhost", "127.0.0.1", "::1", "kiroclaw.localhost"} <= hosts
+
+    def test_hostnames_extracted_port_stripped(self) -> None:
+        from kiro_claw.dashboard.origin import build_allowed_hosts
+
+        hosts = build_allowed_hosts(
+            {"http://myhost:8080", "https://kiroclaw.example.com"}
+        )
+        # Exact set-membership assertion (build_allowed_hosts returns a set of
+        # bare hostnames, never host:port). Compare the whole derived set rather
+        # than `<literal> in hosts` so the check is unambiguously exact — this
+        # also avoids CodeQL py/incomplete-url-substring-sanitization, which
+        # cannot tell that `hosts` is a set (exact) rather than a URL string.
+        assert hosts == {
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "kiroclaw.localhost",
+            "myhost",  # port dropped from myhost:8080
+            "kiroclaw.example.com",
+        }
+
+    def test_ipv6_bracket_stripped(self) -> None:
+        from kiro_claw.dashboard.origin import build_allowed_hosts
+
+        hosts = build_allowed_hosts({"http://[::1]:8777"})
+        assert "::1" in hosts
+
+
+class TestCheckHost:
+    """check_host is an independent DNS-rebinding barrier: it runs for every
+    method and does NOT trust loopback remote (AVP-23427)."""
+
+    def _make_request(self, host: str, allowed=None, remote: str = "127.0.0.1"):
+        from unittest.mock import MagicMock
+
+        request = MagicMock()
+        request.headers = {"Host": host} if host is not None else {}
+        request.remote = remote
+        if allowed is None:
+            allowed = {"http://localhost:5476", "http://127.0.0.1:5476"}
+        # dict .get mirrors aiohttp app mapping access used by check_host
+        request.app = {"allowed_origins": allowed}
+        return request
+
+    def test_spoofed_host_rejected(self) -> None:
+        from kiro_claw.dashboard.origin import check_host
+
+        req = self._make_request("evil.rebind.attacker.com")
+        assert check_host(req) is False
+
+    def test_spoofed_host_rejected_even_from_loopback_remote(self) -> None:
+        """The rebinding connection IS loopback while Host is forged — loopback
+        remote must NOT bypass the Host check (unlike check_origin)."""
+        from kiro_claw.dashboard.origin import check_host
+
+        req = self._make_request("attacker.com", remote="127.0.0.1")
+        assert check_host(req) is False
+
+    def test_localhost_host_accepted(self) -> None:
+        from kiro_claw.dashboard.origin import check_host
+
+        assert check_host(self._make_request("localhost:5476")) is True
+
+    def test_loopback_ip_host_accepted(self) -> None:
+        from kiro_claw.dashboard.origin import check_host
+
+        assert check_host(self._make_request("127.0.0.1:5476")) is True
+
+    def test_tunnel_port_host_accepted_port_independent(self) -> None:
+        """SSH-tunnel local port (localhost:8777) still matches 'localhost'."""
+        from kiro_claw.dashboard.origin import check_host
+
+        assert check_host(self._make_request("localhost:8777")) is True
+
+    def test_configured_remote_host_accepted(self) -> None:
+        from kiro_claw.dashboard.origin import check_host
+
+        allowed = {"http://localhost:5476", "https://kiroclaw.example.com"}
+        req = self._make_request("kiroclaw.example.com", allowed=allowed)
+        assert check_host(req) is True
+
+    def test_missing_host_allowed_from_loopback(self) -> None:
+        """No Host header from a loopback remote is local IPC (mcp-core, doctor)
+        and is allowed; browsers always send Host so this is not a rebinding gap."""
+        from kiro_claw.dashboard.origin import check_host
+
+        assert check_host(self._make_request(None, remote="127.0.0.1")) is True
+
+    def test_missing_host_denied_from_non_loopback(self) -> None:
+        """Deny-by-default: a headerless request from a non-loopback remote is
+        rejected rather than blanket-allowed (AutoSDE security-controls)."""
+        from kiro_claw.dashboard.origin import check_host
+
+        assert check_host(self._make_request(None, remote="10.0.0.5")) is False
+
+    def test_empty_allowlist_denied(self) -> None:
+        """Deny-by-default: a missing/empty allowed_origins must NOT bypass the
+        Host check (AutoSDE security-controls, fail-open guard)."""
+        from kiro_claw.dashboard.origin import check_host
+
+        req = self._make_request("evil.com", allowed=set())
+        assert check_host(req) is False
+
+    def test_missing_allowed_origins_denied(self) -> None:
+        """None allowlist (key never set / race) is a denial, not fail-open."""
+        from unittest.mock import MagicMock
+
+        from kiro_claw.dashboard.origin import check_host
+
+        request = MagicMock()
+        request.headers = {"Host": "localhost:5476"}
+        request.app = {}  # dict.get("allowed_origins") -> None
+        assert check_host(request) is False

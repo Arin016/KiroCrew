@@ -389,6 +389,29 @@ def build_allowed_origins(
     return origins
 
 
+def build_allowed_hosts(allowed_origins: set[str]) -> set[str]:
+    """Derive the ``Host``-header allowlist from the CSRF origin allowlist.
+
+    DNS-rebinding defense-in-depth (AVP-23427): the ``Host`` header must name a
+    host we actually serve. We reuse the SAME source of truth as the CSRF Origin
+    check (``allowed_origins``) so the two layers can never drift — every origin
+    the dashboard trusts contributes its hostname. The comparison is
+    port-independent (hostname only), so an SSH-tunnel local port such as
+    ``localhost:8777`` still matches ``localhost``. The canonical loopback names
+    are always included as a floor so local tooling / doctor / mcp-core are never
+    rejected.
+    """
+    hosts: set[str] = {"localhost", "127.0.0.1", "::1", "kiroclaw.localhost"}
+    for origin in allowed_origins:
+        try:
+            parsed_host = urlparse(origin).hostname
+        except ValueError:
+            parsed_host = None
+        if parsed_host:
+            hosts.add(parsed_host.lower())
+    return hosts
+
+
 # ---------------------------------------------------------------------------
 # Per-request origin check
 # ---------------------------------------------------------------------------
@@ -442,3 +465,53 @@ def check_origin(
     # sends a different local port must opt that port in via
     # ``KIROCLAW_ALLOWED_LOOPBACK_PORTS`` (folded into the allowed set above).
     return False
+
+
+def check_host(request: web.Request) -> bool:
+    """Validate the request ``Host`` header against the dashboard's host allowlist.
+
+    Independent DNS-rebinding barrier (AVP-23427). A rebound request arrives on
+    the loopback socket (the victim's browser resolved the attacker domain to
+    127.0.0.1) but carries the attacker's domain in ``Host``. So, unlike
+    :func:`check_origin`, this:
+
+    * runs for EVERY method — GET-based data exfiltration is the rebinding
+      payload, and CSRF only guards mutating methods; and
+    * does NOT trust a loopback ``request.remote`` — the whole point of DNS
+      rebinding is that the connection *is* loopback while the ``Host`` is forged.
+
+    A missing/empty ``Host`` is allowed ONLY from a loopback ``request.remote``:
+    HTTP/1.1 browsers ALWAYS send ``Host``, so a browser-driven rebinding attack
+    always presents a non-empty forged host (rejected below) and never reaches
+    this branch; only non-browser local IPC clients (mcp-core, doctor) omit
+    ``Host``, and those are always loopback. Rather than blanket-allowing a
+    headerless request, we positively confirm the loopback origin — a headerless
+    request from a non-loopback remote is denied (deny-by-default). This mirrors
+    :func:`check_origin`, which likewise trusts only loopback when the Origin
+    header is absent.
+
+    A missing/empty ``allowed_origins`` is treated as a DENIAL (deny-by-default),
+    not fail-open: ``build_allowed_origins`` always returns at least the loopback
+    origins, so at runtime the set is never empty — a falsy value therefore means
+    misconfiguration or a bug/race, and silently bypassing the whole Host check in
+    that case would be a fail-open authorization hole.
+    """
+    allowed_origins: set[str] | None = request.app.get("allowed_origins")
+    if not allowed_origins:
+        # Deny-by-default: never skip the Host check because the allowlist is
+        # missing/None (unset key, race) or empty. The allowlist is populated at
+        # startup before this middleware runs, so this only fires on a bug.
+        return False
+    raw_host = request.headers.get("Host", "")
+    if not raw_host:
+        # No Host header: positively confirm a loopback origin (local IPC) rather
+        # than blanket-allowing. A headerless request from a non-loopback remote
+        # is denied. Browser-driven rebinding always sends a forged non-empty Host
+        # and is handled below, so this carve-out cannot weaken the barrier.
+        return is_loopback(request.remote or "")
+    # Derive the host allowlist live from allowed_origins (the SAME set the
+    # tunnel adds to / discards from at connect / disconnect) so the Host check
+    # and the CSRF Origin check can never drift out of sync.
+    allowed = build_allowed_hosts(allowed_origins)
+    host = _host_without_port(raw_host).lower()
+    return host in allowed

@@ -65,6 +65,7 @@ from kiro_claw.dashboard.loop_watchdog import LoopStallWatchdog
 from kiro_claw.dashboard.origin import (
     bind_address_for,
     build_allowed_origins,
+    check_host,
     check_origin,
     resolve_dashboard_host,
     should_canonicalize_host,
@@ -1315,6 +1316,35 @@ async def start_dashboard(
     app["local_only"] = local_only
 
     @web.middleware  # type: ignore[misc]
+    async def host_validation_middleware(
+        request: web.Request,
+        handler: object,
+    ) -> web.StreamResponse:
+        # DNS-rebinding defense-in-depth (AVP-23427): reject any request whose
+        # Host header does not name a host we serve. Runs on EVERY method (GET
+        # data-exfil is the rebinding payload) and independently of the CSRF
+        # Origin check and loopback trust — a rebound request is loopback at the
+        # socket but forges Host. See origin.check_host for the missing-Host and
+        # empty-allowlist deny-by-default carve-outs.
+        if not check_host(request):
+            # SEL audit (security-relevant permission decision): make DNS-rebinding
+            # attempts visible in the audit log, mirroring the API-access audit.
+            # Non-critical write (no fail-closed fsync) so it never wedges the
+            # event loop.
+            sel().log_api_access(
+                caller="dashboard_user",
+                operation=f"{request.method} {request.path}",
+                outcome="denied",
+                resources=request.path,
+                error=f"host header not allowed: {request.headers.get('Host', '')[:100]}",
+            )
+            raise web.HTTPForbidden(
+                text="Host header not allowed.",
+                content_type="text/plain",
+            )
+        return await handler(request)  # type: ignore[operator]
+
+    @web.middleware  # type: ignore[misc]
     async def csrf_middleware(
         request: web.Request,
         handler: object,
@@ -1356,6 +1386,7 @@ async def start_dashboard(
     # Explicit middleware ordering — self-documenting and immune to future insertions
     app.middlewares[:] = [
         host_canonical_redirect,
+        host_validation_middleware,
         no_cache_middleware,
         csrf_middleware,
         token_auth_middleware(
