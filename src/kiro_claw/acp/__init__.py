@@ -7,6 +7,7 @@ from kiro_claw.acp.client import (
     AcpProcessDied,
     AcpTimeoutError,
 )
+from kiro_claw.acp.runtime import AcpRuntime, AcpSessionHandle
 from kiro_claw.acp.types import AcpEvent, AcpPromptStats, JsonRpcMessage, JsonRpcRequest
 
 __all__ = [
@@ -15,6 +16,8 @@ __all__ = [
     "AcpPermissionNeeded",
     "AcpProcessDied",
     "AcpTimeoutError",
+    "AcpRuntime",
+    "AcpSessionHandle",
     "AcpEvent",
     "AcpPromptStats",
     "JsonRpcMessage",

@@ -22,6 +22,9 @@ EVENT_MCP_SERVER_INITIALIZED = "mcp_server_initialized"
 EVENT_MCP_SERVER_INIT_FAILURE = "mcp_server_init_failure"
 EVENT_SUBAGENT_LIST = "subagent_list"
 EVENT_SUBAGENT_ACTIVITY = "subagent_activity"
+EVENT_STEER_QUEUED = "steer_queued"
+EVENT_STEER_CONSUMED = "steer_consumed"
+EVENT_STEER_CLEARED = "steer_cleared"
 
 # ── ACP Protocol Methods ──
 
@@ -44,6 +47,7 @@ METHOD_MCP_SERVER_INITIALIZED = "_kiro.dev/mcp/server_initialized"
 METHOD_MCP_SERVER_INIT_FAILURE = "_kiro.dev/mcp/server_init_failure"
 METHOD_SUBAGENT_LIST_UPDATE = "_kiro.dev/subagent/list_update"
 METHOD_KIRO_SESSION_UPDATE = "_kiro.dev/session/update"
+METHOD_SET_CONFIG_OPTION = "session/set_config_option"
 
 # ── ACP Backend Identifiers ──
 
@@ -90,6 +94,10 @@ OPTION_ALLOW_ALWAYS = "allow_always"
 
 STOP_REASON_CANCELLED = "cancelled"
 STOP_REASON_END_TURN = "end_turn"
+# Model-side content refusal ("response declined by the model"). Non-retryable:
+# retrying the same prompt hits the same refusal, so chat_runner surfaces an
+# actionable message instead of churning the retry ladder.
+STOP_REASON_REFUSAL = "refusal"
 
 # ── Approval Modes ──
 
@@ -124,6 +132,17 @@ class JsonRpcMessage:
     result: Any = None
     error: Any = None
     params: Any = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "JsonRpcMessage":
+        """Build a JsonRpcMessage from a parsed JSON-RPC frame."""
+        return cls(
+            id=data.get("id"),
+            method=data.get("method"),
+            result=data.get("result"),
+            error=data.get("error"),
+            params=data.get("params"),
+        )
 
     def is_response_for(self, req_id: int) -> bool:
         # A JSON-RPC *response* carries an id + result/error and NO method.

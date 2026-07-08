@@ -1686,33 +1686,32 @@ class TestBlockedSlashCommands:
 
 
 class TestTitleGenerationSessionLeak:
-    """_generate_title_via_kiro must release BACKGROUND_KEY even when stream() raises."""
+    """_generate_title_via_kiro must destroy its ephemeral bg session even on error."""
 
     @pytest.mark.asyncio
-    async def test_background_session_released_on_stream_error(self, tmp_path):
+    async def test_background_session_destroyed_on_stream_error(self, tmp_path):
         from kiro_claw.dashboard.chat import _generate_title_via_kiro
-        from kiro_claw.session import BACKGROUND_KEY
 
         state = _make_state(tmp_path)
 
-        # Mock client whose stream() raises mid-iteration
+        # Mock session whose prompt() raises mid-iteration
         mock_client = MagicMock()
+        mock_client.destroy = AsyncMock()
 
-        async def _exploding_stream(prompt):
+        async def _exploding_prompt(prompt):
             raise RuntimeError("throttle / ACP error")
             yield  # noqa: unreachable — makes this an async generator
 
-        mock_client.stream = _exploding_stream
-        state.sessions.get_or_create = AsyncMock(return_value=(mock_client, False, False))
-        state.sessions.release = MagicMock()
+        mock_client.prompt = _exploding_prompt
+        state.sessions.get_bg_session = AsyncMock(return_value=mock_client)
 
         messages = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}]
 
         with pytest.raises(RuntimeError, match="throttle"):
             await _generate_title_via_kiro(state, messages)
 
-        # The critical assertion: release MUST be called even though stream() raised
-        state.sessions.release.assert_called_once_with(BACKGROUND_KEY)
+        # The critical assertion: destroy MUST be called even though prompt() raised
+        mock_client.destroy.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_permission_request_rejected_during_title_gen(self, tmp_path):
@@ -1723,54 +1722,49 @@ class TestTitleGenerationSessionLeak:
             EVENT_TEXT_CHUNK,
             LLMEvent,
         )
-        from kiro_claw.session import BACKGROUND_KEY
 
         state = _make_state(tmp_path)
         mock_client = MagicMock()
         mock_client.reject_tool = AsyncMock()
+        mock_client.destroy = AsyncMock()
 
-        async def _stream(prompt):
+        async def _prompt(prompt):
             yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="My Title")
             yield LLMEvent(kind=EVENT_PERMISSION_REQUEST, request_id="req-1")
             yield LLMEvent(kind=EVENT_COMPLETE)
 
-        mock_client.stream = _stream
-        state.sessions.get_or_create = AsyncMock(return_value=(mock_client, False, False))
-        state.sessions.release = MagicMock()
+        mock_client.prompt = _prompt
+        state.sessions.get_bg_session = AsyncMock(return_value=mock_client)
 
         messages = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}]
         title = await _generate_title_via_kiro(state, messages)
 
         mock_client.reject_tool.assert_called_once_with("req-1")
         assert title == "My Title"
-        state.sessions.release.assert_called_once_with(BACKGROUND_KEY)
+        mock_client.destroy.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_complete_event_breaks_stream(self, tmp_path):
         from kiro_claw.dashboard.chat import _generate_title_via_kiro
         from kiro_claw.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK, LLMEvent
-        from kiro_claw.session import BACKGROUND_KEY
 
         state = _make_state(tmp_path)
         mock_client = MagicMock()
+        mock_client.destroy = AsyncMock()
 
-        async def _stream(prompt):
+        async def _prompt(prompt):
             yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="Good")
             yield LLMEvent(kind=EVENT_COMPLETE)
             yield LLMEvent(kind=EVENT_TEXT_CHUNK, text=" SHOULD NOT APPEAR")
 
-        mock_client.stream = _stream
-        state.sessions.get_or_create = AsyncMock(return_value=(mock_client, False, False))
-        state.sessions.release = MagicMock()
+        mock_client.prompt = _prompt
+        state.sessions.get_bg_session = AsyncMock(return_value=mock_client)
 
         messages = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}]
         title = await _generate_title_via_kiro(state, messages)
 
         assert title == "Good"
-        state.sessions.release.assert_called_once_with(BACKGROUND_KEY)
-
-
-# ── Inline tool cards: _flush_segment and segment flush in _run_chat ──
+        mock_client.destroy.assert_awaited_once()
 
 
 class TestFlushSegment:
@@ -5628,9 +5622,8 @@ class TestGenerateFolderIcon:
         monkeypatch.setattr("kiro_claw.providers.base.EVENT_PERMISSION_REQUEST", "permission")
 
         mock_client = AsyncMock()
-        mock_client.stream = MagicMock(return_value=AsyncIterator([mock_event, done_event]))
-        state.sessions.get_or_create = AsyncMock(return_value=(mock_client, False, False))
-        state.sessions.release = MagicMock()
+        mock_client.prompt = MagicMock(return_value=AsyncIterator([mock_event, done_event]))
+        state.sessions.get_bg_session = AsyncMock(return_value=mock_client)
         state.save_folders = MagicMock()
         state.push_slots_update = MagicMock()
 
@@ -5661,9 +5654,8 @@ class TestGenerateFolderIcon:
         monkeypatch.setattr("kiro_claw.providers.base.EVENT_PERMISSION_REQUEST", "permission")
 
         mock_client = AsyncMock()
-        mock_client.stream = MagicMock(return_value=AsyncIterator([mock_event, done_event]))
-        state.sessions.get_or_create = AsyncMock(return_value=(mock_client, False, False))
-        state.sessions.release = MagicMock()
+        mock_client.prompt = MagicMock(return_value=AsyncIterator([mock_event, done_event]))
+        state.sessions.get_bg_session = AsyncMock(return_value=mock_client)
         state.save_folders = MagicMock()
 
         folder = {"id": "f1", "name": "Deploy"}
@@ -5693,9 +5685,8 @@ class TestGenerateFolderIcon:
         monkeypatch.setattr("kiro_claw.providers.base.EVENT_PERMISSION_REQUEST", "permission")
 
         mock_client = AsyncMock()
-        mock_client.stream = MagicMock(return_value=AsyncIterator([mock_event, done_event]))
-        state.sessions.get_or_create = AsyncMock(return_value=(mock_client, False, False))
-        state.sessions.release = MagicMock()
+        mock_client.prompt = MagicMock(return_value=AsyncIterator([mock_event, done_event]))
+        state.sessions.get_bg_session = AsyncMock(return_value=mock_client)
         state.save_folders = MagicMock()
 
         folder = {"id": "f1", "name": "Test"}
@@ -5724,17 +5715,13 @@ class TestGenerateFolderIcon:
         monkeypatch.setattr("kiro_claw.providers.base.EVENT_PERMISSION_REQUEST", "permission")
 
         mock_client = AsyncMock()
-        mock_client.stream = MagicMock(return_value=AsyncIterator([mock_event, done_event]))
-        state.sessions.get_or_create = AsyncMock(return_value=(mock_client, False, False))
-        state.sessions.release = MagicMock()
+        mock_client.prompt = MagicMock(return_value=AsyncIterator([mock_event, done_event]))
+        state.sessions.get_bg_session = AsyncMock(return_value=mock_client)
         state.save_folders = MagicMock()
         state.push_slots_update = MagicMock()
 
-        with patch(
-            "kiro_claw.dashboard.chat_folders.redact_exfiltration_urls", return_value=("🔥", False)
-        ) as mock_url, patch(
-            "kiro_claw.dashboard.chat_folders.redact_credentials", return_value=("🔥", False)
-        ) as mock_cred:
+        with patch("kiro_claw.dashboard.chat_folders.redact_exfiltration_urls", return_value=("🔥", False)) as mock_url, \
+             patch("kiro_claw.dashboard.chat_folders.redact_credentials", return_value=("🔥", False)) as mock_cred:
             folder = {"id": "f1", "name": "Oncall"}
             state._folders = [folder]
             await _generate_folder_icon(state, folder)
@@ -5753,7 +5740,7 @@ class TestGenerateFolderIcon:
 
         mock_event = MagicMock()
         mock_event.kind = "text_chunk"
-        mock_event.text = "\u2764\ufe0f"  # ❤️
+        mock_event.text = "\u2764\uFE0F"  # ❤️
         done_event = MagicMock()
         done_event.kind = "complete"
         monkeypatch.setattr("kiro_claw.providers.base.EVENT_TEXT_CHUNK", "text_chunk")
@@ -5761,9 +5748,8 @@ class TestGenerateFolderIcon:
         monkeypatch.setattr("kiro_claw.providers.base.EVENT_PERMISSION_REQUEST", "permission")
 
         mock_client = AsyncMock()
-        mock_client.stream = MagicMock(return_value=AsyncIterator([mock_event, done_event]))
-        state.sessions.get_or_create = AsyncMock(return_value=(mock_client, False, False))
-        state.sessions.release = MagicMock()
+        mock_client.prompt = MagicMock(return_value=AsyncIterator([mock_event, done_event]))
+        state.sessions.get_bg_session = AsyncMock(return_value=mock_client)
         state.save_folders = MagicMock()
         state.push_slots_update = MagicMock()
 
@@ -5771,16 +5757,15 @@ class TestGenerateFolderIcon:
         state._folders = [folder]
         await _generate_folder_icon(state, folder)
 
-        assert folder["icon"] == "\u2764\ufe0f"
+        assert folder["icon"] == "\u2764\uFE0F"
         state.save_folders.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_uses_background_session(self, tmp_path, monkeypatch):
-        """Folder icon generation should use the shared background session."""
+        """Folder icon generation should use an ephemeral background session."""
         from unittest.mock import AsyncMock, MagicMock
 
         from kiro_claw.dashboard.chat_folders import _generate_folder_icon
-        from kiro_claw.session import BACKGROUND_KEY
 
         monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
         state = _make_state(tmp_path)
@@ -5795,9 +5780,8 @@ class TestGenerateFolderIcon:
         monkeypatch.setattr("kiro_claw.providers.base.EVENT_PERMISSION_REQUEST", "permission")
 
         mock_client = AsyncMock()
-        mock_client.stream = MagicMock(return_value=AsyncIterator([mock_event, done_event]))
-        state.sessions.get_or_create = AsyncMock(return_value=(mock_client, False, False))
-        state.sessions.release = MagicMock()
+        mock_client.prompt = MagicMock(return_value=AsyncIterator([mock_event, done_event]))
+        state.sessions.get_bg_session = AsyncMock(return_value=mock_client)
         state.save_folders = MagicMock()
         state.push_slots_update = MagicMock()
 
@@ -5805,8 +5789,9 @@ class TestGenerateFolderIcon:
         state._folders = [folder]
         await _generate_folder_icon(state, folder)
 
-        state.sessions.get_or_create.assert_called_once_with(BACKGROUND_KEY)
-        state.sessions.release.assert_called_once_with(BACKGROUND_KEY)
+        # Each caller gets its own ephemeral session, used then destroyed.
+        state.sessions.get_bg_session.assert_called_once()
+        mock_client.destroy.assert_awaited_once()
 
 
 class TestFolderAssignmentPersistence:

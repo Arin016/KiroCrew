@@ -9,7 +9,15 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from kiro_claw.acp.client import AcpClient, AcpError
+from kiro_claw.acp.client import (
+    _NOT_LOGGED_IN_MESSAGE,
+    DEFAULT_MODEL,
+    AcpAuthRequired,
+    AcpClient,
+    AcpError,
+)
+from kiro_claw.acp.runtime import AcpRuntime, AcpRuntimeError
+from kiro_claw.acp.session_provider import AcpSessionProvider
 from kiro_claw.acp.types import ACP_BACKEND_CLAUDE, STOP_REASON_CANCELLED, STOP_REASON_END_TURN
 from kiro_claw.effort import (
     EFFORT_LEVELS,
@@ -245,6 +253,142 @@ class AcpProvider(LLMProvider):
         """True when this ACP provider talks to claude-agent-acp (vs kiro-cli)."""
         return self._client.backend == ACP_BACKEND_CLAUDE
 
+    @property
+    def is_session_sharing_eligible(self) -> bool:
+        """True when this provider can host multiplexed subagent sessions.
+
+        Session sharing requires the kiro-cli backend (which supports N
+        concurrent sessions per process via AcpRuntime demux). The Claude
+        Code backend uses AcpClient (one process per session) and is never
+        eligible, so subagents fall back to the legacy per-process path.
+        """
+        return not self.is_claude_backend
+
+    async def _start_kiro_runtime(self) -> None:
+        """Spawn an AcpRuntime and replace self._client with AcpSessionProvider.
+
+        After this, self._client is an AcpSessionProvider that implements the
+        same interface as AcpClient, so all downstream method calls work unchanged.
+        """
+        # Extract params from the AcpClient that was created in __init__
+        # (it was never spawned — just used for config storage)
+        work_dir = self._client._work_dir
+        agent = getattr(self._client, "_agent", None) or ""
+        sandbox_mode = getattr(self._client, "_sandbox_mode", "auto")
+        extra_env = getattr(self._client, "_extra_env", None) or {}
+        mcp_gateway_overlay = getattr(self._client, "_mcp_gateway_overlay", None)
+        mcp_gateway_settings_mcp_json = getattr(
+            self._client, "_mcp_gateway_settings_mcp_json", None
+        )
+        mcp_gateway_socket = getattr(self._client, "_mcp_gateway_socket", None)
+
+        # Check for session resume
+        resume_sid = getattr(self._client, "_resume_session_id", "")
+
+        # Preserve the configured model so we can re-apply it once the session
+        # is live. AcpClient sends session/set_model in its handshake; the runtime
+        # path must do the same or a slot configured with a non-default kiro model
+        # would silently run on the agent's default.
+        configured_model = getattr(self._client, "_model", "") or ""
+
+        runtime = AcpRuntime(
+            work_dir=work_dir,
+            agent=agent or "kiroclaw",
+            sandbox_mode=sandbox_mode,
+            extra_env=extra_env,
+            mcp_gateway_overlay=mcp_gateway_overlay,
+            mcp_gateway_settings_mcp_json=mcp_gateway_settings_mcp_json,
+            mcp_gateway_socket=mcp_gateway_socket,
+        )
+        try:
+            await runtime.spawn()
+        except AcpRuntimeError as exc:
+            # kiro-cli can exit during initialize when not authenticated —
+            # surface an actionable login prompt (parity with AcpClient) rather
+            # than a generic runtime-death error.
+            if runtime.saw_not_logged_in():
+                raise AcpAuthRequired(_NOT_LOGGED_IN_MESSAGE) from exc
+            raise
+
+        # Everything AFTER a successful spawn() must be guarded: until the
+        # AcpSessionProvider is constructed and assigned to self._client, NOTHING
+        # owns the spawned kiro-cli process, so any failure here would orphan it
+        # until the gateway restarts. Kill the runtime on any failure path before
+        # re-raising. BaseException (not Exception) so CancelledError/KeyboardInterrupt
+        # also clean up. Once self._client = provider runs, the session lifecycle
+        # owns the runtime and this guard has already returned.
+        try:
+            # Resume via session/load when a prior transcript exists, otherwise a
+            # fresh session/new. Resume issues session/load DIRECTLY (no
+            # session/new first) so it fully mirrors AcpClient and avoids the
+            # double-context 'refusal' failure mode.
+            handle = None
+            resumed = False
+            if resume_sid:
+                session_file = Path.home() / ".kiro" / "sessions" / "cli" / f"{resume_sid}.json"
+                if session_file.exists():
+                    try:
+                        handle = await runtime.load_session(
+                            str(session_file),
+                            resume_sid,
+                            cwd=work_dir,
+                            agent=agent or None,
+                        )
+                        resumed = True
+                    except Exception:
+                        logger.warning(
+                            "Failed to resume session %s, starting fresh",
+                            resume_sid, exc_info=True,
+                        )
+                        handle = None
+                else:
+                    logger.info("Session file missing for %s, skipping load", resume_sid)
+
+            if handle is None:
+                try:
+                    handle = await runtime.create_session(
+                        cwd=work_dir,
+                        agent=agent or None,
+                    )
+                except AcpRuntimeError as exc:
+                    if runtime.saw_not_logged_in():
+                        raise AcpAuthRequired(_NOT_LOGGED_IN_MESSAGE) from exc
+                    raise
+
+            # Apply the configured model override (mirrors AcpClient handshake).
+            # DEFAULT_MODEL ("auto") means "let kiro-cli pick per agent config".
+            if configured_model and configured_model != DEFAULT_MODEL:
+                try:
+                    await handle.set_model(configured_model)
+                    logger.info("Kiro runtime model set: %s", configured_model)
+                except Exception:
+                    logger.warning(
+                        "Failed to set model %s on kiro runtime session",
+                        configured_model, exc_info=True,
+                    )
+
+            # Replace the placeholder AcpClient with the real AcpSessionProvider
+            provider = AcpSessionProvider(handle, runtime, owns_runtime=True)
+            if resumed:
+                provider.resumed = True
+            self._client = provider  # type: ignore[assignment]
+        except BaseException:
+            # No provider owns the runtime yet — kill it so a failed session
+            # setup doesn't leak an orphaned kiro-cli process. Best-effort:
+            # the cleanup kill must not mask the original exception.
+            try:
+                await runtime.kill()
+            except Exception:
+                logger.debug(
+                    "Cleanup kill of runtime after failed session setup failed",
+                    exc_info=True,
+                )
+            raise
+        logger.info(
+            "Kiro provider started via AcpRuntime (PID %s, session %s, resumed=%s)",
+            runtime.pid, handle.session_id, resumed,
+        )
+
     def available_models(self) -> list[dict[str, str]]:
         """Models the backend advertised at session init (may be empty).
 
@@ -478,7 +622,17 @@ class AcpProvider(LLMProvider):
         # (no-op for claude backend — that path applies effort live below.)
         self._apply_effort_overlay()
         self._apply_tool_search_overlay()
-        await self._client.ensure_ready()
+
+        if not self.is_claude_backend:
+            # ── Kiro unified path: AcpRuntime + AcpSessionHandle ──
+            # Spawn a runtime, create/resume a session, wrap in
+            # AcpSessionProvider. One process hosts parent + all subagent
+            # sessions (session sharing).
+            await self._start_kiro_runtime()
+        else:
+            # ── CC path: legacy AcpClient (unchanged) ──
+            await self._client.ensure_ready()
+
         await self._apply_initial_effort()
 
     async def _apply_initial_effort(self) -> None:

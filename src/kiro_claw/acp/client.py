@@ -559,6 +559,25 @@ class AcpProcessDied(AcpError):  # noqa: N818
     """kiro-cli process exited unexpectedly."""
 
 
+class AcpAuthRequired(AcpError):  # noqa: N818
+    """kiro-cli is not authenticated — the user must run ``kiro-cli login``.
+
+    Non-retryable: respawning the process hits the same wall, so callers must
+    surface the actionable message and skip the retry ladder rather than
+    reset-and-requeue the turn.
+    """
+
+
+# kiro-cli emits a "not logged in" banner on stderr when the user's session
+# has expired. Detected during spawn/prompt so we can raise AcpAuthRequired
+# (non-retryable) instead of churning through the retry ladder.
+_NOT_LOGGED_IN_RE = re.compile(r"not\s+logged\s+in", re.IGNORECASE)
+_NOT_LOGGED_IN_MESSAGE = (
+    "kiro-cli is not logged in. Run `kiro-cli login` in your terminal, "
+    "then start a new chat."
+)
+
+
 def _format_acp_error(error: object) -> str:
     """Format a JSON-RPC error from the ACP backend into actionable user text.
 
@@ -2852,9 +2871,12 @@ class AcpClient:
             result = await self._wait_for_response(req_id, timeout=60.0)
             raw = result.get("text", "") or result.get("message", "")
             if raw:
-                from kiro_claw.security import redact_exfiltration_urls
-
+                # Two-pass redaction (URLs + credentials) to match the shared
+                # AcpSessionHandle.send_command path; a URL-only pass previously
+                # leaked tokens/keys in slash-command output on the legacy path.
+                # (redact_* imported at module top.)
                 raw, _ = redact_exfiltration_urls(raw)
+                raw, _ = redact_credentials(raw)
             return raw
         except AcpTimeoutError:
             logger.debug("Command '%s' response timed out (may still be running)", command)

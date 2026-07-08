@@ -16,7 +16,6 @@ from kiro_claw.context import ContextBuilder
 from kiro_claw.providers.base import EVENT_COMPLETE, EVENT_PERMISSION_REQUEST, EVENT_TEXT_CHUNK
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
-from kiro_claw.session import BACKGROUND_KEY
 
 if TYPE_CHECKING:
     from kiro_claw.dashboard.state import DashboardState
@@ -175,12 +174,12 @@ async def generate_suggestions(state: DashboardState) -> list[str]:
 
     prompt = _PROMPT_TEMPLATE.replace("{context}", context)
 
-    client, _is_new, _resumed = await state.sessions.get_or_create(BACKGROUND_KEY)
+    session = await state.sessions.get_bg_session()
     text = ""
     try:
         async def _stream() -> str:
             nonlocal text
-            async for event in client.stream(prompt):
+            async for event in session.prompt(prompt):
                 if event.kind == EVENT_TEXT_CHUNK:
                     text += event.text
                 elif event.kind == EVENT_PERMISSION_REQUEST:
@@ -190,7 +189,7 @@ async def generate_suggestions(state: DashboardState) -> list[str]:
                         outcome="denied",
                         source="suggestions",
                     )
-                    await client.reject_tool(event.request_id)
+                    await session.reject_tool(event.request_id)
                 elif event.kind == EVENT_COMPLETE:
                     break
             return text
@@ -200,7 +199,7 @@ async def generate_suggestions(state: DashboardState) -> list[str]:
         logger.warning("Suggestions generation timed out")
         return list(_FALLBACK_SUGGESTIONS)
     finally:
-        state.sessions.release(BACKGROUND_KEY)
+        await session.destroy()
 
     suggestions = _parse_suggestions(text)
     if suggestions:

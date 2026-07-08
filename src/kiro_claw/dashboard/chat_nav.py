@@ -69,14 +69,14 @@ def _build_link_summary_prompt(links: list[dict]) -> str:
 async def _resolve_link_summaries(state: DashboardState, links: list[dict]) -> list[str]:
     """Generate summaries for a batch of links using the background session."""
     prompt = _build_link_summary_prompt(links)
-    client, _is_new, _resumed = await state.sessions.get_or_create(BACKGROUND_KEY)
+    session = await state.sessions.get_bg_session()
     text = ""
     try:
-        async for event in client.stream(prompt):
+        async for event in session.prompt(prompt):
             if event.kind == EVENT_TEXT_CHUNK:
                 text += event.text
             elif event.kind == EVENT_PERMISSION_REQUEST:
-                await client.reject_tool(event.request_id)
+                await session.reject_tool(event.request_id)
                 sel().log_tool_invocation(
                     session_key=BACKGROUND_KEY, tool_name="unknown", outcome="denied",
                     source="chat_nav", request_id=str(event.request_id),
@@ -84,7 +84,7 @@ async def _resolve_link_summaries(state: DashboardState, links: list[dict]) -> l
             elif event.kind == EVENT_COMPLETE:
                 break
     finally:
-        state.sessions.release(BACKGROUND_KEY)
+        await session.destroy()
 
     # Parse: one label per line
     lines = [re.sub(r'^\d{1,2}[.)]\s+', '', ln.strip()) for ln in text.strip().splitlines() if ln.strip()]

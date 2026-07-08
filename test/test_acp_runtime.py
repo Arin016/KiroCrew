@@ -1,0 +1,2594 @@
+"""Unit tests for the AcpRuntime single-reader demux (Phase 1 multiplexing).
+
+These exercise the routing logic that lets ONE kiro-cli acp process host
+multiple concurrent sessions: the single _reader_loop owns stdout and routes
+each frame to the right destination —
+
+  - JSON-RPC response whose id is in _pending_requests  → resolve that Future
+  - JSON-RPC response whose id is in _routed_requests   → that session's queue
+  - notification carrying params.sessionId              → that session's queue
+  - notification with no sessionId                       → broadcast to all
+  - empty read (process exit)                            → _mark_dead: fail all
+                                                           futures + poison queues
+
+The headline test (`test_multiple_sessions_routed_independently`) proves the
+end-to-end claim: two AcpSessionHandle turns run concurrently on one runtime and
+each receives only its own session's text + completion.
+
+The reader is driven with a REAL asyncio.StreamReader fed crafted JSON-RPC
+lines; the subprocess and stdin are mocked (no kiro-cli is launched).
+"""
+
+import asyncio
+import json
+import time
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from kiro_claw.acp.runtime import (
+    AcpRuntime,
+    AcpRuntimeDead,
+    AcpRuntimeError,
+    AcpSessionHandle,
+)
+from kiro_claw.acp.types import (
+    EVENT_COMPLETE,
+    EVENT_TEXT_CHUNK,
+    METHOD_COMMANDS_EXECUTE,
+    METHOD_SESSION_LOAD,
+    METHOD_SESSION_NEW,
+    METHOD_SESSION_UPDATE,
+    METHOD_SET_CONFIG_OPTION,
+    METHOD_SET_MODE,
+    JsonRpcMessage,
+)
+
+
+# ── Harness ──
+def _make_runtime():
+    """An initialized AcpRuntime wired to a fake subprocess.
+
+    stdout is a real StreamReader we feed lines into; stdin is a mock that
+    records writes; the reader loop can run against it without a real process.
+    """
+    rt = AcpRuntime(work_dir="/tmp")
+    reader = asyncio.StreamReader()
+    proc = MagicMock()
+    proc.stdout = reader
+    proc.stdin = MagicMock()
+    proc.stdin.write = MagicMock()
+    proc.stdin.drain = AsyncMock()
+    proc.returncode = None
+    proc.pid = 4242
+    rt._process = proc
+    rt._pid = 4242
+    rt._initialized = True
+    return rt, reader, proc
+
+
+def _feed(reader: asyncio.StreamReader, obj: dict) -> None:
+    reader.feed_data((json.dumps(obj) + "\n").encode())
+
+
+def _register(rt: AcpRuntime, *session_ids: str) -> dict[str, asyncio.Queue]:
+    queues = {sid: asyncio.Queue() for sid in session_ids}
+    rt._session_queues.update(queues)
+    return queues
+
+
+async def _start_reader(rt: AcpRuntime) -> asyncio.Task:
+    task = asyncio.ensure_future(rt._reader_loop())
+    await asyncio.sleep(0)  # let the loop reach its first readline
+    return task
+
+
+async def _stop_reader(task: asyncio.Task) -> None:
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+# ── Notification routing by sessionId ──
+
+@pytest.mark.asyncio
+async def test_notification_routed_to_named_session():
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA", "sB")
+    task = await _start_reader(rt)
+    try:
+        _feed(reader, {"method": "session/update", "params": {"sessionId": "sA", "x": 1}})
+        msg = await asyncio.wait_for(q["sA"].get(), timeout=1.0)
+        assert msg.params["sessionId"] == "sA"
+        # The other session's queue must NOT have received it.
+        assert q["sB"].empty()
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_notification_for_unknown_session_is_dropped_not_broadcast():
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    task = await _start_reader(rt)
+    try:
+        # sessionId present but not registered → routed-by-id path misses; it
+        # has a sessionId so it is NOT broadcast either.
+        _feed(reader, {"method": "session/update", "params": {"sessionId": "ghost"}})
+        await asyncio.sleep(0.05)
+        assert q["sA"].empty()
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_null_session_notification_broadcasts_to_all():
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA", "sB")
+    task = await _start_reader(rt)
+    try:
+        _feed(reader, {"method": "some/global", "params": {}})  # no sessionId
+        a = await asyncio.wait_for(q["sA"].get(), timeout=1.0)
+        b = await asyncio.wait_for(q["sB"].get(), timeout=1.0)
+        assert a.method == "some/global"
+        assert b.method == "some/global"
+    finally:
+        await _stop_reader(task)
+
+
+# ── Response routing by id ──
+
+@pytest.mark.asyncio
+async def test_awaited_response_resolves_pending_future():
+    rt, reader, _ = _make_runtime()
+    fut: asyncio.Future = asyncio.get_event_loop().create_future()
+    rt._pending_requests[7] = fut
+    task = await _start_reader(rt)
+    try:
+        _feed(reader, {"id": 7, "result": {"sessionId": "new1"}})
+        result = await asyncio.wait_for(fut, timeout=1.0)
+        assert result == {"sessionId": "new1"}
+        assert 7 not in rt._pending_requests
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_error_response_sets_exception_on_future():
+    rt, reader, _ = _make_runtime()
+    fut: asyncio.Future = asyncio.get_event_loop().create_future()
+    rt._pending_requests[9] = fut
+    task = await _start_reader(rt)
+    try:
+        _feed(reader, {"id": 9, "error": {"code": -1, "message": "boom"}})
+        with pytest.raises(AcpRuntimeError):
+            await asyncio.wait_for(fut, timeout=1.0)
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_routed_response_goes_to_session_queue():
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    rt._routed_requests[11] = "sA"
+    task = await _start_reader(rt)
+    try:
+        _feed(reader, {"id": 11, "result": {"stopReason": "end_turn"}})
+        msg = await asyncio.wait_for(q["sA"].get(), timeout=1.0)
+        assert msg.id == 11
+        assert 11 not in rt._routed_requests
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_unmatched_response_is_ignored():
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    task = await _start_reader(rt)
+    try:
+        _feed(reader, {"id": 999, "result": {}})  # no pending/routed entry
+        await asyncio.sleep(0.05)
+        assert q["sA"].empty()
+        assert not rt._dead
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_non_json_line_is_skipped():
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    task = await _start_reader(rt)
+    try:
+        reader.feed_data(b"not json at all\n")
+        _feed(reader, {"method": "session/update", "params": {"sessionId": "sA"}})
+        msg = await asyncio.wait_for(q["sA"].get(), timeout=1.0)
+        assert msg.params["sessionId"] == "sA"  # loop survived the bad line
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_non_object_json_line_does_not_crash_reader():
+    """A valid-JSON but non-object line (bare scalar / array) must be skipped,
+    not fed to JsonRpcMessage.from_dict (which would raise AttributeError and
+    tear down EVERY multiplexed session on the shared runtime)."""
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    task = await _start_reader(rt)
+    try:
+        for bad in (b"123\n", b'"a string"\n', b"[1, 2, 3]\n", b"true\n", b"null\n"):
+            reader.feed_data(bad)
+        # A well-formed frame after the bad lines must still route → reader alive.
+        _feed(reader, {"method": "session/update", "params": {"sessionId": "sA"}})
+        msg = await asyncio.wait_for(q["sA"].get(), timeout=1.0)
+        assert msg.params["sessionId"] == "sA"
+        assert not rt._dead  # reader never marked the runtime dead
+    finally:
+        await _stop_reader(task)
+
+
+# ── Process death propagation ──
+
+@pytest.mark.asyncio
+async def test_process_exit_marks_dead_and_poisons_queues():
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA", "sB")
+    fut: asyncio.Future = asyncio.get_event_loop().create_future()
+    rt._pending_requests[3] = fut
+    task = await _start_reader(rt)
+    try:
+        reader.feed_eof()  # empty readline → process exited
+        # Pending future fails, every session queue gets a None poison sentinel.
+        with pytest.raises(AcpRuntimeDead):
+            await asyncio.wait_for(fut, timeout=1.0)
+        assert await asyncio.wait_for(q["sA"].get(), timeout=1.0) is None
+        assert await asyncio.wait_for(q["sB"].get(), timeout=1.0) is None
+        assert rt._dead is True
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_mark_dead_is_idempotent():
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    rt._mark_dead("first")
+    rt._mark_dead("second")  # no-op, must not double-poison or raise
+    assert await asyncio.wait_for(q["sA"].get(), timeout=1.0) is None
+    assert q["sA"].empty()
+
+
+# ── Send paths ──
+
+@pytest.mark.asyncio
+async def test_send_request_registers_routing_and_increments_id():
+    rt, _, proc = _make_runtime()
+    _register(rt, "sA")
+    rid = await rt.send_request("session/prompt", {"sessionId": "sA", "prompt": []})
+    assert rt._routed_requests[rid] == "sA"
+    # The next id advances.
+    rid2 = await rt.send_request("session/prompt", {"sessionId": "sA"})
+    assert rid2 != rid
+    # Wire payload carries the id + method.
+    sent = proc.stdin.write.call_args_list[0].args[0].decode()
+    frame = json.loads(sent)
+    assert frame["id"] == rid and frame["method"] == "session/prompt"
+    proc.stdin.drain.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_request_without_session_does_not_register_routing():
+    rt, _, _ = _make_runtime()
+    rid = await rt.send_request("initialize", {})  # no sessionId
+    assert rid not in rt._routed_requests
+
+
+@pytest.mark.asyncio
+async def test_send_notification_has_no_id_and_no_routing():
+    rt, _, proc = _make_runtime()
+    _register(rt, "sA")
+    before_id = rt._next_id
+    await rt.send_notification("session/cancel", {"sessionId": "sA"})
+    sent = proc.stdin.write.call_args_list[0].args[0].decode()
+    frame = json.loads(sent)
+    assert frame["method"] == "session/cancel"
+    assert "id" not in frame  # notification: no id allocated
+    assert rt._next_id == before_id  # id space untouched
+    assert not rt._routed_requests  # nothing to leak
+
+
+@pytest.mark.asyncio
+async def test_send_request_on_dead_runtime_raises():
+    rt, _, _ = _make_runtime()
+    rt._dead = True
+    with pytest.raises(AcpRuntimeDead):
+        await rt.send_request("session/prompt", {"sessionId": "sA"})
+
+
+# ── AcpSessionHandle behaviour ──
+
+@pytest.mark.asyncio
+async def test_handle_destroy_unregisters_session():
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    await handle.destroy()
+    assert "sA" not in rt._session_queues
+
+
+@pytest.mark.asyncio
+async def test_handle_cancel_uses_notification():
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    rt.send_notification = AsyncMock()  # type: ignore[method-assign]
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    await handle.cancel()
+    rt.send_notification.assert_awaited_once()
+    assert rt.send_notification.call_args.args[0] == "session/cancel"
+    assert handle._cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_prompt_on_same_handle_rejected():
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        # First turn is in-flight (no completion fed) — _turn_done stays clear.
+        first = asyncio.ensure_future(handle.prompt("hello").__anext__())
+        await asyncio.sleep(0.05)
+        # A second prompt on the same handle must refuse rather than corrupt state.
+        with pytest.raises(AcpRuntimeError):
+            await handle.prompt("again").__anext__()
+        first.cancel()
+        try:
+            await first
+        except (asyncio.CancelledError, Exception):
+            pass
+    finally:
+        await _stop_reader(task)
+
+
+# ── Headline: one runtime, many sessions, correct routing ──
+
+@pytest.mark.asyncio
+async def test_multiple_sessions_routed_independently():
+    """Two concurrent prompt turns on ONE runtime each receive only their own
+    session's text chunk and completion — proving sessionId demux isolates them.
+    """
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA", "sB")
+    handle_a = AcpSessionHandle("sA", q["sA"], rt)
+    handle_b = AcpSessionHandle("sB", q["sB"], rt)
+    task = await _start_reader(rt)
+
+    out_a: list = []
+    out_b: list = []
+
+    async def drive(handle, out):
+        async for ev in handle.prompt("go", timeout=5.0):
+            out.append(ev)
+
+    da = asyncio.ensure_future(drive(handle_a, out_a))
+    db = asyncio.ensure_future(drive(handle_b, out_b))
+    try:
+        # Let both turns issue their session/prompt requests and register routing.
+        await asyncio.sleep(0.05)
+        sid_to_req = {sid: rid for rid, sid in rt._routed_requests.items()}
+        assert set(sid_to_req) == {"sA", "sB"}, "both prompts must be in flight"
+
+        # Interleave text chunks for the two sessions (out of order on purpose).
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sB",
+            "update": {"sessionUpdate": "agent_message_chunk", "text": "Bravo"},
+        }})
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sA",
+            "update": {"sessionUpdate": "agent_message_chunk", "text": "Alpha"},
+        }})
+        # Complete each turn via its own prompt response (routed by id).
+        _feed(reader, {"id": sid_to_req["sA"], "result": {"stopReason": "end_turn"}})
+        _feed(reader, {"id": sid_to_req["sB"], "result": {"stopReason": "end_turn"}})
+
+        await asyncio.wait_for(asyncio.gather(da, db), timeout=5.0)
+
+        text_a = "".join(e.text for e in out_a if e.kind == EVENT_TEXT_CHUNK)
+        text_b = "".join(e.text for e in out_b if e.kind == EVENT_TEXT_CHUNK)
+        assert text_a == "Alpha"
+        assert text_b == "Bravo"
+        # Cross-talk check: neither session saw the other's text.
+        assert "Bravo" not in text_a
+        assert "Alpha" not in text_b
+        # Each turn ended with its own EVENT_COMPLETE.
+        assert any(e.kind == EVENT_COMPLETE for e in out_a)
+        assert any(e.kind == EVENT_COMPLETE for e in out_b)
+    finally:
+        for t in (da, db):
+            if not t.done():
+                t.cancel()
+        await _stop_reader(task)
+
+
+# ── AcpSessionHandle API method tests ──
+
+
+@pytest.mark.asyncio
+async def test_handle_session_id_property():
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    assert handle.session_id == "sA"
+
+
+@pytest.mark.asyncio
+async def test_handle_is_turn_active():
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    # Freshly created — no active turn
+    assert handle.is_turn_active is False
+
+
+@pytest.mark.asyncio
+async def test_prompt_resets_turn_done_when_send_request_fails():
+    """If send_request raises after _turn_done is cleared (e.g. AcpRuntimeDead on
+    a broken pipe), the handle must NOT stay stuck as turn-active — otherwise
+    every subsequent prompt() is permanently rejected with 'turn already active'."""
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    rt.send_request = AsyncMock(side_effect=AcpRuntimeDead("broken pipe"))
+
+    gen = handle.prompt("hi", timeout=3.0)
+    with pytest.raises(AcpRuntimeDead):
+        await gen.__anext__()  # send_request fires on first iteration
+
+    # Recovered: turn no longer active, so the handle is reusable.
+    assert handle.is_turn_active is False
+
+
+@pytest.mark.asyncio
+async def test_handle_wait_turn_done_immediate():
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    # Already done — returns True immediately
+    result = await handle.wait_turn_done(timeout=0.1)
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_handle_wait_turn_done_timeout():
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle._turn_done.clear()  # simulate active turn
+    result = await handle.wait_turn_done(timeout=0.05)
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_handle_approve_tool():
+    rt, _, proc = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    await handle.approve_tool("req-7", option_id="allow_always")
+    sent = json.loads(proc.stdin.write.call_args.args[0].decode())
+    assert sent["id"] == "req-7"
+    assert sent["result"]["outcome"]["outcome"] == "selected"
+    assert sent["result"]["outcome"]["optionId"] == "allow_always"
+
+
+@pytest.mark.asyncio
+async def test_handle_reject_tool():
+    rt, _, proc = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    await handle.reject_tool("req-8")
+    sent = json.loads(proc.stdin.write.call_args.args[0].decode())
+    assert sent["id"] == "req-8"
+    assert sent["result"]["outcome"]["outcome"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_handle_set_mode():
+    rt, _, proc = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    await handle.set_mode("kiroclaw-lite")
+    sent = json.loads(proc.stdin.write.call_args.args[0].decode())
+    assert sent["method"] == "session/set_mode"
+    assert sent["params"]["modeId"] == "kiroclaw-lite"
+
+
+@pytest.mark.asyncio
+async def test_handle_set_model():
+    rt, _, proc = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    await handle.set_model("claude-sonnet-4")
+    sent = json.loads(proc.stdin.write.call_args.args[0].decode())
+    assert sent["method"] == "session/set_model"
+    assert sent["params"]["modelId"] == "claude-sonnet-4"
+
+
+# ── send_response / send_error ──
+
+
+@pytest.mark.asyncio
+async def test_send_response_writes_json():
+    rt, _, proc = _make_runtime()
+    await rt.send_response("req-42", {"ok": True})
+    sent = json.loads(proc.stdin.write.call_args.args[0].decode())
+    assert sent["id"] == "req-42"
+    assert sent["result"] == {"ok": True}
+    assert "error" not in sent
+
+
+@pytest.mark.asyncio
+async def test_send_error_writes_json():
+    rt, _, proc = _make_runtime()
+    await rt.send_error("req-99", -32601, "Method not found")
+    sent = json.loads(proc.stdin.write.call_args.args[0].decode())
+    assert sent["id"] == "req-99"
+    assert sent["error"]["code"] == -32601
+    assert sent["error"]["message"] == "Method not found"
+
+
+@pytest.mark.asyncio
+async def test_send_response_on_dead_runtime_raises():
+    rt, _, _ = _make_runtime()
+    rt._dead = True
+    with pytest.raises(AcpRuntimeDead):
+        await rt.send_response("x", {})
+
+
+@pytest.mark.asyncio
+async def test_send_error_on_dead_runtime_raises():
+    rt, _, _ = _make_runtime()
+    rt._dead = True
+    with pytest.raises(AcpRuntimeDead):
+        await rt.send_error("x", -1, "err")
+
+
+# ── unregister_session cleans routed_requests ──
+
+
+@pytest.mark.asyncio
+async def test_unregister_session_cleans_routed_requests():
+    rt, _, _ = _make_runtime()
+    _register(rt, "sA")
+    rt._routed_requests[10] = "sA"
+    rt._routed_requests[11] = "sA"
+    rt._routed_requests[12] = "sB"  # different session
+    rt.unregister_session("sA")
+    assert "sA" not in rt._session_queues
+    assert 10 not in rt._routed_requests
+    assert 11 not in rt._routed_requests
+    assert 12 in rt._routed_requests  # sB untouched
+
+
+# ── is_alive ──
+
+
+@pytest.mark.asyncio
+async def test_is_alive_true():
+    rt, _, proc = _make_runtime()
+    proc.returncode = None
+    assert rt.is_alive() is True
+
+
+@pytest.mark.asyncio
+async def test_is_alive_false_when_dead():
+    rt, _, _ = _make_runtime()
+    rt._dead = True
+    assert rt.is_alive() is False
+
+
+@pytest.mark.asyncio
+async def test_is_alive_false_when_no_process():
+    rt, _, _ = _make_runtime()
+    rt._process = None
+    assert rt.is_alive() is False
+
+
+# ── _dispatch_events: notification kind branches ──
+
+
+@pytest.mark.asyncio
+async def test_dispatch_permission_request():
+    """Permission request notification yields EVENT_PERMISSION_REQUEST.
+
+    Uses kiro-cli's REAL payload shape: the tool info is nested under
+    ``params["toolCall"]`` (title/kind/toolCallId), NOT flat under ``params``.
+    A prior ``tool_call`` update (kind="execute") seeds the trusted shell cache
+    so the permission event resolves ``is_shell=True`` — the signal chat_runner's
+    trust-mode gate needs to waive the tool-name length cap on shell commands.
+    """
+    from kiro_claw.acp.types import (
+        EVENT_PERMISSION_REQUEST,
+        METHOD_REQUEST_PERMISSION,
+        METHOD_SESSION_UPDATE,
+    )
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        # First a tool_call update (seeds the trusted is_shell cache).
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sA",
+            "update": {"sessionUpdate": "tool_call", "toolCallId": "tcP",
+                       "title": "git status", "kind": "execute"},
+        }})
+        # Then the permission request in kiro's real toolCall-nested shape.
+        _feed(reader, {
+            "id": 5001, "method": METHOD_REQUEST_PERMISSION,
+            "params": {
+                "sessionId": "sA",
+                "toolCall": {"title": "git status", "kind": "execute", "toolCallId": "tcP"},
+                "options": [{"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+                            {"optionId": "allow_always", "name": "Allow always", "kind": "allow_always"}],
+            },
+        })
+        # Then complete the turn
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        perm = [e for e in events if e.kind == EVENT_PERMISSION_REQUEST]
+        assert len(perm) == 1
+        assert perm[0].title == "git status"
+        assert perm[0].request_id == 5001
+        assert perm[0].tool_kind == "execute"
+        assert perm[0].tool_call_id == "tcP"
+        # The critical regression guard: is_shell must be True so the trust-mode
+        # gate does not reject the long shell command title on the length cap.
+        assert perm[0].is_shell is True
+        # Advertised optionIds recorded so approve/reject echo the exact ids.
+        assert handle._permission_options[5001] == {
+            "once": "allow_once", "always": "allow_always"
+        }
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_approve_tool_echoes_recorded_option():
+    """approve_tool echoes the advertised optionId recorded from the request."""
+    rt, _, proc = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    # Simulate build_permission_event having recorded claude-agent-acp ids.
+    handle._permission_options[42] = {"once": "allow", "always": "allow_always"}
+    await handle.approve_tool(42)  # no explicit id → resolves the "once" variant
+    sent = json.loads(proc.stdin.write.call_args.args[0].decode())
+    assert sent["result"]["outcome"]["optionId"] == "allow"
+    assert 42 not in handle._permission_options  # consumed on use
+
+
+@pytest.mark.asyncio
+async def test_reject_tool_prefers_recorded_reject_option():
+    """reject_tool sends a clean 'selected' reject when one was advertised."""
+    rt, _, proc = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle._permission_options[7] = {"once": "allow", "reject": "reject"}
+    await handle.reject_tool(7)
+    sent = json.loads(proc.stdin.write.call_args.args[0].decode())
+    assert sent["result"]["outcome"]["outcome"] == "selected"
+    assert sent["result"]["outcome"]["optionId"] == "reject"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tool_call_and_result():
+    """Tool call + tool result notifications yield correct events."""
+    from kiro_claw.acp.types import EVENT_TOOL_CALL, EVENT_TOOL_RESULT
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        # Tool call
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sA",
+            "update": {"sessionUpdate": "tool_call", "toolCallId": "tc1", "title": "bash", "kind": "shell"},
+        }})
+        # Tool result (real kiro 2.10.0 shape: nested block.content.text)
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sA",
+            "update": {"sessionUpdate": "tool_call_update", "toolCallId": "tc1",
+                       "content": [{"content": {"type": "text", "text": "output here"}}]},
+        }})
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+
+        tc = [e for e in events if e.kind == EVENT_TOOL_CALL]
+        tr = [e for e in events if e.kind == EVENT_TOOL_RESULT]
+        assert len(tc) == 1 and tc[0].tool_call_id == "tc1" and tc[0].title == "bash"
+        assert len(tr) == 1 and tr[0].tool_output == "output here"
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_tool_stall_cancels_session_not_runtime(monkeypatch):
+    """A dispatched tool that goes silent must be recovered by a session-scoped
+    session/cancel (so co-tenant sessions on the shared runtime survive), NOT by
+    killing the runtime process. The turn ends with stop_reason 'tool_stall'."""
+    from kiro_claw.acp import session_handle as sh_mod
+    from kiro_claw.acp.types import EVENT_COMPLETE
+
+    monkeypatch.setattr(sh_mod, "_TOOL_STALL_TIMEOUT", 0.05)
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    rt.send_notification = AsyncMock()  # type: ignore[method-assign]
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle._tool_dispatched = True   # a tool was dispatched this turn
+    handle._stale_eligible = False   # the stale-turn check must NOT be what fires
+
+    # Queue that always times out (empty forever), advancing the wall clock a
+    # little each poll so the stall idle window is crossed deterministically.
+    class _SilentQueue:
+        async def get(self):
+            await asyncio.sleep(0.06)
+            raise asyncio.TimeoutError
+
+    handle._queue = _SilentQueue()  # type: ignore[assignment]
+
+    events = []
+    async for ev in handle._dispatch_events(req_id=1, timeout=30.0):
+        events.append(ev)
+
+    # Recovery was a session-scoped session/cancel for THIS sessionId — the
+    # runtime process is never killed (no killpg/SIGKILL on the stall path).
+    rt.send_notification.assert_awaited_once()
+    assert rt.send_notification.call_args.args[0] == "session/cancel"
+    assert rt.send_notification.call_args.args[1]["sessionId"] == "sA"
+    # Turn ends cleanly, flagged as a stall.
+    assert events and events[-1].kind == EVENT_COMPLETE
+    assert events[-1].stop_reason == "error: tool stall"
+
+
+@pytest.mark.asyncio
+async def test_tool_stall_recovery_completes_even_if_cancel_fails(monkeypatch):
+    """If session/cancel raises or times out (an unresponsive runtime is likely
+    right after a stall), the watchdog must still complete the turn — the
+    bounded wait_for + except must not let recovery hang or bubble."""
+    from kiro_claw.acp import session_handle as sh_mod
+    from kiro_claw.acp.types import EVENT_COMPLETE
+
+    monkeypatch.setattr(sh_mod, "_TOOL_STALL_TIMEOUT", 0.05)
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle._tool_dispatched = True
+    handle._stale_eligible = False
+    # cancel() fails (stands in for the wait_for timeout path — both raise into
+    # the same except Exception).
+    handle.cancel = AsyncMock(side_effect=RuntimeError("runtime unresponsive"))  # type: ignore[method-assign]
+
+    class _SilentQueue:
+        async def get(self):
+            await asyncio.sleep(0.06)
+            raise asyncio.TimeoutError
+
+    handle._queue = _SilentQueue()  # type: ignore[assignment]
+
+    events = []
+    async for ev in handle._dispatch_events(req_id=1, timeout=30.0):
+        events.append(ev)
+
+    handle.cancel.assert_awaited_once()
+    assert events and events[-1].kind == EVENT_COMPLETE
+    assert events[-1].stop_reason == "error: tool stall"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_thinking_chunk():
+    """agent_thought_chunk yields EVENT_THINKING_CHUNK."""
+    from kiro_claw.acp.types import EVENT_THINKING_CHUNK
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sA",
+            "update": {"sessionUpdate": "agent_thought_chunk", "text": "thinking..."},
+        }})
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        think = [e for e in events if e.kind == EVENT_THINKING_CHUNK]
+        assert len(think) == 1 and think[0].text == "thinking..."
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_compaction_and_clear():
+    """Compaction and clear notifications yield appropriate events."""
+    from kiro_claw.acp.types import (
+        EVENT_CLEAR_STATUS,
+        EVENT_COMPACTION_STATUS,
+        METHOD_CLEAR_STATUS,
+        METHOD_COMPACTION_STATUS,
+    )
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        _feed(reader, {"method": METHOD_COMPACTION_STATUS, "params": {
+            "sessionId": "sA", "status": {"type": "compacting"}, "summary": "50%",
+        }})
+        _feed(reader, {"method": METHOD_CLEAR_STATUS, "params": {"sessionId": "sA"}})
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        comp = [e for e in events if e.kind == EVENT_COMPACTION_STATUS]
+        clr = [e for e in events if e.kind == EVENT_CLEAR_STATUS]
+        assert len(comp) == 1 and comp[0].text == "compacting"
+        assert len(clr) == 1
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_agent_switched():
+    """Agent switched notification yields EVENT_AGENT_SWITCHED."""
+    from kiro_claw.acp.types import EVENT_AGENT_SWITCHED, METHOD_AGENT_SWITCHED
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        _feed(reader, {"method": METHOD_AGENT_SWITCHED, "params": {
+            "sessionId": "sA", "agentName": "kiroclaw-lite",
+        }})
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        sw = [e for e in events if e.kind == EVENT_AGENT_SWITCHED]
+        assert len(sw) == 1 and sw[0].text == "kiroclaw-lite"
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_mcp_oauth_request():
+    """MCP OAuth request notification yields EVENT_MCP_OAUTH_REQUEST."""
+    from kiro_claw.acp.types import EVENT_MCP_OAUTH_REQUEST, METHOD_MCP_OAUTH_REQUEST
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        _feed(reader, {"method": METHOD_MCP_OAUTH_REQUEST, "params": {
+            "sessionId": "sA", "serverName": "github-mcp", "oauthUrl": "https://auth.example.com",
+        }})
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        oauth = [e for e in events if e.kind == EVENT_MCP_OAUTH_REQUEST]
+        assert len(oauth) == 1
+        assert oauth[0].server_name == "github-mcp"
+        assert oauth[0].oauth_url == "https://auth.example.com"
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_mcp_server_initialized():
+    """MCP server initialized yields EVENT_MCP_SERVER_INITIALIZED."""
+    from kiro_claw.acp.types import EVENT_MCP_SERVER_INITIALIZED, METHOD_MCP_SERVER_INITIALIZED
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        _feed(reader, {"method": METHOD_MCP_SERVER_INITIALIZED, "params": {
+            "sessionId": "sA", "serverName": "builder-mcp",
+        }})
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        init = [e for e in events if e.kind == EVENT_MCP_SERVER_INITIALIZED]
+        assert len(init) == 1 and init[0].server_name == "builder-mcp"
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_mcp_server_init_failure():
+    """MCP server init failure yields EVENT_MCP_SERVER_INIT_FAILURE."""
+    from kiro_claw.acp.types import EVENT_MCP_SERVER_INIT_FAILURE, METHOD_MCP_SERVER_INIT_FAILURE
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        _feed(reader, {"method": METHOD_MCP_SERVER_INIT_FAILURE, "params": {
+            "sessionId": "sA", "serverName": "bad-mcp", "error": "timeout",
+        }})
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        fail = [e for e in events if e.kind == EVENT_MCP_SERVER_INIT_FAILURE]
+        assert len(fail) == 1 and fail[0].server_name == "bad-mcp" and fail[0].text == "timeout"
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_unknown_server_request_gets_error_response():
+    """Unknown server→client request gets a -32601 error response."""
+    rt, reader, proc = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        # Unknown method WITH an id (server request, not notification)
+        _feed(reader, {"id": 9999, "method": "unknown/method", "params": {"sessionId": "sA"}})
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        # Check that an error response was sent back
+        calls = proc.stdin.write.call_args_list
+        error_sent = False
+        for call in calls:
+            data = json.loads(call.args[0].decode())
+            if data.get("id") == 9999 and "error" in data:
+                assert data["error"]["code"] == -32601
+                error_sent = True
+        assert error_sent, "Expected -32601 error response for unknown server request"
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tool_call_update_raw_output():
+    """tool_call_update with rawOutput yields EVENT_TOOL_RESULT."""
+    from kiro_claw.acp.types import EVENT_TOOL_RESULT
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sA",
+            "update": {"sessionUpdate": "tool_call_update", "toolCallId": "tc2",
+                       "rawOutput": {"items": [{"Text": "raw stuff"}]}},
+        }})
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        tr = [e for e in events if e.kind == EVENT_TOOL_RESULT]
+        assert len(tr) == 1 and tr[0].tool_output == "raw stuff"
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tool_call_update_refinement():
+    """tool_call_update with title but no content yields EVENT_TOOL_CALL_UPDATE."""
+    from kiro_claw.acp.types import EVENT_TOOL_CALL_UPDATE
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sA",
+            "update": {"sessionUpdate": "tool_call_update", "toolCallId": "tc3",
+                       "title": "Reading file", "kind": "fs", "rawInput": "/etc/hosts"},
+        }})
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        tu = [e for e in events if e.kind == EVENT_TOOL_CALL_UPDATE]
+        assert len(tu) == 1
+        assert tu[0].title == "Reading file"
+        assert tu[0].tool_input == "/etc/hosts"
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_usage_update():
+    """usage_update sets context stats on last_prompt_stats."""
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+
+        async def drive():
+            async for _ in handle.prompt("hi", timeout=3.0):
+                pass
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sA",
+            "update": {"sessionUpdate": "usage_update", "usage": {"used": 5000, "size": 10000}},
+        }})
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        assert handle.last_prompt_stats.context_pct == 50.0
+        assert handle.last_prompt_stats.context_used_tokens == 5000
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_metadata_credits():
+    """_kiro.dev/metadata meteringUsage(unit=credit) accumulates into last_prompt_stats
+    and is propagated onto EVENT_COMPLETE; non-credit units are ignored."""
+    from kiro_claw.acp.types import EVENT_COMPLETE, METHOD_METADATA
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events: list = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        _feed(reader, {"method": METHOD_METADATA, "params": {
+            "sessionId": "sA",
+            "contextUsagePercentage": 12.5,
+            "meteringUsage": [
+                {"unit": "credit", "value": 1.0},
+                {"unit": "token", "value": 999},   # not a credit — ignored
+                {"unit": "credit", "value": 0.23},
+            ],
+        }})
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        assert handle.last_prompt_stats.credits == pytest.approx(1.23)
+        assert handle.last_prompt_stats.context_pct == 12.5
+        complete = [e for e in events if e.kind == EVENT_COMPLETE]
+        assert complete and complete[-1].credits == pytest.approx(1.23)
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_metadata_credits_robust():
+    """Non-numeric / missing meteringUsage values and metadata with no meteringUsage
+    are handled without raising; credits stays 0."""
+    from kiro_claw.acp.types import METHOD_METADATA
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+
+        async def drive():
+            async for _ in handle.prompt("hi", timeout=3.0):
+                pass
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        _feed(reader, {"method": METHOD_METADATA, "params": {
+            "sessionId": "sA",
+            "meteringUsage": [{"unit": "credit", "value": "oops"}, {"unit": "credit"}],
+        }})
+        _feed(reader, {"method": METHOD_METADATA, "params": {"sessionId": "sA"}})  # no meteringUsage
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        assert handle.last_prompt_stats.credits == 0.0
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_metadata_credits_routed_per_session():
+    """Concurrent sessions on one runtime each accrue only their own kiro credits —
+    metadata notifications are demuxed by sessionId, no cross-talk."""
+    from kiro_claw.acp.types import METHOD_METADATA
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA", "sB")
+    handle_a = AcpSessionHandle("sA", q["sA"], rt)
+    handle_b = AcpSessionHandle("sB", q["sB"], rt)
+    task = await _start_reader(rt)
+
+    async def drive(handle):
+        async for _ in handle.prompt("go", timeout=5.0):
+            pass
+
+    da = asyncio.ensure_future(drive(handle_a))
+    db = asyncio.ensure_future(drive(handle_b))
+    try:
+        await asyncio.sleep(0.05)
+        sid_to_req = {sid: rid for rid, sid in rt._routed_requests.items()}
+        assert set(sid_to_req) == {"sA", "sB"}, "both prompts must be in flight"
+
+        _feed(reader, {"method": METHOD_METADATA, "params": {
+            "sessionId": "sA", "meteringUsage": [{"unit": "credit", "value": 2.0}],
+        }})
+        _feed(reader, {"method": METHOD_METADATA, "params": {
+            "sessionId": "sB", "meteringUsage": [{"unit": "credit", "value": 0.5}],
+        }})
+        _feed(reader, {"id": sid_to_req["sA"], "result": {"stopReason": "end_turn"}})
+        _feed(reader, {"id": sid_to_req["sB"], "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(asyncio.gather(da, db), timeout=5.0)
+
+        assert handle_a.last_prompt_stats.credits == pytest.approx(2.0)
+        assert handle_b.last_prompt_stats.credits == pytest.approx(0.5)
+    finally:
+        for t in (da, db):
+            if not t.done():
+                t.cancel()
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_subagent_list():
+    """Subagent list notification yields EVENT_SUBAGENT_LIST."""
+    from kiro_claw.acp.types import EVENT_SUBAGENT_LIST, METHOD_SUBAGENT_LIST_UPDATE
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        _feed(reader, {"method": METHOD_SUBAGENT_LIST_UPDATE, "params": {
+            "sessionId": "sA", "subagents": [{"id": "sub1"}],
+        }})
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        sl = [e for e in events if e.kind == EVENT_SUBAGENT_LIST]
+        assert len(sl) == 1 and sl[0].subagents == [{"id": "sub1"}]
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_subagent_activity_tool():
+    """Subagent activity with toolCallId yields EVENT_SUBAGENT_ACTIVITY.
+
+    The kiro frame's params.sessionId is the SUB-session id (not the parent's
+    registered session), so the reader would correctly drop it. We inject it
+    straight into the parent's queue to exercise the dispatch branch.
+    """
+    from kiro_claw.acp.types import EVENT_SUBAGENT_ACTIVITY, METHOD_KIRO_SESSION_UPDATE
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        q["sA"].put_nowait(JsonRpcMessage.from_dict({
+            "method": METHOD_KIRO_SESSION_UPDATE,
+            "params": {"sessionId": "sub-1", "update": {"toolCallId": "tc5", "title": "read file"}},
+        }))
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        sa = [e for e in events if e.kind == EVENT_SUBAGENT_ACTIVITY]
+        assert len(sa) == 1
+        assert sa[0].sub_session_id == "sub-1"
+        assert sa[0].tool_call_id == "tc5"
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_subagent_activity_text():
+    """Subagent activity with agent_message_chunk yields text event."""
+    from kiro_claw.acp.types import EVENT_SUBAGENT_ACTIVITY, METHOD_KIRO_SESSION_UPDATE
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        q["sA"].put_nowait(JsonRpcMessage.from_dict({
+            "method": METHOD_KIRO_SESSION_UPDATE,
+            "params": {"sessionId": "sub-2",
+                       "update": {"sessionUpdate": "agent_message_chunk", "text": "hello from sub"}},
+        }))
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        sa = [e for e in events if e.kind == EVENT_SUBAGENT_ACTIVITY]
+        assert len(sa) == 1
+        assert sa[0].text == "hello from sub"
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_subagent_activity_text_is_redacted():
+    """Sub-agent streamed text is LLM output surfaced on the dashboard, so it
+    MUST be scrubbed (credentials + exfil URLs) before being yielded."""
+    from kiro_claw.acp.types import EVENT_SUBAGENT_ACTIVITY, METHOD_KIRO_SESSION_UPDATE
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        q["sA"].put_nowait(JsonRpcMessage.from_dict({
+            "method": METHOD_KIRO_SESSION_UPDATE,
+            "params": {"sessionId": "sub-3",
+                       "update": {"sessionUpdate": "agent_message_chunk",
+                                  "text": "leaked AKIAIOSFODNN7EXAMPLE key"}},
+        }))
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+        sa = [e for e in events if e.kind == EVENT_SUBAGENT_ACTIVITY]
+        assert len(sa) == 1
+        assert "AKIAIOSFODNN7EXAMPLE" not in sa[0].text
+        assert "[REDACTED: credential]" in sa[0].text
+    finally:
+        await _stop_reader(task)
+
+
+# ── Error during prompt turn ──
+
+
+@pytest.mark.asyncio
+async def test_prompt_error_response_raises():
+    """An error response for the prompt request raises AcpError."""
+    from kiro_claw.acp.client import AcpError
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        async def drive():
+            async for _ in handle.prompt("hi", timeout=3.0):
+                pass
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        _feed(reader, {"id": req_id, "error": {"code": -1, "message": "throttled"}})
+        with pytest.raises(AcpError):
+            await asyncio.wait_for(driver, timeout=3.0)
+    finally:
+        await _stop_reader(task)
+
+
+# ── Runtime properties ──
+
+
+@pytest.mark.asyncio
+async def test_runtime_pid():
+    rt, _, _ = _make_runtime()
+    assert rt.pid == 4242
+
+
+# ── Multi-session routing: stronger guarantees ──
+
+
+@pytest.mark.asyncio
+async def test_n_sessions_routed_independently():
+    """Five concurrent prompt turns on ONE runtime each receive exactly their
+    own session's text + completion — no cross-talk at higher fan-out.
+    """
+    n = 5
+    sids = [f"s{i}" for i in range(n)]
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, *sids)
+    handles = {sid: AcpSessionHandle(sid, q[sid], rt) for sid in sids}
+    task = await _start_reader(rt)
+
+    out: dict[str, list] = {sid: [] for sid in sids}
+
+    async def drive(sid):
+        async for ev in handles[sid].prompt("go", timeout=5.0):
+            out[sid].append(ev)
+
+    drivers = [asyncio.ensure_future(drive(sid)) for sid in sids]
+    try:
+        await asyncio.sleep(0.05)
+        sid_to_req = {sid: rid for rid, sid in rt._routed_requests.items()}
+        assert set(sid_to_req) == set(sids), "all prompts must be in flight"
+
+        # Feed each session a uniquely-identifying text chunk, reverse order.
+        for sid in reversed(sids):
+            _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+                "sessionId": sid,
+                "update": {"sessionUpdate": "agent_message_chunk", "text": f"text-{sid}"},
+            }})
+        # Complete every turn (responses routed by id).
+        for sid in sids:
+            _feed(reader, {"id": sid_to_req[sid], "result": {"stopReason": "end_turn"}})
+
+        await asyncio.wait_for(asyncio.gather(*drivers), timeout=5.0)
+
+        for sid in sids:
+            text = "".join(e.text for e in out[sid] if e.kind == EVENT_TEXT_CHUNK)
+            assert text == f"text-{sid}", f"session {sid} got wrong/cross text: {text!r}"
+            assert any(e.kind == EVENT_COMPLETE for e in out[sid])
+    finally:
+        for t in drivers:
+            if not t.done():
+                t.cancel()
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_one_session_errors_others_unaffected():
+    """When one session's turn errors, the other concurrent session still
+    completes normally — failures are isolated per session.
+    """
+    from kiro_claw.acp.client import AcpError
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sOk", "sErr")
+    h_ok = AcpSessionHandle("sOk", q["sOk"], rt)
+    h_err = AcpSessionHandle("sErr", q["sErr"], rt)
+    task = await _start_reader(rt)
+
+    ok_out: list = []
+    err_exc: list = []
+
+    async def drive_ok():
+        async for ev in h_ok.prompt("go", timeout=5.0):
+            ok_out.append(ev)
+
+    async def drive_err():
+        try:
+            async for _ in h_err.prompt("go", timeout=5.0):
+                pass
+        except AcpError as exc:  # noqa: BLE001
+            err_exc.append(exc)
+
+    d_ok = asyncio.ensure_future(drive_ok())
+    d_err = asyncio.ensure_future(drive_err())
+    try:
+        await asyncio.sleep(0.05)
+        sid_to_req = {sid: rid for rid, sid in rt._routed_requests.items()}
+        # sErr gets an error response; sOk gets text + normal completion.
+        _feed(reader, {"id": sid_to_req["sErr"], "error": {"code": -1, "message": "boom"}})
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sOk",
+            "update": {"sessionUpdate": "agent_message_chunk", "text": "fine"},
+        }})
+        _feed(reader, {"id": sid_to_req["sOk"], "result": {"stopReason": "end_turn"}})
+
+        await asyncio.wait_for(asyncio.gather(d_ok, d_err), timeout=5.0)
+
+        assert len(err_exc) == 1, "errored session should raise AcpError"
+        ok_text = "".join(e.text for e in ok_out if e.kind == EVENT_TEXT_CHUNK)
+        assert ok_text == "fine"
+        assert any(e.kind == EVENT_COMPLETE for e in ok_out)
+        # The errored session's turn is marked done (does not wedge the runtime).
+        assert not h_err.is_turn_active
+    finally:
+        for t in (d_ok, d_err):
+            if not t.done():
+                t.cancel()
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_interleaved_tool_calls_routed_per_session():
+    """tool_call frames for two concurrent sessions are each delivered only to
+    the originating session's stream.
+    """
+    from kiro_claw.acp.types import EVENT_TOOL_CALL
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA", "sB")
+    h_a = AcpSessionHandle("sA", q["sA"], rt)
+    h_b = AcpSessionHandle("sB", q["sB"], rt)
+    task = await _start_reader(rt)
+
+    out_a: list = []
+    out_b: list = []
+
+    async def drive(handle, out):
+        async for ev in handle.prompt("go", timeout=5.0):
+            out.append(ev)
+
+    da = asyncio.ensure_future(drive(h_a, out_a))
+    db = asyncio.ensure_future(drive(h_b, out_b))
+    try:
+        await asyncio.sleep(0.05)
+        sid_to_req = {sid: rid for rid, sid in rt._routed_requests.items()}
+        # Interleave tool calls for each session.
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sA",
+            "update": {"sessionUpdate": "tool_call", "toolCallId": "a1", "title": "toolA", "kind": "shell"},
+        }})
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sB",
+            "update": {"sessionUpdate": "tool_call", "toolCallId": "b1", "title": "toolB", "kind": "fs"},
+        }})
+        _feed(reader, {"id": sid_to_req["sA"], "result": {"stopReason": "end_turn"}})
+        _feed(reader, {"id": sid_to_req["sB"], "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(asyncio.gather(da, db), timeout=5.0)
+
+        tc_a = [e for e in out_a if e.kind == EVENT_TOOL_CALL]
+        tc_b = [e for e in out_b if e.kind == EVENT_TOOL_CALL]
+        assert len(tc_a) == 1 and tc_a[0].tool_call_id == "a1" and tc_a[0].title == "toolA"
+        assert len(tc_b) == 1 and tc_b[0].tool_call_id == "b1" and tc_b[0].title == "toolB"
+        # No cross-talk: session A never saw session B's tool call and vice versa.
+        assert all(e.tool_call_id != "b1" for e in out_a)
+        assert all(e.tool_call_id != "a1" for e in out_b)
+    finally:
+        for t in (da, db):
+            if not t.done():
+                t.cancel()
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_destroyed_session_stops_receiving_frames():
+    """After a session is destroyed, frames tagged with its id are dropped and
+    do NOT leak into a sibling session that is still active.
+    """
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA", "sB")
+    h_a = AcpSessionHandle("sA", q["sA"], rt)
+    await h_a.destroy()  # sA unregistered
+    task = await _start_reader(rt)
+    try:
+        # Frame for the destroyed session must be dropped (not broadcast to sB).
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sA",
+            "update": {"sessionUpdate": "agent_message_chunk", "text": "ghost"},
+        }})
+        # A legitimate frame for sB still routes.
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sB",
+            "update": {"sessionUpdate": "agent_message_chunk", "text": "live"},
+        }})
+        msg = await asyncio.wait_for(q["sB"].get(), timeout=1.0)
+        assert msg.params["sessionId"] == "sB"
+        # sB's queue must not contain the ghost frame.
+        assert q["sB"].empty()
+    finally:
+        await _stop_reader(task)
+
+
+# ── Tests for Phase 3 unification: AcpSessionHandle gap-fill methods ──
+
+
+class TestAcpSessionHandleCommands:
+    """Tests for send_command and set_config_option."""
+
+    @pytest.mark.asyncio
+    async def test_send_command_plain(self):
+        """send_command with no args sends plain string command."""
+        rt, _, _ = _make_runtime()
+        q = _register(rt, "s1")
+        handle = AcpSessionHandle("s1", q["s1"], rt)
+
+        # Mock send_request to capture what's sent and return a fake req_id
+        sent_payloads = []
+        req_counter = [100]
+
+        async def capture_send(method, params):
+            sent_payloads.append((method, params))
+            req_id = req_counter[0]
+            req_counter[0] += 1
+            # Put a fake response in the queue so _wait_for_response resolves
+            resp_msg = JsonRpcMessage.from_dict(
+                {"id": req_id, "result": {"text": "compacted"}}
+            )
+            await q["s1"].put(resp_msg)
+            return req_id
+
+        rt.send_request = capture_send
+        result = await handle.send_command("/compact")
+        assert result == "compacted"
+        assert sent_payloads[0][0] == METHOD_COMMANDS_EXECUTE
+        assert sent_payloads[0][1]["command"] == "/compact"
+        assert sent_payloads[0][1]["sessionId"] == "s1"
+
+    @pytest.mark.asyncio
+    async def test_send_command_with_args(self):
+        """send_command with args sends TuiCommand object form."""
+        rt, _, _ = _make_runtime()
+        q = _register(rt, "s1")
+        handle = AcpSessionHandle("s1", q["s1"], rt)
+
+        sent_payloads = []
+        req_counter = [200]
+
+        async def capture_send(method, params):
+            sent_payloads.append((method, params))
+            req_id = req_counter[0]
+            req_counter[0] += 1
+            resp_msg = JsonRpcMessage.from_dict(
+                {"id": req_id, "result": {"text": "ok"}}
+            )
+            await q["s1"].put(resp_msg)
+            return req_id
+
+        rt.send_request = capture_send
+        result = await handle.send_command("/effort", args={"level": "high"})
+        assert result == "ok"
+        cmd = sent_payloads[0][1]["command"]
+        assert isinstance(cmd, dict)
+        assert cmd["command"] == "effort"
+        assert cmd["args"] == {"level": "high"}
+
+    @pytest.mark.asyncio
+    async def test_set_config_option(self):
+        """set_config_option sends correct JSON-RPC request."""
+        rt, _, _ = _make_runtime()
+        q = _register(rt, "s1")
+        handle = AcpSessionHandle("s1", q["s1"], rt)
+
+        sent_payloads = []
+        req_counter = [300]
+
+        async def capture_send(method, params):
+            sent_payloads.append((method, params))
+            req_id = req_counter[0]
+            req_counter[0] += 1
+            resp_msg = JsonRpcMessage.from_dict(
+                {"id": req_id, "result": {}}
+            )
+            await q["s1"].put(resp_msg)
+            return req_id
+
+        rt.send_request = capture_send
+        await handle.set_config_option("effort", "high")
+        assert sent_payloads[0][0] == METHOD_SET_CONFIG_OPTION
+        assert sent_payloads[0][1] == {
+            "sessionId": "s1",
+            "configId": "effort",
+            "value": "high",
+        }
+
+
+class TestAcpSessionHandleState:
+    """Tests for state tracking properties."""
+
+    def test_initial_state(self):
+        """New handle has empty state."""
+        rt, _, _ = _make_runtime()
+        q = _register(rt, "s1")
+        handle = AcpSessionHandle("s1", q["s1"], rt)
+        assert handle.model == ""
+        assert handle.config_options == []
+        assert handle.available_models == []
+
+    def test_store_session_config(self):
+        """store_session_config populates configOptions and available models."""
+        rt, _, _ = _make_runtime()
+        q = _register(rt, "s1")
+        handle = AcpSessionHandle("s1", q["s1"], rt)
+
+        resp = {
+            "sessionId": "s1",
+            "configOptions": [
+                {"id": "effort", "options": [{"value": "low"}, {"value": "high"}]},
+            ],
+            "models": {
+                "availableModels": [
+                    {"modelId": "opus-4", "name": "Claude Opus 4"},
+                    {"modelId": "sonnet-4", "name": "Claude Sonnet 4"},
+                ],
+            },
+        }
+        handle.store_session_config(resp)
+        assert len(handle.config_options) == 1
+        assert handle.config_options[0]["id"] == "effort"
+        assert len(handle.available_models) == 2
+        assert handle.available_models[0]["modelId"] == "opus-4"
+
+    def test_supports_config_option(self):
+        """supports_config_option checks for matching id."""
+        rt, _, _ = _make_runtime()
+        q = _register(rt, "s1")
+        handle = AcpSessionHandle("s1", q["s1"], rt)
+
+        # No options yet — returns True (lazy backend assumption)
+        assert handle.supports_config_option("effort") is True
+
+        handle._config_options = [{"id": "effort", "options": []}]
+        assert handle.supports_config_option("effort") is True
+        assert handle.supports_config_option("mode") is False
+
+    def test_get_valid_effort_levels(self):
+        """get_valid_effort_levels extracts from config options."""
+        rt, _, _ = _make_runtime()
+        q = _register(rt, "s1")
+        handle = AcpSessionHandle("s1", q["s1"], rt)
+
+        handle._config_options = [
+            {"id": "effort", "options": [
+                {"value": "low", "label": "Low"},
+                {"value": "medium", "label": "Medium"},
+                {"value": "high", "label": "High"},
+            ]},
+        ]
+        assert handle.get_valid_effort_levels() == ["low", "medium", "high"]
+
+    def test_set_model_updates_state(self):
+        """set_model updates the _model field."""
+        rt, _, _ = _make_runtime()
+        q = _register(rt, "s1")
+        handle = AcpSessionHandle("s1", q["s1"], rt)
+        # Directly set to test the state (set_model is async and would need send_request)
+        handle._model = "opus-4"
+        assert handle.model == "opus-4"
+
+    def test_config_option_update_in_handle_update(self):
+        """_handle_update processes config_option_update by updating state."""
+        rt, _, _ = _make_runtime()
+        q = _register(rt, "s1")
+        handle = AcpSessionHandle("s1", q["s1"], rt)
+
+        msg = JsonRpcMessage.from_dict({
+            "method": METHOD_SESSION_UPDATE,
+            "params": {
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "config_option_update",
+                    "configOptions": [
+                        {"id": "effort", "options": [{"value": "extreme"}]},
+                    ],
+                },
+            },
+        })
+        events = handle._handle_update(msg)
+        assert events == []  # No event emitted
+        assert len(handle._config_options) == 1
+        assert handle._config_options[0]["id"] == "effort"
+
+
+class TestAcpSessionHandleResponsiveness:
+    """Tests for is_responsive."""
+
+    def test_responsive_when_alive_and_recent(self):
+        """is_responsive returns True when runtime is alive with recent activity."""
+        rt, _, _ = _make_runtime()
+        rt._last_activity = time.monotonic()
+        q = _register(rt, "s1")
+        handle = AcpSessionHandle("s1", q["s1"], rt)
+        assert handle.is_responsive() is True
+
+    def test_not_responsive_when_stale(self):
+        """is_responsive returns False when activity is old."""
+        rt, _, _ = _make_runtime()
+        rt._last_activity = time.monotonic() - 700  # 700s ago, threshold is 600
+        q = _register(rt, "s1")
+        handle = AcpSessionHandle("s1", q["s1"], rt)
+        assert handle.is_responsive(stale_threshold=600.0) is False
+
+    def test_not_responsive_when_dead(self):
+        """is_responsive returns False when runtime is dead."""
+        rt, _, _ = _make_runtime()
+        rt._dead = True
+        q = _register(rt, "s1")
+        handle = AcpSessionHandle("s1", q["s1"], rt)
+        assert handle.is_responsive() is False
+
+
+class TestAcpRuntimePidTracking:
+    """kill() must untrack the runtime PID from the orphan-sweep files so a
+    dead entry isn't chased (mirrors AcpClient._reset_state). Spawn-side
+    tracking is covered indirectly — it uses the same session_pid helpers."""
+
+    @pytest.mark.asyncio
+    async def test_kill_untracks_pid(self, monkeypatch):
+        rt, _, proc = _make_runtime()
+        proc.wait = AsyncMock(return_value=0)
+
+        calls: dict[str, list[int]] = {"pid": [], "session": []}
+        import kiro_claw.acp.runtime as rt_mod
+
+        # runtime.py imports these at module top (from kiro_claw.session_pid
+        # import _untrack_pid, _untrack_session_pid), so kill() resolves them in
+        # the runtime namespace — patch WHERE USED, not the source module.
+        monkeypatch.setattr(rt_mod, "_untrack_pid", lambda p: calls["pid"].append(p))
+        monkeypatch.setattr(rt_mod, "_untrack_session_pid", lambda p: calls["session"].append(p))
+        # os.killpg / getpgid on the fake PID would raise — the kill() body
+        # already guards those with OSError/ProcessLookupError, so let them fire.
+
+        await rt.kill()
+
+        assert calls["pid"] == [4242]
+        assert calls["session"] == [4242]
+
+
+class TestAcpRuntimeLoadSession:
+    """load_session() must mirror AcpClient._initialize_session's resume path:
+    issue session/load DIRECTLY (no session/new first) under the ORIGINAL sid,
+    with the same cwd + empty mcpServers + _kiro.dev/session_file _meta. The
+    double-session drift it replaces produced stopReason='refusal'."""
+
+    @pytest.mark.asyncio
+    async def test_load_session_sends_direct_session_load_params(self, monkeypatch):
+        rt, _, _ = _make_runtime()
+        rt._can_load_session = True
+
+        sent: list[tuple[str, dict]] = []
+
+        async def _fake_send(method, params):
+            sent.append((method, params))
+            # session/load echoes "modes"; set_mode echoes nothing meaningful.
+            if method == METHOD_SESSION_LOAD:
+                return {"modes": {"currentModeId": "kiroclaw"}, "models": []}
+            return {}
+
+        monkeypatch.setattr(rt, "_send_and_await", _fake_send)
+
+        handle = await rt.load_session(
+            "/home/u/.kiro/sessions/cli/sid-123.json",
+            "sid-123",
+            cwd="/work",
+            agent="kiroclaw",
+        )
+
+        # No session/new was issued — the first RPC is session/load itself.
+        methods = [m for m, _ in sent]
+        assert METHOD_SESSION_NEW not in methods
+        assert methods[0] == METHOD_SESSION_LOAD
+
+        load_params = sent[0][1]
+        assert load_params == {
+            "sessionId": "sid-123",
+            "cwd": "/work",
+            "mcpServers": [],
+            "_meta": {"_kiro.dev/session_file": "/home/u/.kiro/sessions/cli/sid-123.json"},
+        }
+        # Handle adopts the ORIGINAL sid and its queue is registered.
+        assert handle.session_id == "sid-123"
+        assert "sid-123" in rt._session_queues
+        # set_mode ran for the resumed session (mirrors AcpClient step 4).
+        assert METHOD_SET_MODE in methods
+
+    @pytest.mark.asyncio
+    async def test_load_session_raises_when_capability_absent(self):
+        rt, _, _ = _make_runtime()
+        rt._can_load_session = False
+        with pytest.raises(AcpRuntimeError):
+            await rt.load_session("/f.json", "sid-x")
+        # No queue leaked on the guard path.
+        assert "sid-x" not in rt._session_queues
+
+    @pytest.mark.asyncio
+    async def test_load_session_without_modes_raises_and_unregisters(self, monkeypatch):
+        rt, _, _ = _make_runtime()
+        rt._can_load_session = True
+
+        async def _fake_send(method, params):
+            return {}  # no "modes" → load did not actually restore state
+
+        monkeypatch.setattr(rt, "_send_and_await", _fake_send)
+
+        with pytest.raises(AcpRuntimeError):
+            await rt.load_session("/f.json", "sid-y", agent="kiroclaw")
+        # The queue registered before the send must be cleaned up on failure.
+        assert "sid-y" not in rt._session_queues
+
+    @pytest.mark.asyncio
+    async def test_load_session_params_match_acp_client(self, monkeypatch):
+        """Drift guard: the kiro (non-claude) session/load payload built here
+        must equal the one AcpClient._initialize_session builds, so the two
+        resume paths never diverge. Compares the field set explicitly."""
+        rt, _, _ = _make_runtime()
+        rt._can_load_session = True
+        captured: dict = {}
+
+        async def _fake_send(method, params):
+            if method == METHOD_SESSION_LOAD:
+                captured.update(params)
+                return {"modes": {}, "models": []}
+            return {}
+
+        monkeypatch.setattr(rt, "_send_and_await", _fake_send)
+        await rt.load_session("/k/sid.json", "sid", cwd="/w", agent="kiroclaw")
+
+        # Mirror of AcpClient's kiro-branch load_params (client.py step 2).
+        expected = {
+            "sessionId": "sid",
+            "cwd": "/w",
+            "mcpServers": [],
+            "_meta": {"_kiro.dev/session_file": "/k/sid.json"},
+        }
+        assert captured == expected
+
+    @pytest.mark.asyncio
+    async def test_load_session_unregisters_queue_when_set_mode_fails(self, monkeypatch):
+        """A set_mode failure AFTER the queue is registered must unregister it,
+        so the caller's create_session() fallback doesn't leave the reader
+        routing late transcript-replay frames to an abandoned resume_sid queue."""
+        rt, _, _ = _make_runtime()
+        rt._can_load_session = True
+
+        async def _fake_send(method, params):
+            if method == METHOD_SESSION_LOAD:
+                return {"modes": {}, "models": []}  # load succeeds, queue registers
+            if method == METHOD_SET_MODE:
+                raise AcpRuntimeError("set_mode boom")
+            return {}
+
+        monkeypatch.setattr(rt, "_send_and_await", _fake_send)
+
+        with pytest.raises(AcpRuntimeError):
+            await rt.load_session("/k/sid.json", "sid-z", cwd="/w", agent="kiroclaw")
+        assert "sid-z" not in rt._session_queues
+
+
+@pytest.mark.asyncio
+async def test_create_session_unregisters_queue_when_set_mode_fails(monkeypatch):
+    """A set_mode failure AFTER the session queue is registered must unregister
+    it — otherwise no handle is returned to the caller but the reader loop keeps
+    routing frames to an abandoned queue indefinitely. Mirrors the same cleanup
+    that load_session() already performs."""
+    rt, _, _ = _make_runtime()
+
+    async def _fake_send(method, params):
+        if method == METHOD_SESSION_NEW:
+            return {"sessionId": "sid-new"}  # session/new succeeds → queue registers
+        if method == METHOD_SET_MODE:
+            raise AcpRuntimeError("set_mode boom")
+        return {}
+
+    monkeypatch.setattr(rt, "_send_and_await", _fake_send)
+
+    with pytest.raises(AcpRuntimeError):
+        await rt.create_session(cwd="/w", agent="kiroclaw")
+    # The queue registered before set_mode must be cleaned up on failure.
+    assert "sid-new" not in rt._session_queues
+
+
+@pytest.mark.asyncio
+async def test_create_session_registers_queue_on_success(monkeypatch):
+    """Happy path: a successful create_session keeps the session queue
+    registered so the returned handle receives its frames."""
+    rt, _, _ = _make_runtime()
+
+    async def _fake_send(method, params):
+        if method == METHOD_SESSION_NEW:
+            return {"sessionId": "sid-ok"}
+        return {}
+
+    monkeypatch.setattr(rt, "_send_and_await", _fake_send)
+
+    handle = await rt.create_session(cwd="/w", agent="kiroclaw")
+    assert handle.session_id == "sid-ok"
+    assert "sid-ok" in rt._session_queues
+
+
+# ── Drift-parity fixes (AcpRuntime ↔ AcpClient): #1-#4 + #5b ──
+
+
+@pytest.mark.asyncio
+async def test_steer_notifications_yield_steer_events():
+    """#4: steering_* session/update frames classify as "steer" and yield the
+    EVENT_STEER_* events (previously dropped — classify_notification had no steer
+    branch, so the shared demux path never surfaced mid-turn steer)."""
+    from kiro_claw.acp.types import (
+        EVENT_STEER_CLEARED,
+        EVENT_STEER_CONSUMED,
+        EVENT_STEER_QUEUED,
+    )
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events: list = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sA",
+            "update": {"sessionUpdate": "steering_queued", "content": "please focus on X"},
+        }})
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sA",
+            "update": {"sessionUpdate": "steering_consumed", "content": "focus on X"},
+        }})
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sA",
+            "update": {"sessionUpdate": "steering_cleared"},
+        }})
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+
+        kinds = [e.kind for e in events]
+        assert EVENT_STEER_QUEUED in kinds
+        assert EVENT_STEER_CONSUMED in kinds
+        assert EVENT_STEER_CLEARED in kinds
+        queued = next(e for e in events if e.kind == EVENT_STEER_QUEUED)
+        assert queued.text == "please focus on X"
+        consumed = next(e for e in events if e.kind == EVENT_STEER_CONSUMED)
+        assert consumed.text == "focus on X"
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_tool_interrupted_marker_synthesizes_complete(monkeypatch):
+    """#2: kiro-cli's security-filter marker (text-only, no `complete` response)
+    must synthesize EVENT_COMPLETE so the turn does not hang until the 2h prompt
+    timeout, and must emit the SEL audit. No prompt response is fed here — the
+    turn MUST still terminate."""
+    import kiro_claw.acp.session_handle as sh
+
+    sel_mock = MagicMock()
+    monkeypatch.setattr(sh, "sel", lambda: sel_mock)
+    marker = "Tool uses were interrupted, waiting for the next user prompt"
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events: list = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=5.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        # Only the marker text chunk — NO {"id": req_id, "result": ...} response.
+        _feed(reader, {"method": METHOD_SESSION_UPDATE, "params": {
+            "sessionId": "sA",
+            "update": {"sessionUpdate": "agent_message_chunk",
+                       "content": {"type": "text", "text": marker}},
+        }})
+        # Must finish WITHOUT the turn response (the synthesized complete ends it).
+        await asyncio.wait_for(driver, timeout=3.0)
+
+        assert events[-1].kind == EVENT_COMPLETE
+        assert handle._turn_done.is_set()
+        sel_mock.log_tool_invocation.assert_called_once()
+        _kwargs = sel_mock.log_tool_invocation.call_args.kwargs
+        assert _kwargs["outcome"] == "denied"
+        assert _kwargs["tool_name"] == "kiro_cli_security_filter"
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_unresponsive_cancel_unblocks_without_killing_runtime():
+    """#3: after cancel(), if kiro-cli never acks (no cancelled stopReason) within
+    the grace budget, the dispatch loop synthesizes a terminal EVENT_COMPLETE so
+    the caller unblocks — WITHOUT killing the shared runtime (send_notification is
+    the only runtime call; no kill)."""
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    rt.kill = MagicMock()  # type: ignore[method-assign]  # must NOT be called
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events: list = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=5.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        await handle.cancel()
+        # Backdate the cancel so the grace window has already elapsed.
+        handle._cancel_ts = time.monotonic() - (handle._cancel_grace_secs + 1)
+        # Wake the loop so it re-checks the cancel guard at the top of the while.
+        _feed(reader, {"method": "_kiro.dev/metadata", "params": {"sessionId": "sA"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+
+        assert events[-1].kind == EVENT_COMPLETE
+        assert events[-1].stop_reason == "error: cancel unacked"
+        assert handle._turn_done.is_set()
+        rt.kill.assert_not_called()
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_drain_init_consumes_init_frames_and_captures_config():
+    """#1: drain_init() pulls MCP-init/config frames off the session queue after
+    set_mode so they don't race into the first prompt, and captures
+    config_option_update into cached configOptions."""
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    cfg = [{"id": "effort", "options": ["low", "high"]}]
+    q["sA"].put_nowait(JsonRpcMessage.from_dict({"method": METHOD_SESSION_UPDATE, "params": {
+        "sessionId": "sA",
+        "update": {"sessionUpdate": "config_option_update", "configOptions": cfg},
+    }}))
+    q["sA"].put_nowait(JsonRpcMessage.from_dict({
+        "method": "_kiro.dev/mcp/server_initialized",
+        "params": {"sessionId": "sA", "serverName": "builder-mcp"},
+    }))
+    await handle.drain_init(duration=0.5, idle_exit=0.05)
+    assert q["sA"].empty()  # frames drained, not left for the first prompt
+    assert handle._config_options == cfg
+
+
+@pytest.mark.asyncio
+async def test_drain_init_repoisons_on_dead_runtime():
+    """#1: a None sentinel (runtime died during init) is re-queued so the next
+    consumer still sees the death, and drain stops."""
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    q["sA"].put_nowait(None)
+    await handle.drain_init(duration=0.5, idle_exit=0.05)
+    assert q["sA"].get_nowait() is None  # sentinel preserved
+
+
+def test_backfill_context_window_from_pct(monkeypatch):
+    """#5b: pct-only metadata (kiro 2.10+) backfills window/used tokens from the
+    model registry; no-op once a real usage_update set the window."""
+    import kiro_claw.acp.session_handle as sh
+
+    monkeypatch.setattr(sh.model_registry, "window", lambda mid: 200000)
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle._model = "some-model"
+    handle._track_metadata(JsonRpcMessage.from_dict({
+        "method": "_kiro.dev/metadata", "params": {"contextUsagePercentage": 25},
+    }))
+    assert handle.last_prompt_stats.context_pct == 25.0
+    assert handle.last_prompt_stats.context_window_tokens == 200000
+    assert handle.last_prompt_stats.context_used_tokens == 50000
+
+    # A prior real usage_update wins — backfill must not override it.
+    handle2 = AcpSessionHandle("sA", q["sA"], rt)
+    handle2._model = "some-model"
+    handle2.last_prompt_stats.context_window_tokens = 999
+    handle2._track_metadata(JsonRpcMessage.from_dict({
+        "method": "_kiro.dev/metadata", "params": {"contextUsagePercentage": 80},
+    }))
+    assert handle2.last_prompt_stats.context_window_tokens == 999
+
+
+def test_backfill_context_window_no_model_is_safe(monkeypatch):
+    """#5b: no _model set → records pct only, no crash, no token backfill."""
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle._track_metadata(JsonRpcMessage.from_dict({
+        "method": "_kiro.dev/metadata", "params": {"contextUsagePercentage": 30},
+    }))
+    assert handle.last_prompt_stats.context_pct == 30.0
+    assert handle.last_prompt_stats.context_window_tokens == 0
+
+
+# ── Round-1 follow-up fixes: #5b currentModelId backfill + send_command redaction ──
+
+
+def test_backfill_uses_resolved_model_id_from_session_config(monkeypatch):
+    """#5b (parity): store_session_config captures currentModelId into
+    _resolved_model_id, so context-window backfill works even when the user
+    never called set_model — and _model stays empty (no Mesh-2376 pinning)."""
+    import kiro_claw.acp.session_handle as sh
+
+    monkeypatch.setattr(sh.model_registry, "window", lambda mid: 300000)
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle.store_session_config(
+        {"models": {"currentModelId": "resolved-model", "availableModels": []}}
+    )
+    assert handle._resolved_model_id == "resolved-model"
+    assert handle._model == ""  # must NOT pollute the user-picked model field
+    handle._track_metadata(JsonRpcMessage.from_dict({
+        "method": "_kiro.dev/metadata", "params": {"contextUsagePercentage": 40},
+    }))
+    assert handle.last_prompt_stats.context_window_tokens == 300000
+    assert handle.last_prompt_stats.context_used_tokens == 120000
+
+
+@pytest.mark.asyncio
+async def test_send_command_redacts_output(monkeypatch):
+    """#send_command (parity): the command response text is redacted before
+    return, matching AcpClient.send_command."""
+    import kiro_claw.acp.session_handle as sh
+
+    # send_command now applies the explicit two-pass redactors (parity with
+    # AcpClient.send_command), not the redact_text helper.
+    monkeypatch.setattr(sh, "redact_exfiltration_urls", lambda s: (s, []))
+    monkeypatch.setattr(sh, "redact_credentials", lambda s: ("REDACTED", []))
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+
+    async def _fake_send_request(method, params):
+        return 1
+
+    rt.send_request = _fake_send_request  # type: ignore[method-assign]
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+
+    async def _fake_wait(req_id, timeout=60.0):
+        return JsonRpcMessage.from_dict({"id": 1, "result": {"text": "secret token xyz"}})
+
+    handle._wait_for_response = _fake_wait  # type: ignore[assignment]
+    out = await handle.send_command("/compact")
+    assert out == "REDACTED"
+
+
+# ── Round-2 parity fixes: auth detection, exception translation, steer ──
+
+
+def test_saw_not_logged_in_detects_auth_failure():
+    """#1: AcpRuntime.saw_not_logged_in scans captured stderr for kiro-cli's
+    'not logged in' signal so a death can be surfaced as AcpAuthRequired."""
+    rt, _, _ = _make_runtime()
+    rt._stderr_lines = ["startup noise", "error: You are not logged in, please log in"]
+    assert rt.saw_not_logged_in() is True
+    rt._stderr_lines = ["ordinary stderr", "mcp server ready"]
+    assert rt.saw_not_logged_in() is False
+
+
+@pytest.mark.asyncio
+async def test_stream_translates_runtime_dead_to_process_died():
+    """#2: AcpSessionProvider.stream translates AcpRuntimeDead (an
+    AcpRuntimeError, which chat_runner does NOT catch) into AcpProcessDied so
+    the caller's AcpProcessDied handler fires (parity with AcpClient)."""
+    from kiro_claw.acp.client import AcpProcessDied
+    from kiro_claw.acp.session_provider import AcpSessionProvider
+
+    rt = MagicMock()
+    rt.saw_not_logged_in = MagicMock(return_value=False)
+    handle = MagicMock()
+
+    async def _boom(msg):
+        raise AcpRuntimeDead("pipe broken")
+        yield  # noqa: mark as async generator
+
+    handle.prompt = _boom
+    prov = AcpSessionProvider.__new__(AcpSessionProvider)
+    prov._handle = handle
+    prov._runtime = rt
+    with pytest.raises(AcpProcessDied):
+        async for _ in prov.stream("hi"):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_stream_translates_auth_failure_to_auth_required():
+    """#1: when stderr shows 'not logged in', a runtime death surfaces as
+    AcpAuthRequired (non-retryable login prompt) rather than AcpProcessDied."""
+    from kiro_claw.acp.client import AcpAuthRequired
+    from kiro_claw.acp.session_provider import AcpSessionProvider
+
+    rt = MagicMock()
+    rt.saw_not_logged_in = MagicMock(return_value=True)
+    handle = MagicMock()
+
+    async def _boom(msg):
+        raise AcpRuntimeDead("pipe broken")
+        yield
+
+    handle.prompt = _boom
+    prov = AcpSessionProvider.__new__(AcpSessionProvider)
+    prov._handle = handle
+    prov._runtime = rt
+    with pytest.raises(AcpAuthRequired):
+        async for _ in prov.stream("hi"):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_handle_steer_sends_session_steer():
+    """#3: outbound steer() wraps the message and sends _session/steer; empty
+    message or no session returns False without sending."""
+    sent = {}
+
+    async def _send_request(method, params):
+        sent["method"] = method
+        sent["params"] = params
+        return 1
+
+    rt = MagicMock()
+    rt.send_request = _send_request
+    handle = AcpSessionHandle("sA", asyncio.Queue(), rt)
+    assert handle.supports_steer is True
+    ok = await handle.steer("please focus on X")
+    assert ok is True
+    assert sent["method"] == "_session/steer"
+    assert "please focus on X" in sent["params"]["message"]
+    assert await handle.steer("   ") is False
+
+
+# ── Round-3 fixes: cancel_session grace + idempotent cancel ──
+
+
+@pytest.mark.asyncio
+async def test_provider_cancel_session_accepts_and_forwards_grace():
+    """Blocker #1: AcpSessionProvider.cancel_session must accept grace_secs
+    (AcpProvider.cancel calls it with grace_secs=) and forward it to the
+    handle — otherwise a kiro-path cancel raises TypeError."""
+    from kiro_claw.acp.session_provider import AcpSessionProvider
+
+    rt, _, _ = _make_runtime()
+    rt.send_notification = AsyncMock()  # type: ignore[method-assign]
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    prov = AcpSessionProvider.__new__(AcpSessionProvider)
+    prov._handle = handle
+    prov._runtime = rt
+    await prov.cancel_session(grace_secs=25.0)  # must NOT raise TypeError
+    assert handle._cancel_grace_secs == 25.0
+
+
+def test_is_turn_active_factors_cancelled():
+    """is_turn_active is False once cancel() has fired (parity with
+    AcpClient.has_active_turn) so a repeat cancel is a no-op early-return."""
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle._turn_done.clear()
+    handle._cancelled = False
+    assert handle.is_turn_active is True
+    handle._cancelled = True
+    assert handle.is_turn_active is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_mcp_oauth_guard_and_dedup():
+    """Shared-path mcp_oauth_request mirrors AcpClient (R5 fix): unsafe-scheme
+    URLs and empty serverName are dropped; duplicates deduped; a matching
+    server_initialized discards the dedupe entry so a later retry re-emits."""
+    from kiro_claw.acp.types import (
+        EVENT_MCP_OAUTH_REQUEST,
+        METHOD_MCP_OAUTH_REQUEST,
+        METHOD_MCP_SERVER_INITIALIZED,
+    )
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        events = []
+
+        async def drive():
+            async for ev in handle.prompt("hi", timeout=3.0):
+                events.append(ev)
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        base = {"sessionId": "sA"}
+        # unsafe scheme -> dropped
+        _feed(reader, {"method": METHOD_MCP_OAUTH_REQUEST,
+                       "params": {**base, "serverName": "evil", "oauthUrl": "javascript:alert(1)"}})
+        # empty serverName -> dropped
+        _feed(reader, {"method": METHOD_MCP_OAUTH_REQUEST,
+                       "params": {**base, "serverName": "", "oauthUrl": "https://ok.example.com"}})
+        # safe -> emitted
+        _feed(reader, {"method": METHOD_MCP_OAUTH_REQUEST,
+                       "params": {**base, "serverName": "gh", "oauthUrl": "https://auth.example.com"}})
+        # duplicate same server -> deduped
+        _feed(reader, {"method": METHOD_MCP_OAUTH_REQUEST,
+                       "params": {**base, "serverName": "gh", "oauthUrl": "https://auth.example.com"}})
+        # server_initialized -> discard dedupe entry
+        _feed(reader, {"method": METHOD_MCP_SERVER_INITIALIZED,
+                       "params": {**base, "serverName": "gh"}})
+        # safe again after discard -> re-emitted
+        _feed(reader, {"method": METHOD_MCP_OAUTH_REQUEST,
+                       "params": {**base, "serverName": "gh", "oauthUrl": "https://auth.example.com"}})
+        _feed(reader, {"id": req_id, "result": {"stopReason": "end_turn"}})
+        await asyncio.wait_for(driver, timeout=3.0)
+
+        oauth = [e for e in events if e.kind == EVENT_MCP_OAUTH_REQUEST]
+        # evil (unsafe) + empty-name dropped; gh emitted, deduped, then re-emitted = 2
+        assert [e.server_name for e in oauth] == ["gh", "gh"], [e.server_name for e in oauth]
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_is_turn_active_requires_alive_runtime():
+    """Contract parity: a turn on a DEAD runtime reads inactive (mirrors
+    AcpClient.has_active_turn's process-alive condition)."""
+    rt = MagicMock()
+    rt.is_alive.return_value = True
+    h = AcpSessionHandle("sA", asyncio.Queue(), rt)
+    h._turn_done.clear()
+    h._cancelled = False
+    assert h.is_turn_active is True
+    rt.is_alive.return_value = False
+    assert h.is_turn_active is False
+
+
+@pytest.mark.asyncio
+async def test_set_model_syncs_resolved_model_id():
+    """Contract parity: set_model updates BOTH _model and _resolved_model_id
+    (else context-window backfill uses the stale session/new model)."""
+    rt = MagicMock()
+    rt.is_alive.return_value = True
+    rt.send_request = AsyncMock()
+    h = AcpSessionHandle("sA", asyncio.Queue(), rt)
+    h._turn_done.set()
+    await h.set_model("new-model")
+    assert h._model == "new-model"
+    assert h._resolved_model_id == "new-model"
+
+
+def test_normalize_models_shape():
+    """Contract parity: available_models normalized to {modelId,name,description}
+    with guaranteed keys (mirrors AcpClient._capture_available_models)."""
+    out = AcpSessionHandle._normalize_models([
+        {"modelId": "m1", "name": "Model One", "description": "d"},
+        {"value": "m2"},        # value fallback; name defaults to id
+        {"name": "no-id"},      # dropped: no id
+        "garbage",              # dropped: not a dict
+    ])
+    assert out == [
+        {"modelId": "m1", "name": "Model One", "description": "d"},
+        {"modelId": "m2", "name": "m2", "description": ""},
+    ]
+
+
+def test_store_session_config_syncs_effort_levels(monkeypatch):
+    """Contract parity: store_session_config pushes effort levels to the global
+    validation set (mirrors AcpClient._sync_effort_levels)."""
+    import sys
+    import types
+    calls = []
+    fake = types.ModuleType("kiro_claw.dashboard.chat_persistence")
+    fake.update_reasoning_effort_values = lambda levels: calls.append(levels)
+    monkeypatch.setitem(sys.modules, "kiro_claw.dashboard.chat_persistence", fake)
+    rt = MagicMock()
+    rt.is_alive.return_value = True
+    h = AcpSessionHandle("sA", asyncio.Queue(), rt)
+    h.store_session_config(
+        {"configOptions": [{"id": "effort", "options": [{"value": "low"}, {"value": "high"}]}]}
+    )
+    assert calls == [["low", "high"]]
+
+
+@pytest.mark.asyncio
+async def test_stale_turn_yields_end_turn(monkeypatch):
+    """R7 gap fill: a stale turn (text streamed, then no formal response within
+    the stale window) yields EVENT_COMPLETE(STOP_REASON_END_TURN) -- a benign end,
+    NOT an error (parity with AcpClient). Shared-path counterpart of AcpClient's
+    test_stale_turn_synthesizes_complete_after_text."""
+    from kiro_claw.acp import session_handle as sh_mod
+    from kiro_claw.acp.types import EVENT_COMPLETE, STOP_REASON_END_TURN
+
+    monkeypatch.setattr(sh_mod, "_STALE_TURN_TIMEOUT", 0.05)
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle._stale_eligible = True    # text streamed -> stale watchdog armed
+    handle._tool_dispatched = False  # tool-stall must NOT be what fires
+
+    class _SilentQueue:
+        async def get(self):
+            await asyncio.sleep(0.06)  # advance clock past the stale window
+            raise asyncio.TimeoutError
+
+    handle._queue = _SilentQueue()  # type: ignore[assignment]
+
+    events = []
+    async for ev in handle._dispatch_events(req_id=1, timeout=30.0):
+        events.append(ev)
+
+    assert events and events[-1].kind == EVENT_COMPLETE
+    assert events[-1].stop_reason == STOP_REASON_END_TURN
+    assert handle._turn_done.is_set()
+
+
+@pytest.mark.asyncio
+async def test_mark_dead_clears_routed_requests():
+    """R7 fix: _mark_dead clears _routed_requests (not just _pending_requests) so
+    a routed-request correlation can't linger past runtime death."""
+    rt, _, _ = _make_runtime()
+    rt._routed_requests[42] = "sA"
+    rt._pending_requests[7] = asyncio.get_event_loop().create_future()
+    rt._mark_dead("test")
+    assert rt._routed_requests == {}
+    assert rt._pending_requests == {}
+
+
+def test_build_permission_event_sets_raw_tool_params():
+    """Regression (PR #21 HIGH): the shared build_permission_event must carry
+    raw_tool_params (the structured dict cached from the preceding tool_call) so
+    the governance keystone (hooks.on_tool_call sensitive-path / write-protected
+    checks) enforces on the shared-runtime path even when the display title
+    hides the path."""
+    from kiro_claw.acp._dispatch import build_permission_event
+    from kiro_claw.acp.types import METHOD_REQUEST_PERMISSION
+
+    raw_cache = {"tc-1": {"path": "/home/u/.ssh/id_rsa", "content": "x"}}
+    msg = JsonRpcMessage.from_dict({
+        "id": 5,
+        "method": METHOD_REQUEST_PERMISSION,
+        "params": {
+            "toolCall": {"toolCallId": "tc-1", "title": "Editing"},
+            "options": [],
+        },
+    })
+    event, _recorded = build_permission_event(msg, raw_params_cache=raw_cache)
+    assert event.raw_tool_params == {"path": "/home/u/.ssh/id_rsa", "content": "x"}
+    assert "tc-1" not in raw_cache  # consumed on use
+
+
+def test_build_permission_event_raw_params_none_without_cache():
+    """No cache entry + no inline dict → raw_tool_params stays None (no crash)."""
+    from kiro_claw.acp._dispatch import build_permission_event
+    from kiro_claw.acp.types import METHOD_REQUEST_PERMISSION
+
+    msg = JsonRpcMessage.from_dict({
+        "id": 6,
+        "method": METHOD_REQUEST_PERMISSION,
+        "params": {"toolCall": {"toolCallId": "tc-x", "title": "Editing"}, "options": []},
+    })
+    event, _ = build_permission_event(msg, raw_params_cache={})
+    assert event.raw_tool_params is None
+
+
+def test_mark_dead_unregisters_protected_pid():
+    """Regression (PR #21 follow-up): _mark_dead must release the sweep-protection
+    shield on ANY death path (not just kill()), else the dead PID lingers in
+    _PROTECTED_PIDS forever and could shield a recycled-orphan from the sweep."""
+    from kiro_claw.session_pid import _protected_pids, register_protected_pid
+
+    rt, _, _ = _make_runtime()
+    rt._pid = 515151
+    register_protected_pid(rt._pid)
+    assert rt._pid in _protected_pids()
+    rt._mark_dead("simulated EOF")
+    assert rt._pid not in _protected_pids()

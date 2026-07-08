@@ -19,7 +19,13 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Optional, Protocol
+
+from kiro_claw.acp.session_provider import AcpSessionProvider
+
+if TYPE_CHECKING:
+    from kiro_claw.acp.runtime import AcpRuntime
+    from kiro_claw.providers.base import LLMProvider
 
 from kiro_claw.config.loader import KiroClawConfig
 from kiro_claw.context import ContextBuilder
@@ -579,6 +585,12 @@ class SubagentInfo:
     peak_cpu_cores: float = 0.0
     _cpu_jiffies_prev: int = 0  # last subtree utime+stime sample (clock ticks)
     _cpu_sample_ts: float = 0.0  # monotonic time of the last CPU sample
+    # Session sharing — when True, this subagent runs as a session on the
+    # parent's shared AcpRuntime instead of its own process. Cleanup skips
+    # release/reset (no entry in SessionManager) and instead calls shutdown()
+    # on the _shared_provider directly.
+    _session_sharing: bool = False
+    _shared_provider: Any = None  # AcpSessionProvider when _session_sharing=True
 
 
 # Callback: (subagent_info) -> None
@@ -949,7 +961,12 @@ class SubagentManager:
         """
         now = time.monotonic()
         for info in list(self._agents.values()):
-            if info.done or not info._pid:
+            # Session-sharing subagents multiplex on the parent's SHARED runtime
+            # PID, so sampling info._pid would attribute the whole shared-process
+            # subtree (parent + all sibling sessions) to this one subagent —
+            # poisoning the learned-cost store. A multiplexed session has no
+            # isolable process cost, so skip it.
+            if info.done or not info._pid or info._session_sharing:
                 continue
             pid = info._pid
             rss_kb = _proc_rss_kb(pid)
@@ -969,6 +986,8 @@ class SubagentManager:
 
     def _record_cost(self, info: SubagentInfo) -> None:
         """Persist this run's high-water RSS/CPU to the learned-cost store."""
+        if info._session_sharing:
+            return  # multiplexed on the shared runtime — no isolable per-agent cost
         if info.peak_rss_gb <= 0 and info.peak_cpu_cores <= 0:
             return  # never sampled (e.g. finished before the first reaper sweep)
         try:
@@ -1024,14 +1043,25 @@ class SubagentManager:
         """Kill a subagent's session process and mark it done."""
         session_key = f"subagent:{agent_id}"
 
-        # Kill the process FIRST so the pipe unblocks, then cancel the task.
-        try:
-            await asyncio.wait_for(self._sessions.reset(session_key), timeout=_RESET_TIMEOUT)
-        except asyncio.TimeoutError:
-            logger.warning("Reaper: reset hung for %s, attempting SIGKILL", agent_id)
-            self._sigkill_session(session_key)
-        except Exception:
-            logger.exception("Reaper: reset failed for %s", agent_id)
+        if info._session_sharing:
+            # Session-sharing subagent: destroy the session handle only.
+            # Do NOT kill the shared runtime (other subagents may still use it).
+            try:
+                if info._shared_provider:
+                    await info._shared_provider.shutdown()
+            except Exception:
+                logger.debug(
+                    "Reaper: shared session shutdown failed for %s", agent_id, exc_info=True
+                )
+        else:
+            # Kill the process FIRST so the pipe unblocks, then cancel the task.
+            try:
+                await asyncio.wait_for(self._sessions.reset(session_key), timeout=_RESET_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning("Reaper: reset hung for %s, attempting SIGKILL", agent_id)
+                self._sigkill_session(session_key)
+            except Exception:
+                logger.exception("Reaper: reset failed for %s", agent_id)
 
         task = self._tasks.pop(agent_id, None)
         if task and not task.done():
@@ -1724,30 +1754,38 @@ class SubagentManager:
                     },
                 )
                 try:
-                    self._sessions.release(session_key, cleanup=True)
+                    if info._session_sharing:
+                        # Session-sharing subagents: destroy the session handle
+                        # (unregister from shared runtime). Don't kill the runtime.
+                        # Skip when the reaper already tore it down (info.reaped).
+                        if info._shared_provider and not info.reaped:
+                            await info._shared_provider.shutdown()
+                    else:
+                        self._sessions.release(session_key, cleanup=True)
                 except Exception:
                     logger.warning("Subagent %s: release failed", info.id, exc_info=True)
                 self._running_count -= 1
                 self._drain_queue()
-                try:
-                    await asyncio.wait_for(
-                        self._sessions.reset(session_key), timeout=_RESET_TIMEOUT
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning("Subagent %s: reset timed out, force-killing", info.id)
-                    self._sigkill_session(session_key)
+                if not info._session_sharing:
                     try:
-                        sel().log_tool_invocation(
-                            session_key=session_key,
-                            source="subagent",
-                            tool_name="run_finally_force_kill",
-                            outcome="sigkill",
-                            metadata={"subagent_id": info.id},
+                        await asyncio.wait_for(
+                            self._sessions.reset(session_key), timeout=_RESET_TIMEOUT
                         )
+                    except asyncio.TimeoutError:
+                        logger.warning("Subagent %s: reset timed out, force-killing", info.id)
+                        self._sigkill_session(session_key)
+                        try:
+                            sel().log_tool_invocation(
+                                session_key=session_key,
+                                source="subagent",
+                                tool_name="run_finally_force_kill",
+                                outcome="sigkill",
+                                metadata={"subagent_id": info.id},
+                            )
+                        except Exception:
+                            logger.exception("Subagent %s: SEL audit failed", info.id)
                     except Exception:
-                        logger.exception("Subagent %s: SEL audit failed", info.id)
-                except Exception:
-                    logger.exception("Subagent %s: reset failed", info.id)
+                        logger.exception("Subagent %s: reset failed", info.id)
             self._tasks.pop(info.id, None)
 
         if self._on_done and not info.reaped:
@@ -1898,12 +1936,41 @@ class SubagentManager:
             extra_kwargs["allowed_tools"] = info.allowed_tools
         if info.cwd:
             extra_kwargs["cwd"] = info.cwd
-        client, is_new, _resumed = await self._sessions.get_or_create(
-            session_key, agent=agent or None, approval_policy=parent_policy,
-            **extra_kwargs,
-        )
-        # Detect CC provider to skip permission event loop
-        is_cc = self._is_cc_provider(client)
+
+        # ── Session sharing: reuse parent's shared AcpRuntime ──
+        # When enabled and eligible, subagents get a session on the parent's
+        # companion AcpRuntime (~200ms startup, ~0 memory) instead of spawning
+        # a fresh kiro-cli process (~3-5s, ~400MB).
+        use_session_sharing = self._should_use_session_sharing(info)
+        if use_session_sharing:
+            try:
+                client = await self._create_shared_session(info, session_key, agent)
+            except Exception as exc:
+                # Fallback: shared runtime unavailable (dead, spawn failed, etc.)
+                # Revert to legacy per-process path transparently.
+                logger.warning(
+                    "Subagent %s: session sharing failed (%s), falling back to dedicated process",
+                    info.id, exc,
+                )
+                info._session_sharing = False
+                info._shared_provider = None
+                use_session_sharing = False
+                client, is_new, _resumed = await self._sessions.get_or_create(
+                    session_key, agent=agent or None, approval_policy=parent_policy,
+                    **extra_kwargs,
+                )
+                is_cc = self._is_cc_provider(client)
+            else:
+                is_new = True
+                _resumed = False
+                is_cc = False
+        else:
+            client, is_new, _resumed = await self._sessions.get_or_create(
+                session_key, agent=agent or None, approval_policy=parent_policy,
+                **extra_kwargs,
+            )
+            # Detect CC provider to skip permission event loop
+            is_cc = self._is_cc_provider(client)
         # Intentionally check info.agent (not resolved `agent`) so only
         # explicitly requested agents skip _SYSTEM_PREFIX (defense-in-depth).
         named_agent = bool(info.agent and _AGENT_NAME_RE.fullmatch(info.agent))
@@ -2146,6 +2213,71 @@ class SubagentManager:
         self._sessions.record_success(session_key)
         Stats().inc_subagent_completed()
         logger.info("Subagent %s completed", info.id)
+
+    def _should_use_session_sharing(self, info: SubagentInfo) -> bool:
+        """Decide whether a subagent should use the shared-runtime path.
+
+        All must hold: session_sharing config True; parent session exists and
+        is ACP/kiro-backed (not CC); not a CC-specific spawn (model/allowed_tools/bare).
+        """
+        try:
+            cfg = KiroClawConfig.load()
+            if not cfg.agent.session_sharing:
+                return False
+        except Exception:
+            return False
+        if info.model or info.allowed_tools or info.bare:
+            return False
+        if not info.parent_session_key:
+            return False
+        return self._sessions.is_session_sharing_eligible(info.parent_session_key)
+
+    async def _create_shared_session(
+        self, info: SubagentInfo, session_key: str, agent: str
+    ) -> "LLMProvider":
+        """Create a subagent session on the parent's AcpRuntime.
+
+        The parent session (provider=kiro) runs on an AcpRuntime via
+        AcpSessionProvider. Subagents create additional sessions on that SAME
+        runtime — one process hosts everything. Falls back to
+        get_subagent_runtime() (companion runtime) if the parent doesn't use
+        AcpSessionProvider. Marks info._session_sharing=True so cleanup calls
+        provider.shutdown() instead of SessionManager.release/reset.
+        """
+        runtime = self._get_parent_runtime(info.parent_session_key)
+        if runtime is None:
+            runtime = await self._sessions.get_subagent_runtime(info.parent_session_key)
+
+        cwd = info.cwd or str(getattr(self._sessions, "_pool_cwd", ""))
+        handle = await runtime.create_session(
+            cwd=cwd or None,
+            agent=agent or None,
+        )
+        provider = AcpSessionProvider(handle, runtime)
+        info._session_sharing = True
+        info._shared_provider = provider
+        if runtime.pid:
+            info._pid = runtime.pid
+            update_state(info.id, pid=runtime.pid, pid_recorded_at=time.time())
+        logger.info(
+            "Subagent %s using session sharing on runtime PID %s (session %s, key %s)",
+            info.id, runtime.pid, handle.session_id, session_key,
+        )
+        return provider
+
+    def _get_parent_runtime(self, parent_session_key: str) -> "AcpRuntime | None":
+        """Extract the AcpRuntime from the parent session's provider.
+
+        Returns the runtime if the parent uses AcpSessionProvider (kiro unified
+        path), or None if the parent uses AcpClient (CC or legacy).
+        """
+        provider = self._sessions.get_provider(parent_session_key)
+        if provider is None:
+            return None
+        inner = getattr(provider, "client", None) or getattr(provider, "_client", None)
+        if isinstance(inner, AcpSessionProvider):
+            return inner._runtime
+        return None
 
     @staticmethod
     def _is_cc_provider(provider: object) -> bool:

@@ -75,7 +75,13 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from kiro_claw.acp.runtime import AcpRuntime, AcpSessionHandle
+    from kiro_claw.acp.types import AcpEvent
 
 from kiro_claw import model_registry, shutdown_event
 from kiro_claw.agent import _enforce_denied_commands
@@ -304,6 +310,56 @@ class _Session:
     cancelled: set[str] = field(default_factory=set)
 
 
+class _ProviderBgSession:
+    """``AcpSessionHandle``-compatible handle over the shared ``BACKGROUND_KEY``
+    ``_Session``, for non-kiro providers (claude_code / bedrock) that cannot use
+    the multiplexed kiro-only ``AcpRuntime``.
+
+    All ``_bg`` callers share this ONE provider session, so turns are serialized
+    by the existing per-session ``Semaphore(1)`` — exactly the old pre-multiplex
+    behavior. It yields the SAME ``AcpEvent`` type as ``AcpSessionHandle`` and
+    both paths parse frames through the shared ``_dispatch.parse_session_update``
+    — so the two ``_bg`` code paths cannot drift: this adapter is pure plumbing
+    over ``provider.stream`` / ``provider.reject_tool``, adding no second parser.
+    """
+
+    def __init__(self, sess: "_Session") -> None:
+        self._sess = sess
+        self._sem_held = False
+
+    @property
+    def session_id(self) -> str:
+        try:
+            return self._sess.provider.session_id
+        except Exception:
+            return ""
+
+    def _release(self) -> None:
+        if self._sem_held:
+            self._sem_held = False
+            self._sess.semaphore.release()
+
+    async def prompt(self, message: str, timeout: float | None = None) -> "AsyncIterator[AcpEvent]":
+        # timeout is accepted for AcpSessionHandle signature parity; the
+        # underlying provider/client manages its own stale-turn watchdog.
+        await self._sess.semaphore.acquire()
+        self._sem_held = True
+        try:
+            async for event in self._sess.provider.stream(message):
+                yield event
+        finally:
+            self._release()
+
+    async def reject_tool(self, request_id: str | int) -> None:
+        await self._sess.provider.reject_tool(request_id)
+
+    async def destroy(self) -> None:
+        # The BACKGROUND_KEY _Session is persistent and shared — never tear it
+        # down here. Just release the turn semaphore deterministically so the
+        # next _bg caller isn't blocked on generator finalization.
+        self._release()
+
+
 class SessionManager:
     """Thread-keyed LLM provider pool with warm session pre-spawning."""
 
@@ -381,6 +437,20 @@ class SessionManager:
         # Callback fired when a session expires (idle or orphaned).
         # Used by HistoryConsolidator to trigger skill extraction.
         self.on_session_expire: Callable[[str], None] | None = None
+
+        # Shared runtime for _bg callers (title gen, suggestions, folders, nav).
+        # Each caller gets its own ephemeral AcpSessionHandle via get_bg_session().
+        self._bg_runtime: "AcpRuntime | None" = None
+        # Guards lazy creation of _bg_runtime so concurrent callers don't each
+        # spawn a runtime and leak all but the last (orphaned subprocesses).
+        self._bg_runtime_lock = asyncio.Lock()
+
+        # ── Per-session subagent runtimes (session sharing) ──
+        # Maps parent_session_key → shared AcpRuntime for that session's
+        # subagents. Lazily created on first subagent spawn when
+        # session_sharing=True. Killed when the parent session ends.
+        self._subagent_runtimes: dict[str, "AcpRuntime"] = {}
+        self._subagent_runtime_locks: dict[str, asyncio.Lock] = {}
 
     async def reload_provider_factory(self) -> None:
         """Reload provider factory from current config (after provider switch)."""
@@ -498,6 +568,210 @@ class SessionManager:
                 await provider.shutdown()
 
     # ── Warm Pool ──
+
+    def _bg_provider_is_kiro(self) -> bool:
+        """True when the ``kiroclaw-lite`` ``_bg`` agent resolves to the kiro
+        (``acp``) backend — the only backend the multiplexed ``AcpRuntime``
+        supports. For non-kiro backends ``_bg`` falls back to the provider-backed
+        ``_Session`` path serialized by ``Semaphore(1)``.
+        """
+        try:
+            prov = getattr(self._cfg.agent, "provider", "acp") or "acp"
+        except Exception:
+            prov = "acp"
+        return prov == "acp"
+
+    async def get_bg_session(self) -> "AcpSessionHandle | _ProviderBgSession":
+        """Acquire a ``_bg`` session handle, dispatching by provider backend.
+
+        kiro (``acp``) → ephemeral ``AcpSessionHandle`` on the shared multiplexed
+        ``AcpRuntime`` (each caller gets its own ``sessionId``; runtime creation
+        guarded by ``_bg_runtime_lock``; respawn-once on death). non-kiro →
+        ``_ProviderBgSession`` over the shared ``BACKGROUND_KEY`` ``_Session``
+        serialized by its ``Semaphore(1)``. Caller MUST call ``session.destroy()``
+        in a finally block when done.
+        """
+        if not self._bg_provider_is_kiro():
+            await self._ensure_background()
+            sess = self._sessions.get(BACKGROUND_KEY)
+            if sess is None:
+                raise RuntimeError("background session unavailable for non-kiro _bg provider")
+            return _ProviderBgSession(sess)
+
+        # circular import: session -> acp.runtime -> acp.client -> session
+        from kiro_claw.acp.runtime import AcpRuntime, AcpRuntimeDead
+
+        max_retries = 1
+        for attempt in range(max_retries + 1):
+            async with self._bg_runtime_lock:
+                if self._bg_runtime is None or not self._bg_runtime.is_alive():
+                    # Reap the dead runtime before replacing it — kill() releases
+                    # its PID tracking + sweep-protection shield. Overwriting
+                    # without kill would leak the process and its protected-PID.
+                    if self._bg_runtime is not None:
+                        try:
+                            await self._bg_runtime.kill()
+                        except Exception:
+                            logger.debug(
+                                "get_bg_session: dead _bg runtime kill failed", exc_info=True
+                            )
+                    runtime = AcpRuntime(agent="kiroclaw-lite")
+                    await runtime.spawn()
+                    self._bg_runtime = runtime
+            try:
+                return await self._bg_runtime.create_session(agent="kiroclaw-lite")
+            except AcpRuntimeDead:
+                if attempt >= max_retries:
+                    raise
+                logger.warning(
+                    "get_bg_session: _bg runtime died, respawning (attempt %d/%d)",
+                    attempt + 1, max_retries,
+                )
+                async with self._bg_runtime_lock:
+                    if self._bg_runtime is not None and not self._bg_runtime.is_alive():
+                        try:
+                            await self._bg_runtime.kill()
+                        except Exception:
+                            logger.debug(
+                                "get_bg_session: dead _bg runtime kill failed", exc_info=True
+                            )
+                        self._bg_runtime = None
+        raise AcpRuntimeDead("get_bg_session exhausted retries")
+
+    async def get_subagent_runtime(self, parent_session_key: str) -> "AcpRuntime":
+        """Get or create a shared AcpRuntime for a parent session's subagents.
+
+        Each parent session gets ONE shared runtime that all its subagents
+        multiplex onto. Lazily spawned on first call; reused for subsequent
+        subagent spawns within the same parent session. Killed when the parent
+        session ends (via ``release_subagent_runtime``). Raises ``AcpRuntimeDead``
+        if the runtime cannot be spawned/respawned.
+        """
+        # circular import: session -> acp.runtime -> acp.client -> session
+        from kiro_claw.acp.runtime import AcpRuntime, AcpRuntimeDead
+
+        max_retries = 1
+        attempt = 0
+        while True:
+            # Acquire the CURRENT canonical lock for this key each iteration.
+            # release_subagent_runtime pops the per-key lock inside its own
+            # critical section; if it does so while we are awaiting that same
+            # lock, the object we hold becomes stale (a later caller mints a
+            # fresh lock for the key). Re-reading + the identity re-check below
+            # guarantees we always serialize under the LIVE lock, so two locks
+            # can never guard one key and a racing spawn can't orphan a
+            # sweep-shielded companion runtime.
+            lock = self._subagent_runtime_locks.setdefault(parent_session_key, asyncio.Lock())
+            async with lock:
+                if self._subagent_runtime_locks.get(parent_session_key) is not lock:
+                    # Stale lock: a concurrent release popped it while we waited.
+                    # Retry under the live lock (does not consume a spawn retry).
+                    continue
+                existing = self._subagent_runtimes.get(parent_session_key)
+                if existing is not None and existing.is_alive():
+                    return existing
+                if existing is not None:
+                    # Dead runtime being replaced — reap it (kill() releases its
+                    # PID tracking + sweep-protection shield) before overwriting.
+                    try:
+                        await existing.kill()
+                    except Exception:
+                        logger.debug(
+                            "get_subagent_runtime: dead runtime kill failed for %s",
+                            parent_session_key, exc_info=True,
+                        )
+                agent = self._get_session_agent(parent_session_key) or "kiroclaw"
+                # Mirror the parent's security posture (sandbox + MCP gateway +
+                # env) so companion-runtime subagents never run unsandboxed.
+                rt_kwargs = self._parent_runtime_kwargs(parent_session_key)
+                runtime = AcpRuntime(agent=agent, **rt_kwargs)
+                try:
+                    await runtime.spawn()
+                except AcpRuntimeDead:
+                    if attempt >= max_retries:
+                        raise
+                    attempt += 1
+                    logger.warning(
+                        "Subagent runtime spawn failed for %s (attempt %d/%d), retrying",
+                        parent_session_key, attempt, max_retries + 1, exc_info=True,
+                    )
+                    continue
+                self._subagent_runtimes[parent_session_key] = runtime
+                return runtime
+
+    async def release_subagent_runtime(self, parent_session_key: str) -> None:
+        """Kill and remove the subagent runtime for a parent session.
+
+        Called when the parent session ends, is reset, removed, or destroyed.
+        Safe to call even if no runtime exists for the key. Acquires the per-key
+        spawn lock (when present) so a release racing an in-flight
+        get_subagent_runtime spawn waits for it to finish, then reaps the
+        just-spawned runtime instead of leaving it orphaned with no owner.
+        """
+        lock = self._subagent_runtime_locks.get(parent_session_key)
+        if lock is not None:
+            async with lock:
+                runtime = self._subagent_runtimes.pop(parent_session_key, None)
+                # Popping the lock inside its own critical section is safe:
+                # get_subagent_runtime re-reads the canonical lock each iteration
+                # and re-checks its identity after acquiring, so a spawn that was
+                # waiting on THIS (now-removed) lock detects the staleness and
+                # retries under the live lock instead of racing us.
+                self._subagent_runtime_locks.pop(parent_session_key, None)
+        else:
+            runtime = self._subagent_runtimes.pop(parent_session_key, None)
+        if runtime is not None:
+            try:
+                await runtime.kill()
+            except Exception:
+                logger.warning(
+                    "Failed to kill subagent runtime for %s", parent_session_key, exc_info=True
+                )
+
+    def _get_session_agent(self, session_key: str) -> str:
+        """Return the agent name for an active session, or empty string."""
+        sess = self._sessions.get(session_key)
+        if sess is None:
+            return ""
+        return getattr(sess, "agent", "") or ""
+
+    def _parent_runtime_kwargs(self, parent_session_key: str) -> dict:
+        """Extract the parent provider's sandbox / MCP-gateway / env config so a
+        companion subagent runtime spawns with the SAME security posture as the
+        parent (sandboxed + MCP-gateway-routed), never a bare unsandboxed
+        process. Returns {} when the parent/client can't be resolved.
+        """
+        provider = self.get_provider(parent_session_key)
+        if provider is None:
+            return {}
+        client = getattr(provider, "client", None) or getattr(provider, "_client", None)
+        if client is None:
+            return {}
+        kwargs: dict = {}
+        for attr, key in (
+            ("_sandbox_mode", "sandbox_mode"),
+            ("_extra_env", "extra_env"),
+            ("_mcp_gateway_overlay", "mcp_gateway_overlay"),
+            ("_mcp_gateway_settings_mcp_json", "mcp_gateway_settings_mcp_json"),
+            ("_mcp_gateway_socket", "mcp_gateway_socket"),
+        ):
+            val = getattr(client, attr, None)
+            if val is not None:
+                kwargs[key] = val
+        return kwargs
+
+    def is_session_sharing_eligible(self, parent_session_key: str) -> bool:
+        """Check if a parent session can host multiplexed subagent sessions.
+
+        True when the parent session exists and its provider is kiro-cli backed
+        (ACP, not claude-agent-acp). Used by SubagentManager to choose the
+        shared-runtime path vs the legacy per-subagent-process path.
+        """
+        sess = self._sessions.get(parent_session_key)
+        if sess is None:
+            return False
+        provider = sess.provider
+        return getattr(provider, "is_session_sharing_eligible", False)
 
     async def _fill_warm_pool(self) -> None:
         """
@@ -1413,6 +1687,14 @@ class SessionManager:
                         _kill_escaped_children(child_pids)
                     except Exception:
                         logger.exception("Reset %s: child sweep failed", key)
+            # Kill the shared subagent runtime associated with this session
+            # (if any). Subagents on it are already dead since their queues
+            # are poisoned when the runtime dies.
+            if key in self._subagent_runtimes:
+                try:
+                    await self.release_subagent_runtime(key)
+                except Exception:
+                    logger.debug("Reset %s: subagent runtime cleanup failed", key, exc_info=True)
             logger.debug("Reset session: %s (pid=%s)", key, pid)
 
     def check_context_usage(self, key: str, provider: LLMProvider) -> float:
@@ -1569,6 +1851,11 @@ class SessionManager:
             self._compact_cooldown_until.pop(key, None)
         if session:
             await session.provider.shutdown()
+            # Reap any companion subagent runtime keyed by this parent (the
+            # get_subagent_runtime fallback path). shutdown() covers the common
+            # kiro path (subagents on the parent's own runtime), but a companion
+            # runtime lives only in _subagent_runtimes and would otherwise leak.
+            await self.release_subagent_runtime(key)
             logger.info("Removed session (map preserved): %s", key)
 
     async def destroy(self, key: str) -> None:
@@ -1583,6 +1870,8 @@ class SessionManager:
         try:
             if session:
                 await session.provider.shutdown()
+            # Reap any companion subagent runtime keyed by this parent (see remove()).
+            await self.release_subagent_runtime(key)
         finally:
             self._session_map.delete(key)
             logger.info("Destroyed session (map deleted): %s", key)
@@ -1599,6 +1888,25 @@ class SessionManager:
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             self._background_tasks.clear()
+
+        # Kill the shared _bg runtime and any per-session subagent runtimes.
+        # These are held only in instance attributes (never registered sessions
+        # or warm-pool providers), so the session-shutdown loop below does not
+        # cover them; without this they survive a graceful shutdown until the
+        # next-startup orphan reaper.
+        if self._bg_runtime is not None:
+            try:
+                await self._bg_runtime.kill()
+            except Exception:
+                logger.debug("close_all: _bg_runtime kill failed", exc_info=True)
+            self._bg_runtime = None
+        for _key in list(self._subagent_runtimes):
+            try:
+                await self.release_subagent_runtime(_key)
+            except Exception:
+                logger.debug(
+                    "close_all: subagent runtime cleanup failed for %s", _key, exc_info=True
+                )
 
         # Drain warm pool — shut down pre-spawned processes
         pool_providers: list[LLMProvider] = []

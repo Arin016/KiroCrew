@@ -524,3 +524,36 @@ class TestPeriodicSweepIntegration:
             except Exception:
                 pass  # L1628: catch-all — should not propagate
             mock_sweep.assert_called_once()
+
+
+class TestProtectedPidSweepShield:
+    """Regression (PR #21 HIGH): shared _bg / subagent AcpRuntime PIDs are
+    registered as sweep-protected so _collect_active_pids treats them as active
+    and the periodic orphan sweep does not SIGKILL them mid-use."""
+
+    def test_collect_active_pids_includes_protected(self) -> None:
+        from kiro_claw.session_pid import (
+            _collect_active_pids,
+            register_protected_pid,
+            unregister_protected_pid,
+        )
+
+        register_protected_pid(424242)
+        try:
+            pids, ok = _collect_active_pids({})
+            assert ok is True
+            assert 424242 in pids
+        finally:
+            unregister_protected_pid(424242)
+
+    def test_unregister_removes_protection(self) -> None:
+        from kiro_claw.session_pid import (
+            _collect_active_pids,
+            register_protected_pid,
+            unregister_protected_pid,
+        )
+
+        register_protected_pid(424243)
+        unregister_protected_pid(424243)
+        pids, _ok = _collect_active_pids({})
+        assert 424243 not in pids

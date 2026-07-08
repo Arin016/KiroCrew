@@ -344,3 +344,33 @@ Errors: 400 (missing task), 429 (capacity reached), 503 (subagents not available
 ### Handler keywords (instant, no LLM)
 
 User-typed `spawn <task>`, `bg <task>`, `spawn list`, `spawn status` are intercepted by the handler for instant execution.
+
+
+## Session sharing (shared AcpRuntime)
+
+When `agent.session_sharing` is enabled (default **on** for the kiro backend) and
+the parent session is kiro-backed, subagents no longer spawn a fresh `kiro-cli`
+process each. Instead they open an additional ACP session on a **shared
+`AcpRuntime`** — one process multiplexes the parent session plus all of its
+subagents. Startup drops from ~3–5 s to ~200 ms and per-subagent memory from
+~400 MB to near-zero.
+
+Decision + lifecycle:
+
+- `SubagentManager._should_use_session_sharing(info)` gates the path: config flag
+  on, parent session eligible (`SessionManager.is_session_sharing_eligible`), and
+  no CC-specific overrides (`model` / `allowed_tools` / `bare`).
+- `_create_shared_session()` resolves the parent's `AcpRuntime` via
+  `_get_parent_runtime()` (falling back to `SessionManager.get_subagent_runtime()`
+  — a companion runtime), calls `runtime.create_session()`, and wraps the handle
+  in `AcpSessionProvider`. `SubagentInfo._session_sharing` / `_shared_provider`
+  record the shared path.
+- On any failure the code falls back transparently to the legacy
+  per-process path (`get_or_create`).
+- Cleanup (`_run` finally + `_force_reap`) calls `_shared_provider.shutdown()` to
+  tear down only the session — it never kills the shared runtime, which other
+  subagents may still use. The runtime is killed when the parent session ends
+  (`SessionManager.release_subagent_runtime`, invoked from `reset()`).
+
+Non-kiro (Claude Code) parents are never eligible and always use the legacy
+`AcpClient` per-process path regardless of the flag.

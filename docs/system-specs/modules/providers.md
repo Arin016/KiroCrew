@@ -152,3 +152,22 @@ Provider-level recovery mechanisms that fire automatically without user interven
 
 KiroClaw drives `kiro-cli` over ACP — install it per its own docs, ensure it is
 on `PATH`, and run `kiro-cli login`. `kiroclaw doctor` reports its status.
+
+
+## AcpProvider: shared-runtime startup
+
+`AcpProvider.start()` branches on the backend:
+
+- **kiro (`is_claude_backend` False)** → `_start_kiro_runtime()`. This spawns an
+  `AcpRuntime` (carrying the provider's sandbox mode, extra env, and MCP-gateway
+  overlay/socket), resumes via `runtime.load_session()` when a prior transcript
+  exists or otherwise `runtime.create_session()`, applies the configured model,
+  and replaces `self._client` with an `AcpSessionProvider` (which implements the
+  same interface as `AcpClient`, so downstream callers are unchanged). Any
+  failure after `spawn()` kills the runtime so a half-initialised session never
+  leaks an orphaned `kiro-cli`.
+- **Claude Code (`is_claude_backend` True)** → legacy `AcpClient.ensure_ready()`.
+
+`AcpProvider.is_session_sharing_eligible` returns `not is_claude_backend`; it is
+what `SessionManager.is_session_sharing_eligible()` consults to decide whether a
+parent session can host multiplexed subagent sessions.

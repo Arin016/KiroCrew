@@ -80,29 +80,30 @@ async def _generate_folder_icon(state: DashboardState, folder: dict) -> None:
         "No text, no explanation, just the single emoji character."
     )
 
-    async def _stream(client) -> str:  # type: ignore[no-untyped-def]
+    async def _stream_session(session) -> str:  # type: ignore[no-untyped-def]
         t = ""
-        async for event in client.stream(prompt):
+        async for event in session.prompt(prompt):
             if event.kind == EVENT_TEXT_CHUNK:
                 t += event.text
             elif event.kind == EVENT_PERMISSION_REQUEST:
-                await client.reject_tool(event.request_id)
+                await session.reject_tool(event.request_id)
+                sel().log_tool_invocation(
+                    session_key=BACKGROUND_KEY, tool_name="unknown", outcome="denied",
+                    source="chat_folders", request_id=str(event.request_id),
+                )
             elif event.kind == EVENT_COMPLETE:
                 break
         return t
 
     text = ""
     async with _folder_icon_lock:
-        client, _is_new, _resumed = await state.sessions.get_or_create(BACKGROUND_KEY)
+        session = await state.sessions.get_bg_session()
         try:
-            text = await asyncio.wait_for(_stream(client), timeout=30)
+            text = await asyncio.wait_for(_stream_session(session), timeout=30)
         except Exception:  # noqa: BLE001 — best-effort background task
             text = ""
         finally:
-            state.sessions.release(BACKGROUND_KEY)
-            # Recycle the shared BG session if it's accumulated too much
-            # context. See chat_title.py for the full rationale.
-            await state.sessions.recycle_background()
+            await session.destroy()
     icon = text.strip()
     icon, _ = redact_exfiltration_urls(icon)
     icon, _ = redact_credentials(icon)

@@ -3439,7 +3439,7 @@ class TestSendCommand:
         # here we verify the call site wires it up at all (a vacuous isinstance
         # check would not catch a missed redact step).
         with patch(
-            "kiro_claw.security.redact_exfiltration_urls",
+            "kiro_claw.acp.client.redact_exfiltration_urls",
             return_value=("[redacted]", ["url"]),
         ) as mock_redact:
             result = await client.send_command("/test")

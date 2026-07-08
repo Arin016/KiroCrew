@@ -110,24 +110,18 @@ async def _generate_title_via_kiro(state: DashboardState, messages: list[dict[st
         return ""
 
     logger.debug("Title generation prompt (%d chars): %s", len(prompt), prompt[:120])
-    client, _is_new, _resumed = await state.sessions.get_or_create(BACKGROUND_KEY)
+    session = await state.sessions.get_bg_session()
     text = ""
     try:
-        async for event in client.stream(prompt):
+        async for event in session.prompt(prompt):
             if event.kind == EVENT_TEXT_CHUNK:
                 text += event.text
             elif event.kind == EVENT_PERMISSION_REQUEST:
-                await client.reject_tool(event.request_id)
+                await session.reject_tool(event.request_id)
             elif event.kind == EVENT_COMPLETE:
                 break
     finally:
-        state.sessions.release(BACKGROUND_KEY)
-        # Recycle the shared BG session if it's accumulated too much context.
-        # Without this, every auto-title appends to the kiro-cli child's
-        # internal history; after ~N titles the session bloats past 70-90%
-        # context and the next call gets killed mid-stream by a recycle
-        # triggered elsewhere, also blocking every chat queued on the BG.
-        await state.sessions.recycle_background()
+        await session.destroy()
     title = text.strip().strip('"').strip("'").strip(".")
     if not title or title.upper() == "SKIP":
         logger.info("Title generation returned SKIP/empty — topic not clear yet")

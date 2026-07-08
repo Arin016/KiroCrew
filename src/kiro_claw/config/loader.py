@@ -443,6 +443,17 @@ class AgentConfig:
             "sending full tool specs. No effect on the Claude Code backend.",
         ),
     )
+    session_sharing: bool = field(
+        default=True,
+        metadata=_meta(
+            "Session Sharing",
+            "Subagents reuse a shared ACP runtime instead of spawning a fresh "
+            "kiro-cli process per subagent. Reduces startup from ~3-5s to ~200ms "
+            "and memory from ~400MB to near-zero per subagent. Default ON for the "
+            "kiro-cli backend; always off / ignored for Claude Code (which uses "
+            "AcpClient). Set false to opt kiro back onto per-subagent processes.",
+        ),
+    )
     max_subagents: int = field(
         default=3,
         metadata=_meta(
@@ -2206,6 +2217,7 @@ class KiroClawConfig:
                 notify_override_expiry=agent_data.get("notify_override_expiry", True),
                 conductor_skill=agent_data.get("conductor_skill", False),
                 tool_search=bool(agent_data.get("tool_search", True)),
+                session_sharing=bool(agent_data.get("session_sharing", True)),
                 max_subagents=agent_data.get("max_subagents", 3),
                 subagent_mem_buffer_pct=int(agent_data.get("subagent_mem_buffer_pct", 20)),
                 subagent_cost_gb=float(agent_data.get("subagent_cost_gb", 0.5)),

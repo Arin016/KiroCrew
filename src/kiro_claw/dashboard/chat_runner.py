@@ -22,6 +22,7 @@ from kiro_claw.acp.types import (
     EVENT_MCP_SERVER_INITIALIZED,
     STOP_REASON_CANCELLED,
     STOP_REASON_END_TURN,
+    STOP_REASON_REFUSAL,
 )
 from kiro_claw.config.loader import (
     KiroClawConfig,
@@ -1227,6 +1228,7 @@ async def _run_chat(
     needs_session_reset = False
     saw_compaction = False
     _produced_visible_output = False
+    _turn_tool_calls = 0  # tool dispatches this turn (refusal diagnostic)
     _retrying_empty = False
     # Recoverable tool refusals (host-gate policy deny / read-only bash gate)
     # recorded during this turn as (redacted_title, reason). If non-empty when
@@ -1843,6 +1845,7 @@ async def _run_chat(
                 # turn-emit (set _turn_emitted = True) to avoid a double-emit —
                 # pinned by TestRunChatTransientRetry.test_transient_after_thinking_only_retries.
             elif event.kind == EVENT_TOOL_CALL:
+                _turn_tool_calls += 1
                 # Flush pre-tool text silently (no broadcast) so it persists,
                 # but keep the streaming message in place for correct tool ordering.
                 _flush_text_stream()
@@ -3040,6 +3043,33 @@ async def _run_chat(
                     )
             _flush_text_stream()
             _flush_segment(state, slot, assistant_text, broadcast=False)
+        elif _stop_reason == STOP_REASON_REFUSAL:
+            # Model-side content refusal (kiro-cli passes Anthropic's `refusal`
+            # stop reason through verbatim) with no accompanying text. This is
+            # DETERMINISTIC — a blind retry just re-hits the same refusal and
+            # burns credits — so surface a distinct, non-retried card. A refusal
+            # on turn 1 with zero tool calls and no visible output usually points
+            # at what we PREPENDED (persona / injected context / replay), not the
+            # user's text; log the redacted prompt head + turn shape at WARNING.
+            _refusal_head, _ = redact_exfiltration_urls(full_message[:600])
+            _refusal_head, _ = redact_credentials(_refusal_head)
+            logger.warning(
+                "Model refusal for slot %s — not retrying "
+                "[is_new=%s resumed=%s tool_calls=%d visible_output=%s "
+                "prompt_bytes=%d prompt_head=%r]",
+                slot.key,
+                is_new,
+                resumed,
+                _turn_tool_calls,
+                _produced_visible_output,
+                len(full_message),
+                _refusal_head,
+            )
+            slot.append(
+                "error",
+                "Response declined by the model. Try rephrasing your request.",
+                "msg msg-err",
+            )
         elif (
             _stop_reason != STOP_REASON_CANCELLED
             and not _produced_visible_output

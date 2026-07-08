@@ -18,6 +18,7 @@ import signal
 import struct
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -106,7 +107,7 @@ def _collect_active_pids(sessions: "dict") -> tuple[set[int], bool]:
     If any session's PID is not an int or extraction fails,
     returns ``(partial_set, False)`` — caller should skip the sweep.
     """
-    pids: set[int] = set()
+    pids: set[int] = _protected_pids()  # shared _bg / subagent runtimes shielded from the sweep
     for sess in sessions.values():
         # ACP provider: long-lived process PID via client._pid
         client = getattr(sess.provider, "client", None)
@@ -651,3 +652,33 @@ def _untrack_session_pid(pid: int) -> None:
         lines = path.read_text(encoding="utf-8").splitlines()
         lines = [ln for ln in lines if ln.strip() != entry]
         path.write_text("\n".join(lines) + "\n" if lines else "", encoding="utf-8")
+
+
+# ── Sweep-protected PIDs ──────────────────────────────────────────────────
+# Live agent-process PIDs tracked in the PID file but NOT registered as
+# SessionMap sessions (e.g. app-managed worker pools / shared ACP runtimes).
+# The periodic orphan sweep consults _protected_pids() to avoid killing them.
+_PROTECTED_PIDS: set[int] = set()
+_PROTECTED_LOCK = threading.Lock()
+
+
+def register_protected_pid(pid: int) -> None:
+    """Shield a live agent-process PID from the periodic orphan sweep.
+
+    For app-managed worker pools whose processes are tracked in the PID file but
+    not registered as SessionMap sessions. Pair every call with
+    ``unregister_protected_pid`` on worker shutdown/replacement."""
+    if isinstance(pid, int) and pid > 0:
+        with _PROTECTED_LOCK:
+            _PROTECTED_PIDS.add(pid)
+
+
+def unregister_protected_pid(pid: int) -> None:
+    """Drop a PID from the sweep-protected set (worker shut down / replaced)."""
+    with _PROTECTED_LOCK:
+        _PROTECTED_PIDS.discard(pid)
+
+
+def _protected_pids() -> set[int]:
+    with _PROTECTED_LOCK:
+        return set(_PROTECTED_PIDS)

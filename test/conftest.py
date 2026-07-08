@@ -93,6 +93,25 @@ def _reset_safety_override_between_tests():
 
 
 @pytest.fixture(autouse=True)
+def _reset_reasoning_effort_globals():
+    """Snapshot + restore the process-global reasoning-effort allowlist around
+    each test. The allowlist is union-only/monotonic by design (persistence
+    safety), and several AcpSessionHandle tests drive synthetic effort levels
+    through ``_sync_effort_levels`` -> ``update_reasoning_effort_values``;
+    without this, a level like ``"extreme"`` leaks into the global and poisons
+    validation tests sharing the xdist worker (e.g. test_chat_slot_reasoning_effort)."""
+    import kiro_claw.dashboard.chat_persistence as _cp
+
+    saved_values = set(_cp._reasoning_effort_values)
+    saved_ordered = list(_cp._reasoning_effort_ordered)
+    try:
+        yield
+    finally:
+        _cp._reasoning_effort_values = saved_values
+        _cp._reasoning_effort_ordered = saved_ordered
+
+
+@pytest.fixture(autouse=True)
 def _isolate_kiroclaw_home(tmp_path_factory, monkeypatch):
     """Pin ``KIROCLAW_HOME`` to a per-test tmp dir as a safety net.
 

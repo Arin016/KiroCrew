@@ -271,3 +271,24 @@ Subprocess lifecycle:
 4. Sends both text and image blocks in the `prompt` array
 
 This leverages kiro-cli's `promptCapabilities.image: true` capability. The LLM receives the image inline — no tool call needed.
+
+
+## AcpRuntime & AcpSessionHandle (session multiplexing)
+
+Alongside `AcpClient` (one `kiro-cli` process per session, guarded by
+`_turn_lock`), the ACP package provides **`AcpRuntime`** — a single `kiro-cli`
+process that multiplexes **N concurrent sessions** via a single stdout reader
+that demuxes frames by `params.sessionId` into per-session queues (no
+`_turn_lock`). Each session is fronted by an **`AcpSessionHandle`**; an
+**`AcpSessionProvider`** adapts a handle to the `LLMProvider` interface so it is
+a drop-in replacement for `AcpClient`.
+
+Both transports share one parser — `acp/_dispatch.py`
+(`parse_session_update`, `build_permission_event`, `parse_usage_update`, …) — so
+they cannot drift. `AcpRuntime.load_session()` mirrors `AcpClient`'s resume
+handshake: it issues `session/load` directly under the original sessionId and
+registers the session queue **after** the load response so replayed transcript
+frames are dropped rather than counted against the current turn.
+
+`AcpRuntime` powers the `_bg` pool and (when `agent.session_sharing` is on) the
+shared parent+subagents runtime. See `providers.md` and `subagent.md`.
