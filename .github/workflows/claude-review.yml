@@ -54,7 +54,7 @@ jobs:
           # post findings.
           claude_args: |
             --model us.anthropic.claude-opus-4-8
-            --max-turns 30
+            --max-turns 100
             --allowedTools "Read,Grep,Glob,Bash(gh pr comment:*),Bash(gh pr view:*),Bash(gh api:*)"
           prompt: |
             You are reviewing pull request #${{ github.event.pull_request.number }}
