@@ -9,6 +9,7 @@ import logging
 import re
 import shutil
 import sqlite3
+import threading
 import time
 import uuid
 from enum import Enum
@@ -42,6 +43,10 @@ logger = logging.getLogger(__name__)
 
 RESEARCH_DIR = Path.home() / ".kiroclaw" / "workspace" / "research"
 DB_PATH = Path.home() / ".kiroclaw" / "apps" / "auto-research" / "campaigns.db"
+# Serializes the one-time WAL switch + schema init per DB file (see
+# _ensure_schema). Keyed by DB path so per-test temp DBs each init once.
+_DB_INIT_LOCK = threading.Lock()
+_INITIALIZED_DBS: set[str] = set()
 MAX_CYCLES_HARD_CAP = 100
 POLL_INTERVAL = 5
 _MAX_PARALLEL_WORKERS = 5  # hard cap on parallel sub-agents per cycle
@@ -114,35 +119,79 @@ def _safe_campaign_dir(campaign_id: str) -> Path | None:
 
 def _get_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), isolation_level=None)
+    # Explicit 30s busy timeout (vs the 5s driver default). The research worker
+    # writes findings/status every cycle while the app's HTTP handlers also
+    # read/write; the longer busy timeout absorbs brief write contention instead
+    # of surfacing "database is locked". WAL journal mode is set once per DB in
+    # _ensure_schema() below (it is persistent in the DB header).
+    conn = sqlite3.connect(str(DB_PATH), isolation_level=None, timeout=30.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("BEGIN")
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS campaigns (
-        id TEXT PRIMARY KEY, name TEXT NOT NULL, question TEXT NOT NULL,
-        sub_questions TEXT NOT NULL DEFAULT '[]', sources TEXT NOT NULL DEFAULT '[]',
-        max_cycles INTEGER NOT NULL DEFAULT 30, idle_secs INTEGER NOT NULL DEFAULT 120,
-        status TEXT NOT NULL DEFAULT 'ready',
-        created_at REAL NOT NULL, started_at REAL, completed_at REAL,
-        total_cycles INTEGER NOT NULL DEFAULT 0, error_message TEXT,
-        success_criteria TEXT, auto_approve INTEGER NOT NULL DEFAULT 0)"""
-    )
-    # Migrate DBs created before later columns were added.
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(campaigns)")}
-    if "success_criteria" not in cols:
-        conn.execute("ALTER TABLE campaigns ADD COLUMN success_criteria TEXT")
-    if "auto_approve" not in cols:
-        conn.execute("ALTER TABLE campaigns ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 0")
-    if "parent_id" not in cols:
-        conn.execute("ALTER TABLE campaigns ADD COLUMN parent_id TEXT")
-    if "scope_constraints" not in cols:
-        conn.execute("ALTER TABLE campaigns ADD COLUMN scope_constraints TEXT")
-    if "parallel_workers" not in cols:
-        conn.execute("ALTER TABLE campaigns ADD COLUMN parallel_workers INTEGER NOT NULL DEFAULT 1")
-    if "report_artifact_slug" not in cols:
-        conn.execute("ALTER TABLE campaigns ADD COLUMN report_artifact_slug TEXT")
-    conn.commit()
+    # Belt-and-suspenders: also set busy_timeout via PRAGMA so it applies even if
+    # a driver ignores the connect kwarg. Neither this nor connect() acquires a
+    # DB lock, so it is safe before the schema init runs.
+    conn.execute("PRAGMA busy_timeout=30000")
+    _ensure_schema(conn)
     return conn
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """Switch the DB into WAL mode and create/migrate the schema -- exactly once
+    per DB file, serialized by a process-wide lock.
+
+    ``journal_mode=WAL`` is persistent in the DB header, and *switching into*
+    WAL needs a brief exclusive lock. Running that switch on every connection
+    raced with concurrent writers (validate/create run off the event loop via
+    run_in_executor) and surfaced "database is locked" on the PRAGMA itself --
+    ``busy_timeout`` cannot resolve exclusive-lock contention where several
+    connections all try to flip a not-yet-WAL DB at once. Performing it once,
+    under a Python-level lock, guarantees a single connection does the switch
+    while no other connection holds a DB lock; later connections find WAL
+    already set and skip straight to serving queries. Keyed by DB path so
+    per-test temp DBs each initialize independently.
+    """
+    key = str(DB_PATH)
+    if key in _INITIALIZED_DBS and DB_PATH.exists() and DB_PATH.stat().st_size > 0:
+        return
+    with _DB_INIT_LOCK:
+        if key in _INITIALIZED_DBS and DB_PATH.exists() and DB_PATH.stat().st_size > 0:
+            return  # double-checked locking
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("BEGIN")
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS campaigns (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, question TEXT NOT NULL,
+                sub_questions TEXT NOT NULL DEFAULT '[]', sources TEXT NOT NULL DEFAULT '[]',
+                max_cycles INTEGER NOT NULL DEFAULT 30, idle_secs INTEGER NOT NULL DEFAULT 120,
+                status TEXT NOT NULL DEFAULT 'ready',
+                created_at REAL NOT NULL, started_at REAL, completed_at REAL,
+                total_cycles INTEGER NOT NULL DEFAULT 0, error_message TEXT,
+                success_criteria TEXT, auto_approve INTEGER NOT NULL DEFAULT 0)"""
+            )
+            # Migrate DBs created before later columns were added.
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(campaigns)")}
+            if "success_criteria" not in cols:
+                conn.execute("ALTER TABLE campaigns ADD COLUMN success_criteria TEXT")
+            if "auto_approve" not in cols:
+                conn.execute(
+                    "ALTER TABLE campaigns ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 0"
+                )
+            if "parent_id" not in cols:
+                conn.execute("ALTER TABLE campaigns ADD COLUMN parent_id TEXT")
+            if "scope_constraints" not in cols:
+                conn.execute("ALTER TABLE campaigns ADD COLUMN scope_constraints TEXT")
+            if "parallel_workers" not in cols:
+                conn.execute(
+                    "ALTER TABLE campaigns ADD COLUMN parallel_workers "
+                    "INTEGER NOT NULL DEFAULT 1"
+                )
+            if "report_artifact_slug" not in cols:
+                conn.execute("ALTER TABLE campaigns ADD COLUMN report_artifact_slug TEXT")
+            conn.commit()
+            _INITIALIZED_DBS.add(key)
+        except Exception:
+            conn.rollback()
+            raise
 
 
 # --- Redaction ---

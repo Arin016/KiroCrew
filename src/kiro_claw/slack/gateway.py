@@ -1702,7 +1702,7 @@ class GatewayOrchestrator:
                     # Dashboard notify is best-effort — never mask the original
                     # exception if notification itself fails.
                     try:
-                        if self.dashboard_state:
+                        if self.dashboard_state and not job.silent:
                             title = f"🔇 Cron: {job.name} (dup failure #{job.consecutive_failures})"
                             title, _ = redact_exfiltration_urls(title)
                             title, _ = redact_credentials(title)
@@ -1734,7 +1734,7 @@ class GatewayOrchestrator:
                 # Dashboard notify is best-effort — never mask the original
                 # exception if notification itself fails.
                 try:
-                    if self.dashboard_state:
+                    if self.dashboard_state and not job.silent:
                         alert_title = f"Cron: {job.name}"
                         alert_title, _ = redact_exfiltration_urls(alert_title)
                         alert_title, _ = redact_credentials(alert_title)
@@ -1764,8 +1764,12 @@ class GatewayOrchestrator:
                 # mirroring the dashboard alert_title redaction above.
                 fail_msg, _ = redact_exfiltration_urls(fail_msg)
                 fail_msg, _ = redact_credentials(fail_msg)
+                # Silent jobs still execute but suppress notifications (UI bells
+                # AND Slack DMs). We still log the failure at warning level above,
+                # and consecutive_failures still increments for the SEL event below
+                # — we just skip user-facing noise.
                 slack_failed = False  # track real delivery exceptions only
-                if self.slack:
+                if self.slack and not job.silent:
 
                     try:
                         channel = job.channel
@@ -1802,7 +1806,7 @@ class GatewayOrchestrator:
                             session_key=f"cron:{job.id}",
                             tool_name="cron_failure_alert",
                             outcome="alerted",
-                            downstream_service="slack" if self.slack else "none",
+                            downstream_service="slack" if (self.slack and not job.silent) else "none",
                         )
                     except Exception:
                         logger.debug(

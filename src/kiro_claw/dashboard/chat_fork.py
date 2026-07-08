@@ -15,6 +15,7 @@ from kiro_claw.sel import sel
 logger = logging.getLogger(__name__)
 
 _MAX_SLOTS_FOR_FORK = 500
+_FORK_TITLE_MARKER = "↳ "
 
 
 async def api_chat_slot_fork(request: web.Request) -> web.Response:
@@ -140,7 +141,10 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
     parent_title = slot.title if slot._titled else "Untitled"
     parent_title, _ = redact_exfiltration_urls(parent_title)
     parent_title, _ = redact_credentials(parent_title)
-    new_slot.title = f"Fork of {parent_title}"
+    # Strip a leading marker from the parent so it never compounds on a
+    # fork-of-a-fork.
+    parent_title = parent_title.removeprefix(_FORK_TITLE_MARKER)
+    new_slot.title = f"{_FORK_TITLE_MARKER}Fork of {parent_title}"
     new_slot._titled = True
 
     try:

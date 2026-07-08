@@ -28,6 +28,14 @@ fi
 
 export PYTHONPATH="$SCRIPT_DIR/src"
 export KIROCLAW_HOME="${KIROCLAW_HOME:-.kiroclaw-dev}"
+# Absolutize: config_dir() resolves this against each process's CWD, and MCP
+# subprocesses (mcp-core/mcp-cron) are spawned with session-workspace CWDs —
+# a relative HOME makes them create empty config dirs with no .local_secret,
+# so their gateway IPC calls fail with 403 Forbidden.
+case "$KIROCLAW_HOME" in
+    /*) ;;
+    *) KIROCLAW_HOME="$SCRIPT_DIR/$KIROCLAW_HOME" ;;
+esac
 export KIROCLAW_PORT="${KIROCLAW_PORT:-6777}"
 export KIROCLAW_PROJECT_DIR="$SCRIPT_DIR"
 

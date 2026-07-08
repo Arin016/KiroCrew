@@ -75,7 +75,7 @@ tools), use the **observe → diagnose → fix → verify** pattern:
 
 - Debugging protocol-level issues (ACP JSON-RPC, MCP handshake)
 - Investigating timing/ordering problems (async init, notification delivery)
-- Verifying build pipeline behavior (setuptools, npm, brazil-build)
+- Verifying build pipeline behavior (setuptools, npm, pip)
 - Any issue where mocked unit tests can't reproduce the real behavior
 
 ### Method
@@ -161,13 +161,13 @@ asyncio.run(main())
 
 ```bash
 # Reproduce: run build N times, check for flaky failures
-brazil-build clean && brazil-build && brazil-build && brazil-build
+pip install -e . && pip install -e . && pip install -e .
 
 # Diagnose: find stale cached files
 find build/ -name "SOURCES.txt" -exec grep "basePickBy" {} +
 
 # Verify fix: same sequence must pass consistently
-brazil-build clean && brazil-build && brazil-build && brazil-build
+rm -rf build/ && pip install -e . && pip install -e . && pip install -e .
 ```
 
 ### Key Principles

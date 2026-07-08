@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Sandbox security smoke test — run on dev desktop to verify standard mode
 # Usage: ssh dev-dsk-bolichen-2a-88e4ee3f.us-west-2.amazon.com
-#        cd ~/workplace/KiroClaw/src/KiroClaw && bash test/smoke_sandbox.sh
+#        cd ~/workplace/kiroclaw && bash test/smoke_sandbox.sh
 #
 # Prerequisites: kiroclaw gateway running, ada profile "smoke" configured
 # Setup:  ada profile add --profile smoke --account <account_id> --provider conduit --role IibsAdminAccess-DO-NOT-DELETE
 
 set -uo pipefail
 
-# Resolve PYTHONPATH from brazil build artifacts, fallback to src/
-export PYTHONPATH="${PYTHONPATH:-$(brazil-path run.pythonpath.python3.10 2>/dev/null || echo src)}"
+# Resolve PYTHONPATH — use editable install or fall back to src/
+export PYTHONPATH="${PYTHONPATH:-src}"
 
 ACCOUNT="${1:-373229397057}"
 PROFILE="smoke"

@@ -227,6 +227,25 @@ class TestConversationLog:
         assert by_key["t-with"].get("agent") == "kiro-v2"
         assert "agent" not in by_key["t-without"]
 
+    def test_list_sessions_surfaces_folder_id(self, tmp_path):
+        """list_sessions() should surface folder_id from the metadata line when present."""
+        log = ConversationLog(base_dir=tmp_path)
+        log.append("t-filed", "user", "hi")
+        log.update_metadata("t-filed", {"folder_id": "folder-123"})
+        log.append("t-unfiled", "user", "hi")
+        by_key = {s["key"]: s for s in log.list_sessions()}
+        assert by_key["t-filed"].get("folder_id") == "folder-123"
+        assert "folder_id" not in by_key["t-unfiled"]
+
+    def test_search_sessions_surfaces_folder_id(self, tmp_path):
+        """search_sessions() results carry folder_id — the frontend groups on it."""
+        log = ConversationLog(base_dir=tmp_path)
+        log.append("t-kms", "user", "investigate the kms rollback")
+        log.update_metadata("t-kms", {"folder_id": "folder-cpb"})
+        results = {s["key"]: s for s in log.search_sessions("kms")}
+        assert "t-kms" in results
+        assert results["t-kms"].get("folder_id") == "folder-cpb"
+
 
 class TestRewriteSession:
     def test_rewrite_replaces_content(self, tmp_path):

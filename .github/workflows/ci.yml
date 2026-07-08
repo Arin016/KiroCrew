@@ -112,9 +112,7 @@ jobs:
         # Blocking: fails on any eslint error and on any NEW warning above the
         # current baseline. Ratchet --max-warnings down toward 0 as the ~1116
         # pre-existing warnings (no-explicit-any, jsx-a11y, no-console) are burned
-        # down; do not raise it. (Baseline bumped 1066 -> 1116 by the final
-        # Brazil->GitHub sync, which imported upstream warnings that never faced
-        # this gate; burn-down resumes from 1116.)
+        # down; do not raise it.
         run: npx eslint src/ --max-warnings 1116
 
       - name: Copy/paste detection

@@ -37,6 +37,7 @@ from kiro_claw.dashboard.chat_folders import (  # noqa: F401
     api_chat_folder_update,
     api_chat_folders,
     api_chat_slot_folder,
+    api_chat_slot_mode,
     api_chat_slot_pin,
 )
 from kiro_claw.dashboard.chat_fork import api_chat_slot_fork  # noqa: F401

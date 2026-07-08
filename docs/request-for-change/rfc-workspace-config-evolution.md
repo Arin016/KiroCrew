@@ -57,7 +57,7 @@ Each phase includes its own test plan. The goal is to catch regressions early wi
 **Phase 1** (already specified in `.kiro/specs/config-schema/design.md`):
 - 15 property-based tests via `hypothesis` covering schema registry completeness, type mapping, round-trip serialization, validation fallback, snake_case paths
 - Unit tests for API endpoint (`GET /api/config/schema`), baseline generator, edge cases (malformed JSON, unknown keys, deprecated fields, sensitive masking)
-- Gate: `brazil-build test` passes, baseline generator produces valid JSON
+- Gate: `pytest` passes, baseline generator produces valid JSON
 
 **Phase 2:**
 - Unit tests for `WorkspaceConfig` and `MemoryStoreConfig` dataclasses (field defaults, metadata)
@@ -83,7 +83,7 @@ Each phase includes its own test plan. The goal is to catch regressions early wi
 - Integration test: swap backend via config, verify read/write round-trip
 - Gate: all Phase 3 tests pass with the built-in backend selected via plugin system
 
-**How to run:** All tests run via `brazil-build format && brazil-build clean && brazil-build && brazil-build test`. No separate test commands. Property tests use `@settings(max_examples=100)`. Test files: `test/test_config_schema.py`, `test/test_config_loader.py`, plus new files per phase.
+**How to run:** All tests run via `black src/kiro_claw test && isort src/kiro_claw test && flake8 src/kiro_claw test && pytest`. No separate test commands. Property tests use `@settings(max_examples=100)`. Test files: `test/test_config_schema.py`, `test/test_config_loader.py`, plus new files per phase.
 
 ### Phase 1: Formalized Config System
 
@@ -403,7 +403,7 @@ Phase 4 requires Phase 2 (plugin config needs the schema system). Phase 3 is a s
 
 ## 6. Success Criteria
 
-- Phase 1: `brazil-build test` passes, `GET /api/config/schema` returns all entries, existing configs round-trip without changes
+- Phase 1: `pytest` passes, `GET /api/config/schema` returns all entries, existing configs round-trip without changes
 - Phase 2: workspace selector works in dashboard, memory store selector works, per-workspace agent overrides apply correctly via dict-level merge, auto-migration from flat workspaces works, `default_memory_store` resolves correctly
 - Phase 3: each named store has isolated `memory.db`, dashboard memory tab is store-aware, existing default store data untouched, consolidation writes to correct store
 - Phase 4: at least one alternative backend (e.g. pgvector) works end-to-end via config change only, `"remote": true` consent enforced

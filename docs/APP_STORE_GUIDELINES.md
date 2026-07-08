@@ -6,7 +6,7 @@ This guide walks you through publishing an app to the KiroClaw App Store. An "ap
 
 1. Create `app.json` at your repo root
 2. Add your app to `src/kiro_claw/apps/app-registry.json`
-3. Submit a CR to the KiroClaw package
+3. Open a Pull Request against the KiroClaw repo
 
 ## 1. The App Manifest (`app.json`)
 
@@ -54,7 +54,7 @@ These fields control how your app appears in the App Store:
 
 | Field | Purpose |
 |-------|---------|
-| `repo` | GitFarm package name. Used by the blob proxy to serve images. |
+| `repo` | Git repository name. Used by the blob proxy to serve images. |
 | `iconPath` | Path to app icon relative to repo root. PNG, square, min 256x256px. |
 | `screenshots` | Array of image paths relative to repo root. PNG or JPG, max 5. |
 | `highlights` | Feature bullet points shown on the detail page. Max 10 items. |
@@ -249,7 +249,7 @@ When KiroClaw runs on a compatible platform (e.g. macOS local), the install proc
 - Format: PNG with transparency
 - Size: minimum 256x256px, square aspect ratio
 - Location: commit to your repo (e.g. `assets/icon/logo.png`)
-- The App Store serves icons via a GitFarm blob proxy — no CDN or external hosting needed
+- The App Store serves icons via a git blob proxy — no CDN or external hosting needed
 
 ### Screenshots
 
@@ -278,8 +278,8 @@ That's it. All display information (description, screenshots, highlights, tags, 
 | Field | Description |
 |-------|-------------|
 | `name` | Must match the `name` in your `app.json`. |
-| `repo` | GitFarm package name. Used to fetch `app.json` and serve images. |
-| `versionSet` | Brazil version set for the workspace (e.g. `"KiroClaw/development"`). All registry apps are installed via Brazil workspaces. |
+| `repo` | Git repository name. Used to fetch `app.json` and serve images. |
+| `versionSet` | Version set for dependency resolution (e.g. `"KiroClaw/development"`). |
 
 ### Optional Fields
 
@@ -317,7 +317,7 @@ Teams can host their own app registries without requiring KiroClaw team review f
 - `get_registry_app()` searches external registry caches after the built-in registry
 - Input validation: repo/branch names validated against strict regex patterns to reject path traversal
 
-**Trust model:** user explicitly opts in by adding the registry to their config. The repo must be on internal GitFarm (same trust as any Amazon code).
+**Trust model:** user explicitly opts in by adding the registry to their config. The repo must be accessible via git.
 
 **Management API** (`/api/apps/registries`):
 
@@ -334,18 +334,17 @@ Your app can be installed in two ways:
 
 ### Registry Install (recommended)
 
-Users click "Install" in the App Store. KiroClaw adds the package to a Brazil workspace via `brazil ws use -p`.
+Users click "Install" in the App Store. KiroClaw clones the package into a workspace.
 
-1. KiroClaw creates a Brazil workspace at `~/.kiroclaw/app-sources/.workspaces/{app_name}/` (one per app)
-2. Runs `brazil ws use -p {package} --branch {branch}` to clone and register the package
-3. Runs `brazil-build` (NpmPrettyMuch, BrazilPython, etc. resolve dependencies via the version set)
+1. KiroClaw creates a workspace at `~/.kiroclaw/app-sources/.workspaces/{app_name}/` (one per app)
+2. Clones the repo at the specified branch
+3. Runs the build step (npm/pip depending on the package type)
 4. Runs `setup.onInstall` if declared
 
 Requirements:
-- Repo must be accessible via `ssh://git.amazon.com/pkg/{repo}`
+- Repo must be accessible via git
 - `app.json` must be at the repo root (or at `subdirectory` if specified)
 - Install script must be non-interactive and complete within 5 minutes
-- Brazil packages must declare `versionSet` in the registry entry
 
 ### Self-Managed Install
 
@@ -378,7 +377,7 @@ The three classification fields control behavior:
 
 ## 5. Review Checklist
 
-Before submitting your registry CR:
+Before submitting your registry Pull Request:
 
 - [ ] `app.json` passes validation (`name` is kebab-case, `version` is semver, required fields present)
 - [ ] No path traversal in resource paths (`..` not allowed)
@@ -434,17 +433,16 @@ The app calls `POST /api/apps/register` on startup with `resources: "app"` and m
 
 Apps can declare `minKiroClawVersion` in `app.json`. KiroClaw checks this during install and update — if the current version is too old, the operation is rejected with a clear error message telling the user to update KiroClaw first.
 
-## 8. Brazil Packages
+## 8. Package Build Systems
 
-Apps built with Amazon's Brazil Build System (NpmPrettyMuch, BrazilPython, etc.) are fully supported. The App Store uses `brazil ws use -p` to add packages to a shared workspace and `brazil-build` for dependency resolution.
+Apps can use npm (for TypeScript/React) or pip (for Python) as their build system. The App Store clones the repo and runs the appropriate build command.
 
 ### How It Works
 
-1. The registry entry declares `versionSet` (e.g. `"Mochi/development"`)
-2. On install, KiroClaw creates a workspace at `~/.kiroclaw/app-sources/.workspaces/{app_name}/` (one per app)
-3. Runs `brazil ws use -p {package} --branch {branch}` to clone and register the package in the workspace
-4. `brazil-build` runs in the workspace context — NpmPrettyMuch resolves `@amzn/*` dependencies from the version set
-5. `setup.onInstall` runs after build (for post-build steps like `electron-builder`)
+1. On install, KiroClaw creates a workspace at `~/.kiroclaw/app-sources/.workspaces/{app_name}/` (one per app)
+2. Clones the package at the specified branch
+3. Runs `npm install && npm run build` (for JS/TS packages) or `pip install .` (for Python packages)
+4. `setup.onInstall` runs after build (for post-build steps like `electron-builder`)
 
 ### Registry Entry Example
 
@@ -452,17 +450,16 @@ Apps built with Amazon's Brazil Build System (NpmPrettyMuch, BrazilPython, etc.)
 {
   "name": "mochi-pet",
   "repo": "Mochi",
-  "branch": "mainline",
+  "branch": "main",
   "resources": "app",
   "lifecycle": "app",
-  "versionSet": "Mochi/development",
   "detectInstalled": "test -d ~/Applications/Mochi.app"
 }
 ```
 
-### Setup Script for Brazil Packages
+### Setup Script
 
-Since `brazil-build` handles dependency resolution and compilation, the `onInstall` script should only do things `brazil-build` can't:
+Since the standard build step handles dependency resolution and compilation, the `onInstall` script should only do post-build packaging:
 
 ```json
 {
@@ -476,7 +473,7 @@ Since `brazil-build` handles dependency resolution and compilation, the `onInsta
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-# brazil-build already ran — node_modules and build artifacts are ready.
+# Build already ran — node_modules and build artifacts are ready.
 # This script only does post-build packaging.
 [ -d "node_modules" ] || exit 1  # sanity check
 

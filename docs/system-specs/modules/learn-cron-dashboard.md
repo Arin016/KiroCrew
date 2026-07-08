@@ -356,7 +356,7 @@ The Agents page context window section shows per-session info:
 ### Build & Development
 
 - **Dev mode**: `./dev-frontend.sh` runs Vite dev server on port 3000 with API proxy to backend on 5476
-- **Production build**: `./build-frontend.sh` (called by `setup.py` during `brazil-build`) runs `tsc -b && vite build`, outputs to `src/kiro_claw/static/dist/`
+- **Production build**: `./build-frontend.sh` (called by `setup.py` during `pip install`) runs `tsc -b && vite build`, outputs to `src/kiro_claw/static/dist/`
 - **Static serving**: `server.py` serves `/assets` from `dist/assets/` (Vite hashed bundles), `/static` from legacy static dir
 - **Legacy fallback**: if `static/dist/index.html` is absent, `handlers.py` falls back to `static/dashboard.html`
 

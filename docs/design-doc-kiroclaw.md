@@ -394,7 +394,7 @@ The pattern:
 2. Extract the stable pattern — identify deterministic steps vs LLM-judgment steps
 3. Build a script — mechanical steps become shell commands, judgment steps become targeted `kiro-cli chat --no-interactive --agent <name> "prompt"` calls
 
-Example: "update documentation" graduates to a bash script where `git diff` and `brazil-build test` are deterministic, and only "summarize changes" is an LLM call.
+Example: "update documentation" graduates to a bash script where `git diff` and `pytest` are deterministic, and only "summarize changes" is an LLM call.
 
 ### 3.6 Execution Resilience
 

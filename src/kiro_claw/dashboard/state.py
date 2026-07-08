@@ -753,11 +753,21 @@ class _ChatSlot:
         found_conv = False
         for m in reversed(self.messages):
             role = m.get("role")
+            # Compute meta/compaction flag once for both guards below
+            msg_meta = m.get("meta") or {}
+            is_compaction = role == "assistant" and msg_meta.get("kind") == "compaction"
             # Capture last_activity_ts from the most recent actionable message
-            if not last_activity_ts and role in ("tool_call", "tool_result", "assistant"):
+            if not last_activity_ts and role in ("tool_call", "tool_result", "assistant") and not is_compaction:
                 last_activity_ts = m.get("ts") or ""
-            # Capture last conversational message (once)
-            if not found_conv and role in ("user", "assistant"):
+            # Capture last conversational message (once). Skip compaction
+            # notices: assistant-role system messages tagged
+            # meta.kind == "compaction" — the auto-compact notice
+            # ("Auto-compacted at N%.", _AUTO_COMPACT_NOTICE) and the
+            # /compact result banner (chat_utils._append_compaction_notice).
+            # This keeps the sidebar showing the last real message and mirrors
+            # the frontend's deriveFollowUpOptions skip so preview/options
+            # stay consistent.
+            if not found_conv and role in ("user", "assistant") and not is_compaction:
                 txt = m.get("content") or ""
                 if txt:
                     found_conv = True

@@ -526,3 +526,51 @@ class TestCronFailurePersistence:
         assert j.last_failure_hash == ""
         assert j.last_failure_at == 0.0
         assert j.consecutive_failures == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Silent flag respected on failure
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCronFailureRespectsSilent:
+    """A silent cron is pure background: its failure is recorded (history +
+    circuit breaker) but never broadcast — no Slack DM and no dashboard bell."""
+
+    def test_silent_first_failure_suppresses_slack_and_dashboard(self) -> None:
+        gw = _make_gateway()
+        gw.slack.post_message = AsyncMock()
+        job = _make_job(silent=True)
+        _run_callback_raising(gw, job, RuntimeError("boom"))
+        # No Slack DM and no dashboard bell for a silent cron...
+        gw.slack.post_message.assert_not_awaited()
+        gw.dashboard_state.notify.assert_not_called()
+        # ...but the failure is still recorded so the 5-strike auto-pause works.
+        assert job.last_failure_hash != ""
+        assert job.consecutive_failures == 1
+
+    def test_silent_duplicate_failure_stays_silent(self) -> None:
+        gw = _make_gateway()
+        gw.slack.post_message = AsyncMock()
+        job = _make_job(silent=True)
+        exc = RuntimeError("boom")
+        _run_callback_raising(gw, job, exc)
+        _run_callback_raising(gw, job, exc)  # identical failure within the window
+        # Neither the fresh-failure nor the dup-failure path notifies when silent.
+        gw.slack.post_message.assert_not_awaited()
+        gw.dashboard_state.notify.assert_not_called()
+        # Counter still climbs toward auto-pause.
+        assert job.consecutive_failures == 2
+
+    def test_non_silent_first_failure_still_rings_dashboard(self) -> None:
+        # Regression: the silent guard must not suppress the bell for normal crons.
+        gw = _make_gateway()
+        gw.slack.post_message = AsyncMock()
+        job = _make_job(silent=False)
+        _run_callback_raising(gw, job, RuntimeError("boom"))
+        gw.slack.post_message.assert_awaited_once()
+        alert_calls = [
+            c for c in gw.dashboard_state.notify.call_args_list
+            if "❌ Job failed" in str(c)
+        ]
+        assert alert_calls, "Non-silent cron failure must still ring the dashboard bell"

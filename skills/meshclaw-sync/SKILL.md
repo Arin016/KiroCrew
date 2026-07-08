@@ -27,7 +27,7 @@ The fork bundles **two** upstream packages into one repo, so a full sync tracks
   backend ships only a server-rendered `static/dashboard.html`; the fork's SPA's
   real upstream is **MeshClawWebsite**, a separate package — sync it too or the
   dashboard silently drifts behind.
-- **Fork (this repo):** `/Volumes/workplace/KiroClaw/src/KiroClaw`
+- **Fork (this repo):** `/Volumes/workplace/kiroclaw`
   (package `kiro_claw` + `website/`).
 
 ## Step 1 — Find the candidate commits
@@ -43,7 +43,7 @@ The fork shares the backend's content lineage, so a plain SHA range works:
 ```bash
 cd /Volumes/workplace/MeshClaw/src/MeshClaw
 git fetch -q
-STATE=/Volumes/workplace/KiroClaw/src/KiroClaw/skills/meshclaw-sync/last-synced.txt
+STATE=/Volumes/workplace/kiroclaw/skills/meshclaw-sync/last-synced.txt
 BETA=$(grep '^beta ' "$STATE" | awk '{print $2}')
 MAIN=$(grep '^mainline ' "$STATE" | awk '{print $2}')
 git log --no-merges --oneline "$BETA"..origin/beta-braveheart      # new beta commits
@@ -291,7 +291,7 @@ Gotchas:
   anything.** The real gate is **flake8**, which **ignores E501** (line length)
   — so the long verbatim-copied lines you port are fine. Verify your edits are
   clean by: (a) `flake8 <files>`, (b) a `>100`-char scan of *only your added
-  lines*, (c) comparing black-`--diff` `+`-line counts mainline-vs-yours per
+  lines*, (c) comparing black-`--diff` `+`-line counts main-vs-yours per
   file (equal ⇒ your edits add no new churn). `apps/builtins/*` also ignores E128.
 - **The fork's flake8 can be STRICTER than upstream's** — a faithful
   COPY-not-rewrite port can pass upstream yet fail the fork gate. Seen: **F824**
@@ -301,8 +301,8 @@ Gotchas:
   `flake8 <your files>` on the post-port image, never assume "upstream passed so
   this passes."
 - **isort failures may be pre-existing** — if `isort --check` flags a file you
-  only added a field/kwarg to (no import change), confirm it fails on `mainline`
-  too (`git show mainline:<f> | isort --check -`) and leave it; don't churn.
+  only added a field/kwarg to (no import change), confirm it fails on `main`
+  too (`git show main:<f> | isort --check -`) and leave it; don't churn.
 - **Regenerate-from-pre-image trick** for a test/spec file the commit heavily
   rewrites: if the fork file is byte-identical to the upstream PRE-image (modulo
   the rename), it is safe to regenerate wholesale from the POST-image —
@@ -336,17 +336,18 @@ Task (<Mesh-NNNN>): https://taskei.amazon.dev/tasks/<Mesh-NNNN>
 
 ### MANDATORY: every reference is a full clickable link
 
-In **commit messages, the CR description, AND the CR provenance comment**, never
-write a bare id — always the full `https://` URL (CRUX/Code Browser auto-links
-them). This is non-negotiable; a reviewer must be one click from every source.
+In **commit messages, the PR description, AND the PR provenance comment**, never
+write a bare id — always the full `https://` URL. This is non-negotiable; a
+reviewer must be one click from every source.
 
 | Reference | Link format |
 |---|---|
-| upstream commit | `https://code.amazon.com/packages/<Pkg>/commits/<FULL-40-char-sha>` (NOT the short sha — the full SHA; `Pkg` = `MeshClaw` or `MeshClawWebsite`) |
-| any CR (upstream or this one) | `https://code.amazon.com/reviews/CR-<id>` |
+| upstream commit (internal) | `https://code.amazon.com/packages/<Pkg>/commits/<FULL-40-char-sha>` (NOT the short sha — the full SHA; `Pkg` = `MeshClaw` or `MeshClawWebsite`) |
+| upstream CR (internal) | `https://code.amazon.com/reviews/CR-<id>` |
+| this fork's PR (GitHub) | `https://github.com/kirodotdev-labs/kiroclaw/pull/<number>` |
 | Taskei task | `https://taskei.amazon.dev/tasks/<Mesh-NNNN>` |
 | SIM issue (if a commit cites one) | `https://sim.amazon.com/issues/<Mesh-NNNN>` |
-| package commit browser | `https://code.amazon.com/packages/<Pkg>/commits/mainline` |
+| upstream package commit browser (internal) | `https://code.amazon.com/packages/<Pkg>/commits/mainline` |
 
 Pull the upstream CR / Task / SIM trailers straight from the source commit
 (`git -C <upstream> log -1 --format=%b <sha>` — they appear as `cr:` / `Task:` /
@@ -363,7 +364,7 @@ Scan the cumulative ported diff for couplings that slipped in (LIVE code, not
 comments):
 
 ```bash
-git diff origin/mainline...HEAD -- 'src/**/*.py' 'src/**/*.json' \
+git diff origin/main...HEAD -- 'src/**/*.py' 'src/**/*.json' \
   | grep -iE "^\+" | grep -ivE "^\+\+\+" \
   | grep -iE "midway|mwinit|mcs|kerberos|federate|aea|cognito|codeartifact|builder-mcp|arcc|quip|taskei|brazil|toolbox"
 ```
@@ -424,7 +425,7 @@ other KEPT controls. Specifically, when triaging/porting:
 ## Step 7 — Build, verify, and ship (used by the recurring auto-sync)
 
 After porting + the Step 4 verify + the Step 6 audit, a full sync run finishes
-with a build and a CR:
+with a build and a PR:
 
 1. **Rebuild both macOS DMGs** (the ported backend must ship). Dual-arch from
    one Apple-Silicon Mac via Rosetta — full recipe in `docs/DESKTOP_APP.md`:
@@ -445,13 +446,18 @@ with a build and a CR:
    `skills/meshclaw-sync/last-synced.txt`** to the new branch tips in the final
    commit.
 
-3. **Submit a CR** to mainline:
+3. **Open a PR against `main`** on GitHub:
    ```bash
-   cr --destination-branch mainline --open
-   # if auto-merge later complains the destination is null:
-   #   cr -r CR-XXXXX --destination-branch mainline
+   # Push the sync branch, then open a PR:
+   git push -u origin HEAD
+   gh pr create --base main --title "[KiroClaw] MeshClaw beta sync <date>: N commits ported" \
+     --body "$(cat <<'EOF'
+   ## Summary
+   ...per-commit triage table here...
+   EOF
+   )"
    ```
-   The CR **title** names the batch (e.g. `[KiroClaw] MeshClaw beta sync
+   The PR **title** names the batch (e.g. `[KiroClaw] MeshClaw beta sync
    <date>: N commits ported`). When the batch spans both repos, say so (e.g.
    `... dual-repo sync: N backend + M frontend ported`). The **description MUST
    list, per commit, both what was synced AND what was left out** — every
@@ -460,14 +466,14 @@ with a build and a CR:
    absent, builder-mcp internal, mcp_gateway/secretary/auto-research absent,
    SKIP_NONKIROACP, etc.). **Every SHA / CR / Task / SIM id in the description
    and the comment MUST be a full clickable `https://` link** — use the formats
-   in the Step 5 link table (the `cr` CLI description has a ~4KB cap, so put the
-   high-signal summary there and the EXHAUSTIVE per-commit provenance — every
-   commit/CR/task as a link — in a CR **comment**, which has no size cap; post it
-   with the builder-mcp `CRAddComment` tool, `publish=true`). Provenance across
-   the history-less boundary lives entirely in this description + comment.
+   in the Step 5 link table (keep the PR description concise; put the EXHAUSTIVE
+   per-commit provenance — every upstream commit/CR/task as a link — in a PR
+   **comment**, which has no size cap; post it with
+   `gh pr comment <number> --body "..."`). Provenance across the history-less
+   boundary lives entirely in this description + comment.
 
-   Origin = `ssh://git.amazon.com:2222/pkg/KiroClaw`. Per the global git
-   rule, `commit`/`push`/CR need explicit user authorization — the recurring
+   Origin = `https://github.com/kirodotdev-labs/kiroclaw.git`. Per the global
+   git rule, `commit`/`push`/PR need explicit user authorization — the recurring
    auto-sync cron job **is** that standing authorization; a manual invocation is
    not (ask first).
 
@@ -479,7 +485,7 @@ This skill is also operationalized as a multi-agent Workflow script at
 SKILL** — every agent it spawns reads this file first and the skill wins on any
 conflict. It fans out one analyzer + one skeptic per candidate (the adversarial
 triage), then gates mutation behind `mode`: `triage` (default, read-only report)
-→ `port` (port + verify, no CR) → `full` (+ build DMGs + commit + CR). Paths
+→ `port` (port + verify, no PR) → `full` (+ build DMGs + commit + PR). Paths
 come from `args` (`workspaceFork`/`upstreamBackend`/`upstreamFrontend`,
 defaulting to the locations above) so it runs on any checkout. The script
 parallelizes + enforces the pipeline shape; this skill remains the source of
@@ -488,12 +494,12 @@ truth for every verdict, the de-Amazon rubric, and the surgical porting.
 ## Recurring auto-sync (cron)
 
 A durable cron job runs this whole skill every 6 hours (scan → triage+verify →
-port → build → commit → CR). It is the standing authorization for commit/push/CR.
+port → build → commit → PR). It is the standing authorization for commit/push/PR.
 It **scans BOTH repos** (`mesh_claw` backend + `MeshClawWebsite` frontend) each
 run. If a run finds **zero** new candidates across both, it does nothing and
-exits (no empty commit, no CR). If it hits an ambiguous large/PARTIAL commit it
+exits (no empty commit, no PR). If it hits an ambiguous large/PARTIAL commit it
 can't confidently de-Amazon, it ports the clean KEEPs, leaves the ambiguous one
-un-ported, and **notes it in the CR description** as deferred-for-human-review
+un-ported, and **notes it in the PR description** as deferred-for-human-review
 rather than guessing.
 
 ## Periodic re-audit of the SKIP backlog
@@ -510,7 +516,7 @@ content**:
 #   window = <first-ever beta sha>..<current beta boundary>
 # For each, open the diff and apply the "Anti-miss" checks above. A
 # triage+verify Workflow with a SKEPTICAL confirm pass (high bar to add to a
-# shipped CR) is the right tool — bias toward rescuing a wrongly-dropped GENERIC
+# shipped PR) is the right tool — bias toward rescuing a wrongly-dropped GENERIC
 # hunk, but uphold a SKIP that is truly confined to an absent endpoint/dir.
 ```
 

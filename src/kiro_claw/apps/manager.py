@@ -865,18 +865,6 @@ _BUILTIN_APPS: list[dict[str, Any]] = [
         "ui": {"pages": [{"route": "/board", "label": "Board", "icon": "KanbanSquare"}]},
     },
     {
-        "name": "orchestrated",
-        "version": "1.0.0",
-        "displayName": "Autopilot",
-        "description": "Autonomous task execution — break down complex requests into plans and execute them step by step",
-        "author": "kiroclaw",
-        "tags": ["autonomy", "orchestration", "agents"],
-        "defaultEnabled": False,
-        "ui": {
-            "pages": [{"route": "/orchestrated", "label": "Autopilot", "icon": "MessageSquareDot"}],
-        },
-    },
-    {
         "name": "projects",
         "version": "1.0.0",
         "displayName": "Projects",
@@ -1053,10 +1041,12 @@ def register_builtin_apps() -> int:
             discovered.append(app_data)
     hardcoded_names = {a["name"] for a in _BUILTIN_APPS}
 
-    # Clean up apps that have been escalated to built-in surfaces.
-    # Knowledge Library was promoted from App Store to registerBuiltinSurface()
-    # in the frontend — remove stale installed state so it doesn't double-render.
-    _escalated = ["knowledge"]
+    # Clean up apps that have been escalated to built-in surfaces or merged
+    # into an existing surface — remove stale installed state so they don't
+    # linger in the App Store / nav after the promotion.
+    #   - knowledge: promoted from App Store to registerBuiltinSurface()
+    #   - orchestrated: Autopilot merged into the unified Chat surface (mode flag)
+    _escalated = ["knowledge", "orchestrated"]
     for esc_name in _escalated:
         esc_dir = app_dir(esc_name)
         if esc_dir.is_dir():

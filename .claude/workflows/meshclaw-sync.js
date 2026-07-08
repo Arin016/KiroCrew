@@ -1,7 +1,7 @@
 export const meta = {
   name: 'meshclaw-sync',
-  description: 'Sync fixes from internal MeshClaw (backend) + MeshClawWebsite (frontend) into the de-Amazoned public KiroClaw fork: scan both upstreams from the boundary, adversarially triage each candidate, then (opt-in) port / verify / build DMGs / commit / CR.',
-  whenToUse: 'Run the recurring MeshClaw->KiroClaw content sync. Defaults to a read-only triage report; pass {mode:"port"} or {mode:"full"} to mutate, build, and raise a CR. Source of truth is skills/meshclaw-sync/SKILL.md.',
+  description: 'Sync fixes from internal MeshClaw (backend) + MeshClawWebsite (frontend) into the de-Amazoned public KiroClaw fork: scan both upstreams from the boundary, adversarially triage each candidate, then (opt-in) port / verify / build DMGs / commit / PR.',
+  whenToUse: 'Run the recurring MeshClaw->KiroClaw content sync. Defaults to a read-only triage report; pass {mode:"port"} or {mode:"full"} to mutate, build, and raise a PR. Source of truth is skills/meshclaw-sync/SKILL.md.',
   phases: [
     { title: 'Scan' },
     { title: 'Triage' },
@@ -17,10 +17,10 @@ export const meta = {
 // match the documented checkout locations in skills/meshclaw-sync/SKILL.md.
 // ---------------------------------------------------------------------------
 const cfg = {
-  fork: (args && args.workspaceFork) || '/Volumes/workplace/KiroClaw/src/KiroClaw',
+  fork: (args && args.workspaceFork) || '/Volumes/workplace/kiroclaw',
   backend: (args && args.upstreamBackend) || '/Volumes/workplace/MeshClaw/src/MeshClaw',
   frontend: (args && args.upstreamFrontend) || '/Volumes/workplace/MeshClaw/src/MeshClawWebsite',
-  // mode: 'triage' (read-only, default) | 'port' (port + verify, no build/CR) | 'full' (port + verify + build + commit + CR)
+  // mode: 'triage' (read-only, default) | 'port' (port + verify, no build/PR) | 'full' (port + verify + build + commit + PR)
   mode: (args && args.mode) || 'triage',
 }
 const SKILL = `${cfg.fork}/skills/meshclaw-sync/SKILL.md`
@@ -107,7 +107,7 @@ const SCAN_SCHEMA = {
         properties: { sha: { type: 'string' }, title: { type: 'string' } },
       },
     },
-    syncDate: { type: 'string', description: 'Today (YYYY-MM-DD) from the `date` command, for the CR title.' },
+    syncDate: { type: 'string', description: 'Today (YYYY-MM-DD) from the `date` command, for the PR title.' },
   },
 }
 
@@ -164,7 +164,7 @@ const candidates = [
 log(`Scan: ${scan.backendCandidates.length} backend + ${scan.frontendCandidates.length} frontend candidate(s). Boundary beta=${scan.boundary.beta} fe=${scan.boundary.frontendBeta}.`)
 
 if (candidates.length === 0) {
-  log('No new candidates across both repos — nothing to sync. Exiting (no commit, no CR).')
+  log('No new candidates across both repos — nothing to sync. Exiting (no commit, no PR).')
   return { boundary: scan.boundary, candidates: [], verdicts: [], note: 'no new commits' }
 }
 
@@ -227,7 +227,7 @@ log(`Triage: ${keepers.length} to port (KEEP/PARTIAL), ${skipped.length} SKIP/AL
 
 // In triage-only mode, stop here with the report. This is the safe default.
 if (!willPort || keepers.length === 0) {
-  if (!willPort) log('mode=triage (read-only) — returning the triage report. Re-run with {mode:"port"} or {mode:"full"} to apply.')
+  if (!willPort) log('mode=triage (read-only) — returning the triage report. Re-run with {mode:"port"} or {mode:"full"} to apply changes.')
   else log('No KEEP/PARTIAL commits — boundary-only advance. Nothing to port.')
   return { boundary: scan.boundary, syncDate: scan.syncDate, verdicts, ported: [], note: willPort ? 'no keepers' : 'triage-only' }
 }
@@ -249,9 +249,9 @@ TASK (Step 3 + 4 + 5 — PORT the keepers, verify each, commit each). MUTATING.
 Work in ${cfg.fork}. Sync date: ${scan.syncDate}.
 
 BRANCH: if a sync/beta-* branch is already checked out AND based on
-origin/mainline, use it (a prior CR may still be pending — stacking is correct).
+origin/main, use it (a prior PR may still be pending — stacking is correct).
 Otherwise \`git fetch origin\` then create sync/beta-${scan.syncDate} off
-origin/mainline.
+origin/main.
 
 Port these ${keepers.length} commit(s), IN CHRONOLOGICAL ORDER (oldest first),
 ONE AT A TIME (never parallel — they may share files):
@@ -298,7 +298,7 @@ This is a fresh check, separate from the per-commit runs:
   and \`flake8\` on every touched src+test file.
 - Frontend: \`cd website && npx tsc -b\` then \`npx vitest run\` (full suite — the
   ports touched hot shared files).
-- De-Amazon audit: \`git diff origin/mainline...HEAD\` filtered to live added
+- De-Amazon audit: \`git diff origin/main...HEAD\` filtered to live added
   lines, grep for midway|mwinit|mcs|kerberos|federate|aea|cognito|codeartifact|
   builder-mcp|arcc|quip|taskei|brazil|toolbox|bedrock — expect ONLY inert
   comments/allowlist literals. Any live new usage is a bug to flag.
@@ -309,7 +309,7 @@ the file + failure precisely so the orchestrator can fix it.`,
 log('Verify phase complete.')
 
 if (!willShip) {
-  log('mode=port — stopping before build/commit/CR. Review the branch, then ship manually or re-run with {mode:"full"}.')
+  log('mode=port — stopping before build/commit/PR. Review the branch, then ship manually or re-run with {mode:"full"}.')
   return { boundary: scan.boundary, syncDate: scan.syncDate, verdicts, portReport, verifyReport, note: 'ported, not shipped' }
 }
 
@@ -336,38 +336,37 @@ ${cfg.fork}/docs/DESKTOP_APP.md). Work in ${cfg.fork}. macOS host only.
 - pip install pyinstaller into .venv/.venv-x86 if missing; keep electron version 0.1.0.
 - MOUNT-VERIFY each DMG: \`file .../Resources/backend-dist/kiroclaw-backend/kiroclaw-backend\`
   — the arm64 DMG must carry arm64, the x64 DMG x86_64. A mismatch crashes on launch.
-DMGs + static/dist are gitignored (not in the CR). Report both DMG paths + the
+DMGs + static/dist are gitignored (not in the PR). Report both DMG paths + the
 verified arch of each.`,
   { label: 'build:dual-arch-dmg', phase: 'Build' },
 )
 log('Build phase complete.')
 
 // ---------------------------------------------------------------------------
-// Phase 6 — SHIP: CR + exhaustive provenance comment. Only in full mode.
+// Phase 6 — SHIP: PR + exhaustive provenance comment. Only in full mode.
 // ---------------------------------------------------------------------------
 phase('Ship')
 const shipReport = await agent(
   `${RULES}
 
-TASK (Step 7.3 — raise the CR). Work in ${cfg.fork}. THIS RUN IS AUTHORIZED to
-commit/push/CR (the recurring auto-sync standing authorization).
-- Create the CR: \`cr --new-review --destination-branch mainline\`. (Use
-  --new-review: the cr CLI otherwise infers a shipped upstream CR from a body
-  trailer and refuses. If it complains the destination is null, re-run
-  \`cr -r CR-XXXX --destination-branch mainline\`.)
-- TITLE: "[KiroClaw] MeshClaw dual-repo beta sync ${scan.syncDate}: N ported"
-  (say backend+frontend counts). The cr DESCRIPTION is ~4KB-capped — put a
-  concise high-signal summary there with the two upstream commit-browser links.
-- Post the EXHAUSTIVE per-commit provenance as a CR COMMENT (no size cap) via the
-  builder-mcp CRAddComment tool (publish=true): every KEEP/PARTIAL with its full
+TASK (Step 7.3 — raise the PR). Work in ${cfg.fork}. THIS RUN IS AUTHORIZED to
+commit/push/PR (the recurring auto-sync standing authorization).
+- Push the sync branch: \`git push -u origin HEAD\`.
+  (origin = https://github.com/kirodotdev-labs/kiroclaw.git)
+- Create the PR: \`gh pr create --base main\`.
+- TITLE: "sync: MeshClaw dual-repo beta sync ${scan.syncDate} (N ported)"
+  (say backend+frontend counts). The PR BODY should contain a concise
+  high-signal summary with the two upstream commit-browser links.
+- Post the EXHAUSTIVE per-commit provenance as a PR COMMENT via
+  \`gh pr comment <PR-number> --body "..."\`: every KEEP/PARTIAL with its full
   upstream SHA link + summary, and every SKIP/ALREADY_PRESENT/DEFER with the
   reason. Every SHA/CR/Task id MUST be a full clickable https:// URL
   (code.amazon.com/packages/<Pkg>/commits/<full-sha>, /reviews/CR-<id>,
   taskei.amazon.dev/tasks/<id>).
 Here are the triaged verdicts to source the provenance from:
 ${verdicts.map((v) => `${v.sha} [${v.repo}] ${v.verdict}: ${v.reason} (cr: ${v.upstreamCr || 'n/a'})`).join('\n')}
-Report the CR id + URL and confirm the comment was published.`,
-  { label: 'ship:cr', phase: 'Ship' },
+Report the PR number + URL and confirm the comment was published.`,
+  { label: 'ship:pr', phase: 'Ship' },
 )
 
 return {

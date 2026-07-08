@@ -202,7 +202,7 @@ per-channel enforcement.
 
 **Recommendation:** Warn but do not block non-Toolbox installs. The version authority check
 still applies (git installs have a version in `__init__.py`). Add `--skip-version-check` flag
-for development use only, gated behind `is_brazil_workspace()` detection.
+for development use only, gated behind dev-workspace detection.
 
 ---
 

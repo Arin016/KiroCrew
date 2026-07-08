@@ -307,3 +307,43 @@ async def api_chat_slot_pin(request: web.Request) -> web.Response:
         outcome="allowed", source="dashboard", resources=name,
     )
     return web.json_response({"ok": True, "pinned": slot.pinned})
+
+
+_VALID_MODES = ("", "orchestrator")
+
+
+async def api_chat_slot_mode(request: web.Request) -> web.Response:
+    """PATCH /api/chat/slots/{slot}/mode — switch session mode."""
+
+    state: DashboardState = request.app["state"]
+    name = request.match_info["slot"]
+    slot = state._slots.get(name)
+    if not slot:
+        return web.json_response({"error": "not found"}, status=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    mode = body.get("mode", "")
+    if mode not in _VALID_MODES:
+        return web.json_response({"error": "invalid mode"}, status=400)
+    if slot.running:
+        sel().log_api_access(
+            caller="dashboard", operation="chat.slot_mode",
+            outcome="denied", source="dashboard", resources=name,
+        )
+        return web.json_response(
+            {"error": "cannot switch mode while session is running"}, status=409
+        )
+    slot.mode = mode
+    # Clear orchestrator auto-run flag when leaving orchestrator mode to
+    # prevent stale "Go All" state from triggering on re-entry.
+    if mode != "orchestrator" and getattr(slot, "_auto_run", False):
+        slot._auto_run = False
+    _save_slot_to_history(state, slot, force=True)
+    state.push_slots_update()
+    sel().log_api_access(
+        caller="dashboard", operation="chat.slot_mode",
+        outcome="allowed", source="dashboard", resources=name,
+    )
+    return web.json_response({"ok": True, "mode": slot.mode})

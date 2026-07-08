@@ -394,7 +394,7 @@ The dev server proxies API calls to the KiroClaw backend, so the app has access 
 ### 4.3 Build
 
 ```bash
-brazil-build release
+npm run build
 ```
 
 Runs Vite in library mode. Output: `build/dist/index.mjs` (~20-100KB depending on app complexity). The `kiroclawApp()` Vite plugin:

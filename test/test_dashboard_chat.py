@@ -6461,7 +6461,7 @@ class TestForkSlot:
             data = await resp.json()
             assert data["ok"] is True
             assert data["messages"] == 4
-            assert data["title"] == "Fork of My Chat"
+            assert data["title"] == "↳ Fork of My Chat"
 
         new_slot = state._slots.get(data["key"])
         assert new_slot is not None
@@ -6697,7 +6697,7 @@ class TestForkSlot:
 
         assert "AKIAIOSFODNN7EXAMPLE" not in data["title"]
         assert "[REDACTED" in data["title"]
-        assert data["title"].startswith("Fork of ")
+        assert data["title"].startswith("↳ Fork of ")
         new_slot = state._slots.get(data["key"])
         assert "AKIAIOSFODNN7EXAMPLE" not in new_slot.title
 
@@ -6944,7 +6944,7 @@ class TestForkSlot:
             r1 = await client.post("/api/chat/slots/root/fork", json={})
             d1 = await r1.json()
             mid_key = d1["key"]
-            assert d1["title"] == "Fork of Original"
+            assert d1["title"] == "↳ Fork of Original"
 
             mid = state._slots.get(mid_key)
             mid.append("user", "q2", "msg msg-u")
@@ -6955,7 +6955,7 @@ class TestForkSlot:
             d2 = await r2.json()
 
         leaf = state._slots.get(d2["key"])
-        assert d2["title"] == "Fork of Fork of Original"
+        assert d2["title"] == "↳ Fork of Fork of Original"
         assert (
             leaf.forked_from == f"dashboard:{mid_key}"
         ), f"leaf forked_from should point to intermediate, got {leaf.forked_from}"

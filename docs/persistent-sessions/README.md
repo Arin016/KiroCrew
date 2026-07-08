@@ -75,7 +75,7 @@ Verify: `systemctl --user status kiroclaw` should show `active (running)`.
 
 ```bash
 # Copy the plist
-scp USER@HOST:~/KiroClaw/src/KiroClaw/docs/persistent-sessions/com.kiroclaw.tunnel.plist ~/Library/LaunchAgents/
+scp USER@HOST:~/workplace/kiroclaw/docs/persistent-sessions/com.kiroclaw.tunnel.plist ~/Library/LaunchAgents/
 
 # Replace placeholder with your dev desktop
 sed -i '' 's|ALIAS@DEV_DESKTOP_HOSTNAME|USER@HOST|g' ~/Library/LaunchAgents/com.kiroclaw.tunnel.plist

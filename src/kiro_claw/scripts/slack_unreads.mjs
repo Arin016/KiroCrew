@@ -24,24 +24,37 @@ const api = container.dependencies.apiClient;
 
 console.log = _log; console.info = _info; console.warn = _warn;
 
-const r = await api.post('client.counts', {});
+try {
+  const r = await api.post('client.counts', {});
 
-// DMs/MPIMs: all with any activity (secretary's last_read_ts handles dedup).
-// Channels: only with @mentions (too noisy otherwise — 52+ unread channels).
-const result = {
-  channels: (r.channels || []).filter(c => c.mention_count > 0).map(c => ({
-    id: c.id,
-    mention_count: c.mention_count || 0,
-  })),
-  dms: (r.ims || []).filter(c => c.latest).map(c => ({
-    id: c.id,
-    latest: c.latest || '0',
-  })),
-  mpims: (r.mpims || []).filter(c => c.latest).map(c => ({
-    id: c.id,
-    latest: c.latest || '0',
-  })),
-};
+  // DMs/MPIMs: all with any activity (secretary's last_read_ts handles dedup).
+  // Channels: only with @mentions (too noisy otherwise — 52+ unread channels).
+  const result = {
+    channels: (r.channels || []).filter(c => c.mention_count > 0).map(c => ({
+      id: c.id,
+      mention_count: c.mention_count || 0,
+    })),
+    dms: (r.ims || []).filter(c => c.latest).map(c => ({
+      id: c.id,
+      latest: c.latest || '0',
+    })),
+    mpims: (r.mpims || []).filter(c => c.latest).map(c => ({
+      id: c.id,
+      latest: c.latest || '0',
+    })),
+  };
 
-console.log(JSON.stringify(result));
-process.exit(0);
+  // stdout is async when piped; exiting before it flushes makes process.exit()
+  // truncate the JSON mid-string at the pipe buffer boundary (~512B). Write
+  // first and exit only from the completion callback. Guard against EPIPE
+  // (caller closed the pipe early): surface it on stderr so the failure
+  // isn't invisible, then exit non-zero so the caller treats output as absent.
+  process.stdout.on('error', (err) => {
+    process.stderr.write(`slack_unreads: stdout write failed: ${err.message}\n`);
+    process.exit(1);
+  });
+  process.stdout.write(JSON.stringify(result) + '\n', () => process.exit(0));
+} catch (err) {
+  process.stderr.write(`slack_unreads: API call failed: ${err.message}\n`);
+  process.exit(1);
+}

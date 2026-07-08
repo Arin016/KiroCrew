@@ -392,6 +392,8 @@ class ConversationLog:
                 if d.get("agent"):
                     meta["agent"] = d["agent"]
                 meta["memory_mode"] = d.get("memory_mode", "persistent")
+                if d.get("folder_id"):
+                    meta["folder_id"] = d["folder_id"]
             else:
                 # Read only the first line for metadata
                 try:
@@ -407,6 +409,8 @@ class ConversationLog:
                             if d.get("agent"):
                                 meta["agent"] = d["agent"]
                             meta["memory_mode"] = d.get("memory_mode", "persistent")
+                            if d.get("folder_id"):
+                                meta["folder_id"] = d["folder_id"]
                             self._meta_cache[key] = (stat.st_mtime, d)
                 except Exception:
                     pass

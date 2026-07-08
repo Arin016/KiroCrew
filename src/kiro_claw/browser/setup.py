@@ -89,6 +89,7 @@ def generate_playwright_config() -> Path:
             "browserName": "chromium",
             "isolated": True,
             "launchOptions": {
+                "channel": "chromium",
                 "args": [],
             },
             "contextOptions": {

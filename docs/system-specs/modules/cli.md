@@ -138,52 +138,49 @@ For local dev:
 
 The wrapper sets `KIROCLAW_PROJECT_DIR` and routes to the right runtime based on install type:
 
-- **One-liner install** (`install.sh` clones the repo into `~/.kiroclaw-app/`): if a sibling `.venv/bin/kiroclaw` exists, the wrapper execs it directly. No brazilcli required, which matters because child processes spawned under a minimal PATH (e.g. MCP servers launched by kiro-cli) cannot rely on brazilcli being available.
-- **Brazil workspace**: the wrapper falls through to `brazil-runtime-exec kiroclaw`, letting the runtime farm resolve dependencies.
+- **One-liner install** (`install.sh` clones the repo into `~/.kiroclaw-app/`): if a sibling `.venv/bin/kiroclaw` exists, the wrapper execs it directly.
+- **pip editable install** (`pip install -e .`): the console_scripts entry point resolves directly.
 
 ## Setup Scripts (First-Time Bootstrap)
 
-`setup.sh` (macOS/Linux) auto-installs all dependencies from scratch. The only prerequisite is `mwinit` (Midway authentication).
+`setup.sh` (macOS/Linux) auto-installs all dependencies from scratch using public tooling only.
 
 > **Note:** Windows is not supported.
 
 **Install order:**
-1. Midway authentication (`mwinit -o`)
-2. Builder Toolbox (bootstrap script from `release-service.toolbox.builder-tools.aws.dev`)
-3. `toolbox install kiro-cli`, `aim`; Node 16 via nvm (GLIBC 2.26 compatible)
-4. kiro-cli login (guided SSO authentication)
-5. `aim mcp install builder-mcp`
-6. `brazil-build`
-7. Frontend build (`npm install && npm run build`)
-8. PATH setup + shell profile persistence
-9. `kiroclaw setup --agent-only` (install kiro-cli agent config)
-10. Optional Slack credential configuration
+1. Node.js (via `ensure-node.sh`)
+2. Optional tools (git-lfs, ffmpeg for voice)
+3. kiro-cli (`npm i -g`)
+4. kiro-cli login (guided authentication)
+5. Frontend build (`npm install && npm run build`)
+6. Backend build (`pip install -e .`)
+7. PATH setup + shell profile persistence
+8. `kiroclaw setup --agent-only` (install kiro-cli agent config)
+9. Optional Slack credential configuration
 
-Each step checks if the tool is already installed and skips if present. See `DEPENDENCIES.md` for the full dependency list and manual install instructions.
+Each step checks if the tool is already installed and skips if present.
 
 ## Doctor Checks
 
 1. `kiro-cli` binary in PATH
-2. **Java / brazil-path**: runs `brazil-path` smoke test — detects missing Java configuration. On macOS, auto-installs Corretto 8 via Homebrew and runs `brazil setup --java` if needed.
-3. Project directory and git repo
-4. Agent config installed
-5. Config values (provider, model, approval mode, dashboard port)
-6. **MCP tools**: `@kiroclaw-cron` and `@kiroclaw-core` in `tools`, `allowedTools`, and `mcpServers` — auto-fixes missing entries
-7. **Global mcp.json**: kiroclaw MCP servers present with valid binary paths — auto-fixes stale paths
-8. **Brazil runtime**: Python 3.10 at `env/KiroClaw-1.0/runtime/bin/python3` — checks fallback Python and dependency availability
-9. **Vector memory**: Ollama server health and embedding model status
-10. Slack credentials (optional)
-11. kiro-cli connectivity
-12. Gateway running status
+2. Project directory and git repo
+3. Agent config installed
+4. Config values (provider, model, approval mode, dashboard port)
+5. **MCP tools**: `@kiroclaw-cron` and `@kiroclaw-core` in `tools`, `allowedTools`, and `mcpServers` — auto-fixes missing entries
+6. **Global mcp.json**: kiroclaw MCP servers present with valid binary paths — auto-fixes stale paths
+7. **Python environment**: checks Python 3.9+ availability and dependency installation
+8. **Vector memory**: Ollama server health and embedding model status
+9. Slack credentials (optional)
+10. kiro-cli connectivity
+11. Gateway running status
 
 ## Update Command
 
 `kiroclaw update` pulls the latest source and rebuilds:
 
 1. `git pull` from `KIROCLAW_PROJECT_DIR`
-2. Reads `.install-method` marker: `brazil` → `brazil-build`, `pip` → `pip install -e .`, absent → auto-detect
-3. Rebuilds frontend via `build-frontend.sh` (non-fatal on failure)
-4. Updates ARCC CLI via `toolbox install arcc-cli`
+2. Rebuilds frontend via `build-frontend.sh` (non-fatal on failure)
+3. Reinstalls backend via `pip install -e .`
 
 ## Stop Command
 

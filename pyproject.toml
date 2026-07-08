@@ -21,8 +21,7 @@ Homepage = "https://github.com/kirodotdev-labs/kiroclaw"
 kiroclaw = "kiro_claw.cli:main"
 
 [dependency-groups]
-# Pinned to match Brazil build environment (source: build/private dist-info).
-# Update when version-set changes. Run: find build -name METADATA -path "*dist-info*" | ...
+# Pinned dev tool versions for reproducible CI. Bump as needed.
 dev = [
     "pytest==8.4.1",
     "pytest-xdist==3.5.0",
