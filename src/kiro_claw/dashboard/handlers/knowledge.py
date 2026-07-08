@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import re
+import subprocess
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -463,6 +465,56 @@ async def list_sources(request: web.Request) -> web.Response:
     return web.json_response([dict(r) for r in rows])
 
 
+# Max wall-clock the native folder dialog may stay open before we give up.
+_FOLDER_DIALOG_TIMEOUT = 180  # seconds
+
+
+def _folder_picker_available(request: web.Request) -> bool:
+    """The native folder picker is offered only on macOS (via osascript) and
+    only when the dashboard is local -- a dialog on a remote gateway would open
+    on the wrong screen."""
+    return sys.platform == "darwin" and bool(request.app.get("local_only", False))
+
+
+def _run_folder_dialog() -> str | None:
+    """Open the macOS native folder chooser (blocking) and return the selected
+    absolute path, or None if the user cancelled or it failed to launch. Meant
+    to run off the event loop via an executor."""
+    cmd = [
+        "osascript", "-e",
+        'POSIX path of (choose folder with prompt '
+        '"Select a folder to add to your knowledge base")',
+    ]
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            cmd, capture_output=True, text=True, timeout=_FOLDER_DIALOG_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    # osascript exits non-zero (and prints nothing) when the user cancels.
+    path = proc.stdout.strip()
+    return path if proc.returncode == 0 and path else None
+
+
+async def pick_folder(request: web.Request) -> web.Response:
+    """POST /api/knowledge/pick-folder -- open the macOS native folder chooser on
+    the gateway host and return the selected absolute path.
+
+    Offered only on a local macOS dashboard (see _folder_picker_available). The
+    returned path is not trusted -- it is fed back into the folder path field and
+    re-validated by add_source like any typed path."""
+    if not _folder_picker_available(request):
+        return web.json_response(
+            {"error": "Folder picker is not available on this system"},
+            status=403,
+        )
+    loop = asyncio.get_running_loop()
+    path = await loop.run_in_executor(None, _run_folder_dialog)
+    if path:
+        _sel_log("source.pick_folder", outcome="completed")
+    return web.json_response({"path": path})
+
+
 async def add_source(request: web.Request) -> web.Response:
     """POST /api/knowledge/sources -- add a remote source."""
     store = _store(request)
@@ -905,6 +957,7 @@ async def get_config(request: web.Request) -> web.Response:
     return web.json_response({
         "enabled": pipeline is not None,
         "supported_formats": sorted(FileReader.SUPPORTED - {''}),
+        "folder_picker": _folder_picker_available(request),
     })
 
 
@@ -1347,6 +1400,7 @@ def setup_knowledge_routes(app: web.Application) -> None:
     app.router.add_get("/api/knowledge/stats", get_stats)
     app.router.add_get("/api/knowledge/sources", list_sources)
     app.router.add_post("/api/knowledge/sources", add_source)
+    app.router.add_post("/api/knowledge/pick-folder", pick_folder)
     app.router.add_post("/api/knowledge/sources/{id}/sync", sync_source)
     app.router.add_post("/api/knowledge/sources/{id}/confirm", confirm_source)
     app.router.add_post("/api/knowledge/sources/{id}/pause", pause_source)

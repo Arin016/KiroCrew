@@ -252,6 +252,18 @@ export default function SourcesList({ onIngest, uploadNamespace, setUploadNamesp
     }
   }
 
+  const { data: kbConfig } = useQuery({
+    queryKey: ['knowledge-config'],
+    queryFn: () => knowledgeApi<{ enabled: boolean; supported_formats: string[]; folder_picker?: boolean }>('/config'),
+    staleTime: 60_000,
+  })
+  const folderPickerAvailable = kbConfig?.folder_picker ?? false
+
+  const pickFolderMutation = useMutation({
+    mutationFn: () => knowledgeApi<{ path?: string | null }>('/pick-folder', { method: 'POST' }),
+    onSuccess: (res) => { if (res.path) setAddUri(res.path) },
+  })
+
   const addMutation = useMutation({
     mutationFn: (body: Record<string, unknown>) =>
       knowledgeApi<{ id: string; status?: string; file_count?: number }>('/sources', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
@@ -367,10 +379,19 @@ export default function SourcesList({ onIngest, uploadNamespace, setUploadNamesp
               <input value={addName} onChange={e => setAddName(e.target.value)} placeholder="Name (optional)"
                 aria-label="Source name (optional)"
                 className="w-full px-3 py-1.5 text-sm bg-bg rounded border border-border text-text" />
-              <input value={addUri} onChange={e => setAddUri(e.target.value)}
-                placeholder="Folder path (e.g., /home/user/notes)"
-                aria-label="Folder path"
-                className="w-full px-3 py-1.5 text-sm bg-bg rounded border border-border text-text" />
+              <div className="flex gap-2">
+                <input value={addUri} onChange={e => setAddUri(e.target.value)}
+                  placeholder="Folder path (e.g., /home/user/notes)"
+                  aria-label="Folder path"
+                  className="flex-1 min-w-0 px-3 py-1.5 text-sm bg-bg rounded border border-border text-text" />
+                {folderPickerAvailable && (
+                  <button type="button" onClick={() => pickFolderMutation.mutate()} disabled={pickFolderMutation.isPending}
+                    aria-label="Browse for a folder"
+                    className="shrink-0 px-3 py-1.5 text-sm border border-border rounded text-text hover:bg-bg-elevated disabled:opacity-50 flex items-center gap-1">
+                    <FolderOpen size={14} /> {pickFolderMutation.isPending ? 'Opening...' : 'Browse...'}
+                  </button>
+                )}
+              </div>
               <textarea value={addIgnorePatterns} onChange={e => setAddIgnorePatterns(e.target.value)}
                 placeholder="Ignore patterns (one per line, e.g. .trash/*)&#10;Templates/*"
                 aria-label="Ignore patterns"

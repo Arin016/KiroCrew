@@ -1309,6 +1309,9 @@ async def start_dashboard(
         return await handler(request)  # type: ignore[operator]
 
     app["allowed_origins"] = build_allowed_origins(port, local_only, configured_host)
+    # Exposed to handlers (e.g. knowledge.pick_folder) that only make sense when
+    # the browser and gateway are co-located on localhost.
+    app["local_only"] = local_only
 
     @web.middleware  # type: ignore[misc]
     async def csrf_middleware(
