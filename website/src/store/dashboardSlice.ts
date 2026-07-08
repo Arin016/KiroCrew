@@ -224,9 +224,13 @@ export function slotSurfaceKey(slot: { mode?: string; surface?: string }): strin
 function countUnreadByMode(slots: ChatSlot[], unread: string[], mode: string): number {
   if (unread.length === 0) return 0
   const surfaceByKey = new Map(slots.map(s => [s.key, slotSurfaceKey(s)]))
+  // Unified chat: when counting for the chat surface (''), include orchestrator
+  // slots too since they now live in the same sidebar.
+  const isChatSurface = mode === ''
   let count = 0
   for (const k of unread) {
-    if ((surfaceByKey.get(k) ?? '') === mode) count++
+    const sk = surfaceByKey.get(k) ?? ''
+    if (isChatSurface ? (sk === '' || sk === 'orchestrator') : sk === mode) count++
   }
   return count
 }

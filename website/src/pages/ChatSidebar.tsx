@@ -12,7 +12,7 @@ import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuIte
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from '../components/ui/context-menu'
 import { offlineProps } from '../utils/offline'
 import { switchSlot, createSlot, deleteSlot, fetchHistory, resumeFromHistory, deleteHistorySession } from '../store/chatSlice'
-import { sseSlotTitle, updateSlotFolder, updateSlotPin, markSlotUnread, markSlotRead } from '../store/dashboardSlice'
+import { sseSlotTitle, updateSlotFolder, updateSlotPin, updateSlot, markSlotUnread, markSlotRead } from '../store/dashboardSlice'
 import { api, SEARCH_MIN_CHARS } from '../api/client'
 import { computeReorderedFolders } from '../utils/reorderFolders'
 import { SearchInput, Input, Btn, IconButton, IconButtonGroup } from '../components/ui'
@@ -114,6 +114,7 @@ interface Slot {
   // `pending_approval` rides on every ChatSlot payload; the sidebar reads it to
   // suppress the "your turn" dot and show the yellow "Needs approval" subtitle.
   pending_approval?: boolean
+  mode?: string
   agent?: string
   workspace?: string
   created?: string
@@ -546,6 +547,29 @@ function ChatSidebar({
   })
   const togglePin = useCallback((key: string) => { togglePinMutation.mutate({ key, pinned: !pinned.has(key) }) }, [pinned, togglePinMutation])
 
+  // Mode toggle mutation (optimistic, server-persisted)
+  const toggleModeMutation = useMutation({
+    mutationFn: ({ key, newMode }: { key: string; newMode: string }) => api.setSlotMode(key, newMode),
+    onMutate: ({ key, newMode }) => {
+      const prev = slots.find(s => s.key === key)?.mode ?? ''
+      dispatch(updateSlot({ key, mode: newMode }))
+      return { key, prev }
+    },
+    onError: (_err, _vars, ctx) => {
+      if (ctx) dispatch(updateSlot({ key: ctx.key, mode: ctx.prev }))
+    },
+  })
+  const toggleMode = useCallback((key: string) => {
+    const slot = slots.find(s => s.key === key)
+    const newMode = (slot?.mode === 'orchestrator') ? '' : 'orchestrator'
+    if (confirm(newMode === 'orchestrator'
+      ? 'Switch to Autopilot mode? Future messages will use autopilot behavior (plan → approve → execute).'
+      : 'Switch to normal Chat mode? Future messages will use standard chat behavior.'))
+    {
+      toggleModeMutation.mutate({ key, newMode })
+    }
+  }, [slots, toggleModeMutation]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Folders via React Query
   const { data: folders = [] } = useQuery<ChatFolder[]>({ queryKey: ['chat-folders'], queryFn: () => api.chatFolders() })
 
@@ -919,7 +943,8 @@ function ChatSidebar({
   const createChatInFolderMutation = useMutation({
     mutationFn: ({ folderId }: { folderId: string; columnId?: string }) => {
       const agent = resolveFolderAgent(folders, folderId, defaultAgent)
-      return dispatch(createSlot({ agent, mode })).unwrap()
+      const effectiveMode = loadChatConfig().defaultAutopilot ? 'orchestrator' : (mode || '')
+      return dispatch(createSlot({ agent, mode: effectiveMode })).unwrap()
     },
     onSuccess: (slot: Slot, { folderId, columnId }: { folderId: string; columnId?: string }) => {
       if (slot?.key) {
@@ -937,6 +962,21 @@ function ChatSidebar({
     },
   })
   const createChatInFolder = useCallback((folderId: string, columnId?: string) => { createChatInFolderMutation.mutate({ folderId, columnId }) }, [createChatInFolderMutation])
+
+  // Create autopilot session mutation (consistent with useMutation pattern)
+  const createAutopilotMutation = useMutation({
+    mutationFn: () => dispatch(createSlot({ agent: defaultAgent || undefined, mode: 'orchestrator' })).unwrap(),
+    onSuccess: () => { requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus()) },
+  })
+
+  // Create default chat session mutation
+  const createChatMutation = useMutation({
+    mutationFn: () => {
+      const effectiveMode = loadChatConfig().defaultAutopilot ? 'orchestrator' : (mode || '')
+      return dispatch(createSlot({ agent: defaultAgent || undefined, mode: effectiveMode })).unwrap()
+    },
+    onSuccess: () => { requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus()) },
+  })
 
   // Session colors
   const { paletteColors, boost, colorMode } = useSessionPalette()
@@ -1140,6 +1180,7 @@ function ChatSidebar({
                     {s.memory_mode === 'incognito' && <span className="text-muted" title="Incognito — no memory writes"><EyeOff size={10} /></span>}
                     {s.memory_mode === 'temporary' && <span className="text-aim" title="Temporary — no memory reads or writes"><VenetianMask size={10} /></span>}
                   </>}
+              {s.mode === 'orchestrator' && <span className="text-[11px] px-1 py-0 rounded bg-accent/15 text-accent font-medium" title="Autopilot mode">Autopilot</span>}
               {(s.last_ts || s.created) && <span className="ml-auto text-[11px] text-muted font-normal shrink-0">{fmtRelativeTime(s.last_ts || s.created!)}</span>}
             </div>
             <div className="text-[13px] font-semibold leading-snug line-clamp-2 break-words text-text" title={s.title && s.title !== s.key ? s.title : s.key}>
@@ -1188,6 +1229,7 @@ function ChatSidebar({
                   <DropdownMenuItem onClick={() => { forkMutation.mutate(s.key) }}><Copy size={13} /> Duplicate</DropdownMenuItem>
                   <DropdownMenuItem onClick={() => dispatch(unreadSet.has(s.key) ? markSlotRead(s.key) : markSlotUnread(s.key))}><Circle size={13} /> {unreadSet.has(s.key) ? 'Mark as read' : 'Mark as unread'}</DropdownMenuItem>
                   <DropdownMenuItem onClick={() => togglePin(s.key)}><Pin size={13} /> {pinned.has(s.key) ? 'Unpin' : 'Pin'}</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => toggleMode(s.key)}><Zap size={13} /> {s.mode === 'orchestrator' ? 'Switch to Chat' : 'Switch to Autopilot'}</DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem className="text-danger focus:text-danger" onClick={() => { if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(s.key)) }}><X size={13} /> Close session</DropdownMenuItem>
                   {tagColumnsEnabled && <DropdownMenuItem onClick={() => { setTagCtxSlot(s.key); setTagCtxPos({ x: 0, y: 0 }) }}><TagIcon size={13} /> Tags…</DropdownMenuItem>}
@@ -1205,6 +1247,7 @@ function ChatSidebar({
                   <DropdownMenuItem onClick={() => { const sl = slots.find(x => x.key === s.key); if (sl) copySessionLink(sl.key, sl.title, undefined, mode) }}><Link2 size={13} /> Copy link</DropdownMenuItem>
                   <DropdownMenuItem onClick={() => dispatch(unreadSet.has(s.key) ? markSlotRead(s.key) : markSlotUnread(s.key))}><Circle size={13} /> {unreadSet.has(s.key) ? 'Mark as read' : 'Mark as unread'}</DropdownMenuItem>
                   <DropdownMenuItem onClick={() => togglePin(s.key)}><Pin size={13} /> {pinned.has(s.key) ? 'Unpin' : 'Pin'}</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => toggleMode(s.key)}><Zap size={13} /> {s.mode === 'orchestrator' ? 'Switch to Chat' : 'Switch to Autopilot'}</DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem className="text-danger focus:text-danger" onClick={() => { if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(s.key)) }}><X size={13} /> Close session</DropdownMenuItem>
                   {tagColumnsEnabled && <DropdownMenuItem onClick={() => { setTagCtxSlot(s.key); setTagCtxPos({ x: 0, y: 0 }) }}><TagIcon size={13} /> Tags…</DropdownMenuItem>}
@@ -1221,6 +1264,7 @@ function ChatSidebar({
             <ContextMenuItem onClick={() => { const sl = slots.find(x => x.key === s.key); if (sl) copySessionLink(sl.key, sl.title, undefined, mode) }}><Link2 size={13} /> Copy link</ContextMenuItem>
             <ContextMenuItem onClick={() => dispatch(unreadSet.has(s.key) ? markSlotRead(s.key) : markSlotUnread(s.key))}><Circle size={13} /> {unreadSet.has(s.key) ? 'Mark as read' : 'Mark as unread'}</ContextMenuItem>
             <ContextMenuItem onClick={() => togglePin(s.key)}><Pin size={13} /> {pinned.has(s.key) ? 'Unpin' : 'Pin'}</ContextMenuItem>
+            <ContextMenuItem onClick={() => toggleMode(s.key)}><Zap size={13} /> {s.mode === 'orchestrator' ? 'Switch to Chat' : 'Switch to Autopilot'}</ContextMenuItem>
             <ContextMenuSeparator />
             <ContextMenuItem className="text-danger focus:text-danger" onClick={() => { if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(s.key)) }}><X size={13} /> Close session</ContextMenuItem>
             {tagColumnsEnabled && <ContextMenuItem onClick={() => { setTagCtxSlot(s.key); setTagCtxPos({ x: 0, y: 0 }) }}><TagIcon size={13} /> Tags…</ContextMenuItem>}
@@ -1416,7 +1460,7 @@ function ChatSidebar({
           <div className="relative flex items-center rounded-md bg-accent text-accent-fg overflow-hidden shrink-0" data-create-menu>
             <button
               className={`flex items-center h-7 cursor-pointer bg-transparent border-none text-accent-fg hover:bg-accent-hover active:scale-95 transition-all ${compactHeader ? 'justify-center w-7' : 'gap-1.5 pl-2 pr-2.5 text-[12px] font-semibold'}`}
-              onClick={() => { dispatch(createSlot({ agent: defaultAgent || undefined, mode })).then(() => requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus())) }}
+              onClick={() => { createChatMutation.mutate() }}
               title="New chat" aria-label="New chat session"><Plus size={15} />{!compactHeader && <span className="whitespace-nowrap">New chat</span>}</button>
             <span className="w-px h-4 bg-accent-fg opacity-30" aria-hidden="true" />
             <DropdownMenu>
@@ -1426,6 +1470,10 @@ function ChatSidebar({
                   title="Create…" aria-label="More create options"><ChevronDown size={13} /></button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-[200px]">
+                <DropdownMenuItem onClick={() => { createAutopilotMutation.mutate() }}>
+                  <Zap size={14} className="text-accent" /> New autopilot chat
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => { setCreatingIn('__root__'); setNewName('') }}>
                   <FolderPlus size={14} className="text-muted" /> New folder
                 </DropdownMenuItem>

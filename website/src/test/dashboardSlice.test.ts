@@ -152,11 +152,12 @@ describe('dashboardSlice', () => {
     it('honors slot.surface over slot.mode when both are present', () => {
       // Forward-compat: backend now emits an explicit `surface` field that
       // mirrors `mode` today but is allowed to diverge later. A slot whose
-      // `mode === ''` but `surface === 'orchestrator'` MUST count as
-      // autopilot, not chat — otherwise the divergence isn't actually usable.
+      // `mode === ''` but `surface === 'orchestrator'` counts toward the
+      // unified chat badge (both '' and 'orchestrator' are chat-like).
       const slot: ChatSlot = { key: 'orch-1', title: 'O', messages: 0, running: false, mode: '', surface: 'orchestrator' }
       const state = buildState([slot], ['orch-1'])
-      expect(selectUnreadByMode('')(state)).toBe(0)
+      // Unified: chat badge includes orchestrator slots
+      expect(selectUnreadByMode('')(state)).toBe(1)
       expect(selectUnreadByMode('orchestrator')(state)).toBe(1)
     })
 
@@ -165,7 +166,8 @@ describe('dashboardSlice', () => {
       // via `mode` so this refactor doesn't require a coupled deploy.
       const slot: ChatSlot = { key: 'orch-1', title: 'O', messages: 0, running: false, mode: 'orchestrator' }
       const state = buildState([slot], ['orch-1'])
-      expect(selectUnreadByMode('')(state)).toBe(0)
+      // Unified: chat badge includes orchestrator slots
+      expect(selectUnreadByMode('')(state)).toBe(1)
       expect(selectUnreadByMode('orchestrator')(state)).toBe(1)
     })
 

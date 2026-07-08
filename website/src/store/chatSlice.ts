@@ -1,6 +1,6 @@
 import { createSlice, createAsyncThunk, type PayloadAction } from '@reduxjs/toolkit'
 import { api } from '../api/client'
-import { addSlotOptimistic, removeSlotOptimistic, markSlotRead, fetchSlots, slotSurfaceKey } from './dashboardSlice'
+import { addSlotOptimistic, updateSlot, removeSlotOptimistic, markSlotRead, fetchSlots, slotSurfaceKey } from './dashboardSlice'
 import { resolveDefaultColor } from '../utils/sessionColors'
 import { gcSessionStorage } from '../utils/storageGc'
 import type { RootState } from './index'
@@ -298,7 +298,10 @@ export const resumeFromHistory = createAsyncThunk(
   'chat/resumeFromHistory',
   async ({ key, title }: { key: string; title: string }, { dispatch }) => {
     const d = await api.resumeChatSlot(key, title)
-    if (d.ok) dispatch(addSlotOptimistic({ key: d.key, title: title || d.key, messages: 0, running: false, memory_mode: d.memory_mode, pending_approval: false, waiting_for_input: false, last_activity_ts: undefined }))
+    if (d.ok) {
+      dispatch(addSlotOptimistic({ key: d.key, title: title || d.key, messages: 0, running: false, memory_mode: d.memory_mode, mode: d.mode, surface: d.surface ?? d.mode, pending_approval: false, waiting_for_input: false, last_activity_ts: undefined }))
+      dispatch(updateSlot({ key: d.key, mode: d.mode, surface: d.surface ?? d.mode }))
+    }
     return { ok: d.ok, key: d.key, messages: filterMessages(d.messages || []), hasMore: d.has_more || false, total: d.total || 0 }
   },
 )

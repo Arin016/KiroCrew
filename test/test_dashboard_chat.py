@@ -863,6 +863,31 @@ class TestHistorySaveOnClose:
 
 class TestResumeDedupe:
     @pytest.mark.asyncio
+    async def test_resume_returns_orchestrator_mode(self, tmp_path, monkeypatch):
+        """Resuming an autopilot session returns mode='orchestrator' (+ surface
+        alias) so the recovered slot renders in autopilot mode immediately,
+        without waiting for the SSE slots push to reconcile."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        log = state.conversation_log
+        log.append("dashboard:orchhist", "user", "plan this")
+        log.update_metadata("dashboard:orchhist", {"mode": "orchestrator"})
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            r = await (
+                await client.post(
+                    "/api/chat/slots/orchhist/resume",
+                    json={"key": "dashboard:orchhist", "title": "Auto"},
+                )
+            ).json()
+
+        assert r["ok"] is True
+        assert r["mode"] == "orchestrator"
+        assert r["surface"] == "orchestrator"
+        # The live slot must also carry the restored mode.
+        assert state._slots["orchhist"].mode == "orchestrator"
+
+    @pytest.mark.asyncio
     async def test_resume_existing_slot_returns_it(self, tmp_path, monkeypatch):
         """Resuming a session that's already active should return existing slot."""
         monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)

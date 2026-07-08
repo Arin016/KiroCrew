@@ -49,9 +49,9 @@ describe('buildShareableUrl', () => {
     expect(url).not.toContain('msg=')
   })
 
-  it('uses /orchestrated base path for orchestrator mode', () => {
+  it('uses /chat base path for orchestrator mode (unified view)', () => {
     const url = buildShareableUrl('orch-1', 'Plan migration', undefined, 'orchestrator')
-    expect(url).toContain('/orchestrated/plan-migration?sid=orch-1')
+    expect(url).toContain('/chat/plan-migration?sid=orch-1')
   })
 
   it('uses /chat base path for default mode', () => {

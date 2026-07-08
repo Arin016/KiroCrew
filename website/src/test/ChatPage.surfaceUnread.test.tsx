@@ -146,39 +146,28 @@ const renderChatPage = (mode: '' | 'orchestrator', slots: Array<{ key: string; m
 }
 
 describe('ChatPage – ChatSidebar unreadSlots wiring', () => {
-  it('passes only same-surface unread keys when mounted on /chat', () => {
-    // Cross-mode setup: one chat slot AND one orchestrator slot, both unread.
-    // The bug we're guarding against: ChatPage on /chat used to forward the
-    // raw `unreadSlots` (length 2) and the orchestrator key inflated the
-    // sidebar's "show only unread (N)" tooltip + filter on /chat.
-    //
-    // We assert against the FIRST render's props because asynchronous mount
-    // effects (auto-fetch slots, SSE handshake, mark-read on focus) mutate
-    // dashboard state in ways that aren't relevant to this wiring test —
-    // pre-effect state is the deterministic point at which preloaded
-    // `unreadSlots` flow through `useMemo` -> `<ChatSidebar>`.
+  it('passes all chat-like unread keys in the unified view', () => {
+    // After the Autopilot-into-Chat unification, both default and orchestrator
+    // slots appear in the same sidebar. The unread list includes both.
     sidebarHistory.length = 0
     renderChatPage(
       '',
       [{ key: 'chat-1', mode: '' }, { key: 'orch-1', mode: 'orchestrator' }],
       ['chat-1', 'orch-1'],
     )
-    expect(sidebarHistory[0]?.mode).toBe('')
-    expect(sidebarHistory[0]?.slotsCount).toBe(1)
-    expect(sidebarHistory[0]?.unreadSlots).toEqual(['chat-1'])
+    expect(sidebarHistory[0]?.slotsCount).toBe(2)
+    expect(sidebarHistory[0]?.unreadSlots).toEqual(['chat-1', 'orch-1'])
   })
 
-  it('passes only orchestrator-surface unread keys when mounted on /orchestrated', () => {
-    // Symmetric pin: same store shape, different page mode → only the orch
-    // key crosses into the sidebar.
+  it('unified view also works when mounted with orchestrator mode prop', () => {
+    // Even with mode="orchestrator", the unified filtering shows both slots.
     sidebarHistory.length = 0
     renderChatPage(
       'orchestrator',
       [{ key: 'chat-1', mode: '' }, { key: 'orch-1', mode: 'orchestrator' }],
       ['chat-1', 'orch-1'],
     )
-    expect(sidebarHistory[0]?.mode).toBe('orchestrator')
-    expect(sidebarHistory[0]?.slotsCount).toBe(1)
-    expect(sidebarHistory[0]?.unreadSlots).toEqual(['orch-1'])
+    expect(sidebarHistory[0]?.slotsCount).toBe(2)
+    expect(sidebarHistory[0]?.unreadSlots).toEqual(['chat-1', 'orch-1'])
   })
 })

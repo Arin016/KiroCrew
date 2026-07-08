@@ -18,7 +18,6 @@ import {
 import { removeNotificationByTs } from '../store/notificationsSlice'
 import { interceptSlashCommand } from './chat/ChatInput'
 import { updateSlot, changeApprovalMode, sseSlotTitle, sseSlotColor, updateSlotFolder } from '../store/dashboardSlice'
-import { filterSlotsBySurface, filterUnreadKeysBySurface } from '../surfaces/registry'
 import { api } from '../api/client'
 import type { PlanStepInput } from '../api/client'
 import { useProvider } from '../providers'
@@ -482,26 +481,26 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const provider = useProvider()
   const [searchParams, setSearchParams] = useSearchParams()
   const slots = useAppSelector(s => s.dashboard.slots)
-  // Filter to slots belonging to this page's surface. Each ChatPage instance
-  // is configured with a `mode` prop whose value matches a built-in
-  // surface's `slotMode` ('' for /chat, 'orchestrator' for /orchestrated).
-  // `filterSlotsBySurface` reads `slot.surface ?? slot.mode ?? ''` so we
-  // honor the backend's forward-compat surface field while still working
-  // with payloads that pre-date it.
-  const filteredSlots = useMemo(() => filterSlotsBySurface(slots, mode || ''), [slots, mode])
+  // Unified chat view: show both default and orchestrator slots together.
+  // App-owned worker slots (s.app) are excluded by the sidebar itself.
+  const filteredSlots = useMemo(
+    () => slots.filter(s => {
+      const sk = s.surface ?? s.mode ?? ''
+      return sk === '' || sk === 'orchestrator'
+    }),
+    [slots],
+  )
   const filteredSlotsRef = useRef(filteredSlots)
   filteredSlotsRef.current = filteredSlots
   const unreadSlots = useAppSelector(s => s.dashboard.unreadSlots)
-  // Scope the unread list to the current surface so the sidebar's
-  // "show only unread" toggle, its tooltip count, and the auto-drain
-  // effect all agree with the visible session list. Without this scoping,
-  // an orchestrator-mode unread inflates the toggle count on /chat (and
-  // vice versa) — the same class of cross-mode leak the surface registry
-  // fixed for the nav badge. Pass `filteredSlots` (already partitioned by
-  // surface above) so the helper skips its inner filter pass.
+  // Unified view: unread keys for all chat-like slots (both default and orchestrator).
   const surfaceUnreadSlots = useMemo(
-    () => filterUnreadKeysBySurface(unreadSlots, filteredSlots, mode || ''),
-    [unreadSlots, filteredSlots, mode],
+    () => {
+      if (unreadSlots.length === 0) return []
+      const visibleKeys = new Set(filteredSlots.map(s => s.key))
+      return unreadSlots.filter(k => visibleKeys.has(k))
+    },
+    [unreadSlots, filteredSlots],
   )
   const refreshTrigger = useAppSelector(s => s.dashboard.refreshTrigger)
   const connected = useConnected()
@@ -1318,7 +1317,8 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
       const result = await dispatch(forkSlot({ slot: activeSlot, atIndex: visibleIndex, mode: 'orchestrator' })).unwrap()
       if (result.ok) {
         await dispatch(switchSlot(result.key))
-        if (mode !== 'orchestrator') navigate('/orchestrated')
+        // Unified view: the forked orchestrator slot lives in the same sidebar.
+        if (!mode) navigate('/chat')
       } else {
         alert('Plan from here failed: ' + (result.error || 'unknown error'))
       }
@@ -1656,7 +1656,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   }, [connected])
   // Sync activeSlot → ?sid= in URL (persistent deep-link)
   // Skip entirely when embedded — URL belongs to the host app
-  const basePath = embedMode === 'chat' || embedMode === 'sessions' ? '/embed/chat' : mode === 'orchestrator' ? '/orchestrated' : '/chat'
+  const basePath = embedMode === 'chat' || embedMode === 'sessions' ? '/embed/chat' : '/chat'
   const searchParamsRef = useRef(searchParams)
   searchParamsRef.current = searchParams
   useEffect(() => {
@@ -2032,6 +2032,10 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   }, [activeSlot, setPendingProject])
 
   const currentSlot = slots.find(s => s.key === activeSlot)
+  // Session mode of the active slot. In the unified chat view the page-level
+  // `mode` prop is always '' — the slot's own mode is the source of truth for
+  // header identity (Autopilot icon + tooltip).
+  const effectiveMode = currentSlot?.mode || mode
   const title = currentSlot?.title && currentSlot.title !== currentSlot.key ? currentSlot.title : activeSlot || ''
   const displayMode = approvalMode === 'yolo' ? 'yolo' : currentSlot?.trust ? 'trust' : currentSlot?.trust_reads ? 'trust_reads' : 'normal'
   // Resolve model for existing slots that don't have one stored
@@ -2688,7 +2692,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
         {isMobile && !sidebarOpen && !(activeSlot && (messages.length > 0 || slotRunning)) && (
           <div className="fixed top-[52px] left-2 z-10">
             <button className="p-2 rounded-lg text-muted hover:text-text bg-bg-elevated border border-border shadow-sm cursor-pointer" onClick={() => setMobileSessions(true)} aria-label="Toggle sessions">
-              {mode === 'orchestrator' ? <MessageSquareDot size={18} /> : <MessageSquare size={18} />}
+              {effectiveMode === 'orchestrator' ? <MessageSquareDot size={18} /> : <MessageSquare size={18} />}
             </button>
           </div>
         )}
@@ -2708,7 +2712,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               <div className={`pr-5 pt-3 pb-2 flex items-center gap-2 bg-bg pointer-events-none ${!sidebarOpen && !isMobile ? 'pl-14' : 'pl-5'}`}>
                 {embedMode !== 'chat' && isMobile && (
                   <button className="p-1 rounded-md text-muted hover:text-text cursor-pointer bg-transparent border-none pointer-events-auto" onClick={() => setMobileSessions(p => !p)} aria-label="Toggle sessions">
-                    {mode === 'orchestrator' ? <MessageSquareDot size={16} /> : <MessageSquare size={16} />}
+                    {effectiveMode === 'orchestrator' ? <MessageSquareDot size={16} /> : <MessageSquare size={16} />}
                   </button>
                 )}
                 <div className="group/header flex items-stretch gap-0.5 pointer-events-auto">
@@ -2722,7 +2726,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                   colorIndex={slots.find(s => s.key === activeSlot)?.color_index}
                   agent={currentSlot?.agent}
                   onReveal={activeSlot ? () => { if (!sidebarPinned) setSidebarPinned(true); window.dispatchEvent(new CustomEvent('reveal-slot', { detail: activeSlot })) } : undefined}
-                  mode={mode}
+                  mode={effectiveMode}
                 />
                 </div>
               {editingTitle ? (
@@ -2742,7 +2746,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                 </div>
               )}
                 </div>
-              {mode === 'orchestrator' && <span className="pointer-events-auto"><InfoTip text="Autopilot plans before executing. Each stage needs your approval (or select 'Go All' to run autonomously). Sub-agents are delegated automatically. Plan lessons persist across sessions." /></span>}
+              {effectiveMode === 'orchestrator' && <span className="pointer-events-auto"><InfoTip text="Autopilot plans before executing. Each stage needs your approval (or select 'Go All' to run autonomously). Sub-agents are delegated automatically. Plan lessons persist across sessions." /></span>}
               {embedMode !== 'chat' && !activityOpen && <Clickable className="ml-auto opacity-40 hover:opacity-100 transition-opacity cursor-pointer pointer-events-auto" onClick={toggleAct} aria-label="Toggle activity panel">
                 <SessionStatus />
               </Clickable>}
@@ -2789,7 +2793,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                 transition={{ duration: 0.18 }}
               >
                 <WelcomeView
-                  mode={mode}
+                  mode={currentSlot?.mode || mode}
                   setInput={setInput}
                   memoryMode={currentSlot?.memory_mode ?? 'persistent'}
                   cleanMode={currentSlot?.clean_mode}
@@ -3106,7 +3110,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               followUpLayout={chatConfig.followUpLayout}
               onFollowUpSelect={(o: string, e: React.MouseEvent) => {
                 // Plan options (e.g. Stage-N-APPROVE) dispatch directly — no input fill.
-                if (followUpIsPlan && modeRef.current === 'orchestrator' && activeSlot) {
+                if (followUpIsPlan && effectiveMode === 'orchestrator' && activeSlot) {
                   if (planActionMutationRef.current.isPending) return
                   planActionMutationRef.current.mutate({ slot: activeSlot, action: o })
                   return

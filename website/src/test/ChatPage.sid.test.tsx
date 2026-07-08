@@ -233,22 +233,22 @@ describe('ChatPage ?sid= URL parameter', () => {
     })
   })
 
-  describe('orchestrated mode', () => {
-    it('uses /orchestrated base path', async () => {
+  describe('orchestrated mode (unified view)', () => {
+    it('uses /chat base path for orchestrator sessions', async () => {
       const allSlots = [...slots, ...orchSlots]
-      renderChatPage({ route: '/orchestrated', activeSlot: 'orch-1-100', slots: allSlots, mode: 'orchestrator' })
+      renderChatPage({ route: '/chat', activeSlot: 'orch-1-100', slots: allSlots, mode: 'orchestrator' })
       await waitFor(() => {
-        expect(currentUrl).toContain('/orchestrated/plan-migration')
+        expect(currentUrl).toContain('/chat/plan-migration')
         expect(currentUrl).toContain('sid=orch-1-100')
       })
     })
 
-    it('does not redirect orchestrated to /chat', async () => {
+    it('keeps orchestrator sessions under the unified /chat surface', async () => {
       const allSlots = [...slots, ...orchSlots]
-      renderChatPage({ route: '/orchestrated?sid=orch-1-100', slots: allSlots, mode: 'orchestrator' })
+      renderChatPage({ route: '/chat?sid=orch-1-100', slots: allSlots, mode: 'orchestrator' })
       await waitFor(() => {
-        expect(currentUrl).toContain('/orchestrated')
-        expect(currentUrl).not.toMatch(/^\/chat/)
+        expect(currentUrl).toContain('/chat')
+        expect(currentUrl).not.toMatch(/^\/orchestrated/)
       })
     })
   })

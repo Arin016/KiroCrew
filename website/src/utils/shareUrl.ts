@@ -13,9 +13,9 @@ export function buildShareableUrl(
   slotKey: string,
   title?: string,
   messageTs?: string,
-  mode?: string,
+  _mode?: string,
 ): string {
-  const basePath = mode === 'orchestrator' ? '/orchestrated' : '/chat'
+  const basePath = '/chat'
   const slug = title && title !== slotKey ? toSlug(title) : ''
 
   const params = new URLSearchParams()

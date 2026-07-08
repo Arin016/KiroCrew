@@ -12,7 +12,6 @@ vi.mock('../pages/AgentsPage', () => ({ default: () => <div data-testid="agents-
 vi.mock('../pages/ProjectsPage', () => ({ default: () => <div data-testid="projects-page">ProjectsPage</div> }))
 vi.mock('../pages/LogsPage', () => ({ default: () => <div data-testid="logs-page">LogsPage</div> }))
 vi.mock('../pages/KiroClawAgentsPage', () => ({ default: () => <div data-testid="mc-agents-page">MCAgentsPage</div> }))
-vi.mock('../pages/OrchestratedChatPage', () => ({ default: () => <div data-testid="orch-chat-page">OrchestratedChatPage</div> }))
 vi.mock('../pages/NotificationsPage', () => ({ default: () => <div data-testid="notifications-page">NotificationsPage</div> }))
 vi.mock('../pages/SchedulePage', () => ({ default: () => <div data-testid="schedule-page">SchedulePage</div> }))
 vi.mock('../pages/BoardPage', () => ({ default: () => <div data-testid="board-page">BoardPage</div> }))

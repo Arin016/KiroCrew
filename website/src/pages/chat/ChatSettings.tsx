@@ -30,6 +30,7 @@ export interface ChatConfig {
   followUpLayout: FollowUpLayout
   streamMode: StreamMode
   showContextPct: boolean
+  defaultAutopilot: boolean
 }
 
 export type FileChipStyle = 'expanded' | 'minimal'
@@ -39,7 +40,7 @@ export type FollowUpLayout = 'multiline' | 'scroll'
 export type StreamMode = 'immediate' | 'smooth'
 
 const LS_KEY = 'mc-chat-config'
-const DEFAULTS: ChatConfig = { historyExpanded: true, notifLimit: 50, showTimestamps: true, sendOnEnter: 'enter', collapseAllSteps: true, confirmCloseSession: false, simplifiedToolNames: true, contentWidth: 'compact', tagColumnsEnabled: true, fileChipStyle: 'expanded', followUpLayout: 'scroll', streamMode: 'smooth', showContextPct: false }
+const DEFAULTS: ChatConfig = { historyExpanded: true, notifLimit: 50, showTimestamps: true, sendOnEnter: 'enter', collapseAllSteps: true, confirmCloseSession: false, simplifiedToolNames: true, contentWidth: 'compact', tagColumnsEnabled: true, fileChipStyle: 'expanded', followUpLayout: 'scroll', streamMode: 'smooth', showContextPct: false, defaultAutopilot: false }
 
 const VALID_FILE_CHIP_STYLES: ReadonlySet<FileChipStyle> = new Set(['expanded', 'minimal'])
 const VALID_FOLLOW_UP_LAYOUTS: ReadonlySet<FollowUpLayout> = new Set(['multiline', 'scroll'])

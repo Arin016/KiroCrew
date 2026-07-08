@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef, useMemo, createContext, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAppSelector, useAppDispatch, store } from './store'
 import { fetchSlots, sseStatus, setUpdateProgress, setEnabledAppIds, changeApprovalMode } from './store/dashboardSlice'
@@ -30,7 +30,7 @@ import { DndContext, closestCenter, MouseSensor, TouchSensor, useSensor, useSens
 import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import ChatPage from './pages/ChatPage'
-import OrchestratedChatPage from './pages/OrchestratedChatPage'
+
 import ErrorBoundary from './components/ErrorBoundary'
 import Clickable from './components/Clickable'
 import MarkdownRenderer, { Lightbox } from './components/MarkdownRenderer'
@@ -473,6 +473,7 @@ function NavToggle({ collapsed, expanded, hiddenCount, onClick }: {
 
 function TasksRedirect() { const { search } = useLocation(); return <Navigate to={'/projects' + search} replace /> }
 function ChatRedirect() { const { search } = useLocation(); return <Navigate to={'/chat' + search} replace /> }
+function OrchestratedRedirect() { const { slug } = useParams(); const { search } = useLocation(); return <Navigate to={`/chat${slug ? '/' + slug : ''}${search}`} replace /> }
 
 /**
  * Topbar Notifications bell. Replaces the former left-rail Notifications item
@@ -1134,7 +1135,7 @@ export default function App() {
   const effectiveCollapsed = navCollapsed && !isMobile
   const closeMobileNav = isMobile ? () => setMobileNavOpen(false) : undefined
   const activePath = location.pathname
-  const isChat = activePath === '/chat' || activePath.startsWith('/chat/') || activePath === '/' || activePath === '/orchestrated' || activePath.startsWith('/orchestrated/')
+  const isChat = activePath === '/chat' || activePath.startsWith('/chat/') || activePath === '/'
   const needsFixedHeight = isChat || activePath === '/settings' || activePath === '/developer' || activePath === '/capabilities'
 
   return (
@@ -1587,7 +1588,7 @@ export default function App() {
           <MigrationCheck />
           <Routes>
             <Route path="/chat/:slug?" element={<ErrorBoundary><ChatPage /></ErrorBoundary>} />
-            <Route path="/orchestrated/:slug?" element={<ErrorBoundary><OrchestratedChatPage /></ErrorBoundary>} />
+            <Route path="/orchestrated/:slug?" element={<OrchestratedRedirect />} />
             <Route path="/notifications" element={<ErrorBoundary><NotificationsPage /></ErrorBoundary>} />
             <Route path="/knowledge" element={<ErrorBoundary><KnowledgePage /></ErrorBoundary>} />
             <Route path="/overview" element={<Navigate to="/settings?tab=overview" replace />} />

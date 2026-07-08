@@ -44,10 +44,10 @@ describe('BoardPage card open', () => {
     expect(mockNavigate).toHaveBeenCalledWith('/chat')
   })
 
-  it('navigates to /orchestrated for orchestrator sessions', () => {
+  it('navigates to /chat for orchestrator sessions (unified view)', () => {
     const store = createTestStore(stateWithIdleSlot('orchestrator'))
     renderWithProviders(<BoardPage />, { store, route: '/board' })
     fireEvent.click(screen.getByRole('button', { name: 'Open session Idle Session' }))
-    expect(mockNavigate).toHaveBeenCalledWith('/orchestrated')
+    expect(mockNavigate).toHaveBeenCalledWith('/chat')
   })
 })

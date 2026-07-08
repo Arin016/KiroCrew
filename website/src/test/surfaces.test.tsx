@@ -299,17 +299,19 @@ describe('surfaces registry', () => {
       registerBuiltinSurface({ navId: 'orchestrated', route: '/orchestrated', label: 'Autopilot', icon: TEST_ICON, group: 'Apps', slotMode: 'orchestrator' })
     })
 
-    it('counts only chat-surface slots in the chat badge', () => {
+    it('counts all chat-like slots (including orchestrator) in the chat badge', () => {
       const state = buildState(
         [slot('chat-1', ''), slot('orch-1', 'orchestrator'), slot('chat-2', '')],
         ['chat-1', 'orch-1', 'chat-2'],
       )
-      expect(selectSurfaceBadgeCount('chat')(state)).toBe(2)
+      // Unified: orchestrator slots count toward the chat badge
+      expect(selectSurfaceBadgeCount('chat')(state)).toBe(3)
     })
 
-    it('regression: orchestrator unread does NOT inflate the chat badge', () => {
+    it('orchestrator unread DOES inflate the chat badge (unified view)', () => {
       const state = buildState([slot('chat-1', ''), slot('orch-1', 'orchestrator')], ['orch-1'])
-      expect(selectSurfaceBadgeCount('chat')(state)).toBe(0)
+      // Unified: orchestrator unread contributes to chat badge
+      expect(selectSurfaceBadgeCount('chat')(state)).toBe(1)
       expect(selectSurfaceBadgeCount('orchestrated')(state)).toBe(1)
     })
 
@@ -371,8 +373,11 @@ describe('surfaces registry', () => {
         [slot('chat-1', ''), slot('orch-1', 'orchestrator')],
         ['chat-1', 'orch-1'],
       )
-      // 1 chat + 1 orch + 3 notifications = 5
-      expect(selectAllSurfacesAttention(state)).toBe(5)
+      // Unified chat badge counts both chat + orchestrator slots (2), plus
+      // the orchestrated surface still counts its own (1), plus notifications (3) = 6.
+      // In the real app only the chat surface exists, so no double-counting
+      // occurs — this test registers both to verify the sum logic.
+      expect(selectAllSurfacesAttention(state)).toBe(6)
     })
   })
 })

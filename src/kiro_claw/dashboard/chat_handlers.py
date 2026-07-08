@@ -1534,6 +1534,13 @@ async def api_chat_slot_resume(request: web.Request) -> web.Response:
                 "total": total,
                 "has_more": total > 200,
                 "memory_mode": existing.memory_mode,
+                # Return the slot's mode (and its `surface` alias) so the
+                # frontend can render the recovered slot in the correct mode
+                # (e.g. autopilot/"orchestrator") immediately, without waiting
+                # for the racy SSE slots push to arrive (resumed autopilot
+                # sessions came back as plain chat until SSE reconciled).
+                "mode": existing.mode,
+                "surface": existing.mode,
             }
         )
 
@@ -1629,7 +1636,7 @@ async def api_chat_slot_resume(request: web.Request) -> web.Response:
     _sync_dashboard_slots(state)
     state.push_slots_update()
     return web.json_response(
-        {"ok": True, "key": slot.key, "messages": _prepare_messages(recent, slot.running), "queue": [{"id": q["id"], "content": _redact_for_display(q["content"])} for q in slot._queue], "total": total, "has_more": total > len(recent), "memory_mode": slot.memory_mode}
+        {"ok": True, "key": slot.key, "messages": _prepare_messages(recent, slot.running), "queue": [{"id": q["id"], "content": _redact_for_display(q["content"])} for q in slot._queue], "total": total, "has_more": total > len(recent), "memory_mode": slot.memory_mode, "mode": slot.mode, "surface": slot.mode}
     )
 
 

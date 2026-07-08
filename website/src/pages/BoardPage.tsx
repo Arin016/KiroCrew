@@ -329,9 +329,9 @@ export default function BoardPage() {
   for (const lane of Object.values(byLane)) lane.sort(sortFn)
 
   const openSlot = (key: string) => {
-    const slot = slots.find(s => s.key === key)
     dispatch(switchSlot(key))
-    navigate(slot?.mode === 'orchestrator' ? '/orchestrated' : '/chat')
+    // Unified chat view: both default and orchestrator sessions open under /chat.
+    navigate('/chat')
   }
 
   // Lockout map survives across lane reflow (SSE can move a slot to a different
