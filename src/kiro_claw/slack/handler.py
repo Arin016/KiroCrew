@@ -29,6 +29,10 @@ from collections import OrderedDict
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kiro_claw.session_map import SessionMap
 
 from kiro_claw.acp.client import AcpError, AcpProcessDied, AcpTimeoutError
 from kiro_claw.acp.types import STOP_REASON_CANCELLED, STOP_REASON_END_TURN
@@ -580,6 +584,34 @@ def _is_slack_restricted(session_key: str) -> bool:
     return session_key in _thread_temporary or session_key in _thread_incognito
 
 
+def _conv_state_map(sessions: object) -> "SessionMap | None":
+    """Return the SessionManager's canonical SessionMap, or None.
+
+    v1c-B: the per-conversation ``temporary``/``incognito`` flags are persisted
+    on the session entry via the SAME ``SessionMap`` instance the
+    ``SessionManager`` owns (so writes stay consistent — no second instance can
+    clobber them on save). Test doubles without ``_session_map`` return None, in
+    which case callers fall back to the in-memory LRU dicts only.
+    """
+    return getattr(sessions, "_session_map", None)
+
+
+def _hydrate_conv_flags(sessions: object, session_key: str) -> None:
+    """Restore persisted temporary/incognito flags into the in-memory caches.
+
+    Called once per session in ``handle_message`` so a thread marked temporary
+    or incognito stays so across a gateway restart (the in-memory LRU is rebuilt
+    from the durable ``SessionMap`` entry).
+    """
+    sm = _conv_state_map(sessions)
+    if sm is None:
+        return
+    if sm.get_flag(session_key, "temporary"):
+        _mark_temporary(session_key)
+    if sm.get_flag(session_key, "incognito"):
+        _mark_incognito(session_key)
+
+
 _INCOGNITO_TOKEN_RE = re.compile(r"(?<!\S)!incognito(?!\S)", re.IGNORECASE)
 
 
@@ -619,6 +651,10 @@ async def _apply_temporary_modifier(
     if session_key in _thread_temporary:
         return
     _mark_temporary(session_key)
+    # v1c-B: persist on the session entry (durable across restart).
+    _sm = _conv_state_map(sessions)
+    if _sm is not None:
+        _sm.set_flag(session_key, "temporary", True)
     sel().log_api_access(
         caller=user_id,
         operation="slack.temporary_mode",
@@ -648,6 +684,10 @@ async def _apply_incognito_modifier(
     if session_key in _thread_incognito:
         return
     _mark_incognito(session_key)
+    # v1c-B: persist on the session entry (durable across restart).
+    _sm = _conv_state_map(sessions)
+    if _sm is not None:
+        _sm.set_flag(session_key, "incognito", True)
     sel().log_api_access(
         caller=user_id,
         operation="slack.incognito_mode",
@@ -661,6 +701,59 @@ async def _apply_incognito_modifier(
         "🕶️ Incognito mode ON — this thread can read memory but won't save anything.",
         reply_ts,
     )
+
+
+async def maybe_apply_privacy_modifiers(
+    text: str,
+    cmd_text: str,
+    session_key: str,
+    user_id: str,
+    channel: str,
+    slack: SlackClientOps,
+    sessions: SessionManager,
+    reply_ts: str,
+) -> tuple[str, str, bool]:
+    """Strip and apply the ``!temporary`` / ``!incognito`` privacy modifiers.
+
+    Shared by the native ``handle_message`` path and the messaging-transport
+    ``handle_message_transport`` path so the privacy controls behave identically
+    on both (and the modifier token never leaks into the LLM prompt).
+
+    Returns ``(text, cmd_text, only_modifier)``:
+    - *text* — the LLM-facing message with the modifier token(s) removed.
+    - *cmd_text* — the mention-stripped command text with the token removed
+      (the native path reuses it for its subsequent ``!compact``/``!bang``
+      checks; the transport path ignores it).
+    - *only_modifier* — True when the message was nothing but the modifier(s);
+      the caller MUST then return without starting an LLM turn.
+
+    Mirrors native's original inline ordering exactly, including the early
+    return between ``!temporary`` and ``!incognito`` when nothing remains.
+    """
+    cmd_stripped, had_temporary = _strip_temporary_token(cmd_text)
+    if had_temporary:
+        await _apply_temporary_modifier(
+            session_key, user_id, channel, slack, sessions, reply_ts
+        )
+        cmd_text = cmd_stripped
+        text = _TEMPORARY_TOKEN_RE.sub("", text)
+        text = " ".join(text.split()) or text  # collapse whitespace
+        if not cmd_text:
+            # Message was *only* "!temporary" with no remaining content.
+            return text, cmd_text, True
+
+    cmd_stripped, had_incognito = _strip_incognito_token(cmd_text)
+    if had_incognito:
+        await _apply_incognito_modifier(
+            session_key, user_id, channel, slack, sessions, reply_ts
+        )
+        cmd_text = cmd_stripped
+        text = _INCOGNITO_TOKEN_RE.sub("", text)
+        text = " ".join(text.split()) or text
+        if not cmd_text:
+            return text, cmd_text, True
+
+    return text, cmd_text, False
 
 
 # Tracks Slack threads that already have a title (auto or manual).
@@ -1117,6 +1210,37 @@ def enable_yolo_with_ttl(ttl_secs: int) -> None:
 def is_yolo_mode() -> bool:
     """Return whether YOLO mode is currently active."""
     return safety_override().is_active()
+
+
+def is_slack_session_trusted(session_key: str) -> bool:
+    """Return whether *session_key* has been granted per-session Trust.
+
+    Per-session trust auto-approves all subsequent tools for THIS session only
+    (distinct from global YOLO). Populated by the Trust button on both the
+    native and messaging-transport approval prompts.
+    """
+    return bool(session_key) and session_key in _trusted_sessions
+
+
+def add_trusted_session(session_key: str, sessions: "SessionManager | None" = None) -> None:
+    """Grant per-session Trust for *session_key* (mirrors native trust_tool).
+
+    Adds the session to the in-memory trust set and, when a SessionManager is
+    supplied, sets its approval policy to ``auto`` so spawned subagents inherit
+    the trust (they read the parent's approval policy, not the in-memory set).
+    """
+    if not session_key:
+        return
+    _trusted_sessions.add(session_key)
+    if sessions is not None:
+        try:
+            sessions.set_approval_policy(session_key, "auto")
+        except Exception:
+            logger.warning(
+                "Failed to propagate trust approval policy for %s",
+                session_key,
+                exc_info=True,
+            )
 
 
 def is_allowed_user(user_id: str) -> bool:
@@ -2079,6 +2203,208 @@ async def _handle_compact_command(
         pass
 
 
+async def maybe_handle_keyword_command(
+    text: str,
+    slack: SlackClientOps,
+    sessions: SessionManager,
+    channel: str,
+    reply_ts: str,
+    msg_ts: str,
+    session_key: str,
+    user_id: str,
+    conversation_log: ConversationLog | None = None,
+    *,
+    subagent_manager: SubagentManager | None = None,
+    task_runner: TaskRunner | None = None,
+    cron_service: CronService | None = None,
+    handle_sessions: bool = True,
+) -> bool:
+    """Intercept the path-independent keyword commands.
+
+    These are plain (non-``!``) keyword commands that must behave identically
+    on both the native ``handle_message`` path and the messaging-transport
+    ``handle_message_transport`` path: ``sessions``, ``spawn <task>``,
+    ``run <spec>`` and natural-language ``cron`` wakeups.
+
+    Returns ``True`` when the message was handled as a keyword command — the
+    caller MUST then ``return`` without starting an LLM turn. Returns ``False``
+    when the message is not a keyword command and normal routing continues.
+
+    ``!``-bang commands are intentionally NOT handled here; they stay in
+    ``handle_message`` (owner/allowed gating, mention stripping, modifiers) and
+    are being deprecated in favour of slash commands. Slash commands are
+    already path-independent (handled upstream of the native-vs-transport gate),
+    so they need no porting.
+
+    *handle_sessions* lets the native path opt out of the ``sessions`` branch
+    (it keeps its own earlier, position-sensitive ``sessions`` block so that
+    ``!temporary``/``!incognito`` modifier rewrites cannot turn a modified
+    message into a bare ``sessions`` match). The transport path has no such
+    modifier machinery, so it uses the default and handles all four commands.
+    """
+    # ── Sessions keyword: list recent sessions (owner/allowed only) ──
+    if handle_sessions and text.strip().lower() == "sessions":
+        if is_owner(user_id) or is_allowed_user(user_id):
+            sel().log_api_access(
+                caller=user_id,
+                operation="slack.sessions_command",
+                outcome="allowed",
+                source="slack",
+                resources=channel,
+            )
+            await _handle_sessions_command(
+                text.strip(),
+                slack,
+                channel,
+                reply_ts,
+                msg_ts,
+                session_key,
+                conversation_log,
+                sessions=sessions,
+            )
+        else:
+            # Deny-by-default: unauthorized callers must be audited (so the
+            # security pipeline can see attempted access) and given an
+            # explicit denial — silent return masks the access attempt.
+            sel().log_api_access(
+                caller=user_id,
+                operation="slack.sessions_command",
+                outcome="denied",
+                source="slack",
+                resources=channel,
+                error="unauthorized caller",
+            )
+            await slack.post_message(channel, "_Permission denied._", reply_ts)
+        return True
+
+    # ── Subagent spawn: "spawn <task>" (before cron to avoid NL overlap) ──
+    if subagent_manager:
+        spawn_reply = _handle_spawn_command(text, subagent_manager, session_key)
+        if spawn_reply:
+            await slack.post_message(channel, spawn_reply, reply_ts)
+            if conversation_log and not _is_slack_restricted(session_key):
+                save_conversation_turn(
+                    conversation_log,
+                    session_key,
+                    text,
+                    spawn_reply,
+                    source_thread=session_key,
+                    source_user=user_id,
+                )
+            return True
+
+    # ── Task runner: "run <spec-path>" ──
+    if task_runner:
+        run_reply = _handle_run_command(text, task_runner, slack, channel, reply_ts)
+        if run_reply:
+            await slack.post_message(channel, run_reply, reply_ts)
+            if conversation_log and not _is_slack_restricted(session_key):
+                save_conversation_turn(
+                    conversation_log,
+                    session_key,
+                    text,
+                    run_reply,
+                    source_thread=session_key,
+                    source_user=user_id,
+                )
+            return True
+
+    # ── Natural language cron: intercept wakeup patterns ──
+    if cron_service:
+        cron_reply = _handle_cron_command(text, cron_service, channel, reply_ts)
+        if cron_reply:
+            await slack.post_message(channel, cron_reply, reply_ts)
+            if conversation_log and not _is_slack_restricted(session_key):
+                save_conversation_turn(
+                    conversation_log,
+                    session_key,
+                    text,
+                    cron_reply,
+                    source_thread=session_key,
+                    source_user=user_id,
+                )
+            return True
+
+    return False
+
+
+async def maybe_route_linked_thread(
+    text: str,
+    session_key: str,
+    user_id: str,
+    channel: str,
+    slack: SlackClientOps,
+    reply_ts: str,
+) -> bool:
+    """Route a Slack message to a linked dashboard slot, if one is linked.
+
+    Shared by the native ``handle_message`` path and the messaging-transport
+    ``handle_message_transport`` path so a thread linked via
+    ``/kiroclaw link-to-dashboard`` behaves identically on both.
+
+    Returns ``True`` when the caller MUST return without further handling —
+    either the message was routed into the linked dashboard slot, or an
+    unauthorized user was denied. Returns ``False`` when normal routing should
+    continue: no dashboard state, no linked slot, or a ``!``-bang command
+    (which is intentionally allowed to fall through to normal handling).
+    """
+    if not (_dashboard_state and hasattr(_dashboard_state, "get_linked_slot")):
+        return False
+    _linked_slot = _dashboard_state.get_linked_slot(session_key)
+    if not _linked_slot:
+        return False
+
+    # Auth check FIRST — deny all messages from unauthorized users.
+    if not is_allowed_user(user_id):
+        logger.warning("Unauthorized user %s in linked thread %s", user_id, session_key)
+        sel().log_tool_invocation(
+            session_key=session_key,
+            agent="kiroclaw",
+            source="slack",
+            tool_name="linked_thread_intercept",
+            tool_kind="permission",
+            outcome="denied",
+            metadata={"user_id": user_id, "reason": "not_allowed_user"},
+        )
+        await slack.post_message(channel, "Not authorized.", reply_ts)
+        return True
+
+    # Let bang commands fall through to normal handling.
+    _first_word = text.strip().split(maxsplit=1)[0] if text.strip() else ""
+    if _first_word in _BANG_TO_SLASH:
+        return False
+
+    _linked_slot_key = _linked_slot.key
+    # Redact for UI display only — LLM receives original text so it can process
+    # user intent fully (redaction strips URLs/creds that may be relevant
+    # context). The LLM's own output is redacted before display.
+    _safe_text, _ = redact_exfiltration_urls(text)
+    _safe_text, _ = redact_credentials(_safe_text)
+    _linked_slot.append("user", _safe_text, "msg msg-u")
+    _dashboard_state.broadcast_ws("chat_message", {"slot": _linked_slot_key, "role": "user", "content": _safe_text, "cls": "msg msg-u"})  # type: ignore[attr-defined]
+    if not _linked_slot.running:
+        from kiro_claw.dashboard.chat import _run_chat
+
+        _chat_task = asyncio.create_task(_run_chat(_dashboard_state, _linked_slot, text))  # type: ignore[arg-type]
+        _linked_slot.task = _chat_task
+        _dashboard_state._background_tasks.add(_chat_task)  # type: ignore[attr-defined]
+        _chat_task.add_done_callback(_dashboard_state._background_tasks.discard)  # type: ignore[attr-defined]
+    else:
+        _linked_slot.queue_append(text)
+    _dashboard_state.push_slots_update()  # type: ignore[attr-defined]
+    sel().log_tool_invocation(
+        session_key=session_key,
+        agent="kiroclaw",
+        source="slack",
+        tool_name="linked_thread_intercept",
+        tool_kind="permission",
+        outcome="allowed",
+        metadata={"user_id": user_id, "slot": _linked_slot_key},
+    )
+    logger.info("Routed linked Slack message to dashboard slot %s", _linked_slot_key)
+    return True
+
+
 async def handle_message(
     slack: SlackClientOps,
     sessions: SessionManager,
@@ -2121,59 +2447,11 @@ async def handle_message(
     session_key = thread_ts or msg_ts
     reply_ts = thread_ts or msg_ts
     _hydrate_thread_overrides(session_key, conversation_log)
+    _hydrate_conv_flags(sessions, session_key)
 
     # ── Linked thread intercept: route to dashboard slot if linked ──
-    if _dashboard_state and hasattr(_dashboard_state, "get_linked_slot"):
-        _linked_slot = _dashboard_state.get_linked_slot(session_key)
-        if _linked_slot:
-            # Auth check FIRST — deny all messages from unauthorized users
-            if not is_allowed_user(user_id):
-                logger.warning("Unauthorized user %s in linked thread %s", user_id, session_key)
-                sel().log_tool_invocation(
-                    session_key=session_key,
-                    agent="kiroclaw",
-                    source="slack",
-                    tool_name="linked_thread_intercept",
-                    tool_kind="permission",
-                    outcome="denied",
-                    metadata={"user_id": user_id, "reason": "not_allowed_user"},
-                )
-                await slack.post_message(channel, "Not authorized.", reply_ts)
-                return
-            # Let bang commands fall through to normal handling
-            _first_word = text.strip().split(maxsplit=1)[0] if text.strip() else ""
-            if _first_word in _BANG_TO_SLASH:
-                pass  # fall through
-            else:
-                _linked_slot_key = _linked_slot.key
-                # Redact for UI display only — LLM receives original text so it can
-                # process user intent fully (redaction strips URLs/creds that may be
-                # relevant context). The LLM's own output is redacted before display.
-                _safe_text, _ = redact_exfiltration_urls(text)
-                _safe_text, _ = redact_credentials(_safe_text)
-                _linked_slot.append("user", _safe_text, "msg msg-u")
-                _dashboard_state.broadcast_ws("chat_message", {"slot": _linked_slot_key, "role": "user", "content": _safe_text, "cls": "msg msg-u"})  # type: ignore[attr-defined]
-                if not _linked_slot.running:
-                    from kiro_claw.dashboard.chat import _run_chat
-
-                    _chat_task = asyncio.create_task(_run_chat(_dashboard_state, _linked_slot, text))  # type: ignore[arg-type]
-                    _linked_slot.task = _chat_task
-                    _dashboard_state._background_tasks.add(_chat_task)  # type: ignore[attr-defined]
-                    _chat_task.add_done_callback(_dashboard_state._background_tasks.discard)  # type: ignore[attr-defined]
-                else:
-                    _linked_slot.queue_append(text)
-                _dashboard_state.push_slots_update()  # type: ignore[attr-defined]
-                sel().log_tool_invocation(
-                    session_key=session_key,
-                    agent="kiroclaw",
-                    source="slack",
-                    tool_name="linked_thread_intercept",
-                    tool_kind="permission",
-                    outcome="allowed",
-                    metadata={"user_id": user_id, "slot": _linked_slot_key},
-                )
-                logger.info("Routed linked Slack message to dashboard slot %s", _linked_slot_key)
-                return
+    if await maybe_route_linked_thread(text, session_key, user_id, channel, slack, reply_ts):
+        return
     logger.info(
         "🔍 handle_message: thread_ts=%s msg_ts=%s → session_key=%s channel=%s",
         thread_ts,
@@ -2245,40 +2523,12 @@ async def handle_message(
 
     _cmd_text = re.sub(r"^<@[A-Z0-9]+(?:\|[^>]*)?>\s*", "", text.strip())
 
-    # ── !temporary modifier: strip token and mark session before dispatch ──
-    _cmd_text_stripped, _had_temporary = _strip_temporary_token(_cmd_text)
-    if _had_temporary:
-        await _apply_temporary_modifier(
-            session_key,
-            user_id,
-            channel,
-            slack,
-            sessions,
-            reply_ts,
-        )
-        _cmd_text = _cmd_text_stripped
-        text = _TEMPORARY_TOKEN_RE.sub("", text)
-        text = " ".join(text.split()) or text  # collapse whitespace
-        if not _cmd_text:
-            # Message was *only* "!temporary" with no remaining content
-            return
-
-    # ── !incognito modifier: strip token and mark session before dispatch ──
-    _cmd_text_stripped, _had_incognito = _strip_incognito_token(_cmd_text)
-    if _had_incognito:
-        await _apply_incognito_modifier(
-            session_key,
-            user_id,
-            channel,
-            slack,
-            sessions,
-            reply_ts,
-        )
-        _cmd_text = _cmd_text_stripped
-        text = _INCOGNITO_TOKEN_RE.sub("", text)
-        text = " ".join(text.split()) or text
-        if not _cmd_text:
-            return
+    # ── !temporary / !incognito privacy modifiers (shared with transport) ──
+    text, _cmd_text, _only_modifier = await maybe_apply_privacy_modifiers(
+        text, _cmd_text, session_key, user_id, channel, slack, sessions, reply_ts
+    )
+    if _only_modifier:
+        return
 
     if _cmd_text.strip().lower() == "!compact":
         if is_owner(user_id) or is_allowed_user(user_id):
@@ -2363,53 +2613,28 @@ async def handle_message(
             if reply is not None:
                 return
 
-    # ── Subagent spawn: "spawn <task>" (before cron to avoid NL overlap) ──
-    if subagent_manager:
-        spawn_reply = _handle_spawn_command(text, subagent_manager, session_key)
-        if spawn_reply:
-            await slack.post_message(channel, spawn_reply, reply_ts)
-            if conversation_log and not _is_slack_restricted(session_key):
-                save_conversation_turn(
-                    conversation_log,
-                    session_key,
-                    text,
-                    spawn_reply,
-                    source_thread=session_key,
-                    source_user=user_id,
-                )
-            return
-
-    # ── Task runner: "run <spec-path>" ──
-    if task_runner:
-        run_reply = _handle_run_command(text, task_runner, slack, channel, reply_ts)
-        if run_reply:
-            await slack.post_message(channel, run_reply, reply_ts)
-            if conversation_log and not _is_slack_restricted(session_key):
-                save_conversation_turn(
-                    conversation_log,
-                    session_key,
-                    text,
-                    run_reply,
-                    source_thread=session_key,
-                    source_user=user_id,
-                )
-            return
-
-    # ── Natural language cron: intercept wakeup patterns ──
-    if cron_service:
-        cron_reply = _handle_cron_command(text, cron_service, channel, reply_ts)
-        if cron_reply:
-            await slack.post_message(channel, cron_reply, reply_ts)
-            if conversation_log and not _is_slack_restricted(session_key):
-                save_conversation_turn(
-                    conversation_log,
-                    session_key,
-                    text,
-                    cron_reply,
-                    source_thread=session_key,
-                    source_user=user_id,
-                )
-            return
+    # ── Path-independent keyword commands: spawn/run/cron ──
+    # ``sessions`` is deliberately excluded here (handle_sessions=False): the
+    # native path keeps its own earlier ``sessions`` block above so that the
+    # ``!temporary``/``!incognito`` modifier rewrites can't turn a modified
+    # message into a bare ``sessions`` match. The transport path (which has no
+    # modifier machinery) handles all four via the same helper.
+    if await maybe_handle_keyword_command(
+        text,
+        slack,
+        sessions,
+        channel,
+        reply_ts,
+        msg_ts,
+        session_key,
+        user_id,
+        conversation_log,
+        subagent_manager=subagent_manager,
+        task_runner=task_runner,
+        cron_service=cron_service,
+        handle_sessions=False,
+    ):
+        return
 
     status_ctrl = StatusReactionController(
         slack,

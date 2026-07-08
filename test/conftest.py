@@ -224,6 +224,36 @@ def _clean_emojis():
     _PHASE_EMOJIS.update(original)
 
 
+@pytest.fixture(autouse=True)
+def _clean_slack_thread_state():
+    """Reset the ``handler`` module-global thread-state maps between tests.
+
+    ``handler`` keeps process-global maps for per-thread privacy and routing
+    state: ``_thread_temporary`` / ``_thread_incognito`` (drive
+    ``_is_slack_restricted`` — the memory-write gate consulted by ``!title``,
+    consolidation, etc.), ``_titled_threads`` (auto-title claim), and
+    ``_thread_agents`` (per-thread agent override). Nothing clears these
+    globally, so a test that marks a thread restricted — including one that
+    drives the real ``handle_message_transport`` drain path against a
+    ``MagicMock`` session map, whose ``_hydrate_conv_flags`` reads truthy mock
+    flags and calls ``_mark_incognito`` / ``_mark_temporary`` — leaves e.g.
+    ``"thread1"`` in ``_thread_incognito`` forever. Under ``pytest -n auto``
+    (``--dist load`` interleaves tests across files on each worker) a later
+    ``test_title_updates_conversation_log`` then sees
+    ``_is_slack_restricted("thread1") is True`` and skips ``set_title``,
+    failing with no production-code change — a classic order-dependent flake.
+    Clearing before and after every test makes each hermetic regardless of
+    scheduling. Idempotent with per-file fixtures that already clear a subset.
+    """
+    from kiro_claw.slack import handler as _h
+
+    for _m in (_h._thread_temporary, _h._thread_incognito, _h._titled_threads, _h._thread_agents):
+        _m.clear()
+    yield
+    for _m in (_h._thread_temporary, _h._thread_incognito, _h._titled_threads, _h._thread_agents):
+        _m.clear()
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _isolate_sel_default_dir(tmp_path_factory):
     """Redirect the Security Event Log default dir to a session-local tmp dir.

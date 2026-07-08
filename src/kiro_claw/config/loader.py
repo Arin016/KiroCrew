@@ -652,6 +652,21 @@ class OrchestratorConfig:
 
 
 @dataclass
+class MessagingConfig:
+    use_transport: bool = field(
+        default=True,
+        metadata=_meta(
+            "Use Transport",
+            "Route inbound Slack messages through the SlackTransport → TurnDriver → "
+            "SlackRenderer channel-neutral path instead of the native handle_message "
+            "monolith. Default ON in KiroClaw (the transport abstraction is the canonical "
+            "path, shared with future channels). Set to false to fall back to the legacy "
+            "native handler.",
+        ),
+    )
+
+
+@dataclass
 class CronHistoryConfig:
     cron_summary_cap: int = field(
         default=200,
@@ -1856,6 +1871,10 @@ class KiroClawConfig:
         default_factory=OrchestratorConfig,
         metadata=_meta("Orchestrator", "Autopilot/orchestrator settings."),
     )
+    messaging: MessagingConfig = field(
+        default_factory=MessagingConfig,
+        metadata=_meta("Messaging", "Channel-neutral messaging transport settings."),
+    )
     cron_history: CronHistoryConfig = field(
         default_factory=CronHistoryConfig,
         metadata=_meta("Cron History", "Cron execution history storage limits."),
@@ -2126,6 +2145,9 @@ class KiroClawConfig:
         skills_data = data.get("skills", {})
         if not isinstance(skills_data, dict):
             skills_data = {}
+        messaging_data = data.get("messaging", {})
+        if not isinstance(messaging_data, dict):
+            messaging_data = {}
 
         # Parse agents section into dict[str, KiroClawAgentConfig]
         raw_agents = data.get("agents", {})
@@ -2235,6 +2257,9 @@ class KiroClawConfig:
                     cron_history_data.get("cron_max_records_per_job", 100)
                 ),
                 cron_max_index_records=int(cron_history_data.get("cron_max_index_records", 2000)),
+            ),
+            messaging=MessagingConfig(
+                use_transport=bool(messaging_data.get("use_transport", True)),
             ),
             memory=MemoryConfig(
                 embedding_provider=memory_data.get("embedding_provider", "none"),
@@ -2508,6 +2533,7 @@ class KiroClawConfig:
             "instances": asdict(self.instances),
             "taskrunner": asdict(self.taskrunner),
             "orchestrator": asdict(self.orchestrator),
+            "messaging": asdict(self.messaging),
             "cron_history": asdict(self.cron_history),
             "skills": asdict(self.skills),
             "snapshot_dir": self.snapshot_dir,

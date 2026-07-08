@@ -665,3 +665,71 @@ class TestHomeTabSessionResume:
         assert args[0] == "DUSER"
         assert "C0LINKED" in args[1]
         assert "Go to conversation" in args[1]
+
+
+# ---------------------------------------------------------------------------
+# Transport tool-approval dispatch — deny-by-default authorization
+# ---------------------------------------------------------------------------
+
+
+class TestTransportApprovalAuth:
+    """The messaging-transport approve/trust/deny buttons must never resolve a
+    pending decider for an unauthorized clicker (deny-by-default)."""
+
+    def _payload(self, action_id: str, user_id: str) -> dict:
+        return {
+            "type": "block_actions",
+            "user": {"id": user_id},
+            "channel": {"id": "C1"},
+            "message": {"ts": "200.0"},
+            "actions": [{"action_id": action_id, "value": "rq1", "text": {"text": "x"}}],
+        }
+
+    @pytest.mark.asyncio
+    async def test_unauthorized_click_does_not_resolve(
+        self, orch_fixture: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from kiro_claw.slack import interactions
+        from kiro_claw.slack.renderer import SlackApprovalDecider
+
+        monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: False)
+        spy = MagicMock(return_value=True)
+        monkeypatch.setattr(SlackApprovalDecider, "resolve_global", spy)
+
+        for action_id in ("mc_tool_approve_rq1", "mc_tool_trust_rq1", "mc_tool_deny_rq1"):
+            await interactions.dispatch(self._payload(action_id, "U_INTRUDER"))
+        # Never resolved the pending approval for an unauthorized user.
+        spy.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_authorized_approve_resolves(
+        self, orch_fixture: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from kiro_claw.slack import interactions
+        from kiro_claw.slack.renderer import SlackApprovalDecider
+
+        monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: True)
+        spy = MagicMock(return_value=True)
+        monkeypatch.setattr(SlackApprovalDecider, "resolve_global", spy)
+
+        await interactions.dispatch(self._payload("mc_tool_approve_rq1", "U_OWNER"))
+        spy.assert_called_once_with("rq1", True)
+        orch_fixture.slack.update_message.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_authorized_trust_grants_session_then_resolves(
+        self, orch_fixture: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from kiro_claw.slack import interactions
+        from kiro_claw.slack.renderer import SlackApprovalDecider
+
+        monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: True)
+        monkeypatch.setattr(SlackApprovalDecider, "session_for", classmethod(lambda cls, rid: "thread-1"))
+        monkeypatch.setattr(SlackApprovalDecider, "resolve_global", MagicMock(return_value=True))
+        grant = MagicMock()
+        monkeypatch.setattr(interactions, "add_trusted_session", grant)
+
+        await interactions.dispatch(self._payload("mc_tool_trust_rq1", "U_OWNER"))
+        # Trust granted for the resolved session before the approval resolves.
+        grant.assert_called_once()
+        assert grant.call_args.args[0] == "thread-1"

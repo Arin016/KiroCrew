@@ -676,6 +676,36 @@
       "defaultValue": 1800
     },
     {
+      "path": "messaging",
+      "kind": "core",
+      "type": "object",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Messaging",
+      "help": "Channel-neutral messaging transport settings.",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": {
+        "use_transport": true
+      }
+    },
+    {
+      "path": "messaging.use_transport",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Use Transport",
+      "help": "Route inbound Slack messages through the SlackTransport → TurnDriver → SlackRenderer channel-neutral path instead of the native handle_message monolith. Default ON in KiroClaw (the transport abstraction is the canonical path, shared with future channels). Set to false to fall back to the legacy native handler.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": true
+    },
+    {
       "path": "cron_history",
       "kind": "core",
       "type": "object",

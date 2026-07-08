@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 
 from kiro_claw.config.paths import config_dir
+from kiro_claw.messaging.link import ChannelLink, canonical_key
 
 logger = logging.getLogger(__name__)
 
@@ -52,19 +53,46 @@ class SessionMap:
                 self._data = {}
                 return
             migrated = False
+            new_data: dict[str, dict] = {}
             for key, val in raw.items():
                 if isinstance(val, str):
                     # Backward compat: plain string → new dict format
-                    self._data[key] = {
+                    entry: dict = {
                         "sid": val,
                         "slack_thread_ts": None,
                         "slack_channel_id": None,
                     }
                     migrated = True
                 elif isinstance(val, dict) and "sid" in val:
-                    self._data[key] = val
+                    entry = val
                 else:
                     continue  # skip corrupt entries
+                # v1c: namespace bare Slack thread_ts keys → slack:<thread>,
+                # preserving sid. Keep the raw thread_ts inside the entry so the
+                # reverse index + challenge-redirect resume path are unaffected,
+                # and populate the Layer-3 own-channel link.
+                canon = canonical_key(key)
+                if canon != key:
+                    migrated = True
+                    if not entry.get("slack_thread_ts"):
+                        entry["slack_thread_ts"] = key
+                    if "link" not in entry:
+                        entry["link"] = ChannelLink(
+                            channel_type="slack",
+                            channel_id=entry.get("slack_channel_id"),
+                            thread_id=key,
+                        ).to_dict()
+                existing = new_data.get(canon)
+                if existing is not None:
+                    # Collision (e.g. partially-migrated file): never clobber a
+                    # live session. Overwrite ONLY when the existing entry has no
+                    # sid and the incoming one does; otherwise keep existing.
+                    # Order-independent — if both have a sid, the first-seen wins
+                    # deterministically rather than depending on dict iteration.
+                    if not (entry.get("sid") and not existing.get("sid")):
+                        continue
+                new_data[canon] = entry
+            self._data = new_data
             self._rebuild_thread_index()
             if migrated:
                 self._save()
@@ -103,6 +131,14 @@ class SessionMap:
         ``dashboard:dashboard_chat-1-xxx``.  We try the canonical form too.
         """
         entry = self._data.get(key)
+        # Bidirectional bare <-> slack: shim: a not-yet-updated caller may pass
+        # a bare thread_ts; resolve it to the namespaced entry written at load.
+        if not entry:
+            canon = canonical_key(key)
+            if canon != key:
+                entry = self._data.get(canon)
+                if entry:
+                    key = canon
         # Fallback: dashboard history round-trip (dashboard:dashboard_X → dashboard:X)
         matched_key = key
         if not entry and key.startswith("dashboard:dashboard_"):
@@ -141,6 +177,7 @@ class SessionMap:
 
     def set(self, key: str, sid: str, *, provider: str = "", cwd: str = "") -> None:
         """Save mapping and persist to disk, preserving existing slack fields."""
+        key = canonical_key(key)
         existing = self._data.get(key)
         if existing:
             existing["sid"] = sid
@@ -159,14 +196,14 @@ class SessionMap:
 
     def get_cwd(self, key: str) -> str:
         """Return the stored CWD for *key*, or '' if not set."""
-        entry = self._data.get(key)
+        entry = self._data.get(canonical_key(key))
         if not entry:
             return ""
         return entry.get("cwd", "")
 
     def get_provider(self, key: str) -> str:
         """Return the stored provider for *key* (e.g. 'acp', 'claude_code'), or ''."""
-        entry = self._data.get(key)
+        entry = self._data.get(canonical_key(key))
         if not entry:
             return ""
         return entry.get("provider", "")
@@ -177,14 +214,14 @@ class SessionMap:
         Used on provider switch: the SID is incompatible with the new
         provider, but we keep the entry so Slack link and CWD persist.
         """
-        entry = self._data.get(key)
+        entry = self._data.get(canonical_key(key))
         if entry and entry.get("sid"):
             entry["sid"] = ""
             self._save()
 
     def delete(self, key: str) -> None:
         """Remove mapping and persist."""
-        self._remove_entry(key)
+        self._remove_entry(canonical_key(key))
 
     def prune(self) -> int:
         """Remove entries whose session files no longer exist."""
@@ -207,6 +244,7 @@ class SessionMap:
 
     def set_slack_link(self, key: str, thread_ts: str, channel_id: str | None) -> None:
         """Link a session to a Slack thread. Creates entry if needed."""
+        key = canonical_key(key)
         entry = self._data.get(key)
         if entry:
             if (
@@ -231,7 +269,7 @@ class SessionMap:
 
     def get_slack_link(self, key: str) -> tuple[str | None, str | None]:
         """Return (thread_ts, channel_id) for a session."""
-        entry = self._data.get(key)
+        entry = self._data.get(canonical_key(key))
         if not entry:
             return None, None
         return entry.get("slack_thread_ts"), entry.get("slack_channel_id")
@@ -245,7 +283,7 @@ class SessionMap:
         this session and silently re-engage mirroring. Returns True iff a link
         was present (only then is ``_save()`` called).
         """
-        entry = self._data.get(key)
+        entry = self._data.get(canonical_key(key))
         if not entry:
             return False
         old_ts = entry.get("slack_thread_ts")
@@ -269,3 +307,117 @@ class SessionMap:
             if sid == session_id:
                 return k
         return None
+
+    def get_link(self, key: str) -> ChannelLink | None:
+        """Return the session's OWN inbound-channel link, or None.
+
+        Distinct from the dashboard->Slack *mirror* binding, which stays
+        behind ``get/set_slack_link`` (guardrail G3).
+        """
+        entry = self._data.get(canonical_key(key))
+        if not entry:
+            return None
+        raw = entry.get("link")
+        return ChannelLink.from_dict(raw) if raw else None
+
+    def set_link(self, key: str, link: ChannelLink) -> None:
+        """Set the session's OWN inbound-channel link. Creates entry if needed."""
+        key = canonical_key(key)
+        entry = self._data.get(key)
+        if entry:
+            entry["link"] = link.to_dict()
+        else:
+            self._data[key] = {
+                "sid": "",
+                "slack_thread_ts": None,
+                "slack_channel_id": None,
+                "link": link.to_dict(),
+            }
+        self._save()
+
+    # --- v1c-B: per-conversation state on the session entry ---------------
+    # Durable backing for the per-thread state that ``slack/handler.py`` has
+    # historically kept in module-global dicts (``_thread_temporary``,
+    # ``_thread_incognito``, ``_thread_agents``, ``_thread_projects``).
+    # Storing it on the session entry makes it survive gateway restarts and
+    # ties its lifetime to the session (pruned with the entry) instead of an
+    # ad-hoc bounded LRU. Additive: existing fields and callers are untouched.
+
+    def _ensure_entry(self, key: str) -> dict:
+        """Return the entry for *key*, creating a blank one if absent."""
+        entry = self._data.get(key)
+        if entry is None:
+            entry = {"sid": "", "slack_thread_ts": None, "slack_channel_id": None}
+            self._data[key] = entry
+        return entry
+
+    def set_flag(self, key: str, flag: str, value: bool) -> None:
+        """Set or clear a boolean per-conversation flag (e.g. ``temporary``).
+
+        Flags are stored under an ``flags`` sub-dict on the entry. Clearing the
+        last flag removes the sub-dict so empty state does not accrete on disk.
+        Idempotent: writing an unchanged value still persists (cheap) so callers
+        need not pre-check.
+        """
+        key = canonical_key(key)
+        if value:
+            entry = self._ensure_entry(key)
+        else:
+            # Clearing a flag on a key that was never stored is a no-op — don't
+            # materialize a blank entry (would accrete empty state on disk).
+            existing = self._data.get(key)
+            if not existing:
+                return
+            entry = existing
+        flags = entry.get("flags") or {}
+        if value:
+            flags[flag] = True
+        else:
+            flags.pop(flag, None)
+        if flags:
+            entry["flags"] = flags
+        else:
+            entry.pop("flags", None)
+        self._save()
+
+    def get_flag(self, key: str, flag: str) -> bool:
+        """Return the value of a per-conversation boolean *flag* (default False)."""
+        entry = self._data.get(canonical_key(key))
+        if not entry:
+            return False
+        flags = entry.get("flags")
+        return bool(flags and flags.get(flag))
+
+    def set_agent_override(self, key: str, agent: str | None) -> None:
+        """Set (or clear, when *agent* is falsy) the per-thread agent override."""
+        key = canonical_key(key)
+        if agent:
+            self._ensure_entry(key)["agent_override"] = agent
+        else:
+            entry = self._data.get(key)
+            if not entry or "agent_override" not in entry:
+                return
+            entry.pop("agent_override", None)
+        self._save()
+
+    def get_agent_override(self, key: str) -> str | None:
+        """Return the per-thread agent override for *key*, or None."""
+        entry = self._data.get(canonical_key(key))
+        return entry.get("agent_override") if entry else None
+
+    def set_project_override(self, key: str, project: str | None) -> None:
+        """Set (or clear, when *project* is falsy) the per-thread project dir."""
+        key = canonical_key(key)
+        if project:
+            self._ensure_entry(key)["project_override"] = project
+        else:
+            entry = self._data.get(key)
+            if not entry or "project_override" not in entry:
+                return
+            entry.pop("project_override", None)
+        self._save()
+
+    def get_project_override(self, key: str) -> str | None:
+        """Return the per-thread project-dir override for *key*, or None."""
+        entry = self._data.get(canonical_key(key))
+        return entry.get("project_override") if entry else None

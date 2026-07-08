@@ -10,10 +10,12 @@ import pytest
 from kiro_claw.config.loader import (
     ACTIVATION_ALWAYS,
     ACTIVATION_OFF,
+    ACTIVATION_REVIEW,
     ChannelConfig,
     KiroClawConfig,
+    MessagingConfig,
 )
-from kiro_claw.slack.events import SeenCache, _route_message
+from kiro_claw.slack.events import SeenCache, _dispatch_queued, _route_message
 
 
 def _make_orch(
@@ -25,6 +27,7 @@ def _make_orch(
     cfg = KiroClawConfig(
         slack_channels=channels or {},
         slack_dm_activation=dm_activation,
+        messaging=MessagingConfig(use_transport=False),
     )
     orch._cfg = cfg
     orch.channel_history = MagicMock()
@@ -233,6 +236,49 @@ class TestChannelActivationRouting:
                 assert call_kwargs["channel_agent"] == "ops"
 
 
+class TestTransportGateReviewMode:
+    """The transport gate must EXCLUDE review-mode channels: review mode's
+    privacy machinery (suppress public output + ephemeral approve/edit/cancel
+    draft) lives only in native handle_message, so review-mode channels must
+    route to native even when messaging.use_transport is True."""
+
+    @pytest.mark.asyncio
+    async def test_review_mode_routes_to_native_even_with_transport_on(self):
+        orch = _make_orch(channels={"C1234": ChannelConfig(activation=ACTIVATION_REVIEW)})
+        orch._cfg.messaging = MessagingConfig(use_transport=True)  # transport ON
+        seen = SeenCache()
+        # Review mode requires a mention to be processed at all.
+        event = {"user": "U1", "channel": "C1234", "text": "hi", "ts": "9.0", "team": "TTEST"}
+
+        with patch("kiro_claw.slack.events.handle_message", new_callable=AsyncMock) as mock_hm, \
+             patch("kiro_claw.slack.events.handle_message_transport", new_callable=AsyncMock) as mock_tr, \
+             patch("kiro_claw.slack.events.is_allowed_user", return_value=True):
+            await _route_message(orch, event, seen, is_mention=True)
+            await asyncio.sleep(0)
+            await asyncio.gather(*list(orch._handler_tasks), return_exceptions=True)
+            # Native owns review mode; transport path is skipped.
+            mock_hm.assert_called_once()
+            mock_tr.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_review_channel_uses_transport_when_on(self):
+        # Contrast: a normal channel with transport ON DOES take the transport
+        # path — the guard is narrow to review mode only.
+        orch = _make_orch(channels={"C1234": ChannelConfig(activation=ACTIVATION_ALWAYS)})
+        orch._cfg.messaging = MessagingConfig(use_transport=True)
+        seen = SeenCache()
+        event = {"user": "U1", "channel": "C1234", "text": "hi", "ts": "9.1", "team": "TTEST"}
+
+        with patch("kiro_claw.slack.events.handle_message", new_callable=AsyncMock) as mock_hm, \
+             patch("kiro_claw.slack.events.handle_message_transport", new_callable=AsyncMock) as mock_tr, \
+             patch("kiro_claw.slack.events.is_allowed_user", return_value=True):
+            await _route_message(orch, event, seen, is_mention=False)
+            await asyncio.sleep(0)
+            await asyncio.gather(*list(orch._handler_tasks), return_exceptions=True)
+            mock_tr.assert_called_once()
+            mock_hm.assert_not_called()
+
+
 class TestHandlerChannelAgent:
     @pytest.mark.asyncio
     async def test_channel_agent_passed_to_session(self):
@@ -383,3 +429,42 @@ class TestRouteMessageStop:
             await asyncio.sleep(0)
             # handle_message should never be called — !stop is intercepted before it
             mock_hm.assert_not_called()
+
+
+class TestDispatchQueuedRouting:
+    """Queued follow-up messages must drain through the SAME gate as the
+    initial message: a transport thread keeps using transport for its queued
+    follow-ups (parity), while review-mode / opt-out channels stay on native."""
+
+    def _kwargs(self):
+        return {"channel": "C1234", "thread_ts": "9.0", "sender_id": "U1"}
+
+    @pytest.mark.asyncio
+    async def test_queued_drains_to_transport_when_on(self):
+        orch = _make_orch(channels={"C1234": ChannelConfig(activation=ACTIVATION_ALWAYS)})
+        orch._cfg.messaging = MessagingConfig(use_transport=True)
+        with patch("kiro_claw.slack.events.handle_message", new_callable=AsyncMock) as mock_hm, \
+             patch("kiro_claw.slack.events.handle_message_transport", new_callable=AsyncMock) as mock_tr:
+            await _dispatch_queued(orch, "9.0", "9.0", "follow up", self._kwargs())
+            mock_tr.assert_awaited_once()
+            mock_hm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_queued_review_channel_drains_to_native(self):
+        orch = _make_orch(channels={"C1234": ChannelConfig(activation=ACTIVATION_REVIEW)})
+        orch._cfg.messaging = MessagingConfig(use_transport=True)
+        with patch("kiro_claw.slack.events.handle_message", new_callable=AsyncMock) as mock_hm, \
+             patch("kiro_claw.slack.events.handle_message_transport", new_callable=AsyncMock) as mock_tr:
+            await _dispatch_queued(orch, "9.0", "9.0", "follow up", self._kwargs())
+            mock_hm.assert_awaited_once()
+            mock_tr.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_queued_drains_to_native_when_transport_off(self):
+        orch = _make_orch(channels={"C1234": ChannelConfig(activation=ACTIVATION_ALWAYS)})
+        orch._cfg.messaging = MessagingConfig(use_transport=False)
+        with patch("kiro_claw.slack.events.handle_message", new_callable=AsyncMock) as mock_hm, \
+             patch("kiro_claw.slack.events.handle_message_transport", new_callable=AsyncMock) as mock_tr:
+            await _dispatch_queued(orch, "9.0", "9.0", "follow up", self._kwargs())
+            mock_hm.assert_awaited_once()
+            mock_tr.assert_not_called()

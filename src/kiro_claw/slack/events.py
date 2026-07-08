@@ -88,6 +88,7 @@ from kiro_claw.slack.sessions_view import (
     _build_sessions_blocks,
     _collect_recent_sessions,
 )
+from kiro_claw.slack.transport_dispatch import handle_message_transport
 from kiro_claw.stats import Stats
 from kiro_claw.transcribe import is_available as stt_available
 from kiro_claw.transcribe import transcribe_audio
@@ -1519,6 +1520,13 @@ def _resolve_approval_mode(orch: "GatewayOrchestrator") -> str:
     Normalized to handle_message's auto/interactive contract; reads/yolo are
     gated separately (gateway approval-event path, global YOLO/trust).
     """
+    # Runtime YOLO (owner-toggled via /meshclaw yolo, TTL-capped safety_override)
+    # auto-approves all tools. The native loop checks is_yolo_mode() inline; the
+    # transport TurnDriver only sees this resolved mode, so fold YOLO in here at
+    # the single per-message chokepoint (evaluated fresh each message) — both
+    # paths then honor the runtime toggle consistently.
+    if is_yolo_mode():
+        return APPROVAL_AUTO
     mode = orch._approval_mode or orch._cfg.agent.approval_mode
     return APPROVAL_AUTO if mode == APPROVAL_AUTO else APPROVAL_INTERACTIVE
 
@@ -1538,6 +1546,38 @@ async def _dispatch_queued(
             await orch.slack.remove_reaction(channel, msg_ts, "hourglass_flowing_sand")
         except Exception:
             pass
+    # Route the queued follow-up through the SAME gate as the initial message so
+    # behavior is consistent mid-conversation: a thread that took the transport
+    # path must keep taking it for its queued follow-ups (not silently fall back
+    # to native). Review-mode channels stay on native (privacy gate), matching
+    # the _route_message gate.
+    _activation = orch._cfg.channel_config(channel).activation
+    _use_transport = (
+        getattr(getattr(orch._cfg, "messaging", None), "use_transport", False) is True
+        and _activation != ACTIVATION_REVIEW
+    )
+    if _use_transport:
+        await handle_message_transport(
+            orch.slack,  # type: ignore[arg-type]
+            orch.sessions,  # type: ignore[arg-type]
+            channel,
+            text,
+            thread_ts,
+            msg_ts,
+            kwargs.get("sender_id", ""),
+            context_builder=orch.ctx_builder,
+            conversation_log=orch.conv_log,
+            approval_mode=_resolve_approval_mode(orch),
+            agent_override=kwargs.get("agent_override"),
+            subagent_manager=orch.subagent_mgr,
+            task_runner=orch.task_runner,
+            cron_service=orch.cron_svc,
+            reactions_enabled=orch._cfg.slack.reactions_enabled,
+            show_thinking=orch._cfg.slack.show_thinking,
+            consolidator=orch.consolidator,
+            user_display_name=kwargs.get("user_display_name"),
+        )
+        return
     await handle_message(
         orch.slack,  # type: ignore[arg-type]
         orch.sessions,  # type: ignore[arg-type]
@@ -2206,6 +2246,98 @@ async def _route_message(
             except Exception:
                 logger.debug("Failed to add queue reaction", exc_info=True)
         _cleanup_image_temps()
+        return
+
+    # ── New transport path: route to the messaging abstraction ──
+    # When messaging.use_transport is True, drive the turn through
+    # SlackTransport → TurnDriver → SlackRenderer instead of the native
+    # inline handle_message loop. Default ON in this fork: MessagingConfig
+    # and the loader both default use_transport to True and orch._cfg.messaging
+    # is always populated (default_factory), so every install takes this path
+    # unless it explicitly sets messaging.use_transport=false to opt back into
+    # the native path. (KiroClaw has no challenge-redirect path, so this simply
+    # replaces the native dispatch when the flag is on.)
+    #
+    # Review-mode channels are EXCLUDED from the transport path: review mode is
+    # a privacy gate (suppress public streaming/output, post an ephemeral draft
+    # with approve/edit/cancel for owner sign-off). That machinery lives only in
+    # native handle_message; routing review-mode channels through native keeps
+    # that guarantee intact rather than risking a partial re-implementation.
+    _use_transport = (
+        getattr(getattr(orch._cfg, "messaging", None), "use_transport", False) is True
+        and activation != ACTIVATION_REVIEW
+    )
+    if _use_transport:
+        t = asyncio.create_task(
+            handle_message_transport(
+                orch.slack,  # type: ignore[arg-type]
+                orch.sessions,  # type: ignore[arg-type]
+                channel,
+                clean_text,
+                thread_ts,
+                msg_ts,
+                sender_id,
+                context_builder=orch.ctx_builder,
+                conversation_log=orch.conv_log,
+                # Same approval gating as the native path: respects the
+                # configured mode + operator YOLO/SafetyOverride TTL, rather
+                # than an unconditional auto-approve. Deny-by-default unless
+                # auto-approve is explicitly active.
+                approval_mode=_resolve_approval_mode(orch),
+                # Per-channel agent override (slack.channels.<id>.agent), same
+                # as native handle_message's channel_agent, so a channel-pinned
+                # agent is honored on the transport path too.
+                agent_override=agent_override,
+                # Keyword-command services, same as native handle_message, so
+                # `sessions`/`spawn`/`run`/`cron` work on the transport path via
+                # the shared maybe_handle_keyword_command interceptor.
+                subagent_manager=orch.subagent_mgr,
+                task_runner=orch.task_runner,
+                cron_service=orch.cron_svc,
+                # Respect the user's phase-reaction setting, same as native
+                # handle_message (which reads slack.reactions_enabled).
+                reactions_enabled=orch._cfg.slack.reactions_enabled,
+                # Respect slack.show_thinking (surface reasoning as a 💭 reply).
+                show_thinking=orch._cfg.slack.show_thinking,
+                # History consolidation + display-name context, same as native
+                # handle_message (parity: don't drop these on the transport path).
+                consolidator=orch.consolidator,
+                user_display_name=_sender_display,
+            )
+        )
+        orch._session_tasks[session_key] = t
+
+        def _on_transport_done(task: asyncio.Task) -> None:  # type: ignore[type-arg]
+            orch._handler_tasks.discard(task)
+            if orch._session_tasks.get(session_key) is task:
+                del orch._session_tasks[session_key]
+            _cleanup_image_temps()
+            # Drain queue: only if no other task took over this session.
+            # Mirrors native _on_done so messages queued while this session was
+            # busy aren't stranded when the transport path is the active route.
+            try:
+                if session_key not in orch._session_tasks and orch.sessions:
+                    _next = orch.sessions.dequeue(session_key)
+                    # Fall back to orchestrator-level pending queue (pre-session).
+                    if not _next:
+                        _pq = orch._pending_queue.get(session_key)
+                        if _pq:
+                            _next = _pq.pop(0)
+                            if not _pq:
+                                del orch._pending_queue[session_key]
+                    if _next:
+                        _q_ts, _q_text, _q_kw = _next
+                        _q_t = asyncio.ensure_future(
+                            _dispatch_queued(orch, session_key, _q_ts, _q_text, _q_kw)
+                        )
+                        orch._session_tasks[session_key] = _q_t
+                        orch._handler_tasks.add(_q_t)
+                        _q_t.add_done_callback(_on_transport_done)
+            except Exception:
+                logger.exception("_on_transport_done drain failed for %s", session_key)
+
+        t.add_done_callback(_on_transport_done)
+        orch._handler_tasks.add(t)
         return
 
     try:

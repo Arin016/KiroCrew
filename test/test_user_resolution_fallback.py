@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from kiro_claw.config.loader import KiroClawConfig, SlackConfig
+from kiro_claw.config.loader import KiroClawConfig, MessagingConfig, SlackConfig
 from kiro_claw.slack.events import SeenCache, _route_message
 
 
@@ -15,7 +15,7 @@ def _make_orch(allowed_users: list[dict] | None = None) -> MagicMock:
     """Build a minimal mock orchestrator with allowed_users config."""
     orch = MagicMock()
     slack_cfg = SlackConfig(allowed_users=allowed_users or [])
-    orch._cfg = KiroClawConfig(slack=slack_cfg)
+    orch._cfg = KiroClawConfig(slack=slack_cfg, messaging=MessagingConfig(use_transport=False))
     orch.channel_history = MagicMock()
     orch.channel_history._user_names = {}
     orch.slack = MagicMock()

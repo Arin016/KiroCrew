@@ -18,8 +18,10 @@ from kiro_claw.slack.handler import (
     _pending_approvals,
     _thread_agents,
     _trusted_sessions,
+    add_trusted_session,
     handle_interaction,
     handle_message,
+    is_slack_session_trusted,
     set_allowed_users,
     set_owner_id,
 )
@@ -3070,3 +3072,35 @@ class TestSlackTrustSubagentPropagation:
         assert result == "trust_tool"
         assert sessions.get_approval_policy("thread-9") == "auto"
         assert "thread-9" in _trusted_sessions
+
+
+class TestPerSessionTrust:
+    """Per-session Trust helpers shared by native + transport approval paths."""
+
+    def test_untrusted_session_is_false(self):
+        assert is_slack_session_trusted("thread-1") is False
+        assert is_slack_session_trusted("") is False
+
+    def test_add_trusted_session_marks_only_that_session(self):
+        add_trusted_session("thread-1")
+        assert is_slack_session_trusted("thread-1") is True
+        # Trust is scoped to the one session — others stay untrusted.
+        assert is_slack_session_trusted("thread-2") is False
+
+    def test_add_trusted_session_propagates_policy_to_subagents(self):
+        class _FakeSessions:
+            def __init__(self):
+                self.policies = {}
+
+            def set_approval_policy(self, key, policy):
+                self.policies[key] = policy
+
+        sessions = _FakeSessions()
+        add_trusted_session("thread-9", sessions)
+        assert is_slack_session_trusted("thread-9") is True
+        # Subagents read the parent's approval policy, so trust must propagate.
+        assert sessions.policies == {"thread-9": "auto"}
+
+    def test_add_trusted_session_empty_key_is_noop(self):
+        add_trusted_session("")
+        assert "" not in _trusted_sessions

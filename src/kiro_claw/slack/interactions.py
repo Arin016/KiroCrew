@@ -41,12 +41,19 @@ from kiro_claw.slack.format import (
 )
 from kiro_claw.slack.handler import (
     APPROVAL_INTERACTIVE,
+    add_trusted_session,
     handle_interaction,
     handle_message,
     is_allowed_user,
     is_owner,
     set_allowed_users,
     set_tracking_channels,
+)
+from kiro_claw.slack.renderer import (
+    TOOL_APPROVE_ACTION_PREFIX,
+    TOOL_DENY_ACTION_PREFIX,
+    TOOL_TRUST_ACTION_PREFIX,
+    SlackApprovalDecider,
 )
 
 if TYPE_CHECKING:
@@ -521,6 +528,68 @@ async def dispatch(payload: dict) -> None:
         return
     if action_id.startswith("mc_channel_remove_"):
         await _handle_channel_remove(payload, action, channel, msg_ts, user_id)
+        return
+
+    # ── Messaging-transport interactive tool approval (decider-backed) ──
+    # These buttons come from the new transport path's SlackRenderer
+    # (build_approval_blocks → mc_tool_approve_/trust_/deny_<rid>).
+    # Resolve the per-turn SlackApprovalDecider via its process-global registry.
+    if (
+        action_id.startswith(TOOL_APPROVE_ACTION_PREFIX)
+        or action_id.startswith(TOOL_TRUST_ACTION_PREFIX)
+        or action_id.startswith(TOOL_DENY_ACTION_PREFIX)
+    ):
+        # Defense-in-depth auth gate: dispatch() already denies non-allowed
+        # users at the top, but re-check here (deny-by-default) so a tool
+        # approval / Trust escalation can never be resolved by an unauthorized
+        # actor even if this branch is ever reached via another path. Mirrors
+        # native _handle_tool_approval's explicit trust-escalation check.
+        if not is_allowed_user(user_id):
+            sel().log_api_access(
+                caller=user_id or "unknown",
+                operation="slack.transport_tool_approval",
+                outcome="denied",
+                source="slack",
+                resources=f"action={action_id} unauthorized",
+                error="unauthorized user",
+            )
+            return
+        is_trust = action_id.startswith(TOOL_TRUST_ACTION_PREFIX)
+        approved = is_trust or action_id.startswith(TOOL_APPROVE_ACTION_PREFIX)
+        # value / action_id suffix carry the session-namespaced approval token
+        # (session_key:request_id) so a click resolves ONLY its own session's
+        # pending tool — kiro-cli request ids restart at 1 per session.
+        approval_key = action.get("value", "") or action_id.rsplit("_", 1)[-1]
+        # Trust grants per-session auto-approve BEFORE resolving, so subsequent
+        # tools in this session are auto-approved (mirrors native trust_tool).
+        if is_trust:
+            sess_key = SlackApprovalDecider.session_for(approval_key)
+            add_trusted_session(sess_key, _orch.sessions if _orch else None)
+        resolved = SlackApprovalDecider.resolve_global(approval_key, approved)
+        if resolved:
+            label = (
+                "🔓 Trusted this session — tools auto-approved"
+                if is_trust
+                else ("✅ Approved" if approved else "🚫 Denied")
+            )
+        else:
+            label = "⏱ This approval already expired."
+        sel().log_api_access(
+            caller=user_id,
+            operation="slack.transport_tool_approval",
+            outcome=(
+                ("trusted" if is_trust else ("approved" if approved else "denied"))
+                if resolved
+                else "expired"
+            ),
+            source="slack",
+            resources=f"approval_key={approval_key}",
+        )
+        if _orch and _orch.slack and channel and msg_ts:
+            try:
+                await _orch.slack.update_message(channel, msg_ts, text=label)
+            except Exception:
+                logger.debug("Failed to update transport approval message", exc_info=True)
         return
 
     # ── Tool approval buttons (approve / trust / reject) ──
