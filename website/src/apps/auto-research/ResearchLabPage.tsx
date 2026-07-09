@@ -1,6 +1,6 @@
 import { useState, useEffect, useReducer } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { FlaskConical, Play, Pause, Square, MessageCircle, ChevronDown, ChevronRight, Sparkles, ThumbsUp, ArrowRight, HelpCircle, XCircle, CheckCircle, AlertTriangle, Lock, X, Trash2, GitFork, Flame, BookOpen, FileText, RefreshCw, ExternalLink } from 'lucide-react'
+import { FlaskConical, Play, Pause, Square, MessageCircle, ChevronDown, ChevronRight, Sparkles, ThumbsUp, ArrowRight, HelpCircle, XCircle, CheckCircle, AlertTriangle, Lock, X, Trash2, GitFork, Flame, BookOpen, FileText, RefreshCw, ExternalLink, Loader2 } from 'lucide-react'
 import { api } from '../../api/client'
 import Clickable from '../../components/Clickable'
 import MarkdownRenderer from '../../components/MarkdownRenderer'
@@ -17,6 +17,30 @@ function EvidenceBadge({ s }: { s: string }) {
   if (s === 'strong') return <span className="text-xs px-1.5 py-0.5 rounded bg-bg-elevated text-ok inline-flex items-center gap-0.5"><ThumbsUp size={10} /> Strong</span>
   if (s === 'moderate') return <span className="text-xs px-1.5 py-0.5 rounded bg-bg-elevated text-warn inline-flex items-center gap-0.5"><ArrowRight size={10} /> Moderate</span>
   return <span className="text-xs px-1.5 py-0.5 rounded bg-bg-elevated text-muted inline-flex items-center gap-0.5"><HelpCircle size={10} /> Weak</span>
+}
+
+// Maps every campaign status to a single, consistent state pill so the root
+// list communicates working / failed / done at a glance. Unknown statuses fall
+// back to a neutral pill showing the raw status text.
+const STATE_META: Record<string, { label: string; color: string; Icon: typeof CheckCircle; spin?: boolean }> = {
+  running: { label: 'Working', color: 'text-accent', Icon: Loader2, spin: true },
+  needs_input: { label: 'Needs input', color: 'text-warn', Icon: HelpCircle },
+  paused: { label: 'Paused', color: 'text-muted', Icon: Pause },
+  stagnant: { label: 'Stalled', color: 'text-warn', Icon: AlertTriangle },
+  ready: { label: 'Ready', color: 'text-muted', Icon: Play },
+  complete: { label: 'Done', color: 'text-ok', Icon: CheckCircle },
+  failed: { label: 'Failed', color: 'text-danger', Icon: XCircle },
+  stopped: { label: 'Stopped', color: 'text-muted', Icon: Square },
+}
+
+function StateBadge({ status }: { status: string }) {
+  const m = STATE_META[status] ?? { label: status.replace(/_/g, ' '), color: 'text-muted', Icon: HelpCircle }
+  const { label, color, Icon, spin } = m
+  return (
+    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded bg-bg-elevated inline-flex items-center gap-1 shrink-0 ${color}`} title={`Status: ${status}`}>
+      <Icon size={10} className={spin ? 'animate-spin motion-reduce:animate-none' : undefined} /> {label}
+    </span>
+  )
 }
 
 function FindingCard({ f }: { f: Finding }) {
@@ -477,6 +501,7 @@ function CampaignDetail({ id, onBack, onFork, onOpen }: { id: string; onBack: ()
   const [showNudge, setShowNudge] = useState(false)
   const [nudgeText, setNudgeText] = useState('')
   const [answerText, setAnswerText] = useState('')
+  const [questionExpanded, setQuestionExpanded] = useState(false)
   const [showReport, setShowReport] = useState(false)
   const { data: reportData } = useQuery<{ report: string }>({ queryKey: ['research-report', id], queryFn: () => api.researchReport(id), enabled: showReport })
   const actionMut = useMutation({ mutationFn: (action: string) => api.researchAction(id, action), onSuccess: () => qc.invalidateQueries({ queryKey: ['research-campaign', id] }) })
@@ -495,7 +520,15 @@ function CampaignDetail({ id, onBack, onFork, onOpen }: { id: string; onBack: ()
       <span className="text-xs px-2 py-0.5 rounded bg-bg-elevated">{campaign.status}</span>
       <button className="text-xs px-2 py-1 rounded bg-bg-elevated text-danger ml-auto" onClick={() => { if (window.confirm('Delete this campaign and its report? This cannot be undone.')) deleteMut.mutate() }}><Trash2 size={12} className="inline" /> Delete</button>
     </div>
-    {campaign.question && <div className="text-sm text-muted mb-4">{campaign.question}</div>}
+    {campaign.question && (() => {
+      const isLong = campaign.question.length > 280
+      return <div className="mb-4">
+        <div className={`text-sm text-muted break-words ${isLong && !questionExpanded ? 'line-clamp-3' : ''}`}>{campaign.question}</div>
+        {isLong && <button className="text-xs text-accent mt-1 inline-flex items-center gap-0.5" onClick={() => setQuestionExpanded(v => !v)}>
+          {questionExpanded ? <><ChevronDown size={12} /> Show less</> : <><ChevronRight size={12} /> Show more</>}
+        </button>}
+      </div>
+    })()}
     <div className="flex items-center justify-between mb-4">
       <div className="text-sm text-muted">Cycle {campaign.total_cycles}/{campaign.max_cycles} · {findings.filter(f => f.new_findings_count > 0).length} findings</div>
       {isActive && <div className="flex gap-2">
@@ -596,15 +629,21 @@ export default function ResearchLabPage() {
     ) : <div className="space-y-3">
       {active && <div><div className="text-xs font-medium text-muted mb-1">ACTIVE</div>
         <Clickable className="border border-border rounded-md p-3 bg-card" onClick={() => { setSelectedId(active.id); setView('detail') }}>
-          <div className="font-medium text-sm line-clamp-2" title={active.question}>{active.parent_id && <span className="text-[10px] font-medium text-accent bg-accent-subtle rounded px-1 py-0.5 mr-1 inline-flex items-center gap-0.5 align-middle"><GitFork size={10} /> Forked</span>}{active.question}</div>
-          <div className="text-xs text-muted">Cycle {active.total_cycles}/{active.max_cycles} · {active.status}</div>
+          <div className="flex items-start gap-2">
+            <StateBadge status={active.status} />
+            <div className="font-medium text-sm line-clamp-2 flex-1" title={active.question}>{active.parent_id && <span className="text-[10px] font-medium text-accent bg-accent-subtle rounded px-1 py-0.5 mr-1 inline-flex items-center gap-0.5 align-middle"><GitFork size={10} /> Forked</span>}{active.question}</div>
+          </div>
+          <div className="text-xs text-muted mt-1">Cycle {active.total_cycles}/{active.max_cycles}</div>
         </Clickable></div>}
       {campaigns.filter((c: Campaign) => !ACTIVE_STATUSES.includes(c.status)).length > 0 && <div>
         <div className="text-xs font-medium text-muted mb-1">HISTORY</div>
         {campaigns.filter((c: Campaign) => !ACTIVE_STATUSES.includes(c.status)).map((c: Campaign) => (
           <Clickable key={c.id} className="border border-border rounded-md p-3 bg-card mb-2" onClick={() => { setSelectedId(c.id); setView('detail') }}>
-            <div className="text-sm line-clamp-2" title={c.question}>{c.status === 'complete' ? <CheckCircle size={12} className="text-ok inline mr-1" /> : <Square size={12} className="text-muted inline mr-1" />}{c.parent_id && <span className="text-[10px] font-medium text-accent bg-accent-subtle rounded px-1 py-0.5 mr-1 inline-flex items-center gap-0.5 align-middle"><GitFork size={10} /> Forked</span>}{c.question}</div>
-            <div className="text-xs text-muted">{c.total_cycles} cycles</div>
+            <div className="flex items-start gap-2">
+              <StateBadge status={c.status} />
+              <div className="text-sm line-clamp-2 flex-1" title={c.question}>{c.parent_id && <span className="text-[10px] font-medium text-accent bg-accent-subtle rounded px-1 py-0.5 mr-1 inline-flex items-center gap-0.5 align-middle"><GitFork size={10} /> Forked</span>}{c.question}</div>
+            </div>
+            <div className="text-xs text-muted mt-1">{c.total_cycles} cycles</div>
           </Clickable>
         ))}
       </div>}

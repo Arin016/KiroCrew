@@ -116,6 +116,33 @@ describe('ResearchLabPage', () => {
     expect(screen.getByRole('button', { name: /New Campaign/i })).toBeDisabled()
   })
 
+  it('shows a distinct state badge for each campaign status at the root', async () => {
+    const failed = { ...DONE, id: 'cccc3333', question: 'A campaign that failed', status: 'failed' }
+    const stopped = { ...DONE, id: 'dddd4444', question: 'A campaign that was stopped', status: 'stopped' }
+    vi.mocked(api.researchCampaigns).mockResolvedValue([ACTIVE, DONE, failed, stopped])
+    renderPage()
+    await waitFor(() => expect(screen.getByText('ACTIVE')).toBeInTheDocument())
+    // running -> Working (active card); complete/failed/stopped -> history badges.
+    expect(screen.getByText('Working')).toBeInTheDocument()
+    expect(screen.getByText('Done')).toBeInTheDocument()
+    expect(screen.getByText('Failed')).toBeInTheDocument()
+    expect(screen.getByText('Stopped')).toBeInTheDocument()
+  })
+
+  it('collapses a long campaign brief with a Show more / Show less toggle', async () => {
+    const longQ = 'A very long research brief. '.repeat(20) // ~560 chars > 280 threshold
+    const longCampaign = { ...ACTIVE, id: 'eeee5555', question: longQ }
+    vi.mocked(api.researchCampaigns).mockResolvedValue([longCampaign])
+    vi.mocked(api.researchCampaign).mockResolvedValue(longCampaign)
+    const user = userEvent.setup()
+    renderPage()
+    await waitFor(() => expect(screen.getByText(new RegExp(longQ.slice(0, 20)))).toBeInTheDocument())
+    await user.click(screen.getByText(new RegExp(longQ.slice(0, 20))))
+    await waitFor(() => expect(screen.getByText('Show more')).toBeInTheDocument())
+    await user.click(screen.getByText('Show more'))
+    expect(screen.getByText('Show less')).toBeInTheDocument()
+  })
+
   it('opens campaign detail and renders findings with evidence badges', async () => {
     vi.mocked(api.researchCampaigns).mockResolvedValue([ACTIVE, DONE])
     vi.mocked(api.researchCampaign).mockResolvedValue(ACTIVE)
