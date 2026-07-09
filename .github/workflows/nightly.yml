@@ -214,27 +214,20 @@ jobs:
           echo "SIGNED_ZIP=signed/$(basename "$APP_PATH" .app).zip" >> "$GITHUB_ENV"
 
       # ── Write update feed ─────────────────────────────────────────────────
-      # Points the nightly channel at the signed artifact (or unsigned if
-      # CDSigner is not yet configured).
+      # Only writes the feed AFTER signing completes. Unsigned artifacts must
+      # never appear in the update feed — clients would auto-update to a build
+      # that macOS Gatekeeper blocks. When CDSigner is not configured, the
+      # workflow stops at uploading to pre-signed/ and the feed is unchanged.
 
       - name: Write update feed
-        if: env.HAS_SIGNING_SECRETS
+        if: env.HAS_CDSIGNER && env.SIGNED_ZIP != ''
         run: |
           CHANNEL="nightly"
           BUCKET="${{ secrets.AWS_SIGNING_BUCKET }}"
-
-          # Determine artifact URL (prefer signed, fall back to unsigned)
-          if [ -n "${SIGNED_ZIP:-}" ]; then
-            ZIP_KEY="${SIGNED_ZIP}"
-            ARTIFACT_PREFIX="signed"
-          else
-            ZIP_KEY="pre-signed/${CHANNEL}/${VERSION}/$(ls release/*arm64*.zip 2>/dev/null | head -1 | xargs basename 2>/dev/null || echo '')"
-            ARTIFACT_PREFIX="pre-signed"
-          fi
+          ZIP_KEY="${SIGNED_ZIP}"
 
           # Write latest-mac.json (Squirrel.Mac format)
-          if [ -n "$ZIP_KEY" ] && [ "$ZIP_KEY" != "pre-signed/${CHANNEL}/${VERSION}/" ]; then
-            cat > /tmp/latest-mac.json <<EOF
+          cat > /tmp/latest-mac.json <<EOF
           {
             "version": "${VERSION}",
             "url": "https://${BUCKET}.s3.us-west-2.amazonaws.com/${ZIP_KEY}",
@@ -242,41 +235,9 @@ jobs:
             "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
           EOF
-            aws s3 cp /tmp/latest-mac.json "s3://${BUCKET}/feed/${CHANNEL}/latest-mac.json" \
-              --content-type application/json
-            echo "Feed written: feed/${CHANNEL}/latest-mac.json → ${ZIP_KEY}"
-          fi
-
-          # Write latest-linux.json if AppImage exists
-          APPIMAGE_KEY="pre-signed/${CHANNEL}/${VERSION}/$(ls release/*.AppImage 2>/dev/null | head -1 | xargs basename 2>/dev/null || echo '')"
-          if [ -n "$APPIMAGE_KEY" ] && [ "$APPIMAGE_KEY" != "pre-signed/${CHANNEL}/${VERSION}/" ]; then
-            cat > /tmp/latest-linux.json <<EOF
-          {
-            "version": "${VERSION}",
-            "url": "https://${BUCKET}.s3.us-west-2.amazonaws.com/${APPIMAGE_KEY}",
-            "name": "${VERSION}",
-            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          EOF
-            aws s3 cp /tmp/latest-linux.json "s3://${BUCKET}/feed/${CHANNEL}/latest-linux.json" \
-              --content-type application/json
-            echo "Feed written: feed/${CHANNEL}/latest-linux.json"
-          fi
-
-          # Write pip wheel location
-          WHL_KEY="pre-signed/${CHANNEL}/${VERSION}/$(ls release/*.whl 2>/dev/null | head -1 | xargs basename 2>/dev/null || echo '')"
-          if [ -n "$WHL_KEY" ] && [ "$WHL_KEY" != "pre-signed/${CHANNEL}/${VERSION}/" ]; then
-            cat > /tmp/latest-pip.json <<EOF
-          {
-            "version": "${VERSION}",
-            "url": "https://${BUCKET}.s3.us-west-2.amazonaws.com/${WHL_KEY}",
-            "name": "${VERSION}",
-            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          EOF
-            aws s3 cp /tmp/latest-pip.json "s3://${BUCKET}/feed/${CHANNEL}/latest-pip.json" \
-              --content-type application/json
-          fi
+          aws s3 cp /tmp/latest-mac.json "s3://${BUCKET}/feed/${CHANNEL}/latest-mac.json" \
+            --content-type application/json
+          echo "Feed written: feed/${CHANNEL}/latest-mac.json → ${ZIP_KEY}"
 
       - name: Summary
         run: |
