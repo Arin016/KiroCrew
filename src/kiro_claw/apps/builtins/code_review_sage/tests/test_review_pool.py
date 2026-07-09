@@ -327,3 +327,46 @@ class TestReviewEffort(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWorkerSweepProtection(unittest.TestCase):
+    """AcpReviewWorker must expose its kiro-cli PID via ``pid()`` so the shared
+    pool engine can shield it from the gateway's periodic orphan sweep. Without a
+    shield a busy pool worker is classified as an orphan and SIGKILLed mid-review,
+    which the driver reports as "ACP process exited (code=1)" (the reported bug).
+    The register/unregister lifecycle itself lives in the engine — see
+    test_worker_pool.TestSweepProtection."""
+
+    def test_worker_exposes_live_pid_for_shielding(self):
+        from sage_lib import review_pool as rp
+
+        class _FakeClient:
+            backend = "kiro"          # not ACP_BACKEND_CLAUDE -> skip claude effort push
+            is_ready = True
+
+            def __init__(self, *a, **k):
+                self._pid = 4242
+
+            async def ensure_ready(self):
+                return None
+
+            async def shutdown(self):
+                return None
+
+            def is_process_alive(self):
+                return True
+
+        orig_client = rp.AcpClient
+        rp.AcpClient = _FakeClient
+        try:
+            async def _run():
+                w = rp.AcpReviewWorker()
+                self.assertIsNone(w.pid(), "no PID before start")
+                await w.start()
+                self.assertEqual(w.pid(), 4242, "pid() must report the live process")
+                await w.shutdown()
+                self.assertIsNone(w.pid(), "no PID after shutdown")
+
+            asyncio.run(_run())
+        finally:
+            rp.AcpClient = orig_client

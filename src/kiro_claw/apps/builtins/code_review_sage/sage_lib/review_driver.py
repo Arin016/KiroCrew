@@ -174,6 +174,16 @@ def _cid(link: str) -> str:
         return results.safe_change_id(link)
 
 
+def change_id_for(link: str) -> str:
+    """Public alias for the change-id derivation. The app backend uses this to
+    store the SAME key the driver writes progress under on the run record, so the
+    dashboard can align each row with its live phase (queued/gating/deep/done/failed)
+    and render a human label. Keeping this in one place prevents the frontend from
+    re-deriving the id (and drifting from the backend's sanitization, e.g. an owner
+    hyphen becoming an underscore)."""
+    return _cid(link)
+
+
 def _fetch_instruction(link: str) -> str:
     """Platform-aware FETCH instruction for the gate/deep prompts (GitHub only)."""
     try:

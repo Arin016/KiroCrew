@@ -250,6 +250,14 @@ class AcpReviewWorker:
         logger.info("AcpReviewWorker ready (agent=%s, cwd=%s, effort=%s)",
                     agent, work_dir, effort)
 
+    def pid(self) -> Optional[int]:
+        """Underlying kiro-cli process PID (or None before start / after
+        shutdown). The pool reads this to shield the worker from the gateway's
+        periodic orphan sweep — a busy, unshielded worker is otherwise SIGKILLed
+        mid-review as a false orphan ("ACP process exited (code=1)")."""
+        pid = getattr(self._client, "_pid", None)
+        return pid if isinstance(pid, int) and pid > 0 else None
+
     async def _apply_claude_effort(self) -> None:
         """Push the configured effort live on the CLAUDE backend only.
 

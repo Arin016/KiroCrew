@@ -2603,3 +2603,74 @@ def test_mark_dead_unregisters_protected_pid():
     assert rt._pid in _protected_pids()
     rt._mark_dead("simulated EOF")
     assert rt._pid not in _protected_pids()
+
+
+def test_protected_runtime_pid_lands_in_sweep_active_set():
+    """Companion (``_subagent_runtimes``) and background (``_bg_runtime``)
+    AcpRuntimes live only in SessionManager instance attributes, NOT in
+    ``self._sessions``, so ``_collect_active_pids`` cannot see them via a session
+    provider. They stay protected only because ``AcpRuntime.spawn()`` shields
+    their PID via ``register_protected_pid``, and ``_collect_active_pids`` seeds
+    from ``_protected_pids()``. This asserts both a companion and a bg runtime
+    PID land in the sweep's active set (so phase-2 never confirms them orphans) —
+    the KiroClaw analog of MeshClaw CR-288064441's end-to-end guard.
+    """
+    from kiro_claw.session_pid import (
+        _collect_active_pids,
+        register_protected_pid,
+        unregister_protected_pid,
+    )
+
+    companion_pid, bg_pid = 717171, 727272
+    register_protected_pid(companion_pid)
+    register_protected_pid(bg_pid)
+    try:
+        # Empty session map == neither runtime is a registered session; they are
+        # shielded ONLY via the register_protected_pid path that spawn() uses.
+        active, ok = _collect_active_pids({})
+        assert ok
+        assert companion_pid in active
+        assert bg_pid in active
+    finally:
+        unregister_protected_pid(companion_pid)
+        unregister_protected_pid(bg_pid)
+
+    # Once unregistered (runtime died), they are no longer shielded.
+    active_after, _ = _collect_active_pids({})
+    assert companion_pid not in active_after
+    assert bg_pid not in active_after
+
+
+def test_periodic_sweep_skips_protected_runtime_pid():
+    """Reproduce the exact orphan-sweep path for a live companion/bg runtime: its
+    kiro-cli PID is tagged in ``kiro_session_pids.txt`` and is NOT a registered
+    session, so it would be confirmed an orphan and SIGKILLed — except the sweep
+    wires ``is_managed = (pid in active_pids)`` and ``active_pids`` includes
+    ``_protected_pids()``. With the runtime's PID registered (as ``spawn`` does),
+    ``_sweep_pid_entries`` skips it (0 killed, entry retained).
+    """
+    from unittest.mock import patch
+
+    from kiro_claw.session_pid import (
+        _collect_active_pids,
+        _sweep_pid_entries,
+        register_protected_pid,
+        unregister_protected_pid,
+    )
+
+    runtime_pid = 969696
+    register_protected_pid(runtime_pid)
+    try:
+        active, ok = _collect_active_pids({})
+        assert ok and runtime_pid in active
+        with patch("os.kill", side_effect=lambda pid, sig: None):  # all alive
+            killed, dead, _ = _sweep_pid_entries(
+                [f"1:{runtime_pid}"],
+                should_skip_tagged=lambda gw, p: False,
+                should_skip_bare=lambda p: False,
+                is_managed=lambda p: p in active,  # mirrors the real periodic sweep
+            )
+        assert killed == 0
+        assert f"1:{runtime_pid}" not in dead
+    finally:
+        unregister_protected_pid(runtime_pid)

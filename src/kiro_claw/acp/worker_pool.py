@@ -37,6 +37,23 @@ from typing import Callable, Optional, Protocol
 
 logger = logging.getLogger(__name__)
 
+# Sweep-protection shield. Pool workers are direct, long-lived agent sessions
+# that the gateway's periodic orphan sweep cannot see via ``_collect_active_pids``
+# (they are not SessionMap sessions nor warm-pool providers). Registering their
+# PID here keeps the sweep from classifying a *busy* worker as a leaked orphan and
+# SIGKILLing it mid-task (surfacing to the caller as "ACP process exited (code=1)").
+# The engine owns this lifecycle so every pool built on it is protected by
+# construction — no per-worker wiring, and it can't be forgotten by a new consumer.
+# Imported defensively so the engine stays usable standalone / in hermetic tests.
+try:
+    from kiro_claw.session_pid import register_protected_pid, unregister_protected_pid
+except Exception:  # pragma: no cover - standalone / test fallback
+    def register_protected_pid(pid: int) -> None:  # type: ignore[misc]
+        return None
+
+    def unregister_protected_pid(pid: int) -> None:  # type: ignore[misc]
+        return None
+
 # Engine defaults. Consumers typically pass their own tuned values.
 DEFAULT_MAX_WORKERS = 5
 DEFAULT_MAX_STARTING = 2
@@ -67,9 +84,29 @@ class PoolWorker(Protocol):
         """True if this worker can still process tasks."""
         ...
 
+    # OPTIONAL — ``def pid(self) -> int | None``: the underlying agent-process
+    # PID. When present, the pool auto-shields it from the gateway's orphan
+    # sweep (register on start, re-sync after every reset, unregister on
+    # retire). Workers that omit it (e.g. test fakes) are simply not shielded —
+    # harmless, since only live kiro-cli/claude PIDs are ever swept. Read via
+    # ``_worker_pid`` (getattr), so it is NOT required by the Protocol.
+
 
 # Factory returns an *unstarted* worker; the pool calls ``start()``.
 WorkerFactory = Callable[[], PoolWorker]
+
+
+def _worker_pid(worker: "PoolWorker") -> Optional[int]:
+    """Best-effort read of a worker's underlying agent-process PID (optional
+    ``pid()`` method). Returns a positive int or None (never raises)."""
+    fn = getattr(worker, "pid", None)
+    if not callable(fn):
+        return None
+    try:
+        p = fn()
+    except Exception:
+        return None
+    return p if isinstance(p, int) and p > 0 else None
 
 
 async def _safe_shutdown(worker: PoolWorker) -> None:
@@ -109,6 +146,10 @@ class WorkerPool:
         self._created = 0           # number of LIVE workers (idle + in-flight)
         self._closing = False
         self._name = name
+        # id(worker) -> the PID currently shielded from the orphan sweep for that
+        # worker. Kept in sync across start/reset/retire so a worker's live process
+        # is always protected and a retired one is always released.
+        self._protected: dict[int, int] = {}
 
     # ── Introspection (status / tests) ──
     @property
@@ -143,6 +184,40 @@ class WorkerPool:
         await w.start()
         return w
 
+    def _sync_protection(self, worker: PoolWorker) -> None:
+        """Align the sweep-protection shield with a worker's *current* PID.
+
+        Called after ``start()`` and after every ``reset()`` (which respawns the
+        process under a new PID). Unregisters the previously shielded PID and
+        registers the new one. Idempotent and best-effort — a worker without a
+        ``pid()`` is left unshielded (no-op)."""
+        key = id(worker)
+        new = _worker_pid(worker)
+        old = self._protected.get(key)
+        if old == new:
+            return
+        if old is not None:
+            unregister_protected_pid(old)
+            self._protected.pop(key, None)
+        if new is not None:
+            register_protected_pid(new)
+            self._protected[key] = new
+
+    def _release_protection(self, worker: PoolWorker) -> None:
+        """Drop a worker's sweep-protection shield (worker is being retired)."""
+        old = self._protected.pop(id(worker), None)
+        if old is not None:
+            unregister_protected_pid(old)
+
+    async def _retire(self, worker: PoolWorker) -> None:
+        """Single retirement path: release the shield, then destroy the worker.
+
+        Ordering matters — we unregister BEFORE shutdown so that even if
+        ``shutdown()`` raises, the (soon-dead) PID isn't left shielded and thus
+        able to protect an unrelated process that later recycles the PID."""
+        self._release_protection(worker)
+        await _safe_shutdown(worker)
+
     async def _get_or_create(self) -> tuple[PoolWorker, bool]:
         """Return (worker, reused). Caller already holds a task-sema permit."""
         reap: list[PoolWorker] = []
@@ -161,7 +236,7 @@ class WorkerPool:
                 self._created += 1
                 need_new = True
         for dead in reap:
-            await _safe_shutdown(dead)
+            await self._retire(dead)
         if not need_new:
             assert worker is not None
             return worker, True
@@ -169,6 +244,9 @@ class WorkerPool:
         try:
             async with self._start_sema:
                 worker = await self._new_worker()
+                # Shield the freshly-spawned process from the orphan sweep the
+                # moment it exists (before it can outlive a sweep cycle).
+                self._sync_protection(worker)
         except BaseException:
             async with self._lock:
                 self._created -= 1
@@ -201,7 +279,7 @@ class WorkerPool:
             else:
                 async with self._lock:
                     self._created -= 1
-                await _safe_shutdown(worker)
+                await self._retire(worker)
         finally:
             self._task_sema.release()
 
@@ -222,6 +300,8 @@ class WorkerPool:
         try:
             if reset and reused:
                 await worker.reset()
+                # reset() respawns the process under a new PID — re-shield it.
+                self._sync_protection(worker)
             return await worker.send_message(prompt, timeout=timeout)
         except BaseException:
             healthy = False
@@ -237,7 +317,7 @@ class WorkerPool:
             self._idle.clear()
             self._created -= len(idle)
         for w in idle:
-            await _safe_shutdown(w)
+            await self._retire(w)
         logger.info("%s shut down (%d idle workers retired)", self._name, len(idle))
 
     async def __aenter__(self) -> "WorkerPool":

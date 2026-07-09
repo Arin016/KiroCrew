@@ -621,6 +621,53 @@ class TestAcpWorker:
             await worker.start()
         assert worker._client is fresh
 
+    @pytest.mark.asyncio
+    async def test_start_registers_pid_shutdown_unregisters(self, tmp_path):
+        """AcpWorker must shield its live kiro-cli PID from the gateway orphan
+        sweep (register on start, unregister on shutdown) — otherwise a busy
+        knowledge worker is SIGKILLed mid-task as a false orphan ("ACP process
+        exited (code=1)")."""
+        fresh = AsyncMock()
+        fresh.is_ready = True
+        fresh._pid = 7777
+        registered: list[int] = []
+        unregistered: list[int] = []
+        with patch("kiro_claw.knowledge.llm_pool.Path.home", return_value=tmp_path), \
+             patch("kiro_claw.knowledge.llm_pool.AcpClient", return_value=fresh), \
+             patch("kiro_claw.knowledge.llm_pool.register_protected_pid",
+                   side_effect=registered.append), \
+             patch("kiro_claw.knowledge.llm_pool.unregister_protected_pid",
+                   side_effect=unregistered.append):
+            worker = AcpWorker()
+            await worker.start()
+            assert registered == [7777], "worker did not shield its PID on start"
+            await worker.shutdown()
+            assert unregistered == [7777], "worker did not release its PID on shutdown"
+
+    @pytest.mark.asyncio
+    async def test_respawn_reshields_new_pid(self, tmp_path):
+        """A re-``start`` (respawn under a new PID) must release the old PID's
+        shield and register the new one, so a dead PID is never left shielded."""
+        first = AsyncMock()
+        first.is_ready = True
+        first._pid = 100
+        second = AsyncMock()
+        second.is_ready = True
+        second._pid = 200
+        registered: list[int] = []
+        unregistered: list[int] = []
+        with patch("kiro_claw.knowledge.llm_pool.Path.home", return_value=tmp_path), \
+             patch("kiro_claw.knowledge.llm_pool.AcpClient", side_effect=[first, second]), \
+             patch("kiro_claw.knowledge.llm_pool.register_protected_pid",
+                   side_effect=registered.append), \
+             patch("kiro_claw.knowledge.llm_pool.unregister_protected_pid",
+                   side_effect=unregistered.append):
+            worker = AcpWorker()
+            await worker.start()     # register 100
+            await worker.start()     # stale-drop: unregister 100, then register 200
+        assert registered == [100, 200]
+        assert unregistered == [100]
+
 
 # ---------------------------------------------------------------------------
 # Tests: CCWorker (mocked subprocess)

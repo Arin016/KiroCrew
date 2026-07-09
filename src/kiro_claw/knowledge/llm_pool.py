@@ -21,6 +21,23 @@ try:
 except ImportError:
     AcpClient = None  # type: ignore[assignment,misc]
 
+# Sweep-protection shield for AcpClient-backed workers. These are direct,
+# long-lived AcpClient sessions (not SessionMap sessions / warm-pool providers),
+# so the gateway's periodic orphan sweep can't see them via _collect_active_pids
+# and would SIGKILL a *busy* worker mid-task as a false orphan ("ACP process
+# exited (code=1)"). Registering the live PID here prevents that. Applied inline
+# because this pool does NOT ride the shared kiro_claw.acp.worker_pool engine
+# (which shields its workers by construction). Imported defensively so llm_pool
+# stays importable standalone / in hermetic tests.
+try:
+    from kiro_claw.session_pid import register_protected_pid, unregister_protected_pid
+except Exception:  # pragma: no cover - standalone / test fallback
+    def register_protected_pid(pid: int) -> None:  # type: ignore[misc]
+        return None
+
+    def unregister_protected_pid(pid: int) -> None:  # type: ignore[misc]
+        return None
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_POOL_SIZE = 3
@@ -123,6 +140,8 @@ class AcpWorker(Worker):
         # Pre-resolved by the caller (off the event loop). ``None`` -> resolve
         # lazily in ``start`` (direct construction outside the pool / tests).
         self._sandbox_mode = sandbox_mode
+        # PID currently shielded from the gateway orphan sweep (see module note).
+        self._protected_pid: Optional[int] = None
 
     async def start(self) -> None:
         if AcpClient is None:
@@ -131,6 +150,14 @@ class AcpWorker(Worker):
         # when the client is not ready (e.g. a stalled handshake left _session_id
         # None); without this the previous subprocess would be orphaned.
         if self._client is not None:
+            # Release the old PID's shield before the process goes away, so a
+            # respawn never leaves a dead PID registered.
+            if self._protected_pid is not None:
+                try:
+                    unregister_protected_pid(self._protected_pid)
+                except Exception:
+                    logger.debug("AcpWorker: unregister protected pid failed", exc_info=True)
+                self._protected_pid = None
             try:
                 await self._client.shutdown()
             except Exception:
@@ -144,6 +171,14 @@ class AcpWorker(Worker):
         logger.info("AcpWorker: starting with agent=%s", AGENT_NAME)
         self._client = AcpClient(agent=AGENT_NAME, sandbox_mode=sandbox_mode)
         await self._client.ensure_ready()
+        # Shield the live worker PID from the periodic orphan sweep for as long
+        # as it runs. Paired with unregister in shutdown() and on respawn above.
+        pid = getattr(self._client, "_pid", None)
+        if isinstance(pid, int) and pid > 0:
+            self._protected_pid = pid
+            register_protected_pid(pid)
+        else:
+            self._protected_pid = None
         logger.info("AcpWorker: ready (agent=%s, pid=%s)", AGENT_NAME, getattr(self._client, '_pid', 'unknown'))
 
     async def send_message(self, prompt: str, timeout: float = DEFAULT_TIMEOUT) -> str:
@@ -153,6 +188,12 @@ class AcpWorker(Worker):
         return await self._client.send_message(prompt, timeout=timeout)
 
     async def shutdown(self) -> None:
+        if self._protected_pid is not None:
+            try:
+                unregister_protected_pid(self._protected_pid)
+            except Exception:
+                logger.debug("AcpWorker: unregister protected pid failed", exc_info=True)
+            self._protected_pid = None
         if self._client is not None:
             try:
                 await self._client.shutdown()

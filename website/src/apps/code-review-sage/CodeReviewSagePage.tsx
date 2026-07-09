@@ -18,6 +18,7 @@ interface Run {
   run_id: string
   status: string
   changes: string[]
+  change_ids?: string[]
   progress?: Record<string, RunProgressEntry>
   report_slug?: string | null
   error?: string
@@ -130,7 +131,13 @@ export default function CodeReviewSagePage() {
     ? (createNsMut.error || deleteNsMut.error as Error).message : ''
 
   const s = settings?.settings
-  const changes = run?.changes ?? []
+  // Rows are keyed by the derived change_id (what the backend writes progress
+  // under). Fall back to raw links only for legacy runs recorded before
+  // change_ids existed. Pair each id with its raw link for the row href.
+  const rows = (run?.change_ids ?? run?.changes ?? []).map((id, i) => ({
+    id,
+    link: run?.changes?.[i],
+  }))
   const running = reviewMut.isPending || run?.status === 'running'
   const reviewErr = reviewMut.error instanceof Error ? reviewMut.error.message : ''
 
@@ -195,14 +202,17 @@ export default function CodeReviewSagePage() {
           </div>
           {run.error && <div className="text-danger text-xs mt-1.5">{run.error}</div>}
           <ul className="list-none p-0 mt-2.5">
-            {changes.map(id => {
+            {rows.map(({ id, link }) => {
               const p = run.progress?.[id]
               const phase = p?.phase ?? 'queued'
               const counts = p?.counts
               return (
                 <li key={id}
                   className="flex items-center gap-2.5 text-xs py-1.5 border-b border-border">
-                  <span className="font-mono">{changeLabel(id)}</span>
+                  {link
+                    ? <a href={link} target="_blank" rel="noreferrer"
+                        className="font-mono text-accent">{changeLabel(id)}</a>
+                    : <span className="font-mono">{changeLabel(id)}</span>}
                   <span className={`ml-auto flex items-center gap-1 ${phase === 'failed' ? 'text-danger' : 'text-muted'}`}>
                     {PHASE_LABEL[phase] ?? phase}
                     {counts && phase === 'done' && (

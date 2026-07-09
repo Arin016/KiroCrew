@@ -206,6 +206,10 @@ async def _handle_review(request: web.Request) -> web.Response:
     run: dict[str, Any] = {
         "run_id": uuid.uuid4().hex[:12],
         "changes": changes,
+        # Same keys the driver writes progress under (GH-<owner>-<repo>-<n>), so the
+        # dashboard can align each row with its live phase instead of falling back to
+        # a permanent "queued". Paired positionally with ``changes`` for row hrefs.
+        "change_ids": [review_driver.change_id_for(c) for c in changes],
         "status": "running",
         "started_at": _now(),
         "progress": {},

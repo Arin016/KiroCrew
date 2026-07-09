@@ -149,16 +149,25 @@ class TestHandlers(unittest.IsolatedAsyncioTestCase):
             return None
         self.mod._run_review_bg = _noop      # don't run the real driver
 
+        _url = "https://github.com/kirodotdev-labs/kiroclaw/pull/20"
+
         class _Req:
             async def json(self):
-                return {"links": "CR-1"}
+                return {"links": _url}
         resp = await self.mod._handle_review(_Req())
         data = json.loads(resp.body)
         self.assertEqual(data["status"], "running")
-        self.assertEqual(data["changes"], ["CR-1"])
+        self.assertEqual(data["changes"], [_url])
         self.assertTrue(data["run_id"])
+        run = self.mod._RUNS[0]
         # run recorded with an initialized progress map
-        self.assertEqual(self.mod._RUNS[0]["progress"], {})
+        self.assertEqual(run["progress"], {})
+        # change_ids are the SAME keys the driver writes progress under, so the
+        # dashboard aligns each row with its phase instead of showing "queued"
+        # forever (regression guard for the raw-link-vs-change-id mismatch).
+        from sage_lib import review_driver as _rd
+        self.assertEqual(run["change_ids"], [_rd.change_id_for(_url)])
+        self.assertEqual(run["change_ids"], ["GH-kirodotdev_labs-kiroclaw-20"])
         await asyncio.sleep(0)               # let the no-op bg task drain
 
 
