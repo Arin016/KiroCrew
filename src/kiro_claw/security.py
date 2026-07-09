@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import json
 import logging
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs
 
+from kiro_claw.executors import maintenance_executor
 from kiro_claw.sel import SecurityEvent, SecurityEventLog
 
 if TYPE_CHECKING:
@@ -101,7 +103,12 @@ _CMD_SPLIT_RE = re.compile(r"[;\n`]|\|\|?|&&|&(?!&)|\$\(|\)")
 # remote) is still caught inside ``$(git push)``, `` `git push` ``, ``git push|cat``,
 # ``git push&``, etc., not just when followed by a space.
 _GIT_PUBLISH_RE = re.compile(
-    r"(?:^|[;&|`\n]|\$\()\s*git\s+(?:-\S+\s+(?:[^-]\S*\s+)?)*push(?=\s|[)`;&|]|$)"
+    # ``[^-\s]`` (not ``[^-]``): the optional non-flag arg after a flag must
+    # NOT start with whitespace, otherwise inter-token whitespace could be
+    # matched either by the preceding ``\s+`` or by this group's leading char —
+    # an ambiguity that backtracks exponentially (ReDoS) on whitespace-laden
+    # flag runs when the trailing ``push`` is absent.
+    r"(?:^|[;&|`\n]|\$\()\s*git\s+(?:-\S+\s+(?:[^-\s]\S*\s+)?)*push(?=\s|[)`;&|]|$)"
 )
 
 # Glue-evasion guard: bash command-substitution / quoting tricks that evaluate
@@ -125,6 +132,264 @@ def _is_git_publish(text_lower: str) -> bool:
     push``, ``git commit -m '...push...'``, ``git log --grep push``, etc.
     """
     return bool(_GIT_PUBLISH_RE.search(text_lower) or _GIT_PUBLISH_GLUE_RE.search(text_lower))
+
+
+# ── Feature-branch push gate ──
+# ``_is_git_publish`` only detects that a command IS a ``git push``.  The
+# decision of whether to ALLOW it is made by ``_is_push_to_protected_branch``
+# at the single enforcement point in ``is_denied``.  The push detector is a
+# pure predicate (no side effects); the deny audit (``_emit_deny_event``) and
+# the allow audit (``_schedule_push_allow_audit``) are emitted by the caller so
+# the SEL trail always reflects the FINAL outcome (never an allow for a command
+# that is ultimately denied by a later glob pattern).
+
+# Protected branch names that ``git push`` must never target directly.  A push
+# to any of these (or a bare push, which may resolve to one) is blocked so the
+# change goes through the normal PR/code-review flow.  KiroClaw (OSS) uses
+# ``main``; ``mainline``/``master`` are covered for internal/mirror clones.
+_PROTECTED_BRANCHES = {"main", "mainline", "master"}
+
+# Push flags that push EVERY local branch (protected ones included) regardless
+# of any explicit refspec, so a per-branch target check cannot vouch for them.
+# Presence of any of these denies the push outright (kept in lockstep with the
+# ``--(mirror|all)`` regex in config/defaults.json).
+_PUSH_ALL_BRANCHES_FLAGS = {"--mirror", "--all"}
+
+# Symbolic refs that resolve at runtime — cannot statically verify safety.
+# If the agent is on main and pushes HEAD, it pushes to main on the remote.
+_AMBIGUOUS_REFS = {"head", "@", "fetch_head"}
+
+# Refspecs containing shell expansion or git-revision syntax cannot be
+# statically verified — deny them as ambiguous.
+_AMBIGUOUS_REFSPEC_RE = re.compile(r"[$`]|@\{")
+
+# TRUE shell command separators (NOT command-substitution boundaries). Used to
+# scan the PRE-SPLIT text for substitution glued into a push target — see
+# ``_is_push_to_protected_branch``.
+_CMD_SEPARATOR_RE = re.compile(r"&&|\|\||[;|\n]")
+
+# Shell expansions that fuse text INTO a word, so the literal command hides the
+# real push target. Any of these inside a git-publish command is unverifiable
+# -> deny (fail closed):
+#   - command substitution   $(...)   and backticks  `...`
+#   - parameter expansion     ${...}
+#   - BRACE expansion         {a,b} / {1..5}  -- bash expands ``ma{i,i}n`` to
+#     ``main`` and ``{main,x}`` to ``main x`` BEFORE git sees the token, so a
+#     brace group containing a comma or ``..`` must be treated as ambiguous.
+_AMBIGUOUS_EXPANSION_RE = re.compile(r"\$\(|\$\{|`|\{[^{}]*(?:,|\.\.)[^{}]*\}")
+
+
+def _dequote_token(token: str) -> str:
+    """Collapse shell quoting/escaping to the literal the shell passes to git.
+
+    bash merges adjacent quoted/unquoted fragments into ONE word, so
+    ``ma"in"``, ``m''ain`` and ``ma\\in`` all reach git as the literal
+    ``main``. ``str.strip`` removes only the OUTERMOST quotes, leaving interior
+    quote/backslash characters that make the token compare unequal to a
+    protected name — an evasion of this gate. Remove ALL single/double quotes
+    and backslash escapes so the comparison sees the shell-resolved word.
+    """
+    return token.replace("'", "").replace('"', "").replace("\\", "")
+
+
+def _git_push_args(segment: str) -> list[str] | None:
+    """Return the tokens AFTER the ``push`` subcommand if *segment* is a git push.
+
+    Pure-Python (no regex backtracking — CodeQL ReDoS-safe) replacement for a
+    ``\\bpush\\b`` scan. It anchors ``push`` as the git subcommand — the first
+    non-flag token after ``git`` — so a segment that merely contains the word
+    "push" (e.g. ``echo remember-to-push``) is NOT treated as a push and
+    returns None. Skips leading flags, and a single non-flag value that a flag
+    may take (e.g. ``-C <path>``) — but never swallows ``push`` itself.
+    """
+    tokens = segment.split()
+    if "git" not in tokens:
+        return None
+    i = tokens.index("git") + 1
+    while i < len(tokens) and tokens[i].startswith("-"):
+        i += 1  # skip the flag
+        # A flag may take one separate non-flag value (e.g. ``-C <path>``);
+        # never consume the ``push`` subcommand as a flag value.
+        if i < len(tokens) and not tokens[i].startswith("-") and tokens[i] != "push":
+            i += 1
+    if i < len(tokens) and tokens[i] == "push":
+        return tokens[i + 1:]
+    return None
+
+
+def _is_protected_branch_name(name: str) -> bool:
+    """Return True if *name* is a protected branch or an ambiguous ref."""
+    return name in _PROTECTED_BRANCHES or name in _AMBIGUOUS_REFS
+
+
+def _normalize_ref(ref: str) -> str:
+    """Reduce a push destination ref to the bare branch name git resolves it to.
+
+    Git accepts several destination-side spellings that all resolve to the same
+    branch server-side: ``main``, ``heads/main``, ``refs/heads/main``,
+    ``remotes/<remote>/main``, ``refs/remotes/<remote>/main``. Stripping only
+    ``refs/heads/`` let ``heads/main`` and the ``remotes/`` forms dodge the
+    protected-name check (they still resolve to a protected branch on the
+    server). Normalize every spelling to the bare name so the comparison cannot
+    be evaded by ref-path spelling.
+    """
+    ref = ref.removeprefix("refs/")
+    if ref.startswith("remotes/"):
+        parts = ref.split("/", 2)  # remotes/<remote>/<branch>
+        if len(parts) == 3:
+            return parts[2]
+    return ref.removeprefix("heads/")
+
+
+def _push_segment_targets_protected(arg_tokens: list[str]) -> bool:
+    """Return True if a single push's argument tokens target protected/bare.
+
+    *arg_tokens* are the tokens following the ``push`` subcommand within ONE
+    shell segment (separators already removed).  A bare push (no explicit
+    branch) is treated as protected because the current branch might be a
+    protected one.  Force flags (``--force``/``-f``/``--force-with-lease``)
+    do NOT by themselves make a feature-branch push protected — force-push to
+    a feature branch is a normal PR/rebase workflow — but a force-push to a
+    protected branch is still blocked, because the target check below fires
+    regardless of any flags (force flags are stripped before the check).
+    """
+    tokens = [_dequote_token(t) for t in arg_tokens]
+    # Deny-by-default: flags that push ALL local branches (protected ones
+    # included) bypass any per-branch target check. Detect them BEFORE
+    # stripping flags and deny outright, so the always-on gate never relies on
+    # the secondary regex layer for this case.
+    if any(tok in _PUSH_ALL_BRANCHES_FLAGS for tok in tokens):
+        return True
+    # Skip flags (tokens starting with -); non_flags[0] is the remote and
+    # non_flags[1:] are the refspecs/branches.
+    non_flags = [t for t in tokens if t and not t.startswith("-")]
+    if len(non_flags) < 2:
+        # Bare ``push`` or ``push <remote>`` with no explicit branch — the
+        # current branch might be protected, so deny.
+        return True
+    for refspec in non_flags[1:]:
+        # Refspecs with shell expansion ($, `) or git-revision syntax
+        # (@{upstream}, @{u}) cannot be statically verified — deny.
+        if _AMBIGUOUS_REFSPEC_RE.search(refspec):
+            return True
+        clean = refspec.lstrip("+")  # strip force-push '+' ref prefix
+        # Wildcard refspec (refs/heads/*:refs/heads/*, *:*, feat*) expands to
+        # MANY refs — like --mirror/--all it can include a protected branch and
+        # cannot be statically verified. Deny.
+        if "*" in clean:
+            return True
+        # Handle "local:remote" refspec format — the remote side is the target.
+        target_branch = clean.split(":")[-1] if ":" in clean else clean
+        # Normalize every ref spelling git resolves server-side (heads/main,
+        # remotes/<remote>/main, refs/... ) to the bare name so the path form
+        # cannot dodge the protected-name check.
+        if _is_protected_branch_name(_normalize_ref(target_branch)):
+            return True
+    return False
+
+
+def _is_push_to_protected_branch(text_lower: str) -> bool:
+    """Return True if ANY ``git push`` in the command targets a protected branch.
+
+    A bare ``git push`` (no explicit branch) is BLOCKED because the current
+    branch might be main/mainline. Only explicit non-protected branch targets
+    are allowed. ALL refspecs of ALL push sub-invocations are checked: git
+    accepts multiple refspecs, and a shell command can chain multiple pushes
+    (``push origin feat && push origin main``). Force pushes to feature
+    branches are allowed (normal PR workflow); force pushes to protected
+    branches are blocked by the target check.
+
+    Iterates the command's TRUE shell segments (split only on ``;`` / ``&&`` /
+    ``||`` / ``|`` / newline — NOT on ``$(`` / backtick, which are glued into a
+    single word by the shell). Each segment that is a git-publish (detected via
+    ``_is_git_publish``, so glue-evasion like ``git$(echo ' ')push`` is seen) is
+    validated and FAILS CLOSED:
+
+    * any command-substitution / brace-expansion / backtick glue in the segment
+      — in the verb OR the target (``origin ma$(echo)in`` -> ``main``) — is
+      unverifiable -> deny;
+    * a segment that ``_is_git_publish`` flags as a push but ``_git_push_args``
+      cannot cleanly parse (obfuscated) -> deny;
+    * a bare push, ambiguous ref, or explicit protected target -> deny.
+
+    Only an explicit non-protected branch target is allowed. EVERY push segment
+    is checked (a benign feature push cannot vouch for a sibling protected one).
+    Force pushes to feature branches stay allowed (normal PR workflow). If a
+    push was detected upstream but no segment here parses as one, denies.
+    """
+    saw_push = False
+    for command in _CMD_SEPARATOR_RE.split(text_lower):
+        # ``_is_git_publish`` (not ``_git_push_args``) gates the checks so that
+        # glue-evasion forms — which do NOT tokenize to a clean ``git`` token —
+        # are still recognized as pushes and cannot slip past the ambiguity /
+        # fail-closed guards below.
+        if not _is_git_publish(command):
+            continue
+        saw_push = True
+        # Substitution / expansion glue anywhere in a push command makes it
+        # unverifiable (the shell fuses it into the verb or the target word).
+        if _AMBIGUOUS_EXPANSION_RE.search(command):
+            return True
+        args = _git_push_args(command)
+        if args is None:
+            # Detected as a push but not cleanly parseable (obfuscated) — deny.
+            return True
+        if _push_segment_targets_protected(args):
+            return True
+    if not saw_push:
+        # A push was detected upstream (e.g. glue-evasion ``git_push``) but no
+        # clean ``push`` segment survived splitting — deny to be safe.
+        return True
+    return False
+
+
+def _schedule_push_allow_audit(command: str) -> None:
+    """Fire-and-forget audit write offloaded to the maintenance executor.
+
+    Avoids blocking the event loop on file I/O (same concern as
+    ``_emit_deny_event`` — both should be offloaded per the
+    no-blocking-call-on-event-loop guideline).  Falls back to an inline
+    synchronous write when no event loop is running (sync/test contexts).
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(maintenance_executor(), _emit_push_allow_event, command)
+    except RuntimeError:
+        # No running loop (called from a sync test or non-async context) —
+        # fall back to inline write (acceptable: no event loop to block).
+        _emit_push_allow_event(command)
+
+
+def _emit_push_allow_event(command: str) -> None:
+    """Emit a SEL audit event when a feature-branch push is allowed through.
+
+    Best-effort: an audit failure is logged at WARNING and does not affect the
+    allow decision (the push already passed the protected-branch gate).
+    """
+    try:
+        sel = SecurityEventLog()
+        sel.log(
+            SecurityEvent(
+                event_id=uuid.uuid4().hex[:16],
+                timestamp=datetime.now(tz=timezone.utc).isoformat(),
+                event_type="push_allowed",
+                caller_identity="",
+                agent="kiroclaw",
+                source="security",
+                operation="git_push",
+                outcome="allowed",
+                resources="feature_branch_push",
+                metadata={
+                    "command": command[:200],
+                    "mechanism": "BRANCH_GATE",
+                },
+            )
+        )
+    except Exception:
+        logger.warning(
+            "SEL audit failed for push_allowed (allow stands)",
+            exc_info=True,
+        )
 
 
 # ── Sensitive Paths ──
@@ -906,9 +1171,19 @@ def is_denied(tool_name: str, extra_patterns: list[str] | None = None) -> str | 
     # / ``)`` would otherwise scatter the ``git``/``push`` tokens across
     # segments.  ``_is_git_publish`` is verb-anchored, so a commit message or
     # branch name merely containing "push" does not match.
+    #
+    # A push to a PROTECTED branch (or a bare/ambiguous push) is denied here;
+    # an explicit FEATURE-branch push is allowed to fall through to the normal
+    # glob passes (so any other deny pattern in a compound command still
+    # applies), and we record the allow INTENT now — the ``push_allowed`` audit
+    # is emitted only at a SUCCESS return path below, so the SEL trail reflects
+    # the FINAL outcome (never an allow for a command ultimately denied).
+    push_allow_pending = False
     if _is_git_publish(lower):
-        _emit_deny_event(tool_name, _GIT_PUBLISH_DENY_LABEL, lower)
-        return f"Blocked by security policy: {_GIT_PUBLISH_DENY_LABEL}"
+        if _is_push_to_protected_branch(lower):
+            _emit_deny_event(tool_name, _GIT_PUBLISH_DENY_LABEL, lower)
+            return f"Blocked by security policy: {_GIT_PUBLISH_DENY_LABEL}"
+        push_allow_pending = True
 
     # ── Pass 1: whole-string deny ──
     # If any pattern matches the full input AND no exception matches the
@@ -933,6 +1208,8 @@ def is_denied(tool_name: str, extra_patterns: list[str] | None = None) -> str | 
 
     if pass2_candidate_pattern is None:
         # No deny match at all on the whole string.
+        if push_allow_pending:
+            _schedule_push_allow_audit(lower)
         return None
 
     # ── Pass 2: per-segment exception evaluation ──
@@ -963,6 +1240,10 @@ def is_denied(tool_name: str, extra_patterns: list[str] | None = None) -> str | 
                     continue
                 _emit_deny_event(tool_name, pattern, seg_lower)
                 return f"Blocked by security policy: {pattern}"
+    # All segments cleared the glob passes — the input is allowed.  If it was a
+    # feature-branch push, emit the deferred allow audit now (final outcome).
+    if push_allow_pending:
+        _schedule_push_allow_audit(lower)
     return None
 
 

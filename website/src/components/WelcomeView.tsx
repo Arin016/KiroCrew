@@ -3,7 +3,6 @@ import { createPortal } from 'react-dom'
 import { Droplet, EyeOff, Ghost, RefreshCw, Undo2, VenetianMask } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { KiroGhost } from './KiroGhost'
-import { useBranding } from '../hooks/useBranding'
 import { api } from '../api/client'
 
 interface WelcomeViewProps {
@@ -80,7 +79,6 @@ export default function WelcomeView({
   cleanMode,
   onToggleClean,
 }: WelcomeViewProps) {
-  const { botName, avatar } = useBranding()
   const [anonOpen, setAnonOpen] = useState(false)
   const anonBtnRef = useRef<HTMLButtonElement>(null)
   const anonPopRef = useRef<HTMLDivElement>(null)
@@ -101,7 +99,7 @@ export default function WelcomeView({
 
   return (
     <div className="flex flex-col items-center w-full gap-6 px-8">
-      {mode === 'orchestrator' && <img src={avatar} alt={botName} className="w-16 h-16 rounded-xl object-cover" />}
+      {mode === 'orchestrator' && <KiroGhost size={64} className="drop-shadow-lg shrink-0 animate-float" />}
       <div className="text-center">
         <div className="flex items-center justify-center gap-4">
           {mode !== 'orchestrator' && <KiroGhost size={64} className="drop-shadow-lg shrink-0 animate-float" />}
