@@ -54,16 +54,22 @@ def audit_governance_degraded(
     scope: str = "",
     app: str = "",
     log_warning: bool = True,
+    failed_closed: bool = False,
 ) -> None:
-    """Surface a governance fail-OPEN (a chokepoint degraded to permit/None).
+    """Surface a governance degradation (a chokepoint that lost its opinion).
 
     Every governance chokepoint catches an unexpected
-    (non-``PlatformCompositionError``) error and degrades to "no opinion" so a
-    latent regression cannot wedge the surface — but that silently drops the
-    operator's narrowing for a security-critical control.  Logging only at
-    ``debug`` (invisible at prod level) makes the fail-open undetectable until an
-    incident.  This helper makes it observable: a WARNING log AND a file-backed
-    ``governance_degraded`` SEL record.
+    (non-``PlatformCompositionError``) error.  The pure-resolution helpers
+    (``governance_permits`` / ``governance_floor_ordinal``) degrade to "no
+    opinion" so a latent regression cannot wedge the surface; the HARDENED
+    chokepoints (subagent spawn, Slack enterprise posture, admission load) instead
+    DENY.  Either way the operator's narrowing was not applied as configured, so
+    this helper makes it observable: a log line, a process-global health mark (for
+    the dashboard indicator), AND a file-backed ``governance_degraded`` SEL record.
+
+    ``failed_closed=True`` (AVP-23427) marks the DENY disposition: the log is
+    emitted at ERROR (vs WARNING for a fail-open degrade) and the SEL is written
+    with ``critical=True`` (synchronous), matching other security-critical audits.
 
     ``app`` records which per-app profile was being resolved (the messaging /
     memory-writes / channels chokepoints pass ``app=_governance_app()`` into
@@ -78,36 +84,55 @@ def audit_governance_degraded(
     Best-effort: the SEL emit is guarded so the degrade path can never raise out
     of an except-branch.
     """
+    disposition = (
+        "FAILED CLOSED (denied)" if failed_closed else "FAILED OPEN (degraded to no-opinion)"
+    )
     if log_warning:
-        logger.warning(
-            "governance chokepoint %r FAILED OPEN (degraded to no-opinion); operator "
-            "narrowing not applied for scope=%r session=%r app=%r",
+        emit = logger.error if failed_closed else logger.warning
+        emit(
+            "governance chokepoint %r %s; operator narrowing not applied for "
+            "scope=%r session=%r app=%r",
             chokepoint,
+            disposition,
             scope,
             session_key,
             app,
             exc_info=True,
         )
+    # Process-global health signal for the dashboard indicator (best-effort).
+    try:
+        from kiro_claw.platform.governance_health import mark_governance_incident
+
+        mark_governance_incident(
+            "failed_closed" if failed_closed else "degraded", detail=f"{chokepoint}:{scope}"
+        )
+    except Exception:
+        logger.debug("governance health mark unavailable", exc_info=True)
     try:
         from kiro_claw.sel import sel
 
         sel().log_governance_degraded(
-            session_key=session_key, chokepoint=chokepoint, scope=scope, app=app
+            session_key=session_key,
+            chokepoint=chokepoint,
+            scope=scope,
+            app=app,
+            failed_closed=failed_closed,
         )
     except Exception:
-        # Escalate to WARNING even when log_warning=False: if the SEL write
-        # ITSELF fails (disk full, read-only FS, SEL singleton crash) and we
-        # also suppressed the logger, the fail-open would be COMPLETELY invisible
+        # Escalate to ERROR even when log_warning=False: if the SEL write ITSELF
+        # fails (disk full, read-only FS, SEL singleton crash) and we also
+        # suppressed the logger, the governance trip would be COMPLETELY invisible
         # at prod log level — defeating the observability invariant this helper
         # exists to establish.  The stdio JSON-RPC concern that motivates
-        # log_warning=False is the lesser risk vs. an unrecorded governance
-        # fail-open, and this path only fires when auditing is already broken.
-        logger.warning(
+        # log_warning=False is the lesser risk vs. an unrecorded governance trip,
+        # and this path only fires when auditing is already broken.
+        logger.error(
             "governance_degraded SEL emit FAILED for chokepoint=%r scope=%r app=%r — "
-            "the fail-open is otherwise UNRECORDED",
+            "the governance %s is otherwise UNRECORDED",
             chokepoint,
             scope,
             app,
+            "denial" if failed_closed else "fail-open",
             exc_info=True,
         )
 

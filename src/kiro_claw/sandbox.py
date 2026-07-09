@@ -550,10 +550,20 @@ def _build_seatbelt_profile(sandbox_level: str = "strict") -> str:
             rules.append(f'(deny file-read* (require-all (subpath "{escaped}") {exceptions}))')
         else:
             rules.append(f'(deny file-read* (subpath "{escaped}"))')
+        # AVP-23427: deny creating a HARDLINK whose target is under this dir.
+        # Seatbelt's file-read* deny is path-based, so a hardlink at a
+        # non-denied path (e.g. /tmp) reads the same inode past the deny rule.
+        # ``file-link`` fires on the link TARGET, so this stops the sandboxed
+        # agent from minting such a hardlink in the first place.  Blanket (no
+        # exposed-file exception): the agent never needs to hardlink a
+        # credential-dir file, and blocking it is harmless.
+        rules.append(f'(deny file-link (subpath "{escaped}"))')
     for f in files:
         target = os.path.join(home, f)
         escaped = target.replace('"', '\\"')
         rules.append(f'(deny file-read* (literal "{escaped}"))')
+        # AVP-23427: also deny hardlinking the protected file (see above).
+        rules.append(f'(deny file-link (literal "{escaped}"))')
 
     # .ssh: deny all access except reading known_hosts (strict only)
     if sandbox_level == "strict":
@@ -566,6 +576,10 @@ def _build_seatbelt_profile(sandbox_level: str = "strict") -> str:
             f' (require-not (literal "{ssh_kh_escaped}"))))'
         )
         rules.append(f'(deny file-write* (subpath "{ssh_escaped}"))')
+        # AVP-23427: block hardlinking any .ssh file (private keys) out of the
+        # denied subtree.  Blanket over the whole subpath — no known_hosts
+        # exception, since a hardlink to known_hosts has no legitimate use.
+        rules.append(f'(deny file-link (subpath "{ssh_escaped}"))')
 
     return _SEATBELT_PROFILE.format(deny_rules="\n".join(rules))
 

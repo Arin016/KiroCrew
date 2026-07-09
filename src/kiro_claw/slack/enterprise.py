@@ -95,9 +95,10 @@ def _governance_posture_permits_workspace(enterprise_id: str, team_id: str) -> b
     ``allowed_team_ids``) — an enterprise ceiling the agent cannot edit. We query
     it via ``governance_permits("channels", "slack/<leaf>:<value>")`` for each
     candidate id. Default-open (True) when no policy / no posture governs it, so a
-    standalone host is unaffected. Fail-closed only via PlatformCompositionError
-    (a host that could not compose its companion); any other error → permissive
-    (the config allowlist above already ran).
+    standalone host is unaffected. Fail-closed (deny) on ANY error — a
+    PlatformCompositionError (a host that could not compose its companion) OR any
+    other unexpected error → deny (AVP-23427); a governance error must not
+    silently permit a workspace the operator's posture would restrict.
     """
     from kiro_claw.platform.context import PlatformCompositionError
 
@@ -130,10 +131,10 @@ def _governance_posture_permits_workspace(enterprise_id: str, team_id: str) -> b
     except PlatformCompositionError:
         raise
     except Exception:
-        # Wrapped: a late-import failure must not raise out of this except-branch
-        # (the posture check is best-effort above the operator allowlist).
-        # session_key=_host so the degrade SEL records the honest "host" surface
-        # (this in-process admission check is not driven by a Slack session).
+        # Fail CLOSED (AVP-23427): a governance evaluation error must DENY the
+        # workspace, not silently permit it (previously returned True).  session
+        # key=_host so the degrade SEL records the honest "host" surface (this
+        # in-process admission check is not driven by a Slack session).
         try:
             from kiro_claw.platform.governance_profiles import (
                 HOST_SESSION_KEY,
@@ -141,11 +142,14 @@ def _governance_posture_permits_workspace(enterprise_id: str, team_id: str) -> b
             )
 
             audit_governance_degraded(
-                "slack_enterprise_posture", session_key=HOST_SESSION_KEY, scope="channels.posture"
+                "slack_enterprise_posture",
+                session_key=HOST_SESSION_KEY,
+                scope="channels.posture",
+                failed_closed=True,
             )
         except Exception:
             logger.debug("governance degrade audit unavailable", exc_info=True)
-        return True
+        return False
 
 
 def validate_enterprise(

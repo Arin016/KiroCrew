@@ -381,7 +381,19 @@ def run_first_run_setup() -> None:
     except Exception:
         logger.warning("First-run: shim install failed", exc_info=True)
 
-    # 2. Stale managed-MCP purge — one-time, marker-guarded.
+    # 2. Admission-policy seed — one-time, self-guarded by its OWN marker.  Run
+    #    BEFORE the stale-MCP early return below so an EXISTING install (which
+    #    already has the stale-MCP marker) still gets seeded on its next start;
+    #    otherwise those installs would have no policy file and newly fail closed.
+    try:
+        from kiro_claw.platform.admission import seed_default_policy  # noqa: PLC0415
+
+        if seed_default_policy():
+            logger.info("First-run: seeded default admission policy")
+    except Exception:
+        logger.warning("First-run: admission policy seed failed", exc_info=True)
+
+    # 3. Stale managed-MCP purge — one-time, marker-guarded.
     if _STALE_MCP_PURGE_MARKER.exists():
         return
     try:

@@ -17,6 +17,7 @@ from kiro_claw.platform.admission import (
     AdmissionPolicy,
     evaluate_admission,
     load_admission_policy,
+    seed_default_policy,
 )
 from kiro_claw.platform.context import (
     PROFILE_STANDALONE,
@@ -100,6 +101,13 @@ def discover_companion_context(
     # Decide allow/reject BEFORE ep.load() so a rejected plugin's code never
     # runs.  The policy is the fleet trust root, never sourced from the plugin.
     if policy is None:
+        # Seed the permissive first-run default BEFORE consulting the policy.  A
+        # fleet's FIRST boot runs bootstrap → discovery (here) BEFORE the
+        # gateway's ``run_first_run_setup`` seed, so without this a companion
+        # would be rejected by the fail-closed default and boot would abort.
+        # Marker-guarded + idempotent: a later DELETION is NOT re-seeded, so
+        # tampering still fails closed (AVP-23427).
+        seed_default_policy()
         policy = load_admission_policy()
     decision = evaluate_admission(ep, policy)
     if not decision.allowed:

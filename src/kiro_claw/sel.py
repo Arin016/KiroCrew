@@ -444,6 +444,7 @@ class SecurityEventLog:
         scope: str = "",
         app: str = "",
         reason: str = "",
+        failed_closed: bool = False,
     ) -> None:
         """Record that a governance chokepoint FAILED OPEN (degraded to permit).
 
@@ -456,6 +457,12 @@ class SecurityEventLog:
         which must not write to stdout). ``app`` (when the degraded chokepoint
         resolved a per-app profile) is recorded so an investigator can tell WHICH
         app's narrowing was bypassed. ``reason`` is redacted before persistence.
+
+        ``failed_closed=True`` inverts the disposition (AVP-23427): the chokepoint
+        DENIED the action rather than degrading to permit.  The event is written
+        with ``critical=True`` (synchronously, raising on a filesystem failure)
+        and its ``outcome`` is ``"blocked"``, matching the severity of other
+        security-critical SEL audits so the fail-closed trip is durably recorded.
         """
         from kiro_claw.platform.context import redact_via_context
 
@@ -469,14 +476,16 @@ class SecurityEventLog:
                 agent="kiroclaw",
                 source=_infer_source(session_key),
                 operation=chokepoint[:_MAX_ARG_LEN],
-                outcome="degraded",
+                outcome="blocked" if failed_closed else "degraded",
                 resources="",
                 metadata={
                     "scope": scope,
                     "app": app,
                     "reason": safe_reason[:_MAX_ARG_LEN],
+                    "disposition": "failed_closed" if failed_closed else "failed_open",
                 },
-            )
+            ),
+            critical=failed_closed,
         )
 
     def log_api_access(

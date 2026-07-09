@@ -1036,6 +1036,11 @@ class DashboardState:
             # True when the gateway has wired up a live Slack client (Socket Mode
             # connected). None in pure-dashboard mode or when Slack is disabled.
             "slack_connected": self.slack_client is not None,
+            # Governance enforcement health (AVP-23427): "active" (enforcing),
+            # "disabled" (permissive default / not restricting), "degraded" (a
+            # fail-closed trip, integrity mismatch, or unverified policy this
+            # session), or "unknown" (policy not yet loaded).  Pure in-memory read.
+            "governance": _governance_status(),
         }
 
     _APPROVAL_TIMEOUT = 7200  # 2 hours — triggers pause (not skip/fail) via deny path
@@ -1946,3 +1951,13 @@ def _fmt_duration(secs: int) -> str:
     h, rem = divmod(secs, 3600)
     m, s = divmod(rem, 60)
     return f"{h}h {m}m" if h > 0 else f"{m}m {s}s"
+
+
+def _governance_status() -> str:
+    """Governance health for the status snapshot (never raises)."""
+    try:
+        from kiro_claw.platform.governance_health import governance_status
+
+        return governance_status()
+    except Exception:
+        return "unknown"

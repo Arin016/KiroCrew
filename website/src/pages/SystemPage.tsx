@@ -60,6 +60,7 @@ export default function SystemPage({ embedded }: { embedded?: boolean } = {}) {
             <SysCard title="Storage"><Info k="Total" v={d?.disk_total_gb ? d.disk_total_gb + ' GB' : '—'} /><Info k="Free" v={d?.disk_free_gb ? d.disk_free_gb + ' GB' : '—'} /></SysCard>
             <SysCard title="Ollama"><Info k="Status" v={d?.ollama_running ? (d?.ollama_remote ? <><span className="inline-block w-2.5 h-2.5 rounded-full bg-[var(--ok)]" /> Remote</> : <><span className="inline-block w-2.5 h-2.5 rounded-full bg-[var(--ok)]" /> Running</>) : <><span className="inline-block w-2.5 h-2.5 rounded-full bg-[var(--muted)]" /> Stopped</>} />{d?.ollama_running && <><Info k="PID" v={d?.ollama_pid} /><Info k="Memory (RSS)" v={d?.ollama_mem_mb ? d.ollama_mem_mb + ' MB' : '—'} /></>}</SysCard>
             <SysCard title="Slack"><Info k="Status" v={<span style={{ color: status?.slack_connected ? 'var(--ok)' : 'var(--muted)' }}>{status?.slack_connected ? 'Connected' : 'Not connected'}</span>} /></SysCard>
+            <SysCard title="Governance"><Info k="Status" v={<GovernanceStatus value={status?.governance} />} /></SysCard>
           </div>
         </div>
       </div>
@@ -73,4 +74,16 @@ function SysCard({ title, children }: { title: string; children: React.ReactNode
 
 function Info({ k, v }: { k: string; v?: ReactNode }) {
   return <div className="flex justify-between gap-3 py-2 border-b border-border text-sm last:border-b-0"><span className="text-muted shrink-0">{k}</span><span className="text-text font-medium font-mono text-[13px] break-all text-right">{v ?? '—'}</span></div>
+}
+
+/** Governance enforcement health indicator (AVP-23427). Minimal colored text. */
+function GovernanceStatus({ value }: { value?: 'active' | 'degraded' | 'disabled' | 'unknown' }) {
+  const map = {
+    active: { label: 'Active', color: 'var(--ok)', tip: 'Governance is enforcing an admission policy; no degradation detected.' },
+    degraded: { label: 'Degraded', color: 'var(--danger)', tip: 'A governance check failed closed, an integrity mismatch was detected, or the admission policy is unverified (absent/unreadable). Investigate the SEL audit log.' },
+    disabled: { label: 'Disabled', color: 'var(--muted)', tip: 'No enforcing admission policy is configured (permissive default). Plugins are admitted unless explicitly banned.' },
+    unknown: { label: 'Unknown', color: 'var(--muted)', tip: 'Governance status not yet determined this session.' },
+  } as const
+  const s = map[value ?? 'unknown'] ?? map.unknown
+  return <span style={{ color: s.color }} className="inline-flex items-center gap-1">{s.label}<InfoTip text={s.tip} /></span>
 }

@@ -14,6 +14,8 @@ export interface StatusData {
   no_crons?: boolean
   /** True when the gateway has a live Slack (Socket Mode) connection. */
   slack_connected?: boolean
+  /** Governance enforcement health (AVP-23427). */
+  governance?: 'active' | 'degraded' | 'disabled' | 'unknown'
 }
 
 export interface SystemData {

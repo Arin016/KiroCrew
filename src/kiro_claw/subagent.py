@@ -130,7 +130,8 @@ def _vet_spawn_governance(parent_session_key: str, agent: str) -> str | None:
     2. if enabled with an ``agents`` scope, the target *agent* must be permitted.
 
     Best-effort beyond the always-on guards: a ``PlatformCompositionError``
-    propagates (fail-closed CPP); any other error returns None (no opinion).
+    propagates (fail-closed CPP); any other error returns a denial reason
+    (fail-closed, AVP-23427) rather than None/no-opinion.
     """
     from kiro_claw.platform.context import PlatformCompositionError
 
@@ -156,17 +157,22 @@ def _vet_spawn_governance(parent_session_key: str, agent: str) -> str | None:
     except PlatformCompositionError:
         raise
     except Exception:
-        # Wrapped: a late-import failure must not turn the soft fail-open into a
-        # hard fail that wedges spawn (CR-284272012).
+        # Fail CLOSED (AVP-23427): a governance evaluation error must DENY the
+        # spawn, not silently permit it (previously returned None = no opinion =
+        # allow).  PlatformCompositionError already propagates above; every other
+        # error lands here and is audited before denial.
         try:
             from kiro_claw.platform.governance_profiles import audit_governance_degraded
 
             audit_governance_degraded(
-                "subagent_spawn", session_key=parent_session_key, scope="capabilities.spawn"
+                "subagent_spawn",
+                session_key=parent_session_key,
+                scope="capabilities.spawn",
+                failed_closed=True,
             )
         except Exception:
             logger.debug("governance degrade audit unavailable", exc_info=True)
-        return None
+        return "subagent spawn denied: governance evaluation failed (fail-closed)"
 
 
 def _redact(text: str) -> str:

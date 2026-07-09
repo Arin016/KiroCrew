@@ -144,6 +144,40 @@ class TestBuildSeatbeltProfile:
         # .aws should not appear as a subpath deny
         assert f'(subpath "{home}/.aws")' not in profile
 
+    # ── AVP-23427: hardlink bypass ──
+    def test_strict_denies_hardlink_creation_to_dirs(self):
+        """Each read-denied dir must ALSO deny file-link (hardlink) creation, so a
+        sandboxed agent cannot mint a hardlink at a non-denied path (/tmp) that
+        reads the same inode past the path-based file-read* deny."""
+        profile = _build_seatbelt_profile("strict")
+        home = str(Path.home())
+        for d in _STRICT_DIRS:
+            assert f'(deny file-link (subpath "{os.path.join(home, d)}"))' in profile
+
+    def test_strict_denies_hardlink_to_individual_files(self):
+        profile = _build_seatbelt_profile("strict")
+        home = str(Path.home())
+        for f in _CC_FILES:
+            assert f'(deny file-link (literal "{os.path.join(home, f)}"))' in profile
+
+    def test_strict_denies_hardlink_to_ssh(self):
+        profile = _build_seatbelt_profile("strict")
+        home = str(Path.home())
+        assert f'(deny file-link (subpath "{os.path.join(home, ".ssh")}"))' in profile
+
+    def test_cc_mode_denies_hardlink_to_files(self):
+        profile = _build_seatbelt_profile("cc")
+        home = str(Path.home())
+        for f in _CC_FILES:
+            assert f'(deny file-link (literal "{os.path.join(home, f)}"))' in profile
+
+    def test_uses_valid_file_link_token_not_star(self):
+        """``file-link*`` is NOT a valid SBPL token (unbound variable); the rule
+        must use the bare ``file-link`` operation."""
+        profile = _build_seatbelt_profile("strict")
+        assert "(deny file-link " in profile
+        assert "file-link*" not in profile
+
 
 class TestBuildLauncherScript:
     def test_strict_script_contains_dirs(self):

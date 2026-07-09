@@ -288,7 +288,8 @@ class TestEnforceRequiresManifest:
 
 
 class TestPolicyLoading:
-    def test_no_policy_is_open_default(self, monkeypatch, tmp_path):
+    def test_no_policy_fails_closed(self, monkeypatch, tmp_path):
+        """AVP-23427: an absent policy file must fail closed, not admit-all."""
         monkeypatch.delenv("KIROCLAW_ADMISSION_POLICY", raising=False)
         monkeypatch.setattr(
             "kiro_claw.platform.admission._POLICY_DEFAULT_PATH", tmp_path / "nope.json"
@@ -296,8 +297,10 @@ class TestPolicyLoading:
         from kiro_claw.platform.admission import load_admission_policy
 
         policy = load_admission_policy()
-        assert policy.mode == MODE_OPEN
-        assert policy.approved is None
+        # fail-closed: enforce + signature + empty allowlist (admits nothing).
+        assert policy.mode == MODE_ENFORCE
+        assert policy.require_signature
+        assert policy.approved == []
 
     def test_unreadable_policy_fails_closed(self, monkeypatch, tmp_path):
         bad = tmp_path / "admission_policy.json"
@@ -310,6 +313,76 @@ class TestPolicyLoading:
         assert policy.mode == MODE_ENFORCE
         assert policy.require_signature
         assert policy.approved == []
+
+    def test_seed_then_load_is_open(self, monkeypatch, tmp_path):
+        """The first-run seed writes a permissive file so a fresh install stays open."""
+        import kiro_claw.platform.admission as adm
+
+        monkeypatch.delenv("KIROCLAW_ADMISSION_POLICY", raising=False)
+        monkeypatch.setattr(adm, "_POLICY_DEFAULT_PATH", tmp_path / "admission_policy.json")
+        monkeypatch.setattr(adm, "_SEED_MARKER", tmp_path / ".migrations" / "seeded")
+        monkeypatch.setattr(adm, "_CHECKSUM_PATH", tmp_path / ".migrations" / "policy.sha256")
+
+        assert adm.seed_default_policy() is True
+        policy = adm.load_admission_policy()
+        assert policy.mode == MODE_OPEN
+        assert policy.approved is None
+
+    def test_deletion_after_seed_fails_closed_no_reseed(self, monkeypatch, tmp_path):
+        """AVP-23427: deleting the seeded file must NOT re-seed; load fails closed."""
+        import kiro_claw.platform.admission as adm
+
+        monkeypatch.delenv("KIROCLAW_ADMISSION_POLICY", raising=False)
+        pol = tmp_path / "admission_policy.json"
+        monkeypatch.setattr(adm, "_POLICY_DEFAULT_PATH", pol)
+        monkeypatch.setattr(adm, "_SEED_MARKER", tmp_path / ".migrations" / "seeded")
+        monkeypatch.setattr(adm, "_CHECKSUM_PATH", tmp_path / ".migrations" / "policy.sha256")
+
+        assert adm.seed_default_policy() is True
+        pol.unlink()  # attacker/accident deletes the file
+        # Marker still present → no silent re-seed.
+        assert adm.seed_default_policy() is False
+        assert not pol.exists()
+        policy = adm.load_admission_policy()
+        assert policy.mode == MODE_ENFORCE and policy.approved == []
+
+    def test_integrity_mismatch_is_advisory_not_deny(self, monkeypatch, tmp_path, caplog):
+        """A modified seeded policy is still honored (user-owned) and detected,
+        but a legitimate edit must NOT force the dashboard to 'degraded'."""
+        import logging as _logging
+
+        import kiro_claw.platform.admission as adm
+        from kiro_claw.platform import governance_health as gh
+
+        monkeypatch.delenv("KIROCLAW_ADMISSION_POLICY", raising=False)
+        pol = tmp_path / "admission_policy.json"
+        monkeypatch.setattr(adm, "_POLICY_DEFAULT_PATH", pol)
+        monkeypatch.setattr(adm, "_SEED_MARKER", tmp_path / ".migrations" / "seeded")
+        monkeypatch.setattr(adm, "_CHECKSUM_PATH", tmp_path / ".migrations" / "policy.sha256")
+
+        adm.seed_default_policy()
+        body = json.loads(pol.read_text())
+        body["banned"] = ["rogue-plugin"]  # legitimate operator edit
+        pol.write_text(json.dumps(body))
+        gh.reset()
+        with caplog.at_level(_logging.ERROR):
+            policy = adm.load_admission_policy()
+        # Operator's edit is honored (NOT hard-denied)...
+        assert policy.banned == ["rogue-plugin"]
+        # ...the change IS detected (logged for the audit trail)...
+        assert any("seed checksum" in r.getMessage() for r in caplog.records)
+        # ...but a legitimate edit must NOT force the dashboard to "degraded".
+        assert gh.governance_status() != "degraded"
+
+    def test_absent_policy_reports_degraded_health(self, monkeypatch, tmp_path):
+        import kiro_claw.platform.admission as adm
+        from kiro_claw.platform import governance_health as gh
+
+        monkeypatch.delenv("KIROCLAW_ADMISSION_POLICY", raising=False)
+        monkeypatch.setattr(adm, "_POLICY_DEFAULT_PATH", tmp_path / "nope.json")
+        gh.reset()
+        adm.load_admission_policy()
+        assert gh.governance_status() == "degraded"
 
     def test_policy_round_trip(self, monkeypatch, tmp_path):
         p = tmp_path / "admission_policy.json"
@@ -365,3 +438,22 @@ class TestDiscoveryGate:
         policy = AdmissionPolicy(mode=MODE_OPEN)
         result = discover_companion_context("amazon", None, policy=policy)
         assert result is sentinel
+
+    def test_first_boot_seeds_and_admits_companion(self, monkeypatch, tmp_path):
+        """AVP-23427 ordering: discovery (which runs before the gateway seed on a
+        fleet's first boot) seeds the permissive default, so the companion is
+        admitted instead of fail-closing when no policy file exists yet."""
+        import kiro_claw.platform.admission as adm
+
+        monkeypatch.delenv("KIROCLAW_ADMISSION_POLICY", raising=False)
+        monkeypatch.setattr(adm, "_POLICY_DEFAULT_PATH", tmp_path / "admission_policy.json")
+        monkeypatch.setattr(adm, "_SEED_MARKER", tmp_path / ".migrations" / "seeded")
+        monkeypatch.setattr(adm, "_CHECKSUM_PATH", tmp_path / ".migrations" / "policy.sha256")
+
+        sentinel = object()
+        ep = _FakeEntryPoint(name="amazon", loaded=lambda _cfg: sentinel)
+        monkeypatch.setattr(discovery_mod, "plugin_entry_points", lambda: [ep])
+        # No explicit policy -> discovery must seed + load (not fail closed).
+        result = discover_companion_context("amazon", None)
+        assert result is sentinel
+        assert (tmp_path / "admission_policy.json").exists()

@@ -1033,3 +1033,51 @@ class TestMatchPathNormalization:
         item = "/srv/app/teamA/shared/data.txt"
         pat = "/srv/app/**/../shared/**"
         assert _match_path(item, pat) == fnmatch.fnmatchcase(item, pat)
+
+
+# ── AVP-23427: chokepoints fail CLOSED on governance error ──
+class TestChokepointsFailClosed:
+    def test_vet_spawn_governance_denies_on_error(self, monkeypatch):
+        """A governance evaluation error must DENY the spawn (return a reason)."""
+        from kiro_claw import subagent
+
+        def _boom(*a, **k):
+            raise RuntimeError("governance module broken")
+
+        monkeypatch.setattr(gp, "governance_permits", _boom)
+        reason = subagent._vet_spawn_governance("dashboard:ui", "researcher")
+        assert reason is not None  # denial (previously returned None = allow)
+        assert "fail-closed" in reason
+
+    def test_vet_spawn_governance_reraises_composition_error(self, monkeypatch):
+        """PlatformCompositionError still propagates (hard fail-closed CPP)."""
+        from kiro_claw import subagent
+        from kiro_claw.platform.context import PlatformCompositionError
+
+        def _compose_fail(*a, **k):
+            raise PlatformCompositionError("companion missing")
+
+        monkeypatch.setattr(gp, "governance_permits", _compose_fail)
+        with pytest.raises(PlatformCompositionError):
+            subagent._vet_spawn_governance("dashboard:ui", "researcher")
+
+    def test_enterprise_posture_denies_on_error(self, monkeypatch):
+        """A governance evaluation error must DENY the workspace (return False)."""
+        from kiro_claw.slack import enterprise
+
+        def _boom(*a, **k):
+            raise RuntimeError("governance module broken")
+
+        monkeypatch.setattr(gp, "governance_permits", _boom)
+        assert enterprise._governance_posture_permits_workspace("E_ATTACKER", "T_ATTACKER") is False
+
+    def test_enterprise_posture_reraises_composition_error(self, monkeypatch):
+        from kiro_claw.platform.context import PlatformCompositionError
+        from kiro_claw.slack import enterprise
+
+        def _compose_fail(*a, **k):
+            raise PlatformCompositionError("companion missing")
+
+        monkeypatch.setattr(gp, "governance_permits", _compose_fail)
+        with pytest.raises(PlatformCompositionError):
+            enterprise._governance_posture_permits_workspace("E1", "T1")

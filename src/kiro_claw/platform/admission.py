@@ -44,6 +44,7 @@ import logging
 import os
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
@@ -175,8 +176,201 @@ class AdmissionDecision:
     manifest: Optional[PluginManifest] = None
 
 
+# One-shot marker: records that the first-run seed already ran, so a DELETION of
+# the seeded policy afterward is NOT silently re-seeded (it must fail closed).
+_SEED_MARKER = _POLICY_DEFAULT_PATH.parent / ".migrations" / "admission_policy_seeded"
+
+# Sidecar sha256 of the SEEDED default policy, written by seed_default_policy and
+# verified (advisorily) at load.  Only exists for the file WE seeded — env-
+# override / fleet-managed policies carry no sidecar contract.
+_CHECKSUM_PATH = _POLICY_DEFAULT_PATH.parent / ".migrations" / "admission_policy.sha256"
+
+# The permissive policy body seeded at first run.  ``mode=open`` + ``approved``
+# absent (None) reproduces today's admit-any-non-banned behavior, so a fresh
+# install is unaffected — the security gain is that the file's PRESENCE is now
+# the intended-open signal, and its ABSENCE fails closed (AVP-23427).
+_DEFAULT_POLICY_BODY: Dict[str, object] = {
+    "mode": MODE_OPEN,
+    "require_signature": False,
+    "banned": [],
+    "capability_ceiling": {},
+    "_comment": (
+        "Default permissive admission policy seeded by KiroClaw at first run. "
+        "Deleting this file DISABLES plugin admission (fail-closed, AVP-23427): "
+        "load_admission_policy() then returns MODE_ENFORCE with an empty allowlist "
+        "and the dashboard governance indicator shows Disabled. To restrict "
+        "admission, set mode='enforce' and populate 'approved' / 'require_signature'."
+    ),
+}
+
+
+def _fail_closed_policy() -> AdmissionPolicy:
+    """The restrictive default used whenever the policy cannot be verified.
+
+    MODE_ENFORCE with an empty ``approved`` allowlist admits NOTHING beyond the
+    always-applied kill-switch, and ``require_signature`` rejects even a signed
+    plugin absent an allowlist entry.  This is the fail-closed posture for a
+    missing or unreadable policy (AVP-23427 / AWS-2 fail-closed).
+    """
+    return AdmissionPolicy(mode=MODE_ENFORCE, require_signature=True, approved=[])
+
+
+def seed_default_policy() -> bool:
+    """One-time: write the permissive default policy file at first run.
+
+    Establishes the AVP-23427 invariant that "file present & permissive =
+    intended open state" is distinguishable from "file absent = tampering /
+    misconfig = fail closed".  Guarded by a one-shot marker so that DELETING the
+    policy afterward is never silently re-seeded — a later
+    ``load_admission_policy`` then returns :func:`_fail_closed_policy` and the
+    governance health indicator flips to Disabled.
+
+    Never clobbers an existing policy file (a managed fleet may ship its own) and
+    is skipped entirely when the ``KIROCLAW_ADMISSION_POLICY`` env override is
+    set.  The marker is written even when no file was created, so a later start
+    cannot re-seed / clobber.  Best-effort: returns True only when it wrote the
+    seed; never raises (first-run is best-effort).
+    """
+    try:
+        if _SEED_MARKER.exists():
+            return False
+        env_set = bool(os.environ.get(_POLICY_ENV, "").strip())
+        wrote = False
+        if not env_set and not _POLICY_DEFAULT_PATH.exists():
+            body_text = json.dumps(_DEFAULT_POLICY_BODY, indent=2) + "\n"
+            _POLICY_DEFAULT_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _POLICY_DEFAULT_PATH.write_text(body_text, encoding="utf-8")
+            # Record the integrity baseline for the file we just wrote so a later
+            # modification is detectable at load (advisory — see load below).
+            _CHECKSUM_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _CHECKSUM_PATH.write_text(
+                hashlib.sha256(body_text.encode("utf-8")).hexdigest() + "\n",
+                encoding="utf-8",
+            )
+            wrote = True
+        _SEED_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        _SEED_MARKER.write_text(
+            datetime.now(tz=timezone.utc).isoformat() + "\n", encoding="utf-8"
+        )
+        return wrote
+    except Exception:
+        logger.warning("first-run: admission policy seed failed", exc_info=True)
+        return False
+
+
+def _posture_of(policy: AdmissionPolicy) -> str:
+    """Classify a parsed policy for the governance health indicator.
+
+    "enforcing" when the fleet configured ANY active enforcement (mirrors the
+    ``enforcing`` fast-path in :func:`evaluate_admission`); "permissive"
+    otherwise (the seeded open default — governance present but not restricting).
+    """
+    enforcing = (
+        policy.mode != MODE_OPEN
+        or policy.approved is not None
+        or policy.require_signature
+        or bool(policy.capability_ceiling)
+    )
+    return "enforcing" if enforcing else "permissive"
+
+
+def _record_admission_posture(posture: str) -> None:
+    """Best-effort: publish the admission posture to the health signal."""
+    try:
+        from kiro_claw.platform.governance_health import set_admission_posture
+
+        set_admission_posture(posture)
+    except Exception:
+        logger.debug("admission posture publish unavailable", exc_info=True)
+
+
+def _audit_admission_fail_closed(reason: str) -> None:
+    """Best-effort: record an admission fail-closed / integrity event.
+
+    Emits an ERROR-level SEL ``governance_degraded`` record with
+    ``failed_closed=True`` (critical / synchronous) and sets the process-global
+    governance health signal so the dashboard indicator reflects the trip.  Never
+    raises — admission loading must not be broken by an audit failure, and this
+    runs on the bootstrap path where SEL may not be fully initialized.
+    """
+    try:
+        from kiro_claw.platform.governance_health import mark_governance_incident
+
+        mark_governance_incident("failed_closed", detail=f"admission:{reason}")
+    except Exception:
+        logger.debug("governance health mark unavailable", exc_info=True)
+    try:
+        from kiro_claw.sel import sel
+
+        # session_key "_host": this in-process admission load is a host action,
+        # not driven by any user-facing surface (mirrors HOST_SESSION_KEY).
+        sel().log_governance_degraded(
+            session_key="_host",
+            chokepoint="admission_policy_load",
+            scope="apps.admission",
+            reason=reason,
+            failed_closed=True,
+        )
+    except Exception:
+        logger.debug("admission fail-closed SEL emit unavailable", exc_info=True)
+
+
+def _verify_seed_integrity(policy_bytes: bytes) -> None:
+    """Advisory integrity check on the seeded default policy (AVP-23427 rec #5).
+
+    Compares the on-disk policy against the sha256 baseline written at seed time.
+    A mismatch is RECORDED (ERROR log + critical SEL + health mark) but does NOT
+    override the parsed policy: the file is user-owned, so its checksum cannot be
+    a trust anchor (an attacker running as the user could recompute the sidecar),
+    and hard-denying on mismatch would only break legitimate operator edits.  The
+    value here is DETECTION + observability, not enforcement.  No sidecar (older
+    seed / manually-created file) → nothing to verify.  Never raises.
+    """
+    try:
+        if not _CHECKSUM_PATH.exists():
+            return
+        expected = _CHECKSUM_PATH.read_text(encoding="utf-8").strip()
+        actual = hashlib.sha256(policy_bytes).hexdigest()
+        if not hmac.compare_digest(expected, actual):
+            logger.error(
+                "admission policy at %s does not match its seed checksum "
+                "(modified since first-run); recording integrity event",
+                _POLICY_DEFAULT_PATH,
+            )
+            # Detection only (AVP-23427 rec #5): record for the audit trail but do
+            # NOT drive the dashboard to "degraded".  The seeded policy is
+            # user-owned and MEANT to be edited (e.g. to turn on enforcement), so
+            # a mismatch is EXPECTED on legitimate edits — flagging every edit as
+            # degraded would be alert fatigue.  "degraded" is reserved for genuine
+            # fail-closed / error trips (absent, unreadable, chokepoint errors).
+            try:
+                from kiro_claw.sel import sel
+
+                sel().log_api_access(
+                    caller="_host",
+                    operation="admission_policy_integrity",
+                    outcome="mismatch",
+                    source="startup",
+                    error="modified_since_seed",
+                )
+            except Exception:
+                logger.debug("admission integrity SEL emit unavailable", exc_info=True)
+    except Exception:
+        logger.debug("admission integrity check failed to run", exc_info=True)
+
+
 def load_admission_policy() -> AdmissionPolicy:
-    """Load the fleet admission policy. Default-open when none is present."""
+    """Load the fleet admission policy — fail-closed when it cannot be verified.
+
+    A MISSING policy (no ``KIROCLAW_ADMISSION_POLICY`` env override and no file at
+    the default path) returns :func:`_fail_closed_policy` (MODE_ENFORCE, empty
+    allowlist) rather than admitting everything.  A permissive default file is
+    seeded once at first run by :func:`seed_default_policy` (via
+    ``agent.run_first_run_setup``), so a fresh install still admits plugins by
+    intent; deleting that file therefore DISABLES admission (fail-closed) instead
+    of silently reverting to open (AVP-23427).  A present-but-unreadable file is
+    likewise fail-closed.
+    """
     raw = os.environ.get(_POLICY_ENV, "").strip()
     path: Optional[Path] = None
     if raw:
@@ -184,15 +378,33 @@ def load_admission_policy() -> AdmissionPolicy:
     elif _POLICY_DEFAULT_PATH.exists():
         path = _POLICY_DEFAULT_PATH
     if path is None:
-        return AdmissionPolicy.open_default()
+        # No env override and no file at the default path.  Something the
+        # first-run seed (or a managed fleet) should have placed is absent —
+        # fail closed rather than silently admit everything (AVP-23427).
+        logger.error(
+            "no admission policy found (env %s unset, %s absent); failing closed",
+            _POLICY_ENV,
+            _POLICY_DEFAULT_PATH,
+        )
+        _record_admission_posture("unverified")
+        _audit_admission_fail_closed("no_policy_file")
+        return _fail_closed_policy()
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        raw_text = path.read_text(encoding="utf-8")
+        data = json.loads(raw_text)
     except Exception:
         # A present-but-unreadable policy is a fail-closed signal: a fleet meant
         # to enforce something. Refuse to silently fall open.
         logger.error("admission policy at %s is unreadable; failing closed", path)
-        return AdmissionPolicy(mode=MODE_ENFORCE, require_signature=True, approved=[])
-    return AdmissionPolicy.from_dict(data)
+        _record_admission_posture("unverified")
+        _audit_admission_fail_closed("unreadable")
+        return _fail_closed_policy()
+    # Advisory integrity check on the file WE seeded (not env-override paths).
+    if path == _POLICY_DEFAULT_PATH:
+        _verify_seed_integrity(raw_text.encode("utf-8"))
+    policy = AdmissionPolicy.from_dict(data)
+    _record_admission_posture(_posture_of(policy))
+    return policy
 
 
 def _read_plugin_manifest(ep: "importlib.metadata.EntryPoint") -> Optional[PluginManifest]:
