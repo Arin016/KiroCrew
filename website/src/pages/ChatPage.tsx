@@ -3319,6 +3319,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
             headerClassName="diff-panel-header"
             headerActions={
               <>
+                <button onClick={() => { diffPanel.closeDiff(); handleFileOpen(diffPanel.filePath) }} className="p-1 rounded cursor-pointer transition-colors text-muted hover:text-text" title="Open in Editor" aria-label="Open in Editor"><Pen size={14} /></button>
                 <button onClick={() => setDiffLineNumbers(v => !v)} className={`p-1 rounded cursor-pointer transition-colors ${diffLineNumbers ? 'text-accent' : 'text-muted hover:text-text'}`} title={diffLineNumbers ? 'Hide line numbers' : 'Show line numbers'} aria-label={diffLineNumbers ? 'Hide line numbers' : 'Show line numbers'}><Hash size={14} /></button>
               </>
             }
