@@ -1043,18 +1043,76 @@ def _local_user_token() -> str:
     return token
 
 
-def _get_ppid(pid: int) -> int:
-    """Get parent PID cross-platform. Returns 0 on failure."""
+def _ppid_via_libproc(pid: int) -> int:
+    """macOS parent-PID lookup via libproc's ``proc_pidinfo`` (stdlib ctypes).
+
+    macOS has no ``/proc``, and the app sandbox denies spawning ``ps``
+    (``Operation not permitted``). ``proc_pidinfo`` is an information syscall
+    (no ``exec``), so the sandbox allows it — the same primitive psutil uses,
+    but with zero third-party dependency. Returns 0 on any failure so the caller
+    can fall back.
+    """
+    import ctypes
+    import struct
+
+    _PROC_PIDTBSDINFO = 3
+    # sizeof(struct proc_bsdinfo) is 232 on 64-bit Darwin; over-allocate.
+    _BUF_SIZE = 256
     try:
-        if platform.system() == "Linux":
+        libproc = ctypes.CDLL("libproc.dylib", use_errno=True)
+        libproc.proc_pidinfo.restype = ctypes.c_int
+        libproc.proc_pidinfo.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint64,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        buf = ctypes.create_string_buffer(_BUF_SIZE)
+        n = libproc.proc_pidinfo(pid, _PROC_PIDTBSDINFO, 0, buf, _BUF_SIZE)
+        # pbi_ppid is the 5th uint32 (offset 16); need at least that many bytes.
+        if n <= 16:
+            return 0
+        # struct proc_bsdinfo starts: pbi_flags, pbi_status, pbi_xstatus,
+        # pbi_pid, pbi_ppid (5 x uint32) — pbi_ppid is index 4.
+        return int(struct.unpack_from("<5I", buf.raw, 0)[4])
+    except Exception:
+        return 0
+
+
+def _get_ppid(pid: int) -> int:
+    """Get parent PID cross-platform. Returns 0 on failure.
+
+    Standard-library only — deliberately NO third-party dependency (e.g.
+    psutil), so the shipped app needs nothing extra bundled or code-signed and
+    works across OS versions out of the box.
+
+    - Linux: read ``/proc/<pid>/status`` (plain file read).
+    - macOS: ``proc_pidinfo`` via libproc (see ``_ppid_via_libproc``). The old
+      code shelled out to ``ps`` here, which the macOS app sandbox denies
+      (``Operation not permitted``) — that broke the ancestor PID-walk in
+      ``_resolve_session_key``, leaving spawned sub-agents unable to resolve
+      their parent session key (empty ``KIROCLAW_SESSION_KEY``) and surfacing
+      spurious tool-approval cards on trusted sessions. libproc needs no
+      ``exec``, so it works under the sandbox.
+    - Other/unknown platforms: fall back to ``ps`` (may be blocked, then 0).
+    """
+    system = platform.system()
+    try:
+        if system == "Linux":
             for line in Path(f"/proc/{pid}/status").read_text().splitlines():
                 if line.startswith("PPid:"):
                     return int(line.split()[1])
-        else:
-            out = subprocess.check_output(
-                ["ps", "-o", "ppid=", "-p", str(pid)], text=True, timeout=2
-            )
-            return int(out.strip())
+        elif system == "Darwin":
+            ppid = _ppid_via_libproc(pid)
+            if ppid:
+                return ppid
+        # Last-resort fallback (unknown platform, or a libproc/proc miss): ``ps``.
+        # May be sandbox-blocked, in which case this raises and we return 0.
+        out = subprocess.check_output(
+            ["ps", "-o", "ppid=", "-p", str(pid)], text=True, timeout=2
+        )
+        return int(out.strip())
     except Exception:
         pass
     return 0
