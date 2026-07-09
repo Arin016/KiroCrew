@@ -263,6 +263,19 @@ _MAX_SLOT_MESSAGES = 10000  # Keep all messages — virtual scrolling handles pe
 # Gates the prefix lookup to prevent broad matches (e.g. bare "chat" binding to any slot).
 _CHAT_N_RE = re.compile(r"chat-\d+")
 
+# Display label for a chat slot that has no real title yet — shown in the UI
+# instead of the internal ``chat-N-<ts>`` key (which is an identifier, not a
+# name). Applied at the serialization boundary (``_ChatSlot.display_title``),
+# so a brand-new empty session, the pre-send window, and the pre-LLM window all
+# read the same. The LLM auto-title / fallback replace it with a real title.
+NEW_SESSION_TITLE = "New Session…"
+
+# Matches a slot-key *identifier* used as a title (both the stripped
+# ``chat-N-<ts>`` and the resumed ``dashboard_chat-N-<ts>`` forms). An untitled
+# slot whose title is still such an identifier should display as
+# NEW_SESSION_TITLE, not the raw key. Real titles never match this.
+_SLOT_KEY_TITLE_RE = re.compile(r"(?:dashboard_)?chat-\d+-\d+$")
+
 # Cron notification wrapper format — used by handlers.py (create), chat.py (detect), ChatPage.tsx (render)
 CRON_NOTIFY_PREFIX = "[Cron notification from "
 CRON_NOTIFY_END = "[End of cron notification]"
@@ -396,6 +409,7 @@ class _ChatSlot:
         "_trust_reads",
         "_trusted_patterns",
         "_titled",
+        "_title_in_flight",
         "_taskkeeper_task_id",
         "_resumed_count",
         "_on_message",
@@ -479,6 +493,9 @@ class _ChatSlot:
         self._trust_reads: bool = False  # auto-approve read-only bash commands
         self._trusted_patterns: set[str] = set()  # session-scoped fnmatch globs
         self._titled: bool = False  # True once a title has been assigned
+        # Guards against concurrent LLM auto-title attempts (on-send trigger vs
+        # the end-of-turn chat_done trigger racing on the same slot).
+        self._title_in_flight: bool = False
         self._taskkeeper_task_id: int | None = None  # Set when slot was spawned from a TaskKeeper task; pins taskkeeper_complete to that task only
         self._resumed_count: int = 0  # messages loaded from history on resume
         # Callback for broadcasting messages via global SSE
@@ -741,6 +758,22 @@ class _ChatSlot:
         task.add_done_callback(_log_task_exception)
         return True
 
+    @property
+    def display_title(self) -> str:
+        """Title for UI display. Shows ``NEW_SESSION_TITLE`` while the slot is
+        still on its untouched default key (untitled) — covering brand-new
+        empty sessions and the window before the LLM title lands — otherwise
+        the real title. Slots with a meaningful non-key title (plan, cron,
+        fork, slack) are unaffected since their title != key.
+        """
+        if not self._titled and (
+            not self.title
+            or self.title == self.key
+            or _SLOT_KEY_TITLE_RE.match(self.title)
+        ):
+            return NEW_SESSION_TITLE
+        return self.title
+
     def to_dict(self) -> dict:
         last_ts = self.messages[-1].get("ts", "") if self.messages else ""
         # Single reverse scan for last_msg, options, and last_activity_ts.
@@ -820,7 +853,7 @@ class _ChatSlot:
                 break
         return {
             "key": self.key,
-            "title": _redact(self.title) if self.title else self.title,
+            "title": _redact(self.display_title),
             "agent": self.agent,
             "model": self.model,
             "reasoning_effort": self.reasoning_effort,
@@ -1651,14 +1684,18 @@ class DashboardState:
             }
         )
 
-    def push_slot_title(self, key: str, title: str) -> None:
+    def push_slot_title(self, key: str, title: str, *, full: bool = True) -> None:
         """Push a targeted title update for a single slot.
 
-        Also pushes a full slots update so the sidebar reflects the new
-        title without callers needing to do both.
+        By default also pushes a full slots update so the sidebar reflects the
+        new title without callers needing to do both. Pass ``full=False`` for
+        high-frequency streaming partials (word-by-word title reveal) to send
+        only the lightweight ``slot_title`` event; finalize with a ``full=True``
+        call once.
         """
         self._broadcast({"_type": "slot_title", "key": key, "title": title})
-        self.push_slots_update()
+        if full:
+            self.push_slots_update()
 
     def push_refresh(self, *kinds: str) -> None:
         """Push a lightweight refresh hint for specific data types.

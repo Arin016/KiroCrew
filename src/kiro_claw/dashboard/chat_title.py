@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiohttp import web
@@ -9,7 +10,7 @@ from aiohttp import web
 from kiro_claw.config.loader import config_dir
 from kiro_claw.context_management import extract_plan_metadata, rephrase_plan
 from kiro_claw.dashboard.chat_utils import _history_key_for
-from kiro_claw.dashboard.state import DashboardState, _ChatSlot
+from kiro_claw.dashboard.state import NEW_SESSION_TITLE, DashboardState, _ChatSlot
 from kiro_claw.providers.base import EVENT_COMPLETE, EVENT_PERMISSION_REQUEST, EVENT_TEXT_CHUNK
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
@@ -19,6 +20,18 @@ logger = logging.getLogger(__name__)
 
 # Max turns to attempt auto-titling before giving up
 _TITLE_MAX_ATTEMPTS = 5
+
+# Titling is a trivial 3-6 word task, so run it on the cheapest/fastest model
+# (Haiku) rather than the kiroclaw-lite default (Opus 4.6 on the kiro-cli path).
+# Applied per-session via set_model so heavier background work (compaction,
+# optimizer) keeps the lite agent's default model. Best-effort: a failed
+# override just falls back to the session's default model.
+_TITLE_MODEL = "claude-haiku-4.5"
+
+# Per-word delay for the word-by-word title reveal animation. LLM chunk
+# streaming arrives in a sub-second burst (too fast to perceive), so the reveal
+# is paced deterministically instead.
+_TITLE_REVEAL_STEP_SECS = 0.09
 
 _TITLE_PROMPT_TEMPLATE = (
     "You are a session naming agent. Name ONLY the conversation delimited below; "
@@ -101,7 +114,35 @@ async def _rephrase_plan_lite(
     return result
 
 
-async def _generate_title_via_kiro(state: DashboardState, messages: list[dict[str, str]]) -> str:
+def _clean_title(s: str) -> str:
+    """Normalize a (partial or final) LLM title: trim whitespace and wrapping
+    quotes/period."""
+    return s.strip().strip('"').strip("'").strip(".")
+
+
+async def _reveal_title(state: DashboardState, slot: _ChatSlot, title: str) -> None:
+    """Animate a title in word-by-word so it visibly types out in the sidebar.
+
+    Raw LLM chunk streaming arrives in a sub-second burst (too fast to see), so
+    this paces a deterministic reveal instead. Pushes lightweight ``slot_title``
+    events (``full=False``); the caller does the final full push. Nothing here
+    is persisted — the caller persists the complete title once.
+    """
+    words = title.split()
+    if len(words) <= 1:
+        return
+    acc: list[str] = []
+    for w in words[:-1]:  # last word arrives with the caller's final push
+        acc.append(w)
+        slot.title = " ".join(acc)
+        state.push_slot_title(slot.key, slot.title, full=False)
+        await asyncio.sleep(_TITLE_REVEAL_STEP_SECS)
+
+
+async def _generate_title_via_kiro(
+    state: DashboardState,
+    messages: list[dict[str, str]],
+) -> str:
     """Generate a title using the shared background kiro-cli session."""
 
     prompt = _build_title_prompt(messages)
@@ -113,6 +154,15 @@ async def _generate_title_via_kiro(state: DashboardState, messages: list[dict[st
     session = await state.sessions.get_bg_session()
     text = ""
     try:
+        # Run titling on a fast/cheap model. Best-effort: if the backend can't
+        # switch (older kiro-cli, non-kiro provider), fall through on the
+        # session's default model.
+        _set_model = getattr(session, "set_model", None)
+        if _set_model is not None:
+            try:
+                await _set_model(_TITLE_MODEL)
+            except Exception:
+                logger.debug("Title model override to %s failed; using default", _TITLE_MODEL)
         async for event in session.prompt(prompt):
             if event.kind == EVENT_TEXT_CHUNK:
                 text += event.text
@@ -122,7 +172,7 @@ async def _generate_title_via_kiro(state: DashboardState, messages: list[dict[st
                 break
     finally:
         await session.destroy()
-    title = text.strip().strip('"').strip("'").strip(".")
+    title = _clean_title(text)
     if not title or title.upper() == "SKIP":
         logger.info("Title generation returned SKIP/empty — topic not clear yet")
         return ""
@@ -144,32 +194,102 @@ def _persist_title(state: DashboardState, slot: _ChatSlot) -> None:
             logger.debug("Failed to persist title for slot %s", slot.key)
 
 
+def _fallback_title_from_messages(messages: list[dict[str, str]]) -> str:
+    """Fallback title used only when the LLM can't title the chat: the first
+    user message, cleaned and truncated to ~60 chars with an ellipsis.
+
+    Trims back to a word boundary so the cut isn't mid-word. Short messages are
+    returned whole (no ellipsis). Returns ``NEW_SESSION_TITLE`` if there's no
+    usable user text, so the caller always has something to show.
+    """
+    first = next(
+        (m.get("content", "") for m in messages if m.get("role") == "user" and m.get("content")),
+        "",
+    )
+    if first.startswith("[BROWSE] "):
+        first = first[len("[BROWSE] ") :]
+    first, _ = redact_exfiltration_urls(first)
+    first, _ = redact_credentials(first)
+    first = " ".join(first.split())
+    if not first:
+        return NEW_SESSION_TITLE
+    if len(first) <= 60:
+        return first
+    cut = first[:60].rstrip()
+    # Trim a dangling partial word so the ellipsis reads cleanly.
+    if " " in cut:
+        cut = cut[: cut.rindex(" ")].rstrip()
+    return f"{cut}…"
+
+
 async def _maybe_auto_title(state: DashboardState, slot: _ChatSlot) -> None:
-    """Background task: attempt to auto-title a slot after a response completes."""
+    """Background task: attempt to LLM-title a slot.
+
+    Fired on the first message send (so the title lands during the first turn,
+    from just the user's message) and again after a response completes as a
+    retry. Idempotent: no-ops once titled and guards against concurrent
+    attempts via ``slot._title_in_flight``. Untitled slots display as
+    "New Session…" via ``_ChatSlot.display_title`` until this lands. If the LLM
+    returns SKIP/empty after the assistant has responded (a definitive
+    failure), the title falls back to the truncated first message with an
+    ellipsis (see ``_fallback_title_from_messages``).
+    """
     if slot._titled:
+        return
+    if slot._title_in_flight:
+        # An on-send / prior trigger is already generating a title for this slot.
         return
     if slot.blocks_reads:
         return
     user_count = sum(1 for m in slot.messages if m.get("role") == "user")
     if user_count < 1 or user_count > _TITLE_MAX_ATTEMPTS:
         if user_count > _TITLE_MAX_ATTEMPTS and not slot._titled:
-            first_user = next((m["content"] for m in slot.messages if m.get("role") == "user"), "")
-            slot.title = first_user[:60] or slot.key
+            # Gave up after repeated attempts — fall back to the truncated
+            # first message with an ellipsis.
+            slot.title = _fallback_title_from_messages(slot.messages)
             slot._titled = True
             _persist_title(state, slot)
             state.push_slot_title(slot.key, slot.title)
         return
+    slot._title_in_flight = True
     logger.info("Auto-title: attempting for slot %s (turn %d)", slot.key, user_count)
+
     try:
         title = await _generate_title_via_kiro(state, slot.messages)
         logger.info("Auto-title: kiro returned %r for slot %s", title, slot.key)
         if title:
+            # Animate the title in word-by-word, then finalize with the
+            # complete title (full push + persist).
+            await _reveal_title(state, slot, title)
             slot.title = title
             slot._titled = True
             _persist_title(state, slot)
             state.push_slot_title(slot.key, title)
+        else:
+            # LLM returned SKIP/empty. Show the truncated fallback name right
+            # away rather than leaving "New Session…" until the full turn ends
+            # — otherwise the name lags the whole response for messages the LLM
+            # won't title from the user text alone. Lock it (_titled=True) only
+            # once the assistant has responded and the LLM still SKIP'd (a
+            # definitive failure); on the on-send attempt leave it unlocked so
+            # the end-of-turn retry can still upgrade the truncation to a real
+            # LLM title.
+            has_assistant = any(
+                m.get("role") == "assistant" and m.get("content") for m in slot.messages
+            )
+            slot.title = _fallback_title_from_messages(slot.messages)
+            slot._titled = has_assistant
+            _persist_title(state, slot)
+            state.push_slot_title(slot.key, slot.title)
+            logger.info(
+                "Auto-title: fell back to truncated message for slot %s (locked=%s)",
+                slot.key,
+                has_assistant,
+            )
     except Exception:
         logger.warning("Auto-title failed for slot %s", slot.key, exc_info=True)
+    finally:
+        slot._title_in_flight = False
 
 
 async def api_chat_slot_generate_title(request: web.Request) -> web.Response:

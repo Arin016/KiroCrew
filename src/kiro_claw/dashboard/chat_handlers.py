@@ -35,6 +35,7 @@ from kiro_claw.dashboard.chat_persistence import (
     get_reasoning_effort_values,
 )
 from kiro_claw.dashboard.chat_runner import _run_chat
+from kiro_claw.dashboard.chat_title import _maybe_auto_title
 from kiro_claw.dashboard.chat_utils import (
     _THEME_PERSONAS,
     _build_stream_chunk,
@@ -218,6 +219,10 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
         message = "[BROWSE] " + message
     slot.append("user", message, "msg msg-u", meta=_redact_meta(user_meta) if user_meta else None)
 
+    # Note: untitled slots display as "New Session…" via _ChatSlot.display_title
+    # (serialization layer), so there's no bare chat-N flash to patch here. The
+    # LLM titling is kicked off below, before _run_chat.
+
     # ── AutoNudge: user input cancels any pending nudge timer (user wins). ──
     try:
         from kiro_claw.autonudge import (
@@ -308,6 +313,16 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     # after their SSE reader disconnected. Must happen BEFORE _run_chat
     # so we don't discard the new turn's output.
     slot.drain()
+
+    # Kick off LLM titling now, from the first user message, so the title lands
+    # *during* the first turn instead of waiting for the whole response to
+    # finish (chat_done). Runs on an isolated background kiro-cli session
+    # concurrent with the turn. No-ops once titled / in-flight; the instant
+    # 60-char provisional stays as the fallback if the LLM SKIPs or errors.
+    if not slot._titled and not slot._title_in_flight:
+        _tt = asyncio.create_task(_maybe_auto_title(state, slot))
+        state._background_tasks.add(_tt)
+        _tt.add_done_callback(state._background_tasks.discard)
 
     task = asyncio.create_task(
         asyncio.wait_for(_run_chat(state, slot, message), timeout=CHAT_TURN_TIMEOUT)
@@ -432,7 +447,7 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "key": slot.key,
-            "title": slot.title,
+            "title": slot.display_title,
             "running": slot.running,
             "stopping": slot._stopping,
             "messages": prepared,
