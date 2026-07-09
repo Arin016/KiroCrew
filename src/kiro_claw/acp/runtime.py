@@ -17,7 +17,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import signal
 import time
 from pathlib import Path
@@ -27,7 +26,7 @@ from kiro_claw.acp._dispatch import (
     build_session_new_params,
     set_mode_params,
 )
-from kiro_claw.acp.client import _NOT_LOGGED_IN_RE, _get_start_time
+from kiro_claw.acp.client import _NOT_LOGGED_IN_RE, _get_start_time, _resolve_kiro_bin
 from kiro_claw.acp.session_handle import (
     AcpRuntimeDead,
     AcpRuntimeError,
@@ -74,11 +73,6 @@ KIRO_CLI_SUBCMD = "acp"
 CLIENT_NAME = "kiroclaw"
 CLIENT_VERSION = "0.1.2"
 PROTOCOL_VERSION = "2025-08-22"
-
-
-def _resolve_kiro_bin() -> str | None:
-    """Find kiro-cli on PATH."""
-    return shutil.which(KIRO_CLI_BIN)
 
 
 class AcpRuntime:

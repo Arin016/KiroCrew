@@ -232,6 +232,17 @@ async def test_non_object_json_line_does_not_crash_reader():
         await _stop_reader(task)
 
 
+def test_runtime_uses_clients_augmented_kiro_bin_resolver():
+    """spawn() must resolve kiro-cli via the SAME augmented-PATH resolver as
+    AcpClient (honours KIROCLAW_KIRO_BIN + augmented_path so a non-login gateway
+    finds a ~/.local/bin install). A bare shutil.which(PATH) duplicate regressed
+    the kiro/_bg path to 'kiro-cli not found in PATH'. Assert single-source."""
+    import kiro_claw.acp.client as client_mod
+    import kiro_claw.acp.runtime as runtime_mod
+
+    assert runtime_mod._resolve_kiro_bin is client_mod._resolve_kiro_bin
+
+
 # ── Process death propagation ──
 
 @pytest.mark.asyncio
