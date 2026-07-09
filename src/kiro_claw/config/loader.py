@@ -83,7 +83,15 @@ logger = logging.getLogger(__name__)
 CRED_SLACK_APP_TOKEN = "SLACK_APP_TOKEN"
 CRED_SLACK_BOT_TOKEN = "SLACK_BOT_TOKEN"
 CRED_OWNER_ID = "KIROCLAW_OWNER_ID"
-_CREDENTIAL_KEYS = (CRED_SLACK_APP_TOKEN, CRED_SLACK_BOT_TOKEN, CRED_OWNER_ID)
+CRED_WECOM_BOT_ID = "WECOM_BOT_ID"
+CRED_WECOM_SECRET = "WECOM_SECRET"
+_CREDENTIAL_KEYS = (
+    CRED_SLACK_APP_TOKEN,
+    CRED_SLACK_BOT_TOKEN,
+    CRED_OWNER_ID,
+    CRED_WECOM_BOT_ID,
+    CRED_WECOM_SECRET,
+)
 
 DEFAULT_MODEL = "auto"
 DEFAULT_SESSION_TIMEOUT = 3600  # 60 min
@@ -1865,6 +1873,63 @@ class TunnelConfig:
 
 
 @dataclass
+class WeComConfig:
+    enabled: bool = field(
+        default=False,
+        metadata=_meta(
+            "Enabled",
+            "Enable the WeChat channel via WeCom AI-bot. Requires the WECOM_BOT_ID "
+            "and WECOM_SECRET credentials to be set.",
+            tags=["wechat"],
+        ),
+    )
+    allowed_users: list[dict] = field(
+        default_factory=list,
+        metadata=_meta(
+            "Allowed Users",
+            "WeCom users allowed to DM the bot. Each entry: {userid, name}. "
+            "The owner is always allowed.",
+            tags=["wechat"],
+        ),
+    )
+    ws_url: str = field(
+        default="wss://openws.work.weixin.qq.com",
+        metadata=_meta(
+            "WebSocket URL",
+            "WeCom AI-bot long-connection endpoint.",
+            tags=["wechat"],
+        ),
+    )
+    soft_threshold_pct: int = field(
+        default=80,
+        metadata=_meta(
+            "Soft Context Threshold %",
+            "When a DM's context passes this, prompt the user to /compact or /new "
+            "instead of auto-compacting.",
+            tags=["wechat"],
+        ),
+    )
+    hard_threshold_pct: int = field(
+        default=95,
+        metadata=_meta(
+            "Hard Context Threshold %",
+            "Force a compaction when context reaches this, even without a user "
+            "decision, so the window never overflows.",
+            tags=["wechat"],
+        ),
+    )
+
+    def __post_init__(self) -> None:
+        # Clamp thresholds to [0, 100] and guarantee soft <= hard so a misconfig
+        # (e.g. hard=50, soft=95, or an out-of-range value) can't make the soft
+        # nudge unreachable -- _maybe_notice checks ``pct >= hard`` first.
+        self.soft_threshold_pct = max(0, min(100, self.soft_threshold_pct))
+        self.hard_threshold_pct = max(0, min(100, self.hard_threshold_pct))
+        if self.soft_threshold_pct > self.hard_threshold_pct:
+            self.soft_threshold_pct = self.hard_threshold_pct
+
+
+@dataclass
 class KiroClawConfig:
     agent: AgentConfig = field(
         default_factory=AgentConfig,
@@ -1924,6 +1989,10 @@ class KiroClawConfig:
     slack: SlackConfig = field(
         default_factory=SlackConfig,
         metadata=_meta("Slack", "Slack integration settings.", tags=["slack"]),
+    )
+    wechat: WeComConfig = field(
+        default_factory=WeComConfig,
+        metadata=_meta("WeChat", "WeChat (WeCom AI-bot) integration settings.", tags=["wechat"]),
     )
     dashboard: DashboardConfig = field(
         default_factory=DashboardConfig,
@@ -2135,6 +2204,9 @@ class KiroClawConfig:
         slack_data = data.get("slack", {})
         if not isinstance(slack_data, dict):
             slack_data = {}
+        wechat_data = data.get("wechat", {})
+        if not isinstance(wechat_data, dict):
+            wechat_data = {}
         dashboard_data = data.get("dashboard", {})
         if not isinstance(dashboard_data, dict):
             dashboard_data = {}
@@ -2332,6 +2404,17 @@ class KiroClawConfig:
                 reactions_enabled=bool(slack_data.get("reactions_enabled", True)),
                 use_tunnel_url=bool(slack_data.get("use_tunnel_url", False)),
                 show_thinking=bool(slack_data.get("show_thinking", True)),
+            ),
+            wechat=WeComConfig(
+                enabled=bool(wechat_data.get("enabled", False)),
+                allowed_users=[
+                    u
+                    for u in wechat_data.get("allowed_users", [])
+                    if isinstance(u, dict) and u.get("userid")
+                ],
+                ws_url=str(wechat_data.get("ws_url", "wss://openws.work.weixin.qq.com")),
+                soft_threshold_pct=int(wechat_data.get("soft_threshold_pct", 80)),
+                hard_threshold_pct=int(wechat_data.get("hard_threshold_pct", 95)),
             ),
             dashboard=DashboardConfig(
                 url=dashboard_data.get("url", ""),

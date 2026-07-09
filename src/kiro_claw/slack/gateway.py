@@ -51,6 +51,8 @@ from kiro_claw.config.loader import (
     CRED_OWNER_ID,
     CRED_SLACK_APP_TOKEN,
     CRED_SLACK_BOT_TOKEN,
+    CRED_WECOM_BOT_ID,
+    CRED_WECOM_SECRET,
     _session_work_dir,
     build_provider_factory,
     config_dir,
@@ -121,6 +123,7 @@ from kiro_claw.taskrunner import TaskRunner
 if TYPE_CHECKING:
     from kiro_claw.dashboard.state import _ChatSlot
     from kiro_claw.task_models import Task
+    from kiro_claw.wechat.client import WeComClient
 
 logger = logging.getLogger(__name__)
 
@@ -477,6 +480,11 @@ class GatewayOrchestrator:
         }
         self._open_channels: set[str] = set(cfg.slack.open_channels)
         self._slack_enabled = bool(self._app_token and self._bot_token)
+        self._wecom_bot_id = creds.get(CRED_WECOM_BOT_ID, "")
+        self._wecom_secret = creds.get(CRED_WECOM_SECRET, "")
+        self._wecom_enabled = bool(
+            cfg.wechat.enabled and self._wecom_bot_id and self._wecom_secret
+        )
         self.slack_command = cfg.slack.command
 
         # Services (initialized in start())
@@ -502,6 +510,7 @@ class GatewayOrchestrator:
         self._session_tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
         self._pending_queue: dict[str, list] = {}
         self._socket_client: WSSocketModeClient | None = None
+        self._wecom_client: "WeComClient | None" = None  # set by maybe_start_wecom
         self._ollama_manager: object | None = None  # OllamaManager (lazy import)
 
     # ------------------------------------------------------------------
@@ -3311,6 +3320,8 @@ class GatewayOrchestrator:
             cleanup_tasks.append(self._dashboard_runner.cleanup())
         if self._socket_client:
             cleanup_tasks.append(asyncio.wait_for(self._socket_client.close(), timeout=1.0))
+        if self._wecom_client:
+            cleanup_tasks.append(asyncio.wait_for(self._wecom_client.close(), timeout=2.0))
         # Stop Ollama server if we started it
         if self._ollama_manager is not None:
             if isinstance(self._ollama_manager, OllamaManager):
@@ -3655,6 +3666,11 @@ class GatewayOrchestrator:
         # Wire up event routing and interactive handlers
         init_interactions(self)
         init_socket_mode(self, seen)
+
+        # WeChat (WeCom AI-bot) channel — guarded no-op unless enabled + credentialed.
+        from kiro_claw.wechat.gateway import maybe_start_wecom
+
+        self._wecom_client = await maybe_start_wecom(self)
 
         # Check for updates before printing URLs
         print("🐾 Checking for updates…")

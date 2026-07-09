@@ -2249,6 +2249,122 @@
       "defaultValue": false
     },
     {
+      "path": "wechat",
+      "kind": "core",
+      "type": "object",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [
+        "wechat"
+      ],
+      "label": "WeChat",
+      "help": "WeChat (WeCom AI-bot) integration settings.",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": {
+        "enabled": false,
+        "allowed_users": [],
+        "ws_url": "wss://openws.work.weixin.qq.com",
+        "soft_threshold_pct": 80,
+        "hard_threshold_pct": 95
+      }
+    },
+    {
+      "path": "wechat.enabled",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [
+        "wechat"
+      ],
+      "label": "Enabled",
+      "help": "Enable the WeChat channel via WeCom AI-bot. Requires the WECOM_BOT_ID and WECOM_SECRET credentials to be set.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
+    },
+    {
+      "path": "wechat.allowed_users",
+      "kind": "core",
+      "type": "array",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [
+        "wechat"
+      ],
+      "label": "Allowed Users",
+      "help": "WeCom users allowed to DM the bot. Each entry: {userid, name}. The owner is always allowed.",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": []
+    },
+    {
+      "path": "wechat.allowed_users.*",
+      "kind": "core",
+      "type": "object",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "*",
+      "help": "",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": null
+    },
+    {
+      "path": "wechat.ws_url",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [
+        "wechat"
+      ],
+      "label": "WebSocket URL",
+      "help": "WeCom AI-bot long-connection endpoint.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": "wss://openws.work.weixin.qq.com"
+    },
+    {
+      "path": "wechat.soft_threshold_pct",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [
+        "wechat"
+      ],
+      "label": "Soft Context Threshold %",
+      "help": "When a DM's context passes this, prompt the user to /compact or /new instead of auto-compacting.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 80
+    },
+    {
+      "path": "wechat.hard_threshold_pct",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [
+        "wechat"
+      ],
+      "label": "Hard Context Threshold %",
+      "help": "Force a compaction when context reaches this, even without a user decision, so the window never overflows.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 95
+    },
+    {
       "path": "dashboard",
       "kind": "core",
       "type": "object",
