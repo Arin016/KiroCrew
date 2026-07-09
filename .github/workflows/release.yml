@@ -8,8 +8,8 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    name: Build & Release
+  build-wheel:
+    name: Build Wheel
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,14 +42,89 @@ jobs:
           pip install --upgrade build
           python -m build
 
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel
+          path: dist/*
+
+  build-desktop:
+    name: Build Desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            artifact-name: KiroClaw-macOS-arm64
+          - os: ubuntu-22.04
+            artifact-name: KiroClaw-Linux-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Build desktop app (PBS + uv venv)
+        run: make desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Upload desktop artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: |
+            website/electron/dist/*.dmg
+            website/electron/dist/*.zip
+            website/electron/dist/*.AppImage
+          if-no-files-found: warn
+
+  release:
+    name: Create Release
+    needs: [build-wheel, build-desktop]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      HAS_SIGNING_SECRETS: ${{ secrets.AWS_SIGNING_ROLE_ARN != '' && 'true' || '' }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" -o -name "*.dmg" -o -name "*.zip" -o -name "*.AppImage" \) -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Configure AWS credentials
+        if: env.HAS_SIGNING_SECRETS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_SIGNING_ROLE_ARN }}
+          aws-region: us-west-2
+
+      - name: Upload unsigned DMG to S3 for signing
+        if: env.HAS_SIGNING_SECRETS
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          for f in release/*.dmg release/*.zip; do
+            [ -f "$f" ] || continue
+            echo "Uploading $f → s3://${{ secrets.AWS_SIGNING_BUCKET }}/pre-signed/${VERSION}/$(basename $f)"
+            aws s3 cp "$f" "s3://${{ secrets.AWS_SIGNING_BUCKET }}/pre-signed/${VERSION}/$(basename $f)"
+          done
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: dist/*
-
-      # Uncomment when PyPI publishing is ready:
-      # - name: Publish to PyPI
-      #   uses: pypa/gh-action-pypi-publish@release/v1
-      #   with:
-      #     password: ${{ secrets.PYPI_API_TOKEN }}
+          files: release/*

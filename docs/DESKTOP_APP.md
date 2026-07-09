@@ -1,15 +1,14 @@
 # KiroClaw Desktop App
 
 The desktop app is an [Electron](https://www.electronjs.org/) shell that wraps
-the KiroClaw web dashboard and embeds a **frozen Python backend**. Because the
-backend is frozen with PyInstaller and shipped inside the app, end users need
-**no** Python, pip, npm, or node — they just double-click the app and the
-dashboard opens.
+the KiroClaw web dashboard and embeds a **self-contained Python backend**. The
+backend uses a [python-build-standalone](https://github.com/indygreg/python-build-standalone)
+(PBS) interpreter with all dependencies installed via `uv`/`pip` into the bundled
+interpreter — end users need **no** Python, pip, npm, or node. They just
+double-click the app and the dashboard opens.
 
 The Electron sources live in [`website/electron/`](../website/electron/); the
-build is driven by [`packaging/build-desktop.sh`](../packaging/build-desktop.sh)
-and the PyInstaller spec
-[`packaging/kiroclaw-backend.spec`](../packaging/kiroclaw-backend.spec).
+build is driven by [`packaging/build-desktop.sh`](../packaging/build-desktop.sh).
 
 ## What `make desktop` produces
 
@@ -38,11 +37,12 @@ electron-builder configuration lives in
 > **Important:** `make desktop` produces an installer for the **host OS *and*
 > host CPU architecture only.** It is not a universal/fat binary.
 
-The PyInstaller spec uses `target_arch=None` (honors the host arch) and the
-electron-builder config sets no `arch` key (defaults to the host arch). The
-frozen backend's architecture is therefore **coupled** to the installer's — you
-cannot mix (e.g. an arm64 DMG carrying an x86_64 backend). To cover all four
-supported targets you must run the build on a machine of each architecture:
+The python-build-standalone interpreter is architecture-specific (honors the host
+arch) and the electron-builder config sets no `arch` key (defaults to the host
+arch). The bundled backend's architecture is therefore **coupled** to the
+installer's — you cannot mix (e.g. an arm64 DMG carrying an x86_64 backend). To
+cover all four supported targets you must run the build on a machine of each
+architecture:
 
 | Target | Build host | Produces |
 |--------|-----------|----------|
@@ -63,42 +63,24 @@ which not all publish.
 
 You can produce both the arm64 and the x86_64 DMG on a single Apple-Silicon Mac
 without an Intel machine, by running the x86_64 toolchain under **Rosetta 2**.
-PyInstaller does not cross-compile, so the trick is to freeze the backend with
-an *x86_64* Python (run via `arch -x86_64`) and then ask electron-builder for
-the x64 target (it downloads the x86_64 Electron itself).
+The PBS interpreter is architecture-specific, so the trick is to install an
+x86_64 PBS interpreter via `uv` under Rosetta and build with that.
 
-Prerequisites: Rosetta 2 (`softwareupdate --install-rosetta --agree-to-license`)
-and an x86_64-capable `python3` (the system `/usr/bin/python3` is universal2 and
-works; verify with `arch -x86_64 /usr/bin/python3 -c 'import platform;
-print(platform.machine())'` → `x86_64`).
+Prerequisites: Rosetta 2 (`softwareupdate --install-rosetta --agree-to-license`).
 
 ```bash
-# 0. Build + stage the frontend ONCE (arch-independent); both DMGs reuse it.
+# 0. Build the frontend ONCE (arch-independent); both DMGs reuse it.
 cd website && npm ci && npm run build && cd ..
-rm -rf src/kiro_claw/static/dist && cp -R website/dist src/kiro_claw/static/dist
 
-# 1. arm64 (native): freeze + stage + package. SKIP_FRONTEND reuses step 0.
-SKIP_FRONTEND=1 PYTHON="$PWD/.venv/bin/python" bash packaging/build-desktop.sh
+# 1. arm64 (native):
+SKIP_FRONTEND=1 bash packaging/build-desktop.sh
 #    → website/electron/dist/KiroClaw-<version>-arm64.dmg
 
-# 2. x86_64 (under Rosetta): build an x86_64 venv, freeze with it, then have
-#    electron-builder package the x64 target with that backend staged.
-arch -x86_64 /usr/bin/python3 -m venv .venv-x86
-arch -x86_64 .venv-x86/bin/python -m pip install -U pip setuptools wheel
-arch -x86_64 .venv-x86/bin/python -m pip install -e . "pyinstaller>=6,<7"
-PYTHONPATH="$PWD/src" arch -x86_64 .venv-x86/bin/python -m PyInstaller \
-  packaging/kiroclaw-backend.spec --noconfirm \
-  --distpath "$PWD/build/pyinstaller-x86/dist" \
-  --workpath "$PWD/build/pyinstaller-x86/build"
-rm -rf website/electron/backend-dist/kiroclaw-backend
-cp -R build/pyinstaller-x86/dist/kiroclaw-backend website/electron/backend-dist/kiroclaw-backend
-( cd website/electron && npx electron-builder --mac --x64 )
-#    → website/electron/dist/KiroClaw-<version>.dmg   (no -arch suffix == x64)
-
-# 3. Restore the arm64 backend into backend-dist so the working tree is back to
-#    its native state for normal `make desktop` runs.
-rm -rf website/electron/backend-dist/kiroclaw-backend
-cp -R build/pyinstaller/dist/kiroclaw-backend website/electron/backend-dist/kiroclaw-backend
+# 2. x86_64 (under Rosetta): uv installs the x86_64 PBS interpreter.
+arch -x86_64 uv python install cpython-3.12
+# Then run the build script under Rosetta to pick up the x86_64 interpreter:
+arch -x86_64 bash -c 'SKIP_FRONTEND=1 bash packaging/build-desktop.sh'
+#    → website/electron/dist/KiroClaw-<version>.dmg (x64)
 ```
 
 electron-builder names the host-arch (arm64) DMG `KiroClaw-<v>-arm64.dmg` and the
@@ -152,76 +134,67 @@ version), or `npm ci` will complain about a lock mismatch.
 pipeline end-to-end:
 
 ```
-1. Build the React dashboard (npm)      → website/dist
-2. Stage it into the Python package      → src/kiro_claw/static/dist
-3. Freeze the backend with PyInstaller    → build/pyinstaller/dist/kiroclaw-backend/
-4. Drop the frozen backend into Electron  → website/electron/backend-dist/kiroclaw-backend/
-5. Package with electron-builder          → website/electron/dist/ (DMG / AppImage)
+1. Build the React dashboard (npm)                    → website/dist
+2. Provision a python-build-standalone interpreter    → via uv python install
+3. pip-install kiro_claw + deps into the bundled interpreter
+4. Stage the dashboard into the package's static dir
+5. Prune caches/tests/unused stdlib to shrink bundle
+6. Package with electron-builder                      → website/electron/dist/ (DMG / AppImage)
 ```
 
 Step by step:
 
 1. **Frontend** — in `website/`, runs `npm ci` (or `npm install`) + `npm run
    build`, then copies `website/dist` into `src/kiro_claw/static/dist`. The
-   script aborts if `src/kiro_claw/static/dist/index.html` is missing, so the
-   SPA is always bundled.
-2. **PyInstaller backend** — installs `pyinstaller` if absent, then freezes the
-   backend using `packaging/kiroclaw-backend.spec`. The build is made hermetic by
-   pointing `PYTHONPATH` at this repo's `src/` only (the spec's `pathex=[SRC]`
-   reinforces this) so a polluted ambient `PYTHONPATH` can't leak modules into
-   the bundle. The frozen backend is smoke-tested with
-   `kiroclaw-backend --version`.
-3. **Stage into Electron** — copies the frozen
-   `build/pyinstaller/dist/kiroclaw-backend/` directory into
-   `website/electron/backend-dist/kiroclaw-backend/`.
-4. **Package** — in `website/electron/`, runs `npm ci` (or `npm install`) +
-   `npm run dist` (electron-builder), producing the installer(s) in
-   `website/electron/dist/`. This `npm ci` is pinned to the public registry by
-   `website/electron/.npmrc`; see the registry-pin note under
-   [Refreshing / cleaning the DMGs](#refreshing--cleaning-the-dmgs).
+   script aborts if `website/dist/index.html` is missing.
+2. **PBS interpreter** — uses `uv python install cpython-3.12` to provision a
+   self-contained python-build-standalone interpreter. PBS interpreters use
+   `@executable_path`-relative dylib references, making the bundle portable
+   across machines without needing the same system Python.
+3. **Install into bundle** — copies the PBS interpreter into
+   `website/electron/backend-dist/kiroclaw-backend/`, removes the
+   `EXTERNALLY-MANAGED` marker, then runs `pip install` with
+   `PYTHONNOUSERSITE=1` to force the full closure into the bundle.
+4. **Stage dashboard** — copies the built SPA into the bundled
+   `kiro_claw/static/dist` inside site-packages.
+5. **Prune** — removes `__pycache__`, test dirs, and unused stdlib modules
+   (tkinter, idlelib, etc.) to shrink the bundle.
+6. **Package** — in `website/electron/`, runs electron-builder to produce the
+   installer(s) in `website/electron/dist/`.
 
-### Build-only-the-backend escape hatches
+### Build escape hatches
 
-The script honors two environment flags (also used by `make backend-bin`, which
-sets both):
+The script honors two environment flags:
 
 | Flag | Effect |
 |------|--------|
-| `SKIP_FRONTEND=1` | Reuse an already-staged `src/kiro_claw/static/dist` |
-| `SKIP_ELECTRON=1` | Stop after the frozen backend binary (no electron-builder) |
+| `SKIP_FRONTEND=1` | Reuse an already-built `website/dist` |
+| `SKIP_ELECTRON=1` | Stop after the bundled backend (no electron-builder) |
 
-So `make backend-bin` (`SKIP_FRONTEND=1 SKIP_ELECTRON=1`) yields just the frozen
-backend at `website/electron/backend-dist/kiroclaw-backend/` without packaging
-the desktop app.
+## The bundled backend (python-build-standalone)
 
-## The frozen backend (PyInstaller)
+The build produces a self-contained Python interpreter with all dependencies
+installed, located at `website/electron/backend-dist/kiroclaw-backend/`. Key
+details:
 
-[`packaging/kiroclaw-backend.spec`](../packaging/kiroclaw-backend.spec) produces
-a **one-folder** bundle (not one-file) named `kiroclaw-backend` — chosen for
-faster startup and a stable on-disk layout for bundled data files. Key details:
-
-- **Entry point** is `src/kiro_claw/__main__.py` (not `cli.py`): `__main__`
-  runs SSL-cert setup before importing `kiro_claw.cli`, which caches its SSL
-  context at import time.
-- **Data files** mirror the `setup.cfg` `package_data` (configs, prompts,
-  personas, app manifests, eval scenarios, in-app docs, scripts, skills) **plus**
-  the pre-built dashboard at `static/dist`, which `package_data` intentionally
-  omits because Vite emits content-hashed filenames.
-- **Repo-root `agents/` and `skills/`** are bundled too (loaded via
-  `KIROCLAW_PROJECT_DIR`) so the standalone app has its agent config without a
-  source checkout.
-- **Lean by default** — `boto3`, `botocore`, `amazon_transcribe`, `matplotlib`,
-  and `tkinter` are excluded since the `[aws]`/`[voice]` extras are optional and
-  lazy-imported. Remove them from `excludes` if shipping an AWS/voice build.
-- **`console=True`** — the headless gateway logs to stdout/stderr so the Electron
-  parent can capture output.
+- **Interpreter** is a python-build-standalone CPython 3.12 with `@executable_path`-
+  relative dylib references (genuinely portable, no system Python dependency).
+- **Entry point** is `bin/kiroclaw` — a shell script that execs
+  `bin/python3.12 -s -m kiro_claw "$@"`.
+- **Self-containment verified** — the build script runs
+  `PYTHONNOUSERSITE=1 bin/python3.12 -m kiro_claw --version` to catch any
+  missing dependency before packaging.
+- **Dashboard bundled** — the SPA is staged into
+  `lib/python3.12/site-packages/kiro_claw/static/dist/` inside the bundle.
+- **Pruned** — `__pycache__`, test dirs, and unused stdlib (tkinter, idlelib,
+  turtledemo, ensurepip, lib2to3) are removed to shrink the bundle.
 
 ## How the app finds and launches the backend
 
 When the app starts, [`main.js`](../website/electron/main.js) first checks
 whether a gateway is already running; if not, it locates the backend binary via
 [`find-bin.js`](../website/electron/find-bin.js) and spawns it as
-`kiroclaw-backend gateway --no-open`, then polls `/api/status` (up to 2 minutes)
+`kiroclaw gateway --no-open`, then polls `/api/status` (up to 2 minutes)
 and loads the dashboard once it is healthy.
 
 ### `find-bin.js` — locating the binary
@@ -229,10 +202,10 @@ and loads the dashboard once it is healthy.
 `findKiroclawBin()` checks well-known paths in order and returns the first
 executable it finds, falling back to bare `kiroclaw` on `PATH`:
 
-1. `<resourcesPath>/backend-dist/kiroclaw-backend/kiroclaw-backend` — the bundled
-   PyInstaller binary inside the packaged `.app` (electron-builder ships
+1. `<resourcesPath>/backend-dist/kiroclaw-backend/bin/kiroclaw` — the bundled
+   PBS backend inside the packaged `.app` (electron-builder ships
    `backend-dist/kiroclaw-backend` as `extraResources`).
-2. `<__dirname>/backend-dist/kiroclaw-backend/kiroclaw-backend` — the same binary
+2. `<__dirname>/backend-dist/kiroclaw-backend/bin/kiroclaw` — the same binary
    when running unpackaged from `website/electron/` in development.
 3. `<__dirname>/../bin/kiroclaw`
 4. Well-known install paths under `$HOME` (e.g. `~/.local/bin/kiroclaw`,

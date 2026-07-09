@@ -99,13 +99,13 @@ Optional extras (install with e.g. `pip install kiroclaw[voice]`):
 |-------|------|
 | `voice` | `boto3`, `amazon-transcribe` for speech-to-text |
 | `aws` | `boto3` for AWS integrations |
-| `desktop` | `pyinstaller` for building the frozen backend |
+| `desktop` | `pyinstaller` for building the frozen backend (REMOVED — desktop builds use python-build-standalone + uv) |
 
 ### c. Bundled desktop app
 
-Build a double-clickable desktop app that embeds a frozen Python backend (via
-PyInstaller) inside an Electron shell. End users need **no** Python, pip, npm,
-or node:
+Build a double-clickable desktop app that embeds a python-build-standalone
+interpreter + uv-installed deps inside an Electron shell. End users need **no**
+Python, pip, npm, or node:
 
 ```bash
 make desktop              # → website/electron/dist/KiroClaw-*.dmg (macOS)
@@ -113,14 +113,8 @@ make desktop              # → website/electron/dist/KiroClaw-*.dmg (macOS)
 ```
 
 See [DESKTOP_APP.md](DESKTOP_APP.md) for the full build pipeline (frontend →
-stage → PyInstaller → electron-builder) and how the app locates and launches the
-bundled backend.
-
-To build only the frozen standalone backend binary (no Electron packaging):
-
-```bash
-make backend-bin          # → build/pyinstaller/dist/kiroclaw-backend/kiroclaw-backend
-```
+python-build-standalone → pip install → electron-builder) and how the app
+locates and launches the bundled backend.
 
 ## Makefile targets
 
@@ -128,7 +122,6 @@ make backend-bin          # → build/pyinstaller/dist/kiroclaw-backend/kiroclaw
 |--------|--------------|
 | `make build` | Build the frontend (npm/Vite) + install the backend into `.venv` |
 | `make wheel` | Self-contained pip wheel with the dashboard bundled → `dist/` |
-| `make backend-bin` | Frozen standalone backend binary (PyInstaller), no Electron |
 | `make desktop` | Full desktop app — DMG (macOS) / AppImage (Linux) |
 | `make test` | Build, then run the `pytest` suite |
 | `make clean` | Remove build artifacts, dists, and caches |

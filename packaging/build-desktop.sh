@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
 # Build the standalone KiroClaw desktop app end-to-end.
 #
-# Pipeline:
-#   1. Build the React dashboard (npm)        -> website/dist
-#   2. Stage it into the Python package        -> src/kiro_claw/static/dist
-#   3. Freeze the backend with PyInstaller      -> a self-contained kiroclaw-backend/
-#   4. Drop the frozen backend into the Electron app's backend-dist/
-#   5. Package the desktop app with electron-builder -> DMG (mac) / AppImage (linux)
+# Pipeline (mirrors MeshClaw's python-build-standalone approach):
+#   1. Build the React dashboard (npm)         -> website/dist
+#   2. Provision a python-build-standalone (PBS) interpreter via uv
+#   3. pip-install kiro_claw + deps INTO the bundled interpreter
+#   4. Stage the dashboard into the package's static dir
+#   5. Prune caches/tests/unused stdlib to shrink the bundle
+#   6. Package the desktop app with electron-builder -> DMG (mac) / AppImage (linux)
 #
 # The result is a double-clickable app that embeds the whole Python backend +
 # dashboard — no system Python, pip, npm, or node required by the end user.
 #
-# ARCHITECTURE: this builds for the HOST OS *and* HOST CPU ARCH only (not a
-# universal binary). PyInstaller (target_arch=None) and electron-builder (no
-# arch key) both follow the host. To ship macOS arm64 + x86_64 and Linux
-# x86_64 + aarch64 you must run this once per architecture. See
-# docs/DESKTOP_APP.md -> "Builds are host-architecture-only".
+# This REPLACES the old PyInstaller approach. PBS interpreters are self-contained
+# and use @executable_path-relative dylib references, so the bundle is genuinely
+# portable across machines without needing the exact same system Python version.
+#
+# ARCHITECTURE: builds for the HOST OS and HOST CPU ARCH only (not a universal
+# binary). To ship macOS arm64 + x86_64 and Linux x86_64 + aarch64, run once
+# per architecture.
 #
 # Usage:
 #   bash packaging/build-desktop.sh            # build for the host OS + arch
@@ -26,23 +29,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-printf '\n\033[1;33m▶ Building for host arch only: %s/%s. Universal binaries are NOT produced — run once per target arch (see docs/DESKTOP_APP.md).\033[0m\n' \
+printf '\n\033[1;33m▶ Building for host arch only: %s/%s.\033[0m\n' \
   "$(uname -s)" "$(uname -m)"
 
-# Prefer the repo's build venv (created by `make backend`) so PyInstaller installs
-# without tripping PEP 668 on an externally-managed system Python. An explicit
-# PYTHON=... still wins; otherwise fall back to python3.
-if [ -n "${PYTHON:-}" ]; then
-  PY="$PYTHON"
-elif [ -x "$ROOT/.venv/bin/python" ]; then
-  PY="$ROOT/.venv/bin/python"
-else
-  PY="python3"
-fi
 ELECTRON_DIR="$ROOT/website/electron"
-SPEC="$ROOT/packaging/kiroclaw-backend.spec"
-PYI_DIST="$ROOT/build/pyinstaller/dist"
-PYI_WORK="$ROOT/build/pyinstaller/build"
+
+# Version from the package.
+KC_VERSION="$(grep -m1 '__version__' "$ROOT/src/kiro_claw/__init__.py" \
+  | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/')"
+if [ -z "$KC_VERSION" ]; then
+  echo "ERROR: could not parse __version__ from src/kiro_claw/__init__.py" >&2
+  exit 1
+fi
 
 log() { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 
@@ -52,60 +50,126 @@ if [ "${SKIP_FRONTEND:-0}" != "1" ]; then
   ( cd "$ROOT/website"
     if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
     npm run build )
-  log "Staging dashboard into the package…"
-  rm -rf "$ROOT/src/kiro_claw/static/dist"
-  mkdir -p "$ROOT/src/kiro_claw/static"
-  cp -R "$ROOT/website/dist" "$ROOT/src/kiro_claw/static/dist"
 else
-  log "SKIP_FRONTEND=1 — reusing existing src/kiro_claw/static/dist"
+  log "SKIP_FRONTEND=1 — reusing existing website/dist"
 fi
 
-if [ ! -f "$ROOT/src/kiro_claw/static/dist/index.html" ]; then
-  echo "❌ Dashboard dist missing at src/kiro_claw/static/dist — cannot bundle." >&2
+if [ ! -f "$ROOT/website/dist/index.html" ]; then
+  echo "❌ Dashboard dist missing at website/dist — cannot bundle." >&2
   exit 1
 fi
 
-# --- 2. PyInstaller backend -------------------------------------------------
-log "Freezing backend with PyInstaller…"
-if ! "$PY" -c "import PyInstaller" 2>/dev/null; then
-  echo "PyInstaller not installed — installing into the active environment…"
-  "$PY" -m pip install pyinstaller
-fi
-# Ad-hoc re-sign native libs (numpy, etc.) so macOS does not SIGKILL the
-# PyInstaller isolated subprocesses with a code-signature "Invalid Page" fault.
-# No-op on non-macOS. See packaging/resign-macos-libs.sh for the full rationale.
-bash "$ROOT/packaging/resign-macos-libs.sh" "$PY"
-# Make the build hermetic: point PYTHONPATH at THIS repo's src only, so a
-# polluted ambient PYTHONPATH (e.g. a sibling checkout) can't leak modules
-# into the frozen bundle. The spec's own pathex=[SRC] reinforces this.
-export PYTHONPATH="$ROOT/src"
-"$PY" -m PyInstaller "$SPEC" --noconfirm --distpath "$PYI_DIST" --workpath "$PYI_WORK"
+# --- 2. Provision python-build-standalone interpreter via uv ----------------
+log "Provisioning python-build-standalone interpreter (uv)…"
+command -v uv >/dev/null 2>&1 || {
+  echo "uv not found — installing pinned version from https://docs.astral.sh/uv/" >&2
+  # Pin to a known-good version to avoid silent supply-chain changes.
+  # Bump this explicitly when upgrading uv.
+  UV_VERSION="0.10.11"
+  curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+  export PATH="$HOME/.local/bin:$PATH"
+  command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv not found on PATH after install. Check ~/.local/bin or install manually." >&2
+    exit 1
+  }
+}
 
-BACKEND_OUT="$PYI_DIST/kiroclaw-backend"
-if [ ! -x "$BACKEND_OUT/kiroclaw-backend" ]; then
-  echo "❌ PyInstaller did not produce $BACKEND_OUT/kiroclaw-backend" >&2
+# Pin to CPython 3.12 (latest stable, matches CI python-version).
+UV_PY_VERSION="cpython-3.12"
+uv python install "$UV_PY_VERSION" >/dev/null 2>&1 || true
+
+# Resolve the architecture suffix for the PBS directory name.
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
+[ "$ARCH" = "arm64" ] && ARCH="aarch64"
+[ "$ARCH" = "x86_64" ] && ARCH="x86_64"
+
+if [ "$OS" = "darwin" ]; then
+  PBS_PATTERN="cpython-3.12*-macos-${ARCH}-none"
+else
+  PBS_PATTERN="cpython-3.12*-linux-${ARCH}-gnu"
+fi
+
+PBS_DIR="$(find "$(uv python dir)" -maxdepth 1 -type d -name "$PBS_PATTERN" 2>/dev/null | sort -V | tail -1)"
+if [ -z "$PBS_DIR" ] || [ ! -x "$PBS_DIR/bin/python3.12" ]; then
+  echo "ERROR: no managed python-build-standalone 3.12 for ${OS}-${ARCH} under $(uv python dir)" >&2
+  echo "       Run: uv python install $UV_PY_VERSION" >&2
   exit 1
 fi
+echo "    PBS interpreter: $PBS_DIR"
 
-log "Smoke-testing the frozen backend…"
-"$BACKEND_OUT/kiroclaw-backend" --version
-
-# --- 3. Hand the backend to the Electron app -------------------------------
-log "Staging frozen backend into the Electron app…"
-rm -rf "$ELECTRON_DIR/backend-dist/kiroclaw-backend"
+# --- 3. Install kiro_claw into the bundled interpreter ----------------------
+log "Installing kiro_claw into the bundled interpreter…"
+BACKEND_OUT="$ELECTRON_DIR/backend-dist/kiroclaw-backend"
+rm -rf "$ELECTRON_DIR/backend-dist"
 mkdir -p "$ELECTRON_DIR/backend-dist"
-cp -R "$BACKEND_OUT" "$ELECTRON_DIR/backend-dist/kiroclaw-backend"
+cp -R "$PBS_DIR" "$BACKEND_OUT"
+
+# PBS ships uv's PEP 668 EXTERNALLY-MANAGED marker; drop it so pip can install
+# into our private copy (this is our bundle, not a system interpreter).
+find "$BACKEND_OUT" -name "EXTERNALLY-MANAGED" -delete 2>/dev/null || true
+
+# PYTHONNOUSERSITE=1 + empty PYTHONPATH: force the full closure into the bundle.
+# Without this, pip treats deps already present on the build host as "satisfied"
+# and skips them -> the gateway crashes on a clean machine with ModuleNotFoundError.
+env PYTHONNOUSERSITE=1 PYTHONPATH= KIROCLAW_SKIP_FRONTEND=1 \
+  "$BACKEND_OUT/bin/python3.12" -m pip install \
+  --no-warn-script-location --disable-pip-version-check "$ROOT"
+
+# Stage the dashboard dist into the package's static dir.
+SP="$BACKEND_OUT/lib/python3.12/site-packages"
+log "Staging dashboard dist into kiro_claw/static/dist…"
+mkdir -p "$SP/kiro_claw/static"
+( cd "$SP/kiro_claw/static" && rm -rf dist && cp -R "$ROOT/website/dist" dist )
+[ -f "$SP/kiro_claw/static/dist/index.html" ] || {
+  echo "ERROR: dashboard dist not staged" >&2; exit 1
+}
+
+# Relocatable launcher script.
+cat > "$BACKEND_OUT/bin/kiroclaw" <<'LAUNCH'
+#!/bin/bash
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$DIR/python3.12" -s -m kiro_claw "$@"
+LAUNCH
+chmod +x "$BACKEND_OUT/bin/kiroclaw"
+
+# Self-containment gate: the full import chain must resolve with no user-site.
+log "Verifying self-containment…"
+PYTHONNOUSERSITE=1 "$BACKEND_OUT/bin/python3.12" -m kiro_claw --version >/dev/null \
+  || { echo "ERROR: bundled backend is NOT self-contained (missing dep under PYTHONNOUSERSITE=1)" >&2; exit 1; }
+
+# --- 4. Prune to shrink the bundle ------------------------------------------
+log "Pruning bundle…"
+( cd "$BACKEND_OUT"
+  find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+  find lib/python3.12/site-packages -type d \( -name tests -o -name test \) -prune -exec rm -rf {} + 2>/dev/null || true
+  rm -rf lib/python3.12/test lib/python3.12/idlelib lib/python3.12/tkinter \
+         lib/python3.12/turtledemo lib/python3.12/ensurepip lib/python3.12/lib2to3 2>/dev/null || true )
+
+echo "    backend-dist size: $(du -sh "$BACKEND_OUT" 2>/dev/null | cut -f1)"
 
 if [ "${SKIP_ELECTRON:-0}" = "1" ]; then
-  log "SKIP_ELECTRON=1 — backend ready at $ELECTRON_DIR/backend-dist/kiroclaw-backend"
+  log "SKIP_ELECTRON=1 — backend ready at $BACKEND_OUT"
   exit 0
 fi
 
-# --- 4. Package the desktop app --------------------------------------------
-log "Packaging desktop app (electron-builder)…"
+# --- 5. Package the desktop app with electron-builder -----------------------
+log "Packaging desktop app (electron-builder, version: $KC_VERSION)…"
 ( cd "$ELECTRON_DIR"
   if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
-  npm run dist )
+
+  EB_ARGS=( "-c.extraMetadata.version=$KC_VERSION" )
+  if [ "$OS" = "darwin" ]; then
+    EB_ARGS+=( --mac )
+  else
+    EB_ARGS+=( --linux )
+  fi
+
+  CSC_IDENTITY_AUTO_DISCOVERY=false ./node_modules/.bin/electron-builder "${EB_ARGS[@]}"
+)
 
 log "Done. Installer(s) are in $ELECTRON_DIR/dist/"
-ls -1 "$ELECTRON_DIR/dist" 2>/dev/null | sed 's/^/   /' || true
+ls -1 "$ELECTRON_DIR/dist/"*.{dmg,AppImage,zip} 2>/dev/null | sed 's/^/   /' || true
+echo ""
+echo "    The .app embeds the backend, so it runs with no PATH kiroclaw needed."

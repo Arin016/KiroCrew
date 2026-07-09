@@ -241,7 +241,7 @@ Manage and switch between several **remote** KiroClaw instances (dev hosts, EC2,
 
 ### Desktop App (Electron)
 
-Native desktop app (macOS DMG / Linux AppImage) wrapping the web dashboard. Bundles a PyInstaller backend so end users need no Python, pip, or npm; auto-starts the gateway and connects to `localhost:5476`.
+Native desktop app (macOS DMG / Linux AppImage) wrapping the web dashboard. Bundles a python-build-standalone interpreter so end users need no Python, pip, or npm; auto-starts the gateway and connects to `localhost:5476`.
 
 - **Multi-tab gateways** — connect to multiple KiroClaw gateways simultaneously in separate tabs
 - **WebContentsView architecture** — modern tab/window management replacing legacy BrowserView

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -838,7 +839,19 @@ class TestAuthValidation:
 class TestSigV4Sign:
     """Tests for _sigv4_sign and _get_botocore_session."""
 
+    def test_get_botocore_session_returns_none_without_botocore(self, monkeypatch) -> None:
+        """When botocore is not installed, _get_botocore_session returns None."""
+        from kiro_claw.embeddings import _get_botocore_session
+        _get_botocore_session.cache_clear()
+        monkeypatch.setattr("kiro_claw.embeddings._HAS_BOTOCORE", False)
+        assert _get_botocore_session() is None
+
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("botocore"),
+        reason="botocore not installed (optional voice dep)",
+    )
     def test_get_botocore_session_returns_session(self) -> None:
+        """When botocore IS installed, _get_botocore_session returns a Session."""
         from kiro_claw.embeddings import _get_botocore_session
         _get_botocore_session.cache_clear()
         sess = _get_botocore_session()
@@ -847,12 +860,18 @@ class TestSigV4Sign:
 
     def test_sigv4_sign_success(self, monkeypatch) -> None:
         from kiro_claw.embeddings import _sigv4_sign
+        monkeypatch.setattr("kiro_claw.embeddings._HAS_BOTOCORE", True)
         mock_creds = MagicMock()
         mock_creds.get_frozen_credentials.return_value = MagicMock(
             access_key="AKID", secret_key="SECRET", token=None
         )
         mock_session = MagicMock()
         mock_session.get_credentials.return_value = mock_creds
+        # Mock AWSRequest to capture headers and return them
+        mock_request = MagicMock()
+        mock_request.headers = {"Authorization": "AWS4-HMAC-SHA256 ...", "Content-Type": "application/json"}
+        monkeypatch.setattr("kiro_claw.embeddings.AWSRequest", lambda **kw: mock_request)
+        monkeypatch.setattr("kiro_claw.embeddings.SigV4Auth", MagicMock())
         monkeypatch.setattr("kiro_claw.embeddings._get_botocore_session", lambda: mock_session)
         monkeypatch.setenv("AWS_REGION", "us-west-2")
         result = _sigv4_sign("POST", "https://api.example.com/api/embed", {"Content-Type": "application/json"}, b'{}')
@@ -861,6 +880,7 @@ class TestSigV4Sign:
 
     def test_sigv4_sign_no_credentials(self, monkeypatch) -> None:
         from kiro_claw.embeddings import _sigv4_sign
+        monkeypatch.setattr("kiro_claw.embeddings._HAS_BOTOCORE", True)
         mock_session = MagicMock()
         mock_session.get_credentials.return_value = None
         monkeypatch.setattr("kiro_claw.embeddings._get_botocore_session", lambda: mock_session)
@@ -870,6 +890,7 @@ class TestSigV4Sign:
 
     def test_sigv4_sign_exception(self, monkeypatch) -> None:
         from kiro_claw.embeddings import _sigv4_sign
+        monkeypatch.setattr("kiro_claw.embeddings._HAS_BOTOCORE", True)
         monkeypatch.setattr("kiro_claw.embeddings._get_botocore_session", MagicMock(side_effect=RuntimeError("boom")))
         monkeypatch.setenv("AWS_REGION", "us-west-2")
         result = _sigv4_sign("POST", "https://api.example.com/api/embed", {}, b'{}')
@@ -877,12 +898,17 @@ class TestSigV4Sign:
 
     def test_sigv4_sign_region_fallback(self, monkeypatch) -> None:
         from kiro_claw.embeddings import _sigv4_sign
+        monkeypatch.setattr("kiro_claw.embeddings._HAS_BOTOCORE", True)
         mock_creds = MagicMock()
         mock_creds.get_frozen_credentials.return_value = MagicMock(
             access_key="AKID", secret_key="SECRET", token=None
         )
         mock_session = MagicMock()
         mock_session.get_credentials.return_value = mock_creds
+        mock_request = MagicMock()
+        mock_request.headers = {"Authorization": "AWS4-HMAC-SHA256 ..."}
+        monkeypatch.setattr("kiro_claw.embeddings.AWSRequest", lambda **kw: mock_request)
+        monkeypatch.setattr("kiro_claw.embeddings.SigV4Auth", MagicMock())
         monkeypatch.setattr("kiro_claw.embeddings._get_botocore_session", lambda: mock_session)
         monkeypatch.delenv("AWS_REGION", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
@@ -892,12 +918,17 @@ class TestSigV4Sign:
 
     def test_sigv4_sign_string_body(self, monkeypatch) -> None:
         from kiro_claw.embeddings import _sigv4_sign
+        monkeypatch.setattr("kiro_claw.embeddings._HAS_BOTOCORE", True)
         mock_creds = MagicMock()
         mock_creds.get_frozen_credentials.return_value = MagicMock(
             access_key="AKID", secret_key="SECRET", token=None
         )
         mock_session = MagicMock()
         mock_session.get_credentials.return_value = mock_creds
+        mock_request = MagicMock()
+        mock_request.headers = {"Authorization": "AWS4-HMAC-SHA256 ..."}
+        monkeypatch.setattr("kiro_claw.embeddings.AWSRequest", lambda **kw: mock_request)
+        monkeypatch.setattr("kiro_claw.embeddings.SigV4Auth", MagicMock())
         monkeypatch.setattr("kiro_claw.embeddings._get_botocore_session", lambda: mock_session)
         monkeypatch.setenv("AWS_REGION", "us-west-2")
         result = _sigv4_sign("POST", "https://api.example.com/api/embed", {}, '{"text":"hello"}')

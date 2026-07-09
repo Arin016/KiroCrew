@@ -70,11 +70,9 @@ jobs:
           pytest -q -n auto --timeout=120 --cov=kiro_claw --cov-report=xml \
             --deselect=test/test_script_hooks.py \
             --deselect=test/test_cron_script.py \
-            --deselect=test/test_embeddings.py \
             --deselect=test/test_run_aim_path.py
         # Deselected tests require capabilities unavailable on GH Actions:
         #   test_script_hooks, test_cron_script: Linux namespace sandbox (unshare NEWNS)
-        #   test_embeddings: botocore (only in [voice] extra, not safe to import unconditionally)
         #   test_run_aim_path: `aim` CLI binary (Amazon-internal tool)
 
       - name: Upload coverage
@@ -112,7 +110,9 @@ jobs:
         # Blocking: fails on any eslint error and on any NEW warning above the
         # current baseline. Ratchet --max-warnings down toward 0 as the ~1116
         # pre-existing warnings (no-explicit-any, jsx-a11y, no-console) are burned
-        # down; do not raise it.
+        # down; do not raise it. (Baseline bumped 1066 -> 1116 by the final
+        # Brazil->GitHub sync, which imported upstream warnings that never faced
+        # this gate; burn-down resumes from 1116.)
         run: npx eslint src/ --max-warnings 1116
 
       - name: Copy/paste detection

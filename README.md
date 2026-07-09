@@ -115,9 +115,9 @@ kiroclaw gateway          # → http://localhost:5476
 
 ### c. Bundled desktop app
 
-Build a double-clickable desktop app that embeds a frozen Python backend (via
-PyInstaller) inside an Electron shell — end users need **no** Python, pip, npm,
-or node:
+Build a double-clickable desktop app that embeds a python-build-standalone
+interpreter + uv-installed deps inside an Electron shell — end users need **no**
+Python, pip, npm, or node:
 
 ```bash
 make desktop              # → website/electron/dist/KiroClaw-*.dmg (macOS)
@@ -133,7 +133,6 @@ the app locates and launches the bundled backend.
 |--------|--------------|
 | `make build` | Build the frontend (npm/Vite) + install the backend into `.venv` |
 | `make wheel` | Self-contained pip wheel with the dashboard bundled → `dist/` |
-| `make backend-bin` | Frozen standalone backend binary (PyInstaller), no Electron |
 | `make desktop` | Full desktop app — DMG (macOS) / AppImage (Linux) |
 | `make test` | Build, then run the `pytest` suite |
 | `make clean` | Remove build artifacts, dists, caches |
