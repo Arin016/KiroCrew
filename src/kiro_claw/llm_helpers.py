@@ -61,6 +61,8 @@ _TRANSIENT_MARKERS = (
     "modelstreamerror",
     "connection reset",
     "connectionreset",
+    "dispatch failure",        # AWS SDK connector-level I/O failure (conn/DNS/TLS drop)
+    "dispatchfailure",         # Rust DispatchFailure variant (unspaced)
     "is unavailable on bedrock",  # capacity/region rollout (formatted message)
 )
 

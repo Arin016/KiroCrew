@@ -252,6 +252,22 @@ class TestTransientErrorClassifier:
         assert _is_transient_acp_error("Model 'x' is unavailable on Bedrock right now")
         assert _is_transient_acp_error("connection reset by peer")
 
+    def test_dispatch_failure_is_transient(self) -> None:
+        from kiro_claw.llm_helpers import _is_transient_acp_error
+
+        # AWS SDK connector-level I/O failure (conn/DNS/TLS drop) — retryable.
+        # Uses the exact shapes seen in history-consolidation ACP errors.
+        assert _is_transient_acp_error(
+            "ACP error: {'code': -32603, 'message': 'Internal error', 'data': "
+            "'Encountered an error in the response stream: An unknown error "
+            "occurred: dispatch failure'}"
+        )
+        # Rust DispatchFailure variant (unspaced, from the response stream).
+        assert _is_transient_acp_error(
+            "CodewhispererChatResponseStream(DispatchFailure(DispatchFailure { "
+            "source: ConnectorError { kind: Io } }))"
+        )
+
     def test_auth_and_validation_are_not_transient(self) -> None:
         from kiro_claw.llm_helpers import _is_transient_acp_error
 
