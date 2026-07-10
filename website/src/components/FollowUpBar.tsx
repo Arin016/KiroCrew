@@ -1,4 +1,5 @@
 import { memo, useRef, useState, useEffect, useCallback } from 'react'
+import { ChevronLeft, ChevronRight } from 'lucide-react'
 
 export type FollowUpLayout = 'multiline' | 'scroll'
 
@@ -121,6 +122,14 @@ function ScrollLayout({ options, picked, onSelect, onSend, quickSend }: Omit<Fol
     setCanScrollR(el.scrollLeft + el.clientWidth < el.scrollWidth - 2)
   }, [])
 
+  // Scroll by ~80% of the visible width in the given direction, so a click
+  // reveals the next set of chips while keeping one in view for continuity.
+  const scrollByDir = useCallback((dir: -1 | 1) => {
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollBy({ left: dir * Math.max(el.clientWidth * 0.8, 120), behavior: 'smooth' })
+  }, [])
+
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
@@ -143,10 +152,40 @@ function ScrollLayout({ options, picked, onSelect, onSend, quickSend }: Omit<Fol
     }
   }, [updateScroll, options])
 
+  // Small solid, vertically-centered pill button so the arrow reads as a
+  // distinct control instead of a transparent icon colliding with the chip
+  // text underneath it. The opaque background masks the faded edge chip.
+  const arrowClass = 'absolute top-1/2 -translate-y-1/2 z-20 flex items-center justify-center h-6 w-6 rounded-full bg-bg-elevated border border-border text-muted hover:text-text hover:border-accent/40 shadow-sm cursor-pointer p-0'
+
   return (
-    <div className="relative pt-1">
-      {canScrollL && <div className="absolute left-0 top-0 bottom-0 w-6 z-10 pointer-events-none bg-gradient-to-r from-bg to-transparent" />}
-      {canScrollR && <div className="absolute right-0 top-0 bottom-0 w-6 z-10 pointer-events-none bg-gradient-to-l from-bg to-transparent" />}
+    <div className="pt-1">
+      <div className="relative">
+      {canScrollL && <div className="absolute left-0 top-0 bottom-0 w-10 z-10 pointer-events-none bg-gradient-to-r from-bg to-transparent" />}
+      {canScrollR && <div className="absolute right-0 top-0 bottom-0 w-10 z-10 pointer-events-none bg-gradient-to-l from-bg to-transparent" />}
+      {canScrollL && (
+        <button
+          type="button"
+          aria-label="Scroll suggestions left"
+          title="Scroll left"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => scrollByDir(-1)}
+          className={`${arrowClass} left-0.5`}
+        >
+          <ChevronLeft size={16} />
+        </button>
+      )}
+      {canScrollR && (
+        <button
+          type="button"
+          aria-label="Scroll suggestions right"
+          title="Scroll right"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => scrollByDir(1)}
+          className={`${arrowClass} right-0.5`}
+        >
+          <ChevronRight size={16} />
+        </button>
+      )}
       <div ref={scrollRef} className="flex gap-1.5 overflow-x-auto items-center" style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}>
         {options.map(o => {
           const isPicked = picked.has(o)
@@ -163,6 +202,7 @@ function ScrollLayout({ options, picked, onSelect, onSend, quickSend }: Omit<Fol
             />
           )
         })}
+      </div>
       </div>
     </div>
   )
