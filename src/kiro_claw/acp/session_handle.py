@@ -129,6 +129,9 @@ class AcpRuntimeProtocol(Protocol):
     def unregister_session(self, session_id: str) -> None:
         ...
 
+    async def terminate_session(self, session_id: str) -> None:
+        ...
+
     def is_alive(self) -> bool:
         ...
 
@@ -633,19 +636,27 @@ class AcpSessionHandle:
     # primed session and died / refused. See AcpRuntime.load_session for the fix.
 
     async def destroy(self) -> None:
-        """Unregister this session from the runtime AND delete its transcript.
+        """Terminate this session on kiro-cli, delete its transcript, unregister.
+
+        Sends ``_kiro.dev/session/terminate`` (via the runtime) so the shared
+        kiro-cli process frees this session's transcript/context and reaps its
+        MCP children — NOT just a local queue unregister. Without the terminate,
+        a finished session's state stays resident in the multiplexed process
+        forever, so RSS climbs with cumulative sessions (the background-runtime
+        unbounded-growth bug). ``terminate_session`` is best-effort + bounded and
+        ALWAYS unregisters the queue, so teardown neither hangs nor raises.
 
         Each session on a shared runtime (a ``_bg`` op or a session-sharing
         subagent) is a distinct ``session/new`` with its own persisted
         ``~/.kiro/sessions/cli/{sid}.json``(+``.jsonl``). The shared runtime is
-        not killed on teardown, so without deleting the transcript here these
-        files would accumulate for the gateway lifetime (titles/suggestions/
-        folders/nav run on nearly every chat). Only ephemeral sessions call
-        destroy(): main-chat sessions are torn down via ``owns_runtime=True`` →
-        ``runtime.kill()`` and intentionally keep their transcript for
-        ``session/load`` resume, so cleaning up here is safe.
+        not killed on teardown, so we also delete the transcript here — otherwise
+        these files would accumulate for the gateway lifetime (titles/
+        suggestions/folders/nav run on nearly every chat). Only ephemeral
+        sessions call destroy(): main-chat sessions are torn down via
+        ``owns_runtime=True`` → ``runtime.kill()`` and intentionally keep their
+        transcript for ``session/load`` resume, so cleaning up here is safe.
         """
-        self._runtime.unregister_session(self._session_id)
+        await self._runtime.terminate_session(self._session_id)
         self._cleanup_transcript()
 
     def _cleanup_transcript(self) -> None:

@@ -39,6 +39,12 @@ METHOD_SESSION_UPDATE = "session/update"
 METHOD_METADATA = "_kiro.dev/metadata"
 METHOD_COMMANDS_EXECUTE = "_kiro.dev/commands/execute"
 METHOD_SESSION_LOAD = "session/load"
+# kiro-cli extension: evict a session from the multiplexed process, freeing its
+# transcript/context + reaping its MCP children. Without this the shared
+# kiro-cli process retains every session's state for its whole lifetime, so RSS
+# grows without bound as sessions accumulate. Handler: acp_agent.rs -> Session
+# ManagerRequestData::TerminateSession (self.sessions.remove + handle.shutdown).
+METHOD_SESSION_TERMINATE = "_kiro.dev/session/terminate"
 METHOD_COMPACTION_STATUS = "_kiro.dev/compaction/status"
 METHOD_CLEAR_STATUS = "_kiro.dev/clear/status"
 METHOD_AGENT_SWITCHED = "_kiro.dev/agent/switched"

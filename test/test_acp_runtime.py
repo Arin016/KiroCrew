@@ -21,12 +21,14 @@ lines; the subprocess and stdin are mocked (no kiro-cli is launched).
 
 import asyncio
 import json
+import os
 import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from kiro_claw.acp.runtime import (
+    _TERMINATE_TIMEOUT,
     AcpRuntime,
     AcpRuntimeDead,
     AcpRuntimeError,
@@ -38,6 +40,7 @@ from kiro_claw.acp.types import (
     METHOD_COMMANDS_EXECUTE,
     METHOD_SESSION_LOAD,
     METHOD_SESSION_NEW,
+    METHOD_SESSION_TERMINATE,
     METHOD_SESSION_UPDATE,
     METHOD_SET_CONFIG_OPTION,
     METHOD_SET_MODE,
@@ -324,12 +327,195 @@ async def test_send_request_on_dead_runtime_raises():
 # ── AcpSessionHandle behaviour ──
 
 @pytest.mark.asyncio
-async def test_handle_destroy_unregisters_session():
+async def test_handle_destroy_terminates_and_unregisters_session():
+    """destroy() must evict the session on kiro-cli via _kiro.dev/session/terminate
+    (freeing its transcript/context in the shared multiplexed process) AND
+    unregister the local queue. A local-only unregister would leak the session
+    in kiro-cli's in-memory map for the process's whole lifetime — the
+    background-runtime unbounded-RSS bug this fix closes."""
     rt, _, _ = _make_runtime()
     q = _register(rt, "sA")
+    rt._send_and_await = AsyncMock(return_value={})  # type: ignore[method-assign]
     handle = AcpSessionHandle("sA", q["sA"], rt)
     await handle.destroy()
+    # kiro-cli was told to terminate exactly this session.
+    rt._send_and_await.assert_awaited_once()
+    assert rt._send_and_await.call_args.args[0] == METHOD_SESSION_TERMINATE
+    assert rt._send_and_await.call_args.args[1] == {"sessionId": "sA"}
+    # Local queue also unregistered.
     assert "sA" not in rt._session_queues
+
+
+@pytest.mark.asyncio
+async def test_terminate_session_sends_bounded_terminate_for_target_only():
+    """terminate_session issues _kiro.dev/session/terminate for exactly the
+    target sessionId with a bounded timeout (teardown can't stall on an
+    unresponsive runtime), and unregisters ONLY that session — a co-tenant
+    session on the shared runtime is untouched (unlike kill())."""
+    rt, _, _ = _make_runtime()
+    _register(rt, "sA", "sB")
+    rt._send_and_await = AsyncMock(return_value={})  # type: ignore[method-assign]
+    await rt.terminate_session("sA")
+    rt._send_and_await.assert_awaited_once()
+    assert rt._send_and_await.call_args.args[0] == METHOD_SESSION_TERMINATE
+    assert rt._send_and_await.call_args.args[1] == {"sessionId": "sA"}
+    assert rt._send_and_await.call_args.kwargs["timeout"] == _TERMINATE_TIMEOUT
+    assert "sA" not in rt._session_queues
+    assert "sB" in rt._session_queues  # co-tenant survives
+
+
+@pytest.mark.asyncio
+async def test_terminate_session_is_best_effort_when_send_fails():
+    """If the terminate request fails (runtime slow/dead), teardown must NOT
+    raise and MUST still unregister locally (incl. routed-request cleanup) so
+    the reader stops routing to an abandoned queue."""
+    rt, _, _ = _make_runtime()
+    _register(rt, "sA")
+    rt._routed_requests[5] = "sA"
+    rt._send_and_await = AsyncMock(side_effect=AcpRuntimeError("timed out"))  # type: ignore[method-assign]
+    await rt.terminate_session("sA")  # must not raise
+    assert "sA" not in rt._session_queues
+    assert 5 not in rt._routed_requests
+
+
+@pytest.mark.asyncio
+async def test_terminate_session_skips_roundtrip_when_dead():
+    """A dead runtime already freed the session's memory with the process, so
+    terminate skips the doomed round-trip but still unregisters locally."""
+    rt, _, _ = _make_runtime()
+    _register(rt, "sA")
+    rt._dead = True
+    rt._send_and_await = AsyncMock()  # type: ignore[method-assign]
+    await rt.terminate_session("sA")
+    rt._send_and_await.assert_not_awaited()
+    assert "sA" not in rt._session_queues
+
+
+@pytest.mark.asyncio
+async def test_terminate_session_unregisters_even_on_cancellation():
+    """If the terminate await is cancelled, the local unregister MUST still run.
+    asyncio.CancelledError is a BaseException (not Exception in 3.9+), so it slips
+    past the inner `except Exception`; the `finally` guarantees local cleanup so
+    the reader loop stops routing to an abandoned queue. The cancellation itself
+    still propagates (finally does not swallow it)."""
+    rt, _, _ = _make_runtime()
+    _register(rt, "sA")
+    rt._send_and_await = AsyncMock(side_effect=asyncio.CancelledError())  # type: ignore[method-assign]
+    with pytest.raises(asyncio.CancelledError):
+        await rt.terminate_session("sA")
+    assert "sA" not in rt._session_queues
+
+
+# ── _is_stale / has_active_sessions ──
+
+
+@pytest.mark.asyncio
+async def test_is_stale_none_when_fresh_and_small(monkeypatch):
+    """A freshly-spawned runtime is not stale; the RSS probe is skipped
+    entirely because it is younger than the age band."""
+    rt, _, _ = _make_runtime()
+    rt._spawn_monotonic = time.monotonic()  # just spawned
+    rt._max_rss_mb = 500.0
+    called = {"n": 0}
+
+    def _boom(pid):
+        called["n"] += 1
+        return 999999.0  # would be "stale" if ever consulted
+
+    monkeypatch.setattr("kiro_claw.acp.runtime._get_rss_tree_mb", _boom)
+    assert await rt._is_stale() is None
+    assert called["n"] == 0  # young runtime never probes RSS
+
+
+@pytest.mark.asyncio
+async def test_is_stale_none_when_old_but_small_rss(monkeypatch):
+    """Past the age band but below the RSS threshold → not stale. Exercises the
+    small-RSS branch with a concrete value (not the None lookup-failure path)."""
+    rt, _, _ = _make_runtime()
+    rt._max_age_secs = 6 * 3600
+    rt._spawn_monotonic = time.monotonic() - 600.0  # older than the probe band
+    rt._max_rss_mb = 500.0
+    monkeypatch.setattr("kiro_claw.acp.runtime._get_rss_tree_mb", lambda pid: 10.0)
+    assert await rt._is_stale() is None
+
+
+@pytest.mark.asyncio
+async def test_is_stale_age_when_past_max_age():
+    """A runtime older than _max_age_secs is stale with reason 'age'."""
+    rt, _, _ = _make_runtime()
+    rt._max_age_secs = 10.0
+    rt._spawn_monotonic = time.monotonic() - 20.0
+    assert await rt._is_stale() == "age"
+
+
+@pytest.mark.asyncio
+async def test_is_stale_rss_when_tree_over_threshold(monkeypatch):
+    """Past the age band and RSS tree over threshold → stale with reason 'rss'."""
+    rt, _, _ = _make_runtime()
+    rt._max_age_secs = 6 * 3600
+    rt._spawn_monotonic = time.monotonic() - 600.0  # old enough to probe
+    rt._max_rss_mb = 100.0
+    monkeypatch.setattr("kiro_claw.acp.runtime._get_rss_tree_mb", lambda pid: 250.0)
+    assert await rt._is_stale() == "rss"
+
+
+@pytest.mark.asyncio
+async def test_is_stale_none_when_no_pid():
+    rt, _, _ = _make_runtime()
+    rt._pid = None
+    assert await rt._is_stale() is None
+
+
+def test_stale_by_age_cheap_check():
+    rt, _, _ = _make_runtime()
+    rt._max_age_secs = 10.0
+    rt._spawn_monotonic = time.monotonic() - 20.0
+    assert rt._stale_by_age() is True
+    rt._spawn_monotonic = time.monotonic()
+    assert rt._stale_by_age() is False
+    rt._pid = None
+    assert rt._stale_by_age() is False
+
+
+def test_get_rss_mb_real_process():
+    """_get_rss_mb parses a real process (this test process) and returns a
+    positive MiB value; a nonexistent PID returns None. Skips where the
+    platform can't introspect RSS (no /proc AND ps blocked, e.g. a locked-down
+    macOS sandbox) — _get_rss_mb returns None there by design."""
+    from kiro_claw.acp.runtime import _get_rss_mb
+
+    rss = _get_rss_mb(os.getpid())
+    if rss is None:
+        pytest.skip("RSS introspection unavailable in this environment")
+    assert rss > 0.0
+    assert _get_rss_mb(2**31 - 1) is None  # nonexistent pid
+
+
+def test_get_rss_tree_mb_real_process():
+    """_get_rss_tree_mb sums at least this process's RSS (>0); nonexistent
+    PID returns None. Skips where RSS introspection is unavailable (see
+    test_get_rss_mb_real_process)."""
+    from kiro_claw.acp.runtime import _get_rss_mb, _get_rss_tree_mb
+
+    self_rss = _get_rss_mb(os.getpid())
+    if self_rss is None:
+        pytest.skip("RSS introspection unavailable in this environment")
+    tree = _get_rss_tree_mb(os.getpid())
+    assert tree is not None and tree >= self_rss  # tree includes self (+ children)
+    assert _get_rss_tree_mb(2**31 - 1) is None
+
+
+@pytest.mark.asyncio
+async def test_has_active_sessions_false_when_empty():
+    rt, _, _ = _make_runtime()
+    assert rt.has_active_sessions() is False
+
+
+@pytest.mark.asyncio
+async def test_has_active_sessions_true_when_registered():
+    rt, _, _ = _make_runtime()
+    _register(rt, "sA")
+    assert rt.has_active_sessions() is True
 
 
 @pytest.mark.asyncio
@@ -1589,8 +1775,11 @@ async def test_destroyed_session_stops_receiving_frames():
     """
     rt, reader, _ = _make_runtime()
     q = _register(rt, "sA", "sB")
+    # destroy() now round-trips _kiro.dev/session/terminate; no reader is running
+    # yet here, so ack it instantly to avoid the bounded terminate timeout.
+    rt._send_and_await = AsyncMock(return_value={})  # type: ignore[method-assign]
     h_a = AcpSessionHandle("sA", q["sA"], rt)
-    await h_a.destroy()  # sA unregistered
+    await h_a.destroy()  # sA terminated + unregistered
     task = await _start_reader(rt)
     try:
         # Frame for the destroyed session must be dropped (not broadcast to sB).
@@ -1956,13 +2145,17 @@ class TestAcpRuntimeLoadSession:
 
     @pytest.mark.asyncio
     async def test_load_session_unregisters_queue_when_set_mode_fails(self, monkeypatch):
-        """A set_mode failure AFTER the queue is registered must unregister it,
-        so the caller's create_session() fallback doesn't leave the reader
-        routing late transcript-replay frames to an abandoned resume_sid queue."""
+        """A set_mode failure AFTER the queue is registered must TERMINATE the
+        resumed session on kiro-cli (session/load already restored it there, so
+        a plain unregister leaks it) and drop the local queue, so the caller's
+        create_session() fallback doesn't leave the reader routing late
+        transcript-replay frames to an abandoned resume_sid queue."""
         rt, _, _ = _make_runtime()
         rt._can_load_session = True
+        methods: list[str] = []
 
-        async def _fake_send(method, params):
+        async def _fake_send(method, params, timeout=None):
+            methods.append(method)
             if method == METHOD_SESSION_LOAD:
                 return {"modes": {}, "models": []}  # load succeeds, queue registers
             if method == METHOD_SET_MODE:
@@ -1973,18 +2166,22 @@ class TestAcpRuntimeLoadSession:
 
         with pytest.raises(AcpRuntimeError):
             await rt.load_session("/k/sid.json", "sid-z", cwd="/w", agent="kiroclaw")
+        assert METHOD_SESSION_TERMINATE in methods
         assert "sid-z" not in rt._session_queues
 
 
 @pytest.mark.asyncio
-async def test_create_session_unregisters_queue_when_set_mode_fails(monkeypatch):
-    """A set_mode failure AFTER the session queue is registered must unregister
-    it — otherwise no handle is returned to the caller but the reader loop keeps
-    routing frames to an abandoned queue indefinitely. Mirrors the same cleanup
-    that load_session() already performs."""
+async def test_create_session_terminates_session_when_set_mode_fails(monkeypatch):
+    """A set_mode failure AFTER session/new succeeded must TERMINATE the session
+    on kiro-cli — session/new already created it in the shared process, so a
+    plain local unregister would leak it there (RSS growth). terminate_session
+    also unregisters the local queue, so the abandoned-queue routing is closed
+    too. Mirrors the same cleanup load_session() performs."""
     rt, _, _ = _make_runtime()
+    methods: list[str] = []
 
-    async def _fake_send(method, params):
+    async def _fake_send(method, params, timeout=None):
+        methods.append(method)
         if method == METHOD_SESSION_NEW:
             return {"sessionId": "sid-new"}  # session/new succeeds → queue registers
         if method == METHOD_SET_MODE:
@@ -1995,7 +2192,9 @@ async def test_create_session_unregisters_queue_when_set_mode_fails(monkeypatch)
 
     with pytest.raises(AcpRuntimeError):
         await rt.create_session(cwd="/w", agent="kiroclaw")
-    # The queue registered before set_mode must be cleaned up on failure.
+    # kiro-cli was told to evict the just-created session, and the local queue
+    # registered before set_mode is cleaned up on failure.
+    assert METHOD_SESSION_TERMINATE in methods
     assert "sid-new" not in rt._session_queues
 
 

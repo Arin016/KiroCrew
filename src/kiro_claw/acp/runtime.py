@@ -18,6 +18,8 @@ import json
 import logging
 import os
 import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -36,11 +38,13 @@ from kiro_claw.acp.session_handle import (
 from kiro_claw.acp.types import (
     METHOD_SESSION_LOAD,
     METHOD_SESSION_NEW,
+    METHOD_SESSION_TERMINATE,
     METHOD_SET_MODE,
     JsonRpcMessage,
     JsonRpcRequest,
 )
 from kiro_claw.env import augmented_path, resolve_krb5_ccname
+from kiro_claw.executors import subprocess_executor
 from kiro_claw.sandbox import wrap_argv
 from kiro_claw.session_pid import (
     _track_pid,
@@ -67,12 +71,159 @@ __all__ = [
 _STDOUT_BUFFER_LIMIT = 10 * 1024 * 1024  # 10MB
 _INIT_TIMEOUT = 30.0
 _REQUEST_TIMEOUT = 30.0
+# Teardown must be snappy: a session is usually terminated on a hot path
+# (background task done, subagent reaped). kiro-cli's terminate handler responds
+# as soon as it enqueues the eviction (the actual shutdown runs in its actor
+# loop), so a healthy runtime acks well under this bound; a slow/dead one must
+# not turn teardown into a multi-second stall.
+_TERMINATE_TIMEOUT = 5.0
+
+# Default recycling thresholds for long-lived multiplexed runtimes (see
+# _is_stale()). These are conservative defaults chosen to recycle well before
+# the unbounded growth observed in production (multi-GB RSS after ~24h of
+# uptime with no per-turn compaction) while still amortizing process-spawn
+# cost across many background prompts.
+_DEFAULT_MAX_AGE_SECS = 6 * 3600  # 6 hours
+_DEFAULT_MAX_RSS_MB = 500.0  # 500 MiB
+
+# Below this uptime the RSS staleness probe is skipped entirely (see
+# _is_stale()). A freshly-(re)used runtime has not had time to grow, so this
+# keeps the hot get_bg_session reuse path — which holds _bg_runtime_lock —
+# CPU-only for young runtimes and only pays the offloaded RSS probe once a
+# runtime has lived long enough to plausibly have ballooned.
+_RSS_PROBE_MIN_AGE_SECS = 300.0  # 5 minutes
 
 KIRO_CLI_BIN = "kiro-cli"
 KIRO_CLI_SUBCMD = "acp"
 CLIENT_NAME = "kiroclaw"
 CLIENT_VERSION = "0.1.2"
 PROTOCOL_VERSION = "2025-08-22"
+
+
+def _get_rss_mb(pid: int) -> float | None:
+    """Get resident set size (RSS) of a process in MiB, or None if unavailable.
+
+    Linux: reads /proc/<pid>/status. macOS (no /proc): shells out to
+    ``ps -o rss= -p <pid>`` (ps reports RSS in KiB on both platforms).
+    Returns None on any failure (missing /proc, permission error, process
+    gone, ps not found) so callers can treat "unknown" the same as "not over
+    threshold" rather than raising.
+    """
+    if sys.platform == "linux":
+        try:
+            with open(f"/proc/{pid}/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        # Format: "VmRSS:\t   123456 kB"
+                        parts = line.split()
+                        return int(parts[1]) / 1024.0
+        except (OSError, IndexError, ValueError):
+            return None
+        return None
+
+    # macOS / other: no /proc, fall back to ps (mirrors the sysctl/ps pattern
+    # used elsewhere in this codebase for darwin system info).
+    try:
+        out = subprocess.check_output(
+            ["ps", "-o", "rss=", "-p", str(pid)], timeout=2
+        ).decode().strip()
+        return int(out) / 1024.0
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _iter_descendant_pids(pid: int) -> list[int]:
+    """Return ``[pid, *descendants]`` (Linux only), best-effort.
+
+    Walks ``/proc/<pid>/task/<tid>/children`` breadth-first. Returns ``[pid]``
+    when the interface is unavailable. Used so RSS accounting can cover a
+    sandbox launcher's exec'd child — see _get_rss_tree_mb().
+    """
+    order: list[int] = []
+    visited: set[int] = set()
+    stack = [pid]
+    while stack:
+        p = stack.pop()
+        if p in visited:
+            continue
+        visited.add(p)
+        order.append(p)
+        try:
+            entries = os.listdir(f"/proc/{p}/task")
+        except OSError:
+            continue
+        for tid in entries:
+            try:
+                with open(f"/proc/{p}/task/{tid}/children") as f:
+                    tokens = f.read().split()
+            except OSError:
+                continue
+            for tok in tokens:
+                try:
+                    cpid = int(tok)
+                except ValueError:
+                    continue
+                if cpid not in visited:
+                    stack.append(cpid)
+    return order
+
+
+def _get_rss_tree_mb(pid: int) -> float | None:
+    """Sum RSS (MiB) of *pid* and all its descendants, or None if unavailable.
+
+    On Linux the kiroclaw-lite background runtime is spawned through the
+    namespace sandbox launcher, which ``fork()``s: ``self._pid`` is the
+    launcher parent (small, stable, blocked in ``waitpid``) while the real
+    kiro-cli that accumulates multi-GB RSS is a child. Measuring only
+    ``self._pid`` therefore misses the growth entirely, so we sum the whole
+    descendant tree. On macOS (sandbox-exec / no launcher fork) the tree is
+    just the process itself, so the sum equals the single-process RSS.
+    """
+    if sys.platform == "linux":
+        total = 0.0
+        found = False
+        for p in _iter_descendant_pids(pid):
+            r = _get_rss_mb(p)
+            if r is not None:
+                total += r
+                found = True
+        return total if found else None
+
+    # macOS / other: build a ppid map from a single ps snapshot, then sum the
+    # descendant subtree rooted at pid (ps reports RSS in KiB).
+    try:
+        out = (
+            subprocess.check_output(["ps", "-Ao", "pid=,ppid=,rss="], timeout=2)
+            .decode()
+            .strip()
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _get_rss_mb(pid)
+    children: dict[int, list[int]] = {}
+    rss_kib: dict[int, int] = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        try:
+            cpid, ppid, rss = int(parts[0]), int(parts[1]), int(parts[2])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(cpid)
+        rss_kib[cpid] = rss
+    if pid not in rss_kib:
+        return None
+    total_kib = 0
+    visited: set[int] = set()
+    stack = [pid]
+    while stack:
+        p = stack.pop()
+        if p in visited:
+            continue
+        visited.add(p)
+        total_kib += rss_kib.get(p, 0)
+        stack.extend(children.get(p, []))
+    return total_kib / 1024.0
 
 
 class AcpRuntime:
@@ -95,6 +246,8 @@ class AcpRuntime:
         mcp_gateway_overlay: str | Path | None = None,
         mcp_gateway_settings_mcp_json: str | Path | None = None,
         mcp_gateway_socket: str | Path | None = None,
+        max_age_secs: float = _DEFAULT_MAX_AGE_SECS,
+        max_rss_mb: float = _DEFAULT_MAX_RSS_MB,
     ):
         self._work_dir = Path(work_dir) if work_dir else Path.home() / ".kiroclaw" / "workspace"
         self._agent = agent
@@ -107,10 +260,18 @@ class AcpRuntime:
         self._mcp_gateway_socket = str(mcp_gateway_socket) if mcp_gateway_socket else None
         self._sandbox_cleanup: str | None = None
 
+        # Recycling thresholds — see _is_stale(). Long-lived multiplexed
+        # runtimes (e.g. the kiroclaw-lite background runtime) have no
+        # per-turn compaction, so age/RSS are the only signals available to
+        # bound unbounded growth.
+        self._max_age_secs = max_age_secs
+        self._max_rss_mb = max_rss_mb
+
         # Process state
         self._process: asyncio.subprocess.Process | None = None
         self._pid: int | None = None
         self._start_time: int | None = None
+        self._spawn_monotonic: float | None = None
         self._child_pids: dict[int, int | None] = {}
 
         # Single reader task — the ONLY coroutine that reads stdout
@@ -144,6 +305,64 @@ class AcpRuntime:
             and self._process.returncode is None
             and not self._dead
         )
+
+    def _stale_by_age(self) -> bool:
+        """True if uptime exceeds max_age_secs. Cheap, no I/O — safe to call
+        under a lock. Does NOT consider RSS (see _is_stale for that)."""
+        if self._pid is None or self._spawn_monotonic is None:
+            return False
+        return (time.monotonic() - self._spawn_monotonic) > self._max_age_secs
+
+    async def _is_stale(self) -> str | None:
+        """Return the recycle reason ('age' or 'rss'), or None if not stale.
+
+        Distinct from is_alive(): a runtime can be perfectly healthy (process
+        running, protocol responsive) yet still be "stale" — e.g. the
+        kiroclaw-lite background runtime observed growing unbounded (multi-GB
+        RSS) over ~24h of uptime because the multiplexed design has no per-turn
+        compaction or lifetime cap. Callers should check this alongside
+        is_alive() and, when active session count is 0, kill() and respawn
+        rather than reusing the process indefinitely.
+
+        RSS is measured across the whole descendant tree (_get_rss_tree_mb):
+        under the Linux namespace sandbox self._pid is the launcher parent, and
+        the real kiro-cli child is what grows. The RSS probe shells out / reads
+        /proc, so it is offloaded to subprocess_executor() to keep the event
+        loop free.
+
+        The RSS probe is gated behind _RSS_PROBE_MIN_AGE_SECS: a freshly-(re)used
+        runtime returns None without any executor round-trip, so the hot reuse
+        path in get_bg_session (which holds _bg_runtime_lock) stays CPU-only for
+        young runtimes. The lock IS deliberately held across the probe for
+        older-and-idle runtimes; the age gate bounds how often that happens.
+        """
+        if self._pid is None:
+            return None
+
+        if self._spawn_monotonic is not None:
+            age = time.monotonic() - self._spawn_monotonic
+            if age > self._max_age_secs:
+                return "age"
+            if age < _RSS_PROBE_MIN_AGE_SECS:
+                # Too young to have grown — skip the offloaded RSS probe.
+                return None
+
+        rss_mb = await asyncio.get_running_loop().run_in_executor(
+            subprocess_executor(), _get_rss_tree_mb, self._pid
+        )
+        if rss_mb is not None and rss_mb > self._max_rss_mb:
+            return "rss"
+
+        return None
+
+    def has_active_sessions(self) -> bool:
+        """True if any session is currently registered on this runtime.
+
+        Used by callers deciding whether it's safe to recycle a stale
+        runtime: killing it while a co-tenant session is registered would
+        drop that session's in-flight prompt/response.
+        """
+        return bool(self._session_queues)
 
     # ── Lifecycle ──
 
@@ -186,6 +405,7 @@ class AcpRuntime:
         )
         self._pid = self._process.pid
         self._start_time = _get_start_time(self._pid)
+        self._spawn_monotonic = time.monotonic()
         self._last_activity = time.monotonic()
         logger.info("AcpRuntime spawned kiro-cli acp (PID %d)", self._pid)
 
@@ -560,6 +780,47 @@ class AcpRuntime:
     # Alias for backward compat
     remove_session = unregister_session
 
+    async def terminate_session(self, session_id: str) -> None:
+        """Evict a session from kiro-cli (freeing its memory), then unregister locally.
+
+        Sends the ``_kiro.dev/session/terminate`` request so the multiplexed
+        kiro-cli process drops this session from its in-memory session map and
+        shuts the session's agent down (reaping its MCP child processes). WITHOUT
+        this, a finished session's transcript + context stay resident in the
+        shared process for its entire lifetime — so RSS grows without bound as
+        background tasks and subagents accumulate (the multiplexed design has no
+        per-turn compaction, so per-session eviction is the only reclaim signal).
+
+        This is co-tenant-safe: it targets exactly one ``sessionId`` and never
+        touches the process, unlike ``kill()`` (which would take every sibling
+        session down with it).
+
+        Best-effort and bounded: teardown must never hang or raise. If the
+        runtime is already dead the session's memory died with the process, so
+        the round-trip is skipped. The local ``unregister_session`` ALWAYS runs
+        (``finally``) so the reader loop stops routing to an abandoned queue even
+        when the terminate request could not be delivered — including when the
+        enclosing task is cancelled mid-await (``asyncio.CancelledError`` is a
+        ``BaseException``, so it would otherwise slip past the ``except Exception``).
+        """
+        try:
+            if not self._dead and self._process is not None:
+                try:
+                    await self._send_and_await(
+                        METHOD_SESSION_TERMINATE,
+                        {"sessionId": session_id},
+                        timeout=_TERMINATE_TIMEOUT,
+                    )
+                except Exception:
+                    logger.debug(
+                        "session/terminate failed for %s (runtime dead/slow); "
+                        "proceeding with local unregister",
+                        session_id,
+                        exc_info=True,
+                    )
+        finally:
+            self.unregister_session(session_id)
+
     # ── Session Management ──
 
     async def create_session(
@@ -597,9 +858,11 @@ class AcpRuntime:
         handle.store_session_config(resp)
 
         # Set agent mode if specified. If set_mode raises, no handle is returned
-        # to the caller, so unregister the queue we just registered above —
-        # otherwise the reader loop keeps routing frames to an abandoned queue
-        # indefinitely. Mirrors the same cleanup in load_session().
+        # to the caller, so terminate the session we just created above —
+        # session/new already succeeded so the session exists in kiro-cli; a
+        # plain local unregister would leak it in the shared process. terminate_
+        # session also unregisters the queue. Mirrors the same cleanup in
+        # load_session().
         if agent:
             try:
                 await self._send_and_await(
@@ -607,7 +870,7 @@ class AcpRuntime:
                     set_mode_params(session_id, agent),
                 )
             except Exception:
-                self.unregister_session(session_id)
+                await self.terminate_session(session_id)
                 raise
 
         # Drain MCP-server-init / oauth / config notifications before the first
@@ -675,8 +938,10 @@ class AcpRuntime:
         # Activate the agent (mirrors AcpClient step 4 — set_mode applies to a
         # resumed session too, not just fresh ones). If set_mode raises, the
         # caller falls back to create_session() (a fresh sid + its own queue),
-        # so unregister this resume_sid queue first — otherwise the reader keeps
-        # routing late transcript-replay frames to an abandoned queue.
+        # so terminate this resume_sid session first — session/load already
+        # succeeded so kiro-cli holds it; a plain local unregister would leak it
+        # in the shared process (and leave the reader routing late transcript-
+        # replay frames to an abandoned queue). terminate_session unregisters too.
         if agent:
             try:
                 await self._send_and_await(
@@ -684,7 +949,7 @@ class AcpRuntime:
                     set_mode_params(resume_sid, agent),
                 )
             except Exception:
-                self.unregister_session(resume_sid)
+                await self.terminate_session(resume_sid)
                 raise
 
         # Drain MCP-init / oauth / config notifications before the first prompt
@@ -698,12 +963,16 @@ class AcpRuntime:
 
     # ── Internal Helpers ──
 
-    async def _send_and_await(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def _send_and_await(
+        self, method: str, params: dict[str, Any], timeout: float = _REQUEST_TIMEOUT
+    ) -> dict[str, Any]:
         """Send a JSON-RPC request and await the response via _pending_requests.
 
         Used for control-plane requests (initialize, session/new, set_mode)
         where we need the response immediately rather than routing it to a
-        session queue.
+        session queue. ``timeout`` bounds the wait — teardown paths pass a
+        tighter value than the default so an unresponsive runtime can't stall
+        session eviction.
         """
         if not self._process or not self._process.stdin:
             raise AcpRuntimeDead("process not running")
@@ -731,7 +1000,7 @@ class AcpRuntime:
         self._last_activity = time.monotonic()
 
         try:
-            return await asyncio.wait_for(future, timeout=_REQUEST_TIMEOUT)
+            return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending_requests.pop(req_id, None)
             raise AcpRuntimeError(f"Request {method} timed out")

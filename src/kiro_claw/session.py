@@ -624,6 +624,45 @@ class SessionManager:
         max_retries = 1
         for attempt in range(max_retries + 1):
             async with self._bg_runtime_lock:
+                runtime = self._bg_runtime
+                # Recycle a healthy-but-stale runtime (aged out or grown past
+                # its RSS threshold — see AcpRuntime._is_stale()) before the
+                # normal is_alive() respawn check. Only recycle when zero
+                # sessions are registered so we never kill a runtime out from
+                # under an in-flight co-tenant prompt.
+                #
+                # NOTE (race): create_session() registers its queue OUTSIDE this
+                # lock (below), so a co-tenant whose session/new is in flight is
+                # momentarily invisible to has_active_sessions(); a recycle here
+                # could kill the runtime under it. That caller's create_session
+                # then raises AcpRuntimeDead and is backstopped by the
+                # max_retries respawn loop below (it costs one extra respawn, not
+                # a dropped prompt — a mid-prompt session is always registered).
+                if runtime is not None and runtime.is_alive():
+                    if not runtime.has_active_sessions():
+                        reason = await runtime._is_stale()
+                        if reason:
+                            logger.info(
+                                "get_bg_session: recycling stale _bg runtime "
+                                "(PID %s, reason=%s)",
+                                runtime.pid,
+                                reason,
+                            )
+                            await runtime.kill()
+                            self._bg_runtime = None
+                    elif runtime._stale_by_age():
+                        # Stale but co-tenant sessions are active, so recycling
+                        # is skipped this round. Surface it: if a runtime never
+                        # reaches a zero-session window the age/RSS bound is
+                        # never enforced, and this log makes that observable
+                        # rather than silent.
+                        logger.info(
+                            "get_bg_session: _bg runtime (PID %s) stale by age "
+                            "but has %d active session(s); deferring recycle",
+                            runtime.pid,
+                            len(runtime._session_queues),
+                        )
+
                 if self._bg_runtime is None or not self._bg_runtime.is_alive():
                     # Reap the dead runtime before replacing it — kill() releases
                     # its PID tracking + sweep-protection shield. Overwriting

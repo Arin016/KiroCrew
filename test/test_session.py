@@ -2886,3 +2886,65 @@ class TestCleanupLoopResilience:
         assert "_expire_idle crashed" in caplog.text
         kiro_claw.shutdown_event.clear()
         await mgr.close_all()
+
+
+class TestGetBgSessionRecycle:
+    """get_bg_session() recycles a healthy-but-stale _bg runtime only when it
+    has zero active sessions."""
+
+    @pytest.mark.asyncio
+    async def test_recycles_stale_idle_runtime(self, cfg):
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+
+        stale = AsyncMock()
+        stale.is_alive = lambda: True
+        stale.has_active_sessions = lambda: False
+        stale._is_stale = AsyncMock(return_value="age")
+        stale.kill = AsyncMock()
+        stale.pid = 111
+        mgr._bg_runtime = stale
+
+        rt2 = AsyncMock()
+        rt2.spawn = AsyncMock()
+        rt2.is_alive = lambda: True
+        sentinel = object()
+        rt2.create_session = AsyncMock(return_value=sentinel)
+
+        with patch("kiro_claw.acp.runtime.AcpRuntime", side_effect=[rt2]):
+            result = await mgr.get_bg_session()
+
+        stale._is_stale.assert_awaited_once()
+        stale.kill.assert_awaited_once()  # stale + idle → recycled
+        rt2.spawn.assert_awaited_once()   # respawned
+        assert result is sentinel
+        await mgr.close_all()
+
+    @pytest.mark.asyncio
+    async def test_does_not_recycle_stale_runtime_with_active_sessions(self, cfg):
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+
+        stale = AsyncMock()
+        stale.is_alive = lambda: True
+        stale.has_active_sessions = lambda: True
+        stale._stale_by_age = lambda: True  # drives the deferral log
+        stale._is_stale = AsyncMock(return_value="age")  # must NOT be consulted
+        stale.kill = AsyncMock()
+        stale.pid = 222
+        stale._session_queues = {"s": object()}
+        sentinel = object()
+        stale.create_session = AsyncMock(return_value=sentinel)
+        mgr._bg_runtime = stale
+
+        # A live+reused runtime must not trigger a respawn.
+        with patch(
+            "kiro_claw.acp.runtime.AcpRuntime",
+            side_effect=AssertionError("should not respawn a live runtime"),
+        ):
+            result = await mgr.get_bg_session()
+
+        stale.kill.assert_not_awaited()  # active sessions → recycle deferred
+        # The active-session path uses the cheap _stale_by_age(), NOT the
+        # offloaded _is_stale() probe.
+        stale._is_stale.assert_not_awaited()
+        assert result is sentinel
+        await mgr.close_all()
