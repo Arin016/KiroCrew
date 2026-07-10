@@ -2654,3 +2654,51 @@ class TestTelegramAllowedUserIdsGuard:
             {"telegram": {"enabled": True, "soft_threshold_pct": "abc"}}
         )
         assert cfg.telegram.soft_threshold_pct == 80
+
+
+class TestMessagingConfigValidation:
+    def test_normalizes_bad_scope_mode_and_clamps_resets(self) -> None:
+        from kiro_claw.config.loader import MessagingConfig
+
+        c = MessagingConfig(
+            dm_scope="bogus",
+            queue_mode="nope",
+            idle_reset_minutes=-5,
+            daily_reset_hour=99,
+        )
+        assert c.dm_scope == "per-channel-peer"
+        assert c.queue_mode == "steer"
+        assert c.idle_reset_minutes == 0
+        assert c.daily_reset_hour == -1
+
+    def test_keeps_valid_values(self) -> None:
+        from kiro_claw.config.loader import MessagingConfig
+
+        c = MessagingConfig(
+            dm_scope="unified",
+            queue_mode="queue",
+            idle_reset_minutes=30,
+            daily_reset_hour=4,
+        )
+        assert c.dm_scope == "unified"
+        assert c.queue_mode == "queue"
+        assert c.idle_reset_minutes == 30
+        assert c.daily_reset_hour == 4
+
+    def test_load_hydrates_messaging_fields_from_config(self) -> None:
+        # Guards the load() gap: fields must be read from config.json, not just
+        # defaulted. Without hydration these would all be the defaults.
+        cfg = _load_from_dict(
+            {
+                "messaging": {
+                    "dm_scope": "unified",
+                    "queue_mode": "queue",
+                    "idle_reset_minutes": 30,
+                    "daily_reset_hour": 4,
+                }
+            }
+        )
+        assert cfg.messaging.dm_scope == "unified"
+        assert cfg.messaging.queue_mode == "queue"
+        assert cfg.messaging.idle_reset_minutes == 30
+        assert cfg.messaging.daily_reset_hour == 4

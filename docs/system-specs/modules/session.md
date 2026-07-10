@@ -1,6 +1,6 @@
 # Session Manager Module
 
-Last Updated: 2026-04-06 (Slack thread linking, bidirectional dashboard-Slack sync, slash commands)
+Last Updated: 2026-07-10 (DM channel session-key model + dm_scope + generation reset + mid-turn steer/queue; Slack thread linking, bidirectional dashboard-Slack sync, slash commands)
 
 ## Overview
 
@@ -193,6 +193,46 @@ the frontend can show a link indicator.
 
 **Block Kit builders** (`slack/blocks.py`): reusable Block Kit dict builders
 for slash command UIs. Action IDs follow `mc_<command>_<action>[_<id>]`.
+
+## DM Channel Session Keys & Mid-Turn Handling
+
+DM channels (Telegram, WeCom) have no thread concept, so `messaging/link.py`
+derives the session key with `build_dm_session_key(channel, agent, user, *,
+gen, dm_scope)`:
+
+- **Shape** (channel-first): `{channel}:{agent}:{chatType}:{user}` plus an
+  optional `:gen{N}` suffix. The part before the suffix is a durable **bucket**
+  (history and channel links hang off it); the **generation** rotates to start a
+  fresh transcript within the bucket. `chatType` is `direct` today; `group` is
+  reserved.
+- **`dm_scope`** (`MessagingConfig.dm_scope`): `per-channel-peer` (default) —
+  one bucket per `(channel, user)`; `unified` — all DMs collapse into a single
+  `unified:{agent}` bucket for cross-surface continuity. `agent` is part of the
+  bucket by design, so switching the configured agent starts a fresh session
+  rather than replaying another agent's context.
+- **Generation reset** rotates on `/new`, an idle window
+  (`MessagingConfig.idle_reset_minutes`), or a daily boundary
+  (`daily_reset_hour`), decided by `should_rotate_generation()`.
+
+Legacy bare-thread Slack keys are unaffected — they keep the
+`canonical_key`/`legacy_key` shim. The DM channels are recent, so the key shape
+carries no prior persisted history to migrate.
+
+### Mid-turn messages (steer / queue)
+
+`SessionManager.is_busy(key)` reports whether a turn holds the session
+semaphore. When a DM arrives mid-turn, the dispatcher acts on
+`MessagingConfig.queue_mode`:
+
+- `steer` (default): fold the message into the running turn via the provider's
+  steer channel.
+- `queue`: enqueue it — checked atomically against the semaphore, so a turn
+  that finishes in the window runs the message instead of stranding it — and
+  drain it after the turn, iteratively and capped (not recursively).
+
+WeCom always steers regardless of `queue_mode`: its replies are bound to the
+inbound request, so a queued-then-drained reply can't be delivered later
+(capability-driven, like `supports_proactive_send=False`).
 
 ## Session Lifecycle at Startup
 

@@ -17,11 +17,18 @@ from kiro_claw.wechat.transport_dispatch import WeComDispatcher
 
 
 class FakeProvider:
+    supports_steer = True
+
     def __init__(self, events: list) -> None:
         self._events = events
         self.approved: list = []
         self.rejected: list = []
         self.compacted = False
+        self.steered: list = []
+
+    async def steer(self, text: str) -> bool:
+        self.steered.append(text)
+        return True
 
     async def stream(self, message: str):
         for ev in self._events:
@@ -76,6 +83,9 @@ class FakeSessions:
     def get_provider(self, key):
         return self._p
 
+    def is_busy(self, key) -> bool:
+        return getattr(self, "_busy", False)
+
 
 class _GateResult:
     def __init__(self, action: str = "") -> None:
@@ -126,6 +136,12 @@ def _cfg(default_agent: str = "", approval_mode: str = "interactive"):
     return SimpleNamespace(
         agent=SimpleNamespace(default_agent=default_agent, approval_mode=approval_mode),
         wechat=SimpleNamespace(hard_threshold_pct=95.0, soft_threshold_pct=80.0),
+        messaging=SimpleNamespace(
+            dm_scope="per-channel-peer",
+            idle_reset_minutes=0,
+            daily_reset_hour=-1,
+            queue_mode="steer",
+        ),
     )
 
 
@@ -264,3 +280,49 @@ class TestCommands:
         assert s.is_awaiting("u") is True
         s.clear_awaiting("u")
         assert s.is_awaiting("u") is False
+
+
+class TestWeComMidTurn:
+    @pytest.mark.asyncio
+    async def test_busy_steers_and_acknowledges(self) -> None:
+        provider = FakeProvider([])
+        sessions = FakeSessions(provider)
+        sessions._busy = True
+        client = FakeClient()
+        d = _dispatcher(sessions, FakeCtx(), client)
+
+        await d.handle_message(_inbound("and also this"))
+
+        assert provider.steered == ["and also this"]
+        assert any("合并" in content for _url, content in client.replies)
+        assert sessions.successes == []  # no full turn ran while busy
+
+    @pytest.mark.asyncio
+    async def test_busy_but_turn_finished_runs_fresh(self) -> None:
+        # is_busy is False by the time _handle_busy runs (turn finished in the
+        # window) -> run the message as a fresh turn instead of a false ack.
+        provider = FakeProvider([AcpEvent(kind=EVENT_COMPLETE)])
+        sessions = FakeSessions(provider)  # _busy defaults False
+        client = FakeClient()
+        d = _dispatcher(sessions, FakeCtx(), client)
+
+        await d._handle_busy(_inbound("later"), d._session_key("Wei"))
+
+        assert sessions.successes  # a real turn ran
+        assert provider.steered == []  # not steered
+
+    @pytest.mark.asyncio
+    async def test_busy_steer_unavailable_asks_resend(self) -> None:
+        # A turn is genuinely in flight but steer isn't possible (cold start):
+        # ask the user to resend rather than looping or dropping the message.
+        provider = FakeProvider([])
+        provider.supports_steer = False
+        sessions = FakeSessions(provider)
+        sessions._busy = True
+        client = FakeClient()
+        d = _dispatcher(sessions, FakeCtx(), client)
+
+        await d._handle_busy(_inbound("later"), d._session_key("Wei"))
+
+        assert any("重发" in content for _url, content in client.replies)
+        assert sessions.successes == []

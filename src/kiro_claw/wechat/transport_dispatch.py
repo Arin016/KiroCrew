@@ -24,11 +24,12 @@ Dependency direction is ``wechat -> messaging`` (allowed).
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 from kiro_claw.hooks import TOOL_AUTO_APPROVE, TOOL_DENY
 from kiro_claw.messaging.driver import APPROVAL_INTERACTIVE, TurnDriver
-from kiro_claw.messaging.link import canonical_key
+from kiro_claw.messaging.link import build_dm_session_key
 from kiro_claw.sel import sel
 from kiro_claw.wechat.client import new_stream_id
 from kiro_claw.wechat.commands import ConversationState, parse_command
@@ -101,13 +102,29 @@ class WeComDispatcher:
             await self._handle_compact(inbound)
             return
 
+        # ── Mid-turn concurrency: check the CURRENT-generation key for an
+        # in-flight turn BEFORE any idle/daily rotation (rotating first could
+        # mint a new key and miss the running turn). WeCom replies are bound to
+        # the inbound request, so a queued-then-drained reply can't be delivered
+        # reliably later -- fold it into the running turn via steer.
+        session_key = self._session_key(userid)
+        if self.sessions.is_busy(session_key):
+            await self._handle_busy(inbound, session_key)
+            return
+
+        self._conv.maybe_rotate(
+            userid,
+            time.time(),
+            idle_minutes=self.cfg.messaging.idle_reset_minutes,
+            daily_reset_hour=self.cfg.messaging.daily_reset_hour,
+        )
         session_key = self._session_key(userid)
         channel_id = f"wecom:{userid}"
         # Resolve the kiro-cli agent: an explicit override wins, else the
         # configured default, else the canonical "kiroclaw" agent -- so the
         # session loads kiroclaw-core (spawn_run) instead of kiro-cli's bare
         # built-in default. Mirrors slack/telegram transport_dispatch.
-        agent = self.agent or self.cfg.agent.default_agent or _DEFAULT_KIROCLAW_AGENT
+        agent = self._resolve_agent()
 
         # WeCom has no interactive buttons -> no decider (deny-by-default for
         # INTERACTIVE; auto/trust still auto-approve via the driver ladder).
@@ -215,11 +232,51 @@ class WeComDispatcher:
             if _acquired:
                 self.sessions.release(session_key)
 
+    async def _handle_busy(self, inbound: Any, session_key: str) -> None:
+        """Mid-turn message: fold into the running turn via steer.
+
+        WeCom replies are bound to the inbound request, so a queued-then-drained
+        reply can't be delivered reliably later -- WeCom steers rather than
+        queueing (capability-driven, like the no-proactive-send gate).
+
+        ``steer()`` returning True only means the session exists, not that a turn
+        is active, so it can't detect the is_busy->finished race. Re-check
+        ``is_busy`` (the semaphore, which tracks turn-active) instead: if the
+        turn already finished, run the message as a fresh turn (safe -- is_busy
+        is now False, so no re-entry loop); if a turn is still in flight but
+        steer isn't possible yet (cold start, no session id), ask the user to
+        resend rather than silently dropping the message.
+        """
+        assert self.client is not None
+        if not self.sessions.is_busy(session_key):
+            await self.handle_message(inbound)
+            return
+        provider = self.sessions.get_provider(session_key)
+        steer = getattr(provider, "steer", None)
+        steered = bool(
+            getattr(provider, "supports_steer", False)
+            and steer is not None
+            and await steer(inbound.text)
+        )
+        if steered:
+            await self.client.send_reply(inbound.response_url, "⏳ 已合并到当前回复")
+        else:
+            await self.client.send_reply(inbound.response_url, "⏳ 正在处理上一条,请稍后重发")
+
     # ── Helpers ────────────────────────────────────────────────────────────
+
+    def _resolve_agent(self) -> str:
+        return self.agent or self.cfg.agent.default_agent or _DEFAULT_KIROCLAW_AGENT
 
     def _session_key(self, userid: str) -> str:
         gen = self._conv.current_gen(userid)
-        return canonical_key(f"wecom:{userid}:{gen}")
+        return build_dm_session_key(
+            "wecom",
+            self._resolve_agent(),
+            userid,
+            gen=gen,
+            dm_scope=self.cfg.messaging.dm_scope,
+        )
 
     def _persist_turn(
         self, session_key: str, user_text: str, reply_text: str, is_new: bool

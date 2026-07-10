@@ -2054,6 +2054,11 @@ class SessionManager:
 
     # ── Message queue (Slack thread serialization) ──
 
+    def is_busy(self, key: str) -> bool:
+        """True iff a turn is in flight for *key* (its semaphore is held)."""
+        session = self._sessions.get(key)
+        return bool(session and session.semaphore.locked())
+
     def enqueue(
         self, key: str, msg_ts: str, text: str, *, force: bool = False, **kwargs: object
     ) -> bool:

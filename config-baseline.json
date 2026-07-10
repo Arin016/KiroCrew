@@ -703,7 +703,11 @@
       "hasChildren": true,
       "enumValues": null,
       "defaultValue": {
-        "use_transport": true
+        "use_transport": true,
+        "dm_scope": "per-channel-peer",
+        "idle_reset_minutes": 0,
+        "daily_reset_hour": -1,
+        "queue_mode": "steer"
       }
     },
     {
@@ -719,6 +723,62 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": true
+    },
+    {
+      "path": "messaging.dm_scope",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "DM Session Scope",
+      "help": "How direct-message conversations map to sessions. 'per-channel-peer' (default) keeps one session per (channel, user), so the same person on Telegram vs WeCom stays isolated. 'unified' collapses all DMs into one shared session per agent for cross-surface continuity.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": "per-channel-peer"
+    },
+    {
+      "path": "messaging.idle_reset_minutes",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "DM Idle Reset (minutes)",
+      "help": "Start a fresh session generation when a DM arrives after this many minutes of inactivity. 0 (default) disables idle reset.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 0
+    },
+    {
+      "path": "messaging.daily_reset_hour",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "DM Daily Reset Hour",
+      "help": "Local-time hour (0-23) at which the next DM starts a fresh session generation once per day. -1 (default) disables daily reset.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": -1
+    },
+    {
+      "path": "messaging.queue_mode",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "DM Queue Mode",
+      "help": "How a DM that arrives while a turn is running is handled. 'steer' (default) folds it into the running reply; 'queue' holds it and runs it after the current turn finishes.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": "steer"
     },
     {
       "path": "cron_history",

@@ -44,14 +44,16 @@ class FakeClient:
         return None
 
     async def send_message(
-        self, chat_id: int, text: str, *, parse_mode: Any = None, reply_markup: Any = None
+        self, chat_id: int, text: str, *, parse_mode: Any = None,
+        reply_markup: Any = None, retry_plain: bool = True
     ) -> int:
         self._mid += 1
         self.sent.append((text, reply_markup))
         return self._mid
 
     async def edit_message(
-        self, chat_id: int, message_id: int, text: str, *, parse_mode: Any = None, reply_markup: Any = None
+        self, chat_id: int, message_id: int, text: str, *, parse_mode: Any = None,
+        reply_markup: Any = None, retry_plain: bool = True
     ) -> bool:
         self.edits.append((message_id, text, reply_markup))
         return True
@@ -73,8 +75,15 @@ class _Ev:
 
 
 class FakeProvider:
+    supports_steer = True
+
     def __init__(self, reply: str = "Answer") -> None:
         self._reply = reply
+        self.steered: list = []
+
+    async def steer(self, text: str) -> bool:
+        self.steered.append(text)
+        return True
 
     async def stream(self, message: str) -> Any:
         yield _Ev(EVENT_TEXT_CHUNK, text=f"{self._reply}: {message[:16]}")
@@ -105,6 +114,8 @@ class FakeSessions:
         self.raise_on_get = raise_on_get
         self._busy = False
         self._has = True
+        self.queued: list = []
+        self._gp = FakeProvider()
 
     async def get_or_create(self, key: str, *, agent: Any = None, channel_id: Any = None) -> Any:
         self.last_agent = agent
@@ -128,7 +139,17 @@ class FakeSessions:
         self.released.append(key)
 
     def get_provider(self, key: str) -> Any:
-        return FakeProvider()
+        return self._gp
+
+    def is_busy(self, key: str) -> bool:
+        return self._busy
+
+    def enqueue(self, key: str, ts: str, text: str, *, force: bool = False, **kw: Any) -> bool:
+        self.queued.append((ts, text, kw))
+        return True
+
+    def dequeue(self, key: str) -> Any:
+        return self.queued.pop(0) if self.queued else None
 
     def has_session(self, key: str) -> bool:
         return self._has
@@ -164,6 +185,12 @@ def _cfg(soft: int = 80, default_agent: str = "") -> Any:
     return SimpleNamespace(
         telegram=SimpleNamespace(soft_threshold_pct=soft),
         agent=SimpleNamespace(default_agent=default_agent),
+        messaging=SimpleNamespace(
+            dm_scope="per-channel-peer",
+            idle_reset_minutes=0,
+            daily_reset_hour=-1,
+            queue_mode="steer",
+        ),
     )
 
 
@@ -228,6 +255,23 @@ class TestConversationState:
         s.set_awaiting(1)
         s.bump_gen(1)
         assert s.is_awaiting(1) is False
+
+    def test_maybe_rotate_first_message_no_rotate(self) -> None:
+        s = ConversationState()
+        assert s.maybe_rotate(1, 1000.0, idle_minutes=30) is False
+        assert s.current_gen(1) == 0
+
+    def test_maybe_rotate_idle_bumps_gen(self) -> None:
+        s = ConversationState()
+        s.maybe_rotate(1, 1000.0, idle_minutes=30)
+        assert s.maybe_rotate(1, 1000.0 + 31 * 60, idle_minutes=30) is True
+        assert s.current_gen(1) == 1
+
+    def test_maybe_rotate_records_activity_without_rotating(self) -> None:
+        s = ConversationState()
+        s.maybe_rotate(1, 1000.0, idle_minutes=30)
+        assert s.maybe_rotate(1, 1000.0 + 60, idle_minutes=30) is False
+        assert s.current_gen(1) == 0
 
 
 # ── renderer.py helpers ────────────────────────────────────────────────────
@@ -439,8 +483,8 @@ class TestDispatcher:
 
         asyncio.run(_go())
         assert cli.edits[-1][1] == "Answer: hello world"
-        assert sess.successes == ["telegram:7:0"]
-        assert sess.released == ["telegram:7:0"]
+        assert sess.successes == ["telegram:kiroclaw:direct:7"]
+        assert sess.released == ["telegram:kiroclaw:direct:7"]
 
     def test_agent_resolves_to_kiroclaw_when_unset(self) -> None:
         # agent=None + empty default_agent must fall back to "kiroclaw" so the
@@ -525,8 +569,8 @@ class TestDispatcher:
             )
 
         asyncio.run(_go())
-        assert sess.acquired == ["telegram:7:0"]  # acquired the turn semaphore
-        assert sess.released == ["telegram:7:0"]  # and released it in finally
+        assert sess.acquired == ["telegram:kiroclaw:direct:7"]  # acquired the turn semaphore
+        assert sess.released == ["telegram:kiroclaw:direct:7"]  # and released it in finally
         assert any("Compact" in s[0] for s in cli.sent) or any(
             "Compact" in e[1] for e in cli.edits
         )
@@ -688,3 +732,68 @@ class TestConfigMasking:
         # Unset stays empty (UI shows "not set"), never a fake mask sentinel.
         assert out["telegram"]["bot_token"] == ""
         assert _SENSITIVE_MASK not in str(out)
+
+
+class TestTelegramMidTurn:
+    def test_busy_steer_folds_into_running_turn(self) -> None:
+        d, cli, sess = _dispatcher({7})
+        sess._busy = True
+
+        async def _go() -> None:
+            await d.handle_message(
+                InboundMessage(
+                    channel_type="telegram", user_id="7", conversation_id="7", text="and also this"
+                )
+            )
+
+        asyncio.run(_go())
+        assert sess._gp.steered == ["and also this"]
+        assert any("Folding" in t for t, _ in cli.sent)
+        assert sess.queued == []
+
+    def test_busy_queue_mode_enqueues(self) -> None:
+        d, cli, sess = _dispatcher({7})
+        sess._busy = True
+        d.cfg.messaging.queue_mode = "queue"
+
+        async def _go() -> None:
+            await d.handle_message(
+                InboundMessage(
+                    channel_type="telegram", user_id="7", conversation_id="7", text="later"
+                )
+            )
+
+        asyncio.run(_go())
+        assert [text for _ts, text, _ in sess.queued] == ["later"]
+        assert sess._gp.steered == []
+        assert any("Queued" in t for t, _ in cli.sent)
+
+    def test_not_busy_runs_a_full_turn(self) -> None:
+        d, cli, sess = _dispatcher({7})
+
+        async def _go() -> None:
+            await d.handle_message(
+                InboundMessage(
+                    channel_type="telegram", user_id="7", conversation_id="7", text="hello"
+                )
+            )
+
+        asyncio.run(_go())
+        assert sess.successes == ["telegram:kiroclaw:direct:7"]
+        assert sess._gp.steered == []
+
+    def test_drain_processes_queued_messages_iteratively(self) -> None:
+        d, cli, sess = _dispatcher({7})
+        sess.queued = [("t1", "first", {}), ("t2", "second", {})]
+
+        async def _go() -> None:
+            await d._drain_queue("telegram:kiroclaw:direct:7", 7, 7)
+
+        asyncio.run(_go())
+        # Both queued messages ran as full turns (drain=False -> no recursion),
+        # and the queue is empty afterward.
+        assert sess.successes == [
+            "telegram:kiroclaw:direct:7",
+            "telegram:kiroclaw:direct:7",
+        ]
+        assert sess.queued == []

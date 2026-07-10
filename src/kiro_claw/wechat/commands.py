@@ -14,6 +14,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from kiro_claw.messaging.link import should_rotate_generation
+
 logger = logging.getLogger(__name__)
 
 # ── Command constants ──
@@ -40,6 +42,7 @@ def parse_command(text: str) -> str | None:
 class _UserState:
     gen: int = 0
     awaiting_compact: bool = False
+    last_active: float = 0.0
 
 
 @dataclass
@@ -59,6 +62,20 @@ class ConversationState:
         s.gen += 1
         s.awaiting_compact = False
         return s.gen
+
+    def maybe_rotate(
+        self, userid: str, now: float, *, idle_minutes: int = 0, daily_reset_hour: int = -1
+    ) -> bool:
+        """Rotate the generation on an idle/daily boundary, then record activity."""
+        s = self._get(userid)
+        rotate = should_rotate_generation(
+            s.last_active, now, idle_minutes=idle_minutes, daily_reset_hour=daily_reset_hour
+        )
+        if rotate:
+            s.gen += 1
+            s.awaiting_compact = False
+        s.last_active = now
+        return rotate
 
     def current_gen(self, userid: str) -> int:
         return self._get(userid).gen

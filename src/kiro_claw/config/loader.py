@@ -685,6 +685,53 @@ class MessagingConfig:
             "native handler.",
         ),
     )
+    dm_scope: str = field(
+        default="per-channel-peer",
+        metadata=_meta(
+            "DM Session Scope",
+            "How direct-message conversations map to sessions. 'per-channel-peer' "
+            "(default) keeps one session per (channel, user), so the same person on "
+            "Telegram vs WeCom stays isolated. 'unified' collapses all DMs into one "
+            "shared session per agent for cross-surface continuity.",
+        ),
+    )
+    idle_reset_minutes: int = field(
+        default=0,
+        metadata=_meta(
+            "DM Idle Reset (minutes)",
+            "Start a fresh session generation when a DM arrives after this many "
+            "minutes of inactivity. 0 (default) disables idle reset.",
+        ),
+    )
+    daily_reset_hour: int = field(
+        default=-1,
+        metadata=_meta(
+            "DM Daily Reset Hour",
+            "Local-time hour (0-23) at which the next DM starts a fresh session "
+            "generation once per day. -1 (default) disables daily reset.",
+        ),
+    )
+    queue_mode: str = field(
+        default="steer",
+        metadata=_meta(
+            "DM Queue Mode",
+            "How a DM that arrives while a turn is running is handled. 'steer' "
+            "(default) folds it into the running reply; 'queue' holds it and runs "
+            "it after the current turn finishes.",
+        ),
+    )
+
+    def __post_init__(self) -> None:
+        # Fail safe on hand-edited values (mirrors WeComConfig): an unknown scope
+        # or mode falls back to the safe default, and the reset windows clamp to
+        # valid ranges so a bad config can't wedge dispatch.
+        if self.dm_scope not in ("per-channel-peer", "unified"):
+            self.dm_scope = "per-channel-peer"
+        if self.queue_mode not in ("steer", "queue"):
+            self.queue_mode = "steer"
+        self.idle_reset_minutes = max(0, self.idle_reset_minutes)
+        if not 0 <= self.daily_reset_hour <= 23:
+            self.daily_reset_hour = -1
 
 
 @dataclass
@@ -2425,6 +2472,10 @@ class KiroClawConfig:
             ),
             messaging=MessagingConfig(
                 use_transport=bool(messaging_data.get("use_transport", True)),
+                dm_scope=str(messaging_data.get("dm_scope", "per-channel-peer")),
+                idle_reset_minutes=_coerce_int(messaging_data.get("idle_reset_minutes"), 0),
+                daily_reset_hour=_coerce_int(messaging_data.get("daily_reset_hour"), -1),
+                queue_mode=str(messaging_data.get("queue_mode", "steer")),
             ),
             memory=MemoryConfig(
                 embedding_provider=memory_data.get("embedding_provider", "none"),

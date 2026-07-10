@@ -11,6 +11,7 @@ Stdlib-only; imported by ``session_map`` (no import cycle).
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -77,3 +78,92 @@ def legacy_key(key: str) -> str | None:
         if is_legacy_slack_key(rest):
             return rest
     return None
+
+
+# ── DM session-key model (two-level: stable bucket + rotating generation) ──
+
+#: dmScope values controlling how direct messages map to session buckets.
+DM_SCOPE_PER_CHANNEL_PEER = "per-channel-peer"
+DM_SCOPE_UNIFIED = "unified"
+#: Default isolates by ``(channel, user)`` so the same person on two channels
+#: stays separate; ``unified`` opts into one shared bucket per agent.
+DEFAULT_DM_SCOPE = DM_SCOPE_PER_CHANNEL_PEER
+
+#: Only ``direct`` (1:1 DM) is wired today; ``group`` is reserved for future
+#: group-chat support and is produced by no current channel.
+CHAT_TYPE_DIRECT = "direct"
+
+
+def build_dm_session_key(
+    channel: str,
+    agent: str,
+    user: str,
+    *,
+    gen: int = 0,
+    dm_scope: str = DEFAULT_DM_SCOPE,
+    chat_type: str = CHAT_TYPE_DIRECT,
+) -> str:
+    """Build a DM session key from a stable bucket + a rotating generation.
+
+    The canonical shape is channel-first, ``{channel}:{agent}:{chatType}:{user}``,
+    with an optional ``:gen{N}`` suffix. The bucket (everything before the
+    suffix) is durable -- channel links and history hang off it -- while the
+    generation rotates on reset (``/new``, idle, daily) to start a fresh
+    transcript without discarding the bucket. Generation 0 is the bare bucket
+    (no suffix).
+
+    ``dm_scope``:
+      * ``per-channel-peer`` (default) -- one bucket per ``(channel, user)``, so
+        the same person on Telegram vs WeCom stays isolated.
+      * ``unified`` -- all DMs collapse into a single ``unified:{agent}`` bucket
+        for cross-surface continuity (channel and user drop out of the key).
+
+    An unrecognized ``dm_scope`` falls back to per-channel-peer (safe isolation)
+    rather than raising, so a hand-edited config can never crash dispatch.
+
+    The ``agent`` is part of the durable bucket by design: a different agent is a
+    different assistant/context, so switching the configured agent intentionally
+    starts a fresh session rather than replaying another agent's history. This
+    key shape is new for the recently added DM channels (Telegram, WeCom), which
+    carry no prior persisted history to migrate; the legacy bare-thread Slack
+    keys keep their existing compatibility shim (see ``canonical_key``) untouched.
+    """
+    if dm_scope == DM_SCOPE_UNIFIED:
+        bucket = f"{DM_SCOPE_UNIFIED}:{agent}"
+    else:
+        bucket = f"{channel}:{agent}:{chat_type}:{user}"
+    return f"{bucket}:gen{gen}" if gen else bucket
+
+
+def should_rotate_generation(
+    last_active: float,
+    now: float,
+    *,
+    idle_minutes: int = 0,
+    daily_reset_hour: int = -1,
+) -> bool:
+    """Decide whether an arriving message should rotate the session generation.
+
+    Two opt-in triggers, evaluated against the previous activity timestamp:
+
+      * **idle** -- the gap since ``last_active`` reached ``idle_minutes``
+        (``<= 0`` disables it).
+      * **daily** -- a local-time ``daily_reset_hour`` boundary (``0``-``23``)
+        falls in ``(last_active, now]`` (``< 0`` disables it).
+
+    The first message in a bucket (``last_active <= 0``) never rotates -- there
+    is nothing yet to roll over.
+    """
+    if last_active <= 0:
+        return False
+    if idle_minutes > 0 and (now - last_active) >= idle_minutes * 60:
+        return True
+    if 0 <= daily_reset_hour <= 23:
+        lt = time.localtime(now)
+        midnight = now - (lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec)
+        boundary = midnight + daily_reset_hour * 3600
+        if boundary > now:
+            boundary -= 86400
+        if last_active < boundary <= now:
+            return True
+    return False

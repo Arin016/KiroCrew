@@ -24,12 +24,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 from kiro_claw.acp.types import EVENT_COMPACTION_STATUS, EVENT_COMPLETE
 from kiro_claw.hooks import TOOL_AUTO_APPROVE, TOOL_DENY
 from kiro_claw.messaging.driver import APPROVAL_INTERACTIVE, TurnDriver
-from kiro_claw.messaging.link import canonical_key
+from kiro_claw.messaging.link import build_dm_session_key
 from kiro_claw.messaging.transport import InboundMessage
 from kiro_claw.sel import sel
 from kiro_claw.telegram.commands import ConversationState, parse_command
@@ -95,7 +96,7 @@ class TelegramDispatcher:
 
     # ── Turn dispatch (transport's dispatch callback) ──────────────────────
 
-    async def handle_message(self, msg: InboundMessage) -> None:
+    async def handle_message(self, msg: InboundMessage, *, drain: bool = True) -> None:
         """Drive one authorized inbound message through TurnDriver end-to-end."""
         assert self.client is not None, "TelegramDispatcher.client must be set"
         user_id = int(msg.user_id)
@@ -116,13 +117,29 @@ class TelegramDispatcher:
             await self.client.send_message(chat_id, _HELP_TEXT)
             return
 
+        # ── Mid-turn concurrency: check the CURRENT-generation key for an
+        # in-flight turn BEFORE any idle/daily rotation. Rotating first could
+        # mint a new key and miss the running turn, letting a second concurrent
+        # turn bypass steer/queue. Surface the message (steer or queue) instead
+        # of a silent block.
+        session_key = self._session_key(user_id)
+        if self.sessions.is_busy(session_key):
+            await self._handle_busy(session_key, msg)
+            return
+
+        self._conv.maybe_rotate(
+            user_id,
+            time.time(),
+            idle_minutes=self.cfg.messaging.idle_reset_minutes,
+            daily_reset_hour=self.cfg.messaging.daily_reset_hour,
+        )
         session_key = self._session_key(user_id)
         channel_id = f"telegram:{user_id}"
         # Resolve the kiro-cli agent: an explicit override wins, else the
         # configured default, else the canonical "kiroclaw" agent — so the
         # session loads kiroclaw-core (spawn_run) instead of kiro-cli's bare
         # built-in default. Mirrors slack/transport_dispatch.py.
-        agent = self.agent or self.cfg.agent.default_agent or _DEFAULT_KIROCLAW_AGENT
+        agent = self._resolve_agent()
 
         decider = (
             TelegramApprovalDecider(session_key=session_key)
@@ -229,6 +246,74 @@ class TelegramDispatcher:
             if _acquired:
                 self.sessions.release(session_key)
 
+        # Now that the turn is released, run anything that queued during it
+        # (queue_mode == "queue"). ``drain`` is False for drained turns so the
+        # loop stays iterative at one level (no recursion); ``limit`` bounds it.
+        if drain:
+            await self._drain_queue(session_key, user_id, chat_id)
+
+    async def _handle_busy(self, session_key: str, msg: InboundMessage) -> None:
+        """A message arrived mid-turn: steer the running turn or queue for after it."""
+        assert self.client is not None
+        chat_id = int(msg.conversation_id)
+        if self.cfg.messaging.queue_mode != "queue":
+            provider = self.sessions.get_provider(session_key)
+            steer = getattr(provider, "steer", None)
+            steered = bool(
+                getattr(provider, "supports_steer", False)
+                and steer is not None
+                and await steer(msg.text)
+            )
+            if steered:
+                await self.client.send_message(chat_id, "⏳ Folding that into the current reply…")
+                return
+        # queue mode, or steer unavailable. enqueue only if the turn is still in
+        # flight -- enqueue checks the session semaphore atomically (no await), so
+        # if the turn finished during this window we fall through and run the
+        # message now instead of stranding it in a queue nobody will drain.
+        if self.sessions.enqueue(session_key, str(time.time()), msg.text, force=False):
+            await self.client.send_message(
+                chat_id, "⏳ Queued — I'll get to this after the current reply."
+            )
+        else:
+            await self.handle_message(msg)
+
+    async def _drain_queue(
+        self, session_key: str, user_id: int, chat_id: int, *, limit: int = 10
+    ) -> None:
+        """Run messages queued during a turn as fresh turns, iteratively (capped).
+
+        Each drained turn runs with ``drain=False`` so it does not re-enter this
+        loop -- draining happens at this single level, bounded by ``limit``,
+        rather than recursing one level per queued message. Overflow beyond
+        ``limit`` is not lost: it drains after the next real turn's own drain.
+
+        Only the queued text is replayed; ``attachments`` / ``thread_id`` /
+        ``is_mention`` are intentionally not carried, matching what ``enqueue``
+        persists for DM channels (text only).
+        """
+        for _ in range(limit):
+            item = self.sessions.dequeue(session_key)
+            if item is None:
+                return
+            _ts, qtext, _ = item
+            await self.handle_message(
+                InboundMessage(
+                    channel_type="telegram",
+                    user_id=str(user_id),
+                    conversation_id=str(chat_id),
+                    text=qtext,
+                ),
+                drain=False,
+            )
+        # Hit the cap with the queue not yet drained; the remainder is picked up
+        # by the next real turn's drain. Logged for observability.
+        logger.debug(
+            "telegram: drain hit cap=%d for %s; remainder drains after the next turn",
+            limit,
+            session_key,
+        )
+
     # ── Inline-button handler (client's on_callback) ───────────────────────
 
     async def on_callback(self, cb: "TelegramCallback") -> None:
@@ -300,9 +385,18 @@ class TelegramDispatcher:
         # Deny-by-default (callbacks bypass transport.receive, so re-check here).
         return bool(user_id) and bool(self._allowed) and user_id in self._allowed
 
+    def _resolve_agent(self) -> str:
+        return self.agent or self.cfg.agent.default_agent or _DEFAULT_KIROCLAW_AGENT
+
     def _session_key(self, user_id: int) -> str:
         gen = self._conv.current_gen(user_id)
-        return canonical_key(f"telegram:{user_id}:{gen}")
+        return build_dm_session_key(
+            "telegram",
+            self._resolve_agent(),
+            str(user_id),
+            gen=gen,
+            dm_scope=self.cfg.messaging.dm_scope,
+        )
 
     def _persist_turn(
         self, session_key: str, user_text: str, reply_text: str, is_new: bool
