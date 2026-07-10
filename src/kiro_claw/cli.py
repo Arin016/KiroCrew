@@ -47,6 +47,8 @@ from kiro_claw.config.loader import (
     build_provider_factory,
 )
 from kiro_claw.constants import env_flag_enabled
+from kiro_claw.dashboard.state import set_build_info
+from kiro_claw.env import git_build_info
 from kiro_claw.gateway_lock import GatewayLock, GatewayLockError
 from kiro_claw.history import ConversationLog, HistoryConsolidator
 from kiro_claw.knowledge.dedup import dedup_sweep
@@ -1546,6 +1548,12 @@ Examples:
         # and gateway-only — other CLI subcommands are short-lived and skip it.
         faulthandler.enable()
         gw_kwargs = _resolve_gateway_args(args)
+        # Resolve the running build's git branch+commit ONCE here in the sync
+        # entrypoint: provably AFTER KIROCLAW_PROJECT_DIR detection (top of main())
+        # and BEFORE asyncio.run() starts the loop. Resolving it at state.py import
+        # time froze ("","") under systemd, where this module is imported before
+        # main() detects the project dir (lru_cache then pins the empty result).
+        set_build_info(git_build_info())
         _install_child_watcher()
         # Single-writer guard (Mesh-2386): refuse a second gateway bound to this
         # KIROCLAW_HOME so two ConversationLog writers can never clobber the same

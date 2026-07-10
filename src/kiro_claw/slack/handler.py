@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from kiro_claw.session_map import SessionMap
 
-from kiro_claw.acp.client import AcpError, AcpProcessDied, AcpTimeoutError
+from kiro_claw.acp.client import AcpError, AcpProcessDied, AcpPromptBusy, AcpTimeoutError
 from kiro_claw.acp.types import STOP_REASON_CANCELLED, STOP_REASON_END_TURN
 from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import ACTIVATION_REVIEW, KiroClawConfig, config_dir, config_path
@@ -106,6 +106,7 @@ _BANG_TO_SLASH: dict[str, str] = {
     # "!allowlist" removed — multi-user access disabled for security
     "!channel": "/kiroclaw channel",
     "!link-to-dashboard": "/kiroclaw link-to-dashboard",
+    "!restart": "/kiroclaw restart",
 }
 
 # Approval modes (UX-level, not provider-specific)
@@ -3312,6 +3313,18 @@ async def handle_message(
         _had_error = True
         accumulated = accumulated or "💀 Agent process died. Please try again."
         task.fail("process_died")
+        await sessions.record_failure(session_key)
+        Stats().inc_message_failed()
+    except AcpPromptBusy as e:
+        _had_error = True
+        # Session is wedged mid-prompt — reset the provider so the next
+        # message cold-starts cleanly instead of hitting the same wall.
+        try:
+            await sessions.reset(session_key)
+        except Exception:
+            logger.debug("Failed to reset session %s after prompt-busy", session_key, exc_info=True)
+        accumulated = f"❌ {e}"
+        task.fail(str(e))
         await sessions.record_failure(session_key)
         Stats().inc_message_failed()
     except AcpError as e:

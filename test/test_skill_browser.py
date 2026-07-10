@@ -23,10 +23,16 @@ from kiro_claw.dashboard.handlers._shared import (
     SKILL_FILE_MAX_BYTES,
     SKILL_TREE_MAX_ENTRIES,
     _agent_loads_skill,
+    _aim_skill_path_index,
+    _expand_agent_globs,
     _expand_resource_uri,
+    _load_parsed_agents,
+    _parse_aim_skills,
     _parse_skill_description,
     _resolve_loaded_by_agents,
     _resolve_skill_root,
+    annotate_skills_with_agents,
+    collect_skills_blocking,
     list_kiro_skills,
     list_skill_tree,
     read_skill_file,
@@ -298,6 +304,435 @@ class TestResolveLoadedByAgents:
         out = _resolve_loaded_by_agents(skill_md)
         assert "evil" not in out
         assert out == []
+
+
+class TestLoadParsedAgents:
+    """``_load_parsed_agents`` reads every agent JSON once into
+    ``(name, data, path)`` tuples, skipping junk and sensitive symlinks."""
+
+    def test_parses_each_agent_once(self, fake_home):
+        agents_dir = fake_home / ".kiro" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "a.json").write_text(json.dumps({"name": "alpha", "resources": []}))
+        (agents_dir / "b.json").write_text(json.dumps({"name": "beta", "resources": []}))
+
+        parsed = _load_parsed_agents()
+        names = sorted(name for name, _data, _path in parsed)
+        assert names == ["alpha", "beta"]
+        # Each tuple carries the parsed dict and the source path.
+        for name, data, path in parsed:
+            assert isinstance(data, dict)
+            assert path.suffix == ".json"
+            assert data["name"] == name
+
+    def test_name_falls_back_to_stem(self, fake_home):
+        agents_dir = fake_home / ".kiro" / "agents"
+        agents_dir.mkdir(parents=True)
+        # No "name" key → the file stem is used.
+        (agents_dir / "stem-name.json").write_text(json.dumps({"resources": []}))
+
+        parsed = _load_parsed_agents()
+        assert [name for name, _d, _p in parsed] == ["stem-name"]
+
+    def test_skips_appledouble_invalid_and_non_dict(self, fake_home):
+        agents_dir = fake_home / ".kiro" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "good.json").write_text(json.dumps({"name": "good", "resources": []}))
+        (agents_dir / "._good.json").write_bytes(b"\x00\xa3 not utf-8")  # AppleDouble sidecar
+        (agents_dir / "broken.json").write_text("{ not json")
+        (agents_dir / "binary.json").write_bytes(b"\xff\xfe\x00\x01")  # non-UTF-8
+        (agents_dir / "list.json").write_text(json.dumps(["not", "a", "dict"]))
+
+        parsed = _load_parsed_agents()
+        assert [name for name, _d, _p in parsed] == ["good"]
+
+    def test_skips_sensitive_symlink(self, fake_home):
+        agents_dir = fake_home / ".kiro" / "agents"
+        agents_dir.mkdir(parents=True)
+        creds = fake_home / ".aws" / "credentials"
+        creds.parent.mkdir(parents=True)
+        creds.write_text(json.dumps({"name": "evil", "resources": []}))
+        (agents_dir / "evil.json").symlink_to(creds)
+
+        assert _load_parsed_agents() == []
+
+    def test_empty_when_no_agents_dir(self, fake_home):
+        assert _load_parsed_agents() == []
+
+
+class TestAnnotateSkillsWithAgents:
+    """``annotate_skills_with_agents`` parses agents ONCE and annotates every
+    skill in-place — the batch path behind ``GET /api/skills``."""
+
+    def _setup_agents(self, fake_home):
+        agents_dir = fake_home / ".kiro" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "loader.json").write_text(json.dumps({
+            "name": "loader",
+            "resources": ["skill://~/.kiro/skills/*/SKILL.md"],
+        }))
+        (agents_dir / "non-loader.json").write_text(json.dumps({
+            "name": "non-loader",
+            "resources": ["file://something-else"],
+        }))
+
+    def test_annotates_each_skill_in_place(self, fake_home):
+        self._setup_agents(fake_home)
+        skills_root = fake_home / ".kiro" / "skills"
+        a = _write_skill(skills_root, "alpha")
+        b = _write_skill(skills_root, "beta")
+        skills = [
+            {"name": "alpha", "path": str(a / "SKILL.md")},
+            {"name": "beta", "path": str(b / "SKILL.md")},
+        ]
+        annotate_skills_with_agents(skills)
+        # Both skills are loaded by the wildcard loader, by neither non-loader.
+        assert skills[0]["loaded_by_agents"] == ["loader"]
+        assert skills[1]["loaded_by_agents"] == ["loader"]
+
+    def test_skill_without_path_gets_empty_list(self, fake_home):
+        self._setup_agents(fake_home)
+        skills = [{"name": "no-path"}, {"name": "blank", "path": ""}]
+        annotate_skills_with_agents(skills)
+        assert skills[0]["loaded_by_agents"] == []
+        assert skills[1]["loaded_by_agents"] == []
+
+    def test_matches_per_skill_resolver(self, fake_home):
+        """Batch annotation must produce the same result as calling the
+        single-skill ``_resolve_loaded_by_agents`` for each skill."""
+        self._setup_agents(fake_home)
+        skills_root = fake_home / ".kiro" / "skills"
+        paths = [_write_skill(skills_root, n) / "SKILL.md" for n in ("x", "y", "z")]
+        skills = [{"name": p.parent.name, "path": str(p)} for p in paths]
+
+        annotate_skills_with_agents(skills)
+        for p, s in zip(paths, skills):
+            assert s["loaded_by_agents"] == _resolve_loaded_by_agents(p)
+
+    def test_parses_agents_once_regardless_of_skill_count(self, fake_home, monkeypatch):
+        """The core fix: agent JSONs are parsed ONCE per request, not once
+        per skill (the old O(skills × agents) blowup that wedged the loop)."""
+        self._setup_agents(fake_home)
+        skills_root = fake_home / ".kiro" / "skills"
+        skills = [
+            {"name": n, "path": str(_write_skill(skills_root, n) / "SKILL.md")}
+            for n in ("s1", "s2", "s3", "s4", "s5")
+        ]
+
+        import kiro_claw.dashboard.handlers._shared as shared
+
+        calls = {"n": 0}
+        real = shared._load_parsed_agents
+
+        def _counting() -> list:
+            calls["n"] += 1
+            return real()
+
+        monkeypatch.setattr(shared, "_load_parsed_agents", _counting)
+        shared.annotate_skills_with_agents(skills)
+
+        assert calls["n"] == 1  # ONE parse for all 5 skills, not 5
+        assert all(s["loaded_by_agents"] == ["loader"] for s in skills)
+
+    def test_reusing_parsed_agents_avoids_rereading_disk(self, fake_home):
+        """Passing a pre-parsed agent list to ``_resolve_loaded_by_agents``
+        reuses it instead of re-globbing/parsing ~/.kiro/agents."""
+        self._setup_agents(fake_home)
+        skills_root = fake_home / ".kiro" / "skills"
+        skill_md = _write_skill(skills_root, "alpha") / "SKILL.md"
+
+        parsed = _load_parsed_agents()
+        # Delete the agents dir AFTER parsing: a re-read would now find nothing,
+        # so a correct reuse must still resolve "loader" from the passed list.
+        for f in (fake_home / ".kiro" / "agents").glob("*.json"):
+            f.unlink()
+        assert _resolve_loaded_by_agents(skill_md, parsed) == ["loader"]
+        # Sanity: without the pre-parsed list it re-reads disk and finds none.
+        assert _resolve_loaded_by_agents(skill_md) == []
+
+
+# ── _parse_aim_skills ──
+
+
+class TestParseAimSkills:
+    """``_parse_aim_skills`` turns ``aim skills list`` stdout into metadata
+    dicts. Split from the async subprocess so it can run off the loop."""
+
+    _SAMPLE = (
+        "Installed skills:\n"
+        "MyPackage\n"
+        "  cool-skill [v1.2.3]: Cool Skill\n"
+        "    Description: does cool things\n"
+        "  plain-skill: Plain Skill\n"
+    )
+
+    def test_none_stdout_returns_empty(self):
+        # Subprocess failure (FileNotFoundError / non-zero / timeout) → None.
+        assert _parse_aim_skills(None) == []
+
+    def test_empty_stdout_returns_empty(self):
+        assert _parse_aim_skills("") == []
+
+    def test_parses_skills_and_description(self):
+        out = _parse_aim_skills(self._SAMPLE)
+        keys = {s["key"] for s in out}
+        assert keys == {"aim/cool-skill", "aim/plain-skill"}
+        cool = next(s for s in out if s["key"] == "aim/cool-skill")
+        assert cool["package"] == "MyPackage"
+        assert cool["description"] == "does cool things"
+        assert cool["source"] == "aim"
+
+    def test_matches_legacy_list_aim_skills_shape(self, fake_home):
+        """The split parser must yield the same dicts the old inline
+        AIM-listing loop produced (path/dir depend on ~/.aim resolution,
+        which is empty here → empty strings)."""
+        out = _parse_aim_skills(self._SAMPLE)
+        for s in out:
+            assert set(s) == {
+                "key", "name", "description", "path", "dir",
+                "always", "source", "package",
+            }
+            # No ~/.aim skills on disk in the sandbox → unresolved paths.
+            assert s["path"] == ""
+            assert s["dir"] == ""
+
+    def test_description_before_first_skill_not_treated_as_skill(self, fake_home):
+        """Regression: a ``Description:`` line preceding any skill line (empty
+        result / package mismatch) must be consumed, NOT fall through to the
+        skill regex and append a bogus ``aim/Description`` entry."""
+        stdout = (
+            "Installed skills:\n"
+            "OddPackage\n"
+            "    Description: stray description before any skill\n"
+            "  real-skill: Real Skill\n"
+        )
+        out = _parse_aim_skills(stdout)
+        keys = {s["key"] for s in out}
+        assert keys == {"aim/real-skill"}
+        assert "aim/Description" not in keys
+
+    def test_resolves_paths_from_aim_index(self, fake_home):
+        """When the skill exists under ~/.aim, path/dir are resolved via the
+        one-shot index (both layouts)."""
+        aim = fake_home / ".aim"
+        # skills/<pkg>/<name>/SKILL.md layout
+        s1 = aim / "skills" / "pkgA" / "cool-skill" / "SKILL.md"
+        s1.parent.mkdir(parents=True)
+        s1.write_text("---\n---\n")
+        # packages/<pkg>/skills/<pkg2>/<name>/SKILL.md layout
+        s2 = aim / "packages" / "pkgB" / "skills" / "sub" / "plain-skill" / "SKILL.md"
+        s2.parent.mkdir(parents=True)
+        s2.write_text("---\n---\n")
+
+        out = _parse_aim_skills(self._SAMPLE)
+        by_key = {s["key"]: s for s in out}
+        assert by_key["aim/cool-skill"]["path"] == str(s1)
+        assert by_key["aim/plain-skill"]["path"] == str(s2)
+
+
+class TestAimSkillPathIndex:
+    """``_aim_skill_path_index`` globs ~/.aim ONCE into {name: path}."""
+
+    def test_empty_when_no_aim_dir(self, fake_home):
+        assert _aim_skill_path_index() == {}
+
+    def test_indexes_both_layouts(self, fake_home):
+        aim = fake_home / ".aim"
+        s1 = aim / "skills" / "pkgA" / "alpha" / "SKILL.md"
+        s1.parent.mkdir(parents=True)
+        s1.write_text("x")
+        s2 = aim / "packages" / "pkgB" / "skills" / "sub" / "beta" / "SKILL.md"
+        s2.parent.mkdir(parents=True)
+        s2.write_text("x")
+        index = _aim_skill_path_index()
+        assert index["alpha"] == s1
+        assert index["beta"] == s2
+
+    def test_skills_layout_wins_over_packages(self, fake_home):
+        """Precedence matches _resolve_aim_skill_path: skills/* beats
+        packages/*/skills/* for the same name."""
+        aim = fake_home / ".aim"
+        winner = aim / "skills" / "pkgA" / "dup" / "SKILL.md"
+        winner.parent.mkdir(parents=True)
+        winner.write_text("x")
+        loser = aim / "packages" / "pkgB" / "skills" / "sub" / "dup" / "SKILL.md"
+        loser.parent.mkdir(parents=True)
+        loser.write_text("x")
+        assert _aim_skill_path_index()["dup"] == winner
+
+
+class TestAimListStdoutErrorHandling:
+    """``_aim_list_stdout`` must swallow ANY OSError from spawning ``aim`` and
+    return None (degrade to 'no aim skills'), never propagate and 500 the whole
+    /api/skills endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_permission_error_returns_none(self, monkeypatch):
+        import kiro_claw.dashboard.handlers._shared as shared
+
+        async def _boom(*a, **k):
+            # `aim` present but not executable → PermissionError (an OSError
+            # subclass that is NOT FileNotFoundError).
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(
+            "asyncio.create_subprocess_exec", _boom
+        )
+        assert await shared._aim_list_stdout() is None
+
+    @pytest.mark.asyncio
+    async def test_missing_binary_returns_none(self, monkeypatch):
+        import kiro_claw.dashboard.handlers._shared as shared
+
+        async def _missing(*a, **k):
+            raise FileNotFoundError(2, "No such file")
+
+        monkeypatch.setattr("asyncio.create_subprocess_exec", _missing)
+        assert await shared._aim_list_stdout() is None
+
+
+# ── collect_skills_blocking ──
+
+
+class TestCollectSkillsBlocking:
+    """``collect_skills_blocking`` is the synchronous core behind
+    ``GET /api/skills`` — it gathers every source AND annotates, so the
+    whole thing can be offloaded to a thread in one job."""
+
+    def _loader_with(self, *entries):
+        """A stand-in SkillsLoader whose list_skills() returns *entries*."""
+        loader = MagicMock()
+        loader.list_skills.return_value = [dict(e) for e in entries]
+        return loader
+
+    def test_merges_all_sources_and_annotates(self, fake_home):
+        # Agent that loads every kiro skill via wildcard.
+        agents_dir = fake_home / ".kiro" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "loader.json").write_text(json.dumps({
+            "name": "loader",
+            "resources": ["skill://~/.kiro/skills/*/SKILL.md"],
+        }))
+        kiro_root = fake_home / ".kiro" / "skills"
+        kiro_md = _write_skill(kiro_root, "kiro-one") / "SKILL.md"
+
+        loader = self._loader_with({"key": "mc", "name": "mc", "path": ""})
+        aim_stdout = "Pkg\n  aim-one: Aim One\n"
+
+        result = collect_skills_blocking(loader, aim_stdout, project_dir=None)
+
+        by_key = {s["key"]: s for s in result}
+        # kiroclaw source defaulted, aim parsed, kiro discovered.
+        assert by_key["mc"]["source"] == "kiroclaw"
+        assert "aim/aim-one" in by_key
+        assert "kiro-user/kiro-one" in by_key
+        # Every entry carries loaded_by_agents; the kiro skill matches loader.
+        assert all("loaded_by_agents" in s for s in result)
+        assert by_key["kiro-user/kiro-one"]["loaded_by_agents"] == ["loader"]
+        assert str(kiro_md)  # path was materialized
+
+    def test_none_aim_stdout_skips_aim(self, fake_home):
+        loader = self._loader_with({"key": "mc", "name": "mc", "path": ""})
+        result = collect_skills_blocking(loader, None, project_dir=None)
+        assert [s["key"] for s in result] == ["mc"]
+        assert result[0]["loaded_by_agents"] == []
+
+    def test_empty_everything(self, fake_home):
+        loader = self._loader_with()
+        assert collect_skills_blocking(loader, None, project_dir=None) == []
+
+
+# ── _expand_agent_globs (annotation O(n²) reduction) ──
+
+
+class TestExpandAgentGlobs:
+    """Agent globs are expanded ONCE up front, not per skill."""
+
+    def test_expands_and_drops_resourceless_agents(self, fake_home):
+        parsed = [
+            ("loader", {"resources": ["skill://~/.kiro/skills/*/SKILL.md"]}, fake_home / "a.json"),
+            ("noload", {"resources": ["file://x"]}, fake_home / "b.json"),
+            ("empty", {"resources": []}, fake_home / "c.json"),
+            ("badtype", {"resources": "not a list"}, fake_home / "d.json"),
+        ]
+        out = dict(_expand_agent_globs(parsed))
+        # Only the agent with a skill:// resource survives, with an expanded glob.
+        assert set(out) == {"loader"}
+        assert out["loader"] == [str(fake_home / ".kiro" / "skills" / "*" / "SKILL.md")]
+
+    def test_annotation_matches_per_skill_resolver_after_optimization(self, fake_home):
+        """The optimized batch path must still equal the single-skill resolver."""
+        agents_dir = fake_home / ".kiro" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "loader.json").write_text(json.dumps({
+            "name": "loader",
+            "resources": ["skill://~/.kiro/skills/*/SKILL.md"],
+        }))
+        skills_root = fake_home / ".kiro" / "skills"
+        paths = [_write_skill(skills_root, n) / "SKILL.md" for n in ("a", "b")]
+        skills = [{"name": p.parent.name, "path": str(p)} for p in paths]
+        annotate_skills_with_agents(skills)
+        for p, s in zip(paths, skills):
+            assert s["loaded_by_agents"] == _resolve_loaded_by_agents(p)
+
+
+# ── api_skills does not block the event loop (regression) ──
+
+
+class TestApiSkillsDoesNotBlockLoop:
+    """Regression for the 3.2.x gateway hard-exit: ``GET /api/skills`` must
+    run its filesystem-heavy discovery + annotation OFF the event loop, so a
+    slow catalog can't stall the loop past the loop-stall watchdog (~25s)."""
+
+    @pytest.mark.asyncio
+    async def test_discovery_runs_off_event_loop(self, fake_home, monkeypatch):
+        import asyncio
+
+        import kiro_claw.dashboard.handlers.prompts as prompts
+
+        # Make the synchronous discovery core observably "slow" and record the
+        # thread it runs on. If it ran on the loop thread, the heartbeat below
+        # could not tick while it slept.
+        loop_thread = __import__("threading").get_ident()
+        ran_on = {}
+
+        def _slow_collect(loader, aim_stdout, project_dir):
+            import threading
+            import time
+            ran_on["thread"] = threading.get_ident()
+            time.sleep(0.3)  # simulate a large-catalog blocking walk
+            return [{"key": "x", "name": "x", "loaded_by_agents": []}]
+
+        monkeypatch.setattr(prompts, "collect_skills_blocking", _slow_collect)
+
+        async def _fake_aim_stdout():
+            return None
+        monkeypatch.setattr(prompts, "_aim_list_stdout", _fake_aim_stdout)
+
+        state = MagicMock()
+        state._slots = {}
+        monkeypatch.setattr(prompts, "_get_skills", lambda s: MagicMock())
+
+        request = MagicMock()
+        request.app = {"state": state}
+
+        # Drive the handler while a concurrent heartbeat counts loop ticks.
+        ticks = {"n": 0}
+
+        async def _heartbeat():
+            for _ in range(30):
+                await asyncio.sleep(0.02)
+                ticks["n"] += 1
+
+        hb = asyncio.ensure_future(_heartbeat())
+        resp = await prompts.api_skills(request)
+        hb.cancel()
+
+        # The blocking work ran on a DIFFERENT thread than the event loop.
+        assert ran_on["thread"] != loop_thread
+        # And the loop kept ticking during the 0.3s "blocking" collect.
+        assert ticks["n"] >= 5
+        assert resp.status == 200
 
 
 # ── list_skill_tree ──

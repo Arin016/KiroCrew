@@ -102,7 +102,9 @@ Heartbeat is a self-cleaning task queue that runs every few minutes, survives ga
 
 **Writing a heartbeat task:**
 1. Write a checklist entry to `~/.kiroclaw/workspace/HEARTBEAT.md`:
-   `- [ ] Check CR-XXXXX for new AutoSDE comments. If found, fix them, push a new revision, and respond with HEARTBEAT_KEEP. If none, notify user "CR-XXXXX passed ✅"`
+   `- [ ] Check CR-XXXXX for new reviewer comments. If found, summarize them and respond with HEARTBEAT_KEEP. If none and nothing is owed, complete silently (no notification). <!-- deliver:dashboard -->`
+
+   Notify only on a real signal (a failure, a blocked CR, an item needing action). For a routine "nothing to do" completion, keep the response minimal — do not post a "passed ✅" status. Append `<!-- deliver:dashboard -->` to route the completion to the dashboard bell only (no Slack DM); omit the tag to use the `heartbeat.default_deliver` config default (`slack`), or use `<!-- deliver:slack -->` to force a Slack DM for something genuinely urgent.
 2. Tell the user it's been added to heartbeat monitoring
 3. End the session — heartbeat re-processes retained tasks on the next cycle, creating a monitor-until-done loop
 

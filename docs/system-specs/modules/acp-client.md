@@ -1,6 +1,6 @@
 # ACP Client Module
 
-Last Updated: 2026-05-31 (v2.6.1 — JSON-RPC frame-correlation hardening: deferral in `_wait_for_response`, -32601 for unknown server requests, activity-based load timeout)
+Last Updated: 2026-07-03 (tool-stall watchdog recovery on both ACP transports, model-substitution advisory survival, per-turn kiro billing credits, model-registry context-window backfill)
 
 ## Overview
 
@@ -237,6 +237,17 @@ also synthesizes a final `EVENT_COMPLETE` so dashboard and CLI callers using
 happened, and a `tool_interrupted`-tagged SEL audit event is written for the security
 log since kiro-cli's cancellation is a permission decision outside KiroClaw's control.
 
+### Tool-stall watchdog
+
+While a turn is dispatching, both ACP transports run a watchdog that reaps a turn gone silent for `_TOOL_STALL_TIMEOUT` after a tool was dispatched — and both **recover** rather than just `return` on a dead turn:
+
+- **`AcpClient`** (process-per-session, `_TOOL_STALL_TIMEOUT = 600s`): the stall clock is measured against `_tool_last_seen = max(last_data_ts, self._last_activity)`, so tools that keepalive-ping without emitting stdout frames (`wait`, `spawn_sub_agents`) don't trip a false stall (`_last_activity` is refreshed out of band by the stderr drain / keepalive). On a real stall it `_kill_process(force=True)` and raises `AcpProcessDied`, routing through the existing pipe-death recovery (dashboard resets the session + re-queues, bounded by `_acp_pipe_death_retries`; cron/other callers get a clean error instead of a wedged slot). `_kill_process` only touches the subprocess/pipes (never `_turn_lock`), and blast radius is one session — each `AcpClient` owns exactly one process.
+- **`runtime.py` / `AcpSessionHandle`** (`_TOOL_STALL_TIMEOUT = 300s`): the runtime is **shared** (multiple sessions multiplexed on one process), so it must **not** kill the process on a stall — that would take down every co-tenant session. Instead it sends `session/cancel` for **this `sessionId` only** (bounded by `asyncio.wait_for(..., 5s)` so an unresponsive runtime can't turn stall recovery into a second stall) and yields a terminal `EVENT_COMPLETE(stop_reason="tool_stall")`; siblings keep running. The handle deliberately has **no** separate `_last_activity` clock — keepalive/progress frames on the session queue reset `last_data_ts` directly, so it is the correct (and only) idle signal for the per-session loop. (`_last_activity` lives on `AcpRuntime`, not the handle.)
+
+### Model-substitution advisory
+
+kiro can return a `-32603` error that is an *advisory* that it substituted a different model, not a fatal failure. `_is_model_substitution_advisory()` (with `_extract_advisory_detail()` for the human-readable reason) recognizes this shape, and the session stays alive and continues the turn instead of tearing down — a real fatal error still propagates.
+
 ## Session Update Handling
 
 `_extract_text_chunk()` handles two update types for text streaming:
@@ -244,7 +255,11 @@ log since kiro-cli's cancellation is a permission decision outside KiroClaw's co
 - `agent_message_chunk` — standard text/content. Detects `type: "thinking"` or `"reasoning"` content blocks for extended thinking (kiro-cli style).
 - `agent_thought_chunk` — dedicated reasoning update emitted by `claude-agent-acp`. Always treated as thinking content.
 
-`_track_usage_update()` tracks context window usage from `usage_update` session events. A `KNOWN_SESSION_UPDATES` frozenset in `acp/types.py` suppresses false "unhandled session update" logs for plumbing-only update kinds (`plan`, `available_commands_update`, `current_mode_update`, `config_option_update`, `session_info_update`, `user_message_chunk`, `tool_call_update`). Only genuinely unknown kinds are logged.
+`_track_usage_update()` tracks context window usage from `usage_update` session events, reconciling the frame via the shared `parse_usage_update()` (flat `update.used`/`update.size` primary, nested `update.usage.*` fallback) so `AcpClient` and `AcpRuntime` read the same shape regardless of which kiro emits. A `KNOWN_SESSION_UPDATES` frozenset in `acp/types.py` suppresses false "unhandled session update" logs for plumbing-only update kinds (`plan`, `available_commands_update`, `current_mode_update`, `config_option_update`, `session_info_update`, `user_message_chunk`, `tool_call_update`). Only genuinely unknown kinds are logged.
+
+**Context-window backfill.** kiro 2.10+ metadata may carry only a context-usage *percentage* (no absolute token counts). `_backfill_context_window(pct)` derives the window and used-token counts from `model_registry.window(self._resolved_model_id or self._model)` and the percentage, so the dashboard token text still renders when only a percentage arrives. `_resolved_model_id` is recorded from `models.currentModelId` (the model kiro actually served, which may differ from the requested one).
+
+**Per-turn kiro billing credits.** `_track_metadata()` parses each `_kiro.dev/metadata` notification via the shared `parse_metadata()`, capturing `meteringUsage` entries with `unit=="credit"` (kiro bills in credits; token fields are 0 for the acp provider) into `AcpPromptStats.credits`, accumulated across the turn and surfaced on `EVENT_COMPLETE`.
 
 ## Exceptions
 

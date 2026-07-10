@@ -13,6 +13,11 @@ export type SendMode = 'enter' | 'ctrl-enter' | 'enter-ctrl-newline'
 export const CONTENT_WIDTH: Record<ContentWidth, { messages: string; input: string }> = {
   compact: { messages: '900px', input: '916px' },
   comfortable: { messages: '84%', input: '85%' },
+  // 'full' = the widest single-pane width (keeps a small gutter so text doesn't
+  // touch the window edge). Native grid panes force true edge-to-edge (100%)
+  // via ChatPane's inline --mc-content-width, so this global constant stays at
+  // the single-pane value — widening it here would silently change single-pane
+  // "full" users who never opted into Split View.
   full: { messages: '92%', input: '93%' },
 }
 
@@ -87,6 +92,7 @@ export interface DashboardConfig {
   merge_queued_messages: boolean
   widget_density: 'more' | 'less'
   quick_send: boolean
+  session_grid: boolean
 }
 
 export default function ChatSettings({ config, onChange }: { config: ChatConfig; onChange: (c: ChatConfig) => void }) {
@@ -94,7 +100,7 @@ export default function ChatSettings({ config, onChange }: { config: ChatConfig;
   const btnRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
   const queryClient = useQueryClient()
-  const { data: dashCfg = { restore_sessions: false, restore_window_minutes: 30, merge_queued_messages: false, widget_density: 'more' as const, quick_send: false } } = useQuery<DashboardConfig>({ queryKey: ['dashboardConfig'], queryFn: () => api.dashboardConfig() })
+  const { data: dashCfg = { restore_sessions: false, restore_window_minutes: 30, merge_queued_messages: false, widget_density: 'more' as const, quick_send: false, session_grid: false } } = useQuery<DashboardConfig>({ queryKey: ['dashboardConfig'], queryFn: () => api.dashboardConfig() })
   const dashMut = useMutation({
     mutationFn: (next: DashboardConfig) => api.updateDashboardConfig(next),
     onMutate: async (next) => {

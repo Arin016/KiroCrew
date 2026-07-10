@@ -12,6 +12,7 @@ from aiohttp import web
 
 from kiro_claw.dashboard.chat_persistence import _save_slot_to_history
 from kiro_claw.dashboard.state import DashboardState
+from kiro_claw.executors import subprocess_executor
 from kiro_claw.providers.base import EVENT_COMPLETE, EVENT_PERMISSION_REQUEST, EVENT_TEXT_CHUNK
 from kiro_claw.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
@@ -125,10 +126,60 @@ async def _generate_folder_icon(state: DashboardState, folder: dict) -> None:
             state.push_slots_update()
 
 
+def _folder_history_counts(state: DashboardState) -> dict[str, int]:
+    """Count on-disk (history) sessions filed in each folder, keyed by folder_id.
+
+    Authoritative per-folder archived-session count computed from the full
+    session list, NOT the paginated client history window. The sidebar uses it
+    to decide whether an empty folder can be hidden (it has an archived session
+    that can revive it) or must be deleted instead (nothing could revive it).
+    """
+    counts: dict[str, int] = {}
+    if not state.conversation_log:
+        return counts
+    for session in state.conversation_log.list_sessions():
+        fid = session.get("folder_id")
+        if fid:
+            counts[fid] = counts.get(fid, 0) + 1
+    return counts
+
+
+def _folders_with_history_counts(state: DashboardState) -> list[dict]:
+    """Folders enriched with a computed, non-persisted `history_count` field."""
+    counts = _folder_history_counts(state)
+    return [{**f, "history_count": counts.get(f["id"], 0)} for f in state._folders]
+
+
+def _unhide_folder(state: DashboardState, folder_id: str) -> None:
+    """Clear a folder's `hidden` flag when a session re-engages it.
+
+    Model-B semantics: reviving or moving a session into a folder un-hides it so
+    it stays visible until the user hides it again. Persists on change; the
+    caller is responsible for pushing the slots update.
+    """
+    if not folder_id:
+        return
+    for f in state._folders:
+        if f["id"] == folder_id and f.get("hidden"):
+            f["hidden"] = False
+            state.save_folders()
+            return
+
+
 async def api_chat_folders(request: web.Request) -> web.Response:
-    """GET /api/chat/folders — list all project folders."""
+    """GET /api/chat/folders — list all project folders (with archived-session counts)."""
     state: DashboardState = request.app["state"]
-    return web.json_response(state._folders)
+    # _folders_with_history_counts walks the on-disk session list (a synchronous
+    # filesystem scan) that is user-triggered (every GET) and scales with the
+    # archived-session count. Offload it to keep the event loop responsive, using
+    # subprocess_executor (the pool for potentially-slow work) rather than
+    # maintenance_executor, whose fast periodic sweeps — the orphan reaper — must
+    # stay responsive and could otherwise be starved by frequent polling.
+    loop = asyncio.get_running_loop()
+    folders = await loop.run_in_executor(
+        subprocess_executor(), _folders_with_history_counts, state
+    )
+    return web.json_response(folders)
 
 
 def _validate_project_dir(raw: str) -> tuple[str, str | None]:
@@ -171,6 +222,7 @@ async def api_chat_folder_create(request: web.Request) -> web.Response:
         "name": name,
         "order": len(state._folders),
         "collapsed": False,
+        "hidden": False,
         "parent_id": parent_id,
         "project_dir": project_dir,
     }
@@ -206,6 +258,8 @@ async def api_chat_folder_update(request: web.Request) -> web.Response:
         folder["name"] = new_name
     if "collapsed" in body:
         folder["collapsed"] = bool(body["collapsed"])
+    if "hidden" in body:
+        folder["hidden"] = bool(body["hidden"])
     if "order" in body:
         folder["order"] = int(body["order"])
     if "default_agent" in body:
@@ -289,6 +343,7 @@ async def api_chat_slot_folder(request: web.Request) -> web.Response:
     if folder_id != slot.folder_id:
         slot._folder_changed = True  # re-inject [FOLDER] breadcrumb on next turn
     slot.folder_id = folder_id
+    _unhide_folder(state, folder_id)
     _save_slot_to_history(state, slot, force=True)
     state.push_slots_update()
     sel().log_api_access(

@@ -1,18 +1,18 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, memo } from 'react'
-import { ArrowUpFromLine, ArrowUp, Loader2, Plus, Crop, Bot, Mic, Square, ShieldCheck, BookOpen, Handshake, Rocket, X, ClipboardList, CheckCircle, Ban, Sparkles, Goal, Target, Lock, Globe, FolderOpen, FileText } from 'lucide-react'
+import { ArrowUpFromLine, ArrowUp, Loader2, Plus, Crop, Bot, Mic, Square, ShieldCheck, BookOpen, Handshake, Rocket, X, ClipboardList, CheckCircle, Check, Ban, Sparkles, Goal, Target, Lock, Globe, FolderOpen, FileText } from 'lucide-react'
 import { Toggle } from './ui'
 import VoiceStatusBar from './VoiceStatusBar'
 import { createPortal } from 'react-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useBranding } from '../hooks/useBranding'
 import { useAppSelector, useAppDispatch } from '../store'
-import { resolveByApprovalId, openActivityToTool } from '../store/chatSlice'
+import { resolveByApprovalId, openActivityToTool, selectSlotPendingApproval } from '../store/chatSlice'
+import { useSlotId } from '../providers/SlotContext'
 import { useToolPillVisible } from '../store/toolPillRegistry'
 import { ToolDetails } from '../pages/chat/ToolDetails'
 import { api } from '../api/client'
 import { safeSetItem } from '../utils/safeStorage'
 import { offlineProps } from '../utils/offline'
-import { createSelector } from 'reselect'
 import { shallowEqual } from 'react-redux'
 import { motion, AnimatePresence } from 'framer-motion'
 import { sanitizeLlmOutput } from '../utils/sanitize'
@@ -39,7 +39,6 @@ import {
   findTokenRanges,
 } from '../utils/pasteTokens'
 import type { SendMode } from '../pages/chat/ChatSettings'
-import type { RootState } from '../store'
 
 // Upload picker accept hints. Client-side ONLY (UX) — the server validates type
 // (magic bytes), size, and runs malware scanning per ARCC SAX-04.
@@ -91,21 +90,8 @@ function toApiDecision(d: string): 'approve' | 'reject' {
   return (d === 'approved' || d === 'trust' || d === 'trust_reads') ? 'approve' : 'reject'
 }
 
-const selectPendingApproval = createSelector(
-  (s: RootState) => s.chat.messages,
-  msgs => {
-    // Only consider permissions after the last user message (current turn)
-    let lastUserIdx = -1
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i].role === 'user') { lastUserIdx = i; break }
-    }
-    for (let i = msgs.length - 1; i > lastUserIdx; i--) {
-      const m = msgs[i]
-      if (m.role === 'permission' && !m.meta?.resolved && m.meta?.approval_id) return m
-    }
-    return null
-  }
-)
+// Pending-approval selection is now slot-aware — see selectSlotPendingApproval
+// in chatSlice (Path B S3): each grid pane's approval bar reflects ITS slot.
 
 /** Effective viewport height accounting for KiroClaw zoom scale.
  *  --mc-vh is px when zoom active; falls back to window.innerHeight otherwise. */
@@ -147,6 +133,12 @@ interface ChatInputProps {
   value: string
   onChange: (v: string) => void
   onSend: () => void
+  /** When true (turn is running), show the Steer button. v1 gates on turn-running
+   * only; if the slot's backend is not steer-capable (e.g. claude), the POST safely
+   * falls through to the queue server-side. Plumbing a per-slot capability flag is a follow-up. */
+  canSteer?: boolean
+  /** Inject a mid-turn steer with the given text into the running turn. */
+  onSteer?: (text: string) => void
   disabled?: boolean
   placeholder?: string
   prefillHint?: boolean
@@ -242,6 +234,13 @@ interface ChatInputProps {
    *  warning banner appears above the input. Defaults to true so callers that
    *  don't track connectivity (e.g. tests, embedded previews) keep working. */
   connected?: boolean
+  /** Deliver an optimize result to the session that initiated it when that
+   *  session is no longer the one displayed in this ChatInput (the user
+   *  navigated away mid-optimize). The parent routes `optimized` into
+   *  `slotId`'s draft so the result is never written to the wrong session and
+   *  never silently lost. When the originating session is still on screen,
+   *  ChatInput writes the result itself (undoable) and does NOT call this. */
+  onOptimizeResult?: (slotId: string | null, optimized: string) => void
 }
 
 function FilePreviewStrip({ files, onRemove }: { files: string[]; onRemove?: (path: string) => void }) {
@@ -292,6 +291,8 @@ function ChatInput({
   value,
   onChange,
   onSend,
+  canSteer,
+  onSteer,
   disabled = false,
   placeholder = '',
   prefillHint,
@@ -355,13 +356,22 @@ function ChatInput({
   browseMode = false,
   onBrowseToggle,
   connected = true,
+  onOptimizeResult,
 }: ChatInputProps) {
   const dispatch = useAppDispatch()
-  const pendingApproval = useAppSelector(selectPendingApproval, shallowEqual)
+  const slotId = useSlotId()
+  const pendingApproval = useAppSelector(s => selectSlotPendingApproval(s, slotId), shallowEqual)
   const hasApproval = !!pendingApproval
   const [approvalSubmitting, setApprovalSubmitting] = useState(false)
 
-  const activeSlot = useAppSelector(s => s.chat.activeSlot)
+  // Brief "sent" confirmation on the Steer button. Clicking Steer clears the
+  // composer, which would instantly unmount the button — so hold the composer
+  // for a beat, show a check, then clear.
+  const [steerFlash, setSteerFlash] = useState(false)
+  const steerFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (steerFlashTimer.current) clearTimeout(steerFlashTimer.current) }, [])
+
+  const activeSlot = slotId
   const approvalMeta = pendingApproval?.meta as Record<string, unknown> | undefined
   const approvalId = approvalMeta?.approval_id as string | undefined
   const approvalToolInput = (approvalMeta?.tool_input as string) || ''
@@ -377,7 +387,8 @@ function ChatInput({
 
   const approvalToolEntry = useAppSelector(s => {
     if (!approvalToolCallId) return null
-    const entry = s.chat.toolLog.findLast(e => e.type === 'tool' && e.tool_call_id === approvalToolCallId)
+    const log = slotId && slotId !== s.chat.activeSlot ? (s.chat.slotActivity[slotId]?.toolLog ?? []) : s.chat.toolLog
+    const entry = log.findLast(e => e.type === 'tool' && e.tool_call_id === approvalToolCallId)
     return entry ? { purpose: entry.purpose || '', ts: entry.ts || 0 } : null
   }, shallowEqual)
   const approvalPurpose = approvalToolEntry?.purpose || ''
@@ -580,12 +591,19 @@ function ChatInput({
   // restore). Lets the slot-settling logic tell a keystroke apart from the
   // draft restore regardless of whether ChatPage restores sync or async.
   const valueFromUserRef = useRef(false)
-  // Tracks the prior render's optimizing state so the recording effect can
-  // record a single undo boundary when an optimize completes.
+  // Tracks the prior render's raw pending state so the completion effect can
+  // record a single undo boundary when an optimize actually finishes (as
+  // opposed to the scoped `optimizing` flipping off because the user switched
+  // sessions mid-flight).
   const wasOptimizingRef = useRef(false)
   // Hoisted here (assigned below, where `optimizing` is defined) so the
   // recording effect above the optimizer block can read it.
   const optimizingRef = useRef(false)
+  // The slot that initiated the in-flight optimize. Overlay / readOnly / pending
+  // state is scoped to this slot so navigating to another session mid-optimize
+  // dismisses the overlay here and only reveals it again when we return to the
+  // originating session. Null when no optimize is in flight.
+  const optimizeSlotRef = useRef<string | null>(null)
   const slashMenuOpenRef = useRef(false)
   slashMenuOpenRef.current = slashMenuOpen
   const filePickerOpenRef = useRef(false)
@@ -826,7 +844,7 @@ function ChatInput({
   }, [onChange])
 
   const optimizeMutation = useMutation({
-    mutationFn: async ({ prompt, context }: { prompt: string; context: string }) => {
+    mutationFn: async ({ prompt, context }: { prompt: string; context: string; slotId: string | null }) => {
       const resp = await fetch('/api/optimizer/optimize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-session-key': 'dashboard:ui' },
@@ -837,24 +855,53 @@ function ChatInput({
       return resp.json()
     },
     onSuccess: (data, variables) => {
-      // Drop the result if the input value no longer matches the prompt we
-      // optimized — typically because the user switched chat tabs/slots
-      // while the request was in flight. The textarea is readOnly during
-      // optimize, so any divergence means we'd be writing into a different
-      // slot's draft. The originating slot's draft was preserved by the
-      // slot-change effect, so the user can re-trigger after switching back.
-      if (valueRef.current.trim() !== variables.prompt.trim()) return
-      setTextUndoable(data.changed && data.optimized ? data.optimized : valueRef.current.trim())
+      // Originating session is still the one on screen: write the result here,
+      // undoable. The textarea stayed readOnly for the whole optimize on this
+      // session so the value can't have diverged from what we sent; the
+      // trim-guard defends against a stray whitespace-only mismatch or any
+      // unforeseen divergence (drop rather than clobber).
+      if (variables.slotId === slotId) {
+        if (valueRef.current.trim() !== variables.prompt.trim()) return
+        setTextUndoable(data.changed && data.optimized ? data.optimized : valueRef.current.trim())
+        return
+      }
+      // The user navigated to a different session mid-optimize. Route the
+      // result back to the session that started it instead of writing into the
+      // session now on screen (wrong session) or dropping it (lost work). Fall
+      // back to the original prompt when the optimizer returned no change.
+      onOptimizeResult?.(variables.slotId, data.changed && data.optimized ? data.optimized : variables.prompt)
     },
     onError: (err, variables) => {
       // eslint-disable-next-line no-console -- surface prompt-optimizer failures to the dev console
       console.warn('optimizer failed', err)
-      if (valueRef.current.trim() !== variables.prompt.trim()) return
-      setTextUndoable(valueRef.current.trim())
+      // Same slot-routing split as onSuccess. On the originating session,
+      // restore the original prompt in place; otherwise hand it back to that
+      // session's draft so a failed optimize on a backgrounded session doesn't
+      // leave stale readOnly text or vanish.
+      if (variables.slotId === slotId) {
+        if (valueRef.current.trim() !== variables.prompt.trim()) return
+        setTextUndoable(valueRef.current.trim())
+        return
+      }
+      onOptimizeResult?.(variables.slotId, variables.prompt)
     },
   })
-  const optimizing = optimizeMutation.isPending
+  // Raw request lifecycle — true whenever a request is in flight, regardless of
+  // which session is currently displayed.
+  const optimizePending = optimizeMutation.isPending
+  // Scoped view of that state: only "optimizing" while we're still showing the
+  // slot that initiated it. Navigating to a different session dismisses the
+  // overlay / readOnly / disabled state here; returning restores it. In grid
+  // mode each pane has its own ChatInput + mutation, so slotId always matches
+  // and this reduces to the raw pending flag.
+  const optimizing = optimizePending && optimizeSlotRef.current === slotId
   optimizingRef.current = optimizing
+  // Re-entrancy guard reads the RAW lifecycle: only one optimize may be in
+  // flight per ChatInput instance. Without this, the button on a *different*
+  // session (where scoped `optimizing` is false) could fire a second request
+  // that clobbers the single mutation's in-flight state.
+  const optimizePendingRef = useRef(false)
+  optimizePendingRef.current = optimizePending
 
   // When an optimize completes, ensure its result is a single undo boundary.
   // The recording effect skips writes while `optimizing` is true; a single-shot
@@ -862,34 +909,51 @@ function ChatInput({
   // streaming optimize would otherwise leave the final value unrecorded — so
   // push one boundary here if the tip doesn't already hold it. Idempotent: if
   // the recording effect already captured it, the value-equality guard no-ops.
+  //
+  // Keyed on the RAW pending lifecycle (not the slot-scoped `optimizing`) and
+  // fenced to the originating slot: switching sessions mid-flight flips scoped
+  // `optimizing` off without the request finishing, and we must NOT record a
+  // boundary against the session we navigated to. We only record when the
+  // request truly settles while the originating slot is still displayed; the
+  // request-diverged case is dropped by onSuccess/onError anyway.
   useEffect(() => {
-    if (wasOptimizingRef.current && !optimizing) {
-      const v = valueRef.current
-      const hist = undoHistoryRef.current
-      const ptr = undoPointerRef.current
-      if (hist[ptr]?.value !== v) {
-        const el = inputRef.current
-        hist.splice(ptr + 1)
-        hist.push({ value: v, selStart: el?.selectionStart ?? v.length, selEnd: el?.selectionEnd ?? v.length })
-        if (hist.length > UNDO_MAX_HISTORY) hist.shift()
-        undoPointerRef.current = hist.length - 1
-        undoLastEditRef.current = Date.now()
+    if (wasOptimizingRef.current && !optimizePending) {
+      const originating = optimizeSlotRef.current
+      optimizeSlotRef.current = null
+      if (originating === slotId) {
+        const v = valueRef.current
+        const hist = undoHistoryRef.current
+        const ptr = undoPointerRef.current
+        if (hist[ptr]?.value !== v) {
+          const el = inputRef.current
+          hist.splice(ptr + 1)
+          hist.push({ value: v, selStart: el?.selectionStart ?? v.length, selEnd: el?.selectionEnd ?? v.length })
+          if (hist.length > UNDO_MAX_HISTORY) hist.shift()
+          undoPointerRef.current = hist.length - 1
+          undoLastEditRef.current = Date.now()
+        }
       }
     }
-    wasOptimizingRef.current = optimizing
-  }, [optimizing])
+    wasOptimizingRef.current = optimizePending
+  }, [optimizePending, slotId])
   const { mutate: runOptimize } = optimizeMutation
 
   const optimizePrompt = useCallback(() => {
     const txt = valueRef.current.trim()
-    if (!txt || optimizingRef.current) return
+    // Guard on the RAW lifecycle so a second optimize can't start while one is
+    // in flight — even from a different session where scoped `optimizing` reads
+    // false (a single mutation backs this instance).
+    if (!txt || optimizePendingRef.current) return
+    // Pin the slot that owns this optimize so the overlay and the completion
+    // handler stay bound to it across session switches.
+    optimizeSlotRef.current = slotId
     const context = chatMessages
       .filter(m => m.role === 'user' || m.role === 'assistant')
       .slice(-10)
       .map(m => (m.content || '').slice(0, 200))
       .join('\n')
-    runOptimize({ prompt: txt, context })
-  }, [runOptimize, chatMessages])
+    runOptimize({ prompt: txt, context, slotId })
+  }, [runOptimize, chatMessages, slotId])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Cmd/Ctrl+Shift+V → next paste inserts full text inline (no chip collapse).
@@ -1794,9 +1858,30 @@ function ChatInput({
                   <Loader2 size={18} className="animate-spin" />
                 </button>
               ) : value.trim() || pendingFiles.length ? (
-                <button className="w-8 h-8 rounded-full bg-warn text-warn-fg border-none flex items-center justify-center cursor-pointer hover:bg-warn/80 transition-all" onClick={onSend} title="Queue message" aria-label="Queue message">
-                  <ArrowUpFromLine size={18} />
-                </button>
+                <>
+                  {canSteer && onSteer && (
+                    <button
+                      className={`w-8 h-8 rounded-full border-none flex items-center justify-center transition-all ${steerFlash ? 'bg-ok/20 text-ok cursor-default' : 'bg-accent/20 text-accent hover:bg-accent/30 cursor-pointer'}`}
+                      onClick={() => {
+                        if (steerFlash) return
+                        const t = value.trim()
+                        if (!t) return
+                        onSteer(t)
+                        setSteerFlash(true)
+                        if (steerFlashTimer.current) clearTimeout(steerFlashTimer.current)
+                        steerFlashTimer.current = setTimeout(() => { onChange(''); setSteerFlash(false) }, 700)
+                      }}
+                      title={steerFlash ? 'Steered into the running turn' : "Steer — inject into the running turn (doesn't wait for it to finish)"}
+                      aria-label="Steer"
+                      data-testid="steer-button"
+                    >
+                      {steerFlash ? <Check size={16} /> : <Target size={16} />}
+                    </button>
+                  )}
+                  <button className="w-8 h-8 rounded-full bg-warn text-warn-fg border-none flex items-center justify-center cursor-pointer hover:bg-warn/80 transition-all" onClick={onSend} title="Queue message" aria-label="Queue message">
+                    <ArrowUpFromLine size={18} />
+                  </button>
+                </>
               ) : (
                 <button className="w-8 h-8 rounded-lg bg-transparent border-none text-danger hover:bg-danger/10 flex items-center justify-center cursor-pointer transition-all" onClick={onStop} title="Stop generation" aria-label="Stop generation" data-testid="stop-button-armed">
                   <Square size={18} fill="currentColor" />
@@ -1804,11 +1889,18 @@ function ChatInput({
               )
             ) : (<>
               <button
-                className={`w-8 h-8 rounded-lg border-none flex items-center justify-center cursor-pointer transition-all ${optimizing ? 'bg-accent/20 text-accent animate-pulse' : 'bg-transparent text-muted hover:text-accent hover:bg-accent/10'}`}
+                className={`w-8 h-8 rounded-lg border-none flex items-center justify-center cursor-pointer transition-all disabled:cursor-not-allowed ${optimizing ? 'bg-accent/20 text-accent animate-pulse' : 'bg-transparent text-muted hover:text-accent hover:bg-accent/10 disabled:opacity-40 disabled:hover:text-muted disabled:hover:bg-transparent'}`}
                 onClick={(e) => { e.stopPropagation(); e.preventDefault(); optimizePrompt() }}
-                disabled={!value.trim() || optimizing || !connected}
-                aria-label="Optimize prompt"
-                title={`Optimize prompt (${platformShortcut('Cmd+Shift+Enter')})`}
+                // A single mutation backs this instance, so only one optimize can
+                // run at a time. Disable on the RAW pending flag (not the
+                // slot-scoped `optimizing`) so the button also reads as busy on a
+                // *different* session while the originating session's optimize is
+                // still in flight — matching the re-entrancy guard in
+                // optimizePrompt(). optimizing ⊂ optimizePending, so this stays
+                // disabled on the originating session too.
+                disabled={!value.trim() || optimizePending || !connected}
+                aria-label={optimizePending && !optimizing ? 'Optimize prompt — busy optimizing another chat' : 'Optimize prompt'}
+                title={optimizePending && !optimizing ? 'Optimizing another chat — please wait' : `Optimize prompt (${platformShortcut('Cmd+Shift+Enter')})`}
                 {...offlineProps(connected, 'optimize', 'Optimize')}
               >
                 {optimizing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}

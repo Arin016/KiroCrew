@@ -6,7 +6,7 @@ Last Updated: 2026-06-27
 
 Slack-gated token authentication for the KiroClaw dashboard. The owner generates a time-limited, HMAC-SHA256 signed URL via the `!dashboard` Slack command. An aiohttp middleware validates the token on every request (query param or cookie fallback), sets a session cookie on first use, and pins the token to the client's IP. Static assets bypass checks. Loopback access (127.0.0.1) is always trusted regardless of mode — this ensures local processes (mcp-core, doctor, SSH tunnels) work without tokens. All generation and validation events are logged to SEL.
 
-Up to 5 tokens can be valid concurrently (FIFO eviction via `OrderedDict` when limit exceeded), allowing multiple browser tabs and CLI sessions without invalidating each other. All token state is managed by a thread-safe `TokenStateManager` and is entirely in-memory — cleared on process restart along with the per-process HMAC secret. Users can explicitly revoke all sessions via `kiroclaw logout`.
+Up to `MAX_CONCURRENT_NONCES` (50) link nonces can be valid concurrently (FIFO eviction via `OrderedDict` when the limit is exceeded), allowing multiple browser tabs and CLI sessions without invalidating each other. All in-memory link-session state is managed by a thread-safe `TokenStateManager`. Auth is **not** purely in-memory: the HMAC signing key is the **persistent** `token_signing.key` (mode `0600`) and revoked access-cookie nonces persist to `token_revoked_nonces.json` (mode `0600`), so signed cookies and per-session logouts both survive a gateway restart. Users can revoke a single session via `POST /api/auth/logout` or all sessions via `kiroclaw logout`.
 
 The dashboard also issues a paired **refresh cookie** (`mc_refresh_{port}`, HttpOnly, path-restricted to `/api/auth`, up to 30-day TTL) alongside the access cookie on initial token-URL use. The SPA calls `POST /api/auth/refresh` shortly before the access cookie expires to silently rotate both cookies (rotation-on-use), so users only re-run `!dashboard` / `kiroclaw token` roughly once per 30 idle days instead of every ~20h. Refresh tokens are HMAC-signed with the same persistent `token_signing.key` and enforce RFC 6819 §5.2.2.3 reuse detection: a consumed `jti` replayed outside a 60s same-IP multi-tab grace window auto-revokes the entire chain.
 
@@ -177,23 +177,33 @@ Security invariants:
 - **Mint preserved** — a valid `?token=` is *not* short-circuited; it flows
   through the normal validate-and-mint exchange (steps 4–7).
 
-#### In-Memory State
+#### State: in-memory vs. persisted
 
-All mutable token state is encapsulated in `TokenStateManager`, a thread-safe singleton using `threading.Lock` (not `asyncio.Lock`, since token operations are called from both async middleware and sync CLI contexts):
+The **HMAC signing key** is loaded from (or created at) `<config_dir>/token_signing.key` (mode `0600`) by `token_secret.py` — it is **persistent**, not `os.urandom(32)` per process (that is only a can't-persist fallback). Signed access and refresh cookies therefore survive a gateway restart.
+
+Mutable link-session state is encapsulated in `TokenStateManager`, a thread-safe singleton using `threading.Lock` (not `asyncio.Lock`, since token operations are called from both async middleware and sync CLI contexts):
 
 ```python
-_SECRET: bytes = os.urandom(32)           # HMAC signing key (per-process)
+_SECRET: bytes                             # persistent HMAC key (token_secret.py)
 _state: TokenStateManager                  # Singleton instance
 
 class TokenStateManager:
-    _nonces: OrderedDict[str, float]       # nonce -> expiry (FIFO, max 5)
+    _nonces: OrderedDict[str, float]       # link nonce -> expiry (FIFO, max 50)
     _ip_bindings: dict[str, tuple[str, float]]  # token -> (ip, exp)
     _consumed: dict[str, float]            # token -> exp
 ```
 
-Up to `MAX_CONCURRENT_NONCES` (5) nonces are valid simultaneously. When the limit is exceeded, the oldest nonce is evicted via `OrderedDict.popitem(last=False)` (O(1)). This allows multiple browser tabs and `kiroclaw token` invocations without invalidating prior sessions.
+Up to `MAX_CONCURRENT_NONCES` (**50**) link nonces are valid simultaneously. When the limit is exceeded, the oldest nonce is evicted via `OrderedDict.popitem(last=False)` (O(1)); a successful nonce check also refreshes a nonce's eviction position so an actively-used session isn't evicted by newer grants. The limit was **raised from 5 to 50** specifically so pending Slack link nonces aren't evicted by other token-minting activity (crons, dashboard links, etc.). This allows multiple browser tabs and `kiroclaw token` invocations without invalidating prior sessions.
 
-All state lost on restart — tokens from a previous process are automatically invalid because the secret changes. Users can explicitly clear all state via `kiroclaw logout` (calls `revoke_all_sessions()`).
+The in-memory `TokenStateManager` (link nonces, IP bindings, consumed set) is cleared on restart, but this does **not** log users out: an established session cookie is validated on the cookie path (`use_session_exp=True`), which needs only a valid HMAC signature (persistent key) + unexpired `session_exp` + a nonce not on the persisted denylist — it never consults the in-memory link-nonce set. Revoked-session state is durable: `RevokedNonceStore` persists to `token_revoked_nonces.json` (mode `0600`), so a logged-out cookie stays dead across restarts. Users can revoke a single session via `POST /api/auth/logout` (`revoke_access_cookie()`) or all in-memory sessions via `kiroclaw logout` (`revoke_all_sessions()`).
+
+#### App-token scope confinement (CWE-269)
+
+An **app token** (payload carries a non-empty `app` claim, minted by the `X-App-Secret` exchange at `POST /api/apps/<name>/token`) must not have the same reach as a dashboard-user token. `_enforce_app_scope(request, app_name, path)` applies least privilege, **deny-by-default**:
+
+- An app token may access **only** (1) its **own namespace** — `/apps/<name>/...` and `/api/apps/<name>/...`, matched on a path boundary so app `foo` cannot reach app `foo-bar` — and (2) the API path prefixes the app declared in its manifest `permissions.api` allowlist (`_app_api_allowlist`, cached ~30s; any load failure returns an empty tuple → confined to its own namespace only). Everything else is a 403 with an `app_scope_check` SEL audit event.
+- It is enforced in **every** middleware branch that admits a token (the normal cookie/query-param flow and the cross-app `/apps/<other>/api` reverse-proxy re-check) — otherwise an app token could reach a mixed internal path (e.g. `/api/chat`, `/api/spawn`) with no app identity set and be mistaken for the dashboard user (privilege escalation).
+- It is a **no-op for dashboard-user tokens** (empty `app` claim), which bypass the gate entirely.
 
 ### 2. `origin.py` — Dashboard URL & Bind Address Resolution
 
@@ -321,14 +331,14 @@ Note: Loopback access (127.0.0.1) is always trusted for both token auth and CSRF
 - Name: `mc_token_{port}` (e.g. `mc_token_5476`)
 - Value: the full access token string
 - Attributes: `HttpOnly`, `SameSite=Lax`, `Path=/`
-- `Secure`: set only when the request arrived over HTTPS (`request.scheme == "https"`) — localhost HTTP must NOT set it or the browser refuses to send it back
+- `Secure`: set when `is_https_request(request)` is true — i.e. `request.scheme == "https"` **OR** an `X-Forwarded-Proto: https` header from a **loopback** peer (a TLS-terminating tunnel/reverse proxy that forwards plain HTTP to the loopback-bound gateway). Restricting the header to a loopback peer means a remote attacker can't forge it. Localhost plain HTTP must NOT set `Secure` or the browser refuses to send the cookie back (and the `wss://` dashboard WebSocket would flap online/offline)
 - `max_age`: remaining seconds from `session_exp` (capped at `MAX_SESSION_TTL_SECS`, 20 hours)
 
 ### Refresh cookie
 - Name: `mc_refresh_{port}` (e.g. `mc_refresh_5476`)
 - Value: the refresh token string
 - Attributes: `HttpOnly`, `SameSite=Lax`, `Path=/api/auth` (sent to both `/api/auth/refresh` and `/api/auth/logout`)
-- `Secure`: conditional on HTTPS, same rule as the access cookie
+- `Secure`: conditional on `is_https_request(request)`, same rule as the access cookie
 - `max_age`: remaining seconds from the refresh `session_exp` (capped at `MAX_REFRESH_TTL_SECS`, 30 days)
 
 ## Error Handling
@@ -367,5 +377,6 @@ HTML 403 page includes instructions to run `!dashboard` in Slack. The middleware
 6. Loopback always trusted — local processes (mcp-core, doctor, SSH tunnels) never need tokens
 7. CSRF middleware also trusts loopback — local POST requests (mcp-core API calls) bypass origin checks
 8. Static assets bypass auth — error pages render correctly
-9. Bounded concurrent nonces (max 5) — prevents unbounded memory growth, limits exposure window
+9. Bounded concurrent nonces (max 50; raised from 5 so pending Slack link nonces aren't evicted by other token-minting activity) — prevents unbounded memory growth, limits exposure window; an active session refreshes its eviction position on each check
 10. Explicit revocation via `kiroclaw logout` — clears all nonces, IP bindings, and consumed tokens
+11. App-token scope confinement (CWE-269) — an `app`-claim token is confined deny-by-default to its own namespace (`/apps/<name>`, `/api/apps/<name>`) + its manifest `permissions.api` allowlist, enforced at every grant point; no-op for dashboard-user tokens

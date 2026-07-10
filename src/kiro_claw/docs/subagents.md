@@ -67,18 +67,23 @@ Long results are split into multiple Slack messages (3900 chars per chunk).
 ## Completion Event Truncation
 
 The completion event injected back into the parent conversation is a bounded
-copy of the subagent's streamed transcript. The full transcript stays in
-`~/.kiroclaw/subagents/<id>/result.txt` while the subagent is running and is
-removed after the completion event is delivered to the parent. Use the
-`spawn_status` MCP tool to read the full transcript before that cleanup
-completes.
+copy of the subagent's streamed transcript. When the cap drops content, the
+event carries a **short preview + the transcript's file path** (not a bare
+truncated blob), and the parent reads the rest on demand — the `read` tool
+(offset/limit), `grep`, or the `spawn_status` MCP tool — instead of re-running
+the subagent.
 
-Two `agent.*` config knobs control what the parent session sees:
+The full transcript lives at `~/.kiroclaw/subagents/<id>/result.txt` and is
+**retained for a grace window after delivery** (default 1 hour) so those reads
+succeed; the reaper then prunes it.
+
+Three `agent.*` config knobs control what the parent session sees:
 
 | Key | Values | Default | Effect |
 |-----|--------|---------|--------|
 | `agent.completion_keep` | `"head"` / `"tail"` / `"both"` | `"head"` | Which end of the transcript to keep when it exceeds the cap |
 | `agent.completion_keep_chars` | int (`0` disables) | `3000` | Character cap applied after `completion_keep` |
+| `agent.subagent_result_ttl_secs` | int (seconds) | `3600` | How long the delivered `result.txt` is kept before the reaper prunes it |
 
 Pick the mode that matches how your agents emit their useful output:
 
@@ -95,3 +100,17 @@ Set `completion_keep_chars: 0` to disable truncation entirely.
 
 Set via `kiroclaw config set agent.completion_keep tail` or by editing
 `~/.kiroclaw/config.json` directly.
+
+### Reading the full transcript on demand
+
+`spawn_status` reads the retained transcript by agent ID and supports
+line-oriented paging (like reading code) for large results:
+
+- `spawn_status(agent_id, limit=200)` — first 200 lines
+- `spawn_status(agent_id, offset=200, limit=200)` — next page
+- `spawn_status(agent_id, grep="ERROR|FAIL")` — only lines matching the regex
+
+A paged/filtered response is prefixed with a continuation header
+(`showing lines X-Y of N | more available — call again with offset=Y`). With no
+paging args it returns the full transcript. You can also point the generic
+`read` / `grep` tools straight at the `result_path` from the completion event.

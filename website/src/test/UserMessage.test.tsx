@@ -170,4 +170,23 @@ describe('UserMessage', () => {
     fireEvent.click(screen.getByText('Send'))
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
   })
+
+  // Steer UX: a message injected mid-turn (meta.steer, set by the steer_push WS
+  // echo) must be visually distinct from a normal message so the user can see the
+  // steer landed. Regression guard: before this, UserMessage ignored meta.steer.
+  it('renders a "Steered into the running turn" badge for a steered message', () => {
+    render(<UserMessage content="the job id is 50ec7087" meta={{ steer: true }} messageTs="steer-ts-1" renderContent={renderContent} />)
+    expect(screen.getByText('Steered into the running turn')).toBeInTheDocument()
+  })
+
+  it('does not render the steer badge for a normal (non-steered) message', () => {
+    render(<UserMessage content="normal message" messageTs="normal-ts-1" renderContent={renderContent} />)
+    expect(screen.queryByText('Steered into the running turn')).not.toBeInTheDocument()
+  })
+
+  it('applies the accent bubble treatment only to a steered message', () => {
+    const { container } = render(<UserMessage content="steered" meta={{ steer: true }} messageTs="steer-ts-2" renderContent={renderContent} />)
+    const bubble = container.querySelector('.msg-content') as HTMLElement
+    expect(bubble.className).toContain('border-accent/40')
+  })
 })

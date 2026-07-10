@@ -155,6 +155,20 @@ describe('AssistantMessage', () => {
     render(<AssistantMessage content="typing…" isStreaming={true} slotRunning={true} onFork={onFork} forkIndex={0} />)
     expect(screen.queryByTitle('Fork conversation from here')).not.toBeInTheDocument()
   })
+
+  // Steer UX: the [STEERING …] ack chip must appear the moment kiro-cli emits the
+  // marker — including mid-stream — so the user sees the agent acknowledge the
+  // steer live. Before this it was gated on !isStreaming (only after turn end).
+  it('renders the Steered ack chip live during streaming (not gated on turn end)', () => {
+    render(<AssistantMessage content={'Working on it [STEERING steer-abc123: switching to the job id]'} isStreaming={true} slotRunning={true} />)
+    expect(screen.getByText('Steered')).toBeInTheDocument()
+    expect(screen.getByText(/switching to the job id/)).toBeInTheDocument()
+  })
+
+  it('strips the raw [STEERING] marker from the streamed prose', () => {
+    render(<AssistantMessage content={'Doing X [STEERING steer-abc: did Y]'} isStreaming={true} slotRunning={true} />)
+    expect(screen.getByTestId('md')).not.toHaveTextContent('[STEERING')
+  })
 })
 
 describe('parseOptions', () => {

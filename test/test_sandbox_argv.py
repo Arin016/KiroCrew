@@ -95,14 +95,14 @@ class TestWrapArgv:
     def test_namespace_backend(self, mock_ns_argv, mock_detect):
         mock_ns_argv.return_value = [sys.executable, "/tmp/launcher.py", "kiro-cli"]
         result, cleanup = wrap_argv(["kiro-cli"], mode="strict")
-        mock_ns_argv.assert_called_once_with(["kiro-cli"], "strict")
+        mock_ns_argv.assert_called_once_with(["kiro-cli"], "strict", strip_python_env=False)
 
     @patch("kiro_claw.sandbox.detect_backend", return_value="sandbox-exec")
     @patch("kiro_claw.sandbox.sandbox_exec_argv")
     def test_sandbox_exec_backend(self, mock_sb_argv, mock_detect):
         mock_sb_argv.return_value = (["sandbox-exec", "-f", "/tmp/p.sb", "kiro-cli"], "/tmp/p.sb")
         result, cleanup = wrap_argv(["kiro-cli"], mode="strict")
-        mock_sb_argv.assert_called_once_with(["kiro-cli"], "strict")
+        mock_sb_argv.assert_called_once_with(["kiro-cli"], "strict", strip_python_env=False)
 
 
 class TestBuildSeatbeltProfile:
@@ -326,6 +326,35 @@ class TestSandboxExecArgv:
             assert "-f" in argv
             assert profile_path is not None
             assert os.path.exists(profile_path)
+        finally:
+            if profile_path:
+                os.unlink(profile_path)
+
+    @patch.dict(os.environ, {"PYTHONPATH": "/opt/kiroclaw/site-packages", "PYTHONHOME": "/opt/py"})
+    def test_strips_python_env_when_requested(self):
+        # A foreign Python subprocess (kiro-cli's MCP servers, e.g. ord-mcp) must
+        # NOT inherit KiroClaw's PYTHONPATH/PYTHONHOME, or it prepends KiroClaw's
+        # site-packages to sys.path and imports KiroClaw's fastmcp/cryptography
+        # instead of its own. strip_python_env=True unsets them.
+        argv, profile_path = sandbox_exec_argv(
+            ["kiro-cli", "acp"], "strict", strip_python_env=True
+        )
+        try:
+            assert "PYTHONPATH" in argv
+            assert "PYTHONHOME" in argv
+        finally:
+            if profile_path:
+                os.unlink(profile_path)
+
+    @patch.dict(os.environ, {"PYTHONPATH": "/opt/kiroclaw/site-packages", "PYTHONHOME": "/opt/py"})
+    def test_preserves_python_env_by_default(self):
+        # KiroClaw's OWN sandboxed Python subprocesses (cron scripts, app
+        # backends, code-review workers) import kiro_claw via PYTHONPATH, so it
+        # must be preserved when strip_python_env is not set (regression guard).
+        argv, profile_path = sandbox_exec_argv(["python3", "worker.py"], "standard")
+        try:
+            assert "PYTHONPATH" not in argv
+            assert "PYTHONHOME" not in argv
         finally:
             if profile_path:
                 os.unlink(profile_path)

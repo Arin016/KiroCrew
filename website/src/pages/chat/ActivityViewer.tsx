@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Bot, ScrollText, FileText, X, Lock, CheckCircle, AlertCircle, Loader as LoaderIcon, Ban, Handshake, Wrench, FolderOpen, ChevronLeft, ChevronRight, MessageSquare, ListTree, ArrowUp, ArrowDown } from 'lucide-react'
+import { Bot, ScrollText, FileText, X, Lock, CheckCircle, AlertCircle, Loader as LoaderIcon, Ban, Handshake, Wrench, FolderOpen, ChevronLeft, ChevronRight, MessageSquare, ArrowUp, ArrowDown } from 'lucide-react'
 import { api } from '../../api/client'
 import { timeAgo } from '../../utils/timeAgo'
 import { useSortableTable, applySort, type Comparators } from '../../hooks/useSortableTable'
@@ -9,13 +9,11 @@ import TrustDropdown from '../../components/TrustDropdown'
 import type { SubagentActivity, ToolActivity } from '../../types'
 import type { TouchedFile } from '../../hooks/useTouchedFiles'
 import type { ExtractedLink } from '../../utils/extractChatLinks'
-import type { ChatSection } from '../../hooks/useChatNavigation'
 import { useAppSelector, useAppDispatch } from '../../store'
 import { markSubagentApproving, openActivityToTab } from '../../store/chatSlice'
 import SegmentedControl from '../../components/SegmentedControl'
 import { colorForExt, fileIcon } from '../../utils/fileIcons'
 import SideChat from './SideChat'
-import ChatNavContent from './ChatNavPanel'
 
 const STATUS = {
   pending: <Lock size={12} className="text-muted" />,
@@ -24,6 +22,19 @@ const STATUS = {
   done: <CheckCircle size={12} className="text-green-400" />,
   error: <AlertCircle size={12} className="text-danger" />,
 } as const
+
+// Keyed by extractChatLinks' LinkType, which is 'cr' | 'other' only — the OSS
+// fork classifies URLs as generic git PR/review vs everything else. Use design
+// tokens (not hardcoded Tailwind palette colors) so both themes stay consistent.
+const RESOURCE_TYPE_COLORS: Record<string, string> = {
+  cr: 'bg-accent-subtle text-accent',
+  other: 'bg-muted/15 text-muted',
+}
+
+const RESOURCE_TYPE_LABELS: Record<string, string> = {
+  cr: 'PR',
+  other: 'Link',
+}
 
 function fmtTime(ts: number) {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -443,11 +454,11 @@ function FileBrowser({ onFileOpen, initialPath = '' }: { onFileOpen?: (path: str
   )
 }
 
-export default function ActivityViewer({ subagents, toolLog, open, onToggle, slot, files, onFileOpen, onFileRemove, onFilesClear, projectDir, navLinks, navSections, onScrollToNavSection, navResolving }: {
+export default function ActivityViewer({ subagents, toolLog, open, onToggle, slot, files, onFileOpen, onFileRemove, onFilesClear, projectDir, navLinks, navResolving }: {
   subagents: Record<string, SubagentActivity>; toolLog: ToolActivity[]; open: boolean; onToggle: () => void; slot: string
   files?: TouchedFile[]; onFileOpen?: (path: string) => void; onFileRemove?: (path: string) => void; onFilesClear?: (source: 'history' | 'tool') => void
   projectDir?: string
-  navLinks?: ExtractedLink[]; navSections?: ChatSection[]; onScrollToNavSection?: (displayIdx: number) => void; navResolving?: boolean
+  navLinks?: ExtractedLink[]; navResolving?: boolean
 }) {
   const dispatch = useAppDispatch()
   const [, setSelected] = useState(0)
@@ -456,7 +467,7 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
   const [browserOpen, setBrowserOpen] = useState(!!projectDir)
   const [browserHeight, setBrowserHeight] = useState(320)
   const [browserDragging, setBrowserDragging] = useState(false)
-  const [tab, setTab] = useState<'subagents' | 'logs' | 'files' | 'side' | 'nav'>(reduxTab)
+  const [tab, setTab] = useState<'subagents' | 'logs' | 'files' | 'side'>(reduxTab === ('nav' as string) ? 'files' : reduxTab)
   const explicitTab = useRef(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const ids = Object.keys(subagents)
@@ -466,7 +477,7 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
 
   // Subagent events are subscribed eagerly at WS connect time — no need to toggle here.
 
-  useEffect(() => { setTab(reduxTab); explicitTab.current = true }, [reduxTab])
+  useEffect(() => { setTab(reduxTab === ('nav' as string) ? 'files' : reduxTab); explicitTab.current = true }, [reduxTab])
 
   useEffect(() => {
     if (!open) return
@@ -490,7 +501,6 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
 
   const TABS: { key: typeof tab; label: string; icon: ReactNode; count?: number }[] = [
     { key: 'files', label: 'Files', icon: <FileText size={13} />, count: files?.length || 0 },
-    { key: 'nav', label: 'Navigation', icon: <ListTree size={13} /> },
     { key: 'subagents', label: 'Subagents', icon: <Bot size={13} />, count: ids.length + visibleLog.filter(isSpawnApproval).length },
     { key: 'logs', label: 'Logs', icon: <ScrollText size={13} /> },
     { key: 'side', label: 'Side', icon: <MessageSquare size={13} /> },
@@ -532,16 +542,6 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
 
       {/* Logs tab */}
       {tab === 'logs' && <LogViewer compact />}
-
-      {/* Navigation tab */}
-      {tab === 'nav' && (
-        <ChatNavContent
-          links={navLinks ?? []}
-          sections={navSections ?? []}
-          onScrollToSection={onScrollToNavSection ?? (() => {})}
-          resolving={navResolving}
-        />
-      )}
 
       {/* Files tab */}
       {tab === 'files' && (() => {
@@ -593,7 +593,7 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
               )}
             </div>
             <div className="flex-1 overflow-y-auto py-2">
-              {(suggested.length === 0 && history.length === 0) ? (
+              {(suggested.length === 0 && history.length === 0 && (!navLinks || navLinks.length === 0)) ? (
                 <div className="flex-1 flex items-center justify-center text-muted text-[13px] py-8">No files yet</div>
               ) : (
                 <>
@@ -606,6 +606,33 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
                       </div>
                       <div className="flex flex-wrap gap-1.5">
                         {suggested.map(f => <FileTile key={f.path} f={f} onFileOpen={onFileOpen} onFileRemove={onFileRemove} />)}
+                      </div>
+                    </div>
+                  )}
+                  {navLinks && navLinks.length > 0 && (
+                    <div className="px-3 mb-4">
+                      <div className="flex items-center gap-2 my-2">
+                        <span className="text-[14px] font-semibold text-muted">Resources</span>
+                        <span className="flex-1 h-px bg-border" />
+                        {navResolving && <span className="text-[10px] text-accent animate-pulse">resolving...</span>}
+                      </div>
+                      <div className="flex flex-col gap-0.5">
+                        {navLinks.map((link, i) => (
+                          <a
+                            key={i}
+                            href={link.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-2 px-2 py-1 rounded hover:bg-bg-hover transition-colors no-underline group"
+                          >
+                            <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${RESOURCE_TYPE_COLORS[link.type] || RESOURCE_TYPE_COLORS.other}`}>
+                              {RESOURCE_TYPE_LABELS[link.type] || 'Link'}
+                            </span>
+                            <span className="text-[12px] text-text truncate group-hover:text-accent transition-colors">
+                              {link.label}
+                            </span>
+                          </a>
+                        ))}
                       </div>
                     </div>
                   )}

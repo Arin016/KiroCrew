@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -11,14 +12,15 @@ from typing import Any
 from aiohttp import web
 
 from kiro_claw.dashboard.state import DashboardState
+from kiro_claw.executors import discovery_executor
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 
 from ._shared import (
+    _aim_list_stdout,
     _get_skills,
-    _list_aim_skills,
-    _resolve_loaded_by_agents,
+    _parse_aim_skills,
     _resolve_skill_root,
-    list_kiro_skills,
+    collect_skills_blocking,
     list_skill_tree,
     read_skill_file,
 )
@@ -105,7 +107,14 @@ def _redact_prompt(p: dict[str, Any]) -> None:
 
 async def api_prompts(request: web.Request) -> web.Response:
     """GET /api/prompts — list available prompts and agent SOPs."""
-    prompts = _list_aim_prompts()
+    # _list_aim_prompts() walks ~/.aim/packages (rglob *.sop.md + per-file
+    # resolve/read + frontmatter parse) on a cold cache — blocking FS work that
+    # can stall the event loop on a large ~/.aim tree. It has a 5s TTL cache,
+    # but the cold/expired build must run off the loop. (The cache lives in the
+    # parent package; the executor call still benefits from it on warm builds.)
+    prompts = await asyncio.get_running_loop().run_in_executor(
+        discovery_executor(), _list_aim_prompts
+    )
     home = str(Path.home())
     for p in prompts:
         _redact_prompt(p)
@@ -203,31 +212,33 @@ async def api_skills(request: web.Request) -> web.Response:
     """
     state: DashboardState = request.app["state"]
     skills = _get_skills(state)
-    result = skills.list_skills()
-    for s in result:
-        s.setdefault("source", "kiroclaw")
-    # Skills from an optional ``aim`` CLI (empty when the CLI is absent)
-    result.extend(await _list_aim_skills())
-    # Open-standard skills under ~/.kiro/skills and <project>/.kiro/skills
+    # Resolve the active project dir (cheap in-memory scan of slots) on the loop.
     project_dir: Path | None = None
     for slot in getattr(state, "_slots", {}).values():
         pd = getattr(slot, "project_dir", None)
         if pd:
             project_dir = Path(pd)
             break
-    result.extend(list_kiro_skills(project_dir))
-    # Annotate each skill with the agents whose resources globs would load it.
-    # Isolate per-skill: a failure resolving one skill must not blank the
-    # whole list (defaults to the documented empty-list semantics).
-    for s in result:
-        path = s.get("path") or ""
-        if path:
-            try:
-                s["loaded_by_agents"] = _resolve_loaded_by_agents(Path(path))
-            except Exception:
-                s["loaded_by_agents"] = []
-        else:
-            s["loaded_by_agents"] = []
+    # Run the AIM subprocess async (on the loop, non-blocking), then offload ALL
+    # blocking filesystem work — kiroclaw list_skills() (os.walk + per-file
+    # frontmatter reads), AIM path globs, kiro per-skill resolve/read, and the
+    # agent annotation — onto the dedicated DISCOVERY pool in one job. This work
+    # stalled the event loop past the loop-stall watchdog (~25s) on large
+    # skills×agents catalogs before it moved off-loop. Use the discovery pool
+    # (NOT maintenance_executor): this scan is browser-triggerable and can be
+    # seconds-long, so the maintenance pool would let a few dashboard tabs
+    # occupy the workers the orphan-reaper sweeps need to recover from a wedge
+    # (see kiro_claw.executors). No result cache: the endpoint always reflects
+    # current on-disk state, so freshly created/installed skills appear
+    # immediately (correctness over the latency a cache would add).
+    aim_stdout = await _aim_list_stdout()
+    result = await asyncio.get_running_loop().run_in_executor(
+        discovery_executor(),
+        collect_skills_blocking,
+        skills,
+        aim_stdout,
+        project_dir,
+    )
     return web.json_response(result)
 
 
@@ -335,7 +346,13 @@ async def api_skill_detail(request: web.Request) -> web.Response:
     content = skills.load_skill(name)
     if content is None and name.startswith("aim/"):
         aim_name = name[4:]  # strip "aim/" prefix
-        for s in await _list_aim_skills():
+        # Run the aim subprocess on the loop (async), parse off-loop: the parse
+        # does per-skill ~/.aim globs and must not block the event loop.
+        aim_stdout = await _aim_list_stdout()
+        aim_skills = await asyncio.get_running_loop().run_in_executor(
+            discovery_executor(), _parse_aim_skills, aim_stdout
+        )
+        for s in aim_skills:
             if s["name"] == aim_name or s["key"] == name:
                 if s["path"]:
                     from kiro_claw.hooks import validate_file_path  # noqa: F811

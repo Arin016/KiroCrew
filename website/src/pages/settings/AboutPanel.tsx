@@ -3,6 +3,7 @@ import { Info, RefreshCw, Scale, CheckCircle2, AlertCircle } from 'lucide-react'
 import { Card, CardTitle, Btn } from '../../components/ui'
 import { useBranding } from '../../hooks/useBranding'
 import { useAppSelector } from '../../store'
+import { codeBrowserBranchUrl, codeBrowserCommitUrl } from '../../lib/codeBrowser'
 
 type UpdateState = {
   state: 'checking' | 'available' | 'downloading' | 'downloaded' | 'not-available' | 'error'
@@ -43,6 +44,8 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 export function AboutPanel() {
   const { botName } = useBranding()
   const gatewayVersion = useAppSelector(s => s.dashboard.status?.version) || ''
+  const buildBranch = useAppSelector(s => s.dashboard.status?.branch) || ''
+  const buildCommit = useAppSelector(s => s.dashboard.status?.commit) || ''
   const queryClient = useQueryClient()
   const api = getUpdateApi()
   const isDesktop = !!api
@@ -97,6 +100,8 @@ export function AboutPanel() {
         <CardTitle><Info size={15} className="lucide-inline" /> About</CardTitle>
         <Row label="Application">{botName || 'KiroClaw'}</Row>
         <Row label="Version">{version}</Row>
+        {buildBranch && <Row label="Branch"><a href={codeBrowserBranchUrl(buildBranch)} target="_blank" rel="noopener noreferrer" className="hover:underline" title="Browse this branch on GitHub">{buildBranch}</a></Row>}
+        {buildCommit && <Row label="Commit"><a href={codeBrowserCommitUrl(buildCommit)} target="_blank" rel="noopener noreferrer" className="hover:underline" title="View this commit on GitHub">{buildCommit}</a></Row>}
         {isDesktop && channel && <Row label="Update channel">{channel}</Row>}
         {isDesktop && info?.platform && <Row label="Platform">{info.platform}</Row>}
       </Card>

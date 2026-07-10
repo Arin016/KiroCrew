@@ -65,11 +65,18 @@ function EditInput({ initial, onCommit, onCancel }: {
   )
 }
 
-function QueueStackInner({ messages, onCancel, onInterrupt, onEdit }: {
+function QueueStackInner({ messages, onCancel, onInterrupt, onEdit, fuseBelow = true }: {
   messages: ChatMessage[]
   onCancel?: (queueId: string) => void
   onInterrupt?: (queueId: string) => void
   onEdit?: (queueId: string, content: string) => void
+  /** When true (default) the front collapsed card fuses into the surface directly
+   *  below it (the input box) via a negative bottom margin + a flat, borderless bottom
+   *  edge. Set false when a non-fusable element sits between the queue and the input box
+   *  (follow-up option chips or the knowledge chip): the card then keeps its negative
+   *  margin off and renders as a complete rounded card cleanly above that element instead
+   *  of overlapping it. */
+  fuseBelow?: boolean
 }) {
   const [_expanded, setExpanded] = useState(false)
   const expanded = _expanded && messages.length > 1
@@ -96,7 +103,7 @@ function QueueStackInner({ messages, onCancel, onInterrupt, onEdit }: {
   const expandedHeight = messages.length > 0 ? messages.length * CARD_H + (messages.length - 1) * EXPANDED_GAP : 0
 
   const targetHeight = expanded ? expandedHeight : collapsedHeight
-  const targetMargin = messages.length > 0 && !expanded ? -OVERLAP : 0
+  const targetMargin = messages.length > 0 && !expanded && fuseBelow ? -OVERLAP : 0
 
   // Imperatively control margin: spring on expand/collapse, snap on enter/exit
   const marginMV = useMotionValue(targetMargin)
@@ -179,6 +186,10 @@ function QueueStackInner({ messages, onCancel, onInterrupt, onEdit }: {
             }
 
             const isFrontCollapsed = !expanded && i === 0
+            // Flat, borderless bottom (to seam into the input box) only when we're
+            // actually fusing into the surface below. When fuseBelow is off, keep the
+            // card fully rounded/bordered so it doesn't look cut off above the chips.
+            const fused = isFrontCollapsed && fuseBelow
             const queueId = m.meta?.queueId as string | undefined
             const isEditing = !!queueId && editingId === queueId
             // Per-card actions show on the front single card or when expanded.
@@ -193,9 +204,9 @@ function QueueStackInner({ messages, onCancel, onInterrupt, onEdit }: {
                   filter: `brightness(${brightness})`,
                   borderTopLeftRadius: 12,
                   borderTopRightRadius: 12,
-                  borderBottomLeftRadius: isFrontCollapsed ? 0 : 12,
-                  borderBottomRightRadius: isFrontCollapsed ? 0 : 12,
-                  borderBottomWidth: isFrontCollapsed ? 0 : 1,
+                  borderBottomLeftRadius: fused ? 0 : 12,
+                  borderBottomRightRadius: fused ? 0 : 12,
+                  borderBottomWidth: fused ? 0 : 1,
                 }}
                 exit={{ y: y + 40, zIndex: 50, borderBottomWidth: 1, borderBottomLeftRadius: 12, borderBottomRightRadius: 12, transition: { duration: 0.3, ease: 'easeIn' } }}
                 transition={SPRING}
@@ -267,6 +278,7 @@ function QueueStackInner({ messages, onCancel, onInterrupt, onEdit }: {
 
 export default memo(QueueStackInner, (prev, next) =>
   prev.messages.length === next.messages.length &&
+  prev.fuseBelow === next.fuseBelow &&
   prev.messages.every((m, i) => m === next.messages[i]) &&
   prev.onCancel === next.onCancel &&
   prev.onInterrupt === next.onInterrupt &&

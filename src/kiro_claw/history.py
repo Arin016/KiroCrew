@@ -453,6 +453,23 @@ class ConversationLog:
         sessions.sort(key=lambda s: s.get("modified", 0), reverse=True)
         return sessions
 
+    def agent_usage(self) -> dict[str, tuple[int, float]]:
+        """Return ``{agent_name: (session_count, last_used_mtime)}`` per agent.
+
+        Built on top of :meth:`list_sessions` (not a fresh directory glob) so it
+        inherits that method's canonical-session dedup and symlink-skip — counts
+        are therefore per logical conversation, not per raw ``.jsonl`` file.
+        Sessions whose metadata never recorded an agent are ignored.
+        """
+        usage: dict[str, tuple[int, float]] = {}
+        for meta in self.list_sessions():
+            agent = meta.get("agent")
+            if not agent:
+                continue
+            count, last_used = usage.get(agent, (0, 0.0))
+            usage[agent] = (count + 1, max(last_used, meta.get("modified", 0.0)))
+        return usage
+
     def search_sessions(self, query: str, limit: int = 50) -> list[dict]:
         """Return session metadata for files whose message content matches *query*.
 
@@ -1260,9 +1277,13 @@ class HistoryConsolidator:
                 memory.append_history(entry)
                 logger.info("Consolidated %d messages for %s", len(unconsolidated), key)
 
-            # Structured memory writes (Phase 2/3)
+            # Structured memory writes (Phase 2/3). Offloaded to a worker thread:
+            # _write_structured_memory embeds each item via a blocking urllib call
+            # to Ollama, and _consolidate runs on the event loop thread (fired via
+            # asyncio.create_task). Running it inline stalls the whole gateway loop
+            # if the embedding endpoint is slow/hung (heartbeats, Slack, dashboard).
             if self._vector_store:
-                self._write_structured_memory(result, key)
+                await asyncio.to_thread(self._write_structured_memory, result, key)
 
             # Markdown writes (backward compat — skip if migrated)
             if not self._migrated:

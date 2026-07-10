@@ -64,8 +64,22 @@ class TestStatusSnapshot:
         # These keys must exist — if one is missing, a caller will lose it
         required = {"uptime", "start_time", "sessions", "messages",
                     "cron_jobs", "lessons", "subagents", "update_available",
-                    "no_crons", "slack_connected"}
+                    "no_crons", "slack_connected", "branch", "commit"}
         assert required.issubset(snap.keys())
+
+    def test_includes_build_branch_and_commit(self, state: DashboardState) -> None:
+        """branch/commit come from the build info resolved at construction."""
+        state._build_info = ("beta-braveheart", "abc1234")
+        snap = state.status_snapshot()
+        assert snap["branch"] == "beta-braveheart"
+        assert snap["commit"] == "abc1234"
+
+    def test_build_fields_empty_for_non_git_install(self, state: DashboardState) -> None:
+        """Toolbox/pip installs (no source tree) yield empty strings, not missing keys."""
+        state._build_info = ("", "")
+        snap = state.status_snapshot()
+        assert snap["branch"] == ""
+        assert snap["commit"] == ""
 
     def test_cached_overrides_skip_expensive_calls(self, state: DashboardState) -> None:
         """Passing cron_jobs/lessons skips list_jobs()/load_all()."""
@@ -109,3 +123,44 @@ class TestAllStatusSnapshotCallersPassUpdateAvailable:
         from kiro_claw.dashboard import handlers_system
         source = inspect.getsource(handlers_system)
         assert "update_available=" in source
+
+
+class TestBuildInfoResolution:
+    """set_build_info() is the ONLY resolver — build info is never resolved at import.
+
+    Regression (dogfood 2026-07-06): an earlier revision resolved git_build_info()
+    at state.py *module import*. Under systemd the entrypoint imports this module
+    BEFORE main() detects KIROCLAW_PROJECT_DIR, so it resolved with no project dir
+    and lru_cache then pinned ("", "") for the process lifetime — the dropdown was
+    always blank. The value is now recorded by the CLI gateway entrypoint (sync,
+    pre-loop, post-detection) via set_build_info() and only read here.
+    """
+
+    def test_setter_flows_into_new_state(self, monkeypatch, tmp_path) -> None:
+        from kiro_claw.dashboard import state as state_mod
+
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state_mod.set_build_info(("beta-braveheart", "4f753ed0"))
+        try:
+            st = DashboardState(
+                sessions=MagicMock(count=0),
+                crons=MagicMock(),
+                lessons=MagicMock(),
+                start_time=time.time(),
+            )
+            assert st._build_info == ("beta-braveheart", "4f753ed0")
+        finally:
+            state_mod.set_build_info(("", ""))  # restore shared module global
+
+    def test_default_is_empty_when_setter_never_called(self, monkeypatch, tmp_path) -> None:
+        from kiro_claw.dashboard import state as state_mod
+
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state_mod.set_build_info(("", ""))  # simulate non-git / not-yet-resolved
+        st = DashboardState(
+            sessions=MagicMock(count=0),
+            crons=MagicMock(),
+            lessons=MagicMock(),
+            start_time=time.time(),
+        )
+        assert st._build_info == ("", "")

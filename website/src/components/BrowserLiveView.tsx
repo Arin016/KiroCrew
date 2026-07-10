@@ -1,6 +1,6 @@
 import { safeSetItem } from '../utils/safeStorage'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Monitor, Maximize2, Minimize2, Minus } from 'lucide-react'
+import { Monitor, Maximize2, Minimize2, Minus, X } from 'lucide-react'
 
 import { useAppSelector } from '../store'
 
@@ -18,6 +18,11 @@ import { useAppSelector } from '../store'
  *   hidden → (first frame) → open  ⇄  chip (corner)
  * - It stays hidden until the first frame, then auto-opens as a small,
  *   non-disruptive thumbnail in the bottom-right corner.
+ * - Closing (the header ✕) fully dismisses the window for the *current* browse
+ *   session: unlike minimize, it leaves no chip and suppresses the idle active-
+ *   pump's frames from re-opening it. A genuinely new browse session (a
+ *   different session_key) still surfaces automatically, so close means "hide
+ *   this session's mirror," not "disable the feature."
  * - The window is a free-floating, **fully resizable** rect: drag the header to
  *   move it, and drag any of the eight edge/corner handles to resize (like a
  *   normal desktop window). Position and size are always clamped into the
@@ -159,6 +164,10 @@ export default function BrowserLiveView() {
   const [rect, setRect] = useState<Rect>(() => cornerRect(loadDims()))
   const dragRef = useRef<{ dx: number; dy: number } | null>(null)
   const resizeRef = useRef<{ px: number; py: number; rect: Rect; edges: Edge } | null>(null)
+  // Set by the header ✕: records which session's mirror the user explicitly
+  // closed so the frame handler won't auto-reopen it under the idle active-pump.
+  // `null` = nothing dismissed; `{ key }` = keep hidden while frames carry `key`.
+  const dismissedRef = useRef<{ key: string | null } | null>(null)
 
   // Resolve the mirrored session's display title from the client's own slot
   // store. Only the opaque session key rides the frame wire; the title (which is
@@ -194,11 +203,19 @@ export default function BrowserLiveView() {
     const onFrame = (e: Event) => {
       const d = (e as CustomEvent<FrameDetail>).detail
       if (!d?.data) return
+      const incoming = d.session_key || null
       setFrame(`data:image/${d.format || 'jpeg'};base64,${d.data}`)
       setLastTs(Date.now())
-      setSessionKey(d.session_key || null)
+      setSessionKey(incoming)
       setMode(m => {
         if (m !== 'hidden') return m
+        // Honor an explicit close: stay hidden while frames keep arriving for the
+        // dismissed session. A different session_key clears the dismissal so new
+        // browse activity still auto-opens the mirror.
+        if (dismissedRef.current) {
+          if (dismissedRef.current.key === incoming) return 'hidden'
+          dismissedRef.current = null
+        }
         // First reveal: drop the panel in the bottom-right corner at its saved size.
         setRect(r => cornerRect({ w: r.w, h: r.h }))
         return 'open'
@@ -262,6 +279,14 @@ export default function BrowserLiveView() {
       return clampRect({ ...r, w: target.w, h: target.h })
     })
   }, [])
+
+  // Close fully dismisses the mirror (no chip). We remember the closed session so
+  // the idle active-pump's frames don't bounce it back open; a new session still
+  // auto-opens (see onFrame). Distinct from minimize, which keeps a re-open chip.
+  const onClose = useCallback(() => {
+    dismissedRef.current = { key: sessionKey }
+    setMode('hidden')
+  }, [sessionKey])
 
   if (mode === 'hidden') return null
 
@@ -348,6 +373,15 @@ export default function BrowserLiveView() {
           className="relative z-30 p-1 rounded hover:bg-bg-hover text-muted hover:text-text transition-colors"
         >
           <Minus size={14} />
+        </button>
+        <button
+          onPointerDown={e => e.stopPropagation()}
+          onClick={onClose}
+          aria-label="Close live browser view"
+          title="Close"
+          className="relative z-30 p-1 rounded hover:bg-bg-hover text-muted hover:text-text transition-colors"
+        >
+          <X size={14} />
         </button>
       </div>
 

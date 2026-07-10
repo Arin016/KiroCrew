@@ -169,7 +169,9 @@ class AcpWorker(Worker):
             else await asyncio.to_thread(_get_sandbox_mode)
         )
         logger.info("AcpWorker: starting with agent=%s", AGENT_NAME)
-        self._client = AcpClient(agent=AGENT_NAME, sandbox_mode=sandbox_mode)
+        self._client = AcpClient(
+            agent=AGENT_NAME, sandbox_mode=sandbox_mode, audit_source="subagent"
+        )
         await self._client.ensure_ready()
         # Shield the live worker PID from the periodic orphan sweep for as long
         # as it runs. Paired with unregister in shutdown() and on respawn above.

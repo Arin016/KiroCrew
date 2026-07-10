@@ -81,6 +81,10 @@ Set via `kiroclaw config set sandbox.mode auto`.
   },
   "skills": {
     "max_triggered": 3
+  },
+  "knowledge": {
+    "auto_ingest_artifacts": true,
+    "auto_ingest_artifact_kinds": ["markdown", "text", "html", "json"]
   }
 }
 ```
@@ -127,6 +131,8 @@ Set via `kiroclaw config set sandbox.mode auto`.
 | `memory.embedding_model` | Ollama model name for embeddings | `"qwen3-embedding:0.6b"` |
 | `memory.embedding_runtime` | How Ollama runs: `"native"` or `"docker"` (AL2 glibc fallback) | `"native"` |
 | `skills.max_triggered` | Maximum skills loaded per message (≥1) | `3` |
+| `knowledge.auto_ingest_artifacts` | Auto-ingest content-bearing local artifacts into the Knowledge Library (searchable "Artifacts" source); kept in sync and removed when the artifact is deleted (see [Knowledge Library](knowledge-library-how-it-works.md)) | `true` |
+| `knowledge.auto_ingest_artifact_kinds` | Artifact kinds eligible for auto-ingest (`widget` excluded as UI/dashboards; `svg` excluded — no reader support) | `["markdown", "text", "html", "json"]` |
 
 ## Environment Variables
 

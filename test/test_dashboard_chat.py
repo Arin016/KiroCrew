@@ -111,6 +111,114 @@ class TestChatSlot:
         assert slot._pending_subagent_failures == []
 
 
+class TestBroadcastCompactionResultBackoff:
+    """Streak/cooldown backoff for the per-turn EVENT_COMPACTION_STATUS
+    failure path (Mesh compaction-spam fix). Distinct from the
+    claude/kiro deferred-wait integration tests below — these exercise
+    ``_broadcast_compaction_result`` directly for speed and isolation.
+    """
+
+    @staticmethod
+    def _make_slot_and_state(tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.broadcast_ws = MagicMock()
+        slot = state.get_or_create_slot("s1")
+        return state, slot
+
+    @staticmethod
+    def _failed_event(title: str = ""):
+        from kiro_claw.providers.base import LLMEvent
+
+        return LLMEvent(kind="compaction_status", text="failed", title=title)
+
+    @staticmethod
+    def _completed_event(title: str = "did stuff"):
+        from kiro_claw.providers.base import LLMEvent
+
+        return LLMEvent(kind="compaction_status", text="completed", title=title)
+
+    def test_first_n_failures_shown_as_is(self, tmp_path, monkeypatch):
+        from kiro_claw.dashboard.chat_utils import (
+            _COMPACTION_NOTICE_SHOW_FIRST_N,
+            _broadcast_compaction_result,
+        )
+
+        state, slot = self._make_slot_and_state(tmp_path, monkeypatch)
+
+        for i in range(1, _COMPACTION_NOTICE_SHOW_FIRST_N + 1):
+            msg = _broadcast_compaction_result(state, slot, self._failed_event())
+            assert msg is not None, f"failure #{i} should still be shown"
+            assert "unknown error" in msg
+            # Streak-count wording only appears once we exceed the shown limit.
+            assert f"{i}x in a row" not in msg
+
+    def test_failures_beyond_limit_suppressed_within_cooldown(self, tmp_path, monkeypatch):
+        from kiro_claw.dashboard.chat_utils import (
+            _COMPACTION_NOTICE_SHOW_FIRST_N,
+            _broadcast_compaction_result,
+        )
+
+        state, slot = self._make_slot_and_state(tmp_path, monkeypatch)
+
+        for _ in range(_COMPACTION_NOTICE_SHOW_FIRST_N):
+            _broadcast_compaction_result(state, slot, self._failed_event())
+
+        # One more failure while still within cooldown must return None
+        # (nothing appended to the slot, no new broadcast).
+        before = len(slot.messages)
+        msg = _broadcast_compaction_result(state, slot, self._failed_event())
+        assert msg is None
+        assert len(slot.messages) == before
+
+    def test_cooldown_elapsed_shows_collapsed_streak_message(self, tmp_path, monkeypatch):
+        import kiro_claw.dashboard.chat_utils as chat_utils
+
+        state, slot = self._make_slot_and_state(tmp_path, monkeypatch)
+
+        fake_now = [1000.0]
+        monkeypatch.setattr(chat_utils.time, "monotonic", lambda: fake_now[0])
+
+        for _ in range(chat_utils._COMPACTION_NOTICE_SHOW_FIRST_N):
+            chat_utils._broadcast_compaction_result(state, slot, self._failed_event())
+
+        # Still within cooldown: suppressed.
+        fake_now[0] += 1.0
+        assert (
+            chat_utils._broadcast_compaction_result(state, slot, self._failed_event()) is None
+        )
+
+        # Cooldown elapses: next failure collapses the streak into one message.
+        fake_now[0] += chat_utils._COMPACTION_FAIL_COOLDOWN_SECS + 1.0
+        msg = chat_utils._broadcast_compaction_result(state, slot, self._failed_event())
+        assert msg is not None
+        assert "x in a row" in msg
+        assert "too large to" in msg or "unknown error" in msg
+
+    def test_success_resets_streak_and_cooldown(self, tmp_path, monkeypatch):
+        from kiro_claw.dashboard.chat_utils import (
+            _COMPACTION_NOTICE_SHOW_FIRST_N,
+            _broadcast_compaction_result,
+        )
+
+        state, slot = self._make_slot_and_state(tmp_path, monkeypatch)
+
+        for _ in range(_COMPACTION_NOTICE_SHOW_FIRST_N):
+            _broadcast_compaction_result(state, slot, self._failed_event())
+        assert slot._compaction_fail_streak == _COMPACTION_NOTICE_SHOW_FIRST_N
+
+        msg = _broadcast_compaction_result(state, slot, self._completed_event())
+        assert msg is not None
+        assert "compacted" in msg.lower()
+        assert slot._compaction_fail_streak == 0
+        assert slot._compaction_fail_cooldown_until == 0.0
+
+        # A fresh failure right after a success must be shown (not suppressed),
+        # proving the reset actually took effect.
+        msg = _broadcast_compaction_result(state, slot, self._failed_event())
+        assert msg is not None
+
+
 @pytest.mark.asyncio
 class TestApiChatDrainOnDisconnect:
     """Cover the slot.drain() call in chat_handlers' SSE finally block."""
@@ -3529,6 +3637,65 @@ class TestRunChatToolCallUpdate:
         assert any("after the boom" in m["content"] for m in assistant_msgs)
 
 
+# ── Model refusal (kiro-cli `refusal` stop reason) ──
+
+
+class TestRunChatModelRefusal:
+    """A turn that ends on stop_reason 'refusal' with no text is a DETERMINISTIC
+    model-side content refusal — it must surface a distinct, non-retried card
+    instead of falling into the blind empty-response retry loop (which just
+    re-hits the same refusal and burns credits)."""
+
+    @staticmethod
+    def _make_mock_client(events):
+        client = AsyncMock()
+        client.context_usage_pct = MagicMock(return_value=10.0)
+
+        async def _stream(msg):
+            for ev in events:
+                yield ev
+
+        client.stream = _stream
+        client.stream_command = _stream
+        return client
+
+    @staticmethod
+    def _make_state_for_run_chat(tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.broadcast_ws = MagicMock()
+        state.push_slots_update = MagicMock()
+        state.context_builder = None
+        state.consolidator = None
+        state._hook_store = None
+        state._yolo = False
+        return state
+
+    @pytest.mark.asyncio
+    async def test_refusal_shows_declined_card_and_does_not_retry(self, tmp_path, monkeypatch):
+        from kiro_claw.acp.types import STOP_REASON_REFUSAL
+        from kiro_claw.providers.base import EVENT_COMPLETE, LLMEvent
+
+        events = [LLMEvent(kind=EVENT_COMPLETE, stop_reason=STOP_REASON_REFUSAL)]
+        state = self._make_state_for_run_chat(tmp_path, monkeypatch)
+        slot = state.get_or_create_slot("s1")
+        client = self._make_mock_client(events)
+        state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
+
+        from kiro_claw.dashboard.chat import _run_chat
+
+        await _run_chat(state, slot, "hello")
+
+        # A single declined card is surfaced, NOT the empty-response card.
+        error_msgs = [m for m in slot.messages if m.get("role") == "error"]
+        assert any("declined" in m.get("content", "").lower() for m in error_msgs)
+        assert not any("empty response" in m.get("content", "").lower() for m in error_msgs)
+        # No blind re-queue: the message is not re-enqueued and the retry budget
+        # is untouched.
+        assert not slot._queue
+        assert slot._empty_response_retries == 0
+
+
 # ── Mode/approval policy propagation (HTTP handlers) ──
 
 
@@ -4205,6 +4372,112 @@ class TestPlanExecutionViaButton:
         _, kwargs = mock_loop.call_args
         assert kwargs.get("auto_run") is True
         assert slot._auto_run is True
+
+
+class TestWidgetOriginAutoRunGuard:
+    """P454989291 item 5 — deny-by-default backend guard.
+
+    A chat turn tagged ``meta.origin == "widget"`` was pre-filled into the
+    composer by an LLM-emitted ``<mcwidget>`` postMessage. Its TEXT is
+    attacker-controlled, so the backend MUST refuse the only chat-text-reachable
+    privilege escalation (orchestrator ``go``/``go all`` → ``_auto_run`` +
+    ``_stage_loop``) for such turns, while leaving human-typed ``go all`` intact.
+    """
+
+    @pytest.mark.asyncio
+    async def test_widget_origin_go_all_denied(self, tmp_path, monkeypatch):
+        """A widget-origin 'go all' must NOT enable auto-run or start the stage loop."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("wo-goall", mode="orchestrator")
+
+        stage_loop_mock = AsyncMock()
+        run_chat_mock = AsyncMock()
+        # api_chat calls _stage_loop bound into its own namespace (import at
+        # chat_handlers top), so patch there — not chat_orchestrator.
+        monkeypatch.setattr("kiro_claw.dashboard.chat_handlers._stage_loop", stage_loop_mock)
+        monkeypatch.setattr("kiro_claw.dashboard.chat_handlers._run_chat", run_chat_mock)
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat",
+                json={"message": "go all", "slot": "wo-goall", "meta": {"origin": "widget"}},
+            )
+            assert resp.status == 200
+
+        # Escalation refused: no auto-run, no stage loop; the text falls through
+        # to a normal fully-gated _run_chat turn instead.
+        stage_loop_mock.assert_not_called()
+        assert slot._auto_run is False
+        run_chat_mock.assert_called_once()
+        assert "go all" in run_chat_mock.call_args[0][2]
+
+    @pytest.mark.asyncio
+    async def test_widget_origin_go_denied(self, tmp_path, monkeypatch):
+        """A widget-origin bare 'go' is also refused the stage-loop escalation."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("wo-go", mode="orchestrator")
+
+        stage_loop_mock = AsyncMock()
+        run_chat_mock = AsyncMock()
+        monkeypatch.setattr("kiro_claw.dashboard.chat_handlers._stage_loop", stage_loop_mock)
+        monkeypatch.setattr("kiro_claw.dashboard.chat_handlers._run_chat", run_chat_mock)
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat",
+                json={"message": "Go", "slot": "wo-go", "meta": {"origin": "widget"}},
+            )
+            assert resp.status == 200
+
+        stage_loop_mock.assert_not_called()
+        assert slot._auto_run is False
+        run_chat_mock.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_human_go_all_still_escalates(self, tmp_path, monkeypatch):
+        """A human-typed 'go all' (no widget origin) MUST still enable auto-run."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("human-goall", mode="orchestrator")
+
+        stage_loop_mock = AsyncMock()
+        monkeypatch.setattr("kiro_claw.dashboard.chat_handlers._stage_loop", stage_loop_mock)
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat",
+                json={"message": "go all", "slot": "human-goall"},
+            )
+            assert resp.status == 200
+
+        stage_loop_mock.assert_called_once()
+        assert slot._auto_run is True
+
+    @pytest.mark.asyncio
+    async def test_widget_origin_normal_message_unaffected(self, tmp_path, monkeypatch):
+        """A widget-origin turn whose text isn't go/go-all runs a normal turn."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.get_or_create_slot("wo-normal", mode="orchestrator")
+
+        run_chat_mock = AsyncMock()
+        monkeypatch.setattr("kiro_claw.dashboard.chat_handlers._run_chat", run_chat_mock)
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat",
+                json={
+                    "message": "[UI] refresh",
+                    "slot": "wo-normal",
+                    "meta": {"origin": "widget"},
+                },
+            )
+            assert resp.status == 200
+
+        run_chat_mock.assert_called_once()
+        assert "[UI] refresh" in run_chat_mock.call_args[0][2]
 
 
 class TestPythonStageLoop:
@@ -5291,6 +5564,101 @@ class TestFolderCRUD:
             resp = await client.patch(f"/api/chat/folders/{folder['id']}", json={"collapsed": True})
             data = await resp.json()
             assert data["collapsed"] is True
+
+    @pytest.mark.asyncio
+    async def test_create_folder_hidden_defaults_false(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        app = _make_folder_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/chat/folders", json={"name": "F"})
+            assert (await resp.json())["hidden"] is False
+            resp = await client.get("/api/chat/folders")
+            assert (await resp.json())[0]["hidden"] is False
+
+    @pytest.mark.asyncio
+    async def test_update_folder_hidden(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        app = _make_folder_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/chat/folders", json={"name": "F"})
+            folder = await resp.json()
+            resp = await client.patch(f"/api/chat/folders/{folder['id']}", json={"hidden": True})
+            assert (await resp.json())["hidden"] is True
+            assert state._folders[0]["hidden"] is True
+            resp = await client.patch(f"/api/chat/folders/{folder['id']}", json={"hidden": False})
+            assert (await resp.json())["hidden"] is False
+
+    @pytest.mark.asyncio
+    async def test_folders_get_includes_history_count(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state._folders = [
+            {"id": "f1", "name": "A", "order": 0, "collapsed": False},
+            {"id": "f2", "name": "B", "order": 1, "collapsed": False},
+        ]
+        # History count is computed from the full session list (authoritative),
+        # not the paginated client history window.
+        monkeypatch.setattr(
+            state.conversation_log,
+            "list_sessions",
+            lambda: [
+                {"key": "a", "folder_id": "f1"},
+                {"key": "b", "folder_id": "f1"},
+                {"key": "c", "folder_id": "f2"},
+                {"key": "d"},  # unfiled — ignored
+            ],
+        )
+        app = _make_folder_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/chat/folders")
+            folders = {f["id"]: f for f in await resp.json()}
+            assert folders["f1"]["history_count"] == 2
+            assert folders["f2"]["history_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_assign_slot_to_folder_unhides(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.get_or_create_slot("myslot")
+        state._folders = [{"id": "f1", "name": "Test", "order": 0, "collapsed": False, "hidden": True}]
+        app = _make_folder_app(state)
+        async with TestClient(TestServer(app)) as client:
+            # Moving a session into a hidden folder re-engages it (Model B) → un-hides.
+            resp = await client.patch("/api/chat/slots/myslot/folder", json={"folder_id": "f1"})
+            assert resp.status == 200
+            assert state._folders[0]["hidden"] is False
+
+    @pytest.mark.asyncio
+    async def test_resume_session_unhides_folder(self, tmp_path, monkeypatch):
+        """Reviving a history session filed in a hidden folder un-hides it (Model B).
+
+        Complements test_assign_slot_to_folder_unhides (the move path): here the
+        re-engage happens via api_chat_slot_resume loading an archived session
+        from history, which is the revive path that lets a hidden folder reappear.
+        """
+        from kiro_claw.dashboard.chat import _save_slot_to_history
+
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state._folders = [{"id": "f1", "name": "Test", "order": 0, "collapsed": False, "hidden": True}]
+        # Create a session filed in f1, persist it to history, then drop the active
+        # slot so resume loads it fresh from history (the revive path).
+        slot = state.get_or_create_slot("revive1")
+        slot.folder_id = "f1"
+        slot.append("user", "old msg")
+        slot.drain()
+        _save_slot_to_history(state, slot, closed=True)
+        state._slots.pop("revive1", None)
+        assert state._folders[0]["hidden"] is True  # still hidden before revive
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat/slots/revive1/resume", json={"key": "dashboard:revive1"}
+            )
+            assert resp.status == 200
+        assert state._folders[0]["hidden"] is False  # revive re-engaged → un-hid
 
     @pytest.mark.asyncio
     async def test_update_folder_default_agent(self, tmp_path, monkeypatch):

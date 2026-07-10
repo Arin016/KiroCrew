@@ -1593,6 +1593,20 @@ class TestRestart:
        listening, then detach a fresh gateway via Popen
     """
 
+    @pytest.fixture(autouse=True)
+    def _fast_restart_ready(self, monkeypatch):
+        """Collapse the post-spawn readiness poll so these tests don't spin.
+
+        These tests mock the gateway lifecycle (``_spawn_detached_gateway`` /
+        ``restart_service``); with no real gateway, ``_print_token_url()``'s
+        readiness loop polls ``localhost`` once per second for the full
+        ``_RESTART_READY_TIMEOUT`` (15s) before giving up -- ~15s x5 tests. These
+        tests assert restart/spawn/stop dispatch, not token-URL readiness, so
+        pin the timeout to 0 (loop is skipped, function returns immediately).
+        Production default is unchanged.
+        """
+        monkeypatch.setattr("kiro_claw.cli_server._RESTART_READY_TIMEOUT", 0)
+
     def _mock_sel(self):
         return patch("kiro_claw.cli_server.sel", return_value=MagicMock())
 
@@ -2980,6 +2994,63 @@ class TestPrintTokenUrl:
 class TestInstallPidfdChildWatcher:
     """Verify _install_child_watcher's platform behavior."""
 
+    @staticmethod
+    def _install_then_spawn_in_child(expected_watcher: str) -> None:
+        """Run "_install_child_watcher() then asyncio.run(subprocess)" in a CLEAN
+        child Python process, and assert it exits 0.
+
+        Why a subprocess instead of an in-process ``asyncio.run``: on CPython
+        3.10 the child watcher is bound to the loop inside asyncio's
+        ``set_event_loop()``, which only calls ``attach_loop`` when
+        ``threading.current_thread() is threading.main_thread()``. pytest-xdist
+        runs test bodies on a NON-main worker thread, so an in-process
+        ``asyncio.run`` here skips ``attach_loop`` and the freshly-installed
+        watcher reports inactive -> ``create_subprocess_exec`` raises
+        "child watcher not activated" (a harness artifact, not a product bug).
+        A child ``python -c`` always runs on its own MAIN thread -- exactly like
+        ``kiroclaw gateway`` -- so this deterministically exercises the real
+        install-before-run attach path regardless of the worker thread.
+        """
+        import os
+        import textwrap
+
+        code = textwrap.dedent(
+            """
+            import asyncio
+            from kiro_claw.cli import _install_child_watcher
+
+            async def _spawn_true():
+                proc = await asyncio.create_subprocess_exec(
+                    "true",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.wait()
+                return proc.returncode
+
+            _install_child_watcher()  # mirror the gateway: install BEFORE run
+            assert type(asyncio.get_child_watcher()).__name__ == {expected!r}, (
+                "expected {expected} to be installed"
+            )
+            assert asyncio.run(_spawn_true()) == 0
+            """
+        ).format(expected=expected_watcher)
+        # Propagate the runtime's import path so the child can import kiro_claw
+        # (a bare subprocess would not inherit it without PYTHONPATH).
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+        assert result.returncode == 0, (
+            f"install-before-run child failed (rc={result.returncode}):\n"
+            f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+        )
+
     def test_installs_safe_watcher_on_macos(self, monkeypatch) -> None:
         import asyncio
 
@@ -3069,23 +3140,12 @@ class TestInstallPidfdChildWatcher:
         still work. This is the property the mocked test above cannot prove — it
         guards against the watcher being installed but never attached to the loop
         (which would make every create_subprocess_exec raise RuntimeError).
+
+        Runs in a clean child process (its own main thread) so it is immune to
+        pytest-xdist executing this test body on a non-main worker thread, where
+        set_event_loop's main-thread-guarded attach_loop would be skipped.
         """
-        import asyncio
-
-        from kiro_claw.cli import _install_child_watcher
-
-        async def _spawn_true() -> int:
-            proc = await asyncio.create_subprocess_exec(
-                "true",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.wait()
-            return proc.returncode
-
-        _install_child_watcher()  # mirror the gateway: install BEFORE run
-        rc = asyncio.run(_spawn_true())
-        assert rc == 0
+        self._install_then_spawn_in_child(expected_watcher="PidfdChildWatcher")
 
     @pytest.mark.skipif(
         sys.platform == "linux" or not hasattr(__import__("asyncio"), "SafeChildWatcher"),
@@ -3101,27 +3161,13 @@ class TestInstallPidfdChildWatcher:
         prove: that SafeChildWatcher actually ATTACHES to the loop (its SIGCHLD
         handler) rather than being installed but inert — which would make every
         create_subprocess_exec raise RuntimeError('...not activated...').
+
+        Runs in a clean child process (its own main thread): SafeChildWatcher's
+        attach_loop installs a SIGCHLD handler via loop.add_signal_handler, which
+        is itself main-thread-only, so an in-process run under a non-main
+        pytest-xdist worker thread would fail spuriously.
         """
-        import asyncio
-
-        from kiro_claw.cli import _install_child_watcher
-
-        async def _spawn_true() -> int:
-            proc = await asyncio.create_subprocess_exec(
-                "true",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.wait()
-            return proc.returncode
-
-        _install_child_watcher()  # real install, no mocks — mirror the gateway
-        watcher = asyncio.get_child_watcher()
-        assert isinstance(watcher, asyncio.SafeChildWatcher), (
-            "macOS must install the SIGCHLD-based SafeChildWatcher"
-        )
-        rc = asyncio.run(_spawn_true())
-        assert rc == 0
+        self._install_then_spawn_in_child(expected_watcher="SafeChildWatcher")
 
 
 class TestTokenCommand:

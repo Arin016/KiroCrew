@@ -1,7 +1,7 @@
 """Shared reasoning-effort vocabulary for all LLM providers.
 
 Both kiro-cli and claude-agent-acp expose a per-session "effort" (a.k.a.
-thinking depth) knob, but only on Claude Opus/Sonnet models.  This module
+thinking depth) knob, but only on Claude Fable/Opus/Sonnet models.  This module
 is the single source of truth for the valid levels and the model-capability
 check so the CLI, dashboard handlers, providers, and config loader all agree.
 
@@ -43,16 +43,16 @@ def is_valid_effort(level: object) -> bool:
 
 
 def model_supports_effort(model: str | None) -> bool:
-    """True when *model* is a Claude Opus/Sonnet model that accepts effort.
+    """True when *model* is a Claude Fable/Opus/Sonnet model that accepts effort.
 
-    Effort is only available on Claude Opus and Sonnet (per kiro-cli FAQ and
-    the claude-agent-acp ``supportsEffort`` model flag).  Haiku, Nova, and
-    third-party models do not support it; ``"auto"``/``None`` cannot either
+    Effort is only available on Claude Fable, Opus, and Sonnet (per kiro-cli
+    FAQ and the claude-agent-acp ``supportsEffort`` model flag).  Haiku, Nova,
+    and third-party models do not support it; ``"auto"``/``None`` cannot either
     (kiro-cli errors "Effort configuration is currently not available on auto"
     until a concrete model is selected).
 
-    Matches both naming conventions: kiro-cli (``claude-opus-4.7``) and the
-    Bedrock/claude-agent-acp form (``global.anthropic.claude-opus-4-8[1m]``).
+    Matches both naming conventions: kiro-cli (``claude-fable-5``) and the
+    Bedrock/claude-agent-acp form (``global.anthropic.claude-fable-5[1m]``).
 
     Prefers the registry's declared ``supports_effort`` flag when the model is in
     the registry, so a future model whose canonical key lacks the ``opus``/
@@ -79,7 +79,7 @@ def model_supports_effort(model: str | None) -> bool:
             return declared
     except Exception:
         pass  # fall back to the heuristic
-    return "opus" in m or "sonnet" in m
+    return "opus" in m or "sonnet" in m or "fable" in m
 
 
 def _coerce_defaults(defaults: object) -> dict[str, str]:

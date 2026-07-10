@@ -36,6 +36,7 @@ agent backend and Slack credentials.
 | [Dynamic Sub-Agent Sizing](dynamic-subagent-sizing.md) | Auto-size the concurrent sub-agent cap from host memory/CPU and a learned per-agent cost |
 | [Memory](memory-and-learning.md) | Persistent preferences, project context, and learned corrections across sessions |
 | [Task Runner](task-runner.md) | Autonomous multi-step execution from spec files — hand it a task, walk away |
+| [Research Lab](research-lab.md) | Autonomous multi-cycle research campaigns — grill-tree scoping, adaptive agent execution, exportable reports |
 | [Dashboard](dashboard.md) | React web UI with multi-session chat, memory management, and live system metrics |
 | [Slack](slack-integration.md) | DM-based interaction with tool approval, streaming, and channel monitoring |
 | [Agents](agents.md) | Switch between specialized agents per conversation, thread, or cron job |
@@ -55,6 +56,7 @@ agent backend and Slack credentials.
 | Streaming STT | Live speech-to-text partials in dashboard input (Whisper local; AWS Transcribe optional) |
 | Memory Modes | Per-session persistent, incognito, or temporary memory |
 | TUI | Terminal UI with Ink (React for CLI) — alternative to web dashboard |
+| [Queued-Message Editing](dashboard.md) | Edit, reorder, or cancel a chat message waiting in the queue before it runs |
 
 ## Guides
 

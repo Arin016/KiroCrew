@@ -346,7 +346,7 @@ _state: TokenStateManager = TokenStateManager(max_concurrent_nonces=MAX_CONCURRE
 # request and the browser, parsing the 403 HTML body as a font, logs
 # "invalid sfntVersion" and falls back to a default typeface.
 _BYPASS_PREFIXES = ("/assets/", "/static/", "/fonts/")
-_BYPASS_EXACT = {"/logo.png", "/manifest.json", "/sw.js", "/pcm-worklet.js", "/api/token/local", "/api/shutdown"}
+_BYPASS_EXACT = {"/logo.png", "/manifest.json", "/sw.js", "/pcm-worklet.js", "/api/token/local", "/api/shutdown", "/api/theme/boot"}
 
 # Anchored bypass for installed-app static UI bundles only (federated-app
 # RFC §3.8). Matches /apps/{name}/ui/<anything>, where {name} is the

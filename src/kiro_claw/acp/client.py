@@ -89,6 +89,7 @@ from kiro_claw.env import augmented_path, resolve_krb5_ccname
 from kiro_claw.executors import subprocess_executor
 from kiro_claw.sandbox import wrap_argv
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
+from kiro_claw.sel import sel
 
 logger = logging.getLogger(__name__)
 
@@ -507,6 +508,10 @@ _CANCEL_GRACE_SECS = 10.0  # grace window for cooperative cancel ack
 # replay that streams the whole transcript as notifications is not killed),
 # but never extends past this hard ceiling.
 _WAIT_RESPONSE_MAX_TIMEOUT = 600.0  # 10 min absolute ceiling
+# Upper bound on the offloaded ACP-layer SEL audit emit. Auditing is best-effort
+# and must never gate tool dispatch, so a wedged SEL backend is abandoned (the
+# worker thread may leak, which is survivable) after this timeout.
+_SEL_AUDIT_TIMEOUT_SECONDS = 5.0
 # JSON-RPC 2.0 reserved error code for an unrecognized method — used to answer
 # unknown server→client requests so the agent fails fast instead of hanging.
 _JSONRPC_METHOD_NOT_FOUND = -32601
@@ -565,6 +570,15 @@ class AcpAuthRequired(AcpError):  # noqa: N818
     Non-retryable: respawning the process hits the same wall, so callers must
     surface the actionable message and skip the retry ladder rather than
     reset-and-requeue the turn.
+    """
+
+
+class AcpPromptBusy(AcpError):  # noqa: N818
+    """A prompt is already in progress on this session.
+
+    The backend still has an in-flight prompt (tool stall, timeout, or race
+    between messages). Callers should reset the session so the next message
+    cold-starts cleanly.
     """
 
 
@@ -683,6 +697,15 @@ def _format_acp_error(error: object) -> str:
                 "switch to a different model in the picker."
                 f"{req_id_suffix}"
             )
+        elif re.search(r"already in progress", data, re.IGNORECASE):
+            # The backend still has an in-flight prompt on this session.
+            # This means a previous turn didn't complete cleanly (tool stall,
+            # timeout, or race between messages). The session will auto-recover
+            # on the next attempt once the stale turn expires.
+            formatted = (
+                "I'm still processing a previous request. Please wait a moment "
+                "and try again — if it persists, send `!restart` to reset the session."
+            )
         else:
             # Unknown shape — preserve the raw dict so we don't lose
             # information.  Redaction below scrubs any embedded secrets.
@@ -707,6 +730,27 @@ def _format_acp_error(error: object) -> str:
             len(cred_warnings),
         )
     return redacted
+
+
+# ---------------------------------------------------------------------------
+_PROMPT_BUSY_RE = re.compile(r"already in progress", re.IGNORECASE)
+
+
+def _raise_acp_error(error: object) -> None:
+    """Format and raise the appropriate AcpError subclass for *error*.
+
+    Delegates formatting to ``_format_acp_error`` and raises either
+    ``AcpPromptBusy`` (when the backend reports a concurrent in-flight prompt)
+    or the generic ``AcpError`` for all other cases.
+    """
+    formatted = _format_acp_error(error)
+    # Detect prompt-busy from the raw error (before formatting rewrites it)
+    raw_data = ""
+    if isinstance(error, dict):
+        raw_data = f"{error.get('data', '')} {error.get('message', '')}"
+    if _PROMPT_BUSY_RE.search(raw_data):
+        raise AcpPromptBusy(formatted)
+    raise AcpError(formatted)
 
 
 # Matches claude-agent-acp policy-substitution advisories:
@@ -1006,6 +1050,7 @@ class AcpClient:
         channel_id: str | None = None,
         extra_env: dict[str, str] | None = None,
         acp_backend: str = "",
+        audit_source: str | None = None,
     ):
         self._work_dir = Path(work_dir) if work_dir else Path.home() / ".kiroclaw" / "workspace"
         self._model = model or DEFAULT_MODEL
@@ -1013,6 +1058,12 @@ class AcpClient:
         self._sandbox_mode = sandbox_mode
         self._acp_backend = acp_backend
         self._session_key = session_key
+        # When set, this client emits a per-tool-call SEL audit from the ACP
+        # dispatch loop. Used by app/worker-pool clients (e.g. code-review-sage,
+        # knowledge llm_pool) that have no external audit loop. Left None for
+        # chat / subagent clients, which already audit via chat_runner /
+        # SubagentManager, so they never double-log.
+        self._audit_source = audit_source
         self._channel_id = channel_id
         self._extra_env = extra_env or {}
         self._sandbox_cleanup: str | None = None
@@ -1360,8 +1411,12 @@ class AcpClient:
                 raise AcpError(f"{KIRO_CLI_BIN} not found in PATH")
             argv = [kiro_bin, KIRO_CLI_SUBCMD, "--agent", self._agent]
 
-        # OS-level sandbox: wrap the command to hide sensitive paths
-        argv, self._sandbox_cleanup = wrap_argv(argv, mode=self._sandbox_mode)
+        # OS-level sandbox: wrap the command to hide sensitive paths.
+        # strip_python_env keeps the host PYTHONPATH/PYTHONHOME out of kiro-cli's
+        # foreign MCP subprocesses (which bundle their own interpreter + deps).
+        argv, self._sandbox_cleanup = wrap_argv(
+            argv, mode=self._sandbox_mode, strip_python_env=True
+        )
 
         # Process group isolation: start_new_session=True (calls setsid, enables killpg)
         env = {**os.environ}
@@ -2388,21 +2443,37 @@ class AcpClient:
                     # come back (no result, no progress, no permission) for the
                     # stall window.  This is the silent-hang case where
                     # _stale_eligible is False (cleared on tool_call) so the
-                    # check above never fires.  Treat as a dead turn and exit so
-                    # the caller raises/escalates instead of waiting out the full
-                    # prompt timeout (or, for crons, the job timeout).
+                    # check above never fires.
+                    #
+                    # Recovery (not just detection): the original bare ``return``
+                    # abandoned the turn but left the kiro-cli child ALIVE
+                    # mid-prompt, so the slot wedged and every later prompt hit
+                    # "Prompt already in progress" until the whole backend was
+                    # killed by hand.  Instead, kill the wedged child so the next
+                    # prompt cold-starts, and raise AcpProcessDied so the existing
+                    # recovery path takes over: the dashboard resets the session
+                    # and re-queues the message (bounded by _acp_pipe_death_retries
+                    # → "Session stuck" after 3), and cron/other callers surface a
+                    # clean error instead of a hung turn.  _kill_process only
+                    # touches the subprocess/pipes (never _turn_lock), so it is
+                    # safe to call here — the finally still releases the lock.
+                    #
                     # Use max(last_data_ts, _last_activity) so that MCP tools
                     # which ping /api/session-keepalive (wait, spawn_sub_agents)
                     # keep the watchdog satisfied even though no JSON-RPC frames
                     # arrive on stdout during their execution.
                     _tool_last_seen = max(last_data_ts, self._last_activity)
                     if self._tool_dispatched and (time.monotonic() - _tool_last_seen) > _TOOL_STALL_TIMEOUT:
+                        _stall_idle = time.monotonic() - _tool_last_seen
                         logger.warning(
                             "Tool stall detected for req %d — tool dispatched but no data for %.0fs. "
-                            "Treating turn as dead.",
-                            req_id, time.monotonic() - _tool_last_seen,
+                            "Killing agent to recover the slot.",
+                            req_id, _stall_idle,
                         )
-                        return
+                        await self._kill_process(force=True)
+                        raise AcpProcessDied(
+                            f"tool stalled — no data for {_stall_idle:.0f}s; agent killed to recover"
+                        )
                     continue
 
                 consecutive_empty = 0
@@ -2477,7 +2548,7 @@ class AcpClient:
                     self._turn_done.set()
                     return
                 if action == "error":
-                    raise AcpError(_format_acp_error(msg.error))
+                    _raise_acp_error(msg.error)
                 if action == "permission":
                     await self._handle_permission(msg)
                 elif action == "server_request_unknown":
@@ -2591,7 +2662,7 @@ class AcpClient:
                 yield AcpEvent(kind=EVENT_COMPLETE, stop_reason=reason, credits=self.last_prompt_stats.credits)
                 return
             if action == "error":
-                raise AcpError(_format_acp_error(msg.error))
+                _raise_acp_error(msg.error)
             if action == "permission":
                 yield self._build_permission_event(msg)
             elif action == "server_request_unknown":
@@ -2629,6 +2700,9 @@ class AcpClient:
                     # Check for results from previous tool before yielding new tool_call
                     for tr_event in await asyncio.to_thread(self._read_new_tool_results_sync):
                         yield tr_event
+                    # ACP-layer tool audit for clients with no external audit
+                    # loop (e.g. app worker pools). No-op unless audit_source is set.
+                    await self._maybe_audit_tool_call(tool_event)
                     yield tool_event
                 # Real-time tool result from `tool_call_update` session updates.
                 # kiro-cli emits these the moment a tool completes — fires before
@@ -3049,7 +3123,7 @@ class AcpClient:
                 self._turn_done.set()
                 return "".join(output)
             if action == "error":
-                raise AcpError(_format_acp_error(msg.error))
+                _raise_acp_error(msg.error)
             if action == "permission":
                 await self._handle_permission(msg)
             elif action == "server_request_unknown":
@@ -3144,6 +3218,58 @@ class AcpClient:
             self._handle_config_option_update(msg)
         elif self._is_claude and kind and kind not in KNOWN_SESSION_UPDATES:
             logger.debug("Unhandled session update type: %s", kind)
+
+    async def _maybe_audit_tool_call(self, tool_event: "AcpEvent") -> None:
+        """Emit a per-tool-call SEL audit for clients with no external audit loop.
+
+        App/worker-pool clients (code-review-sage, knowledge llm_pool) run tools
+        through this AcpClient without going through chat_runner or SubagentManager,
+        so their tool calls would otherwise never reach the security audit log.
+        Gated on ``audit_source`` (None for chat / subagent clients, so they never
+        double-log). Best-effort: a SEL failure must never break tool dispatch, but
+        is logged at WARNING so audit-pipeline breakage surfaces to on-call.
+
+        The ``sel().log_tool_invocation`` call is offloaded onto
+        ``subprocess_executor()`` (the same dedicated pool the child-record
+        offloads in this file use, e.g. ``_capture_child_records``) so that any
+        SEL-backend I/O (file write, network, DNS) can never block the event loop
+        and freeze the gateway heartbeat. The dedicated pool — rather than the
+        default executor — isolates a call that can wedge on a stuck kernel
+        resource, so a hung SEL backend cannot starve default-pool users. The
+        offload is additionally bounded by ``asyncio.wait_for``: if the SEL call
+        hangs, the ``await`` cannot stall this turn's tool dispatch indefinitely
+        (a pending executor future never raises on its own) — the timeout raises
+        ``TimeoutError`` (an ``Exception`` subclass), which the handler below
+        swallows so dispatch always proceeds. Per the fault-isolation guideline a
+        leaked worker thread is survivable; a stalled dispatch is not.
+        ``tool_name``/``tool_kind`` use the same ``or`` fallbacks as the
+        observed-tool-call bookkeeping above, so an audit record is always emitted
+        with meaningful values rather than lost.
+        """
+        if not self._audit_source:
+            return
+        # Bind the guard-narrowed (non-None) audit_source into a local: mypy does
+        # not carry the ``if not self._audit_source`` narrowing into the nested
+        # lambda closure below, so referencing the attribute directly there would
+        # be seen as ``str | None``.
+        audit_source = self._audit_source
+        try:
+            await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(
+                    subprocess_executor(),
+                    lambda: sel().log_tool_invocation(
+                        session_key=self._session_key or "",
+                        agent=self._agent,
+                        source=audit_source,
+                        tool_name=tool_event.title or "unknown",
+                        tool_kind=tool_event.tool_kind or "",
+                        outcome="auto_approved",
+                    ),
+                ),
+                timeout=_SEL_AUDIT_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.warning("ACP-layer SEL audit failed", exc_info=True)
 
     def _emit_tool_interrupted_sel(self, site: str) -> None:
         """Emit a SEL audit event when kiro-cli cancels tool uses via its security filter.
@@ -3671,6 +3797,15 @@ class AcpClient:
         params = msg.params or {}
         status = params.get("status", "")
         logger.info("Compaction status: %s", status)
+        # On failure, kiro-cli's notification carries no dedicated error/reason
+        # field today (only `status.type` + an optional `summary`, which is
+        # populated on success but typically empty on failure). Log the full
+        # raw params at WARNING so a future occurrence is actually debuggable
+        # instead of surfacing only "unknown error" to the user with nothing
+        # to grep for server-side. See Mesh compaction-spam investigation.
+        s_type = status.get("type", "") if isinstance(status, dict) else str(status)
+        if s_type == "failed":
+            logger.warning("Compaction failed — raw notification params: %s", params)
 
     async def wait_for_compaction(self, timeout: float = 120.0) -> dict:
         """Read messages until compaction completed/failed arrives. Returns status dict."""

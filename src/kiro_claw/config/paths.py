@@ -66,6 +66,16 @@ def config_package_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def kiro_agents_dir() -> Path:
+    """Return the kiro agents directory (``~/.kiro/agents``).
+
+    Lives in this leaf module so :mod:`kiro_claw.config.loader` can locate
+    installed agent JSONs without importing :mod:`kiro_claw.agent` — which
+    imports ``config.loader`` at module load and would create an import cycle.
+    """
+    return Path.home() / ".kiro" / "agents"
+
+
 def _default_workspace_base() -> Path:
     """Return the platform-specific default base for the workspace."""
     if sys.platform == "darwin":

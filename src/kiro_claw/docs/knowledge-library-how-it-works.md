@@ -6,6 +6,8 @@ The Knowledge Library builds a graph from documents without embeddings. It uses 
 
 ## 1. Chunking
 
+**Supported file types**: Alongside plain-text, markdown, and Org-mode (`.org`), KB folders can ingest PDF (via `pdfplumber`) and DOCX (via `python-docx`); both deps are declared in `setup.cfg` so the binary formats work at runtime.
+
 Files are split into ~400 token chunks using recursive separator splitting (LightRAG style):
 - Separators tried in order: `\n\n` → `\n` → ` `
 - Overlap: 100 tokens between chunks for context preservation
@@ -85,6 +87,23 @@ Two retrieval paths, fused with RRF (Reciprocal Rank Fusion):
 - Returns chunks ranked by graph proximity
 
 **Fusion**: Results from both paths are merged using RRF scoring, giving weight to items that appear in both result sets.
+
+### Citations
+
+`local_knowledge_search` surfaces where each result came from. Every hit carries its `section_title` and chunk line range, plus a per-document locator resolved from the source type. The citation renders as:
+
+```
+**Source:** [local_folder] design-docs — Auth token storage (lines 42-71)
+**File:** design-docs/auth/token-storage.md
+```
+
+- **Source line**: `**Source:** [type] name — section (lines X-Y)`. The `[type]`, section, and line range are each omitted when unavailable.
+- **Locator line** (the most specific the source type affords):
+  - Folder/vault sources → `**File:** <path>` — the specific file within the folder (the source URI is only the folder root).
+  - The aggregate artifact source → `**Artifact:** <slug>`, which deep-links to `/artifacts/<slug>`.
+  - Every other source type → `**Link:** <uri>` (uploads, etc.), where the source URI is already the document locator.
+
+Results whose source is missing or unmapped degrade cleanly — the extra lines are simply absent.
 
 ### With Embeddings (Optional, Future)
 

@@ -344,3 +344,141 @@ class TestEffortControl:
         # the registry's Sonnet fold (see test_effort.py).
         assert not self._effort_provider(backend="", model="auto").supports_effort()
         assert not self._effort_provider(backend="", model="claude-haiku-4.5").supports_effort()
+
+
+class TestStartKiroRuntimeResume:
+    """_start_kiro_runtime resume path: resume issues runtime.load_session()
+    DIRECTLY (session/load, no session/new first) with the full transcript PATH
+    (~/.kiro/sessions/cli/<sid>.json), guarded on the transcript existing on
+    disk. A missing / empty / failed resume falls back to create_session().
+    The direct-load flow mirrors AcpClient and avoids the double-context
+    'refusal' failure mode."""
+
+    def _kiro_provider(self, model="auto"):
+        provider = _build_provider(backend="")  # kiro backend
+        provider._client._work_dir = "/tmp/ws"
+        provider._client._agent = "kiroclaw"
+        provider._client._sandbox_mode = "auto"
+        provider._client._extra_env = {}
+        provider._client._mcp_gateway_overlay = None
+        provider._client._mcp_gateway_settings_mcp_json = None
+        provider._client._mcp_gateway_socket = None
+        # _model is a real string (not a MagicMock) so the DEFAULT_MODEL guard
+        # in _start_kiro_runtime compares correctly.
+        provider._client._model = model
+        return provider
+
+    async def _run_start(self, provider, resume_sid, file_exists, load_raises=False):
+        mock_handle = MagicMock()
+        mock_handle.session_id = "kiro-sess-1"
+        mock_handle.store_session_config = MagicMock()
+        mock_handle.set_model = AsyncMock()
+        mock_runtime = MagicMock()
+        mock_runtime.pid = 4321
+        mock_runtime.spawn = AsyncMock()
+        mock_runtime.create_session = AsyncMock(return_value=mock_handle)
+        if load_raises:
+            mock_runtime.load_session = AsyncMock(side_effect=RuntimeError("load boom"))
+        else:
+            mock_runtime.load_session = AsyncMock(return_value=mock_handle)
+        provider._client._resume_session_id = resume_sid
+
+        with patch("kiro_claw.providers.acp.AcpRuntime", return_value=mock_runtime), patch(
+            "kiro_claw.providers.acp.AcpSessionProvider",
+            side_effect=lambda handle, runtime, **kw: MagicMock(
+                _handle=handle, _runtime=runtime, resumed=False
+            ),
+        ), patch("pathlib.Path.exists", return_value=file_exists):
+            await provider._start_kiro_runtime()
+        return mock_handle, mock_runtime
+
+    @pytest.mark.asyncio
+    async def test_resume_loads_full_transcript_path(self):
+        provider = self._kiro_provider()
+        _handle, runtime = await self._run_start(provider, "abc-123", file_exists=True)
+        runtime.load_session.assert_awaited_once()
+        # session/load must be issued directly — no session/new first.
+        runtime.create_session.assert_not_awaited()
+        args = runtime.load_session.await_args.args
+        loaded_path, loaded_sid = args[0], args[1]
+        # First positional is the full transcript path, never the bare sid.
+        assert loaded_path.endswith("/.kiro/sessions/cli/abc-123.json")
+        assert loaded_path != "abc-123"
+        # Second positional is the original sid, adopted as the resumed sessionId.
+        assert loaded_sid == "abc-123"
+
+    @pytest.mark.asyncio
+    async def test_resume_skipped_when_transcript_missing(self):
+        provider = self._kiro_provider()
+        _handle, runtime = await self._run_start(provider, "stale-sid", file_exists=False)
+        # A stale sid with no transcript on disk must NOT replay — fresh start.
+        runtime.load_session.assert_not_awaited()
+        runtime.create_session.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_resume_when_sid_empty(self):
+        provider = self._kiro_provider()
+        _handle, runtime = await self._run_start(provider, "", file_exists=True)
+        runtime.load_session.assert_not_awaited()
+        runtime.create_session.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_failed_load_falls_back_to_create_session(self):
+        # session/load raising (e.g. capability guard, missing "modes") must not
+        # abort startup — it falls back to a fresh session/new.
+        provider = self._kiro_provider()
+        _handle, runtime = await self._run_start(
+            provider, "abc-123", file_exists=True, load_raises=True
+        )
+        runtime.load_session.assert_awaited_once()
+        runtime.create_session.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_non_default_model_applied_to_runtime_session(self):
+        # A slot configured with a non-default kiro model must get set_model on
+        # the live session (mirrors AcpClient handshake step 5) — else it
+        # silently runs the agent's default model.
+        provider = self._kiro_provider(model="global.anthropic.claude-opus-4-8[1m]")
+        handle, _runtime = await self._run_start(provider, "", file_exists=True)
+        handle.set_model.assert_awaited_once_with("global.anthropic.claude-opus-4-8[1m]")
+
+    @pytest.mark.asyncio
+    async def test_default_model_does_not_call_set_model(self):
+        # DEFAULT_MODEL ("auto") = let kiro-cli pick per agent config → no push.
+        provider = self._kiro_provider(model="auto")
+        handle, _runtime = await self._run_start(provider, "", file_exists=True)
+        handle.set_model.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_create_session_failure_kills_orphaned_runtime(self):
+        # Resource-leak guard: if create_session() raises AFTER a successful
+        # spawn(), nothing owns the kiro-cli process yet — _start_kiro_runtime
+        # must kill the runtime before propagating so it isn't orphaned until
+        # gateway restart. The original exception must still surface.
+        provider = self._kiro_provider(model="auto")
+        provider._client._resume_session_id = ""  # no resume → straight to create_session
+
+        mock_runtime = MagicMock()
+        mock_runtime.pid = 4321
+        mock_runtime.spawn = AsyncMock()
+        mock_runtime.kill = AsyncMock()
+        mock_runtime.saw_not_logged_in = MagicMock(return_value=False)
+        boom = RuntimeError("session limit reached")
+        mock_runtime.create_session = AsyncMock(side_effect=boom)
+
+        with patch("kiro_claw.providers.acp.AcpRuntime", return_value=mock_runtime), patch(
+            "kiro_claw.providers.acp.AcpSessionProvider"
+        ):
+            with pytest.raises(RuntimeError, match="session limit reached"):
+                await provider._start_kiro_runtime()
+
+        # The orphaned runtime was killed exactly once before the raise propagated.
+        mock_runtime.kill.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_successful_start_does_not_kill_runtime(self):
+        # Guard against over-eager cleanup: a normal successful start must NOT
+        # kill the runtime (the AcpSessionProvider now owns it).
+        provider = self._kiro_provider(model="auto")
+        _handle, runtime = await self._run_start(provider, "", file_exists=True)
+        runtime.kill.assert_not_called()

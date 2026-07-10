@@ -77,8 +77,10 @@ describe('ChatInput reasoning effort button', () => {
     expect(REASONING_EFFORT_PROVIDERS.has('claude_code')).toBe(false)
   })
 
-  it('modelSupportsEffort gates per-model (Opus/Sonnet only)', () => {
-    // Capable: Opus/Sonnet in either naming convention.
+  it('modelSupportsEffort gates per-model (Fable/Opus/Sonnet only)', () => {
+    // Capable: Fable/Opus/Sonnet in either naming convention.
+    expect(modelSupportsEffort('claude-fable-5')).toBe(true)
+    expect(modelSupportsEffort('global.anthropic.claude-fable-5[1m]')).toBe(true)
     expect(modelSupportsEffort('claude-opus-4.7')).toBe(true)
     expect(modelSupportsEffort('claude-sonnet-4.6')).toBe(true)
     expect(modelSupportsEffort('global.anthropic.claude-opus-4-8[1m]')).toBe(true)

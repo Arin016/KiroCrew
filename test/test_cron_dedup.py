@@ -574,3 +574,18 @@ class TestCronFailureRespectsSilent:
             if "❌ Job failed" in str(c)
         ]
         assert alert_calls, "Non-silent cron failure must still ring the dashboard bell"
+
+    def test_silent_failure_records_suppressed_sel_audit(self) -> None:
+        # A silent cron's failure is still audited — as a suppression, not a
+        # dropped audit. Locks in the "recorded in the SEL" invariant so a
+        # future refactor can't move the SEL call inside a silent guard.
+        gw = _make_gateway()
+        gw.slack.post_message = AsyncMock()
+        job = _make_job(silent=True)
+        with patch("kiro_claw.slack.gateway.sel") as mock_sel:
+            _run_callback_raising(gw, job, RuntimeError("boom"))
+        mock_sel.return_value.log_tool_invocation.assert_called_once()
+        kwargs = mock_sel.return_value.log_tool_invocation.call_args.kwargs
+        assert kwargs["tool_name"] == "cron_failure_alert"
+        assert kwargs["outcome"] == "suppressed"
+        assert kwargs["downstream_service"] == "none"

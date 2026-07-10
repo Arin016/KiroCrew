@@ -39,5 +39,26 @@ export const Item = React.forwardRef<HTMLDivElement, any>(({ children, className
 })
 export const Separator = React.forwardRef<HTMLDivElement, any>((props, ref) => <div ref={ref} role="separator" {...props} />)
 export const Group: React.FC<any> = ({ children }) => <>{children}</>
-export const Sub: React.FC<any> = ({ children }) => <>{children}</>
+
+// Submenu: stateful like Root — SubTrigger opens it, SubContent renders when open.
+const SubCtx = createContext<{ open: boolean; setOpen: (v: boolean) => void }>({ open: false, setOpen: () => {} })
+export const Sub: React.FC<any> = ({ children, onOpenChange }) => {
+  const [open, setOpen] = useState(false)
+  const set = (v: boolean) => { setOpen(v); onOpenChange?.(v) }
+  return <SubCtx.Provider value={{ open, setOpen: set }}>{children}</SubCtx.Provider>
+}
+export const SubTrigger = React.forwardRef<HTMLDivElement, any>(({ children, className, ...props }, ref) => {
+  const { open, setOpen } = useContext(SubCtx)
+  return (
+    <div ref={ref} role="menuitem" aria-haspopup="menu" aria-expanded={open} className={className} {...props}
+      onClick={e => { props.onClick?.(e); setOpen(!open) }}>
+      {children}
+    </div>
+  )
+})
+export const SubContent = React.forwardRef<HTMLDivElement, any>(({ children, className, ...props }, ref) => {
+  const { open } = useContext(SubCtx)
+  if (!open) return null
+  return <div ref={ref} role="menu" className={className} {...props}>{children}</div>
+})
 export const RadioGroup: React.FC<any> = ({ children }) => <>{children}</>

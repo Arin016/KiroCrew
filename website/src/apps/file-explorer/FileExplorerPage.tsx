@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useQuery, useQueryClient, useMutation, useQueries } from '@tanstack/react-query'
 import { AlertTriangle, MessageSquare, Eye, CornerDownRight, Copy, ArrowUpFromLine } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
+import { useAppDispatch } from '../../store'
+import { setPendingInput } from '../../store/chatSlice'
 import { Skeleton } from '../../components/ui'
 import Clickable from '../../components/Clickable'
 import { fileExplorerApi } from './api'
@@ -29,6 +31,7 @@ const newFileTab = (path: string, folderId: string): FileTab => ({
 
 export default function FileExplorerPage() {
   const navigate = useNavigate()
+  const dispatch = useAppDispatch()
   const queryClient = useQueryClient()
 
   const [folderTabs, setFolderTabs] = useState<FolderTab[]>([])
@@ -258,11 +261,17 @@ export default function FileExplorerPage() {
   }, [activeFolder, updateFolderTab])
 
   // ── Chat launcher ──
+  // Hand the prompt to ChatPage via Redux pendingInput, then navigate with
+  // ?prefill=1 so it lands in the composer (ChatPage clears the param and
+  // shows the prefill hint). The old `?message=` query param was never read
+  // by ChatPage — `?msg=` is a scroll-to-timestamp deep-link, not a prefill —
+  // so the menu item appeared to do nothing.
   const chatAboutPath = useCallback((path: string, kind = 'file') => {
     const noun = kind === 'dir' ? 'folder' : 'file'
     const message = `I'd like to discuss the ${noun} \`${path}\`. Please read it and help me understand or modify it.`
-    navigate(`/chat?message=${encodeURIComponent(message)}`)
-  }, [navigate])
+    dispatch(setPendingInput(message))
+    navigate('/chat?prefill=1')
+  }, [dispatch, navigate])
 
   // ── Context menu ──
   const onTreeContextMenu = useCallback((e: React.MouseEvent, node: TreeEntry) => { setContextMenu({ x: e.clientX, y: e.clientY, node }) }, [])

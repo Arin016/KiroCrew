@@ -9,9 +9,10 @@ import os
 from pathlib import Path
 from typing import Any
 
+from kiro_claw.config.loader import KiroClawConfig
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.security import is_sensitive_path
-from kiro_claw.skills import skills_dir
+from kiro_claw.skills import aim_skills_dir, skills_dir
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +71,37 @@ def _resolve_aim_skill_path(name: str) -> Path | None:
     return None
 
 
-async def _list_aim_skills() -> list[dict[str, Any]]:
-    """List skills from AIM using ``aim skills list`` CLI."""
+def _aim_skill_path_index() -> dict[str, Path]:
+    """Build a ``{skill_name: SKILL.md path}`` index by globbing ``~/.aim`` ONCE.
+
+    :func:`_resolve_aim_skill_path` does two globs of the whole ``~/.aim`` tree
+    per lookup; calling it once per skill is O(2N) tree walks for N skills.
+    When resolving *many* skills (see :func:`_parse_aim_skills`) build this
+    index up front instead — two globs total — then do dict lookups.
+
+    Precedence matches :func:`_resolve_aim_skill_path`, which tries the
+    ``skills/*`` layout before ``packages/*/skills/*``: index the winning
+    layout first, then use ``setdefault`` on the second pass so it only fills
+    names the first pass didn't already claim.
+    """
+    aim_dir = Path.home() / ".aim"
+    index: dict[str, Path] = {}
+    for p in aim_dir.glob("skills/*/*/SKILL.md"):
+        index.setdefault(p.parent.name, p)
+    for p in aim_dir.glob("packages/*/skills/*/*/SKILL.md"):
+        index.setdefault(p.parent.name, p)
+    return index
+
+
+async def _aim_list_stdout() -> str | None:
+    """Run ``aim skills list`` and return its stdout, or None on failure.
+
+    This is the only *async* part of AIM skill discovery — the subprocess
+    is awaited on the event loop (non-blocking). Parsing the output, which
+    does synchronous ``~/.aim`` globbing per skill, is split into the sync
+    :func:`_parse_aim_skills` so callers can run it off the loop.
+    """
     import asyncio
-    import re
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -83,20 +111,44 @@ async def _list_aim_skills() -> list[dict[str, Any]]:
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
         if proc.returncode != 0:
-            return []
-    except FileNotFoundError:
-        return []
+            return None
     except asyncio.TimeoutError:
         try:
             proc.kill()
         except ProcessLookupError:
             pass
         await proc.communicate()
+        return None
+    except OSError:
+        # aim missing (FileNotFoundError), not executable (PermissionError),
+        # or exec failing under resource limits (other OSError). AIM is one of
+        # three skill sources; a failure here must degrade to "no aim skills",
+        # never propagate and 500 the whole /api/skills (which would also hide
+        # the unrelated kiroclaw + kiro sources).
+        return None
+    return stdout.decode(errors="replace")
+
+
+def _parse_aim_skills(stdout: str | None) -> list[dict[str, Any]]:
+    """Parse ``aim skills list`` output into skill metadata dicts.
+
+    Synchronous and filesystem-heavy: resolves each skill's SKILL.md path
+    against a one-shot ``~/.aim`` index (:func:`_aim_skill_path_index`).
+    Callers on the asyncio event loop MUST run this in an executor so it never
+    blocks the loop. Returns ``[]`` when *stdout* is None (subprocess failed).
+    """
+    import re
+
+    if stdout is None:
         return []
 
+    # Glob ~/.aim ONCE up front, then look up each skill by name — instead of
+    # two full-tree globs per skill (O(2N) walks). Built lazily below so the
+    # empty/None-output paths pay nothing.
+    path_index: dict[str, Path] | None = None
     result: list[dict[str, Any]] = []
     pkg = ""
-    for line in stdout.decode(errors="replace").splitlines():
+    for line in stdout.splitlines():
         stripped = line.strip()
         if not stripped:
             continue
@@ -104,16 +156,23 @@ async def _list_aim_skills() -> list[dict[str, Any]]:
         if not line.startswith(" ") and not line.startswith("Installed"):
             pkg = stripped
             continue
-        # Description line (check BEFORE skill line — both match `word: text`)
+        # Description line (check BEFORE skill line — both match `word: text`).
+        # Consume ANY "Description:" line here, even when it precedes the first
+        # skill (empty result / package mismatch): otherwise it falls through to
+        # the skill regex below, which matches "Description: text" and appends a
+        # bogus skill named "Description".
         dm = re.match(r"^\s+Description:\s+(.+)", line)
-        if dm and result and result[-1]["package"] == pkg:
-            result[-1]["description"] = dm.group(1)
+        if dm:
+            if result and result[-1]["package"] == pkg:
+                result[-1]["description"] = dm.group(1)
             continue
         # Skill line: "  name [vX.Y.Z]: display-name" or "  name: display-name"
         m = re.match(r"^\s+(\S+)(?:\s+\[v[\d.]+\])?:\s+(.+)", line)
         if m:
             name = m.group(1)
-            resolved = _resolve_aim_skill_path(name)
+            if path_index is None:
+                path_index = _aim_skill_path_index()
+            resolved = path_index.get(name)
             result.append(
                 {
                     "key": f"aim/{name}",
@@ -264,7 +323,13 @@ def _expand_resource_uri(uri: str, agent_path: Path) -> str | None:
 
 
 def _agent_loads_skill(agent_json: dict[str, Any], agent_path: Path, skill_md: Path) -> bool:
-    """Return True if *agent_json*'s ``resources`` would load *skill_md*."""
+    """Return True if *agent_json*'s ``resources`` would load *skill_md*.
+
+    One-off helper (single skill vs single agent). For annotating *many*
+    skills against *many* agents, prefer :func:`_expand_agent_globs` +
+    :func:`_agents_loading_skill` so each agent's globs are expanded once
+    instead of once per skill.
+    """
     resources = agent_json.get("resources") or []
     if not isinstance(resources, list):
         return False
@@ -278,24 +343,68 @@ def _agent_loads_skill(agent_json: dict[str, Any], agent_path: Path, skill_md: P
     return False
 
 
-def _resolve_loaded_by_agents(skill_md: Path) -> list[str]:
-    """Return list of agent names whose ``resources`` glob matches *skill_md*.
+def _expand_agent_globs(
+    parsed_agents: list[tuple[str, dict[str, Any], Path]],
+) -> list[tuple[str, list[str]]]:
+    """Pre-expand every agent's ``skill://`` resources into fnmatch globs ONCE.
 
-    Best-effort: parses every agent JSON, ignores ones that fail to parse.
-    Empty list means no agent loads this skill via ``skill://`` URIs (it
-    may still be loaded via KiroClaw text-injection or an external MCP server).
+    Returns ``(agent_name, [glob, ...])`` pairs. The glob for a resource
+    depends only on ``(uri, agent_path)`` — NOT on the skill being matched —
+    so expanding here (O(agents × resources)) and reusing the result across
+    all skills avoids re-running :func:`_expand_resource_uri` once per
+    (skill, agent, resource), which on a large catalog is the dominant cost.
+    Agents with no skill:// resources are dropped (they can match nothing).
     """
-    out: list[str] = []
+    expanded: list[tuple[str, list[str]]] = []
+    for name, data, agent_path in parsed_agents:
+        resources = data.get("resources") or []
+        if not isinstance(resources, list):
+            continue
+        globs = [
+            g
+            for res in resources
+            if isinstance(res, str)
+            for g in (_expand_resource_uri(res, agent_path),)
+            if g
+        ]
+        if globs:
+            expanded.append((name, globs))
+    return expanded
+
+
+def _agents_loading_skill(
+    skill_md: Path, expanded_agents: list[tuple[str, list[str]]]
+) -> list[str]:
+    """Return names of agents whose pre-expanded globs match *skill_md*."""
+    target = str(skill_md)
+    return [
+        name
+        for name, globs in expanded_agents
+        if any(fnmatch.fnmatch(target, g) for g in globs)
+    ]
+
+
+def _load_parsed_agents() -> list[tuple[str, dict[str, Any], Path]]:
+    """Read every agent JSON ONCE, returning ``(name, data, agent_path)``.
+
+    Hoisted out of the per-skill loop so ``api_skills`` parses each agent
+    file exactly once per request instead of once per skill — turning an
+    O(skills × agents) read/parse blowup into O(agents). Best-effort: macOS
+    AppleDouble sidecars ("._foo.json"), unreadable/invalid agents, and
+    sensitive-path symlinks are skipped (a symlink under ~/.kiro/agents/
+    could otherwise point at a credential file renamed ``*.json``).
+    """
+    parsed: list[tuple[str, dict[str, Any], Path]] = []
     for agents_dir in _agent_dirs():
-        for agent_path in sorted(agents_dir.glob("*.json")):
-            # Skip macOS AppleDouble sidecars ("._foo.json"). These are not
-            # JSON; a manual tar from macOS can drag them in.
+        try:
+            agent_files = sorted(agents_dir.glob("*.json"))
+        except OSError:
+            # An unreadable agents dir (e.g. PermissionError) must degrade to
+            # "no agents" rather than propagate and 500 the whole response.
+            continue
+        for agent_path in agent_files:
             if agent_path.name.startswith("._"):
                 continue
-            # Resolve and gate on sensitive paths before reading — a symlink
-            # under ~/.kiro/agents/ could otherwise point at a credential
-            # file (e.g. ~/.aws/credentials renamed *.json).  All file reads
-            # must honor is_sensitive_path().
             try:
                 resolved = agent_path.resolve(strict=True)
             except OSError:
@@ -310,10 +419,88 @@ def _resolve_loaded_by_agents(skill_md: Path) -> list[str]:
                 continue
             if not isinstance(data, dict):
                 continue
-            if _agent_loads_skill(data, agent_path, skill_md):
-                name = data.get("name") or agent_path.stem
-                out.append(str(name))
+            name = data.get("name") or agent_path.stem
+            parsed.append((str(name), data, agent_path))
+    return parsed
+
+
+def _resolve_loaded_by_agents(
+    skill_md: Path,
+    parsed_agents: list[tuple[str, dict[str, Any], Path]] | None = None,
+) -> list[str]:
+    """Return list of agent names whose ``resources`` glob matches *skill_md*.
+
+    Pass *parsed_agents* (from :func:`_load_parsed_agents`) to reuse a single
+    agent parse across many skills; omit it for a one-off lookup (parses
+    agents inline). Empty list means no agent loads this skill via
+    ``skill://`` URIs (it may still be loaded via KiroClaw text-injection or
+    an external MCP server).
+    """
+    agents = parsed_agents if parsed_agents is not None else _load_parsed_agents()
+    out: list[str] = []
+    for name, data, agent_path in agents:
+        if _agent_loads_skill(data, agent_path, skill_md):
+            out.append(name)
     return out
+
+
+def annotate_skills_with_agents(skills: list[dict[str, Any]]) -> None:
+    """Annotate each skill dict in-place with ``loaded_by_agents``.
+
+    Parses the agent JSONs ONCE and pre-expands each agent's ``skill://``
+    globs ONCE, then matches every skill against that in-memory set —
+    O(agents × resources) expansion + O(skills × globs) matching, instead of
+    re-expanding every agent glob per skill. Synchronous and filesystem-heavy
+    (the parse walks ~/.kiro/agents) — callers on the asyncio event loop MUST
+    run this off the loop. Per-skill failures isolate to an empty list (the
+    documented default) rather than blanking the whole response.
+    """
+    expanded = _expand_agent_globs(_load_parsed_agents())
+    for s in skills:
+        path = s.get("path") or ""
+        if not path:
+            s["loaded_by_agents"] = []
+            continue
+        try:
+            s["loaded_by_agents"] = _agents_loading_skill(Path(path), expanded)
+        except Exception:
+            s["loaded_by_agents"] = []
+
+
+def collect_skills_blocking(
+    skills_loader: Any,
+    aim_stdout: str | None,
+    project_dir: Path | None,
+) -> list[dict[str, Any]]:
+    """Gather + annotate the full skill catalog. Runs ALL blocking FS work.
+
+    This is the synchronous core behind ``GET /api/skills``. It performs
+    every filesystem-heavy step in one call so the caller can offload the
+    whole thing to a thread via ``run_in_executor`` — previously only the
+    agent annotation was offloaded while ``list_skills()`` (os.walk +
+    per-file frontmatter reads), the AIM path globs, and
+    ``list_kiro_skills()`` (per-skill resolve + read) still ran on the event
+    loop and could stall it past the loop-stall watchdog on large catalogs.
+
+    Steps, in the same order the handler used inline:
+
+    1. ``skills_loader.list_skills()`` — kiroclaw skills (default source).
+    2. ``_parse_aim_skills(aim_stdout)`` — AIM skills; the async ``aim``
+       subprocess must already have run (its stdout passed in), leaving only
+       the synchronous ``~/.aim`` path globs here.
+    3. ``list_kiro_skills(project_dir)`` — open-standard kiro-cli skills.
+    4. ``annotate_skills_with_agents(...)`` — ``loaded_by_agents`` per skill.
+
+    The subprocess is intentionally NOT run here (it needs the event loop);
+    the caller awaits it and hands us the stdout.
+    """
+    result: list[dict[str, Any]] = skills_loader.list_skills()
+    for s in result:
+        s.setdefault("source", "kiroclaw")
+    result.extend(_parse_aim_skills(aim_stdout))
+    result.extend(list_kiro_skills(project_dir))
+    annotate_skills_with_agents(result)
+    return result
 
 
 # ── Skill directory browser (tree + file content) ──
@@ -330,7 +517,7 @@ def _resolve_skill_root(name: str, state: DashboardState) -> Path | None:
     Accepts the same nested-name scheme used by the existing skill API:
     - ``foo`` → ``~/.kiroclaw/skills/foo``
     - ``utils/tiny-url`` → ``~/.kiroclaw/skills/utils/tiny-url``
-    - ``aim/<skill>`` → resolved via _list_aim_skills() lookup
+    - ``aim/<skill>`` → resolved via _resolve_aim_skill_path() lookup
     - ``kiro-user/<skill>`` → ``~/.kiro/skills/<skill>``
     - ``kiro-workspace/<skill>`` → ``<project>/.kiro/skills/<skill>``
 
@@ -381,9 +568,30 @@ def _resolve_skill_root(name: str, state: DashboardState) -> Path | None:
         # deployment even though SkillsLoader (the GET /api/skills source)
         # resolves them correctly.
         rel = name
-        root = skills_dir()
-    if not rel or ".." in rel:
-        return None
+        # Reject empty, traversal, absolute, and home-expansion inputs before
+        # any filesystem probing. pathlib collapses ``Path(root) / "/etc"`` to
+        # ``/etc`` (absolute RHS overrides the base), so an un-rejected absolute
+        # or ``~`` prefix would let _probe() run is_dir() on arbitrary paths
+        # before the containment check.
+        if not rel or ".." in rel or rel.startswith("/") or rel.startswith("~"):
+            return None
+        # Root precedence must match SkillsLoader.load_skill(): kiroclaw ->
+        # user extra_paths -> aim (lowest). Otherwise the tree endpoint could
+        # display a different directory than load_skill() actually reads.
+        roots = [skills_dir()]
+        try:
+            roots.extend(Path(p).expanduser() for p in KiroClawConfig.load().skills.extra_paths)
+        except Exception:
+            logger.debug("failed to load extra skill paths from config", exc_info=True)
+        roots.append(aim_skills_dir())
+
+        def _probe(r: Path) -> bool:
+            try:
+                return (r / rel).is_dir()
+            except OSError:
+                return False
+
+        root = next((r for r in roots if _probe(r)), skills_dir())
     candidate = root / rel
     if not candidate.is_dir():
         return None

@@ -130,32 +130,25 @@ describe('ActivityViewer', () => {
     expect(before(zeta, alpha)).toBeTruthy()
   })
 
-  it('Navigation tab renders links + outline and scrolls a section on click', () => {
-    const onScroll = vi.fn()
+  it('Resources section renders links in Files tab', () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const store = configureStore({
       reducer: { chat: chatReducer, dashboard: dashboardReducer, notifications: notificationsReducer },
     })
-    // Seed the active tab to 'nav' so the component renders the Navigation
-    // body directly — SegmentedControl falls back to compact mode under jsdom
-    // (zero width), so clicking the inactive segment label is unreliable.
-    store.dispatch(openActivityToTab('nav'))
+    // Files tab is the default
+    store.dispatch(openActivityToTab('files'))
     render(
       <Provider store={store}>
         <QueryClientProvider client={qc}>
           <ActivityViewer
             {...baseProps}
             navLinks={[{ url: 'https://code.amazon.com/reviews/CR-1', type: 'cr', label: 'CR-1', msgIdx: 0 }]}
-            navSections={[{ label: 'First question', msgIdx: 0, displayIdx: 3 }]}
-            onScrollToNavSection={onScroll}
           />
         </QueryClientProvider>
       </Provider>,
     )
+    // Resources section should appear in the Files tab
+    expect(screen.getByText('Resources')).toBeInTheDocument()
     expect(screen.getByText('CR-1')).toBeInTheDocument()
-    const section = screen.getByText('First question')
-    expect(section).toBeInTheDocument()
-    fireEvent.click(section)
-    expect(onScroll).toHaveBeenCalledWith(3)
   })
 })

@@ -3457,6 +3457,36 @@ class TestDeliverCronResponse:
         slack.post_message.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_renders_options_action_block(self):
+        # Mesh-2603: an [OPTIONS: ...] tag in cron output renders as an
+        # actions block posted after the message.
+        orch, slack = self._orch_with_slack()
+        slack.post_blocks = AsyncMock()
+        orch.sessions.get_channel = MagicMock(return_value="C123")
+        orch.sessions.get_thread = MagicMock(return_value="T456")
+
+        posted = await orch._deliver_cron_response(
+            "cron:job1", "pick one\n\n[OPTIONS: Yes | No]"
+        )
+
+        assert posted is True
+        body = slack.post_message.call_args.args[1]
+        assert "OPTIONS" not in body
+        slack.post_blocks.assert_awaited_once()
+        assert slack.post_blocks.call_args.args[0] == "C123"
+
+    @pytest.mark.asyncio
+    async def test_no_options_no_action_block(self):
+        orch, slack = self._orch_with_slack()
+        slack.post_blocks = AsyncMock()
+        orch.sessions.get_channel = MagicMock(return_value="C123")
+
+        posted = await orch._deliver_cron_response("cron:job1", "plain text")
+
+        assert posted is True
+        slack.post_blocks.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_redacts_before_posting(self):
         # Defense-in-depth: the helper must redact at the Slack boundary even
         # if the caller already redacted (security-controls).

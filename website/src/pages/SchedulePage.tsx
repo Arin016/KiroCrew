@@ -117,6 +117,29 @@ export default function SchedulePage() {
   useEffect(() => { load() }, [load])
 
   const { running, actionError, setActionError, runNow, openInChat } = useCronActions(load)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+  const confirmRevertTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const armDelete = useCallback((id: string) => {
+    setConfirmDeleteId(id)
+    if (confirmRevertTimer.current) clearTimeout(confirmRevertTimer.current)
+    confirmRevertTimer.current = setTimeout(() => setConfirmDeleteId(null), 3000)
+  }, [])
+  useEffect(() => () => { if (confirmRevertTimer.current) clearTimeout(confirmRevertTimer.current) }, [])
+  const deleteJob = useCallback(async (id: string) => {
+    try {
+      if (confirmRevertTimer.current) clearTimeout(confirmRevertTimer.current)
+      setDeletingId(id)
+      await api.deleteCron(id)
+      setSelected(prev => prev?.id === id ? null : prev)
+      await load()
+    } catch (e: unknown) {
+      setActionError({ id, msg: e instanceof Error ? e.message : 'Delete failed' })
+    } finally {
+      setDeletingId(null)
+      setConfirmDeleteId(null)
+    }
+  }, [load, setActionError])
   const filteredJobs = useMemo(() => sanitizedJobs.filter(j => !cronFilter || (j.name+' '+j.safeMessage+' '+(j.agent||'')).toLowerCase().includes(cronFilter.toLowerCase())), [sanitizedJobs, cronFilter])
   const scheduleComparators = useMemo(() => ({
     name: (a: CronJob, b: CronJob) => a.name.localeCompare(b.name),
@@ -215,7 +238,7 @@ export default function SchedulePage() {
               <SortableHeader label="Status" sortKey="status" sort={schedSort} onToggle={toggleSchedSort} className="w-[70px]" />
               <SortableHeader label="Last Run" sortKey="lastRun" sort={schedSort} onToggle={toggleSchedSort} className="w-[80px]" />
               <SortableHeader label="Next Run" sortKey="nextRun" sort={schedSort} onToggle={toggleSchedSort} className="w-[90px]" />
-              <th className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium w-[180px]">Actions</th>
+              <th className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium w-[210px]">Actions</th>
             </tr></thead>
             <tbody>{jobs.length === 0
               ? <tr><td colSpan={9}><EmptyState icon={<ClipboardList className="lucide-inline" />} title="No cron jobs" /></td></tr>
@@ -235,7 +258,13 @@ export default function SchedulePage() {
                   <span title={j.strict_schedule ? 'Disable strict schedule (allow jitter)' : 'Enable strict schedule (no jitter)'}><Btn onClick={async () => { try { await api.updateCron(j.id, { strict_schedule: !j.strict_schedule }); load() } catch (e: unknown) { setActionError({ id: j.id, msg: e instanceof Error ? e.message : 'Failed' }) } }}>{j.strict_schedule ? <><Check className="lucide-inline" /> Strict</> : 'Strict'}</Btn></span>{' '}
                   <span title={j.enabled ? 'Run now' : 'Resume to run'}><Btn onClick={() => runNow(j.id)} disabled={!j.enabled || running.has(j.id)}>{running.has(j.id) ? '...' : 'Run'}</Btn></span>{' '}
                   <span title={j.has_slot ? 'Continue session' : j.has_result ? 'View last result' : 'No result'}><Btn onClick={() => openInChat(j.id)} disabled={!j.has_result && !j.has_slot}>{j.has_slot ? 'Continue' : 'View'}</Btn></span>{' '}
-                  <Btn onClick={async () => { try { await api.toggleCron(j.id, !j.enabled); load() } catch (e: unknown) { setActionError({ id: j.id, msg: e instanceof Error ? e.message : 'Failed' }) } }}>{j.enabled ? 'Pause' : 'Resume'}</Btn>
+                  <Btn onClick={async () => { try { await api.toggleCron(j.id, !j.enabled); load() } catch (e: unknown) { setActionError({ id: j.id, msg: e instanceof Error ? e.message : 'Failed' }) } }}>{j.enabled ? 'Pause' : 'Resume'}</Btn>{' '}
+                  <Btn
+                    danger
+                    disabled={deletingId === j.id}
+                    title={confirmDeleteId === j.id ? 'Click again to confirm' : 'Delete job'}
+                    onClick={() => confirmDeleteId === j.id ? deleteJob(j.id) : armDelete(j.id)}
+                  >{deletingId === j.id ? '...' : confirmDeleteId === j.id ? 'Confirm' : 'Delete'}</Btn>
                   {actionError?.id === j.id && <span className="text-danger text-[12px] ml-1">{actionError.msg}</span>}
                 </td>
               </tr>

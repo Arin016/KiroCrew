@@ -153,6 +153,18 @@ def write_tombstone(
         logger.warning("write_tombstone failed for %s", agent_id, exc_info=True)
 
 
+def mark_delivered(agent_id: str) -> None:
+    """Mark a successfully-delivered subagent for deferred TTL cleanup.
+
+    Writes a ``cause="delivered"`` tombstone instead of deleting the folder
+    immediately, so (a) orphan reconciliation skips it on restart and (b) the
+    reaper prunes it after the (short) delivered TTL — giving the parent a grace
+    window to read ``result.txt`` via ``spawn_status`` / read / grep after the
+    completion event, rather than re-running the subagent.
+    """
+    write_tombstone(agent_id, cause="delivered", recovery_action="delivered")
+
+
 # ── delete ───────────────────────────────────────────────────────────
 
 
@@ -188,9 +200,17 @@ def list_orphans() -> list[dict]:
 # ── prune ────────────────────────────────────────────────────────────
 
 
-def prune_stale_tombstones(max_age_days: int = 7) -> int:
-    """Delete tombstoned folders older than *max_age_days*. Returns count pruned."""
-    cutoff = time.time() - (max_age_days * 86400)
+def prune_stale_tombstones(max_age_days: int = 7, delivered_ttl_secs: int = 3600) -> int:
+    """Delete tombstoned folders past their retention window. Returns count pruned.
+
+    Two windows: abnormal-exit tombstones (timeout / error / orphan) are kept for
+    *max_age_days* for post-mortem diagnostics; ``cause="delivered"`` tombstones
+    (successful deliveries retained so the parent can read the full transcript)
+    are pruned after the shorter *delivered_ttl_secs* to bound disk growth.
+    """
+    now = time.time()
+    default_cutoff = now - (max_age_days * 86400)
+    delivered_cutoff = now - max(0, delivered_ttl_secs)
     pruned = 0
     try:
         dirs = sorted(_SUBAGENTS_DIR.iterdir())
@@ -204,6 +224,7 @@ def prune_stale_tombstones(max_age_days: int = 7) -> int:
             continue
         try:
             ts = json.loads(ts_path.read_text(encoding="utf-8"))
+            cutoff = delivered_cutoff if ts.get("cause") == "delivered" else default_cutoff
             if ts.get("died", 0) < cutoff:
                 # Best-effort session cleanup — must not block folder removal
                 try:

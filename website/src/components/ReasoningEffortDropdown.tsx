@@ -10,7 +10,7 @@ import InfoTip from './InfoTip'
 const EFFORT_HELP =
   'Reasoning effort sets how long the model thinks before answering. Higher means ' +
   'more time reasoning through hard problems (slower, better answers); lower is faster. ' +
-  '"Model default" applies no override — the model picks its own effort (Opus/Sonnet only).'
+  '"Model default" applies no override — the model picks its own effort (Fable/Opus/Sonnet only).'
 
 // Cold-start fallback before /api/effort-levels resolves (or on fetch failure).
 // Concrete levels only — "default" is a separate toggle, not a slider notch.

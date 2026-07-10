@@ -247,6 +247,58 @@ Window: backend `b35c496b..59ec6e1d`, frontend `fdfe158b..ca99bb4`. Ported:
 | [`5d99a8d4`](https://code.amazon.com/packages/MeshClaw/commits/5d99a8d4198a5904f91eacff87b02380bf781bcb) | backend | SKIP_INTERNAL | feat(security) MCS-Jail Midway AgentContext (Mesh-1517) — Midway/MCS coupling; `jail.py` absent, MCS-Jail Brazil dep. Its one generic hunk (`sandbox.py` `userns_available()` public alias) has **no fork consumer** — only the absent `jail.py` calls it (anti-miss (b); same precedent as batch-16 `useVisibilityInterval`). `cli.py --no-jail`, `agent.jail` enum, cli_doctor jail status, config-baseline all confined to the jail. |
 | [`afed9312`](https://code.amazon.com/packages/MeshClaw/commits/afed93127c82625d7287735202eef6d449ee01da) | backend | SKIP_INTERNAL | fix(mcp-gateway) raise pooled-backend cap 20→64 — 100% confined to `mcp_gateway/` (`manager.py` `GatewaySpec` + `McpGatewayConfig` in loader.py). Fork has **no `McpGatewayConfig`** (grep empty) — no anchor. |
 
+### Batch 27 — GitHub PR (73 ported, 62 left out) — FIRST batch on the public GitHub fork
+
+**First sync run in the public GitHub checkout** (`kirodotdev-labs/kiroclaw`, ships via PR, not
+CRUX). The boundary file was **stale** (recorded batch-25) but the fork had since done batch-26
+(PR #18) plus a large **GitHub-native porting wave** (PRs #10–#38) that did not cite upstream SHAs —
+so the fork is **bidirectional** with MeshClaw, not strictly downstream. Every candidate was triaged
+**by content** against the fork file (SHA reachability is meaningless here). Window: backend
+`6cf3aae0..5dbb7778` (88) + frontend `9b512ca..3858e573` (47) = 135, via a 270-agent adversarial
+Workflow (analyzer + skeptic per commit; 2 skeptics API-errored, hand-confirmed KEEP).
+**73 ported (58 KEEP + 15 PARTIAL: 47 backend + 26 frontend); 62 left out** (22 SKIP_INTERNAL,
+4 SKIP_NONKIROACP, 29 ALREADY_PRESENT, 7 DEFER). Branch `sync/beta-2026-07-10`. Full per-verdict
+detail: the batch-27 block of [`last-synced.txt`](./last-synced.txt) + the PR provenance comment.
+
+| Upstream commit | Repo | Verdict | Reason left out |
+|---|---|---|---|
+| [`7608b99f`](https://code.amazon.com/packages/MeshClaw/commits/7608b99f3c0faef38e808e2f37922199dd6eaf43) | backend | SKIP_INTERNAL | Route WritingReview via backend MCP — `writing_review/` dir absent. |
+| [`7bb86a44`](https://code.amazon.com/packages/MeshClaw/commits/7bb86a44045ada061db55f858ca85d6d16449f1a) | backend | SKIP_INTERNAL | mcp-gateway respawn dead backend — `mcp_gateway/` daemon absent. |
+| [`8b5351f1`](https://code.amazon.com/packages/MeshClaw/commits/8b5351f1170d89193b51d8ccfd7ec1e795379363) | backend | SKIP_INTERNAL | Bot-message filter confined to `secretary.py` `SecretaryPoller` — secretary absent. |
+| [`9a696e65`](https://code.amazon.com/packages/MeshClaw/commits/9a696e650caa3d8c8a853695478752f6673e70c8) | backend | SKIP_INTERNAL | ChorusProvider + multi-provider publishing — artifact publish/Chorus (Quip-replacement via AIM) absent. |
+| [`b944c74d`](https://code.amazon.com/packages/MeshClaw/commits/b944c74de36a223aea965a736e5bb08a0bb77403) | backend | SKIP_INTERNAL | Tunnel health-probe in-process TLS — `tunnel/manager.py` is a stub. |
+| [`a179b9e0`](https://code.amazon.com/packages/MeshClaw/commits/a179b9e0d3b479b44c6f2aa11b035ab4ae0ccb06) | backend | SKIP_INTERNAL | DM owner when AEA tunnel off — AEA-tunnel subsystem absent. |
+| [`cec38579`](https://code.amazon.com/packages/MeshClaw/commits/cec385796075d437a2bcd2464d559d0d22ecf8fe) | backend | SKIP_INTERNAL | security-assistance recommendation engine — Amazon-internal builder-mcp primitive. |
+| [`9bbcb048`](https://code.amazon.com/packages/MeshClaw/commits/9bbcb048b1c84c1d4e3d266a2539afbbeb239c00) | backend | SKIP_INTERNAL | Bundle CHANGELOG into toolbox package — `setup.py` ToolboxBundlerCommand (toolbox absent). |
+| [`cb6f8f19`](https://code.amazon.com/packages/MeshClaw/commits/cb6f8f19a5e540543a7997a6dfbfc43e15b85ece) | backend | SKIP_INTERNAL | Pin launcher site-packages to ABI — Amazon toolbox launcher `configuration/toolbox/bin/meshclaw` absent. |
+| [`c637016b`](https://code.amazon.com/packages/MeshClaw/commits/c637016bd0c1d0bb5672fa5e8e2442fe696f0a64) | backend | SKIP_INTERNAL | Skip lxml/pdfplumber tests — a Brazil-version-set-only failure; the fork installs these normally. |
+| [`7f86241d`](https://code.amazon.com/packages/MeshClaw/commits/7f86241d12a0fa572b5741192dfc3b5bfc53b6b7) | backend | SKIP_INTERNAL | `.mailmap` for internal empty-email committers — no OSS relevance. |
+| [`4f753ed0`](https://code.amazon.com/packages/MeshClaw/commits/4f753ed06525b83813fb18fc44814d7d97d24b8f) | backend | SKIP_INTERNAL | mwinit modal TTL cache reset — Midway/`midway.py` is a stub. |
+| [`1f6b7982`](https://code.amazon.com/packages/MeshClaw/commits/1f6b79827607a2924142cbea5100a29602f29e2e) | backend | SKIP_INTERNAL | Register auto-improvement app — `app-registry.json` is `[]` by design. |
+| [`81d19cef`](https://code.amazon.com/packages/MeshClaw/commits/81d19cef7c962acc00f2d84aaf10f2b071a4ee9d) | backend | SKIP_INTERNAL | Add Papyrus to App Store — internal app-registry data row. |
+| [`0e9c9ffc`](https://code.amazon.com/packages/MeshClaw/commits/0e9c9ffc512804e54f24a3c04f660c887b626f65) / [`d53b497b`](https://code.amazon.com/packages/MeshClaw/commits/d53b497ba84e5f898d86c6ea1180da4c362e4c69) | backend | SKIP_INTERNAL | Version bumps 3.1.1→3.2.0→3.2.1 + changelog — fork is 0.1.0. |
+| [`de64d07b`](https://code.amazon.com/packages/MeshClaw/commits/de64d07bcaa29cf936e5949549612d1f0f734ebb) | backend | SKIP_INTERNAL | artifact_get_comments full body — artifact-comments subsystem absent. |
+| [`321f9fbc`](https://code.amazon.com/packages/MeshClawWebsite/commits/321f9fbcd6aa45b09d326c7a839546cac7ca8899) / [`eed2773d`](https://code.amazon.com/packages/MeshClawWebsite/commits/eed2773df99fd7a4d713bc1a5d517356372e67f6) | frontend | SKIP_INTERNAL | WritingReview context dialogs / resume scan — `WritingReviewPage` absent. |
+| [`3a182608`](https://code.amazon.com/packages/MeshClawWebsite/commits/3a1826087667b36e8afc3b56984d77b1f3b46597) | frontend | SKIP_INTERNAL | code-reviewer workspace pin/drag — `apps/code-reviewer/CodeReviewerPage` absent. |
+| [`5e13d8b7`](https://code.amazon.com/packages/MeshClawWebsite/commits/5e13d8b75f5b06d3d75e3f3ed4f4ed05ccdb82c6) | frontend | SKIP_INTERNAL | Provider-aware share panel + LIVE mode — Harmony Artifactory + Chorus publish absent. |
+| [`92104fcc`](https://code.amazon.com/packages/MeshClawWebsite/commits/92104fccaa5364243a21fbabcf5ae752d84e1d1d) | frontend | SKIP_INTERNAL | Tunnel status tile — AEA-tunnel subsystem absent. |
+| [`3997c2ae`](https://code.amazon.com/packages/MeshClaw/commits/3997c2aefb4856fb1c7bff77c34702ccd074f142) / [`7b74179b`](https://code.amazon.com/packages/MeshClaw/commits/7b74179b3065e830f8bf927b66188b4c6fb0a683) | backend | SKIP_NONKIROACP | `/api/usage/cost` + per-turn token tracking — the deleted `claude_code` provider spend surface. |
+| [`c6bc2744`](https://code.amazon.com/packages/MeshClawWebsite/commits/c6bc2744182f901c3e31c74c5e1747a392ff4184) / [`f6e38b3b`](https://code.amazon.com/packages/MeshClawWebsite/commits/f6e38b3b625d46f35be0dcfcc844f490ed79c9d2) | frontend | SKIP_NONKIROACP | Claude $-spend top-bar pill / model-label dedup — provider-spend + provider-selection surface. |
+| [`3e5d7132`](https://code.amazon.com/packages/MeshClaw/commits/3e5d7132e46c3fd7dd4394dd182fba9f58656025) | backend | DEFER | Reject type-unsafe authored workflow scripts — the dynamic-workflows engine is absent from the fork. |
+| [`f8383887`](https://code.amazon.com/packages/MeshClaw/commits/f8383887d8dec0f3583a3cbcf674468172e3dd45) | backend | DEFER | Hero images for deploy_web/workflows — asset-only, low value; workflows page absent. |
+| [`d2240c48`](https://code.amazon.com/packages/MeshClaw/commits/d2240c48bbd72de6e7141fbc313c1390f9087760) | backend | DEFER | tunnel-off Slack-link warning hardening — follow-up to a tunnel base the fork has stubbed. |
+| [`0000f561`](https://code.amazon.com/packages/MeshClawWebsite/commits/0000f561ecc8f750b51203290279dcdb9ee9d6a7) | frontend | DEFER | Comment-anchor highlight offset — persisted file-artifact comment subsystem absent (same as batch-22/23 defers). |
+| [`3acce399`](https://code.amazon.com/packages/MeshClawWebsite/commits/3acce39988b768a7c8e6dfa15b5bc5ab8ce0d52b) | frontend | DEFER | Research-Lab v2 UI — `apps/auto-research/GrillTree` FE absent (backend `auto_research` exists, FE does not). |
+| [`5360aa4d`](https://code.amazon.com/packages/MeshClawWebsite/commits/5360aa4d0e8b2133de9263878f87e219bab81a87) | frontend | DEFER | Rich tool streaming in split-view panes — depends on a slot-aware ToolCallLine absent in the fork. |
+| [`3858e573`](https://code.amazon.com/packages/MeshClawWebsite/commits/3858e57307ea4d0261ac7e56b2813a3ab40aebcf) | frontend | DEFER | CommandPalette tab-strip horizontal scroll — a tiny generic Tailwind follow-up to the ported `12bfe897`; worth picking up next batch. |
+
+> The 15 PARTIALs (generic hunks kept, internal/absent dropped) are keepers — their dropped
+> sub-hunks are recorded in the batch-27 block of [`last-synced.txt`](./last-synced.txt) and each
+> port commit's body. Notable: `d759d3b3` (kept the 3 `asyncio.to_thread` SEL-offload wraps, bulk
+> ALREADY_PRESENT), `2e960fe2` (kept the dashboard steer wiring; ACP-layer already present),
+> `41ad420c` (dropped the `mcp_gateway` overlay kwargs), `9daac30f` (research-only mode), `12bfe897`
+> (Command Palette — dropped absent-endpoint providers), the Fable-5 pair (model-registry only).
+
 ### Batch 25 — CR pending (9 ported, 6 left out)
 
 Window: backend `bfa7b4e8..6cf3aae0` (13), frontend `0f2c062..9b512ca` (2). Stacked on the

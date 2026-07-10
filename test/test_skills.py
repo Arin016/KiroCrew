@@ -1195,3 +1195,123 @@ class TestResolveDollarSkills:
         assert not loader.has_dollar_candidate("bare $ sign")
         assert not loader.has_dollar_candidate("no dollar here")
         assert not loader.has_dollar_candidate("")
+
+
+class TestLazyLoadContext:
+    """Lazy-load skill injection: pinned core + usage-ranked top-K + tail pointer."""
+
+    def _make(self, tmp_path, n_on_demand=6, always=False):
+        skills_dir = tmp_path / "skills"
+        if always:
+            _create_skill(
+                skills_dir,
+                "core-pinned",
+                "---\nname: core-pinned\ndescription: core\nalways: true\n---\n# CorePinned\nAlways here.",
+            )
+        for i in range(n_on_demand):
+            _create_skill(
+                skills_dir,
+                f"od{i}",
+                f"---\nname: od{i}\ndescription: {'word%d ' % i * 40}\n---\n# OD{i}\nBody {i}.",
+            )
+        return SkillsLoader(skills_path=skills_dir, install_builtins=False)
+
+    def test_pinned_always_full_content(self, tmp_path):
+        loader = self._make(tmp_path, n_on_demand=2, always=True)
+        # Pinned (always:true) skills get full content in BOTH the legacy
+        # (budget=None) and the lazy-load top-K (integer budget) paths.
+        for budget in (None, 100_000):
+            ctx = loader.get_context(budget=budget)
+            assert "### Skill: core-pinned" in ctx, f"budget={budget}"
+            assert "Always here." in ctx, f"budget={budget}"  # full body of pinned
+
+    def test_budget_bounds_block_and_adds_tail_pointer(self, tmp_path):
+        loader = self._make(tmp_path, n_on_demand=30)
+        budget = 1200
+        ctx = loader.get_context(budget=budget)
+        # Regression (footer-truncation bug): get_context reserves room for the
+        # footer + wrapper, so the FINAL block stays within budget and the
+        # caller's backstop never chops the "...N more / skill_search" footer.
+        assert len(ctx) <= budget
+        # The tail that didn't fit is discoverable via skill_search.
+        assert "more skill(s) not shown" in ctx
+        assert "skill_search" in ctx
+
+    def test_unbounded_shows_all(self, tmp_path):
+        loader = self._make(tmp_path, n_on_demand=5)
+        ctx = loader.get_context(budget=None)
+        for i in range(5):
+            assert f"**od{i}**" in ctx
+        assert "more skill(s) not shown" not in ctx
+
+    def test_ranking_prefers_used_skills(self, tmp_path):
+        loader = self._make(tmp_path, n_on_demand=4)
+        # Mark od3 as heavily used — it should sort to the front of the block.
+        for _ in range(5):
+            loader._usage.record("od3")
+        # Ranking applies only on the opt-in (integer-budget) path; a large
+        # budget shows all skills AND exercises the usage ordering.
+        ctx = loader.get_context(budget=100_000)
+        assert ctx.index("**od3**") < ctx.index("**od0**")
+
+    def test_short_desc_truncated(self, tmp_path):
+        loader = self._make(tmp_path, n_on_demand=1)
+        # Description truncation applies only on the opt-in (integer-budget) path.
+        ctx = loader.get_context(budget=100_000)
+        # The verbose 'word0 '*40 description is truncated with an ellipsis.
+        assert "..." in ctx
+
+    def test_budget_none_is_legacy_full_dump(self, tmp_path):
+        # Opt-in OFF (budget=None): legacy block — old header, every skill shown,
+        # no top-K / tail-pointer, no skill_search. Byte-for-byte pre-feature.
+        loader = self._make(tmp_path, n_on_demand=3)
+        ctx = loader.get_context(budget=None)
+        assert "If a user request relates to any skill below" in ctx
+        assert "The most-used skills are listed below" not in ctx
+        assert "more skill(s) not shown" not in ctx
+        assert "skill_search" not in ctx
+        for i in range(3):
+            assert f"**od{i}**" in ctx
+
+
+class TestSearchSkills:
+    def test_search_matches_by_description(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        _create_skill(
+            skills_dir,
+            "deployer",
+            "---\nname: deployer\ndescription: fix a broken deployment pipeline\n---\n# D\n",
+        )
+        _create_skill(
+            skills_dir,
+            "weather",
+            "---\nname: weather\ndescription: get the forecast\n---\n# W\n",
+        )
+        loader = SkillsLoader(skills_path=skills_dir, install_builtins=False)
+        hits = loader.search_skills("deployment")
+        assert [h["key"] for h in hits] == ["deployer"]
+
+    def test_search_empty_query(self, tmp_path):
+        loader = SkillsLoader(skills_path=tmp_path / "skills", install_builtins=False)
+        assert loader.search_skills("") == []
+        assert loader.search_skills("   ") == []
+
+    def test_search_falls_back_to_body(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        _create_skill(
+            skills_dir,
+            "hidden",
+            "---\nname: hidden\ndescription: nothing relevant here\n---\n# H\nThis mentions kubernetes internally.",
+        )
+        loader = SkillsLoader(skills_path=skills_dir, install_builtins=False)
+        hits = loader.search_skills("kubernetes")
+        assert [h["key"] for h in hits] == ["hidden"]
+
+    def test_search_does_not_record_usage(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        _create_skill(
+            skills_dir, "s1", "---\nname: s1\ndescription: alpha beta\n---\n# S1\n"
+        )
+        loader = SkillsLoader(skills_path=skills_dir, install_builtins=False)
+        loader.search_skills("alpha")
+        assert loader._usage.score("s1")[0] == 0.0  # searching is not using

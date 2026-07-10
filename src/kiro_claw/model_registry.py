@@ -46,20 +46,28 @@ _REGISTRY_FILE = Path(__file__).resolve().parent / "model_registry.json"
 _FALLBACK_CANONICAL = "opus-4.8-1m"
 _FALLBACK_PROVIDER_ID = "global.anthropic.claude-opus-4-8[1m]"
 _FALLBACK_PROVIDER_IDS: dict[str, str] = {
+    "fable-5-1m": "global.anthropic.claude-fable-5[1m]",
+    "fable": "global.anthropic.claude-fable-5[1m]",
+    "fable-5": "global.anthropic.claude-fable-5[1m]",
+    "claude-fable-5": "global.anthropic.claude-fable-5[1m]",
     "opus-4.8-1m": "global.anthropic.claude-opus-4-8[1m]",
     "opus": "global.anthropic.claude-opus-4-8[1m]",
     "claude-opus-4.8": "global.anthropic.claude-opus-4-8[1m]",
+    "claude-opus-4-8[1m]": "global.anthropic.claude-opus-4-8[1m]",
     "claude-opus-4.6": "global.anthropic.claude-opus-4-8[1m]",
     "claude-opus-4.6-1m": "global.anthropic.claude-opus-4-8[1m]",
     "opus-4.8": "global.anthropic.claude-opus-4-8",
+    "claude-opus-4-8": "global.anthropic.claude-opus-4-8",
     "claude-opus-4.5": "global.anthropic.claude-opus-4-8",
     "opus-4.7-1m": "global.anthropic.claude-opus-4-7[1m]",
     "claude-opus-4.7": "global.anthropic.claude-opus-4-7[1m]",
     "claude-opus-4.7-1m": "global.anthropic.claude-opus-4-7[1m]",
+    "claude-opus-4-7[1m]": "global.anthropic.claude-opus-4-7[1m]",
     "sonnet-4.6-1m": "global.anthropic.claude-sonnet-4-6[1m]",
     "sonnet": "global.anthropic.claude-sonnet-4-6[1m]",
     "claude-sonnet-4.6": "global.anthropic.claude-sonnet-4-6[1m]",
     "claude-sonnet-4.6-1m": "global.anthropic.claude-sonnet-4-6[1m]",
+    "claude-sonnet-4-6[1m]": "global.anthropic.claude-sonnet-4-6[1m]",
     "claude-sonnet-4.5": "global.anthropic.claude-sonnet-4-6[1m]",
     "claude-sonnet-4.5-1m": "global.anthropic.claude-sonnet-4-6[1m]",
     "claude-sonnet-4": "global.anthropic.claude-sonnet-4-6[1m]",
@@ -184,9 +192,17 @@ def _has_1m_token(lowered: str) -> bool:
 
 
 def available_models(provider: str) -> list[str]:
-    """Non-empty provider ids for ``provider`` (the settings.json allowlist)."""
+    """Non-empty provider ids for ``provider`` (the settings.json allowlist).
+
+    Default-first (like ``display_list``), so the id the claude-agent-acp adapter
+    picks when no explicit model is written — ``resolveModelPreference()`` takes
+    the first entry of ``(SDK list ∩ availableModels)``, which happens on the
+    ``auto`` path where ``settings.local.json`` omits the ``model`` key — is the
+    registry default, not whichever entry happens to be first in the JSON.
+    """
     out: list[str] = []
-    for entry in _REGISTRY.values():
+    items = sorted(_REGISTRY.items(), key=lambda kv: (not kv[1].get("default"), 0))
+    for _key, entry in items:
         pid = entry.get("providers", {}).get(provider)
         if pid:
             out.append(pid)

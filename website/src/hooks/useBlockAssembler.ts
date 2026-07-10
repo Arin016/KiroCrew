@@ -11,6 +11,11 @@ const FENCE_CLOSE_RE = (() => {
   }
 })()
 const DIFF_LINE = /^@@|^[+-]\d+:|^[+-][^+-\s]/
+// Outer fence languages where nested code fence examples are expected.
+// Only these languages trigger inner-fence depth tracking. Code languages
+// (python, bash, json, etc.) skip tracking to avoid over-consuming content
+// when a ```lang line appears as literal text inside them.
+const NESTABLE_LANGS = new Set(['', 'markdown', 'md', 'mdx', 'rst', 'txt', 'text', 'html', 'xml', 'svg', 'asciidoc', 'adoc'])
 // Per-line widget tag regexes. Matched against a line AFTER masking inline
 // code spans, so tags appearing inside backtick-quoted prose are ignored.
 // Match the open tag flexibly: capture the full attribute string so we can
@@ -131,6 +136,9 @@ export function parseBlocks(raw: string, streaming: boolean): ContentBlock[] {
   let widgetBuf: string[] = []
   let fenceTick = ''
   let fenceLang = ''
+  let fenceLen = 0  // raw backtick count of the opening fence
+  let innerFenceDepth = 0  // tracks nested fence pairs inside a code block
+  let fenceNestable = false  // true when outer lang is markup/doc (nested fences expected)
   let widgetTitle = ''
   let widgetSlug = ''
   let widgetFenceTick = ''
@@ -155,6 +163,9 @@ export function parseBlocks(raw: string, streaming: boolean): ContentBlock[] {
     codeBuf = []
     fenceTick = ''
     fenceLang = ''
+    fenceLen = 0
+    innerFenceDepth = 0
+    fenceNestable = false
   }
 
   const flushWidget = (complete: boolean) => {
@@ -218,6 +229,8 @@ export function parseBlocks(raw: string, streaming: boolean): ContentBlock[] {
           flushMd()
           fenceTick = fenceMatch[1].replace(/`/g, '\\`')
           fenceLang = fenceMatch[2] || ''
+          fenceLen = fenceMatch[1].length
+          fenceNestable = NESTABLE_LANGS.has(fenceLang.toLowerCase())
           codeStart = i + 2
           state = 'fence'
           break
@@ -228,9 +241,31 @@ export function parseBlocks(raw: string, streaming: boolean): ContentBlock[] {
 
       case 'fence': {
         if (FENCE_CLOSE_RE(fenceTick).test(line)) {
-          flushCode(true)
-          state = 'outside'
+          // Track nested fence depth: if the code buffer contains unmatched
+          // inner fence opens (e.g. a markdown snippet showing ```python...```)
+          // then this bare ``` is closing an INNER fence, not the outer one.
+          // Only applied for markup/doc outer languages where nested fences
+          // are expected; code languages (python, bash, json, etc.) pass
+          // through to the original close behavior to avoid over-consuming.
+          if (innerFenceDepth > 0) {
+            innerFenceDepth--
+            codeBuf.push(line)
+          } else {
+            flushCode(true)
+            state = 'outside'
+          }
         } else {
+          // Check if this line opens a nested fence inside our code block.
+          // Scoped to markup/doc outer languages where embedded code examples
+          // are common. For code languages (python, js, bash, etc.) a line
+          // like ```python is almost certainly literal content, not a nested
+          // structural fence — so we skip depth tracking entirely.
+          if (fenceNestable) {
+            const innerMatch = FENCE_OPEN.exec(line)
+            if (innerMatch && innerMatch[1].length === fenceLen && innerMatch[2]) {
+              innerFenceDepth++
+            }
+          }
           codeBuf.push(line)
         }
         break

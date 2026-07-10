@@ -379,12 +379,15 @@ class AcpRuntime:
 
         argv: list[str] = [kiro_bin, KIRO_CLI_SUBCMD, "--agent", self._agent]
 
-        # OSS sandbox.wrap_argv takes (argv, mode) only — the MCP-gateway
-        # overlay / gateway-socket / strip-python-env options are an internal
-        # feature not present in kiro_claw's sandbox, so (matching AcpClient) we
-        # apply only the sandbox mode here. The _mcp_gateway_* attrs are retained
-        # for constructor/caller compatibility but are inert under this sandbox.
-        argv, self._sandbox_cleanup = wrap_argv(argv, mode=self._sandbox_mode)
+        # OSS sandbox.wrap_argv supports (argv, mode, strip_python_env). The
+        # MCP-gateway overlay / gateway-socket options remain absent (inert) in
+        # kiro_claw's sandbox — the _mcp_gateway_* attrs are retained for
+        # constructor/caller compatibility but do nothing here. strip_python_env
+        # IS applied to keep the host PYTHONPATH/PYTHONHOME out of kiro-cli's
+        # foreign MCP subprocesses (which bundle their own interpreter + deps).
+        argv, self._sandbox_cleanup = wrap_argv(
+            argv, mode=self._sandbox_mode, strip_python_env=True
+        )
 
         env = {**os.environ}
         if self._extra_env:

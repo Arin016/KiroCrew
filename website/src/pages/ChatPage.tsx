@@ -17,7 +17,7 @@ import {
 } from '../store/chatSlice'
 import { removeNotificationByTs } from '../store/notificationsSlice'
 import { interceptSlashCommand } from './chat/ChatInput'
-import { updateSlot, changeApprovalMode, sseSlotTitle, sseSlotColor, updateSlotFolder } from '../store/dashboardSlice'
+import { changeApprovalMode, sseSlotTitle } from '../store/dashboardSlice'
 import { api } from '../api/client'
 import type { PlanStepInput } from '../api/client'
 import { useProvider } from '../providers'
@@ -57,10 +57,16 @@ import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { useAgents } from '../hooks/useAgents'
 import AgentDropdownList from '../components/AgentDropdownList'
 import ProjectPicker from '../components/ProjectPicker'
-import FolderPickerSubmenu from '../components/FolderPickerSubmenu'
+import SessionActionsMenu from '../components/SessionActionsMenu'
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent,
+  DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent,
+} from '../components/ui/dropdown-menu'
 import ModelEffortDropdown from '../components/ModelEffortDropdown'
 
 import ChatInput from '../components/ChatInput'
+import SessionGridView from '../components/SessionGridView'
+import { anchorForSlot, loadLayout, sessionSlots } from '../hooks/splitLayoutStore'
 import { modelSupportsEffort } from '../lib/effort'
 import QuestionCard from '../components/QuestionCard'
 import ReasoningEffortDropdown from '../components/ReasoningEffortDropdown'
@@ -79,8 +85,9 @@ import TypewriterText from '../components/TypewriterText'
 import ActivityViewer from './chat/ActivityViewer'
 import { useChatNavigation } from '../hooks/useChatNavigation'
 import SubagentProgressBar from './chat/SubagentProgressBar'
+import ChatProgressTrack from './chat/ChatProgressTrack'
 import ChatSidebar, { SIDEBAR_MIN, SIDEBAR_MAX } from './ChatSidebar'
-import { copySessionLink, toSlug } from '../utils/shareUrl'
+import { toSlug } from '../utils/shareUrl'
 import { DRAFT_SAVE_DEBOUNCE_MS, loadDrafts, saveDrafts as persistDrafts, setDraft } from '../utils/chatDrafts'
 import { loadFileDrafts, saveFileDrafts as persistFileDrafts, setFileDraft } from '../utils/chatFileDrafts'
 import { loadPasteDrafts, savePasteDrafts as persistPasteDrafts, setPasteDraft } from '../utils/chatPasteDrafts'
@@ -90,12 +97,12 @@ import OverlayDrawer from '../components/OverlayDrawer'
 import { loadChatConfig, CONTENT_WIDTH, type ChatConfig } from './chat/ChatSettings'
 import { useKnowledgeFetch, extractKnowledgeQuery, expandKnowledgeBlock } from './chat/useKnowledgeFetch'
 import { KnowledgePicker } from './chat/KnowledgePicker'
-import { useSessionPalette } from '../hooks/useSessionPalette'
-import { colorName } from '../utils/sessionColors'
-import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, PanelLeftOpen, PanelLeftClose, Pen, MessageSquareShare, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Locate, Link2, Link2Off, Hash, Undo2, Check, Folder, X } from 'lucide-react'
+import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, PanelLeftOpen, PanelLeftClose, Pen, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Hash, Undo2, Check, Columns2 } from 'lucide-react'
 
 import InfoTip from '../components/InfoTip'
 import { FileCard } from '../components/FileCard'
+import SlotTagPopover from '../components/SlotTagPopover'
+import { TagPopoverProvider } from '../hooks/useTagPopover'
 
 const APPROVAL_SEGMENTS = [
   { key: 'normal' as const, label: 'Normal', icon: <ShieldCheck size={13} />, tooltip: 'KiroClaw asks you before doing anything', desc: 'KiroClaw checks with you before doing anything' },
@@ -106,7 +113,7 @@ const APPROVAL_SEGMENTS = [
 import { AnimatePresence, motion } from 'framer-motion'
 import DetailPanel from '../components/DetailPanel'
 
-import type { ChatMessage, ChatFolder, ChatSlot } from '../types'
+import type { ChatMessage } from '../types'
 
 import ToolCallLine from './chat/ToolCallLine'
 import { renderMcpOAuthMessage } from './chat/McpOAuthBanner'
@@ -120,67 +127,44 @@ import { rewindWithRollback } from '../lib/rewindCall'
 const IDLE_DEFAULT = { kind: 'idle', text: 'Ready', ts: 0 } as const
 
 /** Live session status badge — shows current phase with elapsed timer. */
-export function ChatHeaderMenu({ activeSlot, currentSlot, slackChannels, onSlackLink, slotKey, colorIndex, agent, onReveal, mode }: {
-  activeSlot: string | null; currentSlot: ChatSlot | undefined; slackChannels: { id: string; name: string }[] | null | undefined
-  onSlackLink: (channelId?: string) => void; slotKey?: string; colorIndex?: number | null; agent?: string; onReveal?: () => void; mode?: string
+export function ChatHeaderMenu({ activeSlot, agent, onReveal, onRename, mode }: {
+  activeSlot: string | null; agent?: string; onReveal?: () => void; onRename?: () => void; mode?: string
 }) {
+  // Controlled open state: lets the colour-swatch row (not a Radix menu item)
+  // close the menu after a pick, via the onColorPicked hook passed below.
   const [open, setOpen] = useState(false)
-  const [mcpHover, setMcpHover] = useState(false)
+  // MCP server list is fetched lazily when its submenu opens (was a hover gate
+  // before; now driven by the Radix Sub's open state).
+  const [mcpOpen, setMcpOpen] = useState(false)
   const { data: servers = [] } = useQuery<{ name: string; enabled?: boolean }[]>({
     queryKey: ['mcp-servers', agent],
     queryFn: () => api.mcpActive(agent || undefined),
-    enabled: mcpHover,
+    enabled: mcpOpen,
   })
-  const mcpTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const [folderHover, setFolderHover] = useState(false)
-  const folderTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const { data: folders = [] } = useQuery<ChatFolder[]>({
-    queryKey: ['chat-folders'],
-    queryFn: () => api.chatFolders(),
-    enabled: open,
-  })
-  const ref = useRef<HTMLDivElement>(null)
-  const dispatch = useAppDispatch()
-  const { paletteColors } = useSessionPalette()
-  useEffect(() => {
-    if (!open) return
-    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [open])
-  useEffect(() => { if (!open) { setMcpHover(false); setFolderHover(false) } }, [open])
-
-  const moveToFolder = useCallback((folderId: string | null) => {
-    if (!activeSlot) return
-    const prev = currentSlot?.folder_id ?? ''
-    // Optimistic move with rollback on failure — same semantics as the sidebar drag-and-drop assign.
-    dispatch(updateSlotFolder({ key: activeSlot, folderId: folderId || '' }))
-    api.setSlotFolder(activeSlot, folderId).catch(() => { dispatch(updateSlotFolder({ key: activeSlot, folderId: prev })) })
-    setOpen(false)
-  }, [activeSlot, currentSlot, dispatch])
-
-  const pickColor = (idx: number | null) => {
-    if (!slotKey) return
-    dispatch(sseSlotColor({ key: slotKey, color_index: idx }))
-    api.setSlotColor(slotKey, idx).catch(() => {})
-    setOpen(false)
-  }
 
   return (
-    <div ref={ref} className="relative flex items-center">
-      <button className="px-0.5 py-1 rounded-md text-muted hover:text-text cursor-pointer bg-transparent border-none transition-all" onClick={() => setOpen(!open)}>
-        <ChevronDown size={14} />
-      </button>
-      {open && (
-        <div className="absolute left-0 top-full mt-1 z-50 rounded-lg bg-bg-elevated border border-border shadow-lg py-1 min-w-[180px]">
-          <div role="menuitem" tabIndex={-1} aria-haspopup="menu" aria-expanded={mcpHover} className="relative" onMouseEnter={() => { if (mcpTimer.current) clearTimeout(mcpTimer.current); setMcpHover(true) }} onMouseLeave={() => { mcpTimer.current = setTimeout(() => setMcpHover(false), 200) }}>
-            <div className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text hover:bg-bg-hover cursor-default">
-              <Plug size={13} className="shrink-0 text-muted" />
-              <span className="flex-1">MCP servers</span>
-              <ChevronRight size={12} className="text-muted" />
-            </div>
-            {mcpHover && (
-              <div role="menu" aria-label="MCP servers" tabIndex={-1} className="absolute left-full top-0 ml-1 z-50 rounded-lg bg-bg-elevated border border-border shadow-lg py-2 px-3 min-w-[220px] max-w-[280px] max-h-[300px] overflow-y-auto" onMouseEnter={() => { if (mcpTimer.current) clearTimeout(mcpTimer.current) }} onMouseLeave={() => { mcpTimer.current = setTimeout(() => setMcpHover(false), 200) }}>
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild>
+        <button className="px-0.5 py-1 rounded-md text-muted hover:text-text cursor-pointer bg-transparent border-none transition-all" aria-label="Session options">
+          <ChevronDown size={14} />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-[180px]">
+        {activeSlot && (
+        <SessionActionsMenu
+          variant="dropdown"
+          slotKey={activeSlot}
+          mode={mode}
+          // MCP servers: stateful (lazy fetch gated on the sub's open state), so
+          // it stays here as an info slot rather than a generic capability.
+          infoSlots={[
+            <DropdownMenuSub key="mcp" onOpenChange={setMcpOpen}>
+              <DropdownMenuSubTrigger>
+                <Plug size={13} className="shrink-0 text-muted" />
+                <span className="flex-1">MCP servers</span>
+                <ChevronRight size={12} className="text-muted" />
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="min-w-[220px] max-w-[280px] max-h-[300px] overflow-y-auto px-3 py-2">
                 <div className="text-[11px] uppercase tracking-wider text-muted font-semibold mb-1.5">MCP Servers {servers.length > 0 && `(${servers.filter((s: {enabled?: boolean}) => s.enabled !== false).length}/${servers.length})`}</div>
                 {servers.length === 0 ? <div className="text-muted text-[12px] italic">Loading…</div> : servers.map((s: {name: string; enabled?: boolean}) => (
                   <div key={s.name} className={`flex items-center gap-2 py-0.5 text-[12px] ${s.enabled === false ? 'opacity-40' : ''}`}>
@@ -188,98 +172,17 @@ export function ChatHeaderMenu({ activeSlot, currentSlot, slackChannels, onSlack
                     <code className="text-text">{s.name}</code>
                   </div>
                 ))}
-              </div>
-            )}
-          </div>
-          {activeSlot && onReveal && (
-            <>
-              <div className="mx-2 my-1 border-b border-border" />
-              <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { onReveal(); setOpen(false) }}>
-                <Locate size={13} className="shrink-0 text-muted" /> Reveal in sidebar
-              </button>
-              {folders.length > 0 && (
-                <div role="menuitem" tabIndex={-1} aria-haspopup="menu" aria-expanded={folderHover} className="relative" onMouseEnter={() => { if (folderTimer.current) clearTimeout(folderTimer.current); setFolderHover(true) }} onMouseLeave={() => { folderTimer.current = setTimeout(() => setFolderHover(false), 200) }}>
-                  <div className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text hover:bg-bg-hover cursor-default">
-                    <Folder size={13} className="shrink-0 text-muted" />
-                    <span className="flex-1">Move to folder</span>
-                    <ChevronRight size={12} className="text-muted" />
-                  </div>
-                  {folderHover && (
-                    <FolderPickerSubmenu
-                      folders={folders}
-                      currentFolderId={currentSlot?.folder_id}
-                      includeRoot
-                      onPick={moveToFolder}
-                      onMouseEnter={() => { if (folderTimer.current) clearTimeout(folderTimer.current) }}
-                      onMouseLeave={() => { folderTimer.current = setTimeout(() => setFolderHover(false), 200) }}
-                    />
-                  )}
-                </div>
-              )}
-              <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { copySessionLink(activeSlot, currentSlot?.title, undefined, mode); setOpen(false) }}>
-                <Link2 size={13} className="shrink-0 text-muted" /> Copy session link
-              </button>
-            </>
-          )}
-          {activeSlot && slackChannels != null && !currentSlot?.slack_linked && (
-            <>
-              <div className="mx-2 my-1 border-b border-border" />
-              {slackChannels.length === 0 ? (
-                <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { onSlackLink(); setOpen(false) }}>
-                  <MessageSquareShare size={13} /> Send to Slack
-                </button>
-              ) : (
-                <>
-                  <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { onSlackLink(); setOpen(false) }}>
-                    <MessageSquareShare size={13} /> Send to Slack
-                  </button>
-                  {slackChannels.filter(c => c.id !== 'dm').map(ch => (
-                    <button key={ch.id} className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { onSlackLink(ch.id); setOpen(false) }}>
-                      # {ch.name}
-                    </button>
-                  ))}
-                </>
-              )}
-            </>
-          )}
-          {activeSlot && currentSlot?.slack_linked && (
-            <>
-              <div className="mx-2 my-1 border-b border-border" />
-              <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-ok cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={async () => { try { await api.slackLink(activeSlot) } catch {} setOpen(false) }}>
-                <MessageSquareShare size={13} /> Post reminder in Slack
-              </button>
-              <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-danger cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={async () => {
-                try {
-                  await api.unlinkSlack(activeSlot)
-                  dispatch(updateSlot({ key: activeSlot, slack_linked: false, slack_channel: undefined, slack_thread_ts: undefined }))
-                } catch (e) {
-                  // eslint-disable-next-line no-console -- surface unlink failures for debugging
-                  console.warn('unlinkSlack failed; session stays linked', e)
-                }
-                setOpen(false)
-              }}>
-                <Link2Off size={13} /> Unlink from Slack
-              </button>
-            </>
-          )}
-          <div className="mx-2 my-0.5 border-b border-border" />
-          <div className="flex items-center gap-1.5 px-3 py-1.5">
-              <button type="button" aria-label="No color" className={`w-4 h-4 rounded-full border-[1.5px] cursor-pointer transition-transform hover:scale-125 ${colorIndex == null ? 'border-text-strong scale-110' : 'border-transparent'}`} style={{ background: 'var(--bg-accent)', backgroundImage: 'linear-gradient(135deg, transparent 45%, var(--danger) 45%, var(--danger) 55%, transparent 55%)' }} onClick={() => pickColor(null)} title="No color" />
-              {paletteColors.map((c, i) => (
-                <button type="button" key={i} aria-label={colorName(c)} className={`w-4 h-4 rounded-full border-[1.5px] cursor-pointer transition-transform hover:scale-125 ${colorIndex === i ? 'border-text-strong scale-110' : 'border-transparent'}`} style={{ background: c }} onClick={() => pickColor(i)} title={colorName(c)} />
-              ))}
-          </div>
-          {activeSlot && (
-            <>
-              <div className="mx-2 my-1 border-b border-border" />
-              <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-danger cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { setOpen(false); if (!loadChatConfig().confirmCloseSession || confirm('Close this session?')) dispatch(deleteSlot(activeSlot)) }}>
-                <X size={13} /> Close session
-              </button>
-            </>
-          )}
-        </div>
-      )}
-    </div>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>,
+          ]}
+          onReveal={onReveal}
+          onRename={onRename}
+          // The header controls its own menu, so close it after a colour pick.
+          onColorPicked={() => setOpen(false)}
+        />
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 
@@ -697,32 +600,15 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   })
   useEffect(() => { if (_initResolvedModel && !pendingModel) setPendingModel(_initResolvedModel) }, [_initResolvedModel]) // eslint-disable-line react-hooks/exhaustive-deps
   const [modelBtnRect, setModelBtnRect] = useState<DOMRect | null>(null)
-  const { data: slackChannels } = useQuery({
-    queryKey: ['slack-channels'],
-    queryFn: () => api.slackChannels().then(c => Array.isArray(c) ? c as {id: string, name: string}[] : null),
-  })
-  const [handoffOpen, setHandoffOpen] = useState(false)
-  useEffect(() => {
-    if (!handoffOpen) return
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setHandoffOpen(false) }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [handoffOpen])
-  const slackLinkMutation = useMutation({
-    mutationFn: (channel?: string) => api.slackLink(activeSlot!, channel),
-    onSuccess: (r) => {
-      if (r.ok) dispatch(updateSlot({ key: activeSlot!, slack_linked: true, slack_channel: r.channel, slack_thread_ts: r.thread_ts }))
-      setHandoffOpen(false)
-    },
-    onError: () => { setHandoffOpen(false) },
-  })
   const planActionMutation = useMutation({
     mutationFn: ({ slot, action }: { slot: string; action: string }) => api.planAction(slot, action),
   })
-  const handleSlackLink = useCallback((channel?: string) => {
-    if (!activeSlot || slackLinkMutation.isPending) return
-    slackLinkMutation.mutate(channel)
-  }, [activeSlot, slackLinkMutation])
+  // Mid-turn steer is a POST write, so it goes through useMutation for
+  // consistent error/loading-state handling (fire-and-forget: no onSuccess).
+  const steerMutation = useMutation({
+    mutationFn: (text: string) => api.steerChat(text, activeSlot!),
+    onError: (e) => { console.error('steer failed', e) },
+  })
   const [approvalDropdown, setApprovalDropdown] = useState(false)
   const [approvalBtnRect, setApprovalBtnRect] = useState<DOMRect | null>(null)
   const [reasoningEffortDropdown, setReasoningEffortDropdown] = useState(false)
@@ -1403,6 +1289,21 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
     setUploading(false)
   }, [saveDrafts])
 
+  // Deliver an optimize result to the session that started it when the user
+  // navigated away before the request settled. ChatInput only calls this for
+  // the cross-session case (it writes the result itself when the originating
+  // session is still on screen). Same slot-capture pattern as uploadFiles /
+  // the send-failure draft restore: persist into the originating slot's draft
+  // unconditionally (recoverable on disk + shown when the user returns), and
+  // only splice into the live input when that slot is what's currently on
+  // screen — compared against activeSlotRef.current, never the stale closure.
+  const handleOptimizeResult = useCallback((slot: string | null, optimized: string) => {
+    if (!slot) return
+    setDraft(drafts.current, slot, optimized)
+    saveDrafts()
+    if (slot === activeSlotRef.current) setInput(optimized)
+  }, [saveDrafts])
+
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault(); e.stopPropagation(); setDragOver(false)
     const files = Array.from(e.dataTransfer.files)
@@ -1463,6 +1364,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   // "Scroll to previous user message" pill — tracks topmost visible item
   const topmostIdxRef = useRef(0)
   const [hasUserMsgAbove, setHasUserMsgAbove] = useState(false)
+  const [currentSectionIdx, setCurrentSectionIdx] = useState(0)
   const displayItemsRef = useRef<DisplayItem[]>([])
   // Update topmost index from scroll position (replaces Virtuoso rangeChanged)
   const updateTopmostIdx = useCallback(() => {
@@ -1481,6 +1383,13 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
         const idx = parseInt(htmlItem.getAttribute('data-display-index') || '0', 10)
         topmostIdxRef.current = idx
         setHasUserMsgAbove(findPrevUserMsgDisplayIdx(displayItemsRef.current, idx) >= 0)
+        // Compute which nav section is current (last section whose displayIdx <= topmost)
+        const secs = chatNavSectionsRef.current
+        let secIdx = 0
+        for (let s = secs.length - 1; s >= 0; s--) {
+          if (secs[s].displayIdx <= idx) { secIdx = s; break }
+        }
+        setCurrentSectionIdx(secIdx)
         break
       }
     }
@@ -1764,7 +1673,9 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const [followUpPicked, setFollowUpPicked] = useState<Set<string>>(() => new Set())
   const followUpOptionsKey = followUpOptions.join('\x00')
   useEffect(() => { setFollowUpPicked(new Set()) }, [followUpOptionsKey, activeSlot])
-  const { data: dashCfg } = useQuery<{ quick_send?: boolean }>({ queryKey: ['dashboardConfig'], queryFn: () => api.dashboardConfig(), staleTime: 30_000 })
+  const { data: dashCfg } = useQuery<{ quick_send?: boolean; session_grid?: boolean }>({ queryKey: ['dashboardConfig'], queryFn: () => api.dashboardConfig(), staleTime: 30_000 })
+  // Session grid (split view) is an opt-in feature flag (Settings › Chat › Split View). Gates ⌘D, the Columns2 button, and the grid render.
+  const splitFeatureEnabled = dashCfg?.session_grid === true
   const planTaskId = useMemo(() => {
     for (const m of messages) {
       const match = m.content?.match(/<!-- plan_task_id:(\S+) -->/)
@@ -2055,6 +1966,54 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   })
   const [sidebarDragging, setSidebarDragging] = useState(false)
   const [editingTitle, setEditingTitle] = useState(false)
+  // Native session grid "split mode": an in-place tiling of the chat surface (NOT an
+  // overlay). The flag is EPHEMERAL per mount — nav/refresh lands on single chat —
+  // but the LAYOUT persists per anchor slot (splitLayoutStore). So a split is
+  // preserved across navigation, and a member session opened on its own shows single
+  // chat plus an "in split" badge that re-enters it (β model). `splitAnchor` is the
+  // slot whose split we're showing (the one ⌘D'd from, or the badge's target).
+  const [splitMode, setSplitMode] = useState(false)
+  const [splitAnchor, setSplitAnchor] = useState<string | null>(null)
+  // enterSplit opens Split View for `anchor`: SessionGridView restores anchor's saved
+  // layout if one exists, else seeds [anchor | placeholder]. Closing back down to a
+  // single session dissolves the layout and collapses to native chat (onCollapse).
+  const enterSplit = useCallback((anchor: string | null) => { setSplitAnchor(anchor); setSplitMode(true) }, [])
+  // Anchor of the persisted split the active session belongs to (>= 2 live sessions),
+  // or null — drives the "in split" badge in single chat. Validated against live
+  // slots so a stale layout (a member was deleted) never shows a dead badge.
+  const splitAnchorForActive = useMemo(() => {
+    if (!splitFeatureEnabled || splitMode || !activeSlot) return null
+    const anchor = anchorForSlot(activeSlot)
+    if (!anchor) return null
+    const liveKeys = new Set(slots.map((s) => s.key))
+    return sessionSlots(loadLayout(anchor)).filter((k) => liveKeys.has(k)).length >= 2 ? anchor : null
+  }, [splitFeatureEnabled, splitMode, activeSlot, slots])
+  // True when the active session IS the anchor of its live persisted split (the slot
+  // ⌘D was originally pressed from). The anchor's natural view IS its split, so we
+  // auto-open it (no badge, no extra click); non-anchor members stay single chat + badge.
+  const activeIsSplitAnchor = splitAnchorForActive !== null && splitAnchorForActive === activeSlot
+  // Auto-enter split when you land on its anchor. Gated on splitMode being off (so we
+  // don't fight an in-progress exit) and on a resolved activeSlot + real >=2-member live
+  // layout (so a fresh refresh never seeds an orphan pane — the old localStorage race).
+  // Members never auto-enter; closing a split to 1 dissolves the layout so there's no loop.
+  useEffect(() => {
+    if (embedMode || splitMode || !activeIsSplitAnchor) return
+    enterSplit(splitAnchorForActive)
+  }, [embedMode, splitMode, activeIsSplitAnchor, splitAnchorForActive, enterSplit])
+  // ⌘D / Ctrl+D enters split mode from single chat (splitting the current session).
+  // Inside split mode the grid (SessionGridView) owns ⌘D = split the focused pane.
+  useEffect(() => {
+    if (embedMode) return
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'd') {
+        if (!splitFeatureEnabled || splitMode || !activeSlot) return
+        e.preventDefault()
+        enterSplit(activeSlot)
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [embedMode, splitMode, enterSplit, splitFeatureEnabled, activeSlot])
   const [generatingTitleSlots, setGeneratingTitleSlots] = useState<Set<string>>(new Set())
   const [titleDraft, setTitleDraft] = useState('')
   const lastTextIdx = useMemo(() => {
@@ -2278,6 +2237,17 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
 
   const queuedMessages = useMemo(() => messages.filter(m => m.role === 'queued'), [messages])
 
+  // Mid-turn steer: inject the composer text into the RUNNING turn instead of
+  // queueing for the next one. The POST goes through steerMutation (above);
+  // fire-and-forget — the backend falls back to the queue if steer is
+  // unavailable, and echoes the text inline via the 'steer_push' WS event.
+  // Composer clearing is handled by ChatInput.
+  const steer = useCallback((text: string) => {
+    const t = (text || '').trim()
+    if (!t || !activeSlot) return
+    steerMutation.mutate(t)
+  }, [activeSlot, steerMutation])
+
   const handleCancelQueued = useCallback((queueId: string) => {
     if (!activeSlot) return
     const msg = messagesRef.current.find(m => m.role === 'queued' && (m.meta?.queueId as string) === queueId)
@@ -2318,6 +2288,8 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   }, [displayItems])
 
   const chatNav = useChatNavigation(messages, messageToDisplayIdx)
+  const chatNavSectionsRef = useRef(chatNav.sections)
+  chatNavSectionsRef.current = chatNav.sections
 
   const scrollToNavSection = useCallback((displayIdx: number) => {
     navToDisplayIndex(displayIdx, { behavior: 'smooth', align: 'start', offset: -72 })
@@ -2572,6 +2544,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   }, [filteredSlots.length, sidebarPinned])
 
   return (
+    <TagPopoverProvider>
     <div ref={chatContainerRef} className="flex flex-1 min-h-0 h-full overflow-hidden relative">
       <AnimatePresence>
         {isMobile && mobileSessions && (
@@ -2656,9 +2629,17 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
           onWidthChange={setSidebarWidth}
           onDragChange={setSidebarDragging}
           collapsible={!isMobile}
+          splitEnabled={splitFeatureEnabled}
+          splitActive={splitMode}
+          onOpenSplit={() => enterSplit(activeSlot)}
+          onSelectSlot={() => setSplitMode(false)}
         />
       </OverlayDrawer>
       )}
+
+      {/* Per-slot tag picker — a single connected popover, opened from any session
+          menu (sidebar row or header) via the ChatPage-scoped TagPopover context. */}
+      <SlotTagPopover />
 
       {/* Chat pane */}
       {embedMode !== 'sessions' && (
@@ -2696,7 +2677,13 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
             </button>
           </div>
         )}
-        {!activeSlot ? (
+        {splitMode && splitFeatureEnabled ? (
+          <SessionGridView
+            seedSlot={splitAnchor ?? activeSlot}
+            onClose={() => setSplitMode(false)}
+            onCollapse={(slot) => { dispatch(switchSlot(slot)); setSplitMode(false) }}
+          />
+        ) : !activeSlot ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-4 px-8">
             <EmptyState icon={<MessageSquare className="lucide-inline" />} title="What can I do for you?" subtitle="Start a new chat to begin" />
             <Btn primary onClick={() => dispatch(createSlot({ agent: pendingAgent || defaultAgent || undefined, model: pendingModel || undefined, mode }))}>Start a new chat</Btn>
@@ -2719,13 +2706,9 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                 <div className="rounded-l-md rounded-r-[2px] px-1.5 py-0.5 group-hover/header:bg-bg-hover transition-colors">
                 <ChatHeaderMenu
                   activeSlot={activeSlot}
-                  currentSlot={currentSlot}
-                  slackChannels={slackChannels}
-                  onSlackLink={handleSlackLink}
-                  slotKey={activeSlot ?? undefined}
-                  colorIndex={slots.find(s => s.key === activeSlot)?.color_index}
                   agent={currentSlot?.agent}
                   onReveal={activeSlot ? () => { if (!sidebarPinned) setSidebarPinned(true); window.dispatchEvent(new CustomEvent('reveal-slot', { detail: activeSlot })) } : undefined}
+                  onRename={activeSlot ? () => { setEditingTitle(true); setTitleDraft(title) } : undefined}
                   mode={effectiveMode}
                 />
                 </div>
@@ -2747,6 +2730,15 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               )}
                 </div>
               {effectiveMode === 'orchestrator' && <span className="pointer-events-auto"><InfoTip text="Autopilot plans before executing. Each stage needs your approval (or select 'Go All' to run autonomously). Sub-agents are delegated automatically. Plan lessons persist across sessions." /></span>}
+              {!embedMode && splitFeatureEnabled && (splitAnchorForActive && !activeIsSplitAnchor ? (
+                <Clickable className="ml-auto flex items-center gap-1 text-accent bg-accent/10 hover:bg-accent/20 transition-colors cursor-pointer pointer-events-auto text-[11px] font-medium px-1.5 py-0.5 rounded" onClick={() => enterSplit(splitAnchorForActive)} title="This session is open in a split — return to it" aria-label="Return to split view">
+                <Columns2 size={13} /> In split
+              </Clickable>
+              ) : (
+                <Clickable className="ml-auto opacity-40 hover:opacity-100 transition-opacity cursor-pointer pointer-events-auto" onClick={() => enterSplit(activeSlot)} title="Split view (⌘D)" aria-label="Enter split view">
+                <Columns2 size={14} />
+              </Clickable>
+              ))}
               {embedMode !== 'chat' && !activityOpen && <Clickable className="ml-auto opacity-40 hover:opacity-100 transition-opacity cursor-pointer pointer-events-auto" onClick={toggleAct} aria-label="Toggle activity panel">
                 <SessionStatus />
               </Clickable>}
@@ -2835,6 +2827,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                 />
               </motion.div>
             ) : (
+            <div className="relative flex flex-col flex-1 min-h-0">
             <div
               ref={scrollerRef}
               style={{
@@ -2934,6 +2927,14 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               <ChatFooter running={slotRunning} stopping={slotStopping} state={slotState} lastRole={lastRole} regenerating={regenerating} stopState={currentSlot?.stop_state} />
               <div style={{height: '2vh'}} />
             </div>
+            {!isWelcomeState && chatNav.sections.length >= 2 && (
+              <ChatProgressTrack
+                sections={chatNav.sections}
+                currentIdx={currentSectionIdx}
+                onScrollToSection={scrollToNavSection}
+              />
+            )}
+            </div>
             )}
             <div className="h-6 bg-gradient-to-t from-bg to-transparent pointer-events-none -mt-6 relative z-[1]" />
             <div className="relative">
@@ -2960,7 +2961,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                 </div>
               )}
               {!activityOpen && <SubagentProgressBar slot={activeSlot} />}
-              <QueueStack messages={queuedMessages} onCancel={handleCancelQueued} onInterrupt={handleInterruptQueued} onEdit={handleEditQueued} />
+              <QueueStack messages={queuedMessages} onCancel={handleCancelQueued} onInterrupt={handleInterruptQueued} onEdit={handleEditQueued} fuseBelow={followUpOptions.length === 0 && !knowledgeFetch.pendingKnowledge} />
               {flyingQuote && <FlyingQuote text={flyingQuote.text} from={flyingQuote.from} targetRef={inputAreaRef} onComplete={() => setFlyingQuote(null)} />}
               <div ref={inputAreaRef} className="relative z-10">
               {showHistorySuggestions && (
@@ -3021,6 +3022,8 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               value={input}
               onChange={setInput}
               onSend={() => send()}
+              canSteer={slotRunning}
+              onSteer={(t: string) => steer(t)}
               onFollowUpSend={(text?: string) => send(text)}
               disabled={
                 /* Streaming, compaction (Mesh-1345), and stopping (Mesh-2004) all
@@ -3100,6 +3103,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               onAutoNudgeClick={(rect) => { setAutoNudgeBtnRect(rect); setAutoNudgeOpen(!autoNudgeOpen) }}
               browseMode={browseMode}
               onBrowseToggle={toggleBrowseMode}
+              onOptimizeResult={handleOptimizeResult}
               memoryMode={currentSlot?.memory_mode ?? 'persistent'}
               cleanMode={currentSlot?.clean_mode}
               sentMessages={sentMessages}
@@ -3332,11 +3336,12 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
         )}
         {activityOpen && !panel.isOpen && !diffPanel.isOpen && !search.isOpen && (
           <DetailPanel key="activity-panel" title="Activity" onClose={toggleAct} initialWidth={420} storageKey="mc-activity-width">
-            <ActivityViewer subagents={subagents} toolLog={toolLog} open={true} onToggle={toggleAct} slot={activeSlot || ''} files={touchedFiles.files} onFileOpen={handleFileOpen} onFileRemove={touchedFiles.removeFile} onFilesClear={touchedFiles.clearBySource} projectDir={currentSlot?.project || undefined} navLinks={chatNav.links} navSections={chatNav.sections} onScrollToNavSection={scrollToNavSection} navResolving={chatNav.resolving} />
+            <ActivityViewer subagents={subagents} toolLog={toolLog} open={true} onToggle={toggleAct} slot={activeSlot || ''} files={touchedFiles.files} onFileOpen={handleFileOpen} onFileRemove={touchedFiles.removeFile} onFilesClear={touchedFiles.clearBySource} projectDir={currentSlot?.project || undefined} navLinks={chatNav.links} navResolving={chatNav.resolving} />
           </DetailPanel>
         )}
       </AnimatePresence>
     </div>
+    </TagPopoverProvider>
   )
 }
 

@@ -24,7 +24,8 @@ import { ZoomProvider } from './hooks/ZoomProvider'
 import { api, isAuthBannerShown } from './api/client'
 import { safeSetItem } from './utils/safeStorage'
 import { gcOrphanedStorage } from './utils/storageGc'
-import { Rocket, Menu, Bell, Users, BookOpen, BookOpenText, MessageSquareDot, Settings, Code, RefreshCw, Palette, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, X, Inbox, Gamepad2, KanbanSquare, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain, FolderTree, ChevronUp, MoreHorizontal, Coins, Contact } from 'lucide-react'
+import { codeBrowserBranchUrl, codeBrowserCommitUrl } from './lib/codeBrowser'
+import { Rocket, Menu, Bell, Users, BookOpen, BookOpenText, MessageSquareDot, Settings, Code, RefreshCw, Palette, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, X, Inbox, Gamepad2, KanbanSquare, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain, FolderTree, ChevronUp, MoreHorizontal, Coins, Contact, GitBranch, GitCommitHorizontal } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { DndContext, closestCenter, MouseSensor, TouchSensor, useSensor, useSensors, DragOverlay, type DragStartEvent, type DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
@@ -67,9 +68,11 @@ import MigrationCheck from './components/MigrationCheck'
 import BuiltinAppRoute from './apps/BuiltinAppRoute'
 import { FEATURE_REQUEST_PROMPT } from './prompts/featureRequest'
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts'
+import { useCommandPalette } from './hooks/useCommandPalette'
 import { useProvider } from './providers/context'
 import { useAgents } from './hooks/useAgents'
 import ShortcutsModal from './components/ShortcutsModal'
+import CommandPalette from './components/CommandPalette'
 import Modal from './components/Modal'
 
 type LogSubscribeFn = (cb: ((data: { level: string; msg: string }) => void) | null) => void
@@ -625,6 +628,8 @@ export default function App() {
   const { connected, updateProgress } = useAppSelector(s => s.dashboard)
   const updateAvailable = useAppSelector(s => s.dashboard.status?.update_available)
   const version = useAppSelector(s => s.dashboard.status?.version) || '—'
+  const buildBranch = useAppSelector(s => s.dashboard.status?.branch) || ''
+  const buildCommit = useAppSelector(s => s.dashboard.status?.commit) || ''
   // Track whether the session-expired auth banner is currently injected by
   // api/client.ts. When auth is the real reason the gateway is unreachable,
   // the red top-banner already tells the user what to do (paste a fresh
@@ -676,8 +681,11 @@ export default function App() {
   const terminalEnabled = terminalConfig?.enabled === true
   useEffect(() => { setTerminalEnabledFlag(terminalEnabled) }, [terminalEnabled])
   const navigate = useNavigate()
-  const { colorTheme, setColorTheme, allThemes, preference: modePref, cycle: cycleMode, setTheme: setModePref } = useTheme()
+  const { colorTheme, setColorTheme, allThemes, preference: modePref, cycle: cycleMode, setTheme: setModePref, onboarded, markOnboarded } = useTheme()
   const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem('mc-onboarded'))
+  // Dismiss onboarding when server reports user is already onboarded
+  // (handles the race: boot fetch completes after useState initializer ran).
+  useEffect(() => { if (onboarded) setShowOnboarding(false) }, [onboarded])
   // Capture Electron update lifecycle events app-wide so UpdateModal fires on
   // any page, not just after the user has opened Settings > About.
   useUpdateSubscription()
@@ -857,6 +865,9 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const toggleShortcutsModal = useCallback(() => setShortcutsOpen(p => !p), [])
+  // Search Everywhere command palette (Mesh-2151) — global double-Shift / ⌘K
+  // trigger + open state. Mounted once below at the app shell.
+  const commandPalette = useCommandPalette()
   const newChatMutation = useMutation({
     mutationFn: () => dispatch(createSlot(undefined)).unwrap(),
     onSuccess: () => {
@@ -1273,6 +1284,13 @@ export default function App() {
           </button>
           {settingsOpen && (
             <div ref={settingsMenuRef} className="absolute right-0 top-full mt-1 z-[9999] bg-bg-elevated border border-border rounded-xl shadow-lg min-w-[200px] p-0.5 gap-0.5 flex flex-col animate-slide-up">
+              {(buildBranch || buildCommit) && (
+                <div className="px-3 py-2 border-b border-border mb-0.5">
+                  <div className="text-[12px] font-mono text-text" title="Running build version">v{version}</div>
+                  {buildBranch && <a href={codeBrowserBranchUrl(buildBranch)} target="_blank" rel="noopener noreferrer" className="text-[11px] font-mono text-muted hover:text-text no-underline hover:underline flex items-center gap-1.5 mt-1" title="Browse this branch on GitHub"><GitBranch size={11} className="shrink-0" /> <span className="truncate">{buildBranch}</span></a>}
+                  {buildCommit && <a href={codeBrowserCommitUrl(buildCommit)} target="_blank" rel="noopener noreferrer" className="text-[11px] font-mono text-muted hover:text-text no-underline hover:underline flex items-center gap-1.5 mt-0.5" title="View this commit on GitHub"><GitCommitHorizontal size={11} className="shrink-0" /> {buildCommit}</a>}
+                </div>
+              )}
               <button className="w-full text-left px-3 py-2 rounded-md text-[12px] font-medium text-muted hover:text-text hover:bg-bg-hover cursor-pointer transition-colors border-none bg-transparent flex items-center gap-2" onClick={() => { setSettingsOpen(false); checkForUpdate() }}>{checking ? <><Loader2 size={13} className="animate-spin" /> Checking…</> : updateAvailable ? <><Package size={13} /> Update Available</> : <><RefreshCw size={13} /> Check for Updates</>}</button>
               <div className="px-3 py-2">
                 <div className="text-[12px] font-medium text-muted flex items-center gap-1.5 mb-1.5"><Palette size={13} /> Theme</div>
@@ -1376,7 +1394,7 @@ export default function App() {
                 <button key={t.value} className={`text-left px-2.5 py-1.5 rounded-md text-[12px] cursor-pointer border-none transition-colors ${colorTheme === t.value ? 'bg-accent-subtle text-accent font-medium' : 'bg-transparent text-muted hover:text-text hover:bg-bg-hover'}`} onClick={() => setColorTheme(t.value)}>{t.label}</button>
               ))}
             </div>
-            <button className="w-full py-2 rounded-lg text-[13px] font-medium cursor-pointer bg-accent text-accent-fg border-none hover:opacity-90 transition-opacity" onClick={() => { safeSetItem('mc-onboarded', '1'); setShowOnboarding(false) }}>
+            <button className="w-full py-2 rounded-lg text-[13px] font-medium cursor-pointer bg-accent text-accent-fg border-none hover:opacity-90 transition-opacity" onClick={() => { markOnboarded(); setShowOnboarding(false) }}>
               Let's go
             </button>
           </div>
@@ -1673,6 +1691,11 @@ export default function App() {
         )
       })()}
     </Modal>
+    <CommandPalette
+      open={commandPalette.open}
+      onClose={commandPalette.close}
+      openShortcuts={toggleShortcutsModal}
+    />
     <Lightbox />
     </ZoomProvider>
   )

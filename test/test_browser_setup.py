@@ -188,6 +188,14 @@ class TestGeneratePlaywrightConfig:
         generate_playwright_config()
         assert kiroclaw_dir.exists()
 
+    def test_config_pins_chromium_channel(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        # Without this pin @playwright/mcp defaults launchOptions.channel to the
+        # branded "chrome" channel, which overrides browserName and is absent on
+        # headless/Cloud Desktop hosts; pin it to bundled "chromium".
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        config = json.loads(generate_playwright_config().read_text())
+        assert config["browser"]["launchOptions"]["channel"] == "chromium"
+
 
 # ── TestRefreshStorageState ──────────────────────────────────────────────────
 

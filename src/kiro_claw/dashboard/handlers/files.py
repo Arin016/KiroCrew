@@ -2072,7 +2072,7 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
                 session_key="dashboard", tool_name="dashboard_config_write", outcome="failure"
             )
             return web.json_response({"error": "request body must be a JSON object"}, status=400)
-        _allowed = {"restore_sessions", "restore_window_minutes", "merge_queued_messages", "widget_density", "quick_send"}
+        _allowed = {"restore_sessions", "restore_window_minutes", "merge_queued_messages", "widget_density", "quick_send", "session_grid"}
         unknown = set(body.keys()) - _allowed
         if unknown:
             _sel().log_tool_invocation(
@@ -2131,6 +2131,16 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
                     {"error": "quick_send must be a boolean"}, status=400
                 )
             cfg.dashboard.quick_send = val
+        if "session_grid" in body:
+            val = body["session_grid"]
+            if not isinstance(val, bool):
+                _sel().log_tool_invocation(
+                    session_key="dashboard", tool_name="dashboard_config_write", outcome="failure"
+                )
+                return web.json_response(
+                    {"error": "session_grid must be a boolean"}, status=400
+                )
+            cfg.dashboard.session_grid = val
         cfg.save()
         _sel().log_tool_invocation(
             session_key="dashboard", tool_name="dashboard_config_write", outcome="success"
@@ -2146,5 +2156,6 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             "merge_queued_messages": cfg.dashboard.merge_queued_messages,
             "widget_density": cfg.dashboard.widget_density,
             "quick_send": cfg.dashboard.quick_send,
+            "session_grid": cfg.dashboard.session_grid,
         }
     )

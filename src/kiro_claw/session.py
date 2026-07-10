@@ -278,6 +278,21 @@ _PERSISTENT_KEYS = frozenset({BACKGROUND_KEY, HEARTBEAT_KEY})
 # this set if more sentinel values are introduced (e.g. "default", "system").
 _SENTINEL_MODELS = frozenset({"auto"})
 
+
+def _model_fallback(per_agent_model: str, global_default: str) -> "str | None":
+    """Choose the session model when the caller supplied none.
+
+    Precedence (high → low): explicit caller model (resolved before this is
+    reached) > per-agent pin > global default. When the agent pins its own
+    model, return ``None`` so the provider factory defers to kiro's native
+    agent-JSON resolution. Otherwise return the global default — unless it is a
+    sentinel (e.g. ``"auto"``), in which case return ``None``.
+    """
+    if per_agent_model:
+        return None
+    return global_default if global_default and global_default not in _SENTINEL_MODELS else None
+
+
 # Type alias for provider factory — accepts optional session key
 ProviderFactory = Callable[..., LLMProvider]
 
@@ -972,6 +987,40 @@ class SessionManager:
         """
         return set(self._starting_pids)
 
+    def _companion_runtime_pids(self) -> set[int]:
+        """PIDs of live AcpRuntimes NOT registered as ``self._sessions`` entries.
+
+        Since the AcpRuntime unify (commit 0bf3b85a) every runtime records its
+        PID in ``kiro_session_pids.txt`` at spawn, so the periodic orphan sweep
+        treats any tracked PID it can't find in the active set as an orphan and
+        SIGKILLs it (surfacing as ``process exited (rc=-9)`` mid-chat). Two
+        runtime kinds live OUTSIDE ``self._sessions`` and are therefore invisible
+        to ``_collect_active_pids``:
+
+        - ``self._subagent_runtimes`` — companion runtimes multiplexing a parent
+          session's subagents (alive for the parent's whole lifetime).
+        - ``self._bg_runtime`` — the background runtime backing ``get_bg_session``
+          (kiroclaw-lite title-gen / memory consolidation).
+
+        Both are shielded from the sweep by unioning their live PIDs into the
+        active set here (mirrors ``_pool_pids``/``_in_flight_pids``). Only alive
+        runtimes contribute — a dead entry SHOULD be reaped. Returns a copy.
+        """
+        pids: set[int] = set()
+        for runtime in list(self._subagent_runtimes.values()):
+            try:
+                if runtime is not None and runtime.is_alive() and isinstance(runtime.pid, int):
+                    pids.add(runtime.pid)
+            except Exception:
+                logger.debug("companion runtime pid probe failed", exc_info=True)
+        bg = self._bg_runtime
+        try:
+            if bg is not None and bg.is_alive() and isinstance(bg.pid, int):
+                pids.add(bg.pid)
+        except Exception:
+            logger.debug("bg runtime pid probe failed", exc_info=True)
+        return pids
+
     _POOL_HEALTH_INTERVAL = 30  # seconds between health sweeps
 
     async def _pool_health_loop(self) -> None:
@@ -1238,24 +1287,13 @@ class SessionManager:
             agent: Optional agent name for ``session/set_mode``.  Non-default
                 agents skip the warm pool (cold start only).
             model: Optional model override for the session.  When ``None``,
-                falls back to the global model config (``agent.cc_model`` for
-                the ``claude_code`` provider, ``agent.model`` otherwise) unless
-                that is a sentinel value like ``"auto"``, in which case it
-                stays ``None`` to let the backend resolve from the agent's own
-                JSON config.  Flows through to the provider factory as the
-                ``model_override`` kwarg.
+                falls back to the global ``agent.model`` config — but only when
+                the named agent does not pin its own model (a per-agent pin
+                outranks the global fallback) and the global is not a sentinel
+                value like ``"auto"``, in which case it stays ``None`` to let
+                the backend resolve from the agent's own JSON config.  Flows
+                through to the provider factory as the ``model_override`` kwarg.
         """
-        # Default to global model config if caller didn't specify.
-        # Skip the fallback when global is a sentinel (e.g. "auto") —
-        # kiro-cli already treats None as "auto", so propagating it adds
-        # no value but would trigger the warm-pool post-claim set_model
-        # path with no real change.
-        if model is None:
-            # KiroACP-only: the effective model is the kiro/ACP slot.
-            global_model = self._cfg.agent.model
-            if global_model and global_model not in _SENTINEL_MODELS:
-                model = global_model
-
         # Fast path: existing session — hold lock only briefly
         stale_provider = None
         _claimed: "tuple[_Session, bool] | None" = None
@@ -1392,6 +1430,33 @@ class SessionManager:
             if not self._provider_factory:
                 raise RuntimeError("No provider factory configured")
             factory = self._provider_factory
+
+        # Resolve the session model here — on the cold-start path only.
+        # Existing-session reuse returns above via the fast path without needing
+        # it, so deferring past that short-circuit keeps per-agent resolution
+        # (which globs + reads ``~/.kiro/agents/*.json``) off the hot path for
+        # already-live sessions.
+        if model is None:
+            # KiroACP-only: the effective model is the kiro/ACP slot.
+            #
+            # Precedence: a per-agent model pin outranks the global default — the
+            # global is a *fallback* and must not override an agent that pins its
+            # own model. ``_model_fallback`` defers to kiro (``None``) when a pin
+            # exists, else returns the global (unless a sentinel like "auto").
+            # Blank agents still inherit the global (the original inheritance
+            # behavior); the default ``kiroclaw`` agent is excluded — it
+            # intentionally tracks the global.
+            per_agent_model = ""
+            if agent and agent != "kiroclaw":
+                # Offload the resolver off the event loop: it globs +
+                # read_text() over ~/.kiro/agents/*.json, so on a slow/large
+                # agents dir a cold start would otherwise block the loop (and
+                # every concurrent task) for the duration. No lock or session
+                # semaphore is held at this point, so awaiting is safe.
+                per_agent_model = await asyncio.get_running_loop().run_in_executor(
+                    None, self._cfg._resolve_named_agent_model, agent
+                )
+            model = _model_fallback(per_agent_model, self._cfg.agent.model)
 
         # Check session map for resume — only for long-lived sessions
         resume_sid: str | None = None
@@ -2422,6 +2487,7 @@ class SessionManager:
                 active_pids, ok = _collect_active_pids(self._sessions)
                 active_pids.update(self._pool_pids())
                 active_pids.update(self._in_flight_pids())
+                active_pids.update(self._companion_runtime_pids())
                 if ok:
                     my_gw_pid = os.getpid()
                     # Phase 1 (thread): identify dead entries and orphan candidates.
@@ -2438,6 +2504,7 @@ class SessionManager:
                         current_pids, phase2_safe = _collect_active_pids(self._sessions)
                         current_pids.update(self._pool_pids())
                         current_pids.update(self._in_flight_pids())
+                        current_pids.update(self._companion_runtime_pids())
                         if phase2_safe:
                             confirmed = [pid for pid in candidates if pid not in current_pids]
                     # Phase 2b (thread): kill confirmed orphans + writeback.

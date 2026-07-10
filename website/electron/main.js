@@ -36,15 +36,35 @@ const store = new Store({
   },
 });
 
+const KIROCLAW_HOME = process.env.KIROCLAW_HOME || path.join(os.homedir(), ".kiroclaw");
+
 function resolvePort() {
   const raw = process.env.KIROCLAW_PORT;
-  if (!raw) return 5476;
-  const n = parseInt(raw, 10);
-  if (isNaN(n) || n < 1 || n > 65535) {
-    console.warn(`Invalid KIROCLAW_PORT="${raw}", falling back to 5476`);
-    return 5476;
+  if (raw) {
+    const n = parseInt(raw, 10);
+    if (isNaN(n) || n < 1 || n > 65535) {
+      console.warn(`Invalid KIROCLAW_PORT="${raw}", falling back to 5476`);
+      return 5476;
+    }
+    return n;
   }
-  return n;
+  // No env override — derive the gateway port from config.json. The fork's
+  // DashboardConfig has no `dashboard.port` key; the port lives in
+  // `dashboard.url` (see backend cli_server.resolve_client_port /
+  // dashboard/origin.parse_dashboard_url), so parse the URL. The scheme-prepend
+  // mirrors the backend's _ensure_scheme so a bare "host:7778" parses.
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(KIROCLAW_HOME, "config.json"), "utf8"));
+    let url = cfg && cfg.dashboard && cfg.dashboard.url;
+    if (url) {
+      if (!url.includes("://")) url = "http://" + url;
+      const p = parseInt(new URL(url).port, 10);
+      if (Number.isInteger(p) && p > 0 && p <= 65535) return p;
+    }
+  } catch (e) {
+    console.debug(`No usable dashboard.url port in config.json (${e.message}), falling back to 5476`);
+  }
+  return 5476;
 }
 
 const PORT = resolvePort();
@@ -57,7 +77,6 @@ if (migrateRemoteHostConfig(store, PORT)) {
 const HEALTH_URL = `${BACKEND_URL}/api/status`;
 const POLL_INTERVAL_MS = 500;
 const MAX_WAIT_MS = 30_000; // 30s max wait for backend
-const KIROCLAW_HOME = process.env.KIROCLAW_HOME || path.join(os.homedir(), ".kiroclaw");
 const TAB_BAR_HEIGHT = 28; // macOS native tab bar height in px
 
 const { validateRemoteSettings } = require("./validation");

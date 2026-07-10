@@ -32,7 +32,7 @@ class FileReader:
     # python-docx (both declared in setup.cfg). .pptx -> python-pptx is NOT declared,
     # so .pptx is intentionally kept out of SUPPORTED even though _read_pptx exists.
     SUPPORTED = {
-        '', '.md', '.txt', '.py', '.java', '.ts', '.js', '.rs', '.go',
+        '', '.md', '.txt', '.org', '.py', '.java', '.ts', '.js', '.rs', '.go',
         '.html', '.htm', '.docx', '.pdf',
         '.csv', '.log', '.json', '.yaml', '.yml', '.sh', '.rb', '.c', '.cpp', '.h',
     }

@@ -299,4 +299,134 @@ describe('parseBlocks', () => {
       })
     })
   })
+
+  describe('nested code fences', () => {
+    it('keeps markdown containing inner code blocks as a single code block', () => {
+      // The classic bug: a markdown code block contains a python example.
+      // The inner ``` should NOT close the outer fence.
+      const input = '```markdown\nHere is some code:\n```python\nprint("hello")\n```\nMore text\n```'
+      const blocks = parseBlocks(input, false)
+      expect(blocks).toHaveLength(1)
+      expect(blocks[0].type).toBe('code')
+      expect(blocks[0].language).toBe('markdown')
+      expect(blocks[0].content).toContain('```python')
+      expect(blocks[0].content).toContain('print("hello")')
+      expect(blocks[0].content).toContain('More text')
+    })
+
+    it('handles multiple nested fence pairs inside a code block', () => {
+      const input = '```md\n# Title\n```js\nconst x = 1\n```\nsome text\n```python\ny = 2\n```\nend\n```'
+      const blocks = parseBlocks(input, false)
+      expect(blocks).toHaveLength(1)
+      expect(blocks[0].type).toBe('code')
+      expect(blocks[0].language).toBe('md')
+      expect(blocks[0].content).toContain('```js')
+      expect(blocks[0].content).toContain('```python')
+      expect(blocks[0].content).toContain('end')
+    })
+
+    it('longer outer fence is not affected (CommonMark proper nesting)', () => {
+      // 4-backtick outer fence with 3-backtick inner — already works per spec
+      const input = '````markdown\n```python\ncode\n```\n````'
+      const blocks = parseBlocks(input, false)
+      expect(blocks).toHaveLength(1)
+      expect(blocks[0].type).toBe('code')
+      expect(blocks[0].content).toContain('```python')
+      expect(blocks[0].content).toContain('code')
+    })
+
+    it('simple fence without nesting still closes normally', () => {
+      // Regression guard: basic fences must still work
+      const input = 'before\n```js\nconst x = 1\n```\nafter'
+      const blocks = parseBlocks(input, false)
+      expect(blocks).toHaveLength(3)
+      expect(blocks[0].type).toBe('markdown')
+      expect(blocks[1].type).toBe('code')
+      expect(blocks[1].content).toBe('const x = 1')
+      expect(blocks[2].type).toBe('markdown')
+    })
+
+    it('bare inner fence (no language) is treated as outer close per CommonMark', () => {
+      // A bare ``` inside a code block has no language identifier, so we
+      // cannot distinguish it from the outer closing fence. Per CommonMark
+      // spec, it closes the outer. Only inner fences WITH a language are
+      // tracked as nested opens.
+      const input = '```markdown\n```\n```\n```'
+      const blocks = parseBlocks(input, false)
+      // Line 2 (bare ```) closes the outer → produces first code block (empty)
+      // Line 3 (bare ```) opens a new fence; line 4 closes it → second code block (empty)
+      expect(blocks).toHaveLength(2)
+      expect(blocks[0].type).toBe('code')
+      expect(blocks[1].type).toBe('code')
+    })
+
+    it('nested fences during streaming produce incomplete block', () => {
+      const input = '```markdown\n```python\ncode\n```\nmore content'
+      const blocks = parseBlocks(input, true)
+      expect(blocks).toHaveLength(1)
+      expect(blocks[0].type).toBe('code')
+      expect(blocks[0].complete).toBe(false)
+      expect(blocks[0].content).toContain('```python')
+    })
+
+    it('unbalanced inner opens do not prevent outer close', () => {
+      // Only one inner open, but two potential closes — the first close
+      // pairs with the inner open, the second closes the outer.
+      const input = '```markdown\n```python\ncode\n```\n```'
+      const blocks = parseBlocks(input, false)
+      expect(blocks).toHaveLength(1)
+      expect(blocks[0].type).toBe('code')
+      expect(blocks[0].content).toBe('```python\ncode\n```')
+    })
+
+    it('non-markup outer fence does NOT track inner fences (python)', () => {
+      // A ```python block containing a ```js line should NOT treat it as a
+      // nested fence. The bare ``` closes the outer fence normally.
+      const input = '```python\n# example\n```js\nconsole.log("hi")\n```\nafter text'
+      const blocks = parseBlocks(input, false)
+      expect(blocks).toHaveLength(2)
+      expect(blocks[0].type).toBe('code')
+      expect(blocks[0].language).toBe('python')
+      expect(blocks[0].content).toBe('# example\n```js\nconsole.log("hi")')
+      expect(blocks[1].type).toBe('markdown')
+      expect(blocks[1].content).toContain('after text')
+    })
+
+    it('non-markup outer fence does NOT track inner fences (bash)', () => {
+      const input = '```bash\ncat <<EOF\n```markdown\n# Title\n```\nEOF\n```\noutside'
+      const blocks = parseBlocks(input, false)
+      // First bare ``` on line 5 closes the outer (no depth tracking for bash)
+      expect(blocks[0].type).toBe('code')
+      expect(blocks[0].language).toBe('bash')
+      expect(blocks[0].content).toBe('cat <<EOF\n```markdown\n# Title')
+      // "EOF" is markdown between the two fences
+      expect(blocks.some(b => b.type === 'markdown' && b.content.includes('EOF'))).toBe(true)
+    })
+
+    it('unbalanced inner opens cause over-consumption when depth never reaches zero', () => {
+      // Two inner opens but only one bare ``` follows — depth decrements to 1
+      // but never reaches 0, so the outer fence never closes. At EOF with
+      // streaming=false, the unclosed block is flushed as complete.
+      const input = '```markdown\n```python\n```js\ncode\n```\ntrailing'
+      const blocks = parseBlocks(input, false)
+      // The single bare ``` only decrements depth from 2 to 1; outer never closes.
+      // Everything is consumed as one code block (over-consumption tradeoff).
+      expect(blocks).toHaveLength(1)
+      expect(blocks[0].type).toBe('code')
+      expect(blocks[0].language).toBe('markdown')
+      expect(blocks[0].content).toContain('```python')
+      expect(blocks[0].content).toContain('trailing')
+    })
+
+    it('no-language outer fence (bare ```) enables nesting', () => {
+      // A bare ``` opening (no language) is in the nestable set (empty string)
+      // since the most common LLM output pattern is ``` with no lang showing markdown.
+      const input = '```\nHere:\n```python\nprint(1)\n```\nDone\n```'
+      const blocks = parseBlocks(input, false)
+      expect(blocks).toHaveLength(1)
+      expect(blocks[0].type).toBe('code')
+      expect(blocks[0].content).toContain('```python')
+      expect(blocks[0].content).toContain('Done')
+    })
+  })
 })

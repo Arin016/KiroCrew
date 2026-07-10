@@ -139,6 +139,26 @@ class TestFolderWatcherWalk:
         from kiro_claw.knowledge.readers import FileReader
         assert ".pdf" in FileReader.SUPPORTED
 
+    def test_discovers_org_files(self, store, pipeline, vault):
+        """Org-mode (.org) files must be walked by the folder watcher."""
+        (vault / "notes.org").write_text("* TODO Buy milk\nPlain org content")
+        fw = FolderWatcher(store, pipeline)
+        suffixes = {Path(p).suffix for p, _ in fw._walk(str(vault), [], set())}
+        assert ".org" in suffixes
+
+    def test_org_in_supported_set(self):
+        from kiro_claw.knowledge.readers import FileReader
+        assert ".org" in FileReader.SUPPORTED
+
+    def test_org_file_reader_returns_text(self, tmp_path):
+        from kiro_claw.knowledge.readers import FileReader
+        org_file = tmp_path / "example.org"
+        org_file.write_text("#+TITLE: Test\n* Heading\nBody text")
+        reader = FileReader()
+        text, meta = reader.read(str(org_file))
+        assert "Body text" in text
+        assert meta["extension"] == ".org"
+
 
 class TestFolderWatcherScan:
     @pytest.mark.asyncio

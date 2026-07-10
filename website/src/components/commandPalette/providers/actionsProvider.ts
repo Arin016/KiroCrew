@@ -1,0 +1,171 @@
+import { createElement } from 'react'
+import type { ReactNode } from 'react'
+import { useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { useMutation } from '@tanstack/react-query'
+import { Command, MessageSquarePlus, SunMoon, Keyboard } from 'lucide-react'
+
+import { useAppDispatch } from '../../../store'
+import { createSlot } from '../../../store/chatSlice'
+import { useTheme } from '../../../hooks/useTheme'
+import { fuzzyMatch, makeScoreThenNameComparator } from '../../../utils/fuzzyMatch'
+import type { ResourceProvider, Result } from '../types'
+
+/**
+ * Actions provider (Mesh-2151 Search Everywhere).
+ *
+ * Backs the **Actions** tab with a small, static list of global commands
+ * (New session, Toggle theme, Open Shortcuts) rather than a remote data
+ * source. Each action maps to a {@link Result} whose `onActivate` simply runs
+ * the action.
+ *
+ * Per the §2 Enter matrix, Actions are pure command-invocations: Enter runs
+ * the action and there is no ⌘Enter (new session) or ⌥Enter (preview) variant,
+ * so `onCmdActivate` / `onAltActivate` are intentionally left unset.
+ *
+ * The concrete provider ({@link createActionsProvider}) takes its side effects
+ * as injected callbacks so it stays free of React hooks and is unit-testable
+ * with plain spies. {@link useActionsProvider} wires the real implementations:
+ * `New session` dispatches the `createSlot` chat thunk, `Toggle theme` calls
+ * the theme context's `cycle()` (light → dark → system), and `Open Shortcuts`
+ * is supplied by the palette host (the `ShortcutsModal` open state lives in the
+ * app shell, mirroring `useKeyboardShortcuts`'s `onToggleShortcutsModal`).
+ */
+
+const PROVIDER_ID = 'actions'
+const PROVIDER_LABEL = 'Actions'
+
+/** Icon convention: lucide element with `lucide-inline` (AUTOSDE use-lucide-icons). */
+function inlineIcon(Icon: typeof Command): ReactNode {
+  return createElement(Icon, { className: 'lucide-inline' })
+}
+
+/** A single global action before scoring. */
+interface ActionDef {
+  /** Stable key, used to build the result id. */
+  key: string
+  title: string
+  /** Optional secondary line describing what the action does. */
+  subtitle?: string
+  icon: ReactNode
+  /** The side effect to run on activation (Enter). */
+  run: () => void
+}
+
+/**
+ * Side effects the Actions provider invokes. Injected so the provider has no
+ * hook dependencies and can be tested with plain mock functions.
+ */
+export interface ActionsProviderDeps {
+  /** Start a fresh chat session (Enter on "New session"). */
+  newSession: () => void
+  /** Cycle the color mode (light → dark → system). */
+  toggleTheme: () => void
+  /** Open the keyboard-shortcuts help modal. */
+  openShortcuts: () => void
+}
+
+const compareResults = makeScoreThenNameComparator<Result>(
+  (r) => r.score,
+  (r) => r.title,
+)
+
+/**
+ * Build the Actions {@link ResourceProvider} from injected side effects. Pure
+ * (no React hooks) so it can be exercised directly in tests.
+ *
+ * Matching is done with {@link fuzzyMatch} over the action titles. An empty
+ * query yields a neutral score for every action, so the palette shows the full
+ * action list before the user types anything.
+ */
+export function createActionsProvider(deps: ActionsProviderDeps): ResourceProvider {
+  const actions: ActionDef[] = [
+    {
+      key: 'new-session',
+      title: 'New session',
+      subtitle: 'Start a fresh chat',
+      icon: inlineIcon(MessageSquarePlus),
+      run: deps.newSession,
+    },
+    {
+      key: 'toggle-theme',
+      title: 'Toggle theme',
+      subtitle: 'Cycle light / dark / system',
+      icon: inlineIcon(SunMoon),
+      run: deps.toggleTheme,
+    },
+    {
+      key: 'open-shortcuts',
+      title: 'Open Shortcuts',
+      subtitle: 'Keyboard shortcuts help',
+      icon: inlineIcon(Keyboard),
+      run: deps.openShortcuts,
+    },
+  ]
+
+  return {
+    id: PROVIDER_ID,
+    label: PROVIDER_LABEL,
+    icon: inlineIcon(Command),
+    search(query: string): Result[] {
+      const results: Result[] = []
+      for (const action of actions) {
+        const match = fuzzyMatch(query, action.title)
+        if (!match) continue
+        results.push({
+          id: `${PROVIDER_ID}:${action.key}`,
+          providerId: PROVIDER_ID,
+          title: action.title,
+          subtitle: action.subtitle,
+          icon: action.icon,
+          score: match.score,
+          indices: match.indices,
+          // Declarative §2 Enter action (Mesh-2151 / task 27): Actions are pure
+          // command-invocations — Enter runs `action.run`, and ⌘Enter has no
+          // distinct behavior (the dispatcher ignores the modifier for this
+          // kind). `run` is carried on the action payload so the dispatcher can
+          // invoke it directly; `onActivate` mirrors it for the legacy path.
+          enter: { kind: 'invoke', run: action.run },
+          onActivate: action.run,
+        })
+      }
+      results.sort(compareResults)
+      return results
+    },
+  }
+}
+
+/**
+ * React hook: an Actions provider wired to the chat store and theme context.
+ *
+ * @param opts.openShortcuts - Opens the shortcuts help modal. Supplied by the
+ *   palette host because the `ShortcutsModal` open state is owned by the app
+ *   shell, not a global store slice (mirrors `useKeyboardShortcuts`).
+ */
+export function useActionsProvider(opts: { openShortcuts: () => void }): ResourceProvider {
+  const dispatch = useAppDispatch()
+  const navigate = useNavigate()
+  const { cycle } = useTheme()
+  const { openShortcuts } = opts
+
+  // "New session" is a write (createSlot); route it through useMutation for
+  // error/loading state and consistency with paletteActions.ts's createSlot
+  // mutation (AutoSDE use-react-query). onSuccess navigates to /chat so the
+  // user lands in the new session rather than staying on the current page.
+  const { mutate: doNewSession } = useMutation({
+    mutationFn: () => dispatch(createSlot(undefined)).unwrap(),
+    onSuccess: () => navigate('/chat'),
+  })
+
+  return useMemo(
+    () =>
+      createActionsProvider({
+        newSession: () => doNewSession(),
+        toggleTheme: () => {
+          cycle()
+        },
+        openShortcuts,
+      }),
+    [doNewSession, cycle, openShortcuts],
+  )
+}

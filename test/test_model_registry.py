@@ -104,6 +104,53 @@ class TestModelRegistry:
         # The -1m form of 4.6 no longer downgrades to 4.7; it maps to the flagship.
         assert mr.to_provider_id("claude-opus-4.6-1m", "claude_code") == flagship
 
+    def test_fable_5_canonical_round_trip(self):
+        # Fable 5 entry: canonical -> provider id -> canonical.
+        assert (
+            mr.to_provider_id("fable-5-1m", "claude_code")
+            == "global.anthropic.claude-fable-5[1m]"
+        )
+        assert (
+            mr.from_provider_id("global.anthropic.claude-fable-5[1m]", "claude_code")
+            == "fable-5-1m"
+        )
+
+    def test_fable_5_aliases_resolve(self):
+        expected = "global.anthropic.claude-fable-5[1m]"
+        assert mr.to_provider_id("fable", "claude_code") == expected
+        assert mr.to_provider_id("fable-5", "claude_code") == expected
+        assert mr.to_provider_id("claude-fable-5", "claude_code") == expected
+
+    def test_fable_5_window(self):
+        assert mr.window("fable-5-1m") == 1_000_000
+
+    def test_fable_5_supports_effort(self):
+        assert mr.supports_effort("fable-5-1m") is True
+
+    def test_fable_5_in_available_models(self):
+        ids = mr.available_models("claude_code")
+        assert "global.anthropic.claude-fable-5[1m]" in ids
+
+    def test_bare_advertised_ids_fold_to_canonical_key(self):
+        # claude-agent-acp advertises BARE ids (no "global.anthropic." prefix).
+        # They must fold onto the canonical key via from_provider_id so the
+        # dashboard dropdown does not show a duplicate row per model.
+        assert mr.from_provider_id("claude-opus-4-8[1m]", "claude_code") == "opus-4.8-1m"
+        assert mr.from_provider_id("claude-opus-4-8", "claude_code") == "opus-4.8"
+        assert mr.from_provider_id("claude-opus-4-7[1m]", "claude_code") == "opus-4.7-1m"
+        assert mr.from_provider_id("claude-sonnet-4-6[1m]", "claude_code") == "sonnet-4.6-1m"
+
+    def test_fable_5_not_default(self):
+        # Fable 5 is opt-in; Opus 4.8 stays default.
+        assert mr.default("claude_code") == "opus-4.8-1m"
+
+    def test_available_models_is_default_first(self):
+        # The allowlist is default-first regardless of JSON key order: on the
+        # 'auto' path settings.local.json omits the model key and the
+        # claude-agent-acp adapter picks availableModels[0]. Adding Fable as the
+        # first JSON entry must NOT make Auto sessions resolve to Fable.
+        assert mr.available_models("claude_code")[0] == "global.anthropic.claude-opus-4-8[1m]"
+
     def test_auto_passes_through_empty(self):
         assert mr.to_provider_id("auto", "claude_code") == ""
 

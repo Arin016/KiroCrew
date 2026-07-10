@@ -27,7 +27,10 @@
   "default_workspace": "default",
   "dashboard": {
     "host": "127.0.0.1",
-    "port": 7979
+    "port": 7979,
+    "theme_mode": "dark",
+    "theme_color": "kiro",
+    "onboarded": true
   },
   "timezone": "UTC"
 }

@@ -250,7 +250,21 @@ Injected on every follow-up message:
 | Triggered skills           | On-demand skills matching message keywords |
 | Hook context               | Config-driven context rules           |
 
-Total cap: **165,000 chars / ~55k tokens** (`_MAX_CONTEXT_CHARS`). Truncated with newline-boundary safety if exceeded.
+Budget: **opt-in** via `skills.lazy_load` (default **off**, like MCP `prewarm_count=0`).
+
+- **Off (default)** — legacy behavior, unchanged from before the lazy-load
+  feature: one flat 165,000-char ceiling (`_CONTEXT_BUDGET_BASE`) shared by all
+  sections, and the skills block is the full unranked dump of every on-demand
+  skill.
+- **On** — each section gets its own char cap, expressed as a percentage of the
+  165,000-char base — memory ~37.9%, lessons 22.6%, thread history 21–27%,
+  skills 15%, steering 10%. Sections are truncated to their own caps
+  independently; the global ceiling (`_MAX_CONTEXT_CHARS`) is the **sum** of the
+  section caps (~190k chars / ~63k tokens), so skills/steering can never eat
+  into memory/lessons space. The skills block becomes a usage-ranked top-K with
+  the tail behind the `skill_search` tool. The global truncation (newline-
+  boundary safe) is a last-resort backstop that only fires if a section
+  overflows its own cap.
 
 ---
 

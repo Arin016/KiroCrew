@@ -31,11 +31,28 @@ _MAX_PORT = 65535
 def _is_port_free(port: int, host: str = "127.0.0.1") -> bool:
     """Return True if *port* can be bound on *host* (i.e. it is free).
 
-    Uses ``SO_REUSEADDR`` off so we detect ports held by a live listener. A
-    bind failure (``OSError``) is interpreted as "in use / unavailable".
+    Sets ``SO_REUSEADDR`` before probing so this check mirrors what the SSH
+    forward listener actually does at bind time — OpenSSH sets ``SO_REUSEADDR``
+    on its ``-L`` listener. This matters for the disconnect -> reconnect path:
+    when a tunnel is torn down, ``_SshTunnel.stop()`` reaps the ``ssh`` child so
+    the *listener* socket is gone, but the forward's **accepted** data
+    connections (the embedded dashboard's WebSocket/API traffic) linger in
+    ``TIME_WAIT`` on ``127.0.0.1:<port>`` for the OS's 2*MSL window (~30-60s),
+    each still bound to that local addr:port. A probe *without* ``SO_REUSEADDR``
+    fails to bind while any such ``TIME_WAIT`` socket exists, so the connect
+    pre-flight would falsely report the just-freed port as "in use" and reject
+    the reconnect — the observed symptom of having to "wait longer" before a
+    just-disconnected instance can be reconnected. With ``SO_REUSEADDR`` set the
+    probe matches ssh: a ``TIME_WAIT`` remnant is no longer a false positive,
+    while a genuinely *live* listener (a real port collision between two
+    connected instances) still fails to bind and is correctly reported in use
+    (``SO_REUSEADDR`` exempts ``TIME_WAIT`` only, never an active ``LISTEN``).
+
+    A bind failure (``OSError``) is interpreted as "in use / unavailable".
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((host, port))
         return True
     except OSError:

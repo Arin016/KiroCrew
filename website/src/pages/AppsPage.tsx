@@ -596,12 +596,12 @@ export default function AppsPage() {
                                 src={hero}
                                 alt=""
                                 className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-300"
+                                onError={(e) => { const img = e.currentTarget; img.style.display = 'none'; img.parentElement!.querySelector('.hero-fallback')?.classList.remove('hidden') }}
                               />
-                            ) : (
-                              <div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-elevated)]">
-                                <span className="text-2xl font-bold text-[var(--text)] opacity-10 tracking-widest">KIROCLAW</span>
-                              </div>
-                            )}
+                            ) : null}
+                            <div className={`absolute inset-0 flex items-center justify-center bg-[var(--bg-elevated)] ${hero ? 'hidden' : ''} hero-fallback`}>
+                              <span className="text-2xl font-bold text-[var(--text)] opacity-10 tracking-widest">KIROCLAW</span>
+                            </div>
                           </div>
                         )
                       })()}

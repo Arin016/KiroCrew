@@ -75,6 +75,46 @@ def is_toolbox_install() -> bool:
         return False
 
 
+@functools.lru_cache(maxsize=1)
+def git_build_info() -> tuple[str, str]:
+    """Return ``(branch, short_commit)`` for the running source checkout.
+
+    Reads ``KIROCLAW_PROJECT_DIR`` (the git tree the gateway runs from) and
+    shells out to ``git`` once. The result is cached for the process lifetime
+    (``lru_cache(maxsize=1)``): the running build's branch and commit cannot
+    change without a restart, and status snapshots are emitted on every SSE /
+    WebSocket tick, so this must not spawn ``git`` on the hot path repeatedly.
+
+    Returns ``("", "")`` when there is no source tree to inspect — toolbox /
+    pip-wheel installs (no ``KIROCLAW_PROJECT_DIR`` or no ``.git``) — so callers
+    can omit the fields gracefully. Any git failure also fails open to empty
+    strings.
+    """
+    proj = os.environ.get("KIROCLAW_PROJECT_DIR", "")
+    if not proj or not (Path(proj) / ".git").exists():
+        return ("", "")
+
+    def _run(*args: str) -> str:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=proj,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        if result.returncode != 0:
+            return ""
+        return result.stdout.strip()
+
+    return (
+        _run("rev-parse", "--abbrev-ref", "HEAD"),
+        _run("rev-parse", "--short", "HEAD"),
+    )
+
+
 def augmented_path(base_path: str = "") -> str:
     """Return *base_path* prepended with well-known MCP binary directories.
 

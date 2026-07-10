@@ -1,12 +1,20 @@
 {
-  "_comment": "Canonical model registry. Source of truth for Python (model_registry.py) and frontend (modelRegistry.ts). Canonical keys are versioned+capability. providers maps canonical -> per-provider id. window = context tokens.",
+  "_comment": "Canonical model registry. Source of truth for Python (model_registry.py) and frontend (modelRegistry.ts). Canonical keys are versioned+capability. providers maps canonical -> per-provider id. window = context tokens. Aliases include each provider id's bare (prefix-stripped) form, e.g. 'claude-opus-4-8[1m]', because claude-agent-acp advertises bare ids without the 'global.anthropic.' prefix; listing them lets from_provider_id fold the advertised rows onto the canonical key so the dropdown does not show duplicates.",
+  "fable-5-1m": {
+    "display": "Fable 5 (1M context)",
+    "description": "Most intelligent, demanding reasoning and agentic work",
+    "window": 1000000,
+    "supports_effort": true,
+    "aliases": ["fable", "fable-5", "claude-fable-5"],
+    "providers": { "claude_code": "global.anthropic.claude-fable-5[1m]" }
+  },
   "opus-4.8-1m": {
     "display": "Opus 4.8 (1M context)",
     "description": "Most capable, 1M context window",
     "window": 1000000,
     "default": true,
     "supports_effort": true,
-    "aliases": ["opus", "claude-opus-4.8", "claude-opus-4.6", "claude-opus-4.6-1m"],
+    "aliases": ["opus", "claude-opus-4.8", "claude-opus-4-8[1m]", "claude-opus-4.6", "claude-opus-4.6-1m"],
     "providers": { "claude_code": "global.anthropic.claude-opus-4-8[1m]" }
   },
   "opus-4.8": {
@@ -14,7 +22,7 @@
     "description": "Most capable, 200K context",
     "window": 200000,
     "supports_effort": true,
-    "aliases": ["claude-opus-4.5"],
+    "aliases": ["claude-opus-4-8", "claude-opus-4.5"],
     "providers": { "claude_code": "global.anthropic.claude-opus-4-8" }
   },
   "opus-4.7-1m": {
@@ -22,7 +30,7 @@
     "description": "Most capable for complex work, 1M context",
     "window": 1000000,
     "supports_effort": true,
-    "aliases": ["claude-opus-4.7", "claude-opus-4.7-1m"],
+    "aliases": ["claude-opus-4.7", "claude-opus-4.7-1m", "claude-opus-4-7[1m]"],
     "providers": { "claude_code": "global.anthropic.claude-opus-4-7[1m]" }
   },
   "sonnet-4.6-1m": {
@@ -34,6 +42,7 @@
       "sonnet",
       "claude-sonnet-4.6",
       "claude-sonnet-4.6-1m",
+      "claude-sonnet-4-6[1m]",
       "claude-sonnet-4.5",
       "claude-sonnet-4.5-1m",
       "claude-sonnet-4",

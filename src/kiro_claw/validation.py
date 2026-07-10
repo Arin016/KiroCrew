@@ -184,7 +184,14 @@ def validate_field(value: Any, spec: FieldSpec) -> Any:
         if not value and spec.required:
             raise ValidationError(spec.name, "required (empty after sanitization)")
         if spec.max_len and len(value) > spec.max_len:
-            raise ValidationError(spec.name, f"exceeds max length {spec.max_len}")
+            # Report the actual length + overshoot so a caller (e.g. the LLM
+            # composing a learn_add rule) can trim by the exact amount in one
+            # pass instead of guessing and re-submitting repeatedly.
+            raise ValidationError(
+                spec.name,
+                f"exceeds max length {spec.max_len} "
+                f"(got {len(value)}, trim {len(value) - spec.max_len} chars)",
+            )
         if spec.allowed and value not in spec.allowed:
             raise ValidationError(spec.name, f"must be one of: {', '.join(sorted(spec.allowed))}")
         if spec.pattern and value and not spec.pattern.match(value):
@@ -380,6 +387,10 @@ SPAWN_STATUS_SCHEMA = ToolSchema(
     tool_name="spawn_status",
     fields=[
         FieldSpec("agent_id", str, required=True, max_len=64),
+        # Paged / filtered reads of the retained transcript (line-oriented).
+        FieldSpec("offset", int, min_val=0, max_val=100_000_000),
+        FieldSpec("limit", int, min_val=0, max_val=2000),
+        FieldSpec("grep", str, max_len=500),
     ],
 )
 
@@ -406,6 +417,14 @@ AUTONUDGE_STOP_SCHEMA = ToolSchema(
     tool_name="autonudge_stop",
     fields=[
         FieldSpec("reason", str, max_len=MAX_SHORT_STRING),
+    ],
+)
+
+SKILL_SEARCH_SCHEMA = ToolSchema(
+    tool_name="skill_search",
+    fields=[
+        FieldSpec("query", str, required=True, max_len=MAX_SHORT_STRING),
+        FieldSpec("limit", int),
     ],
 )
 
@@ -761,6 +780,7 @@ MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
     "spawn_status": SPAWN_STATUS_SCHEMA,
     "learn_add": LEARN_ADD_SCHEMA,
     "learn_remove": LEARN_REMOVE_SCHEMA,
+    "skill_search": SKILL_SEARCH_SCHEMA,
     "task_run": TASK_RUN_SCHEMA,
     "send_message": SEND_MESSAGE_SCHEMA,
     "read_slack_profile": READ_SLACK_PROFILE_SCHEMA,

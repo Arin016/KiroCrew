@@ -37,7 +37,7 @@ export function ChatPanel() {
     queryKey: ['dashboardConfig'],
     queryFn: () => api.dashboardConfig(),
   })
-  const dashCfg = dashQ.data ?? { restore_sessions: false, restore_window_minutes: 30, merge_queued_messages: false, widget_density: 'more' as const, quick_send: false }
+  const dashCfg = dashQ.data ?? { restore_sessions: false, restore_window_minutes: 30, merge_queued_messages: false, widget_density: 'more' as const, quick_send: false, session_grid: false }
 
   const dashMut = useMutation({
     mutationFn: (next: DashboardConfig) => api.updateDashboardConfig(next),
@@ -157,6 +157,7 @@ export function ChatPanel() {
             onChange={v => setChat('sendOnEnter', v as SendMode)}
           />
           <SettingsToggle label="Quick Send" description={`Click a suggested reply to send it instantly. ${isMac ? '⇧' : 'Shift'}+Click to select multiple.`} checked={dashCfg.quick_send} onChange={v => setDash({ quick_send: v })} disabled={dashDisabled} />
+          <SettingsToggle label="Split View (Session Grid)" description={`Opt-in: split the chat into resizable session panes (${isMac ? '⌘' : 'Ctrl'}+D). Experimental.`} checked={dashCfg.session_grid} onChange={v => setDash({ session_grid: v })} disabled={dashDisabled} />
           <SettingsToggle label="Show Timestamps" description="Display time on each message" checked={chatCfg.showTimestamps} onChange={v => setChat('showTimestamps', v)} />
           <SettingsToggle label="History Expanded" description="Expand history sidebar by default" checked={chatCfg.historyExpanded} onChange={v => setChat('historyExpanded', v)} />
           <SettingsSelect label="Notification Limit" description="Maximum notifications to display" value={String(chatCfg.notifLimit)} options={NOTIF_OPTIONS} onChange={v => setChat('notifLimit', Number(v))} />

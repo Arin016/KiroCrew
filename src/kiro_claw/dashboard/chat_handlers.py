@@ -26,6 +26,7 @@ from kiro_claw.config.loader import (
     resolve_agent_bindings,
 )
 from kiro_claw.constants import CHAT_TURN_TIMEOUT
+from kiro_claw.dashboard.chat_folders import _unhide_folder
 from kiro_claw.dashboard.chat_orchestrator import _stage_loop
 from kiro_claw.dashboard.chat_persistence import (
     _attach_variants,
@@ -55,7 +56,12 @@ from kiro_claw.dashboard.state import (
 )
 from kiro_claw.providers.acp import AcpProvider
 from kiro_claw.safety_override import safety_override
-from kiro_claw.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
+from kiro_claw.security import (
+    is_sensitive_path,
+    redact,
+    redact_credentials,
+    redact_exfiltration_urls,
+)
 from kiro_claw.sel import SecurityEvent, sel
 from kiro_claw.validation import _AGENT_NAME_RE
 
@@ -192,6 +198,33 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
         slot.color_theme = color_theme
 
     if slot.running:
+        # Mid-turn steer: inject into the RUNNING turn instead of queueing for
+        # the next turn. Gated on an explicit `steer` flag + a live, steer-capable
+        # inner AcpClient that _run_chat published on the slot. Fire-and-forget —
+        # the inline steer card materializes when kiro-cli echoes steering_consumed
+        # (EVENT_STEER_CONSUMED). If steer is requested but unavailable (no live
+        # client / unsupported backend / RPC error), fall through to the queue
+        # path so the user's text is NEVER silently dropped.
+        if body.get("steer") and message:
+            _client = slot._acp_client
+            if _client is not None and getattr(_client, "supports_steer", False):
+                try:
+                    steered = await _client.steer(message)
+                except Exception as exc:  # best-effort — fall through to queue
+                    logger.warning("steer failed for slot %s: %s", slot.key, exc)
+                    steered = False
+                if steered:
+                    _redacted = _redact_for_display(redact(message))
+                    state.broadcast_ws(
+                        "steer_push",
+                        {
+                            "slot": slot.key,
+                            "content": _redacted,
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        },
+                    )
+                    return web.json_response({"ok": True, "steered": True})
+            # steer requested but unavailable → fall through to queue below.
         # Queue the message — return JSON immediately (no SSE needed).
         # The existing SSE reader will pick up queued messages as _run_chat
         # processes the queue in its finally block.
@@ -236,7 +269,42 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
         logger.warning("autonudge.notify_user_input failed", exc_info=True)
 
     # ── Orchestrator "Go All" detection ─────────────────────────────
-    if getattr(slot, "mode", "") == "orchestrator" and message.strip().lower() in ("go", "go all"):
+    # Deny-by-default trust boundary (P454989291 item 5): a turn tagged
+    # origin="widget" was pre-filled into the composer by an LLM-emitted
+    # <mcwidget> postMessage. Even though the frontend now requires a human
+    # gesture to send it, the message TEXT is still attacker-controlled — an
+    # injected widget can pre-fill "go all" and socially engineer the user
+    # into pressing Enter. "go"/"go all" is the only chat-text-reachable
+    # privilege escalation (it flips the orchestrator into unattended
+    # per-stage auto-approval via slot._auto_run + _stage_loop), so we refuse
+    # to honour it for widget-origin turns and let the text fall through to a
+    # normal, fully-gated _run_chat turn instead. Mode changes and tool
+    # approvals live on separate endpoints a widget iframe cannot reach.
+    _widget_origin = bool(user_meta) and user_meta.get("origin") == "widget"
+    if (
+        getattr(slot, "mode", "") == "orchestrator"
+        and message.strip().lower() in ("go", "go all")
+        and _widget_origin
+    ):
+        sel().log(
+            SecurityEvent(
+                event_id=uuid.uuid4().hex,
+                timestamp=datetime.now(tz=timezone.utc).isoformat(),
+                event_type="auto_run_denied",
+                caller_identity=f"dashboard:{slot.key}",
+                agent=getattr(slot, "agent", ""),
+                source="dashboard",
+                operation="go_typed_widget_origin",
+                outcome="denied",
+                resources=f"slot={slot.key}",
+                error="orchestrator go/go-all refused for widget-origin turn",
+            )
+        )
+        logger.warning(
+            "Refused orchestrator auto-run escalation for widget-origin turn on slot %s",
+            slot.key,
+        )
+    elif getattr(slot, "mode", "") == "orchestrator" and message.strip().lower() in ("go", "go all"):
         _is_auto = message.strip().lower() == "go all"
         if _is_auto:
             slot._auto_run = True
@@ -1585,6 +1653,9 @@ async def api_chat_slot_resume(request: web.Request) -> web.Response:
         slot.mode = meta["mode"]
     if meta.get("folder_id"):
         slot.folder_id = meta["folder_id"]
+        # Re-engaging a hidden empty folder (Model B) un-hides it so it stays
+        # visible until the user hides it again.
+        _unhide_folder(state, meta["folder_id"])
     if meta.get("pinned"):
         slot.pinned = True
     if meta.get("color_index") is not None:
@@ -1675,7 +1746,7 @@ async def api_chat_mode(request: web.Request) -> web.Response:
     slot_key = body.get("slot") or None
 
     if mode == "yolo":
-        result = safety_override().activate("dashboard")
+        result = await asyncio.to_thread(safety_override().activate, "dashboard")
         if not result.active:
             return web.json_response(
                 {"ok": False, "error": "safety override activation refused"},
@@ -1903,7 +1974,7 @@ async def api_chat_slot_approve(request: web.Request) -> web.Response:
         action = "approved"
     # YOLO: auto-approve all tools globally (all slots)
     elif action == "yolo":
-        result = safety_override().activate("dashboard")
+        result = await asyncio.to_thread(safety_override().activate, "dashboard")
         if not result.active:
             return web.json_response(
                 {"ok": False, "error": "safety override activation refused"},

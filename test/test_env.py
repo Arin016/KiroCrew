@@ -361,3 +361,82 @@ class TestNodeVersionManagerBinsCache:
         """lru_cache exposes cache_info -- confirms decorator is applied."""
         assert hasattr(_node_version_manager_bins, "cache_info")
         assert hasattr(_node_version_manager_bins, "cache_clear")
+
+
+class TestGitBuildInfo:
+    """kiro_claw.env.git_build_info reports the running checkout's branch+sha."""
+
+    def test_empty_when_no_project_dir(self, monkeypatch) -> None:
+        from kiro_claw.env import git_build_info
+
+        git_build_info.cache_clear()
+        monkeypatch.delenv("KIROCLAW_PROJECT_DIR", raising=False)
+        assert git_build_info() == ("", "")
+        git_build_info.cache_clear()
+
+    def test_empty_when_not_a_git_tree(self, tmp_path, monkeypatch) -> None:
+        # Project dir exists but has no .git (toolbox/pip-wheel layout).
+        from kiro_claw.env import git_build_info
+
+        git_build_info.cache_clear()
+        monkeypatch.setenv("KIROCLAW_PROJECT_DIR", str(tmp_path))
+        assert git_build_info() == ("", "")
+        git_build_info.cache_clear()
+
+    def test_reads_branch_and_commit(self, tmp_path, monkeypatch) -> None:
+        from kiro_claw import env
+
+        env.git_build_info.cache_clear()
+        (tmp_path / ".git").mkdir()
+        monkeypatch.setenv("KIROCLAW_PROJECT_DIR", str(tmp_path))
+
+        def _run(argv, **kwargs):  # noqa: ANN001 - test shim
+            out = "beta-braveheart\n" if "--abbrev-ref" in argv else "abc1234\n"
+            return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+        monkeypatch.setattr("kiro_claw.env.subprocess.run", _run)
+        assert env.git_build_info() == ("beta-braveheart", "abc1234")
+        env.git_build_info.cache_clear()
+
+    def test_reads_in_git_worktree(self, tmp_path, monkeypatch) -> None:
+        # In a git worktree, .git is a FILE ("gitdir: ...") not a directory;
+        # the .exists() gate must still let git run there.
+        from kiro_claw import env
+
+        env.git_build_info.cache_clear()
+        (tmp_path / ".git").write_text("gitdir: /repo/.git/worktrees/wt\n")
+        monkeypatch.setenv("KIROCLAW_PROJECT_DIR", str(tmp_path))
+
+        def _run(argv, **kwargs):  # noqa: ANN001 - test shim
+            out = "wt-branch\n" if "--abbrev-ref" in argv else "def5678\n"
+            return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+        monkeypatch.setattr("kiro_claw.env.subprocess.run", _run)
+        assert env.git_build_info() == ("wt-branch", "def5678")
+        env.git_build_info.cache_clear()
+
+    def test_fails_open_on_nonzero_exit(self, tmp_path, monkeypatch) -> None:
+        from kiro_claw import env
+
+        env.git_build_info.cache_clear()
+        (tmp_path / ".git").mkdir()
+        monkeypatch.setenv("KIROCLAW_PROJECT_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            "kiro_claw.env.subprocess.run", _fake_run(returncode=128, stderr="fatal")
+        )
+        assert env.git_build_info() == ("", "")
+        env.git_build_info.cache_clear()
+
+    def test_fails_open_on_oserror(self, tmp_path, monkeypatch) -> None:
+        from kiro_claw import env
+
+        env.git_build_info.cache_clear()
+        (tmp_path / ".git").mkdir()
+        monkeypatch.setenv("KIROCLAW_PROJECT_DIR", str(tmp_path))
+
+        def _boom(*a, **k):  # noqa: ANN002, ANN003 - test shim
+            raise OSError("git not on PATH")
+
+        monkeypatch.setattr("kiro_claw.env.subprocess.run", _boom)
+        assert env.git_build_info() == ("", "")
+        env.git_build_info.cache_clear()

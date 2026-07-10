@@ -1,11 +1,18 @@
 import { memo, useState, useRef, useEffect, useCallback } from 'react'
-import { Pencil, Send, Copy, Check, Link2 } from 'lucide-react'
+import { motion } from 'framer-motion'
+import { Pencil, Send, Copy, Check, Link2, Target } from 'lucide-react'
 import { copyToClipboard } from '../../utils/clipboard'
 import { copySessionLink } from '../../utils/shareUrl'
 import { useSearchHighlight, useCurrentOcc } from '../../hooks/SearchHighlightContext'
 import { applySearchHighlights } from '../../utils/domHighlight'
 import { scrollCurrentMatchIntoView } from '../../utils/searchScroll'
 import { type PasteBlock, expandAll as expandPasteTokens } from '../../utils/pasteTokens'
+
+// Steer bubbles play a one-shot entrance (slide-in + ring pulse) when they land.
+// The chat transcript is virtualized, so a row can remount when scrolled away and
+// back; without this guard the entrance would replay every time. Module-level set
+// persists for the app session — each steered message animates exactly once.
+const animatedSteers = new Set<string>()
 
 interface UserMessageProps {
   content: string
@@ -35,6 +42,17 @@ const UserMessage = memo(function UserMessage({ content, meta, timestamp, render
   useEffect(() => () => {
     if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current)
   }, [])
+
+  // A steered message was injected into the running turn (meta.steer set by the
+  // steer_push WS echo). Render it distinctly and animate it in exactly once.
+  const isSteer = !!(meta && (meta as { steer?: boolean }).steer)
+  const [playSteer] = useState(() => {
+    if (!isSteer) return false
+    const key = messageTs || content
+    if (animatedSteers.has(key)) return false
+    animatedSteers.add(key)
+    return true
+  })
 
   useEffect(() => {
     if (editing && taRef.current) {
@@ -139,6 +157,12 @@ const UserMessage = memo(function UserMessage({ content, meta, timestamp, render
     )
   }
 
+  const bubble = (
+    <div ref={userRef} onCopy={handleCopy} className={`msg-content px-4 py-1.5 text-sm leading-relaxed rounded-xl overflow-hidden min-w-0 max-w-[550px] ${isSteer ? 'bg-accent/10 text-text border border-accent/40' : 'bg-card text-card-fg'}`} style={{ overflowWrap: 'anywhere', wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
+      {renderContent(content, meta)}
+    </div>
+  )
+
   return (
     <div data-role="user" className="group/msg flex flex-col items-end">
       {/* `whiteSpace: pre-wrap` preserves user-typed line breaks (Shift+Enter).
@@ -149,9 +173,32 @@ const UserMessage = memo(function UserMessage({ content, meta, timestamp, render
           blocks set their own `white-space`, so they override the inherited
           value and are unaffected. Mirrors the pre-wrap spans renderInlineSegment
           already uses on the paste-adjacent path. */}
-      <div ref={userRef} onCopy={handleCopy} className="msg-content px-4 py-1.5 text-sm leading-relaxed rounded-xl bg-card text-card-fg overflow-hidden min-w-0 max-w-[550px]" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
-        {renderContent(content, meta)}
-      </div>
+      {isSteer ? (
+        <>
+          {/* Injected into the RUNNING turn — badge + accent bubble + one-shot
+              entrance so the steer is visibly distinct from a normal message. */}
+          <div className="inline-flex items-center gap-1 text-[12px] font-semibold text-accent mb-1 pr-1">
+            <Target size={12} className="shrink-0" /> Steered into the running turn
+          </div>
+          <motion.div
+            className="relative"
+            initial={playSteer ? { opacity: 0, x: 16 } : false}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ duration: 0.32, ease: 'easeOut' }}
+          >
+            {bubble}
+            {playSteer && (
+              <motion.div
+                aria-hidden="true"
+                className="pointer-events-none absolute -inset-0.5 rounded-xl border-2 border-accent"
+                initial={{ opacity: 0.55, scale: 1 }}
+                animate={{ opacity: 0, scale: 1.04 }}
+                transition={{ duration: 0.9, ease: 'easeOut' }}
+              />
+            )}
+          </motion.div>
+        </>
+      ) : bubble}
       <div className="flex items-center gap-1.5 px-1 mt-1 opacity-0 transition-opacity duration-300 delay-100 group-hover/msg:opacity-100 group-hover/msg:delay-300 group-focus-within/msg:opacity-100 group-focus-within/msg:delay-300">
         <button
           onClick={() => {

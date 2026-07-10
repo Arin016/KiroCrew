@@ -74,6 +74,32 @@ def _masked_config_dict(cfg: KiroClawConfig) -> dict:
     return masked
 
 
+# Static, secret-free fallback served when the dashboard's static bundle cannot
+# be read. Most commonly this is a stale install after an update: the
+# long-running gateway process keeps executing the old install path (it does
+# not hot-swap to the freshly-installed version), so it can no longer read
+# index.html. It can also mean the web assets were never built (dev /
+# first-run). MUST stay static and secret-free -- index() serves it
+# UNAUTHENTICATED on the cold-start path (see the SECURITY CONTRACT on index());
+# no server/user/session state may be injected.
+_DASHBOARD_HTML_NOT_FOUND = (
+    "<h1>Dashboard HTML not found</h1>"
+    "<p>The gateway is running but could not read the dashboard's"
+    " static files.</p>"
+    "<p>This most commonly happens after an update leaves a stale install:"
+    " the long-running gateway keeps executing the old install path and"
+    " cannot read the dashboard bundle (the process does not hot-swap to the"
+    " newly-installed version). It can also mean the web assets were never"
+    " built (dev / first-run) &mdash; build the frontend and stage it into"
+    " the package before starting the gateway.</p>"
+    "<p><strong>Try restarting KiroClaw.</strong> The exact restart step"
+    " depends on your environment: if you installed it as a service use"
+    " <code>kiroclaw service restart</code> (systemd / launchd); otherwise"
+    " stop the running <code>kiroclaw gateway</code> process and start it"
+    " again.</p>"
+)
+
+
 def _sel():
     """Late-binding _sel() for test monkeypatch compatibility."""
     import kiro_claw.dashboard.handlers as _pkg  # noqa: F811 — circular import
@@ -101,7 +127,7 @@ async def index(request: web.Request) -> web.Response:
     try:
         html = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        html = "<h1>Dashboard HTML not found</h1>"
+        html = _DASHBOARD_HTML_NOT_FOUND
     return web.Response(text=html, content_type="text/html")
 
 
@@ -137,6 +163,68 @@ async def api_branding(request: web.Request) -> web.Response:
 async def api_health(request: web.Request) -> web.Response:
     """GET /api/health — liveness probe; returns 200 whenever the server is up."""
     return web.json_response({"ok": True})
+
+
+async def api_theme_boot(request: web.Request) -> web.Response:
+    """GET /api/theme/boot — workspace theme config for frontend boot.
+
+    Unauthenticated (same boundary as /api/health) so the SPA can read the
+    workspace theme before the token flow completes. Contains no secrets —
+    only the workspace-level theme preference and onboarded flag.
+    """
+    cfg = KiroClawConfig.load()
+    return web.json_response({
+        "mode": cfg.dashboard.theme_mode or "",
+        "color": cfg.dashboard.theme_color or "",
+        "onboarded": cfg.dashboard.onboarded,
+    })
+
+
+async def api_theme_config(request: web.Request) -> web.Response:
+    """GET/PUT /api/config/theme — read or update workspace theme settings.
+
+    GET returns the current theme config. PUT accepts {mode?, color?, onboarded?}
+    and persists to the workspace config file.
+    """
+    cfg = KiroClawConfig.load()
+    if request.method == "GET":
+        return web.json_response({
+            "mode": cfg.dashboard.theme_mode or "",
+            "color": cfg.dashboard.theme_color or "",
+            "onboarded": cfg.dashboard.onboarded,
+        })
+
+    # PUT
+    body = await request.json()
+    changed = False
+    if "mode" in body:
+        mode = body["mode"]
+        if mode not in ("", "dark", "light", "system"):
+            raise web.HTTPBadRequest(text="mode must be '', 'dark', 'light', or 'system'")
+        if cfg.dashboard.theme_mode != mode:
+            cfg.dashboard.theme_mode = mode
+            changed = True
+    if "color" in body:
+        color = body["color"]
+        if not isinstance(color, str) or len(color) > 64:
+            raise web.HTTPBadRequest(text="color must be a string (max 64 chars)")
+        if cfg.dashboard.theme_color != color:
+            cfg.dashboard.theme_color = color
+            changed = True
+    if "onboarded" in body:
+        onboarded = bool(body["onboarded"])
+        if cfg.dashboard.onboarded != onboarded:
+            cfg.dashboard.onboarded = onboarded
+            changed = True
+
+    if changed:
+        cfg.save()
+
+    return web.json_response({
+        "mode": cfg.dashboard.theme_mode or "",
+        "color": cfg.dashboard.theme_color or "",
+        "onboarded": cfg.dashboard.onboarded,
+    })
 
 
 async def pwa_file(request: web.Request) -> web.StreamResponse:

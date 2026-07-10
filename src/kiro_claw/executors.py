@@ -29,6 +29,15 @@ Three pools, deliberately split:
   dispatches every due job concurrently, can have several jobs in flight at
   once.  Keeping cron on its OWN pool means a burst of long-running cron jobs
   can never occupy all the maintenance threads and starve the sweeps.
+* :func:`discovery_executor` -- browser-triggerable, read-only filesystem
+  discovery for dashboard list endpoints (``GET /api/skills``,
+  ``/api/agents/installed``, ``/api/prompts``): ``os.walk`` of skill/agent/SOP
+  trees, per-file frontmatter reads, ``~/.aim`` globs.  A large catalog makes
+  one such scan take seconds, and a ``run_in_executor`` future cannot be
+  cancelled once started, so N concurrent dashboard tabs would each pin a
+  worker for the full scan.  This gets its OWN pool so those user-triggerable
+  scans can never occupy the :func:`maintenance_executor` workers the orphan
+  sweeps need to recover from a wedge.
 
 Long-term direction: this blocking work should move into a dedicated
 supervised process (the VS Code extension-host model), so a wedge there cannot
@@ -46,6 +55,7 @@ __all__ = [
     "maintenance_executor",
     "subprocess_executor",
     "cron_executor",
+    "discovery_executor",
     "shutdown_maintenance_executor",
 ]
 
@@ -71,10 +81,19 @@ _MAX_SUBPROCESS_WORKERS = 8
 # threads for; excess jobs queue here instead of starving anything else.
 _MAX_CRON_WORKERS = 4
 
+# Dashboard discovery scans (skills/agents/SOP listing) are read-only but can
+# take seconds on a large catalog, and each is browser-triggerable so several
+# can be in flight at once (multiple tabs / pollers).  A started
+# run_in_executor future cannot be cancelled, so bound this at a handful of
+# workers: concurrent scans queue among THEMSELVES here rather than occupying
+# the maintenance pool's orphan-sweep workers.
+_MAX_DISCOVERY_WORKERS = 4
+
 _lock = threading.Lock()
 _pool: ThreadPoolExecutor | None = None
 _subprocess_pool: ThreadPoolExecutor | None = None
 _cron_pool: ThreadPoolExecutor | None = None
+_discovery_pool: ThreadPoolExecutor | None = None
 
 
 def maintenance_executor() -> ThreadPoolExecutor:
@@ -136,16 +155,39 @@ def cron_executor() -> ThreadPoolExecutor:
     return _cron_pool
 
 
+def discovery_executor() -> ThreadPoolExecutor:
+    """Return the process-wide dashboard-discovery pool, creating it on first use.
+
+    Threads are named ``mc-discovery``.  Separate from :func:`maintenance_executor`
+    so browser-triggerable, seconds-long read-only filesystem scans (skills /
+    agents / SOP listing for the dashboard) can never occupy the workers the
+    orphan-reaping sweeps need to recover from an event-loop wedge.
+    """
+    global _discovery_pool
+    if _discovery_pool is None:
+        with _lock:
+            if _discovery_pool is None:
+                _discovery_pool = ThreadPoolExecutor(
+                    max_workers=_MAX_DISCOVERY_WORKERS,
+                    thread_name_prefix="mc-discovery",
+                )
+                atexit.register(shutdown_maintenance_executor)
+    return _discovery_pool
+
+
 def shutdown_maintenance_executor() -> None:
     """Shut down all maintenance pools if they were created.  Idempotent."""
-    global _pool, _subprocess_pool, _cron_pool
+    global _pool, _subprocess_pool, _cron_pool, _discovery_pool
     with _lock:
         pool, _pool = _pool, None
         subprocess_pool, _subprocess_pool = _subprocess_pool, None
         cron_pool, _cron_pool = _cron_pool, None
+        discovery_pool, _discovery_pool = _discovery_pool, None
     if pool is not None:
         pool.shutdown(wait=False, cancel_futures=True)
     if subprocess_pool is not None:
         subprocess_pool.shutdown(wait=False, cancel_futures=True)
     if cron_pool is not None:
         cron_pool.shutdown(wait=False, cancel_futures=True)
+    if discovery_pool is not None:
+        discovery_pool.shutdown(wait=False, cancel_futures=True)

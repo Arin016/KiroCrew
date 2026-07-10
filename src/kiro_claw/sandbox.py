@@ -97,6 +97,22 @@ _SENSITIVE_ENV_PREFIXES: list[str] = [
     "GIT_ASKPASS",
 ]
 
+# Python interpreter env that must NOT leak into a *foreign* Python subprocess
+# launched under the sandbox (e.g. the MCP servers kiro-cli spawns, such as
+# ord-mcp, which bundle their own interpreter + deps). KiroClaw's runtime may
+# export PYTHONPATH pointing at its own site-packages; a foreign server that
+# inherits it prepends KiroClaw's site-packages to sys.path and imports
+# KiroClaw's fastmcp/cryptography instead of its own -> ABI collision + init
+# hang. Stripped ONLY when the caller passes ``strip_python_env=True`` (the
+# kiro-cli / agent spawn path). It is deliberately NOT part of
+# ``_SENSITIVE_ENV_PREFIXES`` because KiroClaw's OWN sandboxed Python
+# subprocesses (cron scripts, app backends, code-review workers) import
+# ``kiro_claw`` via PYTHONPATH and would break if it were stripped.
+_PYTHON_ENV_PREFIXES: list[str] = [
+    "PYTHONPATH",
+    "PYTHONHOME",
+]
+
 # Additional credential names scrubbed only in cc/strict modes (LLM-controlled
 # agent subprocesses). Mirrors the file-level deny list for ~/.kiroclaw/.env:
 # config/loader.py seeds these into os.environ so trusted children (gateway,
@@ -246,7 +262,11 @@ def _ssh_supports_accept_new() -> bool:
     return False
 
 
-def _build_launcher_script(sandbox_level: str = "strict") -> str:
+def _build_launcher_script(
+    sandbox_level: str = "strict",
+    *,
+    strip_python_env: bool = False,
+) -> str:
     """Build a Python launcher script for the Linux namespace sandbox.
 
     The launcher is executed as a subprocess.  It:
@@ -284,6 +304,10 @@ def _build_launcher_script(sandbox_level: str = "strict") -> str:
         # config/loader.py seeds them into os.environ for trusted children
         # only — sandboxed agents must not see them either way).
         env_prefixes = env_prefixes + list(_AGENT_DENIED_ENV_KEYS)
+    if strip_python_env:
+        # Foreign Python subprocess (kiro-cli's MCP servers) — do not let
+        # KiroClaw's PYTHONPATH/PYTHONHOME leak in and shadow their own deps.
+        env_prefixes = env_prefixes + list(_PYTHON_ENV_PREFIXES)
     hide_ssh = sandbox_level == "strict"
     dirs_json = json.dumps([os.path.join(home, d) for d in dirs])
     files_json = json.dumps([os.path.join(home, f) for f in files])
@@ -488,7 +512,12 @@ if __name__ == "__main__":
 '''
 
 
-def namespace_argv(argv: list[str], sandbox_level: str = "strict") -> list[str]:
+def namespace_argv(
+    argv: list[str],
+    sandbox_level: str = "strict",
+    *,
+    strip_python_env: bool = False,
+) -> list[str]:
     """Wrap *argv* via the Python namespace launcher.
 
     The launcher forks, the parent writes identity UID/GID maps, and the
@@ -499,7 +528,7 @@ def namespace_argv(argv: list[str], sandbox_level: str = "strict") -> list[str]:
     if real_argv:
         real_argv[0] = _resolve_real_kiro_bin(real_argv[0])
 
-    script = _build_launcher_script(sandbox_level)
+    script = _build_launcher_script(sandbox_level, strip_python_env=strip_python_env)
     fd, path = tempfile.mkstemp(suffix=".py", prefix="kiroclaw_sandbox_")
     os.write(fd, script.encode())
     os.close(fd)
@@ -587,6 +616,8 @@ def _build_seatbelt_profile(sandbox_level: str = "strict") -> str:
 def sandbox_exec_argv(
     argv: list[str],
     sandbox_level: str = "strict",
+    *,
+    strip_python_env: bool = False,
 ) -> tuple[list[str], str | None]:
     """Wrap *argv* with ``sandbox-exec -f <profile>``.
 
@@ -610,6 +641,8 @@ def sandbox_exec_argv(
     prefixes = list(_SENSITIVE_ENV_PREFIXES)
     if sandbox_level in ("cc", "strict"):
         prefixes.extend(_AGENT_DENIED_ENV_KEYS)
+    if strip_python_env:
+        prefixes.extend(_PYTHON_ENV_PREFIXES)
     unset_args: list[str] = []
     for key in os.environ:
         for prefix in prefixes:
@@ -785,7 +818,12 @@ def _clamp_sandbox_mode(mode: str) -> str:
     return floor
 
 
-def wrap_argv(argv: list[str], mode: str = "auto") -> tuple[list[str], str | None]:
+def wrap_argv(
+    argv: list[str],
+    mode: str = "auto",
+    *,
+    strip_python_env: bool = False,
+) -> tuple[list[str], str | None]:
     """Wrap a command argv with OS-level sandbox if available.
 
     Args:
@@ -822,11 +860,11 @@ def wrap_argv(argv: list[str], mode: str = "auto") -> tuple[list[str], str | Non
     backend = detect_backend(config_mode=mode)
 
     if backend == "namespace":
-        wrapped = namespace_argv(argv, sandbox_level)
+        wrapped = namespace_argv(argv, sandbox_level, strip_python_env=strip_python_env)
         # The launcher script is argv[1] — caller should clean it up
         return wrapped, wrapped[1]
     if backend == "sandbox-exec":
-        return sandbox_exec_argv(argv, sandbox_level)
+        return sandbox_exec_argv(argv, sandbox_level, strip_python_env=strip_python_env)
 
     if backend == "none":
         _warn_no_isolation(mode)

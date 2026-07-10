@@ -82,13 +82,15 @@ Cancels all running subagents, stops the reaper loop, and awaits their cleanup. 
 ```python
 @dataclass
 class SubagentInfo:
-    id: str           # 8-char hex UUID
-    task: str         # original task text
-    started: float    # time.time() at spawn
-    done: bool        # True when finished (success or error)
-    result: str       # LLM response text
-    error: str        # error message if failed
-    elapsed: float    # seconds from start to completion (set in _run finally)
+    id: str               # 8-char hex UUID
+    task: str             # original task text
+    started: float        # time.time() at spawn
+    done: bool            # True when finished (success or error)
+    result: str           # LLM response text (trimmed to completion_keep for the event)
+    result_path: str      # ~/.kiroclaw/subagents/<id>/result.txt (full transcript)
+    result_truncated: bool  # completion copy dropped content → event carries summary+path
+    error: str            # error message if failed
+    elapsed: float        # seconds from start to completion (set in _run finally)
 ```
 
 ## Session Lifecycle
@@ -283,27 +285,58 @@ On startup, `SubagentManager` scans `~/.kiroclaw/subagents/` and reconciles:
 
 ### Tombstone Lifecycle
 
-- Created on: process death without result, delivery failure, timeout
-- Pruned by reaper after 7 days
-- `spawn_status` falls back to persistence layer for completed/tombstoned agents
+- Created on: process death without result, delivery failure, timeout (`cause` =
+  `error` / `timeout` / `cancelled` / `reaped` / `gateway_restart`), **and on
+  successful delivery** (`cause="delivered"`, via `mark_delivered`) so `result.txt`
+  is retained for the grace window instead of deleted immediately.
+- Pruned by reaper: `delivered` tombstones after `agent.subagent_result_ttl_secs`
+  (default 1h); all other tombstones after 7 days. `prune_stale_tombstones` takes
+  a per-cause cutoff for this.
+- `spawn_status` falls back to persistence layer for completed/tombstoned agents,
+  reading the retained `result.txt` (and honoring offset/limit/grep).
 
 ### MCP Tool: `spawn_status`
 
-Retrieves the full untruncated result for a completed subagent.
-Completion events are truncated by `_run_subagent_finalize` in
-`subagent.py` (post-stream finalization, around the
-`apply_completion_keep` call) — by default the **first** 3000 chars of
-the streamed transcript. The full transcript stays in
-`~/.kiroclaw/subagents/<id>/result.txt` until the parent session receives
-the completion event, after which the folder is removed by
-`delete_agent_folder`. Use `spawn_status` to retrieve the full transcript
-before that cleanup completes.
+Retrieves a completed subagent's transcript by ID. The completion event now
+carries a **summary + the `result_path`** whenever the completion copy was
+truncated (`result_truncated`) or in orchestrator mode, so the parent reads the
+full transcript on demand instead of re-running the subagent.
+
+The full transcript stays in `~/.kiroclaw/subagents/<id>/result.txt` for a
+**retention grace window** after delivery — on success the folder is *not*
+deleted immediately; `mark_delivered` writes a `cause="delivered"` tombstone and
+the reaper prunes it after `agent.subagent_result_ttl_secs` (default 3600s / 1h).
+This fixes the prior day-1 bug where `delete_agent_folder` ran immediately on
+delivery, so a later `spawn_status` found no file and silently fell back to the
+truncated in-memory `info.result` ("truncated at the same place").
+
+Parameters:
+- `agent_id` (str, required): subagent ID from the completion event (alnum, max 64 chars)
+- `offset` (int, optional): 0-based start line for a paged read (line-oriented, like reading code)
+- `limit` (int, optional): max lines to return (1–2000). Omit for the full transcript.
+- `grep` (str, optional): case-insensitive regex; return only matching transcript lines (offset/limit then apply to the matches)
+
+When any of `offset`/`limit`/`grep` is set, the `/api/spawn/{id}` response
+includes a `result_meta` block (`total_lines`, `matched_lines`, `offset`,
+`returned_lines`, `has_more`) and the tool output is prefixed with a one-line
+continuation header (`showing lines X-Y of N | more available — call again with
+offset=Y`). With no paging params the full-transcript contract is unchanged. The
+line split + regex run via `asyncio.to_thread` so a pathological pattern never
+stalls the event loop.
 
 ### Completion Event Truncation Modes
 
 The character cap and which end of the transcript to keep are both
 configurable. Defaults preserve original behavior — opt-in to the others
 when a particular agent style benefits from the change.
+
+When truncation drops content (`SubagentInfo.result_truncated`), the completion
+event is not a raw truncated blob: it carries a **first+last-words preview + the
+`result_path`** (via `context_management.summarize_result`) so the parent reads
+the full transcript on demand (read / grep / `spawn_status`) instead of
+re-running the subagent. This is the same shape orchestrator-mode deliveries
+have always used, now applied to chat mode too (gated on `result_truncated` so
+small results still inline in full).
 
 | Config key | Values | Default | Effect |
 |------------|--------|---------|--------|

@@ -119,6 +119,39 @@ describe('BrowserLiveView', () => {
     expect(screen.getByLabelText('Show live browser view')).toBeInTheDocument()
   })
 
+  it('closes fully — no panel and no chip remain', async () => {
+    renderWithProviders(<BrowserLiveView />)
+    await act(async () => { window.dispatchEvent(frameEvent('QUJD', 'sess-1')) })
+    const close = await screen.findByLabelText('Close live browser view')
+    await act(async () => { close.click() })
+    // Unlike minimize, close leaves no chip re-open affordance.
+    expect(screen.queryByText('Browser — live')).toBeNull()
+    expect(screen.queryByLabelText('Show live browser view')).toBeNull()
+  })
+
+  it('stays closed when the dismissed session keeps pumping frames', async () => {
+    renderWithProviders(<BrowserLiveView />)
+    await act(async () => { window.dispatchEvent(frameEvent('QUJD', 'sess-1')) })
+    const close = await screen.findByLabelText('Close live browser view')
+    await act(async () => { close.click() })
+    // The idle active-pump forwards more frames for the SAME session — the mirror
+    // must not bounce back open after an explicit close.
+    await act(async () => { window.dispatchEvent(frameEvent('WFla', 'sess-1')) })
+    expect(screen.queryByText('Browser — live')).toBeNull()
+    expect(screen.queryByLabelText('Show live browser view')).toBeNull()
+  })
+
+  it('re-opens when a new browse session starts after a close', async () => {
+    renderWithProviders(<BrowserLiveView />)
+    await act(async () => { window.dispatchEvent(frameEvent('QUJD', 'sess-1')) })
+    const close = await screen.findByLabelText('Close live browser view')
+    await act(async () => { close.click() })
+    expect(screen.queryByText('Browser — live')).toBeNull()
+    // A genuinely different session_key represents new activity and should surface.
+    await act(async () => { window.dispatchEvent(frameEvent('WFla', 'sess-2')) })
+    expect(await screen.findByText('Browser — live')).toBeInTheDocument()
+  })
+
   it('opens via the programmatic toggle before any frame arrives', async () => {
     renderWithProviders(<BrowserLiveView />)
     await act(async () => { window.dispatchEvent(toggle()) })

@@ -9,6 +9,7 @@ All limits are centralized here so they can be tuned in one place.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import time
@@ -395,6 +396,43 @@ def apply_completion_keep(text: str, mode: str, max_chars: int) -> str:
         tail_budget = max_chars - marker_len - head_budget
         return text[:head_budget] + _COMPLETION_BOTH_MARKER + text[-tail_budget:]
     return text[:max_chars]
+
+
+def summarize_result(result: str, result_path: str, words: int = RESULT_SUMMARY_WORDS) -> str:
+    """Build a completion-event body that points at the full transcript on disk.
+
+    Emits a first+last ``words`` preview of *result* plus the ``result_path`` to
+    the full (up to ``RESULT_FILE_MAX_BYTES``) transcript, and instructs the
+    parent to read it on demand (``read`` with offset/limit, ``grep``, or the
+    ``spawn_status`` MCP tool) instead of re-running the subagent.
+
+    Used when the completion-event copy was truncated (``head``/``tail``/``both``
+    dropped content) or for orchestrator-mode delivery, so the deliverable at the
+    end of a long transcript is never silently lost. The preview reflects whatever
+    end ``apply_completion_keep`` retained; the file is the source of truth.
+    """
+    tokens = (result or "").split()
+    half = max(1, words // 2)
+    if len(tokens) <= words:
+        preview = " ".join(tokens)
+    else:
+        preview = (
+            " ".join(tokens[:half])
+            + "\n[...middle truncated — read the full transcript below...]\n"
+            + " ".join(tokens[-half:])
+        )
+    size = ""
+    try:
+        size = f" ({os.path.getsize(result_path):,} bytes)"
+    except OSError:
+        pass
+    return (
+        f"Full transcript: {result_path}{size}\n"
+        f"Preview (first+last {half} words):\n{preview}\n\n"
+        f"The full result is on disk — read it on demand with the read tool "
+        f"(offset/limit), grep the path above, or call "
+        f"spawn_status(agent_id, offset=, limit=, grep=). Do NOT re-run the subagent."
+    )
 
 
 def cap_history(entries: list[dict]) -> list[dict]:

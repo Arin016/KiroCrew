@@ -296,15 +296,26 @@ def _collect_system_metrics() -> dict[str, object]:
                     parts = line.split()
                     meminfo[parts[0].rstrip(":")] = int(parts[1])
                 mem_total = round(meminfo.get("MemTotal", 0) / (1024**2), 1)
-                mem_free = round(
-                    (
-                        meminfo.get("MemFree", 0)
-                        + meminfo.get("Buffers", 0)
-                        + meminfo.get("Cached", 0)
+                # Prefer the kernel's own MemAvailable (Linux 3.14+): it already
+                # accounts for reclaimable page cache AND reclaimable slab
+                # (SReclaimable), so "used" matches `free`'s accounting. The old
+                # MemFree+Buffers+Cached estimate omitted SReclaimable and could
+                # over-report "used" by the whole slab cache (tens of GB on hosts
+                # with large dentry/inode caches). Fall back to the estimate
+                # (now including SReclaimable) on kernels without MemAvailable.
+                if "MemAvailable" in meminfo:
+                    mem_free = round(meminfo["MemAvailable"] / (1024**2), 1)
+                else:
+                    mem_free = round(
+                        (
+                            meminfo.get("MemFree", 0)
+                            + meminfo.get("Buffers", 0)
+                            + meminfo.get("Cached", 0)
+                            + meminfo.get("SReclaimable", 0)
+                        )
+                        / (1024**2),
+                        1,
                     )
-                    / (1024**2),
-                    1,
-                )
                 data["mem_total_gb"] = mem_total
                 data["mem_free_gb"] = mem_free
                 data["mem_used_gb"] = round(mem_total - mem_free, 1)

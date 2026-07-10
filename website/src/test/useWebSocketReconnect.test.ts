@@ -69,7 +69,7 @@ describe('useWebSocket reconnect unread suppression', () => {
     markSlotUnreadCalls.length = 0
     WS_INSTANCES.length = 0
     testStore = createTestStore({
-      chat: { activeSlot: 'chat-active' } as RootState['chat'],
+      chat: { activeSlot: 'chat-active', slotMessages: {}, slotRun: {}, slotHydrated: {}, slotActivity: {} } as RootState['chat'],
     })
     vi.stubGlobal('WebSocket', MockWebSocket)
   })
@@ -135,7 +135,7 @@ describe('Mesh-2093: unread fires on chat_done not chat_chunk', () => {
     markSlotUnreadCalls.length = 0
     WS_INSTANCES.length = 0
     testStore = createTestStore({
-      chat: { activeSlot: 'chat-active' } as RootState['chat'],
+      chat: { activeSlot: 'chat-active', slotMessages: {}, slotRun: {}, slotHydrated: {}, slotActivity: {} } as RootState['chat'],
     })
     vi.stubGlobal('WebSocket', MockWebSocket)
   })

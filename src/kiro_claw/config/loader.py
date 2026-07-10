@@ -42,6 +42,7 @@ from kiro_claw.config.paths import (  # noqa: F401
     _safe_dir_name,
     config_dir,
     config_package_dir,
+    kiro_agents_dir,
 )
 
 # Schema validation + the validated-data cache live in ``config.validation``.
@@ -553,6 +554,17 @@ class AgentConfig:
             "completion_keep. 0 disables truncation entirely. Default 3000.",
         ),
     )
+    subagent_result_ttl_secs: int = field(
+        default=3600,
+        metadata=_meta(
+            "SubAgent Result TTL (seconds)",
+            "How long a delivered subagent's result.txt is retained before the "
+            "reaper prunes it. The completion event returns a summary plus this "
+            "file path; the parent reads the full transcript on demand (read / "
+            "grep / spawn_status) within this window instead of re-running the "
+            "subagent. 0 prunes on the next reaper sweep. Default 3600 (1h).",
+        ),
+    )
     subagent_cwd_allowed_roots: list[str] = field(
         default_factory=lambda: ["~/workspace", "~/workplace"],
         metadata=_meta(
@@ -923,6 +935,16 @@ class SlackConfig:
         default="kiroclaw",
         metadata=_meta("Command", "Slack slash command trigger word."),
     )
+    forward_to_agent_callback: str = field(
+        default="",
+        metadata=_meta(
+            "Forward to Agent Callback",
+            "Callback ID for the 'Forward to Agent' message shortcut. "
+            "Must match the callback_id configured in your Slack app manifest. "
+            "Leave empty to disable the feature.",
+            tags=["slack"],
+        ),
+    )
     trusted_bot_ids: set[str] = field(
         default_factory=set,
         metadata=_meta(
@@ -1061,6 +1083,13 @@ class DashboardConfig:
             "Click a suggested reply to send it instantly. Shift+Click to select multiple.",
         ),
     )
+    session_grid: bool = field(
+        default=False,
+        metadata=_meta(
+            "Session Grid (Split View)",
+            "Opt-in: enable terminal-style split view to run multiple chat sessions side by side.",
+        ),
+    )
     terminal: dict = field(
         default_factory=lambda: {"enabled": True},
         metadata=_meta(
@@ -1073,6 +1102,31 @@ class DashboardConfig:
         metadata=_meta(
             "Default Project",
             "Directory path used as the project for new chat tabs. Empty = workspace dir.",
+        ),
+    )
+    theme_mode: str = field(
+        default="",
+        metadata=_meta(
+            "Theme Mode",
+            "Dashboard color mode preference: 'dark', 'light', or 'system'. "
+            "Empty = unset (frontend falls back to localStorage or 'system').",
+            enum=["", "dark", "light", "system"],
+        ),
+    )
+    theme_color: str = field(
+        default="",
+        metadata=_meta(
+            "Theme Color",
+            "Dashboard color theme slug (e.g. 'kiro', 'emerald', 'monokai'). "
+            "Empty = unset (frontend falls back to localStorage or 'kiro').",
+        ),
+    )
+    onboarded: bool = field(
+        default=False,
+        metadata=_meta(
+            "Onboarded",
+            "Whether the user has completed the dashboard onboarding flow. "
+            "When true, the 'Choose your look' modal is skipped on first load.",
         ),
     )
 
@@ -1148,6 +1202,21 @@ class SkillsConfig:
     max_triggered: int = field(
         default=3,
         metadata=_meta("Max Triggered", "Maximum number of skills to load per message (≥1)."),
+    )
+    # ── Lazy skill injection (opt-in, like MCP prewarm) ──
+    lazy_load: bool = field(
+        default=False,
+        metadata=_meta(
+            "Lazy Skill Injection",
+            "When true, the session-start skills block injects only a usage-ranked "
+            "top-K of on-demand skills (bounded by its own section budget) and leaves "
+            "the long tail discoverable via the skill_search tool / $skillname / "
+            "triggers; each context section also gets its own independent char cap so "
+            "the global ceiling becomes their sum (~190k) and a large skills set can "
+            "never crowd out memory/lessons. Disabled by default (0-impact upgrade, "
+            "like prewarm_count=0): off means the legacy full skills dump under a "
+            "single shared 165k budget — unchanged behavior.",
+        ),
     )
     # ── Hermes-style auto skill creation (Mesh-677) ──
     # All fields default to OFF so upgrades are zero-impact. Enable via
@@ -1897,6 +1966,22 @@ class InstancesConfig:
 
 
 @dataclass
+class HeartbeatConfig:
+    """Heartbeat background task queue (~/.kiroclaw/workspace/HEARTBEAT.md)."""
+
+    default_deliver: str = field(
+        default="slack",
+        metadata=_meta(
+            "Default delivery",
+            "Where a heartbeat completion with no inline <!-- deliver:... --> tag is "
+            "routed: 'slack' (Slack DM + dashboard bell, the default) or 'dashboard' "
+            "(dashboard slot + bell only, no Slack). Per-task deliver tags always "
+            "override this.",
+        ),
+    )
+
+
+@dataclass
 class TunnelConfig:
     enabled: bool = field(
         default=False,
@@ -2105,6 +2190,10 @@ class KiroClawConfig:
         metadata=_meta(
             "Instances", "Multi-instance management — manage/switch remote KiroClaws over SSH."
         ),
+    )
+    heartbeat: HeartbeatConfig = field(
+        default_factory=HeartbeatConfig,
+        metadata=_meta("Heartbeat", "Heartbeat background task queue delivery defaults."),
     )
 
     slack: SlackConfig = field(
@@ -2350,6 +2439,14 @@ class KiroClawConfig:
         instances_data = data.get("instances", {})
         if not isinstance(instances_data, dict):
             instances_data = {}
+        heartbeat_data = data.get("heartbeat", {})
+        if not isinstance(heartbeat_data, dict):
+            heartbeat_data = {}
+        heartbeat_default_deliver = (
+            str(heartbeat_data.get("default_deliver", "slack")).strip().lower()
+        )
+        if heartbeat_default_deliver not in ("slack", "dashboard"):
+            heartbeat_default_deliver = "slack"
         tunnel_data = data.get("tunnel", {})
         if not isinstance(tunnel_data, dict):
             tunnel_data = {}
@@ -2432,6 +2529,9 @@ class KiroClawConfig:
                     agent_data.get("completion_keep", "head")
                 ),
                 completion_keep_chars=int(agent_data.get("completion_keep_chars", 3000)),
+                subagent_result_ttl_secs=int(
+                    agent_data.get("subagent_result_ttl_secs", 3600)
+                ),
                 subagent_cwd_allowed_roots=list(
                     agent_data.get(
                         "subagent_cwd_allowed_roots",
@@ -2530,6 +2630,9 @@ class KiroClawConfig:
                     c for c in slack_data.get("open_channels", []) if isinstance(c, str)
                 ],
                 command=slack_data.get("command", "kiroclaw"),
+                forward_to_agent_callback=str(
+                    slack_data.get("forward_to_agent_callback") or ""
+                ).strip(),
                 trusted_bot_ids=set(slack_data.get("trusted_bot_ids", [])),
                 allowed_enterprise_ids=[
                     e
@@ -2568,9 +2671,13 @@ class KiroClawConfig:
                 ),
                 auto_open_browser=dashboard_data.get("auto_open_browser", True),
                 quick_send=dashboard_data.get("quick_send", False),
+                session_grid=dashboard_data.get("session_grid", False),
                 widget_density=dashboard_data.get("widget_density", "more"),
                 terminal=dashboard_data.get("terminal", {"enabled": True}),
                 default_project=dashboard_data.get("default_project", ""),
+                theme_mode=dashboard_data.get("theme_mode", ""),
+                theme_color=dashboard_data.get("theme_color", ""),
+                onboarded=bool(dashboard_data.get("onboarded", False)),
             ),
             tunnel=TunnelConfig(
                 enabled=bool(tunnel_data.get("enabled", False)),
@@ -2673,8 +2780,10 @@ class KiroClawConfig:
                     instances_data.get("probe_failure_threshold", _DEFAULT_PROBE_FAILS)
                 ),
             ),
+            heartbeat=HeartbeatConfig(default_deliver=heartbeat_default_deliver),
             skills=SkillsConfig(
                 max_triggered=int(skills_data.get("max_triggered", 3)),
+                lazy_load=bool(skills_data.get("lazy_load", False)),
                 auto_create_from_sessions=bool(skills_data.get("auto_create_from_sessions", False)),
                 auto_refine_on_deviation=bool(skills_data.get("auto_refine_on_deviation", False)),
                 auto_min_tool_calls=int(skills_data.get("auto_min_tool_calls", 5)),
@@ -2854,6 +2963,30 @@ class KiroClawConfig:
             except (json.JSONDecodeError, OSError):
                 pass
         return DEFAULT_MODEL
+
+    @staticmethod
+    def _resolve_named_agent_model(agent: str, agents_dir: Path | None = None) -> str:
+        """Return a named agent's own kiro ``model`` field, or ``""`` if none.
+
+        Used by :meth:`SessionManager.get_or_create` so an explicit global
+        ``agent.model`` does not override an agent that pins its own model — the
+        global default must rank *below* a per-agent pin. Returns the kiro
+        ``model`` slot only; ``""`` when the agent declares none, so the caller
+        falls back to the global. ``agents_dir`` overrides the lookup directory
+        (a dependency-injection seam for tests); defaults to ``kiro_agents_dir()``.
+        """
+        if not agent:
+            return ""
+        base = agents_dir if agents_dir is not None else kiro_agents_dir()
+        for af in base.glob("*.json"):
+            try:
+                ad = json.loads(af.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            # Skip stray non-object JSON a user may have dropped in the dir.
+            if isinstance(ad, dict) and (ad.get("name") == agent or af.stem == agent):
+                return ad.get("model") or ""
+        return ""
 
     def load_credentials(self) -> dict[str, str]:
         """Load credentials from ~/.kiroclaw/.env and environment variables.

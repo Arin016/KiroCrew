@@ -1,14 +1,20 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import type { ReactNode } from 'react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { useTheme, ThemeProvider } from '../hooks/useTheme'
 
 // Every renderHook in this file goes through the provider so useTheme can
 // resolve its context. Mirrors how the hook is consumed in production
-// (main.tsx wraps App in <ThemeProvider>).
-const wrapper = ({ children }: { children: ReactNode }) => (
-  <ThemeProvider>{children}</ThemeProvider>
-)
+// (main.tsx wraps App in <QueryClientProvider><ThemeProvider>).
+const wrapper = ({ children }: { children: ReactNode }) => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return (
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider>{children}</ThemeProvider>
+    </QueryClientProvider>
+  )
+}
 
 function renderThemeHook() {
   return renderHook(() => useTheme(), { wrapper })

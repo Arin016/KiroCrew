@@ -9,6 +9,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -30,6 +31,14 @@ from kiro_claw.sel import SecurityEvent, sel
 from kiro_claw.validation import MAX_TOOL_NAME_LEN, sanitize_string
 
 logger = logging.getLogger(__name__)
+
+# Per-turn compaction-failure backoff (Mesh compaction-spam fix). See
+# _broadcast_compaction_result for the full rationale. Kept small: this is a
+# UX/spam guard, not a correctness gate — the underlying compaction attempt
+# still runs (or fails) on kiro-cli's own schedule every turn; we only
+# control how often we *tell the user about it*.
+_COMPACTION_NOTICE_SHOW_FIRST_N = 2
+_COMPACTION_FAIL_COOLDOWN_SECS = 60.0
 
 
 def _redact_deep(obj):
@@ -224,18 +233,54 @@ def _append_compaction_notice(
 def _broadcast_compaction_result(
     state: DashboardState, slot: _ChatSlot, event: "LLMEvent"
 ) -> str | None:
-    """Broadcast compaction completed/failed to the slot. Returns message text or None."""
+    """Broadcast compaction completed/failed to the slot. Returns message text or None.
+
+    Failure backoff (Mesh compaction-spam fix): the per-turn
+    EVENT_COMPACTION_STATUS path has no cooldown of its own — kiro-cli can
+    re-attempt (and re-fail) auto-compaction every single turn while context
+    stays over threshold, previously appending a near-identical
+    "Compaction failed: unknown error" notice each time with no backoff. We
+    now track a per-slot consecutive-failure streak and a short cooldown:
+    the first couple of failures are shown as-is (so the user sees it's
+    happening), then subsequent failures within the cooldown window are
+    suppressed from the chat (still logged server-side via
+    AcpClient._log_compaction_status) until the cooldown elapses, at which
+    point a single collapsed notice reports the streak length instead of
+    repeating the same line indefinitely.
+    """
     status_type = event.text
     if status_type == "completed":
+        slot._compaction_fail_streak = 0
+        slot._compaction_fail_cooldown_until = 0.0
         summary, _ = redact_credentials(event.title)
         summary, _ = redact_exfiltration_urls(summary)
         msg_text = (
             f"✅ Conversation compacted: {summary}" if summary else "✅ Conversation compacted."
         )
     elif status_type == "failed":
+        now = time.monotonic()
+        slot._compaction_fail_streak += 1
+        streak = slot._compaction_fail_streak
+
+        if streak > _COMPACTION_NOTICE_SHOW_FIRST_N and now < slot._compaction_fail_cooldown_until:
+            # Suppress: still within cooldown after we already told the user
+            # once/twice. Nothing new to say — don't spam identical notices.
+            return None
+
         error, _ = redact_credentials(event.title or "unknown error")
         error, _ = redact_exfiltration_urls(error)
-        msg_text = f"❌ Compaction failed: {error}"
+        if streak <= _COMPACTION_NOTICE_SHOW_FIRST_N:
+            msg_text = f"❌ Compaction failed: {error}"
+        else:
+            # Cooldown just elapsed after 1+ suppressed repeats — collapse
+            # into one message instead of resuming per-turn spam.
+            msg_text = (
+                f"❌ Compaction has failed {streak}x in a row "
+                f"({error}) — this conversation may be too large to "
+                "auto-compact. Consider `/compact` manually or starting a "
+                "new chat if this persists."
+            )
+        slot._compaction_fail_cooldown_until = now + _COMPACTION_FAIL_COOLDOWN_SECS
     else:
         return None
     _append_compaction_notice(state, slot, msg_text)

@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect, memo, useRef } from 'react'
-import { Copy, Check, Volume2, Code, ClipboardList, CheckCircle, RefreshCw, ChevronLeft, ChevronRight, GitFork, Link2 } from 'lucide-react'
+import { motion } from 'framer-motion'
+import { Copy, Check, Volume2, Code, ClipboardList, CheckCircle, RefreshCw, ChevronLeft, ChevronRight, GitFork, Link2, Compass } from 'lucide-react'
 import { copyToClipboard } from '../../utils/clipboard'
 import { copySessionLink } from '../../utils/shareUrl'
 import MarkdownRenderer from '../../components/MarkdownRenderer'
@@ -40,6 +41,41 @@ export function parseOptions(content: string): { text: string; options: string[]
   return { text, options, multi, isPlan }
 }
 
+// kiro-cli emits a steering acknowledgment inline in the model's output when it
+// consumes a mid-turn steer: `[STEERING steer-<id>: <what it did in response>]`.
+// Showing that raw marker is ugly; instead we pull it out and render it as a
+// distinct "Steered" chip (mirrors KiRoom's stripSteeringTag display-parity).
+// The id part is `steer-<hex>` (no ']' or ':'); the summary is non-greedy up to
+// the first ']' (matching KiRoom's behavior — a literal ']' inside a summary ends
+// it early, which producers avoid).
+const STEER_ACK_RE = /\[STEERING\s+steer-[^\]:]+:\s*([\s\S]*?)\]/g
+
+export function extractSteeringAcks(content: string): { cleaned: string; acks: string[] } {
+  const acks: string[] = []
+  const cleaned = content.replace(STEER_ACK_RE, (_m, summary) => {
+    const s = String(summary).trim()
+    if (s) acks.push(s)
+    return ''
+  })
+  // Collapse the blank line the removed marker leaves behind.
+  return { cleaned: cleaned.replace(/\n{3,}/g, '\n\n').trimEnd(), acks }
+}
+
+// A compact "Steered" chip rendered in place of the raw [STEERING …] marker.
+function SteerAckChip({ summary }: { summary: string }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25, ease: 'easeOut' }}
+      className="mt-2 inline-flex items-start gap-1.5 rounded-lg border border-accent/40 bg-accent/10 px-2.5 py-1.5 text-[12px] leading-snug text-accent max-w-full"
+    >
+      <Compass size={13} className="mt-0.5 shrink-0" />
+      <span className="min-w-0"><span className="font-semibold">Steered</span>{summary ? <span className="text-text"> — {summary}</span> : null}</span>
+    </motion.div>
+  )
+}
+
 const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, onFileOpen, planTaskId, onApplyPlan, slotRunning, onSpeak, timestamp, showFooter = true, onRegenerate, variants, variantIdx, onSwitchVariant, isRegenerating, onFork, onPlanFromHere, forkIndex, onQuote, messageTs, slotKey, slotTitle, mode, fileChanges, onOpenDiff, fileChipStyle }: { content: string; isStreaming: boolean; onFileOpen?: (path: string) => void; planTaskId?: string; onApplyPlan?: (steps: PlanStepInput[]) => Promise<boolean>; slotRunning?: boolean; onSpeak?: () => void; timestamp?: string; showFooter?: boolean; onRegenerate?: () => void; variants?: { content: string; ts?: string }[]; variantIdx?: number; onSwitchVariant?: (index: number) => void; isRegenerating?: boolean; onFork?: (index: number) => void | Promise<void>; onPlanFromHere?: (index: number) => void | Promise<void>; forkIndex?: number; onQuote?: (text: string, rect: DOMRect) => void; messageTs?: string; slotKey?: string; slotTitle?: string; mode?: string; fileChanges?: FileChangeEntry[]; onOpenDiff?: (path: string, modified: string, original: string) => void; fileChipStyle?: FileChipStyle }) {
   const [applied, setApplied] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -59,9 +95,13 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { if (applied) setApplied(false) }, [effectiveContent])
   const { text } = parseOptions(effectiveContent)
+  // Pull kiro-cli's [STEERING …] acknowledgments out of the prose; render them as
+  // chips instead of raw markers. Feed the cleaned text (marker removed) to the
+  // stream so the raw tag never renders.
+  const { cleaned: steerCleaned, acks: steerAcks } = useMemo(() => extractSteeringAcks(text), [text])
   const [smooth] = useState(() => loadChatConfig().streamMode !== 'immediate')
   const speed = 4 // force high speed smooth streaming to avoid lagging behind raw model output
-  const smoothedText = useSmoothStream(text, isStreaming, smooth, speed)
+  const smoothedText = useSmoothStream(steerCleaned, isStreaming, smooth, speed)
 
   const planSteps = useMemo<PlanStepInput[] | null>(() => {
     if (isStreaming || !planTaskId || !effectiveContent) return null
@@ -136,6 +176,14 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
   return <div data-role="assistant" className="group/msg">
     <div ref={contentRef} className="msg-content group/bubble relative text-sm leading-relaxed text-text overflow-hidden" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
       <MarkdownRenderer content={smoothedText} streaming={isStreaming} onFileOpen={onFileOpen} rawMode={rawMode} messageTs={messageTs} glow={isStreaming} smooth={smooth} />
+      {/* Render the steer ack the moment kiro-cli emits the [STEERING …] marker
+          — including mid-stream — so the user sees the agent acknowledge the
+          steer live, not only after the whole turn finishes. */}
+      {steerAcks.length > 0 && (
+        <div className="flex flex-col items-start gap-1">
+          {steerAcks.map((a, i) => <SteerAckChip key={i} summary={a} />)}
+        </div>
+      )}
       {!isStreaming && selectionActions.length > 0 && <SelectionToolbar containerRef={contentRef} actions={selectionActions} />}
     </div>
     {fileChanges && fileChanges.length > 0 && !isStreaming && (
@@ -144,7 +192,7 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
     {!isStreaming && showFooter && (
       <div className="flex items-center gap-1 mt-0.5 opacity-0 transition-opacity duration-300 delay-100 group-hover/msg:opacity-100 group-hover/msg:delay-300 group-focus-within/msg:opacity-100 group-focus-within/msg:delay-300">
         {timestamp && <span className="text-muted text-[12px] font-mono mr-1.5">{timestamp}</span>}
-        <button className="text-muted hover:text-text p-0.5 rounded transition-colors" title="Copy" aria-label={copied ? 'Copied!' : 'Copy'} onClick={() => { copyToClipboard(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }).catch(() => {}) }}>{copied ? <Check size={14} className="text-ok" /> : <Copy size={14} />}</button>
+        <button className="text-muted hover:text-text p-0.5 rounded transition-colors" title="Copy" aria-label={copied ? 'Copied!' : 'Copy'} onClick={() => { copyToClipboard(steerCleaned).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }).catch(() => {}) }}>{copied ? <Check size={14} className="text-ok" /> : <Copy size={14} />}</button>
         {messageTs && slotKey && <button className="text-muted hover:text-text p-0.5 rounded transition-colors" title="Copy link to message" aria-label="Copy link to message" onClick={() => { copySessionLink(slotKey, slotTitle, messageTs, mode).then(() => { setLinkCopied(true); setTimeout(() => setLinkCopied(false), 1500) }).catch(() => {}) }}>{linkCopied ? <Check size={14} className="text-ok" /> : <Link2 size={14} />}</button>}
         {onFork && forkIndex !== undefined && <button className="text-muted hover:text-text p-0.5 rounded transition-colors disabled:opacity-50" disabled={forking} title="Fork conversation from here" aria-label="Fork conversation from here" onClick={async () => { setForking(true); try { await onFork(forkIndex) } finally { setForking(false) } }}><GitFork size={14} /></button>}
         {onPlanFromHere && forkIndex !== undefined && <button className="text-muted hover:text-text p-0.5 rounded transition-colors disabled:opacity-50" disabled={forking} title="Plan from here" aria-label="Plan from here" onClick={async () => { setForking(true); try { await onPlanFromHere(forkIndex) } finally { setForking(false) } }}><ClipboardList size={14} /></button>}

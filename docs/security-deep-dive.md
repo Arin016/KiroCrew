@@ -174,6 +174,10 @@ Scans for plaintext AND base64-encoded credentials:
 - `SessionToken=`, `aws_session_token=`
 - Private key headers (`BEGIN RSA/DSA/EC/OPENSSH PRIVATE KEY`)
 - Slack tokens (`xoxb-`/`xoxp-`)
+- **Third-party provider families**: GitHub (`ghp_`/`gho_`/… + `github_pat_`), GitLab (`glpat-`), Stripe (`sk_live`/`rk_live`/`sk_test`/`rk_test`), SendGrid (`SG.`), OpenAI (`sk-proj-`), Anthropic (`sk-ant-`), npm (`npm_`), PyPI (`pypi-`), DigitalOcean (`do*_v1_`), Google OAuth (`GOCSPX-`)
+- **DB connection URIs** with embedded credentials — the `scheme://user:pass@` prefix for `postgres`/`postgresql`, `mysql`, `mongodb`(`+srv`), `redis`(`s`), and `amqp`(`s`) schemes
+
+**JSON-aware key-value matching**: Key-value patterns allow an optional quote (`[\"']?`) between the key name and separator (`[:=]`), matching both bare `key=VALUE` and JSON `"key": "VALUE"` formats. The value class uses `[^\s"',}]+` (bounded, stops at JSON structural delimiters) rather than greedy `\S+`, preventing over-capture in compact JSON that would swallow adjacent fields and mask subsequent credentials.
 
 Base64 detection: finds 40+ char base64 chunks, decodes, checks if decoded content matches any credential pattern.
 
@@ -183,6 +187,12 @@ Applied on ALL 5 output paths:
 3. Dashboard non-chunk messages
 4. Dashboard history save (JSONL)
 5. Slack final response
+
+The `redact()` dual-pass helper composes both scanners in order (`redact_exfiltration_urls()` then `redact_credentials()`) for a single call site.
+
+### Streaming Redaction (`StreamRedactor`)
+
+Per-chunk redaction misses a credential split across token/streaming boundaries: a chunk ending `...AKIA` and the next starting `IOSFODNN7...` each individually escape `redact_credentials()`, so the raw fragments reach WebSocket/SSE/Slack consumers even though the final assembled message would have been redacted. `StreamRedactor` is a rolling-buffer redactor that feeds all streamed output: it withholds the trailing run of credential-class characters (letters, digits, and URL/base64/connection-string punctuation — the possible start of a not-yet-complete credential) until a non-credential-class terminator arrives or the stream ends, redacting only the confirmed-safe prefix before it is emitted on the wire. The hold-back is bounded at 512 chars so latency/memory stay bounded on a pathologically long unbroken run.
 
 ### URL Exfiltration Detection (`scan_exfiltration_urls`)
 
@@ -250,8 +260,13 @@ HMAC-SHA256 signed tokens with dual expiry:
 - 5-minute link click window (`exp`)
 - Session TTL up to 20 hours (`session_exp`)
 - IP-pinned on first use
-- Single-use token → `mc_token` cookie for subsequent requests
-- Loopback trusted only in local-only mode (SSH tunnel via `ssh -NL`)
+- **Every request requires a valid token** — there is no unauthenticated path.
+
+Additional controls:
+- **Per-session logout** (CWE-613): the access cookie carries a per-session `nonce`; `POST /api/auth/logout` records that nonce in the `RevokedNonceStore` so the individual session is revoked without affecting others.
+- **App-token scope** (CWE-269, least privilege): app tokens are confined to their declared per-app API allowlist via `_enforce_app_scope()` — out-of-scope paths return 403, deny-by-default even on internal paths.
+- **Refresh cookie**: a path-restricted refresh token authenticates `POST /api/auth/refresh` (and `/api/auth/logout`), letting the app self-recover after the access cookie expires.
+- **Secure flag**: the auth cookies set `Secure` when `is_https_request()` detects the gateway is behind a TLS/HTTPS-terminating tunnel.
 
 ### CSRF Protection
 

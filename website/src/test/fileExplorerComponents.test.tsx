@@ -8,10 +8,12 @@
  * which transitively loads highlight.js + mermaid (5s timeout in vitest).
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { Provider } from 'react-redux'
+import { createTestStore } from './helpers'
 
 // Polyfill ResizeObserver for jsdom (TabStrip uses it for scroll fade detection)
 globalThis.ResizeObserver = class {
@@ -45,15 +47,18 @@ import TabStrip from '../apps/file-explorer/TabStrip'
 import PathBar from '../apps/file-explorer/PathBar'
 import type { TreeEntry, FolderTab, FileTab, GitInfo } from '../apps/file-explorer/types'
 
-function renderPage() {
+function renderPage(store = createTestStore()) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
-  return render(
-    <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={['/file-explorer']}>
-        <FileExplorerPage />
-      </MemoryRouter>
-    </QueryClientProvider>,
+  const utils = render(
+    <Provider store={store}>
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={['/file-explorer']}>
+          <FileExplorerPage />
+        </MemoryRouter>
+      </QueryClientProvider>
+    </Provider>,
   )
+  return { ...utils, store }
 }
 
 function renderWithQuery(ui: React.ReactElement) {
@@ -89,6 +94,27 @@ describe('FileExplorerPage', () => {
     await waitFor(() => expect(screen.getByText('src')).toBeInTheDocument())
     expect(screen.getByText('README.md')).toBeInTheDocument()
     expect(screen.getByText('package.json')).toBeInTheDocument()
+  })
+
+  it('"Chat about this file" hands the prompt to chat via Redux pendingInput', async () => {
+    vi.mocked(fileExplorerApi.health).mockResolvedValue({ allowedRoots: ['/home/user'] })
+    vi.mocked(fileExplorerApi.tree).mockResolvedValue({ entries: TREE_ENTRIES })
+    vi.mocked(fileExplorerApi.gitStatus).mockResolvedValue(null)
+    const { store } = renderPage()
+    await waitFor(() => expect(screen.getByText('README.md')).toBeInTheDocument())
+
+    // Right-click the file to open the context menu, then click the chat row.
+    fireEvent.contextMenu(screen.getByText('README.md'))
+    const rows = Array.from(document.querySelectorAll('.mc-fe-ctx-row'))
+    const chatRow = rows.find(r => r.textContent?.includes('Chat about this'))
+    expect(chatRow).toBeTruthy()
+    fireEvent.click(chatRow!)
+
+    // The prompt is delivered through Redux pendingInput (ChatPage's prefill
+    // contract), NOT an unconsumed ?message= URL param.
+    const pending = store.getState().chat.pendingInput
+    expect(pending).toContain('/home/user/README.md')
+    expect(pending).toContain('file')
   })
 
   it('shows skeleton when health has not resolved', async () => {

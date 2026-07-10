@@ -16,12 +16,54 @@
 #                so frontend sync is by CONTENT within the post-snapshot window, not a
 #                clean SHA range. This SHA records the upstream tip last triaged.
 
-beta 6cf3aae0ad1ec28e5e5d443a17d24daf99e33457      # 2026-07-03 MeshClaw backend triaged tip (batch-25). 13 candidates triaged; 8 ported (5 KEEP + 3 PARTIAL). This IS the live beta tip (no straggler) — the batch-24 stragglers (bf9663df/76cfc2e0/210baed2) were picked up this batch as designed.
-frontend-beta 9b512cab7597ec2b791da50921b10128099fff52  # 2026-07-03 MeshClawWebsite triaged tip (batch-25). 2 candidates triaged; 1 ported (0d9797e per-tab remote host). This IS the live frontend tip (no straggler).
-mainline 199d7853  # 2026-07-03 MeshClaw mainline tip (upstream). Unchanged since batch-24; fcee75b9 (v3.1.1 slack sliding-idle hotfix) remains the only mainline-only delta but == beta 7ae12831 content (SKIP_INTERNAL). No NEW mainline-only content to port.
+beta 5dbb777804337ab792956a47909fe472224b329d      # 2026-07-10 MeshClaw backend triaged tip (batch-27, GitHub fork). 88 backend candidates in the 6cf3aae0..5dbb7778 window triaged BY CONTENT (the fork is bidirectional with upstream + had a native-PR wave, so SHA reachability is NOT presence); 47 ported (many others ALREADY_PRESENT via native PRs #10-#38).
+frontend-beta 3858e57307ea4d0261ac7e56b2813a3ab40aebcf  # 2026-07-10 MeshClawWebsite triaged tip (batch-27). 47 frontend candidates in the 9b512ca..3858e573 window triaged by content; 26 ported. Tip 3858e57 itself is DEFER (CommandPalette tab-strip scroll — pairs the ported 12bfe897; small follow-up).
+mainline 45dcb603f117886648d79c7dde05e82d2d8cda2d  # 2026-07-10 MeshClaw mainline tip (upstream), advanced from 199d7853. No NEW mainline-only content to port (all in-window candidates reached the fork via beta-braveheart; every mainline-only delta is a release-merge or already triaged via beta).
 # NOTE: this 'mainline' SHA is the UPSTREAM MeshClaw mainline tip (for the mainline-only
 # candidate check), NOT the fork's mainline — batch-12 mistakenly recorded the fork SHA
 # (796e21c5) here, which broke the `$MAIN..origin/mainline` scan. Corrected in batch-13.
+
+# --- Batch-27 (dual-repo sync 2026-07-10, ultracode comprehensive, FIRST on the GitHub fork) ---
+# RUN IN THE PUBLIC GITHUB CHECKOUT /workplace/bolichen/KiroClawGitHub (origin github.com/
+# kirodotdev-labs/kiroclaw), which ships via PULL REQUEST — NOT the internal Brazil workspace/CRUX
+# path of batches 1-25. Branch sync/beta-2026-07-10 off origin/main 8355fc6 (safety tag batch27-base).
+# KEY CONTEXT: the boundary file was STALE (recorded batch-25 beta 6cf3aae0) but the fork had since
+# done batch-26 (PR #18) + a large GitHub-NATIVE porting wave (PRs #10-#38) that did NOT cite the
+# upstream SHA — so the fork is BIDIRECTIONAL with upstream, NOT strictly downstream. Every candidate
+# was therefore triaged BY CONTENT against the fork file, never by SHA reachability.
+#   Window: backend beta 6cf3aae0..5dbb7778 (88 candidates) ; frontend 9b512ca..3858e573 (47) = 135.
+#   mainline advanced 199d7853..45dcb603 (no new mainline-only content).
+# 135 candidates triaged via a 270-agent adversarial Workflow (analyzer + skeptic per commit, decide
+# by content; 2 skeptics hit an API error and were hand-confirmed: 2dce8f8a/8e58cadf both KEEP). Tally:
+# 73 PORTED (58 KEEP + 15 PARTIAL: 47 backend + 26 frontend) + 62 left out (22 SKIP_INTERNAL, 4
+# SKIP_NONKIROACP, 29 ALREADY_PRESENT, 7 DEFER).
+# HEADLINE backend: d759d3b3 SEL-audit off-loop (PARTIAL — bulk ALREADY_PRESENT, fork-origin CR-286485989),
+#   255ef0b8 opt-in lazy-load skills (new skill_usage.py + skill_search), 9daac30f auto-research
+#   recursive exploration, 2e960fe2 mid-turn steer (PARTIAL — ACP layer already present, ported the
+#   dashboard wiring), 647cc057 deny widget-origin orchestrator auto-run, 2dce8f8a instances SO_REUSEADDR
+#   reconnect, 0a22f1c7 restart-bot-from-Slack, 41ad420c strip PYTHONPATH/PYTHONHOME from foreign MCP,
+#   8a11ca98 preserve data/ on app install, c4b62689 forward-Slack-message shortcut, 8b9dfc18
+#   server-authoritative workspace theme, 52deca0/b182453 Claude Fable 5 (model-registry, PARTIAL).
+# HEADLINE frontend: a7f25225 native recursive split-pane grid (biggest FE port), 12bfe897 Command
+#   Palette / Search Everywhere (PARTIAL), 26ce1d57+033951d Steer button + visible ack, b66599c unified
+#   store-connected SessionActionsMenu, 07e9f27 Pinned filter, folder-visibility + search-by-folder.
+# LEFT OUT (highlights): SKIP_INTERNAL = WritingReview (7608b99f/321f9fbc/eed2773d), mcp_gateway
+#   (7bb86a44), secretary (8b5351f1), code-reviewer FE (3a182608), artifact/Chorus publish (9a696e65/
+#   5e13d8b7), AEA-tunnel (92104fcc/a179b9e0/b944c74d), toolbox/Brazil/mailmap (9bbcb048/cb6f8f19/
+#   c637016b/7f86241d), midway (4f753ed0), builder-mcp security-assistance (cec38579), app-registry
+#   (1f6b7982/81d19cef), version bumps (0e9c9ffc/d53b497b). SKIP_NONKIROACP = claude_code usage/cost
+#   tracking (3997c2ae/7b74179b/c6bc2744/f6e38b3b — the fork has no per-provider spend surface).
+#   DEFER (7, human review): 3e5d7132 (workflows engine absent), f8383887 (deploy_web/workflows hero
+#   assets), d2240c48 (tunnel-off warning follow-up), 0000f561/3acce399/5360aa4d (FE: comment-anchor
+#   subsystem / RL-v2 UI / split-view rich tool-stream — absent substrates), 3858e573 (CommandPalette
+#   tab-strip scroll — pairs the ported 12bfe897, tiny follow-up worth picking up next batch).
+# Verify (independent cumulative pass): backend flake8 CLEAN (51 touched .py) + pytest 11260 pass/52
+#   skip/1 fail (ONLY the pre-existing test_skills mtime flake — confirmed failing identically on
+#   origin/main, untouched by this batch). frontend tsc -b CLEAN + 3156 vitest pass (273 files, 1 skip).
+#   Step-6 de-Amazon: 0 LIVE couplings (all inert comments/labels/test-strings). KiroACP invariant HELD
+#   (provider enum ["acp"], ACP_BACKEND_CLAUDE seam intact, no provider selector/cc_*/bedrock_* re-added).
+# 73 commits on branch. DMG rebuild OWED (macOS-only; this ran on Linux — mode:port ceiling). PR against
+#   main authorized by the user for this manual run.
 
 # --- Batch-25 (dual-repo sync 2026-07-03, ultracode comprehensive) -----------
 # STACKED on the batch-22+23+24 worktree branch sync/beta-2026-06-27 AFTER rebasing all 141 commits

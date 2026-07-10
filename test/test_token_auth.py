@@ -1750,3 +1750,39 @@ async def test_served_shell_is_auth_independent() -> None:
         "someminted.token.value",
     ):
         assert marker not in body, f"shell leaked state marker: {marker!r}"
+
+
+@pytest.mark.asyncio
+async def test_index_serves_guidance_when_bundle_missing(tmp_path, monkeypatch) -> None:
+    """Fallback branch: when neither the React build nor dashboard.html can be
+    read, index() serves the static guidance page (recognizable heading + cause
+    + restart hint) instead of a bare error. It must remain request-independent
+    and secret-free -- the same cold-start security contract as the normal shell
+    (this handler is served unauthenticated).
+    """
+    import kiro_claw.dashboard.handlers.core as core
+
+    # Point both the React build dir and the dashboard.html path at
+    # non-existent locations so index() falls into the FileNotFoundError branch.
+    monkeypatch.setattr(core, "_DIST_DIR", tmp_path / "no-dist")
+    monkeypatch.setattr(core, "_HTML_PATH", tmp_path / "no-dashboard.html")
+
+    anon = _make_request(path="/", remote="10.0.0.1")
+    authed = _make_request(
+        path="/",
+        cookies={"mc_token_7777": "someminted.token.value"},
+        remote="10.0.0.1",
+    )
+    resp_anon = await core.index(anon)
+    resp_authed = await core.index(authed)
+
+    assert resp_anon.status == 200
+    assert resp_anon.content_type == "text/html"
+    body = resp_anon.text
+    # Recognizable heading preserved + actionable guidance added.
+    assert "<h1>Dashboard HTML not found</h1>" in body
+    assert "restarting KiroClaw" in body
+    assert "kiroclaw service restart" in body
+    # Request-independent and secret-free (same contract as the served shell).
+    assert resp_anon.text == resp_authed.text
+    assert "someminted.token.value" not in body

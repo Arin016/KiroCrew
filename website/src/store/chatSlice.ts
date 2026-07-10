@@ -55,6 +55,9 @@ interface ChatState {
   historyHasMore: boolean
   historyOffset: number
   pendingInput: string | null
+  // True while a createSlot POST is in flight. Lets every New Chat entry
+  // point show a pending state so the UI never looks dead on click.
+  creatingSlot: boolean
   slotContextPct: Record<string, number>
   // Real token counts behind the context ring (from the adapter usage_update),
   // keyed by slot. Used for the ring tooltip so "44%" shows its absolute
@@ -65,14 +68,20 @@ interface ChatState {
   subagents: Record<string, SubagentActivity>
   toolLog: ToolActivity[]
   activityOpen: boolean
-  activityTab: 'subagents' | 'logs' | 'files' | 'side' | 'nav'
+  activityTab: 'subagents' | 'logs' | 'files' | 'side'
   /** Tool call to highlight & auto-expand inline. Set by openActivityToTool;
    *  consumed (cleared) once the matching ToolCallLine has expanded itself. */
   focusToolCallId: string | null
-  slotActivity: Record<string, { toolLog: ToolActivity[]; subagents: Record<string, SubagentActivity>; activityTab?: 'subagents' | 'logs' | 'files' | 'side' | 'nav' }>
+  slotActivity: Record<string, { toolLog: ToolActivity[]; subagents: Record<string, SubagentActivity>; activityTab?: 'subagents' | 'logs' | 'files' | 'side' }>
   slotSide: Record<string, SideState>
   slotSideClosed: Record<string, boolean>
   slotMessages: Record<string, ChatMessage[]>
+  /** Path B: per-slot live stream state so a non-active pane shows its own
+   *  streaming/tool/idle indicator (mirrors slotActivity for tool events). */
+  slotRun: Record<string, { state: SlotState; lastChunkSeq?: number }>
+  /** Path B: per-slot one-time hydration guard so the server history is
+   *  prepended exactly once even if a WS frame seeds slotMessages first. */
+  slotHydrated: Record<string, boolean>
   slotLoading: boolean
   slotHistory: string[]
   stopPressedAt: Record<string, number | null>
@@ -99,6 +108,7 @@ const initialState: ChatState = {
   historyHasMore: false,
   historyOffset: 0,
   pendingInput: null,
+  creatingSlot: false,
   slotContextPct: {},
   slotContextTokens: {},
   voicePlaying: false,
@@ -110,6 +120,8 @@ const initialState: ChatState = {
   focusToolCallId: null,
   slotActivity: {},
   slotMessages: {},
+  slotRun: {},
+  slotHydrated: {},
   slotLoading: false,
   slotSide: {},
   slotSideClosed: {},
@@ -123,6 +135,151 @@ function pushHistory(history: string[], key: string): string[] {
   const deduped = history.filter(k => k !== key)
   deduped.push(key)
   return deduped.length > 50 ? deduped.slice(-50) : deduped
+}
+
+/**
+ * Path B (native session grid): apply a WS chat frame for a NON-active slot
+ * into the per-slot store so a pane rendering that slot streams live. The
+ * ACTIVE-slot path in sseChatMessage is intentionally left byte-identical
+ * (zero blast radius on the main chat); this mirrors the slotActivity tool
+ * pattern already used for tool/subagent events on non-active slots.
+ */
+function applyNonActiveFrame(
+  state: ChatState,
+  p: { slot: string; role: string; content: string; ts?: string; seq?: number; cls?: string; meta?: Record<string, unknown>; kind?: string },
+) {
+  const { slot, role, content, ts, seq, cls, meta, kind } = p
+  const msgs = (state.slotMessages[slot] ??= [])
+  const run = (state.slotRun[slot] ??= { state: 'idle' })
+  const sa = (state.slotActivity[slot] ??= { toolLog: [], subagents: {} })
+  const toolLog = sa.toolLog
+
+  const effectiveKind = kind ?? (meta?.kind as string | undefined)
+  if (effectiveKind === 'stop_event') {
+    const id = (meta?.id as string) ?? ''
+    const idx = id ? msgs.findIndex(m => m.meta?.id === id) : -1
+    const msg: ChatMessage = { role, content, cls: cls || '', ts, meta: { ...meta, kind: 'stop_event' }, kind: 'stop_event' }
+    if (idx >= 0) msgs[idx] = msg
+    else msgs.push(msg)
+    return
+  }
+  if (role === '_segment') {
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'streaming') { msgs[i].role = 'assistant'; msgs[i].rawText = msgs[i].content; break }
+    }
+    return
+  }
+  if (role === 'chunk') {
+    run.state = 'streaming'
+    // Drop only the EMPTY thinking placeholder (mirror the active
+    // sseChatMessage path at chatSlice ~998), keeping content-bearing reasoning
+    // blocks so a background pane's hydrated reasoning isn't silently deleted by
+    // the next streamed chunk.
+    if (msgs.some(m => m.role === 'thinking' && !m.content)) {
+      const filtered = msgs.filter(m => !(m.role === 'thinking' && !m.content))
+      msgs.length = 0
+      msgs.push(...filtered)
+    }
+    const last = toolLog[toolLog.length - 1]
+    if (last?.type === 'reasoning') last.text += content
+    else {
+      toolLog.push({ type: 'reasoning', text: content, ts: Date.now() })
+      // Cap the non-active slot's tool log (mirrors the sseToolActivity cap)
+      // so a long background-pane turn can't grow slotActivity without bound.
+      if (toolLog.length > 100) toolLog.splice(0, toolLog.length - 100)
+    }
+    let streamIdx = -1
+    for (let i = msgs.length - 1; i >= 0; i--) { if (msgs[i].role === 'streaming') { streamIdx = i; break } }
+    if (streamIdx >= 0) {
+      const msg = msgs[streamIdx]
+      // Share missedChunkMarker with the active path so the two cannot drift.
+      if (seq !== undefined && run.lastChunkSeq !== undefined) {
+        msg.content += missedChunkMarker(run.lastChunkSeq, seq)
+      }
+      msg.content += content
+      msg.rawText = msg.content
+    } else {
+      msgs.push({ role: 'streaming', content, cls: 'msg msg-a', rawText: content })
+    }
+    if (seq !== undefined) run.lastChunkSeq = seq
+    return
+  }
+  if (role === '_done') {
+    run.state = 'idle'
+    run.lastChunkSeq = undefined
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'streaming') { msgs[i].role = 'assistant'; msgs[i].rawText = msgs[i].content; break }
+    }
+    return
+  }
+  if (role === 'compacting') { run.state = 'compacting'; return }
+  if (role === 'tool') {
+    run.state = 'tool_running'
+    let insertIdx = msgs.length
+    if (insertIdx > 0 && msgs[insertIdx - 1]?.role === 'streaming') insertIdx--
+    msgs.splice(insertIdx, 0, { role, content, cls: cls || '', ts, meta })
+    return
+  }
+  if (role === 'thinking') {
+    if (!msgs.some(m => m.role === 'thinking')) msgs.push({ role: 'thinking', content: '', cls: '' })
+    return
+  }
+  if (role === 'assistant') {
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'streaming') { msgs[i].role = 'assistant'; msgs[i].content = content; if (ts) msgs[i].ts = ts; return }
+    }
+  }
+  if (role === 'user') {
+    sa.toolLog = []
+    for (const m of msgs) {
+      if (m.role === 'permission' && !m.meta?.resolved) { if (m.meta) m.meta.resolved = 'rejected'; else m.meta = { resolved: 'rejected' } }
+    }
+    // Reconcile the optimistic user bubble (appendSlotMessage) rather than
+    // pushing a 2nd identical one when the server echoes the user frame — same
+    // pattern as sseSideResult. Kills the during-turn duplicate user message.
+    const lastUser = msgs[msgs.length - 1]
+    if (lastUser?.role === 'user' && lastUser.content === content) {
+      if (ts) lastUser.ts = ts
+      if (meta) lastUser.meta = { ...(lastUser.meta || {}), ...meta }
+      return
+    }
+  }
+  let effectiveMeta = meta
+  if (role === 'permission' && !meta?.approval_id && cls) {
+    try {
+      const parsed = JSON.parse(cls)
+      if (parsed.request_id) {
+        effectiveMeta = { ...meta, approval_id: parsed.request_id, tool_input: parsed.tool_input ?? '', is_read_only: parsed.is_read_only ?? '', ...(parsed.tool_call_id ? { tool_call_id: parsed.tool_call_id } : {}), ...(parsed.resolved ? { resolved: parsed.resolved } : {}) }
+      }
+    } catch { /* not JSON cls, ignore */ }
+  }
+  msgs.push({ role, content, cls: cls || '', ts, meta: effectiveMeta, kind })
+}
+
+/** Path B selectors: read a slot's messages / stream-state, falling back to the
+ *  global active mirror when the slot IS the currently-active one. */
+const EMPTY_MESSAGES: ChatMessage[] = []
+export const selectSlotMessages = (state: RootState, slot: string): ChatMessage[] =>
+  slot === state.chat.activeSlot ? state.chat.messages : (state.chat.slotMessages[slot] ?? EMPTY_MESSAGES)
+export const selectSlotStreamState = (state: RootState, slot: string): SlotState =>
+  slot === state.chat.activeSlot ? state.chat.slotState : (state.chat.slotRun[slot]?.state ?? 'idle')
+
+const EMPTY_TOOLLOG: ToolActivity[] = []
+/** Per-slot tool log, falling back to the global active mirror. */
+export const selectSlotToolLog = (state: RootState, slot: string | null): ToolActivity[] =>
+  slot && slot !== state.chat.activeSlot ? (state.chat.slotActivity[slot]?.toolLog ?? EMPTY_TOOLLOG) : state.chat.toolLog
+/** Per-slot pending tool-approval (unresolved permission after the slot's last
+ *  user message) — slot-aware version of ChatInput's old selectPendingApproval,
+ *  so each grid pane's approval bar reflects ITS slot, not the global active one. */
+export const selectSlotPendingApproval = (state: RootState, slot: string | null): ChatMessage | null => {
+  const msgs = slot ? selectSlotMessages(state, slot) : state.chat.messages
+  let lastUserIdx = -1
+  for (let i = msgs.length - 1; i >= 0; i--) { if (msgs[i].role === 'user') { lastUserIdx = i; break } }
+  for (let i = msgs.length - 1; i > lastUserIdx; i--) {
+    const m = msgs[i]
+    if (m.role === 'permission' && !m.meta?.resolved && m.meta?.approval_id) return m
+  }
+  return null
 }
 
 export const fetchHistory = createAsyncThunk(
@@ -210,7 +367,10 @@ export const refreshSlot = createAsyncThunk(
  *  cache instead of waiting for the on-switch fetch round-trip. Guarded to
  *  non-active slots; the fulfilled reducer writes only slotMessages[key] and
  *  never touches the active `messages`, so a background completion can't churn
- *  the view the user is currently looking at. */
+ *  the view the user is currently looking at. Session-grid panes also rely on
+ *  this to reconcile a background pane's optimistic/streamed/echoed messages to
+ *  the server's canonical history at end-of-turn (replaces the earlier
+ *  reconcileSlot thunk, which did the same job). */
 export const warmSlotCache = createAsyncThunk(
   'chat/warmSlotCache',
   async (key: string, { getState }) => {
@@ -379,6 +539,14 @@ const chatSlice = createSlice({
       }
     },
     appendMessage(state, action: PayloadAction<ChatMessage>) { state.messages.push(action.payload) },
+    /** Optimistically append a message to a specific slot's store — global
+     *  `messages` when it's the active slot, else `slotMessages[slot]`. Lets a
+     *  grid pane show a just-sent user message immediately in the right place. */
+    appendSlotMessage(state, action: PayloadAction<{ slot: string; message: ChatMessage }>) {
+      const { slot, message } = action.payload
+      const msgs = slot === state.activeSlot ? state.messages : (state.slotMessages[slot] ??= [])
+      msgs.push(message)
+    },
     updateStreamingMessage(state, action: PayloadAction<string>) {
       const last = state.messages[state.messages.length - 1]
       if (last?.role === 'streaming') { last.content = action.payload }
@@ -394,7 +562,13 @@ const chatSlice = createSlice({
     removeByApprovalId(state, action: PayloadAction<string>) { state.messages = state.messages.filter(m => m.meta?.approval_id !== action.payload) },
     resolveByApprovalId(state, action: PayloadAction<{ id: string; decision?: string }>) {
       const decision = action.payload.decision || 'approved'
-      const m = state.messages.find(m => m.meta?.approval_id === action.payload.id)
+      let m = state.messages.find(m => m.meta?.approval_id === action.payload.id)
+      if (!m) {
+        for (const arr of Object.values(state.slotMessages)) {
+          const f = arr.find(x => x.meta?.approval_id === action.payload.id)
+          if (f) { m = f; break }
+        }
+      }
       if (m?.meta) m.meta.resolved = decision
       // If rejected, mark the matching toolLog entry so the pill can show a rejection icon
       const toolCallId = m?.meta?.tool_call_id as string | undefined
@@ -460,10 +634,26 @@ const chatSlice = createSlice({
     clearMessages(state) { state.messages = []; state.slotHasMore = false; state.slotOldestIndex = 0; state.voiceAudio = null; state.voicePlaying = false },
     truncateAfterIndex(state, action: PayloadAction<number>) { state.messages = state.messages.slice(0, action.payload) },
     replaceMessages(state, action: PayloadAction<ChatMessage[]>) { state.messages = action.payload },
+    /** Path B: seed a non-active slot's message history into the per-slot store
+     *  (one-time hydrate on pane mount). Prepends the server history BEFORE any
+     *  frames that already arrived live: applyNonActiveFrame seeds slotMessages
+     *  via `??= []` on the first WS frame, so `cur` can be non-empty before this
+     *  hydrate fetch resolves. A dedicated `slotHydrated` flag makes it fire
+     *  exactly once, so a racing frame can't make us silently drop history.
+     *  No-op for the active slot (its mirror is already live). */
+    hydrateSlotMessages(state, action: PayloadAction<{ slot: string; messages: ChatMessage[] }>) {
+      const { slot, messages } = action.payload
+      if (slot === state.activeSlot) return
+      if (state.slotHydrated?.[slot]) return
+      const cur = state.slotMessages[slot] ?? []
+      state.slotMessages[slot] = [...messages, ...cur]
+      if (!state.slotHydrated) state.slotHydrated = {}
+      state.slotHydrated[slot] = true
+    },
     setVoicePlaying(state, action: PayloadAction<boolean>) { state.voicePlaying = action.payload },
     setVoiceAudio(state, action: PayloadAction<string | null>) { state.voiceAudio = action.payload },
     toggleActivity(state) { state.activityOpen = !state.activityOpen; if (!state.activityOpen) state.focusToolCallId = null },
-    openActivityToTab(state, action: PayloadAction<'subagents' | 'logs' | 'files' | 'side' | 'nav'>) { state.activityOpen = true; state.activityTab = action.payload; state.focusToolCallId = null },
+    openActivityToTab(state, action: PayloadAction<'subagents' | 'logs' | 'files' | 'side'>) { state.activityOpen = true; state.activityTab = action.payload; state.focusToolCallId = null },
     /** Tools tab is deprecated — tool details now expand inline in the chat. This action
      *  signals the matching ToolCallLine pill to auto-expand and scroll into view. */
     openActivityToTool(state, action: PayloadAction<string>) { state.focusToolCallId = action.payload },
@@ -719,7 +909,7 @@ const chatSlice = createSlice({
     },
     sseChatMessage(state, action: PayloadAction<{ slot: string; role: string; content: string; ts?: string; seq?: number; cls?: string; meta?: Record<string, unknown>; kind?: string; batched?: boolean }>) {
       const { slot, role, content, ts, seq, cls, meta, kind, batched } = action.payload
-      if (slot !== state.activeSlot) return
+      if (slot !== state.activeSlot) { applyNonActiveFrame(state, action.payload); return }
       // stop_event — replace in place by id, or insert new
       const effectiveKind = kind ?? (meta?.kind as string | undefined)
       if (effectiveKind === 'stop_event') {
@@ -883,33 +1073,40 @@ const chatSlice = createSlice({
     },
     /** Remove the first queued message matching content and append a user bubble at the end. */
     removeQueuedMessage(state, action: PayloadAction<{ slot: string; content: string; queue_id?: string }>) {
-      if (action.payload.slot !== state.activeSlot) return
-      const idx = action.payload.queue_id
-        ? state.messages.findIndex(m => m.role === 'queued' && (m.meta?.queueId as string) === action.payload.queue_id)
-        : state.messages.findIndex(m => m.role === 'queued' && m.content === action.payload.content)
+      const { slot, content, queue_id } = action.payload
+      const msgs = slot === state.activeSlot ? state.messages : state.slotMessages[slot]
+      if (!msgs) return
+      const idx = queue_id
+        ? msgs.findIndex(m => m.role === 'queued' && (m.meta?.queueId as string) === queue_id)
+        : msgs.findIndex(m => m.role === 'queued' && m.content === content)
       if (idx >= 0) {
-        const ts = state.messages[idx].ts
-        state.messages.splice(idx, 1)
-        state.messages.push({ role: 'user', content: action.payload.content, cls: 'msg msg-u', ts })
+        const ts = msgs[idx].ts
+        msgs.splice(idx, 1)
+        msgs.push({ role: 'user', content, cls: 'msg msg-u', ts })
       }
     },
     /** Cancel a queued message: remove from messages. pendingInput is set locally by the initiating client. */
     cancelQueuedMessage(state, action: PayloadAction<{ slot: string; queue_id: string }>) {
-      if (action.payload.slot !== state.activeSlot) return
-      const idx = state.messages.findIndex(m => m.role === 'queued' && (m.meta?.queueId as string) === action.payload.queue_id)
-      if (idx >= 0) state.messages.splice(idx, 1)
+      const { slot, queue_id } = action.payload
+      const msgs = slot === state.activeSlot ? state.messages : state.slotMessages[slot]
+      if (!msgs) return
+      const idx = msgs.findIndex(m => m.role === 'queued' && (m.meta?.queueId as string) === queue_id)
+      if (idx >= 0) msgs.splice(idx, 1)
     },
     /** Edit a queued message in place (from backend queue_edit WS event or optimistic local update). */
     editQueuedMessage(state, action: PayloadAction<{ slot: string; queue_id: string; content: string }>) {
-      if (action.payload.slot !== state.activeSlot) return
-      const idx = state.messages.findIndex(m => m.role === 'queued' && (m.meta?.queueId as string) === action.payload.queue_id)
-      if (idx >= 0) state.messages[idx].content = action.payload.content
+      const { slot, queue_id, content } = action.payload
+      const msgs = slot === state.activeSlot ? state.messages : state.slotMessages[slot]
+      if (!msgs) return
+      const idx = msgs.findIndex(m => m.role === 'queued' && (m.meta?.queueId as string) === queue_id)
+      if (idx >= 0) msgs[idx].content = content
     },
     /** Add a queued message (from backend queue_push WS event). */
     appendQueuedMessage: {
       reducer(state, action: PayloadAction<{ slot: string; content: string; ts: string; queueId: string }>) {
-        if (action.payload.slot !== state.activeSlot) return
-        state.messages.push({ role: 'queued', content: action.payload.content, cls: 'msg msg-queued', ts: action.payload.ts, meta: { queueId: action.payload.queueId } })
+        const { slot, content, ts, queueId } = action.payload
+        const msgs = slot === state.activeSlot ? state.messages : (state.slotMessages[slot] ??= [])
+        msgs.push({ role: 'queued', content, cls: 'msg msg-queued', ts, meta: { queueId } })
       },
       prepare(payload: { slot: string; content: string; ts: string; queue_id?: string }) {
         return { payload: { ...payload, queueId: payload.queue_id || crypto.randomUUID() } }
@@ -944,7 +1141,7 @@ const chatSlice = createSlice({
         state.subagents = cached?.subagents ?? {}
         // 'tools' tab was removed in May 2026 (inline expansion replaces it). Cached
         // pre-migration values fall back to 'files'.
-        state.activityTab = (cached?.activityTab && cached.activityTab !== ('tools' as never)) ? cached.activityTab : 'files'
+        state.activityTab = (cached?.activityTab && cached.activityTab !== ('tools' as never) && cached.activityTab !== ('nav' as never)) ? cached.activityTab : 'files'
         // Set activeSlot immediately so WS events for the new slot are accepted.
         // Restore cached messages if available (instant switch), otherwise show loading.
         state.activeSlot = action.meta.arg
@@ -1052,9 +1249,32 @@ const chatSlice = createSlice({
         // owns its messages, so leave the cache for it to manage.
         if (state.activeSlot === key) return
         if (!state.slotMessages) state.slotMessages = {}
-        state.slotMessages[key] = messages
+        // Preserve permission flags resolved client-side but not yet reflected
+        // in the refetched history (a grid pane can resolve an approval between
+        // the server snapshot and this warm), then collapse the pane's
+        // optimistic/streamed/echoed messages to the canonical history.
+        const localResolved = new Map<string, unknown>()
+        for (const m of (state.slotMessages[key] || [])) {
+          if (m.role === 'permission' && m.meta?.approval_id && m.meta?.resolved) {
+            localResolved.set(m.meta.approval_id as string, m.meta.resolved)
+          }
+        }
+        state.slotMessages[key] = messages.map(m => {
+          const aid = m.role === 'permission' ? (m.meta?.approval_id as string | undefined) : undefined
+          return aid && localResolved.has(aid)
+            ? { ...m, meta: { ...m.meta, resolved: localResolved.get(aid) } }
+            : m
+        })
+        // Clear the per-slot run indicator (the _done frame already idles it;
+        // this is belt-and-braces for the fetch-completes-after-_done ordering).
+        const run = (state.slotRun[key] ??= { state: 'idle' })
+        run.state = 'idle'
+        run.lastChunkSeq = undefined
       })
+      .addCase(createSlot.pending, (state) => { state.creatingSlot = true })
+      .addCase(createSlot.rejected, (state) => { state.creatingSlot = false })
       .addCase(createSlot.fulfilled, (state, action) => {
+        state.creatingSlot = false
         if (state.activeSlot) {
           state.slotActivity[state.activeSlot] = { toolLog: state.toolLog, subagents: state.subagents, activityTab: state.activityTab }
           state.slotHistory = pushHistory(state.slotHistory, state.activeSlot)
@@ -1073,6 +1293,8 @@ const chatSlice = createSlice({
       .addCase(deleteSlot.fulfilled, (state, action) => {
         delete state.slotActivity[action.payload]
         delete state.slotMessages[action.payload]
+        delete state.slotRun[action.payload]
+        delete state.slotHydrated[action.payload]
         delete state.slotSide[action.payload]
         delete state.slotSideClosed[action.payload]
         state.slotHistory = state.slotHistory.filter(k => k !== action.payload)
@@ -1096,7 +1318,7 @@ const chatSlice = createSlice({
           state.toolLog = cached?.toolLog ?? []
           state.subagents = cached?.subagents ?? {}
           // 'tools' tab was removed (inline expansion replaces it). Cached pre-migration values fall back to 'files'.
-          state.activityTab = (cached?.activityTab && cached.activityTab !== ('tools' as never)) ? cached.activityTab : 'files'
+          state.activityTab = (cached?.activityTab && cached.activityTab !== ('tools' as never) && cached.activityTab !== ('nav' as never)) ? cached.activityTab : 'files'
           state.activeSlot = action.payload.key
           state.messages = mergePreservedPastes(state.messages, action.payload.messages)
           state.slotState = 'idle'
@@ -1130,8 +1352,8 @@ const chatSlice = createSlice({
 })
 
 export const {
-  setActiveSlot, clearSlotState, setPendingInput, setQuestionCard, clearQuestionCard, appendMessage, updateStreamingMessage, finalizeAssistant,
-  removeThinking, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, startLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage,
+  setActiveSlot, clearSlotState, setPendingInput, setQuestionCard, clearQuestionCard, appendMessage, appendSlotMessage, updateStreamingMessage, finalizeAssistant,
+  removeThinking, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, startLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, hydrateSlotMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage,
   sseContextUsage, setVoicePlaying, setVoiceAudio,
   toggleActivity, openActivityToTab, openActivityToTool, clearFocusToolCallId, sseSubagentPending, markSubagentApproving, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentDone,
   sseSubagentSnapshot, sseToolActivity, sseToolResult, sseActivityEvent,

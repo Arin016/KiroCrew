@@ -43,6 +43,7 @@ code blocks, Mermaid diagrams, and clickable file paths.
 - **Tool purpose pills**: tool call labels show purpose text, persisted across reloads
 - **Batch tool rejection**: reject multiple pending tool approvals at once
 - **Cancel queued messages**: cancel button for messages waiting in the queue
+- **Edit queued messages**: edit a message waiting in the queue in place before it runs (order preserved)
 - **iOS-style queue stack**: queued messages displayed as a visual stack
 - **Streaming transcription**: live speech-to-text partials via WebSocket
 - **Board view**: 4-lane Kanban view for sessions (Active, Idle, Completed, Archived)

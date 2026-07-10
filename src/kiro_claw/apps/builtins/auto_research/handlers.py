@@ -6,6 +6,7 @@ import asyncio
 import html as html_mod
 import json
 import logging
+import math
 import re
 import shutil
 import sqlite3
@@ -18,7 +19,9 @@ from typing import Any
 
 from aiohttp import web
 
+from kiro_claw.apps.builtins.auto_research import subquestion_queue as _sq
 from kiro_claw.autonudge import get_instance as _autonudge_instance
+from kiro_claw.config.paths import config_dir
 from kiro_claw.knowledge.llm_pool import LLMPool
 
 try:
@@ -41,13 +44,28 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-RESEARCH_DIR = Path.home() / ".kiroclaw" / "workspace" / "research"
-DB_PATH = Path.home() / ".kiroclaw" / "apps" / "auto-research" / "campaigns.db"
+# Resolve under the active KiroClaw home (honors KIROCLAW_HOME for isolated dev
+# gateways) — NOT a hardcoded ~/.kiroclaw, which would make dev instances collide
+# with prod Research Lab state and contend with the prod gateway's watchdog.
+RESEARCH_DIR = config_dir() / "workspace" / "research"
+DB_PATH = config_dir() / "apps" / "auto-research" / "campaigns.db"
 # Serializes the one-time WAL switch + schema init per DB file (see
 # _ensure_schema). Keyed by DB path so per-test temp DBs each init once.
 _DB_INIT_LOCK = threading.Lock()
 _INITIALIZED_DBS: set[str] = set()
 MAX_CYCLES_HARD_CAP = 100
+# Execution mode + recursive-exploration budget defaults (RL v2). The SQLite
+# column DEFAULTs in _get_db() mirror these — keep them in sync. The public
+# fork ships agent mode ONLY: the Dynamic Workflow runner is absent here, so
+# VALID_EXECUTION_MODES is ("agent",) and create_campaign clamps any stray
+# 'workflow' back to 'agent' — a workflow-mode campaign can never start with no
+# runner and sit zombie in RUNNING. The execution_mode DB column is kept
+# (default 'agent') for forward-compat.
+VALID_EXECUTION_MODES = ("agent",)
+DEFAULT_EXECUTION_MODE = "agent"
+DEFAULT_MAX_SUBQUESTIONS_PER_ROUND = 3
+DEFAULT_DEPTH_DECAY = 0.5
+DEFAULT_RESERVE_FRACTION = 0.15
 POLL_INTERVAL = 5
 _MAX_PARALLEL_WORKERS = 5  # hard cap on parallel sub-agents per cycle
 # Default seconds between cycles (until the next nudge fires). The watchdog's
@@ -91,7 +109,7 @@ _TERMINAL_STATUSES = (CampaignStatus.COMPLETE, CampaignStatus.STOPPED)
 _RESEARCH_AGENT = "kiroclaw-research"
 _RESEARCH_NUDGE = (
     "Run the next research cycle for campaign {cid} "
-    "(dir ~/.kiroclaw/workspace/research/{cid}/). Follow your per-cycle research "
+    "(dir {dir}). Follow your per-cycle research "
     "protocol and end the turn when done."
 )
 
@@ -187,6 +205,21 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
                 )
             if "report_artifact_slug" not in cols:
                 conn.execute("ALTER TABLE campaigns ADD COLUMN report_artifact_slug TEXT")
+            # RL v2: dual execution mode + recursive-exploration budget. NOT NULL
+            # with a DEFAULT so existing rows backfill automatically (DEFAULTs
+            # mirror the DEFAULT_* constants above).
+            if "execution_mode" not in cols:
+                conn.execute(
+                    "ALTER TABLE campaigns ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'agent'")
+            if "max_subquestions_per_round" not in cols:
+                conn.execute(
+                    "ALTER TABLE campaigns ADD COLUMN max_subquestions_per_round "
+                    "INTEGER NOT NULL DEFAULT 3")
+            if "depth_decay" not in cols:
+                conn.execute("ALTER TABLE campaigns ADD COLUMN depth_decay REAL NOT NULL DEFAULT 0.5")
+            if "reserve_fraction" not in cols:
+                conn.execute(
+                    "ALTER TABLE campaigns ADD COLUMN reserve_fraction REAL NOT NULL DEFAULT 0.15")
             conn.commit()
             _INITIALIZED_DBS.add(key)
         except Exception:
@@ -287,8 +320,13 @@ def validate_campaign(config: dict) -> dict:
         errors.append("Question too vague — provide more context (min 20 characters)")
     if len(config.get("sub_questions", [])) < 2:
         warnings.append("Consider decomposing into sub-questions for better coverage")
-    if not config.get("sources"):
-        errors.append("Select at least one source type")
+    # RL v2 dropped the "sources required" gate (agent mode researches without a
+    # pre-selected source list). The public fork ships agent mode ONLY (the
+    # Dynamic Workflow runner is absent), so reject any execution_mode other than
+    # 'agent' — this keeps workflow mode unreachable so a workflow-mode campaign
+    # can never start with no runner and sit zombie in RUNNING.
+    if config.get("execution_mode", DEFAULT_EXECUTION_MODE) not in VALID_EXECUTION_MODES:
+        errors.append("Execution mode must be 'agent'")
 
     max_cycles = config.get("max_cycles", 30)
     if max_cycles > MAX_CYCLES_HARD_CAP:
@@ -454,13 +492,27 @@ def create_campaign(config: dict) -> dict:
     campaign_id = uuid.uuid4().hex[:8]
     name = config.get("name") or config["question"][:50].strip()
     parent_id = config.get("parent_id") or None
+    # RL v2: validate/clamp execution mode + recursive-exploration budget. Any
+    # stray non-'agent' mode is clamped back to 'agent' (workflow runner absent).
+    exec_mode = config.get("execution_mode", DEFAULT_EXECUTION_MODE)
+    if exec_mode not in VALID_EXECUTION_MODES:
+        exec_mode = DEFAULT_EXECUTION_MODE
+    max_subq = max(0, int(config.get("max_subquestions_per_round",
+                                     DEFAULT_MAX_SUBQUESTIONS_PER_ROUND)))
+    depth_decay = float(config.get("depth_decay", DEFAULT_DEPTH_DECAY))
+    if not 0.0 <= depth_decay <= 1.0:
+        depth_decay = DEFAULT_DEPTH_DECAY
+    reserve_fraction = float(config.get("reserve_fraction", DEFAULT_RESERVE_FRACTION))
+    if not 0.0 <= reserve_fraction < 1.0:
+        reserve_fraction = DEFAULT_RESERVE_FRACTION
     db = _get_db()
     db.execute("BEGIN")
     db.execute(
         "INSERT INTO campaigns (id,name,question,sub_questions,sources,scope_constraints,"
         "max_cycles,idle_secs,success_criteria,auto_approve,parent_id,parallel_workers,"
+        "execution_mode,max_subquestions_per_round,depth_decay,reserve_fraction,"
         "status,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             campaign_id,
             name,
@@ -474,6 +526,7 @@ def create_campaign(config: dict) -> dict:
             int(bool(config.get("auto_approve", False))),
             parent_id,
             min(int(config.get("parallel_workers", 1)), _MAX_PARALLEL_WORKERS),
+            exec_mode, max_subq, depth_decay, reserve_fraction,
             CampaignStatus.READY,
             time.time(),
         ),
@@ -691,6 +744,10 @@ async def _watchdog_loop(app: web.Application | None = None) -> None:
                     )
                     db2.commit()
                     db2.close()
+                    # RL v2: advance recursive exploration (ingest agent-proposed
+                    # emergent sub-questions + activate queued ones). Agent-mode
+                    # only and fully guarded — must never break the watchdog.
+                    _advance_exploration(cid)
                     verified = latest.get("verification")
                     if isinstance(verified, dict) and verified.get("passed") is True:
                         update_campaign_status(cid, CampaignStatus.COMPLETE)
@@ -783,7 +840,7 @@ async def _launch_loop(request: web.Request, cid: str) -> None:
     state.push_slots_update()  # surface the app-owned worker slot so the UI filters it
     await svc.add(
         slot_key=slot.key,
-        message=_RESEARCH_NUDGE.format(cid=cid),
+        message=_RESEARCH_NUDGE.format(cid=cid, dir=_campaign_dir(cid)),
         idle_secs=int(row["idle_secs"] or DEFAULT_IDLE_SECS),
         max_cycles=int(row["max_cycles"] or 0),
         stop_sentinel_path=str(_campaign_dir(cid) / "STOP"),
@@ -854,8 +911,21 @@ def _write_brief(cid: str, row: Any) -> None:
             "when met, set verification.passed=true in the finding.",
         ]
     lines += [
-        "",
-        "Adapt direction each cycle from prior findings; pursue the highest-value open "
+        "", "**Recursive exploration (emergent sub-questions):** As you research you will "
+        "discover NEW high-value questions not in the initial list. Each cycle, in addition "
+        "to your finding, you MAY propose follow-up sub-questions by writing "
+        "`emergent_questions.json` in this dir as a JSON array: "
+        "`[{\"text\": \"...\", \"priority\": 0.0-1.0}, ...]` where priority is how valuable "
+        "/ relevant the lead is to the main question. The system ranks them, admits the top "
+        "few per round (a budget), de-duplicates against existing questions, and appends the "
+        "winners to the checklist above (tagged _(emergent)_) for you to investigate in "
+        "later cycles — so you can follow leads BEYOND the initial questions. Do NOT "
+        "re-propose questions already on the checklist, and stop proposing once the main "
+        "question is sufficiently answered (your Definition of Done / verification).",
+        "", "Each cycle, also read `guidance.txt` in this dir if present and follow any "
+        "directive there (e.g. a FINALIZE MODE instruction to stop exploring and "
+        "synthesize your final answer).",
+        "", "Adapt direction each cycle from prior findings; pursue the highest-value open "
         "lead toward the question.",
     ]
     # Parallel worker instruction
@@ -870,6 +940,230 @@ def _write_brief(cid: str, row: Any) -> None:
             f"If fewer than {pw} sub-questions remain open, spawn only as many as needed.",
         ]
     _campaign_dir(cid).joinpath("brief.md").write_text("\n".join(lines))
+
+
+# --- RL v2: recursive exploration (emergent sub-questions) ---
+
+_EMERGENT_FILENAME = "emergent_questions.json"
+_FINALIZE_FLAG = "finalize.flag"
+
+
+def _reserve_cycles(max_cycles: int, reserve_fraction: float) -> int:
+    """Trailing cycles reserved for final synthesis (>=1 when bounded)."""
+    if not max_cycles or max_cycles <= 0:
+        return 0
+    return max(1, math.ceil(max_cycles * max(0.0, min(1.0, reserve_fraction))))
+
+
+def _in_reserve_zone(total_cycles: int, max_cycles: int, reserve_fraction: float) -> bool:
+    """True once only the reserved trailing cycles remain — time to stop
+    exploring and synthesize. Always False when max_cycles is unbounded (<=0)."""
+    if not max_cycles or max_cycles <= 0:
+        return False
+    reserve = _reserve_cycles(max_cycles, reserve_fraction)
+    return total_cycles >= max(1, max_cycles - reserve)
+
+
+def _ingest_emergent_questions(campaign_id: str) -> list[dict]:
+    """Admit agent-proposed emergent sub-questions into the queue (agent mode).
+
+    Each cycle the agent MAY write ``emergent_questions.json`` = a JSON array of
+    ``{"text", "priority"?}`` (findings-derived follow-ups). We rank by priority
+    decayed for this round's depth, de-duplicate against the queue AND the
+    existing checklist, admit at most ``max_subquestions_per_round`` into the
+    queue's pending bucket, persist, and consume the file. Returns admitted items.
+    """
+    d = _safe_campaign_dir(campaign_id)
+    if d is None:
+        return []
+    ef = d / _EMERGENT_FILENAME
+    if not ef.exists():
+        return []
+    db = _get_db()
+    row = db.execute(
+        "SELECT execution_mode, max_subquestions_per_round, depth_decay, sub_questions "
+        "FROM campaigns WHERE id = ?",
+        (campaign_id,),
+    ).fetchone()
+    db.close()
+    if row is None or row["execution_mode"] != DEFAULT_EXECUTION_MODE:
+        ef.unlink(missing_ok=True)  # not agent mode (or gone) — discard
+        return []
+    try:
+        raw = json.loads(ef.read_text())
+    except (json.JSONDecodeError, OSError):
+        raw = []
+    ef.unlink(missing_ok=True)  # consumed regardless of validity
+    if not isinstance(raw, list) or not raw:
+        return []
+    max_admit = int(
+        row["max_subquestions_per_round"]
+        if row["max_subquestions_per_round"] is not None
+        else DEFAULT_MAX_SUBQUESTIONS_PER_ROUND
+    )
+    decay = float(row["depth_decay"] if row["depth_decay"] is not None else DEFAULT_DEPTH_DECAY)
+    existing = json.loads(row["sub_questions"] or "[]")
+    existing_norm = {
+        _sq.normalize(s.get("text", "")) for s in existing if isinstance(s, dict)
+    }
+    queue = _sq.load_queue(d)
+    depth = _sq.next_depth(queue)
+    factor = decay ** depth
+
+    # emergent_questions.json is LLM output that flows into the sub_questions DB
+    # column and the dashboard UI — scrub creds + exfil URLs before it enters the
+    # queue (same defense-in-depth the finding-read path applies).
+    def _redact_em(s: str) -> str:
+        cleaned, _ = redact_credentials(s)
+        cleaned, _ = redact_exfiltration_urls(cleaned)
+        return cleaned
+
+    cands: list[dict] = []
+    for it in raw:
+        if isinstance(it, dict):
+            text = str(it.get("text", "")).strip()
+            base = float(it.get("priority", 0.5))
+        else:
+            text = str(it).strip()
+            base = 0.5
+        text = _redact_em(text)  # scrub LLM output before it reaches DB/UI
+        if not text or _sq.normalize(text) in existing_norm:
+            continue  # empty, or already a checklist question
+        base = min(1.0, max(0.0, base))  # clamp to [0,1] before decay
+        cands.append({"text": text, "priority": base * factor})
+    admitted = _sq.enqueue(queue, cands, depth=depth, max_admit=max_admit)
+    _sq.save_queue(d, queue)
+    if admitted:
+        _audit("campaign_emergent_ingested", campaign_id)
+    return admitted
+
+
+def _activate_emergent(campaign_id: str) -> list[dict]:
+    """Pull queued emergent sub-questions into the agent's checklist (agent mode).
+
+    Gate: only once the initial (grill/manual) questions are addressed — either
+    all marked answered, or enough cycles have run to have plausibly covered them
+    (``total_cycles >= #initial``), since 'answered' status is not always set.
+    Dequeues up to ``max_subquestions_per_round`` highest-priority pending items,
+    appends them to ``sub_questions`` (origin 'emergent', status 'open'), marks
+    them analyzed (dedup ledger), and rewrites the brief. Returns activated items.
+    """
+    d = _safe_campaign_dir(campaign_id)
+    if d is None:
+        return []
+    queue = _sq.load_queue(d)
+    if _sq.pending_count(queue) == 0:
+        return []
+    db = _get_db()
+    row = db.execute(
+        "SELECT execution_mode, max_subquestions_per_round, sub_questions, total_cycles "
+        "FROM campaigns WHERE id = ?",
+        (campaign_id,),
+    ).fetchone()
+    if row is None or row["execution_mode"] != DEFAULT_EXECUTION_MODE:
+        db.close()
+        return []
+    subs = json.loads(row["sub_questions"] or "[]")
+    initial = [
+        s for s in subs
+        if isinstance(s, dict) and s.get("origin") in ("grill", "manual", None, "")
+    ]
+    initial_open = [s for s in initial if s.get("status") != "answered"]
+    if initial_open and int(row["total_cycles"] or 0) < len(initial):
+        db.close()
+        return []  # still working the initial questions — hold emergent ones
+    k = int(
+        row["max_subquestions_per_round"]
+        if row["max_subquestions_per_round"] is not None
+        else DEFAULT_MAX_SUBQUESTIONS_PER_ROUND
+    )
+    activated = _sq.dequeue_top_k(queue, k)
+    if not activated:
+        db.close()
+        return []
+    for a in activated:
+        subs.append({"text": a["text"], "origin": "emergent", "status": "open"})
+    db.execute("BEGIN")
+    db.execute(
+        "UPDATE campaigns SET sub_questions = ? WHERE id = ?",
+        (json.dumps(subs), campaign_id),
+    )
+    db.commit()
+    _sq.mark_analyzed(queue, activated)  # dedup ledger: never re-admit/re-activate
+    _sq.save_queue(d, queue)
+    full = db.execute(
+        "SELECT question, sub_questions, sources, scope_constraints, max_cycles, "
+        "idle_secs, success_criteria, auto_approve, parallel_workers "
+        "FROM campaigns WHERE id = ?",
+        (campaign_id,),
+    ).fetchone()
+    db.close()
+    if full is not None:
+        _write_brief(campaign_id, full)  # surface the new emergent items next cycle
+    _audit("campaign_emergent_activated", campaign_id)
+    return activated
+
+
+def _should_finalize(campaign_id: str) -> bool:
+    """Agent-mode: are we in the reserved trailing cycles (stop exploring, start
+    synthesizing)? Reads max_cycles + reserve_fraction + total_cycles."""
+    db = _get_db()
+    row = db.execute(
+        "SELECT execution_mode, max_cycles, reserve_fraction, total_cycles "
+        "FROM campaigns WHERE id = ?",
+        (campaign_id,),
+    ).fetchone()
+    db.close()
+    if row is None or row["execution_mode"] != DEFAULT_EXECUTION_MODE:
+        return False
+    reserve_fraction = (
+        float(row["reserve_fraction"]) if row["reserve_fraction"] is not None
+        else DEFAULT_RESERVE_FRACTION
+    )
+    return _in_reserve_zone(
+        int(row["total_cycles"] or 0), int(row["max_cycles"] or 0), reserve_fraction)
+
+
+def _enter_finalize(campaign_id: str) -> bool:
+    """Signal FINALIZE MODE once: freeze exploration (drop any stray emergent
+    file) and write a guidance directive telling the agent to consolidate the
+    accumulated findings into a final answer. Returns True if newly signaled."""
+    d = _safe_campaign_dir(campaign_id)
+    if d is None:
+        return False
+    (d / _EMERGENT_FILENAME).unlink(missing_ok=True)  # halt pending exploration
+    flag = d / _FINALIZE_FLAG
+    if flag.exists():
+        return False  # already signaled — leave the guidance in place
+    flag.write_text(str(time.time()))
+    write_guidance(
+        campaign_id,
+        "FINALIZE MODE — you are near the cycle budget. STOP opening new "
+        "sub-questions and STOP proposing emergent_questions.json. Use the "
+        "remaining cycles to CONSOLIDATE everything you have learned into a "
+        "clear, well-structured final answer to the main question in FINDINGS.md "
+        "(executive summary, key findings with evidence, and any open gaps). If "
+        "the Definition of Done is met, set verification.passed=true in your finding.",
+    )
+    _audit("campaign_finalize_mode", campaign_id)
+    return True
+
+
+def _advance_exploration(campaign_id: str) -> None:
+    """One recursive-exploration step (agent mode). When the campaign enters the
+    reserved trailing cycles, freeze exploration and signal FINALIZE MODE so the
+    run still delivers a synthesized report instead of exploring up to the cap;
+    otherwise ingest agent-proposed emergent sub-questions and activate queued
+    ones. Best-effort — never raises into the watchdog.
+    """
+    try:
+        if _should_finalize(campaign_id):
+            _enter_finalize(campaign_id)
+            return
+        _ingest_emergent_questions(campaign_id)
+        _activate_emergent(campaign_id)
+    except Exception:
+        logger.exception("auto_research: emergent exploration failed for %s", campaign_id)
 
 
 async def _stop_loop(cid: str, *, remove: bool) -> None:
@@ -894,7 +1188,9 @@ async def _handle_validate(request: web.Request) -> web.Response:
         return denied
     _audit("campaign_validate", "*")
     body = await request.json()
-    return web.json_response(validate_campaign(body))
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, validate_campaign, body)
+    return web.json_response(result)
 
 
 # --- Grill question tree ---
@@ -1054,10 +1350,11 @@ async def _handle_create(request: web.Request) -> web.Response:
     if denied := _require_auth(request):
         return denied
     body = await request.json()
-    v = validate_campaign(body)
+    loop = asyncio.get_running_loop()
+    v = await loop.run_in_executor(None, validate_campaign, body)
     if not v["can_start"]:
         return web.json_response({"error": "Validation failed", **v}, status=400)
-    result = create_campaign(body)
+    result = await loop.run_in_executor(None, create_campaign, body)
     result["name"] = _redact_finding({"v": result["name"]})["v"]
     return web.json_response(result, status=201)
 
@@ -1066,7 +1363,9 @@ async def _handle_list(request: web.Request) -> web.Response:
     if denied := _require_auth(request):
         return denied
     _audit("campaign_list", "*")
-    return web.json_response(list_campaigns())
+    loop = asyncio.get_running_loop()
+    campaigns = await loop.run_in_executor(None, list_campaigns)
+    return web.json_response(campaigns)
 
 
 async def _handle_get(request: web.Request) -> web.Response:
@@ -1076,7 +1375,8 @@ async def _handle_get(request: web.Request) -> web.Response:
     if not _validate_campaign_id(cid):
         return web.json_response({"error": "Invalid campaign ID"}, status=400)
     _audit("campaign_get", cid)
-    c = get_campaign(cid)
+    loop = asyncio.get_running_loop()
+    c = await loop.run_in_executor(None, get_campaign, cid)
     return web.json_response(c) if c else web.json_response({"error": "Not found"}, status=404)
 
 
@@ -1149,7 +1449,8 @@ async def _handle_action(request: web.Request) -> web.Response:
             "parent_id": cid,
             "grill_tree": body.get("grill_tree"),
         }
-        result = create_campaign(fork_config)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, create_campaign, fork_config)
         # Copy parent FINDINGS.md as context into the fork's dir. Use the
         # path-traversal-guarded _safe_campaign_dir (resolve + is_relative_to)
         # for both ids — defense-in-depth even though both are already

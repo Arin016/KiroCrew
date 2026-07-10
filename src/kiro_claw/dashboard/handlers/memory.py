@@ -188,7 +188,9 @@ async def api_memory_semantic_write(request: web.Request) -> web.Response:
     source = body.get("source", "user_explicit")
     if not key or value is None:
         return web.json_response({"error": "key and value required"}, status=400)
-    err = store.set_semantic(key, value, confidence, source)
+    # set_semantic may embed via a blocking urllib call to Ollama; offload so a
+    # slow/hung endpoint can't stall the dashboard event loop.
+    err = await asyncio.to_thread(store.set_semantic, key, value, confidence, source)
     if err is not None:
         code, message = err
         sk = request.headers.get("X-Session-Key", "")
@@ -570,7 +572,13 @@ async def api_memory_episodic_search(request: web.Request) -> web.Response:
     except (ValueError, TypeError):
         limit = 20
     tag_filter = [t.strip() for t in request.query.get("tags", "").split(",") if t.strip()] or None
-    emb = store._try_embed(query) if store.embed_fn and query else None
+    # _try_embed issues a blocking urllib call to Ollama; offload to keep the
+    # dashboard event loop responsive if the embedding endpoint is slow.
+    emb = (
+        await asyncio.to_thread(store._try_embed, query)
+        if store.embed_fn and query
+        else None
+    )
     results = []
     for e in store.search_episodic(
         query_embedding=emb, query_text=query, limit=limit, tag_filter=tag_filter

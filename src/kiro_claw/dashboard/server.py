@@ -728,6 +728,7 @@ async def start_dashboard(
     app.router.add_get("/api/midway-ttl", handlers.api_midway_ttl)
     app.router.add_get("/api/dashboard/branding", handlers.api_branding)
     app.router.add_get("/api/health", handlers.api_health)
+    app.router.add_get("/api/theme/boot", handlers.api_theme_boot)
     app.router.add_get("/api/admin/compliance/yolo-status", handlers.api_compliance_yolo_status)
 
     # Suggestions (pre-computed contextual prompts)
@@ -818,6 +819,8 @@ async def start_dashboard(
     app.router.add_get("/api/config/kiroclaw", handlers.api_kiroclaw_config)
     app.router.add_put("/api/config/kiroclaw", handlers.api_kiroclaw_config)
     app.router.add_patch("/api/config/kiroclaw", handlers.api_kiroclaw_config_patch)
+    app.router.add_get("/api/config/theme", handlers.api_theme_config)
+    app.router.add_put("/api/config/theme", handlers.api_theme_config)
     app.router.add_get("/api/dashboard/config", handlers.api_dashboard_config)
     app.router.add_put("/api/dashboard/config", handlers.api_dashboard_config)
 

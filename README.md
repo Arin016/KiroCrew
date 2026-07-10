@@ -243,6 +243,8 @@ kiroclaw setup --agent-only --clean  # fresh config from scratch
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow and PR guidelines |
 | [docs/REMOTE_DESKTOP_SETUP.md](docs/REMOTE_DESKTOP_SETUP.md) | 24/7 remote host setup |
 | [docs/security-deep-dive.md](docs/security-deep-dive.md) | Security architecture |
+| [docs/memory-architecture.md](docs/memory-architecture.md) | Memory system architecture (preferences, lessons, knowledge graph) |
+| [docs/mcp-architecture.md](docs/mcp-architecture.md) | MCP server discovery and tool management architecture |
 | [docs/app-kit/getting-started.md](docs/app-kit/getting-started.md) | App Kit developer guide |
 | [docs/system-specs/](docs/system-specs/) | Module-level specifications |
 

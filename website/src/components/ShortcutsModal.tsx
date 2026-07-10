@@ -71,6 +71,25 @@ export default function ShortcutsModal({ onClose }: { onClose: () => void }) {
             </div>
           )
         })}
+        {/* Search Everywhere — bindings live outside DEFAULT_SHORTCUTS: the double-Shift
+            sequence + ⌘K/Ctrl+K global trigger is wired in useCommandPalette (not the
+            Alt-based useKeyboardShortcuts handler), so document them with a dedicated row. */}
+        <div className="mb-5 last:mb-0">
+          <div className="text-[12px] font-medium text-muted uppercase tracking-wider mb-2">Search</div>
+          <div className="grid gap-1">
+            <div className="flex items-center justify-between py-1.5 px-2 rounded-md hover:bg-bg-hover transition-colors">
+              <span className="text-[13px] text-text">Search Everywhere</span>
+              <span className="flex items-center gap-1">
+                <Kbd>{IS_MAC ? '⇧' : 'Shift'}</Kbd>
+                <Kbd>{IS_MAC ? '⇧' : 'Shift'}</Kbd>
+                <span className="text-muted text-[11px] mx-1">or</span>
+                <Kbd>{IS_MAC ? '⌘' : 'Ctrl'}</Kbd>
+                <span className="text-muted text-[11px]">+</span>
+                <Kbd>K</Kbd>
+              </span>
+            </div>
+          </div>
+        </div>
         <div className="mt-4 pt-3 border-t border-border flex items-center justify-between">
           <span className="flex items-center gap-2 text-[12px] text-muted cursor-pointer">
             <Toggle checked={enabled} onChange={toggle} label="Enable shortcuts" />

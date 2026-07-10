@@ -347,7 +347,15 @@ class VectorMemoryStore:
         if extra_prefixes:
             self._prefixes.extend(extra_prefixes)
         self._db: sqlite3.Connection | None = None
-        self._db_lock = threading.Lock()
+        # Serializes the db + FAISS critical sections. Writes are offloaded to
+        # worker threads (history consolidation, dashboard handlers) while reads
+        # (search_episodic via context assembly) run on the event loop thread, so
+        # concurrent access to the shared sqlite connection and the (non-thread-
+        # safe) FAISS index / _faiss_id_map must be serialized. Reentrant because
+        # locked write sections call helpers (save_faiss_index) that re-acquire.
+        # NOTE: never hold this across a blocking embed call — embeds happen
+        # before the locked region so the lock only guards local db/FAISS work.
+        self._db_lock = threading.RLock()
         # FAISS state
         self._faiss_index: object | None = None  # faiss.IndexFlatIP (untyped)
         self._faiss_id_map: list[str] = []
@@ -523,55 +531,67 @@ class VectorMemoryStore:
         Returns None on success, or a human-readable conflict reason string.
         """
 
-        # 7. Conflict resolution
-        existing = self.db.execute("SELECT * FROM semantic_memory WHERE key = ?", (key,)).fetchone()
+        # Steps 7-8 (SELECT→conflict-resolve→UPSERT) are serialized: semantic
+        # writes are offloaded to worker threads (consolidation, dashboard), so
+        # without this the read-modify-write can interleave with a concurrent
+        # writer on the shared sqlite connection (lost update / "recursive use of
+        # cursors"). The lock is NOT held across step 9's _retire_stale_episodic,
+        # which issues a blocking embed — holding _db_lock across network I/O
+        # would defeat the whole point of offloading to a thread.
+        with self._db_lock:
+            # 7. Conflict resolution
+            existing = self.db.execute(
+                "SELECT * FROM semantic_memory WHERE key = ?", (key,)
+            ).fetchone()
 
-        if existing and not existing["is_deleted"]:
-            old_conf = existing["confidence"]
-            if source == "user_explicit":
-                pass  # user_explicit always wins
-            elif existing["source"] == "user_explicit":
-                # Existing is user_explicit — only another user_explicit can overwrite
+            if existing and not existing["is_deleted"]:
+                old_conf = existing["confidence"]
+                if source == "user_explicit":
+                    pass  # user_explicit always wins
+                elif existing["source"] == "user_explicit":
+                    # Existing is user_explicit — only another user_explicit can overwrite
+                    self._log_event(
+                        "conflict_skip", "semantic", key, existing["value_json"], value_json, source
+                    )
+                    return "Existing entry set by user cannot be overwritten by automated source"
+                elif confidence > old_conf:
+                    pass  # higher confidence wins
+                elif abs(confidence - old_conf) < 0.1:
+                    pass  # similar confidence → newer wins (same or different source)
+                else:
+                    self._log_event(
+                        "conflict_skip",
+                        "semantic",
+                        key,
+                        existing["value_json"],
+                        value_json,
+                        source,
+                    )
+                    return f"Existing entry has higher confidence ({old_conf:.2f} vs {confidence:.2f})"
                 self._log_event(
-                    "conflict_skip", "semantic", key, existing["value_json"], value_json, source
-                )
-                return "Existing entry set by user cannot be overwritten by automated source"
-            elif confidence > old_conf:
-                pass  # higher confidence wins
-            elif abs(confidence - old_conf) < 0.1:
-                pass  # similar confidence → newer wins (same or different source)
-            else:
-                self._log_event(
-                    "conflict_skip",
+                    "update",
                     "semantic",
                     key,
                     existing["value_json"],
                     value_json,
                     source,
                 )
-                return f"Existing entry has higher confidence ({old_conf:.2f} vs {confidence:.2f})"
-            self._log_event(
-                "update",
-                "semantic",
-                key,
-                existing["value_json"],
-                value_json,
-                source,
-            )
-        else:
-            self._log_event("create", "semantic", key, None, value_json, source)
+            else:
+                self._log_event("create", "semantic", key, None, value_json, source)
 
-        # 8. Upsert
-        now = _now_iso()
-        self.db.execute(
-            "INSERT INTO semantic_memory (key, value_json, confidence, source, created_at, updated_at, is_deleted) "
-            "VALUES (?, ?, ?, ?, ?, ?, 0) "
-            "ON CONFLICT(key) DO UPDATE SET value_json=?, confidence=?, source=?, updated_at=?, is_deleted=0",
-            (key, value_json, confidence, source, now, now, value_json, confidence, source, now),
-        )
-        self.db.commit()
+            # 8. Upsert
+            now = _now_iso()
+            self.db.execute(
+                "INSERT INTO semantic_memory (key, value_json, confidence, source, created_at, updated_at, is_deleted) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0) "
+                "ON CONFLICT(key) DO UPDATE SET value_json=?, confidence=?, source=?, updated_at=?, is_deleted=0",
+                (key, value_json, confidence, source, now, now, value_json, confidence, source, now),
+            )
+            self.db.commit()
 
         # 9. Retire conflicting episodic entries that reference the old value
+        # (outside the lock — _retire_stale_episodic does a blocking embed and
+        # re-locks its own FAISS search section).
         if existing and not existing["is_deleted"]:
             old_val = existing["value_json"]
             try:
@@ -894,6 +914,13 @@ class VectorMemoryStore:
                 normed = [x / norm_f for x in embedding] if norm_f > 0 else embedding
                 embedding_blob = struct.pack(f"{len(normed)}f", *normed)
 
+        # db + FAISS critical section — serialized against concurrent readers on
+        # the event loop thread (search_episodic) and other writer threads. The
+        # blocking embed above already ran outside the lock, so this only guards
+        # local work. FAISS add + _faiss_id_map.append MUST stay atomic together:
+        # a reader that sees index.ntotal == N+1 while len(id_map) == N would
+        # IndexError (or the concurrent add/search would corrupt the C++ index).
+        with self._db_lock:
             # Dedup via FAISS
             if self._faiss_index is not None and self._faiss_index.ntotal > 0:  # type: ignore[attr-defined]
                 distances, indices = self._faiss_index.search(vec.reshape(1, -1), 5)  # type: ignore[attr-defined]
@@ -926,34 +953,34 @@ class VectorMemoryStore:
                             )
                             return False
 
-        # Enforce cap
-        self._enforce_episodic_cap()
+            # Enforce cap
+            self._enforce_episodic_cap()
 
-        mem_id = str(uuid4())
-        now = _now_iso()
-        self.db.execute(
-            "INSERT INTO episodic_memories (id, conversation_id, text, embedding, tags, "
-            "importance, created_at, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
-            (
-                mem_id,
-                conversation_id,
-                text,
-                embedding_blob,
-                json.dumps(clean_tags),
-                importance,
-                now,
-            ),
-        )
-        self.db.commit()
+            mem_id = str(uuid4())
+            now = _now_iso()
+            self.db.execute(
+                "INSERT INTO episodic_memories (id, conversation_id, text, embedding, tags, "
+                "importance, created_at, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+                (
+                    mem_id,
+                    conversation_id,
+                    text,
+                    embedding_blob,
+                    json.dumps(clean_tags),
+                    importance,
+                    now,
+                ),
+            )
+            self.db.commit()
 
-        # Add to FAISS
-        if embedding_blob is not None and self._faiss_index is not None:
-            vec = np.frombuffer(embedding_blob, dtype=np.float32).reshape(1, -1)
-            self._faiss_index.add(vec)  # type: ignore[attr-defined]
-            self._faiss_id_map.append(mem_id)
-            self._faiss_writes_since_save += 1
-            if self._faiss_writes_since_save >= _FAISS_SAVE_INTERVAL:
-                self.save_faiss_index()
+            # Add to FAISS
+            if embedding_blob is not None and self._faiss_index is not None:
+                vec = np.frombuffer(embedding_blob, dtype=np.float32).reshape(1, -1)
+                self._faiss_index.add(vec)  # type: ignore[attr-defined]
+                self._faiss_id_map.append(mem_id)
+                self._faiss_writes_since_save += 1
+                if self._faiss_writes_since_save >= _FAISS_SAVE_INTERVAL:
+                    self.save_faiss_index()
 
         self._log_event("create", "episodic", mem_id, None, text[:200], source)
         has_vec = embedding_blob is not None
@@ -1000,27 +1027,31 @@ class VectorMemoryStore:
             norm = np.linalg.norm(vec)
             if norm > 0:
                 vec = vec / norm
-            k = min(limit * 2, self._faiss_index.ntotal)  # type: ignore[attr-defined]
-            distances, indices = self._faiss_index.search(vec.reshape(1, -1), k)  # type: ignore[attr-defined]
-
+            # FAISS search + id_map lookups must be serialized against concurrent
+            # writers (write_episodic on worker threads): a mid-flight add could
+            # otherwise corrupt the C++ index or leave _faiss_id_map shorter than
+            # index.ntotal, IndexError-ing the lookup below.
             now = datetime.now(tz=timezone.utc)
             candidates: list[dict] = []
-            for dist, idx in zip(distances[0], indices[0]):
-                if idx == -1:
-                    break
-                mem_id = self._faiss_id_map[int(idx)]
-                mem = self._get_episodic(mem_id)
-                if not mem or mem["is_deleted"]:
-                    continue
-                if tag_filter and not self._matches_tags(mem, tag_filter):
-                    continue
-                cosine_sim = float(dist)
-                created = datetime.fromisoformat(mem["created_at"])
-                days_old = max(0, (now - created).days)
-                score = cosine_sim * (0.7 + 0.3 * mem["importance"]) * math.exp(-0.03 * days_old)
-                candidates.append(
-                    {**mem, "score": round(score, 4), "cosine_sim": round(cosine_sim, 4)}
-                )
+            with self._db_lock:
+                k = min(limit * 2, self._faiss_index.ntotal)  # type: ignore[attr-defined]
+                distances, indices = self._faiss_index.search(vec.reshape(1, -1), k)  # type: ignore[attr-defined]
+                for dist, idx in zip(distances[0], indices[0]):
+                    if idx == -1:
+                        break
+                    mem_id = self._faiss_id_map[int(idx)]
+                    mem = self._get_episodic(mem_id)
+                    if not mem or mem["is_deleted"]:
+                        continue
+                    if tag_filter and not self._matches_tags(mem, tag_filter):
+                        continue
+                    cosine_sim = float(dist)
+                    created = datetime.fromisoformat(mem["created_at"])
+                    days_old = max(0, (now - created).days)
+                    score = cosine_sim * (0.7 + 0.3 * mem["importance"]) * math.exp(-0.03 * days_old)
+                    candidates.append(
+                        {**mem, "score": round(score, 4), "cosine_sim": round(cosine_sim, 4)}
+                    )
 
             candidates.sort(key=lambda x: x["score"], reverse=True)
             result = _mmr_rerank(candidates, limit=limit) if mmr else candidates[:limit]
@@ -1531,10 +1562,12 @@ class VectorMemoryStore:
         perform a blocking HTTP request to Ollama (up to the HTTP client timeout),
         so this method MUST be invoked from a sync context (worker thread, sync
         handler, etc.). Callers reaching this from an async event loop should
-        wrap the call in `asyncio.to_thread()` to avoid stalling the loop. All
-        current callers (add_memory, inject, recall paths) are sync. The rebind
-        block is serialized by `_embed_fn_rebind_lock` so concurrent writers
-        share at most one factory call + probe per cooldown window.
+        wrap the call in `asyncio.to_thread()` to avoid stalling the loop. Async
+        callers (history consolidation, dashboard memory handlers) MUST offload
+        via `asyncio.to_thread()`; the sync paths (add_memory, inject, recall)
+        call directly. The rebind block is serialized by `_embed_fn_rebind_lock`
+        so concurrent writers share at most one factory call + probe per cooldown
+        window.
         """
         if self.embed_fn is None and self.embed_fn_factory is not None:
             # Hold the rebind lock for the cooldown check + factory call + probe so

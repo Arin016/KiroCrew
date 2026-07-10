@@ -23,6 +23,7 @@ from kiro_claw.apps.manifest import AppManifest
 from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import config_dir
 from kiro_claw.platform import current_context, safe_context_call
+from kiro_claw.sel import sel
 
 logger = logging.getLogger(__name__)
 
@@ -276,20 +277,52 @@ def install_app(source: str | Path) -> AppResult:
     """
     source = Path(source).expanduser().resolve()
     if not source.is_dir():
+        sel().log_api_access(
+            caller="app_install",
+            operation="install",
+            outcome="failed",
+            resources=f"source={source!s}",
+            error="source is not a directory",
+        )
         return AppResult(ok=False, error=f"source is not a directory: {source}")
 
     # Validate
     errors = _validate_source_path(source)
     if errors:
+        sel().log_api_access(
+            caller="app_install",
+            operation="install",
+            outcome="failed",
+            resources=f"source={source!s}",
+            error="; ".join(errors),
+        )
         return AppResult(ok=False, error="; ".join(errors))
 
     manifest = AppManifest.from_json_file(source / APP_MANIFEST_FILENAME)
     name = manifest.name
     dest = app_dir(name)
 
+    # Guard against path traversal in manifest name
+    if not _check_path_safety(name):
+        sel().log_api_access(
+            caller="app_install",
+            operation="path_safety_check",
+            outcome="rejected",
+            resources=f"name={name!r}",
+            error="unsafe app name (path traversal attempt)",
+        )
+        return AppResult(ok=False, name=name, error=f"unsafe app name: {name!r}")
+
     # Check if already installed — reject, use update_app() or uninstall first
     existing = _read_installed(name)
     if existing:
+        sel().log_api_access(
+            caller="app_install",
+            operation="install",
+            outcome="failed",
+            resources=f"name={name!r}",
+            error=f"already installed (v{existing.version})",
+        )
         return AppResult(
             ok=False,
             name=name,
@@ -298,14 +331,80 @@ def install_app(source: str | Path) -> AppResult:
         )
 
     # Copy app files to install directory
+    # Preserve existing data/ directory (left behind by prior uninstall --keep-data)
+    existing_data = dest / "data" if dest.exists() else None
+    # Use same temp name as uninstall_app/update_app so data stranded by a
+    # crashed sibling operation is reclaimable by whichever lifecycle runs next.
+    tmp_data = dest.parent / f".{name}-data-tmp"
+
+    # Clean stale tmp from a previous failed install/uninstall.
+    # Only remove tmp_data if the original data/ also exists (proving tmp is
+    # truly stale). If data/ is gone, tmp_data may be the sole surviving copy.
     try:
+        if tmp_data.is_dir():
+            if existing_data and existing_data.is_dir():
+                shutil.rmtree(str(tmp_data))
+    except OSError as cleanup_exc:
+        logger.error(
+            "Failed to clean stale temp dir %s for app %s: %s",
+            tmp_data,
+            name,
+            cleanup_exc,
+        )
+        sel().log_api_access(
+            caller="app_install",
+            operation="install",
+            outcome="failed",
+            resources=f"name={name!r}",
+            error=f"stale temp cleanup: {cleanup_exc}",
+        )
+        return AppResult(
+            ok=False,
+            name=name,
+            error=f"cannot clean stale temp dir {tmp_data}: {cleanup_exc}",
+        )
+
+    try:
+        if existing_data and existing_data.is_dir():
+            shutil.move(str(existing_data), str(tmp_data))
+        elif tmp_data.is_dir():
+            # tmp_data is the sole surviving copy from a prior crash —
+            # keep it intact; it will be restored after copytree.
+            pass
+
         if dest.exists():
             shutil.rmtree(dest)
         shutil.copytree(source, dest, dirs_exist_ok=True)
+
+        # Restore preserved data/ (overwrite empty data/ from source package)
+        if tmp_data.is_dir():
+            restored = dest / "data"
+            if restored.exists():
+                shutil.rmtree(restored)
+            shutil.move(str(tmp_data), str(restored))
     except OSError as exc:
-        # Rollback
+        # Clean up partial install first
         if dest.exists():
             shutil.rmtree(dest, ignore_errors=True)
+        # Restore preserved data to the clean dest
+        try:
+            if tmp_data.is_dir():
+                dest.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(tmp_data), str(dest / "data"))
+        except OSError as restore_exc:
+            logger.error(
+                "Failed to restore preserved data for app %s; " "data left at %s: %s",
+                name,
+                tmp_data,
+                restore_exc,
+            )
+        sel().log_api_access(
+            caller="app_install",
+            operation="install",
+            outcome="failed",
+            resources=f"name={name!r}",
+            error=f"copy failed: {exc}",
+        )
         return AppResult(ok=False, name=name, error=f"failed to copy app files: {exc}")
 
     # Write installed metadata
@@ -323,9 +422,18 @@ def install_app(source: str | Path) -> AppResult:
     app_data_dir(name)
 
     # Generate and write app secret for token-based auth (App Kit §5.1)
+    # circular import: token_auth -> dashboard -> bridges -> manager
     from kiro_claw.dashboard.token_auth import generate_app_secret, write_app_secret
 
     write_app_secret(name, generate_app_secret())
+
+    # Audit successful install for all callers (CLI, registry, dashboard)
+    sel().log_api_access(
+        caller="app_install",
+        operation="install",
+        outcome="success",
+        resources=f"name={name!r} version={manifest.version}",
+    )
 
     logger.info("Installed app %s v%s from %s", name, manifest.version, source)
     return AppResult(ok=True, name=name, message=f"installed {name} v{manifest.version}")

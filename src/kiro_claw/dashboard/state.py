@@ -42,6 +42,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Running build's git (branch, short_commit). Resolved ONCE by the CLI gateway
+# entrypoint via set_build_info() — AFTER KIROCLAW_PROJECT_DIR is detected and
+# BEFORE asyncio.run() starts the loop. Deliberately NOT resolved at import time:
+# under systemd the entrypoint imports this module before main() detects the
+# project dir, so an import-time git_build_info() would see no project dir and the
+# lru_cache would then pin ("", "") forever. DashboardState (built on the loop) and
+# status_snapshot() only READ this global — they never call git_build_info() — so
+# no subprocess ever runs on the event loop.
+_build_info: tuple[str, str] = ("", "")
+
+
+def set_build_info(info: tuple[str, str]) -> None:
+    """Record the running build's ``(branch, short_commit)`` for status payloads.
+
+    Called once from the CLI gateway entrypoint (sync, pre-loop, post-detection).
+    Defaults to ``("", "")`` for non-git / toolbox installs, which the frontend
+    renders by omitting the build-info rows.
+    """
+    global _build_info
+    _build_info = info
+
 
 def _log_task_exception(task: asyncio.Task[Any]) -> None:
     """Log unhandled exceptions from fire-and-forget tasks.
@@ -347,7 +368,11 @@ def build_refusal_recovery_prompt(refusals: list[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
-_OPTIONS_RE = re.compile(r"\[OPTIONS:\s*([^\]]+)\]")
+# Anchor the closing ']' to end-of-line so the non-greedy body expands past a
+# literal ']' inside option text (e.g. "Fix [x] logging") instead of truncating
+# at the first inner bracket. Mirrors slack/format.py's _OPTIONS_RE so both the
+# dashboard pills and Slack buttons parse OPTIONS identically.
+_OPTIONS_RE = re.compile(r"\[OPTIONS:\s*(.+?)\]\s*$", re.MULTILINE)
 
 
 def _redact(text: str) -> str:
@@ -438,6 +463,8 @@ class _ChatSlot:
         "_transient_5xx_retries",
         "_empty_response_retries",
         "_batch_rejected",
+        "_compaction_fail_streak",
+        "_compaction_fail_cooldown_until",
         "color_index",
         "color_theme",
         "memory_mode",
@@ -457,6 +484,7 @@ class _ChatSlot:
         "linked_session_key",
         "_browse_mode",
         "_side",
+        "_acp_client",
     )
 
     def __init__(
@@ -531,6 +559,15 @@ class _ChatSlot:
         self._transient_5xx_retries: int = 0
         self._empty_response_retries: int = 0
         self._batch_rejected: bool = False
+        # Per-turn compaction-status failure tracking (Mesh compaction-spam
+        # fix). Distinct from SessionManager._compact_cooldown_until, which
+        # only gates the *proactive* session-level auto-compact trigger —
+        # this gates the per-turn EVENT_COMPACTION_STATUS notice path in
+        # chat_runner, which previously had no backoff at all and could
+        # append one near-identical "Compaction failed: unknown error"
+        # message per turn indefinitely.
+        self._compaction_fail_streak: int = 0
+        self._compaction_fail_cooldown_until: float = 0.0
         self.color_index: int | None = None
         self.color_theme: str = ""
         if memory_mode not in VALID_MEMORY_MODES:
@@ -571,6 +608,11 @@ class _ChatSlot:
         self.linked_session_key: str = ""  # when set, _run_chat uses this as session key
         self._browse_mode: bool = False  # per-turn: True when user explicitly enables browser
         self._side: SideState | None = None
+        # Live inner AcpClient for the in-flight turn, published by _run_chat at
+        # turn start and cleared in its finally. Lets a concurrent request (the
+        # dashboard steer handler) reach the running session's client to inject
+        # a mid-turn steer. None when idle.
+        self._acp_client = None
 
     @property
     def _plan_stage_count(self) -> int:
@@ -938,6 +980,10 @@ class DashboardState:
         self.slack_client = slack_client
         self.owner_id = owner_id
         self._owner_hash: str | None = None
+        # Branch+commit are resolved once by the CLI entrypoint (set_build_info,
+        # pre-loop, post-detection); status_snapshot() reads this attribute so
+        # subprocess never runs on the event loop. See module-level _build_info.
+        self._build_info: tuple[str, str] = _build_info
         self.messages_received = 0
         # Broadcast: each SSE client gets its own queue; _notify_event wakes all
         self._sse_queues: list[asyncio.Queue[dict[str, Any]]] = []
@@ -1056,6 +1102,7 @@ class DashboardState:
     ) -> dict[str, Any]:
         """Core status fields shared by /api/status, SSE, and WebSocket pushes."""
         uptime = int(time.time() - self.start_time)
+        branch, commit = self._build_info
         return {
             "uptime": _fmt_duration(uptime),
             "start_time": self.start_time,
@@ -1066,6 +1113,8 @@ class DashboardState:
             "subagents": self.subagents.count if self.subagents else 0,
             "update_available": update_available,
             "no_crons": self.no_crons,
+            "branch": branch,
+            "commit": commit,
             # True when the gateway has wired up a live Slack client (Socket Mode
             # connected). None in pure-dashboard mode or when Slack is disabled.
             "slack_connected": self.slack_client is not None,

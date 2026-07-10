@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
+import pytest
+
 from kiro_claw.vector_memory import (
+    _HAS_FAISS,
+    _HAS_NUMPY,
     _MMR_MAX_POOL,
     SemanticRejectCode,
     VectorMemoryStore,
@@ -946,3 +951,61 @@ class TestMmrRerankNegativeScores:
         ]
         out = _mmr_rerank([dict(c) for c in cands], limit=2)
         assert len(out) == 2
+
+
+class TestVectorStoreConcurrency:
+    """Writes are offloaded to worker threads (consolidation, dashboard) while
+    reads (search_episodic via context assembly) run on the event loop thread.
+
+    The shared sqlite connection and the non-thread-safe FAISS index /
+    _faiss_id_map must be serialized by _db_lock. Without it, a concurrent
+    write_episodic (faiss.add + id_map.append) racing a search_episodic can
+    IndexError on _faiss_id_map[idx] (add-before-append window) or corrupt the
+    C++ index. Regression guard for the loop-offload concurrency finding.
+    """
+
+    def test_concurrent_write_and_search_no_crash(self, tmp_path) -> None:
+        if not (_HAS_FAISS and _HAS_NUMPY):
+            pytest.skip("FAISS/numpy not available on this platform")
+
+        dim = 16
+
+        def _fake_embed(text: str):
+            # Deterministic pseudo-embedding derived from the text so FAISS has
+            # real vectors to add/search without a network call.
+            seed = sum(ord(c) for c in text)
+            return [float((seed + i) % 7) + 0.1 for i in range(dim)]
+
+        store = VectorMemoryStore(db_path=tmp_path / "mem.db", embedding_dim=dim)
+        store.init()
+        store.embed_fn = _fake_embed
+        store.build_faiss_index()
+
+        errors: list[BaseException] = []
+
+        def _writer(n: int) -> None:
+            try:
+                for i in range(n):
+                    store.write_episodic(f"episodic memory number {i} about topic alpha beta")
+            except BaseException as exc:  # noqa: BLE001 - capture any thread crash
+                errors.append(exc)
+
+        def _searcher(n: int) -> None:
+            try:
+                for _ in range(n):
+                    store.search_episodic(query_text="topic alpha", limit=5)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=_writer, args=(40,)),
+            threading.Thread(target=_writer, args=(40,)),
+            threading.Thread(target=_searcher, args=(60,)),
+            threading.Thread(target=_searcher, args=(60,)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"concurrent write/search raised: {errors!r}"

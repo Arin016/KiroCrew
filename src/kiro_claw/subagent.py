@@ -35,6 +35,7 @@ from kiro_claw.context_management import (
     cap_result_file,
     evict_completed_agents,
 )
+from kiro_claw.executors import maintenance_executor
 from kiro_claw.hooks import (
     HOOK_EVENT_POST_TOOL_USE,
     TOOL_AUTO_APPROVE,
@@ -65,8 +66,8 @@ from kiro_claw.subagent_persistence import (
     _agent_dir,
     _cleanup_session_files_sync,
     create_agent_folder,
-    delete_agent_folder,
     list_orphans,
+    mark_delivered,
     prune_stale_tombstones,
     update_state,
     write_result_chunk,
@@ -562,6 +563,7 @@ class SubagentInfo:
     done: bool = False
     result: str = ""
     result_path: str = ""
+    result_truncated: bool = False  # completion-event copy dropped content → summary+path
     error: str = ""
     parent_session_key: str = ""
     agent: str = ""
@@ -669,6 +671,15 @@ class SubagentManager:
                 exc_info=True,
             )
             self._global_approval_mode = ""
+        # Retention window (seconds) for a delivered subagent's result.txt before
+        # the reaper prunes it — the parent's grace window to read the full
+        # transcript (spawn_status / read / grep) after the completion event.
+        try:
+            self._result_ttl_secs = int(
+                KiroClawConfig.load().agent.subagent_result_ttl_secs
+            )
+        except Exception:
+            self._result_ttl_secs = 3600
         # Spawn stagger interval — bounds the cold-start ramp rate so a high cap
         # never bursts (dynamic-subagent-sizing.md §5.3).
         try:
@@ -1039,7 +1050,12 @@ class SubagentManager:
 
             # Prune stale tombstoned folders (>7 days old)
             try:
-                pruned = prune_stale_tombstones(max_age_days=7)
+                pruned = await asyncio.get_running_loop().run_in_executor(
+                    maintenance_executor(),
+                    prune_stale_tombstones,
+                    7,
+                    self._result_ttl_secs,
+                )
                 if pruned:
                     logger.info("Reaper: pruned %d stale tombstone(s)", pruned)
             except Exception:
@@ -1797,12 +1813,16 @@ class SubagentManager:
         if self._on_done and not info.reaped:
             try:
                 await asyncio.wait_for(self._on_done(info), timeout=_ON_DONE_TIMEOUT)
-                # Clean up agent folder after successful delivery
+                # Retain result.txt for a TTL grace window instead of deleting it
+                # now, so the parent can read the full transcript (spawn_status /
+                # read / grep) after the completion event. A "delivered" tombstone
+                # excludes it from orphan reconciliation; the reaper prunes it after
+                # agent.subagent_result_ttl_secs (default 1h).
                 if not info.error:
                     try:
-                        delete_agent_folder(info.id)
+                        mark_delivered(info.id)
                     except Exception:
-                        logger.debug("Failed to clean up agent folder for %s", info.id, exc_info=True)
+                        logger.debug("Failed to mark subagent %s delivered", info.id, exc_info=True)
                     # Clean up workspace result file (agent-{id}.md in parent session dir)
                     try:
                         parent_key = info.parent_session_key
@@ -2209,6 +2229,13 @@ class SubagentManager:
         # Cap disk file and trim memory — gateway decides how much to show based on mode.
         if info.result_path:
             cap_result_file(Path(info.result_path))
+        # Flag whether the completion-event copy will drop content, so the gateway
+        # emits a summary + result_path pointer (read on demand) instead of a lossy
+        # blob. The full transcript stays in result.txt for the TTL grace window.
+        info.result_truncated = (
+            self._completion_keep_chars > 0
+            and len(info.result) > self._completion_keep_chars
+        )
         info.result = apply_completion_keep(
             info.result,
             self._completion_keep,

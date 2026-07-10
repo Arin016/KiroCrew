@@ -244,7 +244,9 @@ class AcpReviewWorker:
         # `python3 sage_lib/pipeline.py` — so the sandbox is safe here and satisfies the
         # agent-subprocess sandboxing guideline. Degrades to a no-op if unprivileged
         # user namespaces are unavailable, so it never breaks the worker.
-        self._client = AcpClient(agent=agent, sandbox_mode="auto", work_dir=work_dir)
+        self._client = AcpClient(
+            agent=agent, sandbox_mode="auto", work_dir=work_dir, audit_source="subagent"
+        )
         await self._client.ensure_ready()
         await self._apply_claude_effort()   # claude-backend fallback (kiro uses the overlay)
         logger.info("AcpReviewWorker ready (agent=%s, cwd=%s, effort=%s)",

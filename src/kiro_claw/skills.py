@@ -16,12 +16,24 @@ from kiro_claw.config.loader import KiroClawConfig, config_dir
 from kiro_claw.hooks import validate_file_path
 from kiro_claw.security import is_sensitive_path
 from kiro_claw.sel import sel
+from kiro_claw.skill_usage import SKILL_USAGE_FILENAME, SkillUsageLedger
 
 logger = logging.getLogger(__name__)
 
 
 SKILLS_DIR_NAME = "skills"
 _MIN_TRIGGER_OVERLAP = 0.7
+
+# Lazy-load ranking (Mesh skill lazy-load): the session-start skills block only
+# affords a bounded slice of the context budget, so on-demand skills are ranked
+# by usage and summarized top-down; the tail is discoverable via `skill_search`.
+# Per-skill description is truncated to this many chars in the summary line so a
+# few verbose descriptions can't dominate the block.
+_SHORT_DESC_CHARS = 160
+# A skill whose file mtime is within this window gets a recency boost in the
+# ranking so a freshly-added, never-used skill still surfaces instead of being
+# starved by the rich-get-richer usage ordering.
+_NEW_SKILL_BOOST_WINDOW_SECS = 7 * 24 * 60 * 60
 
 # ── $skill inline trigger (Mesh-588) ──
 # A ``$skillname`` token anywhere in a user message explicitly loads that skill,
@@ -333,6 +345,20 @@ class SkillsLoader:
             and not is_sensitive_path(str(aim_skills_root))
         ):
             self._extra_paths.append(aim_skills_root)
+
+        # Persistent usage ledger for hotness-ranked lazy skill injection.
+        # Co-located with the skills root's parent (the KiroClaw home) so it
+        # travels with runtime state. Best-effort: a failure here must not break
+        # skill loading — ranking then falls back to recency/unweighted order.
+        self._usage: SkillUsageLedger | None
+        try:
+            self._usage = SkillUsageLedger(self._dir.parent / SKILL_USAGE_FILENAME)
+        except Exception:  # pragma: no cover — ledger is best-effort telemetry
+            logger.warning(
+                "skill-usage: ledger init failed; ranking falls back to unweighted",
+                exc_info=True,
+            )
+            self._usage = None
 
     def _iter(self) -> list[tuple[str, Path]]:
         """Return all ``(name, skill_file)`` pairs, TTL-cached.
@@ -705,6 +731,12 @@ class SkillsLoader:
         scored.sort(key=lambda x: x[1], reverse=True)
         triggered = [name for name, _ in scored[: self._max_triggered]]
 
+        # Record usage — triggered skills are injected full-body this turn, so
+        # this is the authoritative "skill was used" signal that feeds the
+        # lazy-load hotness ranking in get_context.
+        for name in triggered:
+            self._record_use(name)
+
         # Emit ONE audit event for the matched + denied sets rather than one per
         # skill. Previously this wrote a SEL entry for every skill (incl. every
         # non-match) on every message — N synchronous writes per message that
@@ -728,26 +760,115 @@ class SkillsLoader:
             )
         return triggered
 
-    def get_context(self) -> str:
-        """Build skills context for prompt injection.
+    def get_context(self, budget: int | None = None) -> str:
+        """Build skills context for prompt injection (lazy-loaded).
 
-        Always-loaded skills: full content included.
-        Other skills: summary with instruction to load via bash when needed.
+        Pinned skills (``always: true`` frontmatter) get full content, always —
+        this is the "core" set (mark core/ARCC skills ``always: true`` to pin
+        them). The remaining on-demand skills are ranked by usage (hottest
+        first, with a recency boost for freshly-added skills) and summarized
+        top-down until *budget* chars are consumed; the long tail is left
+        discoverable via the ``skill_search`` tool, the ``$skillname`` inline
+        token, ``cat``, and the per-message trigger auto-loader. This bounds the
+        block so no single section can blow the context budget.
+
+        ``budget=None`` (opt-in OFF, the default) returns the LEGACY full-dump
+        block — every on-demand skill summarized, unranked and untruncated,
+        byte-for-byte the pre-lazy-load behavior. An integer ``budget`` (opt-in
+        ON) switches to the bounded, usage-ranked top-K described above.
         """
-        always = self.get_always_skills()
         all_skills = self.list_skills()
         if not all_skills:
             return ""
+        if budget is None:
+            return self._legacy_context(all_skills)
+        # get_always_skills() returns the _iter() identifier — the same value
+        # list_skills() exposes as "key" (the dir-relative path, e.g.
+        # "AIPowerUserCapabilities/brazil"), NOT the frontmatter "name". So the
+        # pinned check below, _record_use() (also called with the _iter
+        # identifier), and _rank_key()'s score(s["key"]) are all consistently
+        # keyed by "key" — there is no key/name mismatch here.
+        pinned = set(self.get_always_skills())
 
         parts: list[str] = []
 
+        # Pinned (core / ARCC / always:true): full content, always injected.
+        for s in all_skills:
+            if s["key"] not in pinned:
+                continue
+            content = self.load_skill(s["key"])
+            if content:
+                stripped = self.strip_frontmatter(content)
+                parts.append(f"### Skill: {s['key']}\n\n{stripped}")
+
+        # On-demand: rank by usage (hottest first), fill a summary block up to
+        # `budget`, then point at skill_search for the tail.
+        on_demand = [s for s in all_skills if s["key"] not in pinned]
+        if on_demand:
+            ranked = sorted(on_demand, key=self._rank_key, reverse=True)
+            header = (
+                "## Available Skills\n\n"
+                "The most-used skills are listed below. If a request relates to "
+                "one, read its full file with `cat <path>` first. To run a "
+                "skill's scripts, `cd` into its directory. Relevant skills also "
+                "auto-load when your message matches their triggers.\n\n"
+            )
+            # Reserve room for everything that surrounds the summary lines so the
+            # FINAL returned string stays within `budget` and the caller's backstop
+            # truncation never chops the trailing "...N more / skill_search" footer:
+            # the "[Skills:]"/"[End of skills]" wrapper, the "---" separators, the
+            # pinned parts already in `parts`, the header, and the footer line.
+            footer_reserve = len(
+                f"- _...and {len(ranked)} more skill(s) not shown here. Find them "
+                f"with the `skill_search` tool (grep by keyword), the "
+                f"`$skillname` inline token, or `cat` a known path._"
+            ) + 1  # +1 for the "\n" join before the footer
+            wrap_overhead = len("[Skills:]\n") + len("\n[End of skills]\n\n")
+            sep_overhead = len("\n\n---\n\n") * len(parts)
+            lines: list[str] = []
+            used = wrap_overhead + sep_overhead + sum(len(p) for p in parts) + len(header)
+            shown = 0
+            for s in ranked:
+                line = (
+                    f"- **{s['name']}**: {self._short_desc(s['description'])} "
+                    f"-> `{s['path']}` (dir: `{s['dir']}`)"
+                )
+                if (
+                    budget is not None
+                    and shown > 0
+                    and used + len(line) + 1 + footer_reserve > budget
+                ):
+                    break
+                lines.append(line)
+                used += len(line) + 1
+                shown += 1
+            remaining = len(ranked) - shown
+            if remaining > 0:
+                lines.append(
+                    f"- _...and {remaining} more skill(s) not shown here. Find them "
+                    f"with the `skill_search` tool (grep by keyword), the "
+                    f"`$skillname` inline token, or `cat` a known path._"
+                )
+            parts.append(header + "\n".join(lines))
+
+        return "[Skills:]\n" + "\n\n---\n\n".join(parts) + "\n[End of skills]\n\n"
+
+    def _legacy_context(self, all_skills: list[dict]) -> str:
+        """Pre-lazy-load skills block (opt-in OFF, the default).
+
+        Full content for pinned (``always: true``) skills + a one-line summary
+        for EVERY on-demand skill, unranked and untruncated — byte-for-byte the
+        behavior before the lazy-load feature, so leaving ``skills.lazy_load``
+        off is a zero-impact upgrade.
+        """
+        always = self.get_always_skills()
+        parts: list[str] = []
         # Full content for always-loaded skills
         for name in always:
             content = self.load_skill(name)
             if content:
                 stripped = self.strip_frontmatter(content)
                 parts.append(f"### Skill: {name}\n\n{stripped}")
-
         # Summary for on-demand skills
         on_demand = [s for s in all_skills if s["name"] not in always]
         if on_demand:
@@ -764,8 +885,73 @@ class SkillsLoader:
                     f"- **{s['name']}**: {s['description']} → `{s['path']}` (dir: `{s['dir']}`)"
                 )
             parts.append("\n".join(summary_lines))
-
         return "[Skills:]\n" + "\n\n---\n\n".join(parts) + "\n[End of skills]\n\n"
+
+    def _record_use(self, key: str) -> None:
+        """Best-effort usage bump for the lazy-load ranking. Never raises."""
+        if self._usage is None:
+            return
+        try:
+            self._usage.record(key)
+        except Exception:  # pragma: no cover — telemetry must not break injection
+            pass
+
+    def _recency_boost(self, path_str: str) -> float:
+        """Return the file mtime if the skill is newer than the boost window,
+        else 0.0. Lets a freshly-added, never-used skill rank above stale unused
+        ones (cold-start protection) without flooding the top of the list."""
+        try:
+            mtime = Path(path_str).stat().st_mtime
+        except OSError:
+            return 0.0
+        return mtime if (time.time() - mtime) < _NEW_SKILL_BOOST_WINDOW_SECS else 0.0
+
+    def _rank_key(self, s: dict) -> tuple[float, float]:
+        """Sort key for on-demand skills: (usage_hits, effective_recency).
+        Higher sorts first. Falls back to recency-only if the ledger is absent."""
+        boost = self._recency_boost(s["path"])
+        if self._usage is None:
+            return (0.0, boost)
+        return self._usage.score(s["key"], recency_boost=boost)
+
+    @staticmethod
+    def _short_desc(desc: str) -> str:
+        """Collapse whitespace and truncate a description for the summary line."""
+        d = " ".join((desc or "").split())
+        if len(d) > _SHORT_DESC_CHARS:
+            return d[:_SHORT_DESC_CHARS].rstrip() + "..."
+        return d
+
+    def search_skills(self, query: str, limit: int = 20) -> list[dict]:
+        """Grep skills by keyword for on-demand discovery (the skill_search tool).
+
+        Scores each skill by how many query terms appear in its key / name /
+        description; only when the metadata misses entirely does it fall back to
+        grepping the skill body (bounded cost, and only on an explicit tool
+        call — never per message). Results are ranked by match strength then
+        usage, capped at *limit*. Does NOT record usage — searching is not using.
+        """
+        q = (query or "").strip().lower()
+        if not q:
+            return []
+        terms = [t for t in re.findall(r"\w+", q) if t]
+        if not terms:
+            return []
+        scored: list[tuple[int, float, dict]] = []
+        for s in self.list_skills():
+            hay = f"{s['key']} {s['name']} {s['description']}".lower()
+            meta_hits = sum(1 for t in terms if t in hay)
+            body_hits = 0
+            if meta_hits == 0:
+                content = (self.load_skill(s["key"]) or "").lower()
+                body_hits = sum(1 for t in terms if t in content)
+            total = meta_hits * 10 + body_hits
+            if total <= 0:
+                continue
+            usage = self._usage.score(s["key"])[0] if self._usage else 0.0
+            scored.append((total, usage, s))
+        scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+        return [s for _, _, s in scored[:limit]]
 
     def resolve_dollar_skills(self, text: str) -> list[tuple[str, str, str]]:
         """Resolve ``$skillname`` tokens in *text* to loadable skills.
@@ -814,6 +1000,7 @@ class SkillsLoader:
                 continue
             seen_names.add(matched)
             resolved.append((token, matched, self.strip_frontmatter(content)))
+            self._record_use(matched)
             if len(resolved) >= _MAX_DOLLAR_SKILLS:
                 break
         return resolved

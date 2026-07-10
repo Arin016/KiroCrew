@@ -127,27 +127,31 @@ are automatically split into multiple messages instead of truncating.
 ### Subagent completion event seems cut off
 
 The completion event injected into the parent session is a bounded copy of
-the subagent's streamed transcript. By default, KiroClaw keeps the **first
-3000 characters** (`agent.completion_keep` = `"head"`), so any summary,
-or conclusion the agent emits at the **end** of its output gets dropped.
+the subagent's streamed transcript (`agent.completion_keep` = `"head"` by
+default keeps the **first 3000 characters**). When that cap drops content,
+KiroClaw no longer injects a bare truncated blob: the event carries a
+**short preview + the full transcript's file path**, and the parent is told
+to read the rest on demand (the `read` tool with offset/limit, `grep`, or the
+`spawn_status` MCP tool) rather than re-running the subagent.
 
-For agents that summarize at the end (developer agents, code reviewers,
-on-call triage), switch to `tail` (keep the conclusion) or `both` (keep
-both ends with a middle marker):
+To change how much is previewed / which end is kept:
 
 ```bash
-kiroclaw config set agent.completion_keep tail
-# or
-kiroclaw config set agent.completion_keep both
+kiroclaw config set agent.completion_keep tail   # keep the conclusion
+# or: both (head + middle marker + tail); head is the default
 # optional: change the size cap (default 3000 chars; 0 disables truncation)
 kiroclaw config set agent.completion_keep_chars 5000
 ```
 
-The full transcript is always available at
-`~/.kiroclaw/subagents/<agent_id>/result.txt` while the subagent is
-running, and via the `spawn_status` MCP tool. After the completion event
-is delivered to the parent session, the transcript file is cleaned up by
-design — see `docs/system-specs/modules/subagent.md` for the lifecycle.
+The full transcript lives at `~/.kiroclaw/subagents/<agent_id>/result.txt`.
+After delivery it is **retained for a grace window** (default 1 hour,
+`agent.subagent_result_ttl_secs`) so `spawn_status` / `read` / `grep` can pull
+the full text, then the reaper prunes it. Raise the TTL if you routinely read
+subagent transcripts long after they finish:
+
+```bash
+kiroclaw config set agent.subagent_result_ttl_secs 21600   # 6 hours
+```
 
 See [Subagents — Completion Event Truncation](subagents.md#completion-event-truncation)
 for the full reference.

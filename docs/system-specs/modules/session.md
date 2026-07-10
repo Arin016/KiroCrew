@@ -20,6 +20,7 @@ background work. It is:
 - **Created on startup** by `start_pool()` alongside the warm pool
 - **Never expired** by idle cleanup (`_expire_idle` skips it)
 - **Serialized** by the per-session semaphore (one background task at a time)
+  — applies to the **non-kiro** `_bg` path only; see "Multiplexed _bg runtime"
 - **Shared by**: heartbeat tasks, lesson extraction (NOT cron — see below)
 
 This eliminates the cost of spawning/tearing down a kiro-cli process for
@@ -37,6 +38,31 @@ if needed — no compaction, since background tasks are stateless:
 - Below thresholds → no-op (session stays warm)
 
 Callers: heartbeat callback, taskrunner lesson extraction.
+
+### Multiplexed _bg runtime
+
+`get_bg_session()` acquires a `_bg` handle, dispatching by provider backend and
+returning `AcpSessionHandle | _ProviderBgSession`. Provider dispatch is via
+`_bg_provider_is_kiro()`, which resolves the `kiroclaw-lite` agent backend:
+
+- **kiro (`acp`)** — the only backend the multiplexed `AcpRuntime` supports.
+  Each caller (title generation, suggestions, folders, nav) gets its **own**
+  ephemeral `sessionId` multiplexed on a single shared `_bg_runtime` (an
+  `AcpRuntime`, kiro-cli only), created lazily under `_bg_runtime_lock`.
+  `create_session()` runs **outside** the lock so independent callers aren't
+  serialized. The runtime is respawned-and-retried once on `AcpRuntimeDead`
+  (`max_retries=1`, 2 attempts total).
+- **non-kiro** — falls back to a `_ProviderBgSession` over the shared
+  `BACKGROUND_KEY` `_Session`, serialized by its `Semaphore(1)`. `AcpRuntime` is
+  kiro-only, so any non-kiro backend must use the provider path. In the public
+  KiroClaw edition `agent.provider` is fixed to `acp`, so this branch is the
+  dormant fallback for the reserved `ACP_BACKEND_CLAUDE` seam only.
+
+Both paths yield `AcpEvent` through the shared
+`acp/_dispatch.parse_session_update` parser, so there is no behavioral drift
+between them. Callers **MUST** call `session.destroy()` in a `finally` block
+when done. See [acp-client.md](acp-client.md) for `AcpRuntime` /
+`AcpSessionHandle`.
 
 ## Key Behaviors
 

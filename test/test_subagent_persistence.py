@@ -11,6 +11,7 @@ from kiro_claw.subagent_persistence import (
     create_agent_folder,
     delete_agent_folder,
     list_orphans,
+    mark_delivered,
     prune_stale_tombstones,
     read_state,
     update_state,
@@ -194,6 +195,52 @@ class TestPruneStaleTombstones:
         create_agent_folder("running1", task="t")
         prune_stale_tombstones(max_age_days=7)
         assert (agent_root / "running1").exists()
+
+    def test_delivered_pruned_after_ttl(self, agent_root):
+        # A delivered result older than the (short) delivered TTL is pruned even
+        # though it is far younger than the 7-day default window.
+        create_agent_folder("del1", task="t")
+        mark_delivered("del1")
+        ts_path = agent_root / "del1" / "tombstone.json"
+        ts = json.loads(ts_path.read_text())
+        ts["died"] = time.time() - 7200  # 2h ago
+        ts_path.write_text(json.dumps(ts))
+        prune_stale_tombstones(max_age_days=7, delivered_ttl_secs=3600)
+        assert not (agent_root / "del1").exists()
+
+    def test_delivered_kept_within_ttl(self, agent_root):
+        create_agent_folder("del2", task="t")
+        mark_delivered("del2")
+        prune_stale_tombstones(max_age_days=7, delivered_ttl_secs=3600)
+        assert (agent_root / "del2").exists()
+
+    def test_non_delivered_kept_past_delivered_ttl(self, agent_root):
+        # A non-delivered (timeout) tombstone uses the 7-day window, so a 2h-old
+        # one survives even a 1h delivered TTL — proves the per-cause cutoff.
+        create_agent_folder("err1", task="t")
+        write_tombstone("err1", cause="timeout", recovery_action="notified")
+        ts_path = agent_root / "err1" / "tombstone.json"
+        ts = json.loads(ts_path.read_text())
+        ts["died"] = time.time() - 7200  # 2h ago
+        ts_path.write_text(json.dumps(ts))
+        prune_stale_tombstones(max_age_days=7, delivered_ttl_secs=3600)
+        assert (agent_root / "err1").exists()
+
+
+class TestMarkDelivered:
+    def test_writes_delivered_tombstone(self, agent_root):
+        create_agent_folder("mv1", task="t")
+        write_result_chunk("mv1", "final output")
+        mark_delivered("mv1")
+        ts = json.loads((agent_root / "mv1" / "tombstone.json").read_text())
+        assert ts["cause"] == "delivered"
+        assert ts["recovery_action"] == "delivered"
+        assert ts["result_available"] is True
+
+    def test_delivered_excluded_from_orphans(self, agent_root):
+        create_agent_folder("mv2", task="t")
+        mark_delivered("mv2")
+        assert "mv2" not in [o["id"] for o in list_orphans()]
 
 
 # ── Slice 2: spawn() creates agent folder ────────────────────────────
@@ -642,10 +689,11 @@ class TestTombstoneOnAbnormalExit:
 
 
 class TestFolderCleanupOnSuccess:
-    """Verify agent folder is deleted after successful result delivery."""
+    """Verify agent folder is retained (delivered tombstone) after successful
+    delivery, so the parent can read the transcript during the TTL grace window."""
 
     @pytest.mark.asyncio
-    async def test_folder_deleted_on_success(self, agent_root):
+    async def test_folder_retained_on_success(self, agent_root):
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from kiro_claw.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK, LLMEvent
@@ -682,8 +730,13 @@ class TestFolderCleanupOnSuccess:
             info = manager.spawn("cleanup test", parent_session_key="dashboard:default")
             await manager._tasks[info.id]
 
-        # Folder should be cleaned up after successful delivery
-        assert not (agent_root / info.id).exists()
+        # Folder is RETAINED after successful delivery (TTL grace window) so the
+        # parent can read the full transcript via spawn_status / read / grep. A
+        # "delivered" tombstone marks it for deferred prune by the reaper.
+        agent_dir = agent_root / info.id
+        assert agent_dir.exists()
+        ts = json.loads((agent_dir / "tombstone.json").read_text())
+        assert ts["cause"] == "delivered"
         on_done.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -1109,6 +1162,7 @@ class TestSpawnStatusReadsFromAgentFolder:
         subagents.get = MagicMock(return_value=None)
         request = MagicMock()
         request.match_info = {"agent_id": "disk_agent"}
+        request.query = {}  # real mapping so _apply_result_view reads no paging params
         request.app = {"state": MagicMock(subagents=subagents)}
 
         resp = await api_spawn_status(request)

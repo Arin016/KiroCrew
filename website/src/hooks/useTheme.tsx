@@ -6,6 +6,7 @@ import {
   useContext,
   type ReactNode,
 } from 'react'
+import { useQuery, useMutation } from '@tanstack/react-query'
 import { api } from '../api/client'
 import { sanitizeCssValue } from '../lib/cssSanitize'
 import { safeSetItem } from '../utils/safeStorage'
@@ -165,6 +166,8 @@ export interface ThemeContextValue {
   customThemes: ThemeEntry[]
   customThemeDataMap: Map<string, CustomThemeData>
   themeVersion: number
+  onboarded: boolean
+  markOnboarded: () => void
   addCustomTheme: (data: Omit<CustomThemeData, 'slug'> & { slug?: string }) => Promise<CustomThemeData>
   deleteCustomTheme: (slug: string) => Promise<void>
   loadCustomThemes: () => Promise<void>
@@ -215,6 +218,7 @@ function useThemeState(): ThemeContextValue {
   // themeEditor dispatches CUSTOM_THEMES_CHANGED_EVENT.
   const [themeVersion, setThemeVersion] = useState(0)
   const bumpThemeVersion = useCallback(() => setThemeVersion(v => v + 1), [])
+  const [onboarded, setOnboarded] = useState(() => !!localStorage.getItem('mc-onboarded'))
 
   const loadCustomThemes = useCallback(async () => {
     try {
@@ -252,6 +256,33 @@ function useThemeState(): ThemeContextValue {
     return () => window.removeEventListener(CUSTOM_THEMES_CHANGED_EVENT, handler)
   }, [loadCustomThemes])
 
+  // Fetch workspace theme config from server on boot.
+  // Server is the source of truth; localStorage is a render cache.
+  const { data: bootData } = useQuery({
+    queryKey: ['theme-boot'],
+    queryFn: () => api.themeBoot(),
+    staleTime: Infinity,  // only need it once on mount
+    retry: false,         // if server unavailable, fall back to localStorage silently
+  })
+
+  useEffect(() => {
+    if (!bootData) return
+    if (bootData.mode && bootData.mode !== mode) {
+      safeSetItem('mc-theme', bootData.mode)
+      setMode(bootData.mode as ModePreference)
+      setResolved(resolveMode(bootData.mode as ModePreference))
+    }
+    if (bootData.color && bootData.color !== colorTheme) {
+      safeSetItem('mc-color-theme', bootData.color)
+      setColorThemeState(bootData.color)
+    }
+    if (bootData.onboarded) {
+      safeSetItem('mc-onboarded', '1')
+      setOnboarded(true)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bootData])  // Only react when boot data arrives
+
   useEffect(() => {
     applyTheme(colorTheme, resolved)
     bumpThemeVersion()
@@ -276,13 +307,19 @@ function useThemeState(): ThemeContextValue {
     return () => mql.removeEventListener('change', handler)
   }, [mode])
 
+  const { mutate: persistTheme } = useMutation({
+    mutationFn: (body: { mode?: string; color?: string; onboarded?: boolean }) =>
+      api.updateThemeConfig(body),
+  })
+
   const setMode_ = useCallback((pref: ModePreference) => {
     safeSetItem('mc-theme', pref)
     setMode(pref)
     setResolved(resolveMode(pref))
     const ct = (localStorage.getItem('mc-color-theme') as ColorTheme) || 'emerald'
     broadcast(pref, ct)
-  }, [])
+    persistTheme({ mode: pref })
+  }, [persistTheme])
 
   const cycleMode = useCallback(() => {
     const next: ModePreference = mode === 'system' ? 'light' : mode === 'light' ? 'dark' : 'system'
@@ -294,7 +331,8 @@ function useThemeState(): ThemeContextValue {
     setColorThemeState(t)
     const m = (localStorage.getItem('mc-theme') as ModePreference) || 'system'
     broadcast(m, t)
-  }, [])
+    persistTheme({ color: t })
+  }, [persistTheme])
 
   /** Add a new custom theme via API, inject CSS, and select it. */
   const addCustomTheme = useCallback(async (data: Omit<CustomThemeData, 'slug'> & { slug?: string }) => {
@@ -322,6 +360,12 @@ function useThemeState(): ThemeContextValue {
   // Combined themes list: built-in + custom
   const allThemes: ThemeEntry[] = [...THEMES, ...customThemes]
 
+  const markOnboarded = useCallback(() => {
+    safeSetItem('mc-onboarded', '1')
+    setOnboarded(true)
+    persistTheme({ onboarded: true })
+  }, [persistTheme])
+
   return {
     theme: resolved,
     preference: mode,
@@ -333,6 +377,8 @@ function useThemeState(): ThemeContextValue {
     customThemes,
     customThemeDataMap,
     themeVersion,
+    onboarded,
+    markOnboarded,
     addCustomTheme,
     deleteCustomTheme,
     loadCustomThemes,

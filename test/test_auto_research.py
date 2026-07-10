@@ -11,8 +11,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from kiro_claw.apps.builtins.auto_research.handlers import (
+    DEFAULT_DEPTH_DECAY,
+    DEFAULT_EXECUTION_MODE,
+    DEFAULT_MAX_SUBQUESTIONS_PER_ROUND,
+    DEFAULT_RESERVE_FRACTION,
+    VALID_EXECUTION_MODES,
     CampaignStatus,
+    _activate_emergent,
+    _advance_exploration,
+    _enter_finalize,
+    _get_db,
+    _in_reserve_zone,
+    _ingest_emergent_questions,
+    _reserve_cycles,
     _safe_campaign_dir,
+    _should_finalize,
     _validate_campaign_id,
     check_stagnation,
     create_campaign,
@@ -74,9 +87,10 @@ class TestValidation:
         )
         assert r["can_start"]
 
-    def test_no_sources(self):
+    def test_sources_optional(self):
+        # Sources are no longer collected/required — the agent decides what to fetch.
         r = validate_campaign({"question": "A valid research question here ok", "sources": []})
-        assert not r["can_start"]
+        assert r["can_start"]
 
     def test_sub_questions_warning(self):
         r = validate_campaign(
@@ -2011,3 +2025,287 @@ class TestGrillHTTP:
         request.get.return_value = None  # no authenticated user
         resp = await _handle_grill_expand(request)
         assert resp.status == 401
+
+
+class TestExecutionModeAndBudget:
+    """RL v2: execution_mode + recursive-exploration budget fields."""
+
+    def _base(self, **over: object) -> dict:
+        cfg: dict = {
+            "question": "How do teams handle API rate limiting in services?",
+            "sources": ["web"],
+        }
+        cfg.update(over)
+        return cfg
+
+    def test_migration_adds_columns(self):
+        # Touch the DB so the schema (incl. migrations) is created.
+        create_campaign(self._base())
+        db = _get_db()
+        cols = {r["name"] for r in db.execute("PRAGMA table_info(campaigns)")}
+        db.close()
+        assert {
+            "execution_mode", "max_subquestions_per_round",
+            "depth_decay", "reserve_fraction",
+        } <= cols
+
+    def test_defaults_applied(self):
+        r = create_campaign(self._base())
+        c = get_campaign(r["id"])
+        assert c["execution_mode"] == DEFAULT_EXECUTION_MODE
+        assert c["max_subquestions_per_round"] == DEFAULT_MAX_SUBQUESTIONS_PER_ROUND
+        assert c["depth_decay"] == DEFAULT_DEPTH_DECAY
+        assert c["reserve_fraction"] == DEFAULT_RESERVE_FRACTION
+
+    def test_workflow_mode_clamped_to_agent(self):
+        # Divergence from upstream: the public fork has no Dynamic Workflow
+        # runner, so VALID_EXECUTION_MODES is ("agent",) and create_campaign
+        # clamps a stray 'workflow' back to 'agent' (never a zombie RUNNING
+        # workflow with no runner). The recursive-exploration budget fields still
+        # persist as given.
+        r = create_campaign(self._base(
+            execution_mode="workflow", max_subquestions_per_round=5,
+            depth_decay=0.25, reserve_fraction=0.2))
+        c = get_campaign(r["id"])
+        assert c["execution_mode"] == DEFAULT_EXECUTION_MODE
+        assert c["max_subquestions_per_round"] == 5
+        assert c["depth_decay"] == 0.25
+        assert c["reserve_fraction"] == 0.2
+
+    def test_invalid_mode_clamped_to_agent(self):
+        r = create_campaign(self._base(execution_mode="bogus"))
+        c = get_campaign(r["id"])
+        assert c["execution_mode"] == DEFAULT_EXECUTION_MODE
+
+    def test_out_of_range_budget_clamped(self):
+        r = create_campaign(self._base(
+            depth_decay=5.0, reserve_fraction=1.5, max_subquestions_per_round=-3))
+        c = get_campaign(r["id"])
+        assert c["depth_decay"] == DEFAULT_DEPTH_DECAY
+        assert c["reserve_fraction"] == DEFAULT_RESERVE_FRACTION
+        assert c["max_subquestions_per_round"] == 0  # max(0, -3)
+
+    def test_validate_rejects_bad_mode(self):
+        r = validate_campaign(self._base(execution_mode="nope"))
+        assert not r["can_start"]
+        assert any("execution mode" in e.lower() for e in r["errors"])
+
+    def test_validate_rejects_workflow_mode(self):
+        # Divergence from upstream: workflow mode is unreachable in the public
+        # fork (no DW runner), so validate rejects it rather than accepting it.
+        r = validate_campaign(self._base(execution_mode="workflow"))
+        assert not r["can_start"]
+        assert "workflow" not in VALID_EXECUTION_MODES
+
+
+class TestRecursiveExploration:
+    """RL v2 Stage 5: emergent sub-question ingest + activation + relevance gate."""
+
+    def _emergent_path(self, cid: str):
+        return _safe_campaign_dir(cid) / "emergent_questions.json"
+
+    def _write_emergent(self, cid: str, items: list) -> None:
+        self._emergent_path(cid).write_text(json.dumps(items))
+
+    def _agent_campaign(self, **over) -> str:
+        cfg = {
+            "question": "How do teams handle API rate limiting in services today?",
+            "sources": ["web"], "sub_questions": [],
+            "max_subquestions_per_round": 2, "depth_decay": 0.5,
+        }
+        cfg.update(over)
+        return create_campaign(cfg)["id"]
+
+    def test_ingest_ranks_decays_and_consumes(self):
+        cid = self._agent_campaign()
+        self._write_emergent(cid, [
+            {"text": "low", "priority": 0.1},
+            {"text": "high", "priority": 0.9},
+            {"text": "mid", "priority": 0.5},
+        ])
+        admitted = _ingest_emergent_questions(cid)
+        assert [a["text"] for a in admitted] == ["high", "mid"]  # top-K by priority
+        assert admitted[0]["priority"] == pytest.approx(0.45)     # 0.9 * 0.5**1
+        assert not self._emergent_path(cid).exists()              # consumed
+
+    def test_activate_appends_emergent_to_checklist(self):
+        cid = self._agent_campaign()
+        self._write_emergent(cid, [{"text": "follow up A", "priority": 0.8}])
+        _ingest_emergent_questions(cid)
+        activated = _activate_emergent(cid)
+        assert [a["text"] for a in activated] == ["follow up A"]
+        subs = json.loads(get_campaign(cid)["sub_questions"])
+        emergent = [s for s in subs if s.get("origin") == "emergent"]
+        assert [s["text"] for s in emergent] == ["follow up A"]
+        assert (_safe_campaign_dir(cid) / "brief.md").exists()
+
+    def test_ingest_dedups_against_existing_checklist(self):
+        cid = self._agent_campaign(
+            sub_questions=[{"text": "Existing Q", "origin": "grill", "status": "open"}],
+            max_subquestions_per_round=5)
+        self._write_emergent(cid, [
+            {"text": "  existing   q ", "priority": 0.9},  # dup of checklist
+            {"text": "fresh q", "priority": 0.8},
+        ])
+        admitted = _ingest_emergent_questions(cid)
+        assert [a["text"] for a in admitted] == ["fresh q"]
+
+    def test_non_agent_mode_discards_emergent(self):
+        # create_campaign clamps 'workflow' -> 'agent' in the public fork, so
+        # force the column to a non-agent value directly to exercise the guard:
+        # _ingest_emergent_questions must discard (not process) for any mode that
+        # is not 'agent'.
+        cid = self._agent_campaign()
+        db = _get_db()
+        db.execute("BEGIN")
+        db.execute("UPDATE campaigns SET execution_mode = 'workflow' WHERE id = ?", (cid,))
+        db.commit()
+        db.close()
+        self._write_emergent(cid, [{"text": "ignored", "priority": 1.0}])
+        assert _ingest_emergent_questions(cid) == []
+        assert not self._emergent_path(cid).exists()  # discarded, not processed
+
+    def test_activation_gate_holds_with_open_initial_questions(self):
+        cid = self._agent_campaign(sub_questions=[
+            {"text": "init A", "origin": "grill", "status": "open"},
+            {"text": "init B", "origin": "grill", "status": "open"},
+        ])
+        self._write_emergent(cid, [{"text": "emergent 1", "priority": 0.9}])
+        _ingest_emergent_questions(cid)
+        # total_cycles=0 < 2 initial open questions -> emergent held back.
+        assert _activate_emergent(cid) == []
+        subs = json.loads(get_campaign(cid)["sub_questions"])
+        assert not [s for s in subs if s.get("origin") == "emergent"]
+
+    def test_advance_exploration_end_to_end(self):
+        cid = self._agent_campaign()
+        self._write_emergent(cid, [{"text": "e2e lead", "priority": 0.7}])
+        _advance_exploration(cid)  # ingest + activate in one call
+        subs = json.loads(get_campaign(cid)["sub_questions"])
+        assert [s["text"] for s in subs if s.get("origin") == "emergent"] == ["e2e lead"]
+
+    def test_no_emergent_file_is_noop(self):
+        cid = self._agent_campaign()
+        assert _ingest_emergent_questions(cid) == []
+        assert _activate_emergent(cid) == []
+
+
+class TestReserveAndFinalize:
+    """RL v2 Stage 6: reserve trailing cycles for synthesis + FINALIZE MODE."""
+
+    def test_reserve_cycles(self):
+        assert _reserve_cycles(30, 0.15) == 5    # ceil(4.5)
+        assert _reserve_cycles(5, 0.15) == 1     # ceil(0.75) -> 1
+        assert _reserve_cycles(1, 0.15) == 1     # floor at 1 when bounded
+        assert _reserve_cycles(0, 0.15) == 0     # unbounded
+        assert _reserve_cycles(100, 0.0) == 1    # always reserve >=1
+
+    def test_in_reserve_zone(self):
+        assert not _in_reserve_zone(24, 30, 0.15)   # 30-5=25 boundary
+        assert _in_reserve_zone(25, 30, 0.15)
+        assert _in_reserve_zone(30, 30, 0.15)
+        assert not _in_reserve_zone(5, 0, 0.15)     # unbounded never finalizes
+
+    def _agent_campaign(self, **over) -> str:
+        cfg = {
+            "question": "How do teams handle API rate limiting in services today?",
+            "sources": ["web"], "sub_questions": [],
+            "max_cycles": 10, "max_subquestions_per_round": 2,
+            "depth_decay": 0.5, "reserve_fraction": 0.2,
+        }
+        cfg.update(over)
+        return create_campaign(cfg)["id"]
+
+    def _set_cycles(self, cid: str, n: int) -> None:
+        db = _get_db()
+        db.execute("BEGIN")
+        db.execute("UPDATE campaigns SET total_cycles = ? WHERE id = ?", (n, cid))
+        db.commit()
+        db.close()
+
+    def test_should_finalize_tracks_cycles(self):
+        cid = self._agent_campaign()  # max_cycles=10, reserve=ceil(2)=2 -> zone at >=8
+        self._set_cycles(cid, 7)
+        assert not _should_finalize(cid)
+        self._set_cycles(cid, 8)
+        assert _should_finalize(cid)
+
+    def test_should_finalize_false_in_non_agent_mode(self):
+        # create_campaign clamps 'workflow' -> 'agent' in the public fork, so
+        # force the column to a non-agent value to exercise the guard.
+        cid = self._agent_campaign()
+        db = _get_db()
+        db.execute("BEGIN")
+        db.execute("UPDATE campaigns SET execution_mode = 'workflow' WHERE id = ?", (cid,))
+        db.commit()
+        db.close()
+        self._set_cycles(cid, 10)
+        assert not _should_finalize(cid)
+
+    def test_enter_finalize_writes_flag_and_guidance(self):
+        cid = self._agent_campaign()
+        d = _safe_campaign_dir(cid)
+        # stray emergent file should be dropped when entering finalize
+        (d / "emergent_questions.json").write_text("[]")
+        assert _enter_finalize(cid) is True
+        assert (d / "finalize.flag").exists()
+        assert not (d / "emergent_questions.json").exists()
+        assert "FINALIZE MODE" in (d / "guidance.txt").read_text()
+        # idempotent — second call does not re-signal
+        assert _enter_finalize(cid) is False
+
+    def test_advance_freezes_exploration_in_reserve_zone(self):
+        cid = self._agent_campaign()
+        d = _safe_campaign_dir(cid)
+        self._set_cycles(cid, 9)  # in reserve zone (>=8)
+        (d / "emergent_questions.json").write_text(
+            json.dumps([{"text": "late lead", "priority": 0.9}]))
+        _advance_exploration(cid)
+        # exploration frozen: emergent file consumed without admission, no new
+        # emergent sub-questions on the checklist, finalize signaled.
+        assert not (d / "emergent_questions.json").exists()
+        subs = json.loads(get_campaign(cid)["sub_questions"])
+        assert not [s for s in subs if s.get("origin") == "emergent"]
+        assert (d / "finalize.flag").exists()
+
+    def test_advance_explores_before_reserve_zone(self):
+        cid = self._agent_campaign()
+        d = _safe_campaign_dir(cid)
+        self._set_cycles(cid, 3)  # below reserve zone
+        (d / "emergent_questions.json").write_text(
+            json.dumps([{"text": "early lead", "priority": 0.9}]))
+        _advance_exploration(cid)
+        subs = json.loads(get_campaign(cid)["sub_questions"])
+        assert [s["text"] for s in subs if s.get("origin") == "emergent"] == ["early lead"]
+        assert not (d / "finalize.flag").exists()
+
+
+class TestResearchBackendInfra:
+    """KIROCLAW_HOME path isolation + off-event-loop DB concurrency."""
+
+    def test_nudge_dir_tracks_campaign_dir(self):
+        # The per-cycle nudge must point the agent at the real campaign dir
+        # (resolves via config_dir()/KIROCLAW_HOME), NOT a hardcoded ~/.kiroclaw
+        # literal — otherwise a dev gateway is aimed at the prod home.
+        from kiro_claw.apps.builtins.auto_research.handlers import (
+            _RESEARCH_NUDGE,
+            _campaign_dir,
+        )
+        assert "~/.kiroclaw" not in _RESEARCH_NUDGE
+        cid = "abc12345"
+        msg = _RESEARCH_NUDGE.format(cid=cid, dir=_campaign_dir(cid))
+        assert str(_campaign_dir(cid)) in msg
+
+    def test_concurrent_creates_do_not_lock(self):
+        # validate/create run off the event loop (run_in_executor), so creates can
+        # overlap the research worker's per-cycle writes. WAL + the explicit busy
+        # timeout must absorb that instead of raising "database is locked".
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _mk(i: int) -> dict:
+            return create_campaign({
+                "question": f"Concurrent research question number {i} here",
+            })
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            results = list(ex.map(_mk, range(10)))
+        assert len({r["id"] for r in results}) == 10

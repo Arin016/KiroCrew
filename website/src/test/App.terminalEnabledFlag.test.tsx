@@ -1,0 +1,120 @@
+/**
+ * Regression test: App syncs the terminal-enabled registry flag from the
+ * /api/terminal/sessions config.
+ *
+ * The "Run in Terminal" button on shell code blocks is gated in
+ * MonacoCodeBlock behind `useTerminalEnabled()`, which reads a module-level
+ * flag in terminalRegistry (`_enabled`, initialised to false). App is the ONE
+ * place that flips that flag on, via:
+ *
+ *   const terminalEnabled = terminalConfig?.enabled === true
+ *   useEffect(() => { setTerminalEnabledFlag(terminalEnabled) }, [terminalEnabled])
+ *
+ * This wiring has been silently dropped once already: the original feature
+ * CR-275803011 shipped it correctly, but CR-276396575 ("workspace sync")
+ * rewrote App.tsx and accidentally reverted both the import and the effect --
+ * the same clobber that took out the nav/embed features later restored in
+ * d3daac1 / dfbc99c. The terminal line was never restored, so the button
+ * vanished from every build for ~5 weeks until CR-287631374 re-added it.
+ *
+ * Existing MonacoCodeBlock / terminalRegistry tests exercise the gate GIVEN
+ * the flag -- none assert that App actually sets it, which is exactly why the
+ * regression slipped through green tests. These tests pin the App-to-registry
+ * contract directly so a future App.tsx refactor can't silently drop it again:
+ *   1. config enabled  -> isTerminalEnabled() becomes true
+ *   2. config disabled -> App actively drives the flag to false, even if a
+ *      prior enabled session had left it true (button removed on disable)
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { waitFor } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
+import { server } from '../../integration/mocks/server'
+import { renderWithProviders } from './helpers'
+import App from '../App'
+import { isTerminalEnabled, setTerminalEnabledFlag } from '../utils/terminalRegistry'
+
+// Match the App.test.tsx mock setup: isolate routing + stub the api client so
+// App mounts without hitting real network for everything except the MSW-served
+// /api/terminal/sessions endpoint this test cares about.
+vi.mock('../pages/ChatPage', () => ({ default: () => <div data-testid="chat-page">ChatPage</div> }))
+vi.mock('../pages/SystemPage', () => ({ default: () => null }))
+vi.mock('../pages/AgentsPage', () => ({ default: () => null }))
+vi.mock('../pages/ProjectsPage', () => ({ default: () => null }))
+vi.mock('../pages/LogsPage', () => ({ default: () => null }))
+vi.mock('../pages/KiroClawAgentsPage', () => ({ default: () => null }))
+vi.mock('../pages/NotificationsPage', () => ({ default: () => null }))
+vi.mock('../pages/SchedulePage', () => ({ default: () => null }))
+vi.mock('../pages/BoardPage', () => ({ default: () => null }))
+vi.mock('../hooks/useWebSocket', () => ({ useWebSocket: () => ({ subscribeLogs: () => {} }) }))
+vi.mock('../hooks/useAgents', () => ({ useAgents: vi.fn(() => ({ agents: [{ name: 'kiroclaw' }], defaultAgent: 'kiroclaw' })) }))
+vi.mock('../providers/context', () => ({ useProvider: () => ({ id: 'acp' }) }))
+vi.mock('../components/MarkdownRenderer', () => ({ default: ({ content }: { content: string }) => <span>{content}</span>, Lightbox: () => null }))
+vi.mock('../api/client', () => ({
+  api: {
+    chatSlots: vi.fn().mockResolvedValue([]),
+    notifications: vi.fn().mockResolvedValue({ notifications: [] }),
+    status: vi.fn().mockResolvedValue({ uptime: '1h', sessions: 0, messages: 0, cron_jobs: 0, subagents: 0, lessons: 0 }),
+    sessionsUsage: vi.fn().mockResolvedValue({ usage: { credits_used: 0, credits_covered: 3044, credits_plan: 10000, resets: '2026-07-01', plan: 'KIRO POWER', cost_usd: 0, overage_rate: '0.04' } }),
+    listApps: vi.fn().mockResolvedValue([]),
+    system: vi.fn().mockResolvedValue({ mem_used_gb: 4.0, mem_total_gb: 16.0, cpu_pct: 25.0, disk_total_gb: 100.0, disk_free_gb: 60.0 }),
+    chatSlotAgent: vi.fn().mockResolvedValue({}),
+    chatSlotReasoningEffort: vi.fn().mockResolvedValue({}),
+    chatSlotModel: vi.fn().mockResolvedValue({}),
+    chatMode: vi.fn().mockResolvedValue({}),
+    listInstances: vi.fn().mockResolvedValue({ instances: [], warm_set_cap: 5 }),
+  },
+  isAuthBannerShown: vi.fn(() => false),
+  ApiError: class ApiError extends Error {
+    status: number
+    constructor(status: number, message: string) {
+      super(message)
+      this.status = status
+    }
+  },
+}))
+
+Object.defineProperty(window, 'matchMedia', {
+  writable: true,
+  value: vi.fn().mockImplementation((query: string) => ({
+    matches: query === '(prefers-color-scheme: dark)',
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  })),
+})
+globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} } as any
+
+describe('App terminal-enabled registry flag sync', () => {
+  beforeEach(() => {
+    // Reset the module-level flag to its initial (off) state so each test
+    // starts from the same baseline regardless of ordering.
+    setTerminalEnabledFlag(false)
+  })
+  afterEach(() => {
+    setTerminalEnabledFlag(false)
+  })
+
+  it('turns the flag ON when /api/terminal/sessions reports enabled', async () => {
+    server.use(
+      http.get('/api/terminal/sessions', () => HttpResponse.json({ enabled: true, sessions: [] })),
+    )
+    expect(isTerminalEnabled()).toBe(false)
+    renderWithProviders(<App />, { route: '/chat' })
+    await waitFor(() => expect(isTerminalEnabled()).toBe(true))
+  })
+
+  it('drives the flag OFF when config is disabled, even if a prior session left it on', async () => {
+    // Simulate a stale "on" flag left over from an earlier enabled session:
+    // if App only ever turned the flag ON (the buggy ws.onopen approach), a
+    // later config-off would leave the button stuck visible. The config-driven
+    // effect must actively clear it.
+    setTerminalEnabledFlag(true)
+    server.use(
+      http.get('/api/terminal/sessions', () => HttpResponse.json({ enabled: false, sessions: [] })),
+    )
+    renderWithProviders(<App />, { route: '/chat' })
+    await waitFor(() => expect(isTerminalEnabled()).toBe(false))
+    // A second settle window guards against a late async re-flip.
+    await new Promise(r => setTimeout(r, 20))
+    expect(isTerminalEnabled()).toBe(false)
+  })
+})

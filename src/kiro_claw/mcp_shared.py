@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
 import platform
+import struct
 import subprocess
 import sys
 import time
@@ -113,17 +115,40 @@ def _resolve_excluded_tools() -> set[str]:
         # Resolve session key (same logic as mcp_core._resolve_session_key)
         session_key = os.environ.get("KIROCLAW_SESSION_KEY", "")
         if not session_key:
-            def _get_ppid(pid: int) -> int:
+            def _ppid_via_libproc(pid: int) -> int:
+                """macOS parent-PID via libproc proc_pidinfo (no exec, sandbox-safe)."""
+                _PROC_PIDTBSDINFO = 3
+                _BUF_SIZE = 256
                 try:
-                    if platform.system() == "Linux":
+                    libproc = ctypes.CDLL("libproc.dylib", use_errno=True)
+                    libproc.proc_pidinfo.restype = ctypes.c_int
+                    libproc.proc_pidinfo.argtypes = [
+                        ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                        ctypes.c_void_p, ctypes.c_int,
+                    ]
+                    buf = ctypes.create_string_buffer(_BUF_SIZE)
+                    n = libproc.proc_pidinfo(pid, _PROC_PIDTBSDINFO, 0, buf, _BUF_SIZE)
+                    if n <= 16:
+                        return 0
+                    return int(struct.unpack_from("<5I", buf.raw, 0)[4])
+                except Exception:
+                    return 0
+
+            def _get_ppid(pid: int) -> int:
+                system = platform.system()
+                try:
+                    if system == "Linux":
                         for line in Path(f"/proc/{pid}/status").read_text().splitlines():
                             if line.startswith("PPid:"):
                                 return int(line.split()[1])
-                    else:
-                        out = subprocess.check_output(
-                            ["ps", "-o", "ppid=", "-p", str(pid)], text=True, timeout=2
-                        )
-                        return int(out.strip())
+                    elif system == "Darwin":
+                        ppid = _ppid_via_libproc(pid)
+                        if ppid:
+                            return ppid
+                    out = subprocess.check_output(
+                        ["ps", "-o", "ppid=", "-p", str(pid)], text=True, timeout=2
+                    )
+                    return int(out.strip())
                 except Exception:
                     pass
                 return 0

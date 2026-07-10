@@ -1993,9 +1993,13 @@ to write to).
   asks you to "fix" or "update" something, treat it as "observe and notify
   the user so they can fix" — never the action itself.
 - **Your response IS the notification.** Whatever you write becomes the
-  Slack/dashboard message the user sees. There is no transcript to scroll;
-  be concise (a sentence or two for a status check, a short bulleted summary
-  for a comment dump). Keep it scannable.
+  message the user sees, routed per the task's `<!-- deliver:... -->` tag or,
+  when untagged, the `heartbeat.default_deliver` config (default `slack` = Slack
+  DM + dashboard bell; `dashboard` = dashboard bell only). Report only when there
+  is a real signal — a failure, a blocked CR, an item needing action. For a
+  routine "nothing to do" completion, keep your response minimal. There is no
+  transcript to scroll; be concise (a sentence or two for a status check, a short
+  bulleted summary for a comment dump). Keep it scannable.
 - **HEARTBEAT_KEEP semantics.** Include the literal token `HEARTBEAT_KEEP`
   anywhere in your response when the task is NOT done (so it retries next
   cycle). Omit the token when the task is fully complete (so it is dropped

@@ -5,12 +5,14 @@ import json
 import os
 import signal
 import time
+import types
 from collections import deque
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import kiro_claw.acp.client as acp_client
 from kiro_claw.acp.client import (
     _CLAUDE_ACP_PKG_ENTRY,
     _DRAIN_DURATION,
@@ -102,6 +104,99 @@ class TestAcpClientInit:
     def test_custom_work_dir(self, tmp_path):
         client = AcpClient(work_dir=tmp_path)
         assert client._work_dir == tmp_path
+
+    def test_audit_source_defaults_none(self):
+        # Chat/subagent clients already audit via chat_runner / SubagentManager;
+        # the flag must stay None by default so they never double-log.
+        assert AcpClient()._audit_source is None
+
+    def test_audit_source_opt_in(self):
+        # App/worker-pool clients (code-review-sage, knowledge llm_pool) have no
+        # external audit loop, so they opt in to ACP-layer SEL tool auditing.
+        assert AcpClient(audit_source="subagent")._audit_source == "subagent"
+
+
+class TestAcpClientToolAudit:
+    """Covers the _maybe_audit_tool_call ACP-layer SEL emit (worker-pool path)."""
+
+    @staticmethod
+    def _ev(title="Reading /x/SKILL.md", kind="read"):
+        # Minimal stand-in for AcpEvent: the helper only reads .title/.tool_kind.
+        return types.SimpleNamespace(title=title, tool_kind=kind)
+
+    @pytest.mark.asyncio
+    async def test_emits_when_audit_source_set(self, monkeypatch):
+        calls = []
+
+        class _Sel:
+            def log_tool_invocation(self, **kw):
+                calls.append(kw)
+
+        monkeypatch.setattr(acp_client, "sel", lambda: _Sel())
+        client = AcpClient(session_key="sk", audit_source="subagent")
+        await client._maybe_audit_tool_call(self._ev())
+        assert len(calls) == 1
+        assert calls[0]["source"] == "subagent"
+        assert calls[0]["session_key"] == "sk"
+        assert calls[0]["tool_name"] == "Reading /x/SKILL.md"
+        assert calls[0]["tool_kind"] == "read"
+        assert calls[0]["outcome"] == "auto_approved"
+
+    @pytest.mark.asyncio
+    async def test_none_title_kind_fall_back(self, monkeypatch):
+        # tool_event.title/.tool_kind can be None (see the observed-tool-call
+        # bookkeeping in the dispatch loop); the audit must still emit meaningful
+        # values instead of a None tool_name or a swallowed error.
+        calls = []
+
+        class _Sel:
+            def log_tool_invocation(self, **kw):
+                calls.append(kw)
+
+        monkeypatch.setattr(acp_client, "sel", lambda: _Sel())
+        client = AcpClient(session_key="sk", audit_source="subagent")
+        await client._maybe_audit_tool_call(self._ev(title=None, kind=None))
+        assert len(calls) == 1
+        assert calls[0]["tool_name"] == "unknown"
+        assert calls[0]["tool_kind"] == ""
+
+    @pytest.mark.asyncio
+    async def test_noop_when_audit_source_none(self, monkeypatch):
+        calls = []
+
+        class _Sel:
+            def log_tool_invocation(self, **kw):
+                calls.append(kw)
+
+        monkeypatch.setattr(acp_client, "sel", lambda: _Sel())
+        client = AcpClient()  # audit_source defaults to None
+        await client._maybe_audit_tool_call(self._ev())
+        assert calls == []  # chat / subagent clients must never double-log
+
+    @pytest.mark.asyncio
+    async def test_swallows_sel_errors(self, monkeypatch):
+        def _boom():
+            raise RuntimeError("SEL backend down")
+
+        monkeypatch.setattr(acp_client, "sel", _boom)
+        client = AcpClient(session_key="sk", audit_source="subagent")
+        # A SEL failure must never break tool dispatch.
+        await client._maybe_audit_tool_call(self._ev())
+
+    @pytest.mark.asyncio
+    async def test_hung_backend_times_out_and_is_swallowed(self, monkeypatch):
+        # A wedged SEL backend must not stall tool dispatch: the wait_for bound
+        # raises TimeoutError (caught) so the coroutine returns promptly.
+        class _Sel:
+            def log_tool_invocation(self, **kw):
+                time.sleep(5)  # simulate a hung backend, well past the timeout
+
+        monkeypatch.setattr(acp_client, "sel", lambda: _Sel())
+        monkeypatch.setattr(acp_client, "_SEL_AUDIT_TIMEOUT_SECONDS", 0.05)
+        client = AcpClient(session_key="sk", audit_source="subagent")
+        start = time.monotonic()
+        await client._maybe_audit_tool_call(self._ev())  # must not raise / hang
+        assert time.monotonic() - start < 4  # returned via timeout, not the 5s sleep
 
 
 class TestAcpClientSessionKey:
@@ -302,7 +397,7 @@ class TestAcpClientBackendSelection:
             return_value=["/usr/local/bin/node", "/usr/local/lib/claude-agent-acp/index.js"],
         ), patch("kiro_claw.acp.client._resolve_kiro_bin", return_value="/usr/bin/kiro-cli"), patch(
             "kiro_claw.acp.client.wrap_argv",
-            side_effect=lambda argv, mode: (argv, None),
+            side_effect=lambda argv, mode, **kwargs: (argv, None),
         ), patch(
             "asyncio.create_subprocess_exec", new_callable=AsyncMock
         ) as mock_exec, patch(
@@ -340,7 +435,7 @@ class TestAcpClientBackendSelection:
             "kiro_claw.acp.client._resolve_kiro_bin", return_value="/usr/bin/kiro-cli"
         ), patch(
             "kiro_claw.acp.client.wrap_argv",
-            side_effect=lambda argv, mode: (argv, None),
+            side_effect=lambda argv, mode, **kwargs: (argv, None),
         ), patch(
             "asyncio.create_subprocess_exec", new_callable=AsyncMock
         ) as mock_exec, patch(
@@ -4423,19 +4518,26 @@ class TestToolStallWatchdog:
         # Simulate "a tool was dispatched this turn".
         client._tool_dispatched = True
         client._stale_eligible = False  # the stale check must NOT be what saves us
+        client._last_activity = time.monotonic() - 10.0  # stderr/keepalive also silent
         # Process is alive but silent: _read_message always returns None.
         client._read_message = AsyncMock(return_value=None)
         client._is_process_alive = lambda: True
+        # Recovery kills the wedged child; stub it so the test doesn't touch a
+        # real process (there is none — AcpClient was not spawned).
+        client._kill_process = AsyncMock()
 
         actions = []
         # Generous outer timeout; the watchdog must end the loop well before it.
         t0 = time.monotonic()
-        async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
-            actions.append(action)
+        with pytest.raises(AcpProcessDied, match="tool stalled"):
+            async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
+                actions.append(action)
         elapsed = time.monotonic() - t0
 
-        # Loop returned (did not hang) and emitted no spurious actions.
+        # No spurious actions, the wedged child was killed, and the turn-done
+        # waiter was released via the finally so no cooperative-stop hangs.
         assert actions == []
+        client._kill_process.assert_awaited_once()
         assert client._turn_done.is_set()
         # Prove it was the watchdog (stall window 0.2s) that ended the loop,
         # not the outer 30s deadline — guards against the watchdog branch being
@@ -4491,6 +4593,8 @@ class TestToolStallWatchdog:
         client._turn_done.clear()
         client._tool_dispatched = True  # a tool was dispatched this turn
         client._stale_eligible = False
+        client._last_activity = time.monotonic() - 10.0  # stderr/keepalive silent
+        client._kill_process = AsyncMock()
 
         # One progress frame, then silence forever.
         frames = [JsonRpcMessage(method="session/update", params={})]
@@ -4504,12 +4608,14 @@ class TestToolStallWatchdog:
         actions = []
         # The single frame is yielded as an action; then the watchdog must end
         # the loop well before this generous outer timeout.
-        async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
-            actions.append(action)
+        with pytest.raises(AcpProcessDied, match="tool stalled"):
+            async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
+                actions.append(action)
 
         # The flag was NOT cleared by the inbound frame (that's _dispatch_events'
-        # job), so the watchdog still fired and the loop returned.
+        # job), so the watchdog still fired, killed the child, and raised.
         assert client._tool_dispatched is True
+        client._kill_process.assert_awaited_once()
         assert client._turn_done.is_set()
 
     @pytest.mark.asyncio
@@ -4649,17 +4755,21 @@ class TestToolStallKeepalive:
         client._stale_eligible = False
         client._read_message = AsyncMock(return_value=None)
         client._is_process_alive = lambda: True
+        client._kill_process = AsyncMock()
         # No keepalive pings — _last_activity stays at construction time.
 
         actions: list[object] = []
         t0 = time.monotonic()
-        async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
-            actions.append(action)
+        with pytest.raises(AcpProcessDied, match="tool stalled"):
+            async for action, _ in client._prompt_loop(req_id=1, timeout=30.0):
+                actions.append(action)
         elapsed = time.monotonic() - t0
 
-        # Watchdog fired quickly (at ~0.2s stall window), NOT the outer 30s.
+        # Watchdog fired quickly (at ~0.2s stall window), NOT the outer 30s,
+        # killed the wedged child, and raised.
         assert elapsed < 5.0, f"watchdog didn't fire ({elapsed:.2f}s)"
         assert actions == []
+        client._kill_process.assert_awaited_once()
         assert client._turn_done.is_set()
 
 

@@ -695,3 +695,104 @@ class TestCronSlackDefault:
             assert data["delivered_to"] == "notification"
             assert data["slack"] is False
             slack.post_message.assert_not_called()
+
+
+# ── OPTIONS button rendering (Mesh-2603) ──
+
+
+class TestOptionsRendering:
+    @pytest.mark.asyncio
+    async def test_options_tag_renders_action_block(self, mock_sel):
+        """A plain-text send with an [OPTIONS: ...] tag posts the message with
+        the tag stripped, then an actions block with the choices."""
+        slack = MagicMock()
+        slack.open_dm = AsyncMock(return_value="D_OWNER")
+        slack.post_message = AsyncMock(return_value="1712793600.000010")
+        slack.post_blocks = AsyncMock(return_value="1712793600.000011")
+        state = _mock_state(slack_client=slack, owner_id="U_OWNER")
+        app = _make_app(state)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/send-message",
+                json={
+                    "text": "Pick one:\n\n[OPTIONS: Alpha | Bravo | Charlie]",
+                    "session": "slack",
+                },
+            )
+            assert resp.status == 200
+            # Message posted with the OPTIONS tag stripped from the text.
+            posted_text = slack.post_message.call_args[0][1]
+            assert "OPTIONS" not in posted_text
+            assert "Alpha | Bravo | Charlie" not in posted_text
+            # An actions block was posted after the message.
+            slack.post_blocks.assert_called_once()
+            blocks_arg = slack.post_blocks.call_args[0][1]
+            assert isinstance(blocks_arg, list) and blocks_arg
+
+    @pytest.mark.asyncio
+    async def test_no_options_tag_posts_no_action_block(self, mock_sel):
+        """A plain-text send with no OPTIONS tag posts only the message."""
+        slack = MagicMock()
+        slack.open_dm = AsyncMock(return_value="D_OWNER")
+        slack.post_message = AsyncMock(return_value="1712793600.000010")
+        slack.post_blocks = AsyncMock(return_value="1712793600.000011")
+        state = _mock_state(slack_client=slack, owner_id="U_OWNER")
+        app = _make_app(state)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/send-message",
+                json={"text": "no options here", "session": "slack"},
+            )
+            assert resp.status == 200
+            slack.post_message.assert_called_once()
+            slack.post_blocks.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explicit_blocks_skip_options_parsing(self, mock_sel):
+        """When the caller supplies blocks, an [OPTIONS: ...] substring in the
+        fallback text is left untouched (blocks own their layout)."""
+        slack = MagicMock()
+        slack.open_dm = AsyncMock(return_value="D_OWNER")
+        slack.post_blocks = AsyncMock(return_value="1712793600.000012")
+        state = _mock_state(slack_client=slack, owner_id="U_OWNER")
+        app = _make_app(state)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/send-message",
+                json={
+                    "text": "fallback [OPTIONS: X | Y]",
+                    "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "hi"}}],
+                    "session": "slack",
+                },
+            )
+            assert resp.status == 200
+            # Only the caller's blocks are posted — no second options block.
+            slack.post_blocks.assert_called_once()
+            fallback = slack.post_blocks.call_args[0][2]
+            assert "[OPTIONS: X | Y]" in fallback
+
+    @pytest.mark.asyncio
+    async def test_options_block_failure_does_not_mask_delivery(self, mock_sel):
+        """If posting the OPTIONS actions block fails, the already-sent main
+        message is still reported as delivered (not a 502) — the options post
+        is guarded by its own try/except."""
+        slack = MagicMock()
+        slack.open_dm = AsyncMock(return_value="D_OWNER")
+        slack.post_message = AsyncMock(return_value="1712793600.000010")
+        slack.post_blocks = AsyncMock(side_effect=Exception("blocks boom"))
+        state = _mock_state(slack_client=slack, owner_id="U_OWNER")
+        app = _make_app(state)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/send-message",
+                json={"text": "Pick one:\n\n[OPTIONS: Alpha | Bravo]", "session": "slack"},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["delivered_to"] == "slack"
+            slack.post_message.assert_called_once()
+            slack.post_blocks.assert_called_once()

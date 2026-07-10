@@ -532,6 +532,11 @@ export const api = {
   reorderTagColumns: (ids: string[]) => fetch('/api/chat/tag-columns/order', { method: 'PUT', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ ids }) }).then(j),
   sendChat: (message: string, slot?: string, colorTheme?: string, signal?: AbortSignal, meta?: Record<string, unknown>, browse?: boolean) =>
     fetch('/api/chat?ws=1', { method: 'POST', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ message, slot, ...(colorTheme ? { color_theme: colorTheme } : {}), ...(meta ? { meta } : {}), ...(browse ? { browse: true } : {}) }), signal }),
+  // Mid-turn steer: inject into the RUNNING turn instead of queueing. Fire-and-forget
+  // JSON response ({ok, steered}); the backend falls back to queue if steer is
+  // unavailable so the text is never dropped.
+  steerChat: (message: string, slot?: string) =>
+    fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ message, slot, steer: true }) }).then(j),
   sessionsHealth: () => fetch('/api/sessions/health').then(j),
   // Knowledge
   knowledgeSearch: (q: string) => get(`/api/knowledge/search-for-context?q=${encodeURIComponent(q)}`).then(j),
@@ -633,6 +638,10 @@ export const api = {
   updateTheme: (slug: string, body: object) => put('/api/themes/' + encodeURIComponent(slug), body).then(j),
   deleteTheme: (slug: string) => del('/api/themes/' + encodeURIComponent(slug)).then(j),
   themeDetail: (slug: string) => fetch('/api/themes/' + encodeURIComponent(slug)).then(j),
+  // Workspace theme config (server-authoritative)
+  themeBoot: () => fetch('/api/theme/boot').then(j),
+  updateThemeConfig: (body: { mode?: string; color?: string; onboarded?: boolean }) =>
+    put('/api/config/theme', body).then(j),
   // Voice
   voiceConfig: () => fetch('/api/voice/config').then(j),
   updateVoiceConfig: (body: object) => put('/api/voice/config', body).then(j),

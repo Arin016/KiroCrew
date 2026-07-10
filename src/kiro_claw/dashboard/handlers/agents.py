@@ -35,6 +35,7 @@ from kiro_claw.dashboard.chat_persistence import get_reasoning_effort_ordered
 from kiro_claw.dashboard.chat_utils import _SLASH_COMMANDS, _history_key_for
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.env import augmented_path
+from kiro_claw.executors import discovery_executor
 from kiro_claw.security import is_sensitive_path
 
 _VALID_PACKAGE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$")
@@ -676,8 +677,19 @@ async def api_agents_installed(request: web.Request) -> web.Response:
 
     kiroclaw is always first; kiroclaw-lite is excluded.
     """
-    agents = list(list_agents())
-    agents.sort(key=lambda a: (0 if a.name == "kiroclaw" else 1, a.name))
+    # list_agents() does glob + per-file resolve(strict=True) + read_bytes +
+    # json.loads over ~/.kiro/agents — blocking filesystem work that, on a large
+    # agents dir (network home, many project-registry agents), can stall the
+    # event loop past the loop-stall watchdog when a browser loads the dashboard.
+    # Offload to the discovery pool, same as api_agents_rescan and /api/skills.
+    def _collect() -> list[Any]:
+        agents = list(list_agents())
+        agents.sort(key=lambda a: (0 if a.name == "kiroclaw" else 1, a.name))
+        return agents
+
+    agents = await asyncio.get_running_loop().run_in_executor(
+        discovery_executor(), _collect
+    )
     return web.json_response([a.to_dict() for a in agents])
 
 
@@ -891,7 +903,12 @@ async def api_agents_rescan(request: web.Request) -> web.Response:
         resources=", ".join(safe_paths) if safe_paths else "<registry>",
     )
 
-    agents = await asyncio.to_thread(lambda: sorted(list_agents(), key=lambda a: (0 if a.name == "kiroclaw" else 1, a.name)))
+    # Discovery pool (not asyncio.to_thread's DEFAULT executor, which shares the
+    # loop's DNS pool) — same off-loop discipline as api_agents_installed.
+    agents = await asyncio.get_running_loop().run_in_executor(
+        discovery_executor(),
+        lambda: sorted(list_agents(), key=lambda a: (0 if a.name == "kiroclaw" else 1, a.name)),
+    )
     return web.json_response({
         "discovered": len(discovered),
         "agents": [a.to_dict() for a in agents],
@@ -1370,7 +1387,7 @@ async def api_aim_mcp_registry(request: web.Request) -> web.Response:
 
 
 async def api_kiroclaw_agents(request: web.Request) -> web.Response:
-    """GET /api/agents — list all KiroClaw agent definitions."""
+    """GET /api/agents — list all KiroClaw agent definitions, most-used first."""
     cfg = KiroClawConfig.load()
     agents = [
         {"name": name, **dataclasses.asdict(agent_cfg)} for name, agent_cfg in cfg.agents.items()
@@ -1397,6 +1414,30 @@ async def api_kiroclaw_agents(request: web.Request) -> web.Response:
                 config_keys.add((pa.name, pa.project_path))
     except Exception:
         logger.warning("Failed to append project agents to agent list", exc_info=True)
+
+    # Reorder by usage frequency (most-used first). Derived read-only from chat
+    # history; degrade to config-insertion order on any failure so the dropdown
+    # never breaks or drops agents when history is unreadable.
+    state: DashboardState | None = request.app.get("state")
+    conversation_log = state.conversation_log if state else None
+    if conversation_log:
+        try:
+            usage = await asyncio.to_thread(conversation_log.agent_usage)
+            # Default missing agents to (0, 0) — keeps the sort key total and
+            # deterministic (never negates None); never-used agents collapse to
+            # their config-insertion index and form a stable bottom block.
+            sorted_agents = sorted(
+                enumerate(agents),
+                key=lambda item: (
+                    -usage.get(item[1]["name"], (0, 0.0))[0],
+                    -usage.get(item[1]["name"], (0, 0.0))[1],
+                    item[0],
+                ),
+            )
+            agents = [a for _, a in sorted_agents]
+        except Exception:
+            logger.warning("Failed to sort agents by usage; using config order", exc_info=True)
+
     return web.json_response(
         {
             "agents": agents,

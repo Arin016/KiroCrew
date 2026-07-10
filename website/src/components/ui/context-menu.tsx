@@ -57,6 +57,43 @@ const ContextMenuSeparator = React.forwardRef<
 ))
 ContextMenuSeparator.displayName = ContextMenuPrimitive.Separator.displayName
 
+const ContextMenuSubTrigger = React.forwardRef<
+  React.ComponentRef<typeof ContextMenuPrimitive.SubTrigger>,
+  React.ComponentPropsWithoutRef<typeof ContextMenuPrimitive.SubTrigger> & { inset?: boolean }
+>(({ className, inset, children, ...props }, ref) => (
+  <ContextMenuPrimitive.SubTrigger
+    ref={ref}
+    className={cn(
+      'relative flex cursor-pointer select-none items-center gap-2 rounded-md px-3 py-1.5 text-[13px] outline-none transition-colors',
+      'focus:bg-bg-hover data-[state=open]:bg-bg-hover',
+      inset && 'pl-8',
+      className
+    )}
+    {...props}
+  >
+    {children}
+  </ContextMenuPrimitive.SubTrigger>
+))
+ContextMenuSubTrigger.displayName = ContextMenuPrimitive.SubTrigger.displayName
+
+const ContextMenuSubContent = React.forwardRef<
+  React.ComponentRef<typeof ContextMenuPrimitive.SubContent>,
+  React.ComponentPropsWithoutRef<typeof ContextMenuPrimitive.SubContent>
+>(({ className, ...props }, ref) => (
+  <ContextMenuPrimitive.Portal>
+    <ContextMenuPrimitive.SubContent
+      ref={ref}
+      className={cn(
+        'z-[9999] min-w-[8rem] overflow-hidden rounded-lg border border-border bg-bg-elevated p-1 text-text shadow-lg',
+        'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
+        className
+      )}
+      {...props}
+    />
+  </ContextMenuPrimitive.Portal>
+))
+ContextMenuSubContent.displayName = ContextMenuPrimitive.SubContent.displayName
+
 export {
   ContextMenu,
   ContextMenuTrigger,
@@ -66,5 +103,7 @@ export {
   ContextMenuGroup,
   ContextMenuPortal,
   ContextMenuSub,
+  ContextMenuSubTrigger,
+  ContextMenuSubContent,
   ContextMenuRadioGroup,
 }

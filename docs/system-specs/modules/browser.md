@@ -86,6 +86,56 @@ Playwright MCP's `browser_snapshot` returns full accessibility trees (50-100K to
 
 **Source:** `src/kiro_claw/mcp_playwright_proxy.py`
 
+### Live Browse Mirror
+
+The dashboard mirrors the headless `[BROWSE]` Chromium in near-real-time **without
+opening any debug port on the browser**. The headless Chromium runs on the gateway
+host; the only window onto it from a laptop is the dashboard (reachable over the
+reverse SSH tunnel).
+
+**Relay path.** The Playwright proxy already intercepts every
+`browser_take_screenshot` response and re-encodes it to JPEG. It additionally
+re-POSTs that already-captured frame to the gateway's loopback
+`POST /api/browser/frame`, which rebroadcasts it over the existing WS as a
+`browser_frame` event; the `BrowserLiveView` panel renders the latest frame. This
+rides Playwright's existing authenticated, pipe-based control channel — it
+deliberately does **not** add a `--remote-debugging-port`. An earlier revision
+attached to a CDP debug port for smoother frames; that port was an unauthenticated,
+full-control endpoint on an authenticated browser session (a net-new
+local-process-takeover surface), so it was dropped (Mesh-2068).
+
+**Frame validation (`build_frame_payload`).** A pure helper normalizes the POSTed
+body into the `browser_frame` payload so the framing contract is unit-testable:
+- `data` must match the base64 charset (`_B64_RE`) — this structurally excludes
+  `:` (no `://` URL), whitespace, and `<`/`>` (no HTML/script), which is the right
+  boundary control for browser-captured image bytes; no text redaction is applied.
+- `format` must be in the `{jpeg, png, webp}` allowlist; `svg` is deliberately
+  excluded because an SVG data URI can carry executable script (XSS safety).
+- `session_key` is passed through only if it matches a bounded safe charset
+  (`_SESSION_KEY_RE`, ≤128 chars) so the WS payload can't carry arbitrary text.
+
+**Active pump.** Frames from agent screenshots alone are sparse, so the proxy runs
+a background active pump that injects its own idle-gated `browser_take_screenshot`
+into the Playwright subprocess to keep the mirror current between agent shots
+(~1-3 fps). It is single-in-flight (with a timeout so a hung browser can't wedge
+it), demuxes the proxy-namespaced response id (`__mc_pump_` prefix — never
+forwarded to kiro or written to disk), and backs off when there are zero
+subscribers (learned from the frame endpoint's response subscriber count). It is
+disabled in extension mode (the user already sees their own Chrome) and gated on
+recent real browse activity.
+
+**Pump audit.** The proxy is a stdlib-only stdio subprocess and cannot reach
+`sel.py`, so each pump injection is reported to loopback
+`POST /api/browser/pump-audit` and the gateway emits the SEL
+`browser_take_screenshot` tool-invocation audit event on the proxy's behalf,
+keeping proxy-internal tool calls auditable.
+
+**Panel.** `BrowserLiveView` is a resizable, persisted panel and is threaded with
+the resolved session *title* (the raw `session_key` is only a client-side lookup
+key against the dashboard's own slot store).
+
+**Source:** `src/kiro_claw/browser/screencast.py`, `src/kiro_claw/mcp_playwright_proxy.py`
+
 **Fallback tools** in kiroclaw-core (for manual use if needed):
 
 | Tool | Purpose |
@@ -104,6 +154,8 @@ Playwright MCP's `browser_snapshot` returns full accessibility trees (50-100K to
   - `PUT /api/browser/config` — save extension mode + token (patches `mcp.json`, restarts sessions)
   - `POST /api/browser-auth-retry` — retry auth (calls `ensure()`)
   - `POST /api/browser-event` — broadcast browser activity events via WebSocket
+  - `POST /api/browser/frame` — ingest a browse screenshot, rebroadcast as `browser_frame` WS event, return live subscriber count (loopback-only, in `internal_paths`)
+  - `POST /api/browser/pump-audit` — SEL audit for proxy active-pump screenshot injections (loopback-only, in `internal_paths`)
 
 ### Security
 

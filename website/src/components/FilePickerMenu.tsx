@@ -49,19 +49,27 @@ export default function FilePickerMenu({ query, anchorRef, open, onSelect, onClo
   const onFileOpenRef = useRef(onFileOpen)
   onFileOpenRef.current = onFileOpen
 
-  const choose = useCallback((idx: number) => {
-    const r = resultsRef.current
-    const f = r[idx >= r.length ? 0 : idx]
-    if (f) onSelect({ path: f.path, relativePath: makeRelative(f.path, rootRef.current) })
-  }, [onSelect])
-
-  // Cmd/Ctrl+Enter opens the file in the viewer instead of inserting it.
-  // Returns true to signal the hook to skip the default choose.
-  const altEnter = useCallback((idx: number): boolean => {
+  // Open the highlighted file in the viewer (the eye/preview action) instead of
+  // inserting an @-mention. Shared by the Cmd/Ctrl+Enter path (via onChoose's
+  // withModifier flag) and the Alt+Enter path (via onAltEnter). Returns true so
+  // the hook knows the default choose was superseded.
+  const openInViewer = useCallback((idx: number): boolean => {
     const f = resultsRef.current[idx]
     if (f && onFileOpenRef.current) { onFileOpenRef.current(f.path); onClose(); return true }
     return false
   }, [onClose])
+
+  // Enter inserts the @-mention. Cmd/Ctrl+Enter preserves the pre-Mesh-2151
+  // binding — open in the viewer — now that the shared useListKeyboardNav hook
+  // threads the modifier state through onChoose's 2nd arg (withModifier).
+  const choose = useCallback((idx: number, withModifier = false) => {
+    const r = resultsRef.current
+    const eff = idx >= r.length ? 0 : idx
+    const f = r[eff]
+    if (!f) return
+    if (withModifier && openInViewer(eff)) return
+    onSelect({ path: f.path, relativePath: makeRelative(f.path, rootRef.current) })
+  }, [onSelect, openInViewer])
 
   // Shared Arrow/Enter/Tab/Escape + scroll-into-view (see useListKeyboardNav).
   const { selected, setSelected, itemRefs } = useListKeyboardNav({
@@ -69,7 +77,7 @@ export default function FilePickerMenu({ query, anchorRef, open, onSelect, onClo
     count: results.length,
     onChoose: choose,
     onClose,
-    onAltEnter: altEnter,
+    onAltEnter: openInViewer,
   })
 
   useEffect(() => {

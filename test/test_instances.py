@@ -163,6 +163,41 @@ class TestPortAllocator:
         finally:
             s.close()
 
+    def test_is_port_free_detects_live_listener_even_with_reuseaddr(self):
+        """A genuinely LISTENing port is still reported in-use.
+
+        Regression guard for the disconnect->reconnect fix: `_is_port_free`
+        now sets SO_REUSEADDR (so a just-freed port lingering in TIME_WAIT is
+        not a false positive, matching ssh's own `-L` listener bind). This must
+        NOT relax detection of a real, live listener — a true two-instance port
+        collision still has to be caught. SO_REUSEADDR exempts TIME_WAIT only,
+        never an active LISTEN, so the probe (also SO_REUSEADDR) must still fail
+        to bind against a LISTENing socket that itself set SO_REUSEADDR.
+        """
+        from kiro_claw.instances.port_allocator import _is_port_free
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # The occupier sets SO_REUSEADDR too (as ssh does); the probe must still
+        # be denied while this socket is actively listening.
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+        try:
+            assert _is_port_free(port) is False
+        finally:
+            s.close()
+
+    def test_is_port_free_true_for_unbound_port(self):
+        from kiro_claw.instances.port_allocator import _is_port_free
+
+        # Grab an OS-assigned port, then release it — it is now free to bind.
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        assert _is_port_free(port) is True
+
 
 # ── token mint ──────────────────────────────────────────────────────────────
 

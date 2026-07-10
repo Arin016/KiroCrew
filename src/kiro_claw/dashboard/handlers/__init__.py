@@ -48,7 +48,6 @@ from kiro_claw.dashboard.handlers._shared import (  # noqa: E402, F401
     _get_memory,
     _get_skills,
     _is_restricted_session,
-    _list_aim_skills,
     _resolve_aim_skill_path,
 )
 
@@ -451,6 +450,8 @@ from kiro_claw.dashboard.handlers.core import (  # noqa: E402, F401
     api_stt_config,
     api_stt_install,
     api_stt_transcribe,
+    api_theme_boot,
+    api_theme_config,
     api_token_local,
     index,
     logo,

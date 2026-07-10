@@ -32,6 +32,7 @@ from kiro_claw.dashboard.state import (
     _rewrite_notifications,
 )
 from kiro_claw.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
+from kiro_claw.slack.format import build_options_blocks, extract_options
 from kiro_claw.subagent_persistence import _agent_dir, read_state
 from kiro_claw.validation import (
     _EMOJI_NAME_RE,
@@ -126,6 +127,61 @@ def _redact(text: str) -> str:
     return text
 
 
+_SPAWN_STATUS_MAX_LINES = 2000  # cap lines returned per spawn_status page
+_SPAWN_STATUS_MAX_GREP_LEN = 500
+
+
+def _spawn_result_view(text: str, offset: int, limit: int, grep: str) -> tuple[str, dict]:
+    """Apply optional grep (regex line filter) then offset/limit line slicing.
+
+    Line-oriented, like reading code: *offset* is a 0-based start line and *limit*
+    caps returned lines (0 = to end, hard-capped at ``_SPAWN_STATUS_MAX_LINES``).
+    When *grep* is set, lines are filtered by a case-insensitive regex first, then
+    offset/limit apply to the matches. Returns ``(view_text, meta)``; on a bad
+    regex ``meta['grep_error']`` is set and *view_text* is empty. Pure CPU — run
+    via ``asyncio.to_thread`` so a pathological regex never stalls the loop.
+    """
+    lines = text.splitlines()
+    total = len(lines)
+    if grep:
+        try:
+            pat = re.compile(grep[:_SPAWN_STATUS_MAX_GREP_LEN], re.IGNORECASE)
+        except re.error as exc:
+            return "", {"grep_error": f"invalid grep regex: {exc}"}
+        lines = [ln for ln in lines if pat.search(ln)]
+    meta: dict = {"total_lines": total}
+    if grep:
+        meta["matched_lines"] = len(lines)
+    start = min(max(0, offset), len(lines))
+    span = _SPAWN_STATUS_MAX_LINES if limit <= 0 else min(limit, _SPAWN_STATUS_MAX_LINES)
+    end = min(len(lines), start + span)
+    meta["offset"] = start
+    meta["returned_lines"] = end - start
+    meta["has_more"] = end < len(lines)
+    return "\n".join(lines[start:end]), meta
+
+
+async def _apply_result_view(request: web.Request, text: str) -> tuple[str, dict]:
+    """Read offset/limit/grep query params and apply :func:`_spawn_result_view`.
+
+    Returns ``(text, {})`` unchanged when no paging/filter params are present, so
+    the default ``spawn_status`` contract (full transcript) is preserved. Only a
+    paged/filtered request pays the split+regex cost, offloaded to a thread.
+    """
+    def _q_int(name: str) -> int:
+        try:
+            return max(0, int(request.query.get(name, 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    offset = _q_int("offset")
+    limit = _q_int("limit")
+    grep = (request.query.get("grep") or "").strip()[:_SPAWN_STATUS_MAX_GREP_LEN]
+    if not (grep or offset > 0 or limit > 0):
+        return text, {}
+    return await asyncio.to_thread(_spawn_result_view, text, offset, limit, grep)
+
+
 async def api_spawn_status(request: web.Request) -> web.Response:
     """GET /api/spawn/{id} — poll subagent status."""
     state: DashboardState = request.app["state"]
@@ -155,7 +211,10 @@ async def api_spawn_status(request: web.Request) -> web.Response:
                         pass
                 # _redact() defined at line 82 of this file; calls both
                 # redact_exfiltration_urls() and redact_credentials() per security guidelines.
-                disk_data["result"] = _redact(result) if result else "_No result._"
+                view, view_meta = await _apply_result_view(request, result)
+                if view_meta:
+                    disk_data["result_meta"] = view_meta
+                disk_data["result"] = _redact(view) if view else "_No result._"
                 # Check for tombstone
                 tombstone_path = _agent_dir(agent_id) / "tombstone.json"
                 if tombstone_path.exists() and not is_sensitive_path(str(tombstone_path)):
@@ -185,7 +244,10 @@ async def api_spawn_status(request: web.Request) -> web.Response:
                 )
             except OSError:
                 pass
-        data["result"] = _redact(result)
+        view, view_meta = await _apply_result_view(request, result)
+        data["result"] = _redact(view)
+        if view_meta:
+            data["result_meta"] = view_meta
         data["error"] = _redact(info.error) if info.error else ""
     else:
         data["turns"] = info.turns
@@ -459,6 +521,15 @@ async def api_send_message(request: web.Request) -> web.Response:
     if blocks:
         blocks = _sanitize_blocks(blocks, redact_exfiltration_urls, redact_credentials)
 
+    # Mesh-2603: render [OPTIONS: ...] tags as interactive buttons on the
+    # plain-text path (when the caller did not supply explicit blocks — those
+    # own their own layout). Strip the tag from the text used for both the
+    # dashboard notification and the Slack post; an actions block is appended
+    # after the message when options are present.
+    options: list[str] = []
+    if not blocks:
+        text, options = extract_options(text)
+
     # --- Authorization gates (before any side effects) ---
     if target_channel and not is_tracked_channel(target_channel):
         _sel().log_tool_invocation(
@@ -653,6 +724,17 @@ async def api_send_message(request: web.Request) -> web.Response:
                                 unfurl_media=unfurl_media,
                                 reply_broadcast=reply_broadcast,
                             )
+                            if options:
+                                try:
+                                    await state.slack_client.post_blocks(
+                                        channel, build_options_blocks(options), text,
+                                        thread_ts=thread_ts,
+                                    )
+                                except Exception:
+                                    logger.debug(
+                                        "send_message: failed to post OPTIONS blocks",
+                                        exc_info=True,
+                                    )
                         sent_slack = True
                 except Exception as exc:
                     slack_attempted = True

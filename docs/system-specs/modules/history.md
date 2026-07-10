@@ -96,6 +96,18 @@ Non-blocking via `asyncio.create_task`. Requires `SessionManager` to be passed
 at construction time; consolidation is silently skipped if no session manager
 is available.
 
+**Loop safety:** the task body runs on the event loop thread, so any blocking
+work inside it must be offloaded. `_write_structured_memory` embeds each
+semantic/episodic item via a blocking `urllib` call to Ollama, so it is invoked
+through `asyncio.to_thread()` — running it inline would freeze the gateway loop
+(heartbeats, Slack, dashboard) whenever the embedding endpoint is slow or hung,
+and can trip the faulthandler hard-kill. Dashboard memory handlers that write
+semantic entries or embed a query (`set_semantic`, `_try_embed`) offload the
+same way. Because these writes now run on worker threads concurrently with
+loop-thread reads (`search_episodic` during context assembly), `VectorMemoryStore`
+serializes its sqlite + FAISS critical sections with `_db_lock` (a `RLock`); the
+lock is never held across the blocking embed itself.
+
 ## Stop Events
 
 Stop events are persisted to JSONL as `system` messages. The structured

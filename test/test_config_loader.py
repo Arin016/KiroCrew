@@ -2702,3 +2702,20 @@ class TestMessagingConfigValidation:
         assert cfg.messaging.queue_mode == "queue"
         assert cfg.messaging.idle_reset_minutes == 30
         assert cfg.messaging.daily_reset_hour == 4
+
+
+def test_heartbeat_default_deliver_default_is_slack():
+    """Absent config -> backward-compatible 'slack' default."""
+    cfg = _load_from_dict({})
+    assert cfg.heartbeat.default_deliver == "slack"
+
+
+def test_heartbeat_default_deliver_accepts_dashboard():
+    cfg = _load_from_dict({"heartbeat": {"default_deliver": "dashboard"}})
+    assert cfg.heartbeat.default_deliver == "dashboard"
+
+
+def test_heartbeat_default_deliver_invalid_falls_back_to_slack():
+    """Any value outside {slack, dashboard} normalizes to the safe default."""
+    cfg = _load_from_dict({"heartbeat": {"default_deliver": "carrier-pigeon"}})
+    assert cfg.heartbeat.default_deliver == "slack"

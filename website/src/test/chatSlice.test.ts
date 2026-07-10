@@ -1457,3 +1457,32 @@ describe('queue edit reducers', () => {
     expect(state.messages.filter(m => m.role === 'queued').map(m => m.content)).toEqual(['second'])
   })
 })
+
+describe('creatingSlot — New Chat pending flag', () => {
+  const initial = reducer(undefined, { type: '@@INIT' })
+  const pending = { type: 'chat/createSlot/pending', meta: { arg: undefined, requestId: 'r1', requestStatus: 'pending' as const } }
+  const rejected = { type: 'chat/createSlot/rejected', meta: { arg: undefined, requestId: 'r1', requestStatus: 'rejected' as const }, error: { message: 'boom' } }
+  const fulfilled = { type: 'chat/createSlot/fulfilled', meta: { arg: undefined, requestId: 'r1', requestStatus: 'fulfilled' as const }, payload: { key: 'new-slot' } }
+
+  it('defaults to false', () => {
+    expect(initial.creatingSlot).toBe(false)
+  })
+
+  it('createSlot.pending sets creatingSlot true', () => {
+    expect(reducer(initial, pending).creatingSlot).toBe(true)
+  })
+
+  it('createSlot.fulfilled clears creatingSlot', () => {
+    let state = reducer(initial, pending)
+    expect(state.creatingSlot).toBe(true)
+    state = reducer(state, fulfilled)
+    expect(state.creatingSlot).toBe(false)
+  })
+
+  it('createSlot.rejected clears creatingSlot (button never stuck)', () => {
+    let state = reducer(initial, pending)
+    expect(state.creatingSlot).toBe(true)
+    state = reducer(state, rejected)
+    expect(state.creatingSlot).toBe(false)
+  })
+})

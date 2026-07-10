@@ -47,9 +47,11 @@ class TestModelSupportsEffort:
             "claude-sonnet-4.6",
             "global.anthropic.claude-opus-4-8[1m]",
             "anthropic.claude-sonnet-4-20250514-v1:0",
+            "claude-fable-5",
+            "global.anthropic.claude-fable-5[1m]",
         ],
     )
-    def test_opus_sonnet_supported(self, model: str):
+    def test_opus_sonnet_fable_supported(self, model: str):
         assert model_supports_effort(model)
 
     @pytest.mark.parametrize(

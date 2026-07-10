@@ -784,6 +784,40 @@ class TestLoadSteeringResources:
 
         assert "SECRET" not in result
 
+    def test_steering_injected_for_cc_but_not_acp(self, tmp_path):
+        """kiro-cli loads an agent's ``resources`` natively when spawned with
+        ``--agent`` (acp/client.py ``_spawn``), so build_session_context must
+        NOT re-inject steering on the ACP backend — that would duplicate what
+        kiro already loaded. The CC backend (claude-agent-acp) does not read
+        agent ``resources``, so it still needs the explicit load.
+        """
+        import json
+
+        steering_dir = tmp_path / ".kiro" / "steering"
+        steering_dir.mkdir(parents=True)
+        (steering_dir / "rules.md").write_text("# My Rules\nSTEERING_MARKER_XYZ")
+        agents_dir = tmp_path / ".kiro" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "kiroclaw.json").write_text(
+            json.dumps({"resources": ["file://.kiro/steering/**/*.md"]})
+        )
+
+        builder = ContextBuilder(
+            memory=MemoryStore(workspace=tmp_path / "ws"),
+            skills=SkillsLoader(skills_path=tmp_path / "skills", install_builtins=False),
+            lessons=LessonStore(base_dir=tmp_path),
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            cc_ctx = builder.build_session_context(provider_type="claude_code")
+            acp_ctx = builder.build_session_context(provider_type="acp")
+
+        assert "STEERING_MARKER_XYZ" in cc_ctx, "CC backend must get explicit steering load"
+        assert "STEERING_MARKER_XYZ" not in acp_ctx, (
+            "ACP backend must NOT re-inject steering — kiro-cli loads agent "
+            "resources natively via --agent"
+        )
+
 
 class TestLessonsCap:
     def test_over_cap_injects_error_block(self, tmp_path):

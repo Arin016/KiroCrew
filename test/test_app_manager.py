@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 
 import pytest
 from hypothesis import given, settings
@@ -179,6 +180,159 @@ class TestUninstall:
         assert (app_home / "apps" / "test-app" / "data" / "cache.json").is_file()
         # App files removed
         assert not (app_home / "apps" / "test-app" / APP_MANIFEST_FILENAME).exists()
+
+    def test_install_preserves_existing_data(self, tmp_path, app_home):
+        """Reinstall after uninstall --keep-data must preserve user data."""
+        src = _make_app_source(tmp_path)
+        install_app(src)
+        # Write user data
+        data_dir = app_home / "apps" / "test-app" / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "priorities.md").write_text("- item1\n- item2\n")
+        (data_dir / "state").mkdir(exist_ok=True)
+        (data_dir / "state" / "oncall.json").write_text('{"oncall": true}')
+
+        # Uninstall with keep_data
+        result = uninstall_app("test-app", keep_data=True)
+        assert result.ok
+        assert (data_dir / "priorities.md").is_file()
+
+        # Reinstall from same source (source has empty data/)
+        src2 = _make_app_source(tmp_path / "src2")
+        result = install_app(src2)
+        assert result.ok
+
+        # User data must survive
+        assert (data_dir / "priorities.md").read_text() == "- item1\n- item2\n"
+        assert (data_dir / "state" / "oncall.json").read_text() == '{"oncall": true}'
+
+    def test_install_rollback_restores_data_on_copy_failure(self, tmp_path, app_home, monkeypatch):
+        """If copytree fails after data/ was preserved, rollback must restore data/."""
+        src = _make_app_source(tmp_path)
+        install_app(src)
+        # Write user data
+        data_dir = app_home / "apps" / "test-app" / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "config.yaml").write_text("oncall:\n  rotation: my-rotation\n")
+        (data_dir / "state").mkdir(exist_ok=True)
+        (data_dir / "state" / "oncall.json").write_text('{"oncall": true}')
+
+        # Uninstall with keep_data
+        uninstall_app("test-app", keep_data=True)
+        assert (data_dir / "config.yaml").is_file()
+
+        # Patch copytree to fail AFTER rmtree succeeds (simulates partial install failure)
+        def failing_copytree(*args, **kwargs):
+            raise OSError("Simulated disk full error")
+
+        src2 = _make_app_source(tmp_path / "src2")
+        monkeypatch.setattr("shutil.copytree", failing_copytree)
+        result = install_app(src2)
+
+        # Install must fail
+        assert not result.ok
+        assert "failed to copy app files" in result.error
+
+        # Rollback must have restored data/
+        assert data_dir.is_dir(), "data/ directory must be restored after rollback"
+        assert (data_dir / "config.yaml").read_text() == "oncall:\n  rotation: my-rotation\n"
+        assert (data_dir / "state" / "oncall.json").read_text() == '{"oncall": true}'
+
+    def test_install_rejects_unsafe_app_name(self, tmp_path, app_home, monkeypatch):
+        """Path-traversal name must be rejected with SEL audit event."""
+        # Use a valid kebab-case name that passes manifest validation,
+        # but monkeypatch _check_path_safety to simulate a traversal detection.
+        src = _make_app_source(tmp_path, name="evil-app")
+        sel_calls = []
+        monkeypatch.setattr(
+            "kiro_claw.apps.manager.sel",
+            lambda: type("FakeSel", (), {
+                "log_api_access": lambda self, **kw: sel_calls.append(kw)
+            })(),
+        )
+        monkeypatch.setattr(
+            "kiro_claw.apps.manager._check_path_safety",
+            lambda name: False,
+        )
+        result = install_app(src)
+        assert not result.ok
+        assert "unsafe app name" in result.error
+        # Verify SEL rejection event was emitted
+        assert len(sel_calls) == 1
+        assert sel_calls[0]["outcome"] == "rejected"
+        assert sel_calls[0]["operation"] == "path_safety_check"
+        # Verify nothing was written to disk
+        assert not (app_home / "apps" / "evil-app" / APP_MANIFEST_FILENAME).exists()
+
+    def test_install_reclaims_stale_tmp_when_data_absent(self, tmp_path, app_home):
+        """Stale .data-tmp from a crashed uninstall must be reclaimed on reinstall."""
+        src = _make_app_source(tmp_path)
+        install_app(src)
+        dest = app_home / "apps" / "test-app"
+        data_dir = dest / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "myfile.md").write_text("precious data\n")
+
+        # Simulate crashed uninstall: data moved to .data-tmp, app dir removed
+        stale_tmp = dest.parent / ".test-app-data-tmp"
+        shutil.move(str(data_dir), str(stale_tmp))
+        shutil.rmtree(str(dest))
+        assert stale_tmp.is_dir()
+        assert not dest.exists()
+
+        # Reinstall — must reclaim data from stale tmp
+        src2 = _make_app_source(tmp_path / "src2")
+        result = install_app(src2)
+        assert result.ok
+        assert (data_dir / "myfile.md").read_text() == "precious data\n"
+        assert not stale_tmp.exists()
+
+    def test_install_stale_tmp_removed_when_current_data_exists(self, tmp_path, app_home):
+        """If both stale .data-tmp and current data/ exist, current wins."""
+        src = _make_app_source(tmp_path)
+        install_app(src)
+        dest = app_home / "apps" / "test-app"
+        data_dir = dest / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "current.md").write_text("current data\n")
+
+        # Uninstall with keep_data — data/ is preserved in dest
+        uninstall_app("test-app", keep_data=True)
+        assert (data_dir / "current.md").is_file()
+
+        # Now simulate a leftover stale tmp (as if a PREVIOUS crashed install
+        # left it behind after uninstall restored data/)
+        stale_tmp = dest.parent / ".test-app-data-tmp"
+        stale_tmp.mkdir(parents=True, exist_ok=True)
+        (stale_tmp / "old.md").write_text("old stale data\n")
+
+        # Reinstall — current data/ must win; stale tmp must be cleaned
+        src2 = _make_app_source(tmp_path / "src2")
+        result = install_app(src2)
+        assert result.ok
+
+        # Current data must survive; stale tmp must be gone
+        assert (data_dir / "current.md").read_text() == "current data\n"
+        assert not (data_dir / "old.md").exists()
+        assert not stale_tmp.exists()
+
+    def test_install_emits_success_sel_event(self, tmp_path, app_home, monkeypatch):
+        """Successful install must emit SEL audit event."""
+        sel_calls = []
+        monkeypatch.setattr(
+            "kiro_claw.apps.manager.sel",
+            lambda: type("FakeSel", (), {
+                "log_api_access": lambda self, **kw: sel_calls.append(kw)
+            })(),
+        )
+        src = _make_app_source(tmp_path)
+        result = install_app(src)
+        assert result.ok
+        # Must have emitted a success event
+        success_events = [c for c in sel_calls if c.get("outcome") == "success"]
+        assert len(success_events) == 1
+        assert success_events[0]["operation"] == "install"
+        assert "test-app" in success_events[0]["resources"]
 
 
 # ---------------------------------------------------------------------------

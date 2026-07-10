@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { screen, fireEvent } from '@testing-library/react'
 import { renderWithProviders } from './helpers'
 import ChatInput from '../components/ChatInput'
+import { SlotProvider } from '../providers/SlotContext'
 
 const defaultProps = {
   value: '',
@@ -770,80 +771,185 @@ describe('ChatInput', () => {
       else (document as any).execCommand = originalExec // eslint-disable-line @typescript-eslint/no-explicit-any
     })
 
-    it('drops optimize result when value changed mid-flight (e.g. user switched chat tabs)', async () => {
+    // A session switch is a change to the slot the ChatInput binds to
+    // (useSlotId), which the SlotProvider supplies. Wrapping ChatInput in a
+    // provider and re-rendering with a new slotId reproduces exactly what
+    // ChatPage does on session switch — it flips the value Stage 1/Stage 2 key
+    // on (`slotId`), not merely the `value` prop. `value` also changes because
+    // ChatPage swaps in the target session's draft.
+    const renderInSlot = (
+      slotId: string,
+      props: Record<string, unknown>,
+    ) =>
+      renderWithProviders(
+        <SlotProvider slotId={slotId}>
+          <ChatInput {...defaultProps} {...props} />
+        </SlotProvider>,
+      )
+    const rerenderInSlot = (
+      rerender: (ui: React.ReactElement) => void,
+      slotId: string,
+      props: Record<string, unknown>,
+    ) =>
+      rerender(
+        <SlotProvider slotId={slotId}>
+          <ChatInput {...defaultProps} {...props} />
+        </SlotProvider>,
+      )
+
+    it('routes optimize result to the originating session when the user switched away', async () => {
+      // The originating session (slot A) starts an optimize, then the user
+      // navigates to slot B before it settles. The result must NOT be written
+      // into the on-screen textarea (that would corrupt slot B's draft), and
+      // must NOT be silently dropped — it goes to the parent via
+      // onOptimizeResult tagged with slot A so ChatPage can route it into A's
+      // draft.
       let resolveFetch: ((value: Response) => void) | null = null
       const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(() =>
         new Promise<Response>(res => { resolveFetch = res })
       )
-      // Spy on document.execCommand — setTextUndoable writes the optimized
-      // text via execCommand('insertText', ...). If the guard fires, this is
-      // never called for the optimized text. Asserting on onChange would be
-      // vacuous because jsdom treats execCommand as a no-op so onChange
-      // wouldn't fire either way. Removing the guard from ChatInput's
-      // onSuccess makes this assertion fail (verified locally), so the test
-      // exercises the guard rather than passing trivially.
+      // execCommand is the in-place write path; it must never fire for the
+      // cross-session case (that would write into the on-screen session).
       const execSpy = vi.spyOn(document, 'execCommand').mockReturnValue(true)
       try {
         const onChange = vi.fn()
-        const { rerender } = renderWithProviders(
-          <ChatInput {...defaultProps} value="fix bug" onChange={onChange} />,
-        )
+        const onOptimizeResult = vi.fn()
+        const { rerender } = renderInSlot('slot-A', { value: 'fix bug', onChange, onOptimizeResult })
         fireEvent.click(screen.getByRole('button', { name: 'Optimize prompt' }))
-        // Let the mutation start so variables.prompt is captured at "fix bug".
+        // Let the mutation start so variables.slotId is captured as 'slot-A'.
         await new Promise(r => setTimeout(r, 10))
-        // Simulate the user switching slots: parent re-renders with a different
-        // slot's draft. This is the exact pattern ChatPage uses on slot change.
-        rerender(<ChatInput {...defaultProps} value="review CR-123" onChange={onChange} />)
+        // Switch to slot B (new slotId + that session's draft as value).
+        rerenderInSlot(rerender, 'slot-B', { value: 'review CR-123', onChange, onOptimizeResult })
         await new Promise(r => setTimeout(r, 10))
         execSpy.mockClear()
         resolveFetch!(new Response(
           JSON.stringify({ optimized: 'OPTIMIZED FIX BUG WITH MORE DETAIL', changed: true }),
           { status: 200, headers: { 'Content-Type': 'application/json' } },
         ))
-        // Wait long enough for any deferred onSuccess to settle.
         await new Promise(r => setTimeout(r, 50))
-        // The guard must short-circuit BEFORE setTextUndoable runs, so
-        // execCommand('insertText', ..., '<optimized text>') must never fire.
+        // No in-place write on the now-displayed slot B.
         const insertCalls = execSpy.mock.calls.filter(c => c[0] === 'insertText')
         expect(insertCalls).toEqual([])
+        // Result handed back to the parent, tagged with the ORIGINATING slot.
+        expect(onOptimizeResult).toHaveBeenCalledWith('slot-A', 'OPTIMIZED FIX BUG WITH MORE DETAIL')
       } finally {
         execSpy.mockRestore()
         fetchSpy.mockRestore()
       }
     })
 
-    it('drops optimize fallback when fetch fails after a slot switch (onError path)', async () => {
-      // Same hazard as the success path: when the optimizer fetch fails after
-      // the user has switched slots, onError must NOT call setTextUndoable on
-      // the (now different) textarea. Without the guard, the fallback
-      // setTextUndoable(valueRef.current.trim()) re-issues a focus/select on
-      // the new slot's textarea — visible UX glitch even though the inserted
-      // text matches what's already there.
+    it('routes original prompt to the originating session when fetch fails after a switch (onError path)', async () => {
+      // Same cross-session hazard on the failure path: onError must not touch
+      // the on-screen textarea, and must hand the ORIGINAL prompt back to the
+      // originating session so the user's text isn't lost.
       let rejectFetch: ((reason?: Error) => void) | null = null
       const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(() =>
         new Promise<Response>((_res, rej) => { rejectFetch = rej })
       )
       const execSpy = vi.spyOn(document, 'execCommand').mockReturnValue(true)
-      // Suppress the console.warn the onError path emits so the test output
-      // stays clean.
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => { })
       try {
         const onChange = vi.fn()
-        const { rerender } = renderWithProviders(
-          <ChatInput {...defaultProps} value="fix bug" onChange={onChange} />,
-        )
+        const onOptimizeResult = vi.fn()
+        const { rerender } = renderInSlot('slot-A', { value: 'fix bug', onChange, onOptimizeResult })
         fireEvent.click(screen.getByRole('button', { name: 'Optimize prompt' }))
         await new Promise(r => setTimeout(r, 10))
-        rerender(<ChatInput {...defaultProps} value="review CR-123" onChange={onChange} />)
+        rerenderInSlot(rerender, 'slot-B', { value: 'review CR-123', onChange, onOptimizeResult })
         await new Promise(r => setTimeout(r, 10))
         execSpy.mockClear()
         rejectFetch!(new Error('network'))
         await new Promise(r => setTimeout(r, 50))
         const insertCalls = execSpy.mock.calls.filter(c => c[0] === 'insertText')
         expect(insertCalls).toEqual([])
+        expect(onOptimizeResult).toHaveBeenCalledWith('slot-A', 'fix bug')
       } finally {
         warnSpy.mockRestore()
         execSpy.mockRestore()
+        fetchSpy.mockRestore()
+      }
+    })
+
+    it('writes the result in place (not via onOptimizeResult) when the originating session is still on screen', async () => {
+      // No switch: the optimize completes on the same slot it started on. The
+      // result is written in place (execCommand insertText) and onOptimizeResult
+      // is never invoked — the cross-session escape hatch stays dormant.
+      let resolveFetch: ((value: Response) => void) | null = null
+      const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(() =>
+        new Promise<Response>(res => { resolveFetch = res })
+      )
+      const execSpy = vi.spyOn(document, 'execCommand').mockReturnValue(true)
+      try {
+        const onChange = vi.fn()
+        const onOptimizeResult = vi.fn()
+        renderInSlot('slot-A', { value: 'fix bug', onChange, onOptimizeResult })
+        fireEvent.click(screen.getByRole('button', { name: 'Optimize prompt' }))
+        await new Promise(r => setTimeout(r, 10))
+        execSpy.mockClear()
+        resolveFetch!(new Response(
+          JSON.stringify({ optimized: 'OPTIMIZED FIX BUG', changed: true }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ))
+        await new Promise(r => setTimeout(r, 50))
+        const insertCalls = execSpy.mock.calls.filter(c => c[0] === 'insertText')
+        expect(insertCalls.length).toBe(1)
+        expect(insertCalls[0][2]).toBe('OPTIMIZED FIX BUG')
+        expect(onOptimizeResult).not.toHaveBeenCalled()
+      } finally {
+        execSpy.mockRestore()
+        fetchSpy.mockRestore()
+      }
+    })
+
+    it('hides the optimizing overlay after switching to another session, and restores it on return', async () => {
+      // Bug 1: the overlay must be scoped to the originating session. It shows
+      // on slot A while optimizing, disappears when the user navigates to slot
+      // B (even though the request is still in flight), and reappears if they
+      // switch back to A before it settles.
+      const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(() =>
+        new Promise<Response>(() => { /* never resolves — stays pending */ })
+      )
+      try {
+        const onChange = vi.fn()
+        const { rerender } = renderInSlot('slot-A', { value: 'fix bug', onChange })
+        fireEvent.click(screen.getByRole('button', { name: 'Optimize prompt' }))
+        await new Promise(r => setTimeout(r, 10))
+        // Overlay present on the originating session.
+        expect(screen.getByText(/Optimizing prompt/)).toBeInTheDocument()
+        // Switch away → overlay gone even though the request is still pending.
+        rerenderInSlot(rerender, 'slot-B', { value: 'review CR-123', onChange })
+        await new Promise(r => setTimeout(r, 10))
+        expect(screen.queryByText(/Optimizing prompt/)).not.toBeInTheDocument()
+        // Switch back → overlay returns (request still in flight).
+        rerenderInSlot(rerender, 'slot-A', { value: 'fix bug', onChange })
+        await new Promise(r => setTimeout(r, 10))
+        expect(screen.getByText(/Optimizing prompt/)).toBeInTheDocument()
+      } finally {
+        fetchSpy.mockRestore()
+      }
+    })
+
+    it('disables the Optimize button on another session while an optimize is in flight', async () => {
+      // A single mutation backs the instance, so only one optimize runs at a
+      // time. The button must READ as busy (disabled) on the session the user
+      // navigated to, matching the re-entrancy guard — not look clickable then
+      // silently no-op. The originating session shows the spinner; the other
+      // session shows a disabled Sparkles button with an explanatory label.
+      const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(() =>
+        new Promise<Response>(() => { /* never resolves — stays pending */ })
+      )
+      try {
+        const onChange = vi.fn()
+        const { rerender } = renderInSlot('slot-A', { value: 'fix bug', onChange })
+        fireEvent.click(screen.getByRole('button', { name: 'Optimize prompt' }))
+        await new Promise(r => setTimeout(r, 10))
+        // Navigate to slot B — its own draft, its own value, request still pending.
+        rerenderInSlot(rerender, 'slot-B', { value: 'review CR-123', onChange })
+        await new Promise(r => setTimeout(r, 10))
+        // Button is present under a busy-aware label and is disabled.
+        const btn = screen.getByRole('button', { name: /busy optimizing another chat/i })
+        expect(btn).toBeDisabled()
+        expect(btn).toHaveAttribute('title', 'Optimizing another chat — please wait')
+      } finally {
         fetchSpy.mockRestore()
       }
     })

@@ -13,8 +13,11 @@ CLI flags (CR-274772612, merged).
 
 from __future__ import annotations
 
+import http.cookiejar
 import json
 import os
+import sys
+import time
 import urllib.request
 
 import pytest
@@ -39,22 +42,51 @@ def gateway():
         yield handle
 
 
+_openers: dict[int, urllib.request.OpenerDirector] = {}
+
+
+def _opener(gateway) -> urllib.request.OpenerDirector:
+    """Return a cookie-jar opener primed with the durable session cookie.
+
+    The harness hands us a one-time *link* token. Re-presenting it as a
+    ``?token=`` query param on every request works for normal routes, but
+    ``mixed_internal`` routes (/api/crons, /api/lessons, /api/chat/slots,
+    /api/artifacts) validate the query token against the revoked-nonce
+    denylist and 403 once the link nonce is revoked after first use. So mint
+    the durable ``mc_token_<port>`` session cookie once via a normal-path GET
+    (which carries the link token and Set-Cookies the session), then send
+    that cookie on every later request with no ``?token=`` -- the minted
+    session token has a fresh, non-revoked nonce so mixed_internal writes
+    pass.
+    """
+    opener = _openers.get(gateway.port)
+    if opener is None:
+        jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        prime = urllib.request.Request(
+            f"http://localhost:{gateway.port}/api/status?token={gateway.token}"
+        )
+        with opener.open(prime, timeout=10):
+            pass
+        _openers[gateway.port] = opener
+    return opener
+
+
 def _api_get(gateway, path: str) -> dict:
-    """GET an API endpoint with token auth, return parsed JSON."""
-    sep = "&" if "?" in path else "?"
-    url = f"http://localhost:{gateway.port}{path}{sep}token={gateway.token}"
-    req = urllib.request.Request(url)
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    """GET an API endpoint via the session cookie, return parsed JSON."""
+    req = urllib.request.Request(f"http://localhost:{gateway.port}{path}")
+    with _opener(gateway).open(req, timeout=10) as resp:
         return json.loads(resp.read())
 
 
 def _api_post(gateway, path: str, body: dict) -> dict:
-    """POST to an API endpoint with token auth, return parsed JSON."""
-    url = f"http://localhost:{gateway.port}{path}?token={gateway.token}"
+    """POST to an API endpoint via the session cookie, return parsed JSON."""
     data = json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, method="POST")
+    req = urllib.request.Request(
+        f"http://localhost:{gateway.port}{path}", data=data, method="POST"
+    )
     req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with _opener(gateway).open(req, timeout=30) as resp:
         return json.loads(resp.read())
 
 
@@ -103,21 +135,21 @@ def test_memory_workspace_exists(gateway):
 
 
 def _api_delete(gateway, path: str) -> dict:
-    """DELETE an API endpoint with token auth, return parsed JSON."""
-    url = f"http://localhost:{gateway.port}{path}?token={gateway.token}"
-    req = urllib.request.Request(url, method="DELETE")
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    """DELETE an API endpoint via the session cookie, return parsed JSON."""
+    req = urllib.request.Request(f"http://localhost:{gateway.port}{path}", method="DELETE")
+    with _opener(gateway).open(req, timeout=10) as resp:
         return json.loads(resp.read())
 
 
 def _api_post_with_session(gateway, path: str, body: dict, session_key: str = "dashboard:ui") -> dict:
-    """POST with token auth + X-Session-Key header."""
-    url = f"http://localhost:{gateway.port}{path}?token={gateway.token}"
+    """POST via the session cookie + X-Session-Key header."""
     data = json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, method="POST")
+    req = urllib.request.Request(
+        f"http://localhost:{gateway.port}{path}", data=data, method="POST"
+    )
     req.add_header("Content-Type", "application/json")
     req.add_header("X-Session-Key", session_key)
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with _opener(gateway).open(req, timeout=30) as resp:
         return json.loads(resp.read())
 
 
@@ -182,3 +214,113 @@ def test_session_search(gateway):
     """Session search endpoint returns results without errors."""
     data = _api_get(gateway, "/api/sessions/search?q=test")
     assert "sessions" in data
+
+
+# --- Send -> assert (fake ACP backend) ---------------------------------------
+#
+# The control-plane tests above never exercise a model turn. This section
+# stands up a *fake* ACP backend and drives a real chat turn end-to-end
+# (gateway HTTP -> chat runner -> subprocess spawn -> ACP handshake -> streamed
+# agent_message_chunk -> assembled assistant reply), fully offline.
+#
+# Seam: the gateway's provider already defaults to ``acp`` (the minimal fixture
+# omits ``agent.provider``), so pointing ``KIROCLAW_KIRO_BIN`` at the fake makes
+# a turn spawn the fake instead of a real ``kiro-cli`` -- no new provider enum,
+# no config-key override, nothing remotely selectable.
+
+@pytest.fixture()
+def acp_gateway(monkeypatch, tmp_path):
+    """Gateway whose ``kiro-cli`` is the offline fake ACP backend.
+
+    Function-scoped (separate from the module ``gateway``): only these tests
+    want the fake wired in, and it must not leak ``KIROCLAW_KIRO_BIN`` into the
+    control-plane gateway. ``monkeypatch`` restores the env on teardown.
+    """
+    from kiro_claw.testing import fake_acp_backend
+    from kiro_claw.testing.harness import spawn_feature_gateway
+
+    # Launch the *packaged* fake by path under this test's interpreter, so it
+    # runs under a known-present python (no fleet-PATH ``python3`` dependency)
+    # and exercises the shipped module rather than a copy.
+    launcher = tmp_path / "fake_acp_backend"
+    launcher.write_text(
+        f"#!{sys.executable}\n"
+        "import runpy\n"
+        f"runpy.run_path({fake_acp_backend.__file__!r}, run_name='__main__')\n"
+    )
+    launcher.chmod(0o755)
+    monkeypatch.setenv("KIROCLAW_KIRO_BIN", str(launcher))
+
+    with spawn_feature_gateway(fixture="minimal", approval="reads") as handle:
+        # The KIROCLAW_KIRO_BIN seam only fires when the provider resolves to
+        # ``acp`` (the minimal fixture omits ``agent.provider``, which defaults
+        # to acp). Fail fast with a clear message if that assumption ever
+        # breaks, rather than surfacing it 60s later as a "no reply" timeout.
+        cfg = handle.home / "config.json"
+        if cfg.is_file():
+            provider = json.loads(cfg.read_text()).get("agent", {}).get("provider", "acp")
+            assert provider == "acp", (
+                "acp_gateway needs provider=acp for the KIROCLAW_KIRO_BIN seam; "
+                f"minimal fixture resolved provider={provider!r}"
+            )
+        yield handle
+
+
+def _await_assistant_reply(gateway, slot: str, timeout: float = 60.0) -> dict:
+    """Poll a slot's history until a non-empty assistant reply appears."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        detail = _api_get(gateway, f"/api/chat/slots/{slot}")
+        for msg in detail.get("messages", []):
+            if msg.get("role") == "assistant" and str(msg.get("content", "")).strip():
+                return msg
+        time.sleep(0.5)
+    raise AssertionError(f"no non-empty assistant reply within {timeout:.0f}s")
+
+
+def test_chat_send_receives_reply(acp_gateway):
+    """A chat turn against the fake ACP backend yields a non-empty reply.
+
+    This is the send->assert gate: it proves the whole gateway<->subprocess<->
+    ACP path works (spawn, initialize/session-new handshake, prompt, streamed
+    ``agent_message_chunk``, reply assembly + persistence) with a deterministic
+    offline backend -- no Bedrock, no network, no auth.
+    """
+    slot = _api_post(acp_gateway, "/api/chat/slots", {})["key"]
+    assert slot
+
+    # ws=1: POST returns immediately; the reply is delivered over the WebSocket
+    # AND persisted to the slot's message history, which we poll below.
+    _api_post(
+        acp_gateway,
+        "/api/chat?ws=1",
+        {"message": "ping", "slot": slot, "agent": "kiroclaw"},
+    )
+
+    reply = _await_assistant_reply(acp_gateway, slot)
+    # Search the serialized message so the assertion doesn't couple to the
+    # exact content field name after display preparation/redaction.
+    assert "pong from the fake ACP backend" in json.dumps(reply)
+
+
+def test_chat_tool_call_renders(acp_gateway):
+    """A ``[[TOOL]]`` prompt drives the fake's tool-call path end-to-end.
+
+    The fake emits a ``tool_call`` update + a ``tool_call_update`` (no
+    permission) before the reply. Asserting the final reply still arrives
+    proves the gateway processed the tool-call updates without stalling the
+    turn -- the offline tool-card coverage the Playwright E2E builds on. The
+    ``[[PERMISSION]]`` approval-modal path needs a UI to resolve the modal, so
+    it is exercised by Playwright, not this headless suite.
+    """
+    slot = _api_post(acp_gateway, "/api/chat/slots", {})["key"]
+    assert slot
+
+    _api_post(
+        acp_gateway,
+        "/api/chat?ws=1",
+        {"message": "please [[TOOL]] run the demo", "slot": slot, "agent": "kiroclaw"},
+    )
+
+    reply = _await_assistant_reply(acp_gateway, slot)
+    assert "pong from the fake ACP backend" in json.dumps(reply)

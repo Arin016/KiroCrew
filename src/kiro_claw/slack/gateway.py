@@ -60,6 +60,7 @@ from kiro_claw.config.loader import (
 )
 from kiro_claw.constants import CHAT_TURN_TIMEOUT, DATA_WARNING
 from kiro_claw.context import ContextBuilder
+from kiro_claw.context_management import summarize_result
 from kiro_claw.cron import CronJob, CronService, build_cron_session_context
 from kiro_claw.cron_script import resolve_script_path, run_command_sandboxed, run_script_sandboxed
 from kiro_claw.dashboard import start_dashboard
@@ -848,8 +849,14 @@ class GatewayOrchestrator:
             # silently (security-controls deny-by-default). critical=True
             # forces a synchronous SEL write so a filesystem failure reaches
             # this except instead of being swallowed by the async writer.
+            # Offloaded to a worker thread: the critical write does blocking
+            # file IO + a Condition.wait() drain, which must not run on the
+            # gateway event loop (no-blocking-call-on-event-loop). The
+            # exception still propagates through await, preserving fail-closed.
             try:
-                _audit("auto_approved", critical=True, reason="in_heartbeat_safe_tools")
+                await asyncio.to_thread(
+                    _audit, "auto_approved", critical=True, reason="in_heartbeat_safe_tools"
+                )
             except Exception:
                 logger.warning(
                     "SEL audit failed on heartbeat approve path — "
@@ -1123,8 +1130,20 @@ class GatewayOrchestrator:
         # even if a future caller forgets to pre-redact (security-controls).
         text, _ = redact_exfiltration_urls(text)
         text, _ = redact_credentials(text)
+        # Mesh-2603: render [OPTIONS: ...] tags as interactive buttons, matching
+        # the interactive-handler / subagent-completion / dashboard-mirror paths.
+        text, options = extract_options(text)
         for part in split_message(to_slack_mrkdwn(text), limit=_CRON_MSG_LIMIT):
             await self.slack.post_message(channel, part, thread_ts)
+        if options:
+            try:
+                await self.slack.post_blocks(
+                    channel, build_options_blocks(options), "Options", thread_ts,
+                )
+            except Exception:
+                logger.debug(
+                    "Cron %s: failed to post OPTIONS blocks", parent_key, exc_info=True
+                )
         return True
 
     def _cron_job_is_silent(self, parent_key: str) -> bool:
@@ -1825,7 +1844,7 @@ class GatewayOrchestrator:
                         sel().log_tool_invocation(
                             session_key=f"cron:{job.id}",
                             tool_name="cron_failure_alert",
-                            outcome="alerted",
+                            outcome="suppressed" if job.silent else "alerted",
                             downstream_service="slack" if (self.slack and not job.silent) else "none",
                         )
                     except Exception:
@@ -2121,7 +2140,9 @@ class GatewayOrchestrator:
         - ``slack:<chan>:<ts>`` → reply to Slack thread
         - ``slack``            → new Slack DM only (no dashboard notification)
         - ``silent``           → log only
-        - ``""`` (empty)       → Slack DM (if available) + dashboard notification
+        - ``""`` (empty)       → routed per ``heartbeat.default_deliver`` config:
+          ``slack`` (default) = Slack DM (if available) + dashboard notification;
+          ``dashboard`` = dashboard slot + bell only (no Slack)
         """
         result_text, _ = redact_exfiltration_urls(result_text)
         result_text, _ = redact_credentials(result_text)
@@ -2129,6 +2150,18 @@ class GatewayOrchestrator:
         task_summary, _ = redact_credentials(task_summary)
         title, _ = redact_exfiltration_urls(title)
         title, _ = redact_credentials(title)
+
+        # Tagless heartbeat completions route per the configured default
+        # (heartbeat.default_deliver, default "slack" = backward compatible).
+        # "dashboard" -> dashboard slot + bell only (no Slack); "slack" -> leave
+        # empty so the default Slack-DM + dashboard branch below runs. An explicit
+        # per-task <!-- deliver:... --> tag makes deliver non-empty and bypasses this.
+        if not deliver:
+            try:
+                if KiroClawConfig.load().heartbeat.default_deliver == "dashboard":
+                    deliver = "dashboard"
+            except Exception:
+                logger.debug("heartbeat default_deliver lookup failed", exc_info=True)
         body = f"{task_summary}\n\n{result_text}"
 
         # ── silent: log only ──
@@ -2542,33 +2575,17 @@ class GatewayOrchestrator:
                                 )
             except Exception:
                 logger.warning("Orchestration guard failed for %s", info.id, exc_info=True)
-            # Chat mode: pass info.result through (subagent.py already applied
-            # agent.completion_keep + completion_keep_chars).
-            # Orchestrator mode: 200-word summary + disk path so LLM can read full file.
+            # Chat mode: inline info.result (subagent.py already trimmed it to
+            # agent.completion_keep + completion_keep_chars) when it fits. When the
+            # completion copy dropped content (result_truncated) or in orchestrator
+            # mode, emit a summary + result_path pointer so the parent reads the full
+            # transcript on demand (read / grep / spawn_status) instead of re-running
+            # the subagent.
             result_path = info.result_path or ""
             if info.error:
                 detail = f"Error: {info.error}"
-            elif _is_orchestrator and result_path:
-                from kiro_claw.context_management import RESULT_SUMMARY_WORDS
-
-                words = (info.result or "").split()
-                half = RESULT_SUMMARY_WORDS // 2
-                if len(words) <= RESULT_SUMMARY_WORDS:
-                    summary = " ".join(words)
-                else:
-                    summary = (
-                        " ".join(words[:half])
-                        + "\n[...middle truncated...]\n"
-                        + " ".join(words[-half:])
-                    )
-                import os
-
-                size = ""
-                try:
-                    size = f", {os.path.getsize(result_path)} bytes"
-                except OSError:
-                    pass
-                detail = f"Full result: {result_path} ({size.lstrip(', ')})\nSummary (first+last {half} words):\n{summary}\n\nUse the read tool on the path above if the summary is not enough."
+            elif result_path and (info.result_truncated or _is_orchestrator):
+                detail = summarize_result(info.result, result_path)
             else:
                 detail = info.result or "_No response._"
             detail, _ = redact_exfiltration_urls(detail)

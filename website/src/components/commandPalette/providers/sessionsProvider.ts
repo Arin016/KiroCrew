@@ -1,0 +1,173 @@
+import { createElement } from 'react'
+import { MessageSquare } from 'lucide-react'
+import { useMemo } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+
+import { api } from '../../../api/client'
+import { useAppDispatch } from '../../../store'
+import { resumeFromHistory } from '../../../store/chatSlice'
+import { fuzzyMatch, makeScoreThenNameComparator } from '../../../utils/fuzzyMatch'
+import type { Result, ResourceProvider } from '../types'
+
+/**
+ * Sessions provider for the Search Everywhere command palette (Mesh-2151).
+ *
+ * Backs the **Sessions** tab. Wraps `api.sessionsSearch(q)` (the existing
+ * `/api/sessions/search` full-text endpoint) and maps each hit to a
+ * {@link Result}:
+ *  - `onActivate` (Enter) — open / switch to the session
+ *    (`resumeFromHistory`, which re-attaches an existing slot or opens a new
+ *    one optimistically).
+ *  - `onCmdActivate` (⌘Enter) — open the session in a split pane (Session
+ *    Grid). The grid opener is injected by the palette host (it lives in a
+ *    different feature surface and may be absent in some builds); when it is
+ *    not supplied, ⌘Enter is simply unbound for session rows.
+ *
+ * The backend already does the relevance filtering, so the {@link fuzzyMatch}
+ * pass here is only for **client-side highlight indices** on the returned
+ * titles (per the §2 design + AUTOSDE `frontend-security` — highlights render
+ * as React `<mark>` nodes keyed off `indices`, never as HTML strings). Title
+ * matches additionally bias the client-side ordering; non-title (body-only)
+ * matches are kept with a neutral score so backend results are never dropped.
+ */
+
+const PROVIDER_ID = 'sessions'
+const PROVIDER_LABEL = 'Sessions'
+
+/** Cache server responses briefly so retyping the same query is free. */
+const SESSIONS_STALE_MS = 30_000
+
+/**
+ * One session as returned by `/api/sessions/search`. `api.sessionsSearch` is
+ * loosely typed at the client layer, so we pin the fields the provider reads.
+ */
+export interface SessionSearchItem {
+  key: string
+  title?: string
+  created?: string
+  modified?: number
+  agent?: string
+  memory_mode?: 'persistent' | 'incognito' | 'temporary'
+  clean_mode?: boolean
+}
+
+/** Shape of the `/api/sessions/search` response envelope. */
+export interface SessionSearchResponse {
+  sessions?: SessionSearchItem[]
+}
+
+/** A session reference passed to the open / split-pane callbacks. */
+export interface SessionRef {
+  key: string
+  title: string
+}
+
+/**
+ * Injectable dependencies for {@link createSessionsProvider}. Keeping the
+ * concrete provider free of React hooks makes it unit-testable with a plain
+ * mock fetch + open callbacks; the {@link useSessionsProvider} hook wires the
+ * real React-Query + Redux implementations.
+ */
+export interface SessionsProviderDeps {
+  /** Fetch search hits for a query (React-Query-cached in the hook). */
+  fetchSessions: (query: string) => Promise<SessionSearchResponse>
+  /** Open / switch to a session (Enter). */
+  openSession: (ref: SessionRef) => void
+  /** Open a session in a split pane / Session Grid (⌘Enter). Optional. */
+  openInSplit?: (ref: SessionRef) => void
+}
+
+function sessionIcon() {
+  return createElement(MessageSquare, { className: 'lucide-inline' })
+}
+
+/**
+ * Build the Sessions {@link ResourceProvider} from injected dependencies.
+ * Pure (no hooks) so it can be exercised directly in tests.
+ */
+export function createSessionsProvider(deps: SessionsProviderDeps): ResourceProvider {
+  const { fetchSessions, openSession, openInSplit } = deps
+
+  return {
+    id: PROVIDER_ID,
+    label: PROVIDER_LABEL,
+    icon: sessionIcon(),
+    async search(query: string): Promise<Result[]> {
+      const q = query.trim()
+      const data = await fetchSessions(q)
+      const sessions = data?.sessions ?? []
+
+      const results: Result[] = sessions.map((s) => {
+        const title = s.title || s.key
+        // Highlight + client-side rank bias; never used to drop backend hits.
+        const match = fuzzyMatch(q, title)
+        const ref: SessionRef = { key: s.key, title }
+        return {
+          id: `${PROVIDER_ID}:${s.key}`,
+          providerId: PROVIDER_ID,
+          title,
+          subtitle: s.agent || undefined,
+          icon: sessionIcon(),
+          score: match ? match.score : 0,
+          indices: match ? match.indices : [],
+          // Declarative Enter contract (Mesh-2151 §2). The central
+          // `dispatchEnter` in CommandPalette routes on this; for sessions
+          // both Enter and ⌘Enter open/switch to the session (task 23 — no
+          // distinct modifier action). `onActivate`/`onCmdActivate` are kept
+          // as the payload-bound execution path (`open-session` invokes
+          // `onActivate`) and as the legacy/mouse fallback.
+          enter: { kind: 'open-session', sessionKey: s.key, title },
+          onActivate: () => openSession(ref),
+          onCmdActivate: openInSplit ? () => openInSplit(ref) : undefined,
+        }
+      })
+
+      // Title matches first, then deterministic name order. Skip the re-rank on
+      // an empty query so the backend's recency ordering is preserved (Sessions
+      // tab + All-tab recents rely on it — AutoSDE f-fa877fb9).
+      if (q.length > 0) {
+        results.sort(makeScoreThenNameComparator<Result>(r => r.score, r => r.title))
+      }
+      return results
+    },
+  }
+}
+
+/**
+ * React hook that returns a live Sessions provider wired to React-Query and
+ * the chat store.
+ *
+ * Per the AUTOSDE `use-react-query` rule the server fetch goes through
+ * React-Query with the key `['palette', 'sessions', q]` (mirrors
+ * `SkillPickerMenu`'s `['skills']` keying). `queryClient.fetchQuery` is used
+ * rather than `useQuery` because a {@link ResourceProvider}'s `search` is an
+ * imperative call from the palette, not a render-time subscription — the cache
+ * (key + `staleTime`) is still shared with any `useQuery(['palette','sessions',q])`.
+ *
+ * @param opts.openInSplit - Optional Session Grid opener supplied by the
+ *   palette host; when omitted, ⌘Enter is unbound for session rows.
+ */
+export function useSessionsProvider(opts?: {
+  openInSplit?: (ref: SessionRef) => void
+}): ResourceProvider {
+  const dispatch = useAppDispatch()
+  const queryClient = useQueryClient()
+  const openInSplit = opts?.openInSplit
+
+  return useMemo(
+    () =>
+      createSessionsProvider({
+        fetchSessions: (q) =>
+          queryClient.fetchQuery<SessionSearchResponse>({
+            queryKey: ['palette', 'sessions', q],
+            queryFn: () => api.sessionsSearch(q),
+            staleTime: SESSIONS_STALE_MS,
+          }),
+        openSession: (ref) => {
+          dispatch(resumeFromHistory(ref))
+        },
+        openInSplit,
+      }),
+    [dispatch, queryClient, openInSplit],
+  )
+}

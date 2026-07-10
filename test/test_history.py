@@ -472,6 +472,64 @@ class TestListSessionsDedup:
         )
 
 
+class TestAgentUsage:
+    """Tests for ConversationLog.agent_usage() session-frequency aggregation."""
+
+    def test_counts_sessions_per_agent(self, tmp_path):
+        log = ConversationLog(base_dir=tmp_path)
+        log.append("s1", "user", "hi", agent="beta")
+        log.append("s2", "user", "hi", agent="beta")
+        log.append("s3", "user", "hi", agent="alpha")
+
+        usage = log.agent_usage()
+
+        assert usage["beta"][0] == 2
+        assert usage["alpha"][0] == 1
+
+    def test_last_used_is_max_mtime(self, tmp_path):
+        import os
+
+        log = ConversationLog(base_dir=tmp_path)
+        log.append("s_old", "user", "hi", agent="beta")
+        log.append("s_new", "user", "hi", agent="beta")
+        os.utime(tmp_path / "s_old.jsonl", (1000, 1000))
+        os.utime(tmp_path / "s_new.jsonl", (5000, 5000))
+
+        usage = log.agent_usage()
+
+        assert usage["beta"][0] == 2
+        assert usage["beta"][1] == 5000.0
+
+    def test_ignores_agentless_sessions(self, tmp_path):
+        log = ConversationLog(base_dir=tmp_path)
+        log.append("s1", "user", "hi", agent="alpha")
+        log.append("s2", "user", "hi")  # no agent recorded
+
+        usage = log.agent_usage()
+
+        assert "alpha" in usage
+        assert len(usage) == 1
+
+    def test_empty_when_no_sessions(self, tmp_path):
+        log = ConversationLog(base_dir=tmp_path)
+
+        assert log.agent_usage() == {}
+
+    def test_inherits_symlink_skip_and_dedup(self, tmp_path):
+        log = ConversationLog(base_dir=tmp_path)
+        # Symlink alias should not double-count the agent.
+        log.append("original", "user", "hi", agent="alpha")
+        (tmp_path / "alias.jsonl").symlink_to("original.jsonl")
+        # Stacked-prefix canonical duplicate should not double-count either.
+        log.append("dashboard_chat-1-100", "user", "hi", agent="alpha")
+        log.append("dashboard_dashboard_chat-1-100", "user", "hi", agent="alpha")
+
+        usage = log.agent_usage()
+
+        # 1 for "original" + 1 for the deduped stacked-prefix pair = 2.
+        assert usage["alpha"][0] == 2
+
+
 class TestSearchSessions:
     """Tests for content search over session JSONL files."""
 
@@ -1287,6 +1345,56 @@ class TestConsolidationOffset:
 
         asyncio.run(run())
         assert c._prefs_offset["k"] == _CONSOLIDATION_THRESHOLD
+
+
+class TestConsolidationDoesNotBlockLoop:
+    """Structured-memory writes embed synchronously (blocking urllib to Ollama).
+
+    _consolidate runs as an asyncio.create_task on the event loop thread, so it
+    MUST offload _write_structured_memory to a worker thread — otherwise a slow
+    or stalled embedding endpoint freezes the whole gateway loop (heartbeats,
+    Slack, dashboard) and can trip the faulthandler hard-kill. Regression guard
+    for the loop-stall crash traced to embeddings.py urlopen on the loop thread.
+    """
+
+    @pytest.mark.asyncio
+    async def test_structured_memory_write_runs_off_loop_thread(self):
+        import threading
+
+        loop_thread_id = threading.get_ident()
+        write_thread_id: dict[str, int] = {}
+
+        log = MagicMock()
+        log.get_unconsolidated.return_value = ([{"role": "user", "content": "hi"}], 1)
+        log.get_metadata.return_value = {}
+
+        memory = MagicMock()
+        memory.read_preferences.return_value = ""
+        memory.read_projects.return_value = ""
+
+        vector_store = MagicMock()
+        vector_store.get_all_semantic.return_value = []
+
+        c = HistoryConsolidator(
+            log=log, memory=memory, sessions=None,
+            vector_store=vector_store, migrated=True,
+        )
+
+        def _fake_write(result, key):
+            # Simulate the blocking embed call; record the executing thread.
+            write_thread_id["id"] = threading.get_ident()
+
+        with patch.object(c, "_call_llm", new_callable=AsyncMock) as llm, \
+                patch.object(c, "_write_structured_memory", side_effect=_fake_write):
+            llm.return_value = {"episodic": [{"text": "x" * 20}]}
+            await c._consolidate("k", include_history=False)
+
+        assert write_thread_id.get("id") is not None, "_write_structured_memory was not called"
+        assert write_thread_id["id"] != loop_thread_id, (
+            "_write_structured_memory ran on the event loop thread — a blocking "
+            "embed here freezes the gateway loop. It must be offloaded via "
+            "asyncio.to_thread()."
+        )
 
 
 class TestStopEventContextInjection:

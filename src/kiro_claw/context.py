@@ -37,8 +37,14 @@ _memory_stores: dict[str, MemoryStore] = {}
 # Lazy cache of LessonStore instances keyed by workspace name.
 _lesson_stores: dict[str, LessonStore] = {}
 
-# Cap injected context to avoid blowing the context window on first turn
-_MAX_CONTEXT_CHARS = 165_000  # ~55k tokens
+# Per-section budget BASE — the char count each section's percentage cap is
+# taken from. Kept at 165k so memory / lessons / history keep their existing
+# sizes: per the design agreement (Joe Guo), memory's budget is NOT shrunk to
+# make room for skills. Instead skills/steering get their own ADDITIONAL caps
+# and the global ceiling (_MAX_CONTEXT_CHARS, DERIVED below as the sum of all
+# section caps) grows accordingly — so sections never share one pool and
+# truncate each other.
+_CONTEXT_BUDGET_BASE = 165_000  # ~55k tokens
 
 # kiro-cli task_executor slices strings at fixed byte offsets (e.g. 4096).
 # Multi-byte UTF-8 chars straddling the boundary cause a Rust panic:
@@ -69,27 +75,59 @@ _MULTIBYTE_TABLE = str.maketrans(
     }
 )
 
-# Soft per-component caps: each component is individually truncated to its
-# cap, then the assembled context is hard-truncated at _MAX_CONTEXT_CHARS.
-# No single component may exceed 30% of the hard cap to prevent any one
-# category from dominating. The sum of soft caps (~145k) is under the hard
-# cap (165k), so all components can coexist without silent truncation.
-_HISTORY_BUDGET_CHARS = 35_000  # thread history (fallback/truncated)
-# Caps below absorbed the 6_000-char budget that the removed cross-tab block
-# used to consume, distributed proportionally across the six memory components
-# (per Bolin's review feedback on CR-273346177).
-_MEMORY_PREFS_CAP = 4_250  # user preferences (+250)
-_MEMORY_PROJECTS_CAP = 6_400  # active projects (+400)
-_MEMORY_HISTORY_CAP = 26_600  # daily history (multi-tier decay) (+1_600)
-_LESSONS_CAP = 37_250  # learned corrections (high priority) (+2_250)
-_SEMANTIC_MEMORY_CAP = 12_750  # structured key-value facts (vector memory) (+750)
-_EPISODIC_MEMORY_CAP = 12_750  # relevant past conversation fragments (vector memory) (+750)
+
+# Per-section caps as PERCENTAGES of the budget base. Each section is truncated
+# to its OWN cap independently, and the global ceiling (_MAX_CONTEXT_CHARS,
+# below) is their SUM — so a large skills/steering set can never eat into
+# memory/lessons space. Previously every section shared one fixed 165k pool, so
+# the position-based hard truncation silently dropped tail content (lessons,
+# provenance) once skills+steering pushed the total over. Splitting into
+# independent caps (per Joe Guo's design) is what makes usage-ranked top-K
+# meaningful; the cost is a larger startup context (the sum), NOT a smaller
+# memory budget.
+def _budget(fraction: float) -> int:
+    """A section char cap as a percentage of the budget base."""
+    return int(_CONTEXT_BUDGET_BASE * fraction)
+
+
+_HISTORY_BUDGET_CHARS = _budget(0.21)    # thread history (fallback/truncated)  = 21%
+_MEMORY_PREFS_CAP = _budget(0.026)       # user preferences                     = 2.6%
+_MEMORY_PROJECTS_CAP = _budget(0.039)    # active projects                      = 3.9%
+_MEMORY_HISTORY_CAP = _budget(0.16)      # daily history (multi-tier decay)     = 16%
+_LESSONS_CAP = _budget(0.226)            # learned corrections (high priority)  = 22.6%
+_SEMANTIC_MEMORY_CAP = _budget(0.077)    # semantic memory (vector)             = 7.7%
+_EPISODIC_MEMORY_CAP = _budget(0.077)    # episodic memory (vector)             = 7.7%
+_SKILLS_CAP = _budget(0.15)              # skills top-K block (lazy-loaded)     = 15%
+_STEERING_CAP = _budget(0.10)            # steering resource files              = 10%
 _PER_MESSAGE_CAP = 8_000  # truncate individual messages on fallback path
 
 # Strip Mode Identity blocks from injected context so cross-tab or history
 # content from a different mode doesn't override the current prompt's identity.
 _MODE_IDENTITY_RE = re.compile(r"## 🔒 Mode Identity.*?(?=\n## |\Z)", re.DOTALL)
-_COMPRESSED_HISTORY_CAP = 45_000  # budget for LLM-compressed thread summary
+_COMPRESSED_HISTORY_CAP = _budget(0.27)  # budget for LLM-compressed thread summary  = 27%
+
+# Global ceiling = SUM of the independent section caps (Joe Guo's design: the
+# global cap is Σ section caps, not a shared pool the sections fight over). Only
+# the larger history variant (compressed) is counted — one history form is
+# present per build. A small preamble headroom covers the fixed blocks (critical
+# rules, agent/runtime identity, workspace identity, docs pointer, date). With
+# this, the final hard truncation fires only if a section overflows its OWN cap
+# (the per-section caps already prevent that), so sections never truncate each
+# other. Works out to ~1.155 x base ≈ 190k chars (~63k tokens) — a larger
+# startup context, well within a 200k-token model window.
+_PREAMBLE_HEADROOM = _budget(0.03)  # fixed rules/identity/workspace/docs/date  = 3%
+_MAX_CONTEXT_CHARS = (
+    _COMPRESSED_HISTORY_CAP
+    + _MEMORY_PREFS_CAP
+    + _MEMORY_PROJECTS_CAP
+    + _MEMORY_HISTORY_CAP
+    + _SEMANTIC_MEMORY_CAP
+    + _EPISODIC_MEMORY_CAP
+    + _LESSONS_CAP
+    + _SKILLS_CAP
+    + _STEERING_CAP
+    + _PREAMBLE_HEADROOM
+)
 
 
 _STOP_EVENT_CAP = 3  # max recent stop events to inject into LLM context
@@ -717,23 +755,27 @@ class ContextBuilder:
         ``compress_thread_history()`` before calling this method.
 
         All providers — including ``provider_type="claude_code"`` — receive the
-        same injected context (critical rules, steering files, thread history,
-        memory, skills, lessons). This keeps Claude Code at parity with kiro so
-        dashboard/Slack UI contracts (diff blocks, OPTIONS buttons, file links)
-        and prior conversation context behave identically across providers.
+        same injected context (critical rules, thread history, memory, skills,
+        lessons); steering files are the one exception (see below). This keeps
+        Claude Code at parity with kiro so dashboard/Slack UI contracts (diff
+        blocks, OPTIONS buttons, file links) and prior conversation context
+        behave identically across providers.
 
-        *provider_type* no longer branches the assembled context (the prior
-        ``is_cc`` gates were removed for CC parity); it is retained only for
-        call-site symmetry with :meth:`build_message` (which still uses it for
-        the persona-prompt branch) and as a forward-compat hook. Intentionally
-        unused in this method body.
+        *provider_type* is consumed again for the steering gate only: the
+        steering block below is injected solely on the CC backend
+        (``provider_type == "claude_code"``). kiro-cli loads an agent's
+        ``resources`` natively when spawned with ``--agent`` (acp/client.py
+        ``_spawn``), so re-injecting steering on the ACP/kiro backend would
+        duplicate what kiro already loaded; the CC backend (claude-agent-acp)
+        does NOT read agent ``resources`` and still needs the explicit load.
+        Everything else stays at CC/ACP parity.
 
         For custom agents (non-kiroclaw), skills and workspace identity
         are skipped — the agent loads its own via kiro-cli. Memory,
         lessons, critical rules, and hooks are injected for all agents.
         """
-        _ = provider_type  # see docstring: retained for API symmetry, not branched on
         is_custom = agent and agent != "kiroclaw"
+        is_cc = provider_type == "claude_code"
         parts: list[str] = []
 
         # Minimal-context mode (Mesh-1632): only date/time + agent identity.
@@ -825,12 +867,27 @@ class ContextBuilder:
             if docs_ctx:
                 parts.append(docs_ctx)
 
+        # Skills lazy-load is opt-in (default OFF), mirroring MCP prewarm. OFF:
+        # the skills block is the legacy full dump under a single flat 165k
+        # ceiling (unchanged behavior). ON: each section gets its own cap and
+        # the global ceiling is their sum (~190k), so skills/steering can't
+        # crowd out memory/lessons.
+        _cfg = KiroClawConfig.load()
+        lazy_skills = bool(getattr(_cfg.skills, "lazy_load", False))
+        max_context_chars = _MAX_CONTEXT_CHARS if lazy_skills else _CONTEXT_BUDGET_BASE
+
         # Steering files from agent config resources.
-        # kiro-cli injects these natively; dashboard/CC must load explicitly.
-        # Inject for CC too so it sees the same .kiro/steering rules kiro does.
-        if not is_custom:
+        # kiro-cli loads an agent's ``resources`` natively when spawned with
+        # ``--agent`` (see acp/client.py ``_spawn``) — the same mechanism that
+        # lets us skip this for custom agents above. The CC backend
+        # (claude-agent-acp) does NOT read agent ``resources``, so only it needs
+        # the explicit load. Injecting on the ACP/kiro backend would duplicate
+        # what kiro-cli already loaded.
+        if not is_custom and is_cc:
             steering_ctx = _load_steering_resources()
             if steering_ctx:
+                if lazy_skills and len(steering_ctx) > _STEERING_CAP:
+                    steering_ctx = steering_ctx[:_STEERING_CAP] + "\n...[steering truncated]\n"
                 parts.append(steering_ctx)
 
         # Thread conversation history — highest priority context.
@@ -921,10 +978,18 @@ class ContextBuilder:
             if memory_ctx:
                 parts.append(memory_ctx)
 
-        # Skills: kiroclaw-only (custom agents load their own via kiro-cli)
+        # Skills: kiroclaw-only (custom agents load their own via kiro-cli).
+        # Pass the section budget so the loader injects a usage-ranked top-K of
+        # on-demand skills (plus always:true pinned) and leaves the tail to
+        # skill_search — keeping this block bounded instead of dumping every
+        # skill's summary. The slice below is a defensive backstop only.
         if not is_custom:
-            skills_ctx = self.skills.get_context()
+            # ON: usage-ranked top-K bounded by the skills section cap.
+            # OFF (budget=None): legacy full skills dump, unchanged behavior.
+            skills_ctx = self.skills.get_context(budget=_SKILLS_CAP if lazy_skills else None)
             if skills_ctx:
+                if lazy_skills and len(skills_ctx) > _SKILLS_CAP:
+                    skills_ctx = skills_ctx[:_SKILLS_CAP] + "\n...[skills truncated]\n"
                 parts.append(skills_ctx)
 
         # Lessons: merge global + workspace-scoped — inject for ALL agents
@@ -989,13 +1054,13 @@ class ContextBuilder:
                 parts.append("## Recent Session Context\n" + "\n".join(prov_lines) + "\n\n")
 
         context = "".join(parts)
-        if len(context) > _MAX_CONTEXT_CHARS:
+        if len(context) > max_context_chars:
             logger.warning(
                 "Session context too large (%d chars), truncating to %d",
                 len(context),
-                _MAX_CONTEXT_CHARS,
+                max_context_chars,
             )
-            context = context[:_MAX_CONTEXT_CHARS]
+            context = context[:max_context_chars]
             # Avoid cutting mid-line
             last_nl = context.rfind("\n")
             if last_nl > 0:

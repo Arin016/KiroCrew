@@ -43,6 +43,7 @@ from kiro_claw.config.loader import (
 from kiro_claw.cron import format_schedule
 from kiro_claw.dashboard.handlers import get_update_info
 from kiro_claw.dashboard.token_auth import LINK_WINDOW_SECS, MAX_SESSION_TTL_SECS, parse_duration
+from kiro_claw.executors import subprocess_executor
 from kiro_claw.hooks import safe_read_file
 from kiro_claw.mcp_discovery import list_servers
 from kiro_claw.platform import current_context
@@ -631,6 +632,86 @@ async def _handle_status(
 
 
 register_slash_command("status", _handle_status, "show runtime stats")
+
+
+async def _handle_restart(
+    orch: GatewayOrchestrator, caller_id: str, args: str, respond: Callable
+) -> None:
+    """Restart the gateway process (owner-only, requires systemd supervisor)."""
+    if not is_owner(caller_id):
+        sel().log_tool_invocation(
+            session_key="", source="slack", tool_name="/kiroclaw restart",
+            outcome="denied", resources=f"user={caller_id}",
+        )
+        await respond("⛔ Only the owner can restart the gateway.")
+        return
+
+    if not os.environ.get("INVOCATION_ID"):
+        sel().log_tool_invocation(
+            session_key="", source="slack", tool_name="/kiroclaw restart",
+            outcome="denied", resources=f"user={caller_id},reason=no_supervisor",
+        )
+        await respond(
+            "⛔ Restart requires a process supervisor (systemd). "
+            "Running in bare mode — restart manually."
+        )
+        return
+
+    sel().log_tool_invocation(
+        session_key="", source="slack", tool_name="/kiroclaw restart",
+        outcome="approved", resources=f"user={caller_id}",
+    )
+    try:
+        await respond("♻️ Restarting gateway…")
+    except Exception:
+        logger.debug("Restart notification failed", exc_info=True)
+    try:
+        if orch.dashboard_state and hasattr(orch.dashboard_state, "push_update_progress"):
+            # circular import: dashboard.chat imports events via orchestrator
+            # setup; events imports dashboard.chat for slot persistence
+            from kiro_claw.dashboard.chat import save_all_slots_to_history
+
+            orch.dashboard_state.push_update_progress("restarting", "Restarting server…")
+            # save_all_slots_to_history does synchronous per-slot file I/O that can
+            # block on a wedged disk; offload it to the dedicated subprocess_executor
+            # (the pool reserved for potentially-hanging teardown work) bounded by
+            # wait_for so it cannot freeze the event loop and prevent os._exit(1)
+            # below. Using the default pool risks starving other default-pool
+            # consumers if the thread wedges.
+            await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(
+                    subprocess_executor(), save_all_slots_to_history, orch.dashboard_state
+                ),
+                timeout=5.0,
+            )
+    except Exception:
+        logger.debug("Dashboard state save before restart failed", exc_info=True)
+    try:
+        if orch.sessions:
+            # Bound the cleanup: a session close can hang waiting on a remote
+            # peer, and os._exit() below would otherwise never be reached.
+            # asyncio.TimeoutError subclasses Exception, so the handler proceeds
+            # to exit on timeout.
+            await asyncio.wait_for(orch.sessions.close_all(), timeout=5.0)
+    except Exception:
+        logger.debug("Session cleanup before restart failed", exc_info=True)
+    # Flush the SEL audit queue: logging is async (background writer thread +
+    # atexit flush) and os._exit() runs neither atexit handlers nor finalizers,
+    # so the approved-restart audit event above would be lost. flush() is a
+    # synchronous blocking drain, so offload it to an executor bounded by
+    # wait_for — a wedged writer (disk full, unreachable sink) must not block
+    # the loop indefinitely and prevent os._exit(1) from being reached.
+    try:
+        await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(subprocess_executor(), sel().flush),
+            timeout=3.0,
+        )
+    except Exception:
+        logger.debug("SEL flush before restart failed", exc_info=True)
+    os._exit(1)
+
+
+register_slash_command("restart", _handle_restart, "restart the gateway (owner-only)")
 
 
 # ---------------------------------------------------------------------------
@@ -2161,6 +2242,18 @@ async def _route_message(
             )
             if orch.slack:
                 await orch.slack.post_message(channel, "Nothing running.", thread_ts or msg_ts)
+        return
+
+    # ── !restart: bang alias for /kiroclaw restart — intercept here so it
+    #    never reaches the LLM session. Delegates to the slash handler
+    #    (_handle_restart) which owns owner-check + supervisor guard, keeping
+    #    a single source of truth for the restart logic. ──
+    if clean_text.strip().lower() == "!restart":
+        async def _restart_respond(text: str, **_kw: Any) -> None:
+            if orch.slack:
+                await orch.slack.post_message(channel, text, thread_ts or msg_ts)
+
+        await _handle_restart(orch, sender_id, "", _restart_respond)
         return
 
     # Per-channel agent override

@@ -1,10 +1,12 @@
 # Security Event Log (SEL) Module
 
-Last Updated: 2026-06-03
+Last Updated: 2026-07-03 (added `acp`, `token_auth`, and `refresh_tokens` audit sources)
 
 ## Overview
 
 Immutable, tamper-evident audit trail for all tool invocations, MCP calls, and dashboard API mutations. Implements transactional event logging per Amazon Security Event Logging Standard.
+
+See also the SEL section in [`security.md`](security.md) for the threat-model view of these events.
 
 Storage: `~/.kiroclaw/security_events.jsonl` (append-only JSONL with HMAC-SHA256 chain).
 
@@ -19,7 +21,7 @@ Each entry records:
 | `event_type` | `tool_invocation`, `api_access`, `governance_decision`, `governance_degraded` |
 | `caller_identity` | Session key (e.g. `dashboard:abc`, `cron:xyz`, `subagent:123`) |
 | `agent` | Agent name (`kiroclaw`, custom agent name) |
-| `source` | Interface: `slack`, `dashboard`, `cli`, `cron`, `subagent`, `taskrunner`, `mcp`, `background`, `host` (the `_host` sentinel — an in-process host action like app activation / workspace admission), `unknown` (empty/unrecognized session key, which must NOT be mis-tagged `slack`) |
+| `source` | Interface: `slack`, `dashboard`, `cli`, `cron`, `subagent`, `taskrunner`, `mcp`, `background`, `acp` (ACP-transport events, e.g. `tool_interrupted`), `token_auth` / `refresh_tokens` (dashboard auth), `host` (the `_host` sentinel — an in-process host action like app activation / workspace admission), `unknown` (empty/unrecognized session key, which must NOT be mis-tagged `slack`) |
 | `operation` | Tool name or `METHOD /api/path` |
 | `tool_kind` | Tool category (`execute_bash`, `fs_write`, `mcp_core`, `mcp_cron`, etc.) |
 | `outcome` | `invoked`, `auto_approved`, `approved`, `rejected`, `denied`, `completed`, `failed`, `degraded` (a governance chokepoint failed OPEN) |
@@ -75,6 +77,9 @@ Default 365 days. Pruned daily by heartbeat service (`_PRUNE_TICKS`).
 | MCP core tools | `spawn_run`, `learn_add`, `task_run` calls and outcomes | `mcp_core.py` |
 | MCP cron tools | `cron_add`, `cron_remove`, etc. calls and outcomes | `mcp_cron.py` |
 | Dashboard API | All POST/PUT/DELETE operations via middleware | `dashboard/server.py` |
+| Token auth | `internal_auth`, `app_scope_check`, `dashboard_sessions_revoked`, `refresh_token_initial_mint`, `nonce_evicted` (`source=token_auth`) | `dashboard/token_auth.py` |
+| Refresh tokens | `refresh_token_use`, `refresh_token_logout`, `access_cookie_revoked` (`source=refresh_tokens`) | `dashboard/handlers/auth_refresh.py` |
+| ACP transport | `tool_interrupted` per-turn cancellation audit (`source=acp`) | `acp/client.py` |
 
 ## APIs
 

@@ -4,6 +4,7 @@ import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { readFileSync } from 'fs'
 import http from 'http'
+import path from 'path'
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf-8'))
 const backendPort = process.env.KIROCLAW_PORT || 5476
@@ -80,6 +81,11 @@ function appImportMapPlugin(): Plugin {
 
 export default defineConfig({
   plugins: [react(), tokenProxyPlugin(), appImportMapPlugin()],
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
   },
@@ -89,7 +95,7 @@ export default defineConfig({
     setupFiles: './integration/setup.ts',
     css: true,
     pool: 'forks',  // More stable than threads on ARM64 build fleet (avoids ERR_IPC_CHANNEL_CLOSED)
-    include: ['integration/**/*.test.{ts,tsx}', 'src/test/**/*.test.{ts,tsx}'],
+    include: ['integration/**/*.test.{ts,tsx}', 'src/**/*.test.{ts,tsx}'],
     onConsoleLog: (log) => !log.includes('was not wrapped in act('),
     // Coverage emitted when ``vitest run --coverage`` is passed (see the
     // ``test:website`` script in package.json). Off in watch mode to keep

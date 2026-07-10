@@ -741,3 +741,94 @@ class TestStartingPidGuard:
         # Simulate the finally-block cleanup after registration completes.
         manager._starting_pids.discard(777)
         assert 777 not in manager._in_flight_pids()
+
+
+class TestCompanionRuntimeGuard:
+    """Companion subagent runtimes (self._subagent_runtimes) and the background
+    runtime (self._bg_runtime) live OUTSIDE self._sessions, so _collect_active_pids
+    can't see them. Since the AcpRuntime unify (0bf3b85a) tracks every runtime PID
+    in kiro_session_pids.txt, an unprotected live PID gets SIGKILLed by the periodic
+    orphan sweep mid-chat (process exited rc=-9). _companion_runtime_pids() shields
+    them by contributing their live PIDs to the sweep's active set."""
+
+    def _make_manager(self):
+        from kiro_claw.session import SessionManager
+
+        cfg = MagicMock()
+        cfg.session.pool_size = 0
+        cfg.session.pool_agent = ""
+        cfg.session.pool_ttl_secs = 0
+        return SessionManager(cfg=cfg, provider_factory=None)
+
+    @staticmethod
+    def _fake_runtime(pid, alive=True):
+        rt = MagicMock()
+        rt.pid = pid
+        rt.is_alive.return_value = alive
+        return rt
+
+    def test_empty_when_no_companion_or_bg(self):
+        manager = self._make_manager()
+        assert manager._companion_runtime_pids() == set()
+
+    def test_live_companion_runtime_reported(self):
+        manager = self._make_manager()
+        manager._subagent_runtimes["parent-a"] = self._fake_runtime(5151)
+        manager._subagent_runtimes["parent-b"] = self._fake_runtime(5252)
+        pids = manager._companion_runtime_pids()
+        assert {5151, 5252} <= pids
+
+    def test_live_bg_runtime_reported(self):
+        manager = self._make_manager()
+        manager._bg_runtime = self._fake_runtime(6060)
+        assert 6060 in manager._companion_runtime_pids()
+
+    def test_dead_runtime_excluded(self):
+        """A dead runtime SHOULD be reapable — it must not be shielded."""
+        manager = self._make_manager()
+        manager._subagent_runtimes["parent-a"] = self._fake_runtime(5151, alive=False)
+        manager._bg_runtime = self._fake_runtime(6060, alive=False)
+        assert manager._companion_runtime_pids() == set()
+
+    def test_non_int_pid_ignored(self):
+        manager = self._make_manager()
+        manager._subagent_runtimes["parent-a"] = self._fake_runtime(None)
+        assert manager._companion_runtime_pids() == set()
+
+    def test_is_alive_exception_swallowed(self):
+        manager = self._make_manager()
+        rt = MagicMock()
+        rt.pid = 5151
+        rt.is_alive.side_effect = RuntimeError("boom")
+        manager._subagent_runtimes["parent-a"] = rt
+        # Must not raise, and the flaky runtime simply doesn't contribute.
+        assert manager._companion_runtime_pids() == set()
+
+    def test_returned_set_is_a_copy(self):
+        manager = self._make_manager()
+        manager._bg_runtime = self._fake_runtime(6060)
+        snapshot = manager._companion_runtime_pids()
+        snapshot.discard(6060)
+        # Mutating the returned set must not affect the next probe.
+        assert 6060 in manager._companion_runtime_pids()
+
+    def test_companion_pid_not_swept_as_orphan(self):
+        """The active set the sweep checks against must include companion + bg
+        runtime PIDs, even though they are absent from self._sessions."""
+        from kiro_claw.session_pid import _collect_active_pids
+
+        manager = self._make_manager()
+        companion_pid = 71017
+        bg_pid = 71018
+        manager._subagent_runtimes["parent-a"] = self._fake_runtime(companion_pid)
+        manager._bg_runtime = self._fake_runtime(bg_pid)
+
+        # Mirror the sweep's active-set construction (session.py periodic sweep).
+        active, ok = _collect_active_pids(manager._sessions)  # empty -> no live sessions
+        active.update(manager._pool_pids())
+        active.update(manager._in_flight_pids())
+        active.update(manager._companion_runtime_pids())
+
+        assert ok is True
+        assert companion_pid in active, "companion runtime PID must be sweep-protected"
+        assert bg_pid in active, "bg runtime PID must be sweep-protected"

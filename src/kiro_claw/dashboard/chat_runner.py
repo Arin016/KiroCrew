@@ -1420,6 +1420,10 @@ async def _run_chat(
             reasoning_effort_override=slot.reasoning_effort or None,
         )
         _acquired = True
+        # Publish the live inner AcpClient onto the slot so a concurrent request
+        # (the dashboard steer handler) can reach the running session's client
+        # to inject a mid-turn steer. Cleared in the finally below.
+        slot._acp_client = getattr(client, "client", None)
         # Backfill slot.model from provider if user didn't explicitly set one.
         # AcpProvider stores the resolved model on client._model. For claude_code
         # that is a provider id; map it back to the canonical registry key so it
@@ -3379,6 +3383,9 @@ async def _run_chat(
         await state.sessions.record_failure(session_key)
     finally:
         slot._batch_rejected = False
+        # Steer handle: turn is over, drop the live client ref so a late steer
+        # can't target a dead session (the route also re-checks running state).
+        slot._acp_client = None
         # Ensure file changes always surface, even on cancel/error. Wrapped so
         # a raise here cannot skip the re-arm below and re-introduce the orphan
         # bug this fix prevents (Mesh-2147).

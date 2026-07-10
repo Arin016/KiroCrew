@@ -4,7 +4,10 @@ import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 
 import ChatSidebar from '../src/pages/ChatSidebar'
-import { renderWithProviders } from './helpers'
+import SlotTagPopover from '../src/components/SlotTagPopover'
+import { TagPopoverProvider } from '../src/hooks/useTagPopover'
+import { sseSlots } from '../src/store/dashboardSlice'
+import { renderWithProviders, createTestStore } from './helpers'
 import { server } from './mocks/server'
 
 const mockConfirm = vi.fn(() => true)
@@ -30,6 +33,21 @@ const defaultProps = {
   historyHasMore: false,
   defaultAgent: 'kiroclaw',
   installedAgents: [{ name: 'kiroclaw', source: 'builtin' }, { name: 'oncall', source: 'aim' }],
+}
+
+/**
+ * Render the sidebar + the single app-wide connected tag popover, with the
+ * session slots seeded into the store. SlotTagPopover reads a slot's tags from
+ * the store (in production ChatPage populates dashboard.slots and derives
+ * ChatSidebar's `slots` prop from it), so the store must carry them here too.
+ */
+function renderBoard() {
+  const store = createTestStore()
+  store.dispatch(sseSlots(baseSlots as any))
+  return renderWithProviders(
+    <TagPopoverProvider><ChatSidebar {...defaultProps} /><SlotTagPopover /></TagPopoverProvider>,
+    { store },
+  )
 }
 
 /**
@@ -155,7 +173,7 @@ describe('ChatSidebar tag/column UI', () => {
     backend.state.columns = [
       { id: 'c1', name: '', tag_ids: [], mode: 'any', order: 0, include_untagged: false },
     ]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     const moreBtn = await screen.findByTitle('More options')
     expect(moreBtn).toBeInTheDocument()
     await user.click(moreBtn)
@@ -164,7 +182,7 @@ describe('ChatSidebar tag/column UI', () => {
 
   it('shows the empty-state seed prompt when no columns exist and toggling on creates a default column', async () => {
     backend.state.columns = []
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await screen.findByTitle('More options')
     // With 0 columns, the legacy flat list renders — board-toggle menuitem still accessible via menu
     expect(screen.queryByTestId('column-strip')).not.toBeInTheDocument()
@@ -174,7 +192,7 @@ describe('ChatSidebar tag/column UI', () => {
     backend.state.columns = []
     localStorage.setItem('mc-chat-config', JSON.stringify({ tagColumnsEnabled: false }))
     const user = userEvent.setup()
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await user.click(await screen.findByTitle('More options'))
     const menuitem = await screen.findByRole('menuitem', { name: /Switch to board view/ })
     await user.click(menuitem)
@@ -188,7 +206,7 @@ describe('ChatSidebar tag/column UI', () => {
       { id: 'c1', name: '', tag_ids: [], mode: 'any', order: 0, include_untagged: false },
     ]
     const user = userEvent.setup()
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await user.click(await screen.findByTitle('More options'))
     const menuitem = await screen.findByRole('menuitem', { name: /Switch to list view/ })
     await user.click(menuitem)
@@ -201,7 +219,7 @@ describe('ChatSidebar tag/column UI', () => {
       { id: 'c1', name: '', tag_ids: ['todo'], mode: 'any', order: 0, include_untagged: false },
       { id: 'c2', name: 'Wrap-up', tag_ids: ['done'], mode: 'any', order: 1, include_untagged: false },
     ]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-strip')).toBeInTheDocument())
     expect(screen.getByTestId('column-c1')).toBeInTheDocument()
     expect(screen.getByTestId('column-c2')).toBeInTheDocument()
@@ -215,7 +233,7 @@ describe('ChatSidebar tag/column UI', () => {
     backend.state.columns = []
     localStorage.setItem('mc-chat-config', JSON.stringify({ tagColumnsEnabled: true }))
     const user = userEvent.setup()
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await user.click(await screen.findByTitle('More options'))
     // Orphan state (enabled but no columns) shows "Switch to board view"
     const menuitem = await screen.findByRole('menuitem', { name: /Switch to board view/ })
@@ -228,7 +246,7 @@ describe('ChatSidebar tag/column UI', () => {
 
   it('column header buttons all have aria-labels (icon-buttons-need-labels)', async () => {
     backend.state.columns = [{ id: 'c1', name: '', tag_ids: ['todo'], mode: 'any', order: 0, include_untagged: false }]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     // The column header puts each icon button under data-testid="column-{id}" so
     // we scope queries to the column itself — multiple "New folder" buttons may
@@ -243,7 +261,7 @@ describe('ChatSidebar tag/column UI', () => {
   it('opens the column filter popover and closes it on outside click', async () => {
     const user = userEvent.setup()
     backend.state.columns = [{ id: 'c1', name: '', tag_ids: ['todo'], mode: 'any', order: 0, include_untagged: false }]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     await user.click(screen.getByTestId('column-edit-c1'))
     // Popover renders via portal; query by data-attribute
@@ -260,7 +278,7 @@ describe('ChatSidebar tag/column UI', () => {
   it('toggling a tag in the popover sends a PATCH to update tag_ids', async () => {
     const user = userEvent.setup()
     backend.state.columns = [{ id: 'c1', name: '', tag_ids: [], mode: 'any', order: 0, include_untagged: false }]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     await user.click(screen.getByTestId('column-edit-c1'))
     // Each tag row exists keyed by tag id
@@ -278,7 +296,7 @@ describe('ChatSidebar tag/column UI', () => {
   it('clicking ⚡ status icon flips the tag.status flag via PATCH', async () => {
     const user = userEvent.setup()
     backend.state.columns = [{ id: 'c1', name: '', tag_ids: [], mode: 'any', order: 0, include_untagged: false }]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     await user.click(screen.getByTestId('column-edit-c1'))
     await waitFor(() => expect(screen.getByTestId('tag-status-todo')).toBeInTheDocument())
@@ -292,7 +310,7 @@ describe('ChatSidebar tag/column UI', () => {
   it('include-untagged toggle persists', async () => {
     const user = userEvent.setup()
     backend.state.columns = [{ id: 'c1', name: '', tag_ids: ['todo'], mode: 'any', order: 0, include_untagged: false }]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     await user.click(screen.getByTestId('column-edit-c1'))
     await waitFor(() => expect(screen.getByTestId('column-include-untagged-c1')).toBeInTheDocument())
@@ -303,7 +321,7 @@ describe('ChatSidebar tag/column UI', () => {
   it('mode radios switch between any / all / none', async () => {
     const user = userEvent.setup()
     backend.state.columns = [{ id: 'c1', name: '', tag_ids: ['todo'], mode: 'any', order: 0, include_untagged: false }]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     await user.click(screen.getByTestId('column-edit-c1'))
     await waitFor(() => expect(screen.getByRole('radio', { name: 'all' })).toBeInTheDocument())
@@ -316,7 +334,7 @@ describe('ChatSidebar tag/column UI', () => {
   it('inline tag rename commits on blur', async () => {
     const user = userEvent.setup()
     backend.state.columns = [{ id: 'c1', name: '', tag_ids: [], mode: 'any', order: 0, include_untagged: false }]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     await user.click(screen.getByTestId('column-edit-c1'))
     await waitFor(() => expect(screen.getByTestId('tag-name-todo')).toBeInTheDocument())
@@ -329,7 +347,7 @@ describe('ChatSidebar tag/column UI', () => {
   it('creating a new tag inline appends to the vocabulary', async () => {
     const user = userEvent.setup()
     backend.state.columns = [{ id: 'c1', name: '', tag_ids: [], mode: 'any', order: 0, include_untagged: false }]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     await user.click(screen.getByTestId('column-edit-c1'))
     await waitFor(() => expect(screen.getByTestId('tag-create-c1')).toBeInTheDocument())
@@ -344,7 +362,7 @@ describe('ChatSidebar tag/column UI', () => {
   it('deleting a tag via the row × removes it', async () => {
     const user = userEvent.setup()
     backend.state.columns = [{ id: 'c1', name: '', tag_ids: [], mode: 'any', order: 0, include_untagged: false }]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     await user.click(screen.getByTestId('column-edit-c1'))
     await waitFor(() => expect(screen.getByTestId('tag-delete-todo')).toBeInTheDocument())
@@ -358,7 +376,7 @@ describe('ChatSidebar tag/column UI', () => {
       { id: 'c1', name: 'A', tag_ids: [], mode: 'any', order: 0, include_untagged: false },
       { id: 'c2', name: 'B', tag_ids: [], mode: 'any', order: 1, include_untagged: false },
     ]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     await user.click(screen.getByTestId('column-add-after-c1'))
     await waitFor(() => expect(backend.state.columns.length).toBe(3))
@@ -371,7 +389,7 @@ describe('ChatSidebar tag/column UI', () => {
   it('× delete removes a column', async () => {
     const user = userEvent.setup()
     backend.state.columns = [{ id: 'c1', name: '', tag_ids: [], mode: 'any', order: 0, include_untagged: false }]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     await user.click(screen.getByTestId('column-delete-c1'))
     await waitFor(() => expect(backend.state.columns.length).toBe(0))
@@ -380,7 +398,7 @@ describe('ChatSidebar tag/column UI', () => {
   it('clear-filter button empties the column tag_ids', async () => {
     const user = userEvent.setup()
     backend.state.columns = [{ id: 'c1', name: '', tag_ids: ['todo', 'done'], mode: 'any', order: 0, include_untagged: false }]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     await user.click(screen.getByTestId('column-edit-c1'))
     await waitFor(() => expect(screen.getByText('Clear filter')).toBeInTheDocument())
@@ -390,7 +408,7 @@ describe('ChatSidebar tag/column UI', () => {
 
   it('column-level "+ folder" button creates a folder', async () => {
     backend.state.columns = [{ id: 'c1', name: '', tag_ids: ['todo'], mode: 'any', order: 0, include_untagged: false }]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     fireEvent.click(screen.getByTestId('column-new-folder-c1'))
     // An inline input appears scoped to this column; set value and submit with Enter
@@ -405,7 +423,7 @@ describe('ChatSidebar tag/column UI', () => {
     backend.state.columns = [
       { id: 'c1', name: 'Planned', tag_ids: ['planned'], mode: 'any', order: 0, include_untagged: true },
     ]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     expect(screen.getByText('+ untagged')).toBeInTheDocument()
   })
@@ -414,7 +432,7 @@ describe('ChatSidebar tag/column UI', () => {
     backend.state.columns = [
       { id: 'c1', name: '', tag_ids: ['todo'], mode: 'any', order: 0, include_untagged: false },
     ]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     // Find a session row in the column and right-click it
     const slotRow = await screen.findByText('Pipeline debug')
@@ -435,7 +453,7 @@ describe('ChatSidebar tag/column UI', () => {
     backend.state.columns = [
       { id: 'c1', name: '', tag_ids: ['todo'], mode: 'any', order: 0, include_untagged: false },
     ]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     // Open tag picker for slot-1 (which has ['todo'] in its tags)
     fireEvent.contextMenu(await screen.findByText('Pipeline debug'))
@@ -457,7 +475,7 @@ describe('ChatSidebar tag/column UI', () => {
     backend.state.columns = [
       { id: 'c1', name: '', tag_ids: ['todo'], mode: 'any', order: 0, include_untagged: false },
     ]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     fireEvent.contextMenu(await screen.findByText('Pipeline debug'))
     fireEvent.click(await screen.findByRole('menuitem', { name: /Tags/ }))
@@ -475,7 +493,7 @@ describe('ChatSidebar tag/column UI', () => {
     backend.state.columns = [
       { id: 'c1', name: '', tag_ids: ['todo'], mode: 'any', order: 0, include_untagged: false },
     ]
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     fireEvent.contextMenu(await screen.findByText('Pipeline debug'))
     fireEvent.click(await screen.findByRole('menuitem', { name: /Tags/ }))
@@ -494,7 +512,7 @@ describe('ChatSidebar tag/column UI', () => {
   })
 
   it('tag picker has accessibility attributes on the dialog (aria-modal, aria-label)', async () => {
-    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    renderBoard()
     fireEvent.contextMenu(await screen.findByText('Pipeline debug'))
     fireEvent.click(await screen.findByRole('menuitem', { name: /Tags/ }))
     await waitFor(() => expect(screen.getByTestId('slot-tag-picker')).toBeInTheDocument())

@@ -1,10 +1,15 @@
 /**
- * Tests for the Slack link/unlink menu actions in ChatHeaderMenu (Mesh-1969).
+ * Tests for the Slack link/unlink actions surfaced by the session menu
+ * (Mesh-1969). Slack is now a *connected* sub-section (SlackLinkSection, keyed
+ * on slotKey) rendered by SessionActionsMenu, so this exercises it through the
+ * header (ChatHeaderMenu) with the slot seeded in the store and the shared
+ * ['slack-channels'] query mocked — no slack props are passed anymore.
  *
- * Verifies the symmetric menu contract:
- *  - linked   -> shows "Unlink from Slack" + "Post reminder in Slack", hides "Send to Slack"
- *  - clicking Unlink calls api.unlinkSlack and dispatches updateSlot({slack_linked:false})
- *  - after unlink (slack_linked=false) "Send to Slack" reappears, Unlink is gone
+ * Verifies the symmetric contract:
+ *  - linked   -> "Unlink from Slack" + "Post reminder in Slack", hides "Send to Slack"
+ *  - unlinked -> "Send to Slack" (once channels load), hides Unlink/Post reminder
+ *  - clicking Unlink calls api.unlinkSlack and clears the link in the store
+ *  - after unlink the menu live-swaps back to "Send to Slack" on the same tree
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -18,31 +23,18 @@ vi.mock('../api/client', () => ({
   api: {
     unlinkSlack: vi.fn().mockResolvedValue({ ok: true, was_linked: true }),
     slackLink: vi.fn().mockResolvedValue({ ok: true }),
+    // SlackLinkSection fetches the workspace channel list internally now.
+    slackChannels: vi.fn().mockResolvedValue([]),
     mcpActive: vi.fn().mockResolvedValue([]),
     setSlotColor: vi.fn().mockResolvedValue({}),
+    chatFolders: vi.fn().mockResolvedValue([]),
   },
 }))
 
-import { useAppSelector } from '../store'
 import type { RootState } from '../store'
 import type { ChatSlot } from '../types'
 import { api } from '../api/client'
 import { ChatHeaderMenu } from '../pages/ChatPage'
-
-/** Binds currentSlot to the store the way ChatPage does (useAppSelector), so a
- *  post-click updateSlot dispatch actually re-renders the menu branch. */
-function ConnectedMenu({ slotKey }: { slotKey: string }) {
-  const currentSlot = useAppSelector((s: RootState) => s.dashboard.slots.find((x: ChatSlot) => x.key === slotKey))
-  return (
-    <ChatHeaderMenu
-      activeSlot={slotKey}
-      currentSlot={currentSlot}
-      slackChannels={[]}
-      onSlackLink={vi.fn()}
-      slotKey={slotKey}
-    />
-  )
-}
 
 const dashboardState = {
   status: {}, connected: true, slots: [], approvalMode: 'normal',
@@ -51,9 +43,12 @@ const dashboardState = {
   sessionDefaultColor: null, sessionColorsMode: 'tint', sessionColorsPalette: 'horizon', sessionColorsIntensity: 'clear',
 } as RootState['dashboard']
 
-function renderMenu(slot: Partial<ChatSlot>) {
-  // Seed the slot into the store's slots[] so updateSlot (which only mutates an
-  // existing slot) has a target to flip.
+/**
+ * Seed the slot into the store's slots[] (the connected SlackLinkSection reads
+ * `slack_linked` from there, and updateSlot only mutates an existing slot), then
+ * render the header menu and open it. No slack props — the section is connected.
+ */
+function renderMenu(slot: Partial<ChatSlot> & { key: string }) {
   const store = createTestStore({ dashboard: { ...dashboardState, slots: [{ ...slot }] } })
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const utils = render(
@@ -61,62 +56,41 @@ function renderMenu(slot: Partial<ChatSlot>) {
       <Provider store={store}>
         <ThemeProvider>
           <MemoryRouter>
-            <ChatHeaderMenu
-              activeSlot="chat-1-100"
-              currentSlot={slot}
-              slackChannels={[]}
-              onSlackLink={vi.fn()}
-              slotKey="chat-1-100"
-            />
+            <ChatHeaderMenu activeSlot={slot.key} />
           </MemoryRouter>
         </ThemeProvider>
       </Provider>
     </QueryClientProvider>,
   )
-  // Open the ⋯ menu (the only button rendered before opening).
-  fireEvent.click(utils.container.querySelector('button')!)
-  return { store, ...utils }
-}
-
-function renderConnectedMenu(slot: Partial<ChatSlot>) {
-  const store = createTestStore({ dashboard: { ...dashboardState, slots: [{ ...slot }] } })
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  const utils = render(
-    <QueryClientProvider client={qc}>
-      <Provider store={store}>
-        <ThemeProvider>
-          <MemoryRouter>
-            <ConnectedMenu slotKey={slot.key} />
-          </MemoryRouter>
-        </ThemeProvider>
-      </Provider>
-    </QueryClientProvider>,
-  )
-  fireEvent.click(utils.container.querySelector('button')!)
+  // Open the ⋯ menu. The trigger is a Radix DropdownMenuTrigger, which opens on
+  // keyboard activation (Enter) — a path jsdom handles, unlike the
+  // PointerEvent-driven click Radix uses for mouse opens.
+  fireEvent.keyDown(utils.container.querySelector('button')!, { key: 'Enter' })
   return { store, ...utils }
 }
 
 beforeEach(() => vi.clearAllMocks())
 
-describe('ChatHeaderMenu — Slack unlink', () => {
-  it('linked menu shows Unlink + Post reminder and hides Send to Slack', () => {
+describe('Session menu — Slack link/unlink (connected)', () => {
+  it('linked menu shows Unlink + Post reminder and hides Send to Slack', async () => {
     renderMenu({ key: 'chat-1-100', slack_linked: true })
-    expect(screen.getByText('Unlink from Slack')).toBeInTheDocument()
+    expect(await screen.findByText('Unlink from Slack')).toBeInTheDocument()
     expect(screen.getByText('Post reminder in Slack')).toBeInTheDocument()
     expect(screen.queryByText('Send to Slack')).not.toBeInTheDocument()
   })
 
-  it('unlinked menu shows Send to Slack and hides Unlink', () => {
+  it('unlinked menu shows Send to Slack and hides Unlink', async () => {
     renderMenu({ key: 'chat-1-100', slack_linked: false })
-    expect(screen.getByText('Send to Slack')).toBeInTheDocument()
+    // "Send to Slack" appears only once the channel list resolves.
+    expect(await screen.findByText('Send to Slack')).toBeInTheDocument()
     expect(screen.queryByText('Unlink from Slack')).not.toBeInTheDocument()
     expect(screen.queryByText('Post reminder in Slack')).not.toBeInTheDocument()
   })
 
   it('clicking Unlink calls api.unlinkSlack and clears the link in the store', async () => {
-    const { store } = renderConnectedMenu({ key: 'chat-1-100', slack_linked: true, slack_channel: 'C-1', slack_thread_ts: 'ts-1' })
+    const { store } = renderMenu({ key: 'chat-1-100', slack_linked: true, slack_channel: 'C-1', slack_thread_ts: 'ts-1' })
 
-    fireEvent.click(screen.getByText('Unlink from Slack'))
+    fireEvent.click(await screen.findByText('Unlink from Slack'))
 
     await waitFor(() => expect(api.unlinkSlack).toHaveBeenCalledWith('chat-1-100'))
     await waitFor(() => {
@@ -129,14 +103,14 @@ describe('ChatHeaderMenu — Slack unlink', () => {
   })
 
   it('clicking Unlink live-swaps the menu to Send to Slack on the same tree', async () => {
-    // Connected harness: currentSlot is store-derived, so the dispatch re-renders.
-    const { container } = renderConnectedMenu({ key: 'chat-1-100', slack_linked: true })
-    fireEvent.click(screen.getByText('Unlink from Slack'))
+    // The section is store-connected, so the optimistic updateSlot re-renders it.
+    const { container } = renderMenu({ key: 'chat-1-100', slack_linked: true })
+    fireEvent.click(await screen.findByText('Unlink from Slack'))
     await waitFor(() => expect(api.unlinkSlack).toHaveBeenCalled())
 
-    // The click also closed the menu (setOpen(false)); reopen via the ⋯ toggle
-    // (the first/only button left in the tree) and assert the symmetric swap.
-    fireEvent.click(container.querySelector('button')!)
+    // The select also closed the menu; reopen via the ⋯ toggle (the only button
+    // left in the tree) and assert the symmetric swap.
+    fireEvent.keyDown(container.querySelector('button')!, { key: 'Enter' })
     await waitFor(() => {
       expect(screen.getByText('Send to Slack')).toBeInTheDocument()
       expect(screen.queryByText('Unlink from Slack')).not.toBeInTheDocument()

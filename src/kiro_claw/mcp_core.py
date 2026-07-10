@@ -16,6 +16,7 @@ Tools:
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import mimetypes
 import os
@@ -57,6 +58,7 @@ from kiro_claw.security import (
     redact_exfiltration_urls,
 )
 from kiro_claw.sel import sel
+from kiro_claw.skills import SkillsLoader
 from kiro_claw.validation import (
     _SLACK_TS_RE,
     ARTIFACT_DELETE_SCHEMA,
@@ -70,6 +72,7 @@ from kiro_claw.validation import (
     CHANNEL_ID_RE,
     GET_CHAT_SESSION_SCHEMA,
     KNOWLEDGE_DEDUP_SCHEMA,
+    LEARN_ADD_SCHEMA,
     LOCAL_KNOWLEDGE_SEARCH_SCHEMA,
     MAX_MEDIUM_STRING,
     MAX_SHORT_STRING,
@@ -77,6 +80,7 @@ from kiro_claw.validation import (
     REGISTER_HOOK_SCHEMA,
     SEARCH_CHAT_HISTORY_SCHEMA,
     SET_PROJECT_SCHEMA,
+    SKILL_SEARCH_SCHEMA,
     SPAWN_RUN_SCHEMA,
     SPAWN_SUB_AGENTS_SCHEMA,
     TASK_RUN_SCHEMA,
@@ -159,6 +163,18 @@ def _search_snapshot(snapshot: str, query: str, max_results: int = 50) -> str:
 
 
 def _list_tools() -> list[dict[str, Any]]:
+    # Derive the learn_add rule/negative char limit from the schema field the
+    # validator actually enforces (single source of truth) so the tool hint
+    # tracks the enforced limit — including a future config-driven value —
+    # instead of a parallel constant that can silently drift.
+    _rule_max = next(
+        (f.max_len for f in LEARN_ADD_SCHEMA.fields if f.name == "rule"),
+        MAX_SHORT_STRING,
+    )
+    _neg_max = next(
+        (f.max_len for f in LEARN_ADD_SCHEMA.fields if f.name == "negative"),
+        MAX_SHORT_STRING,
+    )
     return [
         {
             "name": "spawn_run",
@@ -222,10 +238,39 @@ def _list_tools() -> list[dict[str, Any]]:
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
+            "name": "skill_search",
+            "description": (
+                "Search available skills by keyword (grep over skill names, "
+                "descriptions, and — on a metadata miss — bodies). Only the most-"
+                "used skills are pre-listed in the injected '## Available Skills' "
+                "block; use this tool to discover the long tail that is NOT shown "
+                "there. Returns matching skills with file paths — `cat` a path to "
+                "load the full skill, or use the $<name> inline token."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Keywords to search for across skills.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results (default 20, max 50).",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+        {
             "name": "spawn_status",
             "description": (
-                "Call with the agent ID from a subagent completion event "
-                "to retrieve the full output in the event of truncation."
+                "Retrieve a completed subagent's full transcript by agent ID (from a "
+                "completion event). The completion event gives a summary plus this "
+                "transcript on disk — use this tool (or the read/grep tools on the path) "
+                "to read the rest instead of re-running the subagent. For large "
+                "transcripts, page with offset/limit (line-based, like reading code) or "
+                "filter with grep (regex) rather than pulling the whole thing into context."
             ),
             "inputSchema": {
                 "type": "object",
@@ -233,6 +278,24 @@ def _list_tools() -> list[dict[str, Any]]:
                     "agent_id": {
                         "type": "string",
                         "description": "Subagent ID from completion event",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "0-based start line for a paged read (default 0)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": (
+                            "Max lines to return (1-2000). Omit for the full transcript; "
+                            "use with offset to page through a large result."
+                        ),
+                    },
+                    "grep": {
+                        "type": "string",
+                        "description": (
+                            "Case-insensitive regex; return only transcript lines that "
+                            "match (offset/limit then apply to the matches)."
+                        ),
                     },
                 },
                 "required": ["agent_id"],
@@ -290,7 +353,18 @@ def _list_tools() -> list[dict[str, Any]]:
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "rule": {"type": "string", "description": "The lesson to remember"},
+                    "rule": {
+                        "type": "string",
+                        "maxLength": _rule_max,
+                        "description": (
+                            f"The lesson to remember. HARD LIMIT {_rule_max} "
+                            "characters — longer rules are REJECTED (not truncated), "
+                            "so keep it concise. Put 'what not to do' in the separate "
+                            "'negative' field rather than inlining a long '-- NOT: ...' "
+                            "clause here, and split unrelated corrections into multiple "
+                            "learn_add calls instead of one oversized rule."
+                        ),
+                    },
                     "category": {
                         "type": "string",
                         "enum": ["tool", "preference", "knowledge"],
@@ -298,7 +372,11 @@ def _list_tools() -> list[dict[str, Any]]:
                     },
                     "negative": {
                         "type": "string",
-                        "description": "What NOT to do (optional)",
+                        "maxLength": _neg_max,
+                        "description": (
+                            f"What NOT to do (optional). HARD LIMIT {_neg_max} "
+                            "characters — rejected if exceeded."
+                        ),
                     },
                     "scope": {
                         "type": "string",
@@ -2010,13 +2088,45 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         agent_id = args.get("agent_id", "")
         if not agent_id or not agent_id.isalnum():
             return "Error: invalid agent_id"
-        d = _get(f"/api/spawn/{agent_id}")
+        # Optional paged / filtered read of the retained transcript.
+        spawn_params: dict[str, str] = {}
+        offset = args.get("offset")
+        limit = args.get("limit")
+        grep = args.get("grep")
+        if isinstance(offset, int) and offset > 0:
+            spawn_params["offset"] = str(offset)
+        if isinstance(limit, int) and limit > 0:
+            spawn_params["limit"] = str(limit)
+        if isinstance(grep, str) and grep.strip():
+            spawn_params["grep"] = grep
+        path = f"/api/spawn/{agent_id}"
+        if spawn_params:
+            path += "?" + urlencode(spawn_params)
+        d = _get(path)
         if d.get("error"):
             return f"Error: {d['error']}"
+
+        meta = d.get("result_meta")
+        if isinstance(meta, dict) and meta.get("grep_error"):
+            return f"Error: {meta['grep_error']}"
 
         result = d.get("result") or "_No result._"
         result, _ = redact_exfiltration_urls(result)
         result, _ = redact_credentials(result)
+
+        if isinstance(meta, dict) and meta:
+            # Paged/grepped read — prepend a compact header so the LLM knows how
+            # much it saw and how to continue, without re-reading the whole file.
+            hdr: list[str] = []
+            total = meta.get("total_lines", "?")
+            if "matched_lines" in meta:
+                hdr.append(f"{meta['matched_lines']} line(s) matched grep of {total} total")
+            start = meta.get("offset", 0)
+            returned = meta.get("returned_lines", 0)
+            hdr.append(f"showing lines {start}-{start + returned} of {total}")
+            if meta.get("has_more"):
+                hdr.append(f"more available — call again with offset={start + returned}")
+            return f"[{' | '.join(hdr)}]\n{result}"
         return result
 
     if name == "learn_add":
@@ -2080,6 +2190,55 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         if d.get("error"):
             return f"Error: {d['error']}"
         return f"Removed lessons matching: {query}"
+
+    if name == "skill_search":
+        args = validate_tool_args(args, SKILL_SEARCH_SCHEMA)
+        query = str(args.get("query", "")).strip()
+        if not query:
+            # Audit even validation failures — every tool invocation must emit a
+            # SEL event (matches the success/error paths below).
+            sel().log_tool_invocation(
+                session_key=_resolve_session_key(), source="mcp",
+                tool_name="skill_search", tool_kind="read",
+                outcome="validation_error", metadata={"reason": "empty_query"},
+            )
+            return "Provide a 'query' to search skills."
+        try:
+            limit = int(args.get("limit", 20) or 20)
+        except (TypeError, ValueError):
+            limit = 20
+        limit = max(1, min(50, limit))
+        try:
+            # install_builtins=False → read-only search, no on-disk side effects.
+            matches = SkillsLoader(install_builtins=False).search_skills(query, limit=limit)
+        except Exception as exc:  # pragma: no cover — defensive
+            sel().log_tool_invocation(
+                session_key=_resolve_session_key(), source="mcp",
+                tool_name="skill_search", tool_kind="read", outcome="error",
+                metadata={"error": type(exc).__name__},
+            )
+            return f"skill_search failed: {type(exc).__name__}: {exc}"
+        sel().log_tool_invocation(
+            session_key=_resolve_session_key(), source="mcp",
+            tool_name="skill_search", tool_kind="read", outcome="success",
+            metadata={"query_hash": hashlib.sha256(query.encode()).hexdigest()[:16],
+                      "matches": len(matches)},
+        )
+        if not matches:
+            return (
+                f"No skills matched '{query}'. Try broader keywords, or `cat` a "
+                "known SKILL.md path directly."
+            )
+        lines = [f"Skills matching '{query}' (top {len(matches)}):", ""]
+        for s in matches:
+            desc = " ".join((s.get("description") or "").split())
+            if len(desc) > 300:
+                desc = desc[:300].rstrip() + "..."
+            lines.append(
+                f"- **{s['name']}** (`{s['key']}`): {desc}\n"
+                f"  load: `cat {s['path']}`  or  `${s['key'].rsplit('/', 1)[-1]}`"
+            )
+        return "\n".join(lines)
 
     if name == "task_run":
         args = validate_tool_args(args, TASK_RUN_SCHEMA)
