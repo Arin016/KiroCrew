@@ -61,6 +61,7 @@ _CONTRADICTION_PROMPT = (
 )
 
 _CONTRADICTION_SESSION_KEY = "background:contradiction-check"
+_CONTRADICTION_MODEL = "claude-haiku-4.5"
 
 
 async def _resolve_contradictions(
@@ -77,6 +78,14 @@ async def _resolve_contradictions(
                 _CONTRADICTION_SESSION_KEY, agent="kiroclaw-lite",
             )
             try:
+                # Contradiction check is a trivial binary classification —
+                # run on the cheapest model.
+                _set_model = getattr(provider, "set_model", None)
+                if _set_model is not None:
+                    try:
+                        await _set_model(_CONTRADICTION_MODEL)
+                    except Exception:
+                        pass
                 response = await stream_and_collect(provider, prompt)
             finally:
                 state.sessions.release(_CONTRADICTION_SESSION_KEY)

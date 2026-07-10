@@ -66,12 +66,24 @@ def _build_link_summary_prompt(links: list[dict]) -> str:
     return _LINK_SUMMARY_PROMPT.format(items="\n".join(items))
 
 
+_LINK_SUMMARY_MODEL = "claude-haiku-4.5"
+
+
 async def _resolve_link_summaries(state: DashboardState, links: list[dict]) -> list[str]:
     """Generate summaries for a batch of links using the background session."""
     prompt = _build_link_summary_prompt(links)
     session = await state.sessions.get_bg_session()
     text = ""
     try:
+        # Link labeling is a trivial classification task — run on the cheapest
+        # model. Best-effort: fall through on the session's default if the
+        # backend can't switch.
+        _set_model = getattr(session, "set_model", None)
+        if _set_model is not None:
+            try:
+                await _set_model(_LINK_SUMMARY_MODEL)
+            except Exception:
+                logger.debug("Link summary model override to %s failed; using default", _LINK_SUMMARY_MODEL)
         async for event in session.prompt(prompt):
             if event.kind == EVENT_TEXT_CHUNK:
                 text += event.text

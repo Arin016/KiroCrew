@@ -68,6 +68,9 @@ def _is_single_emoji(s: str) -> bool:
     return clusters == 1
 
 
+_FOLDER_ICON_MODEL = "claude-haiku-4.5"
+
+
 async def _generate_folder_icon(state: DashboardState, folder: dict) -> None:
     """Background task: ask LLM for a single emoji for the folder name.
 
@@ -81,6 +84,13 @@ async def _generate_folder_icon(state: DashboardState, folder: dict) -> None:
     )
 
     async def _stream_session(session) -> str:  # type: ignore[no-untyped-def]
+        # Folder icon is a trivial single-emoji task — run on the cheapest model.
+        _set_model = getattr(session, "set_model", None)
+        if _set_model is not None:
+            try:
+                await _set_model(_FOLDER_ICON_MODEL)
+            except Exception:
+                logger.debug("Folder icon model override to %s failed; using default", _FOLDER_ICON_MODEL)
         t = ""
         async for event in session.prompt(prompt):
             if event.kind == EVENT_TEXT_CHUNK:
