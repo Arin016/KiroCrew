@@ -85,12 +85,14 @@ CRED_SLACK_BOT_TOKEN = "SLACK_BOT_TOKEN"
 CRED_OWNER_ID = "KIROCLAW_OWNER_ID"
 CRED_WECOM_BOT_ID = "WECOM_BOT_ID"
 CRED_WECOM_SECRET = "WECOM_SECRET"
+CRED_TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
 _CREDENTIAL_KEYS = (
     CRED_SLACK_APP_TOKEN,
     CRED_SLACK_BOT_TOKEN,
     CRED_OWNER_ID,
     CRED_WECOM_BOT_ID,
     CRED_WECOM_SECRET,
+    CRED_TELEGRAM_BOT_TOKEN,
 )
 
 DEFAULT_MODEL = "auto"
@@ -1929,6 +1931,78 @@ class WeComConfig:
             self.soft_threshold_pct = self.hard_threshold_pct
 
 
+def _coerce_int_ids(raw: object) -> list[int]:
+    """Coerce a config value to a clean ``list[int]``, dropping anything invalid.
+
+    Fail closed against a hand-edited config: a non-list (e.g. the string
+    ``"12345"``) yields ``[]`` instead of iterating char-by-char, and any entry
+    that isn't a clean base-10 integer (``"--100"``, ``"1.5"``, unicode digits,
+    booleans) is skipped rather than raising in ``int()`` and crashing config
+    load / gateway startup.
+    """
+    if not isinstance(raw, list):
+        return []
+    ids: list[int] = []
+    for u in raw:
+        try:
+            ids.append(int(str(u)))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def _coerce_int(raw: object, default: int) -> int:
+    """Return ``int(raw)`` or *default* if *raw* isn't a clean base-10 integer.
+
+    Fail closed against a hand-edited non-numeric config value (e.g. ``"abc"``)
+    that would otherwise raise in ``int()`` and crash config load.
+    """
+    try:
+        return int(str(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+@dataclass
+class TelegramConfig:
+    enabled: bool = field(
+        default=False,
+        metadata=_meta(
+            "Enabled",
+            "Enable the Telegram Bot API channel (long-polling). Requires "
+            "TELEGRAM_BOT_TOKEN (env/.env) or telegram.bot_token.",
+            tags=["telegram"],
+        ),
+    )
+    bot_token: str = field(
+        default="",
+        metadata=_meta(
+            "Bot Token",
+            "Telegram Bot API token from @BotFather. Prefer the TELEGRAM_BOT_TOKEN "
+            "credential (env/.env) over storing it here.",
+            tags=["telegram"],
+            sensitive=True,
+        ),
+    )
+    allowed_user_ids: list[int] = field(
+        default_factory=list,
+        metadata=_meta(
+            "Allowed User IDs",
+            "Numeric Telegram user IDs permitted to DM the bot. Empty = deny all "
+            "(fail closed): a Telegram bot is globally reachable by @username.",
+            tags=["telegram"],
+        ),
+    )
+    soft_threshold_pct: int = field(
+        default=80,
+        metadata=_meta(
+            "Soft Context Threshold %",
+            "Prompt the user to /compact or /new when context passes this percentage.",
+            tags=["telegram"],
+        ),
+    )
+
+
 @dataclass
 class KiroClawConfig:
     agent: AgentConfig = field(
@@ -1993,6 +2067,10 @@ class KiroClawConfig:
     wechat: WeComConfig = field(
         default_factory=WeComConfig,
         metadata=_meta("WeChat", "WeChat (WeCom AI-bot) integration settings.", tags=["wechat"]),
+    )
+    telegram: TelegramConfig = field(
+        default_factory=TelegramConfig,
+        metadata=_meta("Telegram", "Telegram Bot API integration settings.", tags=["telegram"]),
     )
     dashboard: DashboardConfig = field(
         default_factory=DashboardConfig,
@@ -2201,6 +2279,9 @@ class KiroClawConfig:
         knowledge_data = data.get("knowledge", {})
         if not isinstance(knowledge_data, dict):
             knowledge_data = {}
+        telegram_data = data.get("telegram", {})
+        if not isinstance(telegram_data, dict):
+            telegram_data = {}
         slack_data = data.get("slack", {})
         if not isinstance(slack_data, dict):
             slack_data = {}
@@ -2376,6 +2457,14 @@ class KiroClawConfig:
                     )
                     if isinstance(k, str)
                 ],
+            ),
+            telegram=TelegramConfig(
+                enabled=bool(telegram_data.get("enabled", False)),
+                bot_token=str(telegram_data.get("bot_token", "")),
+                allowed_user_ids=_coerce_int_ids(telegram_data.get("allowed_user_ids")),
+                soft_threshold_pct=max(
+                    1, min(100, _coerce_int(telegram_data.get("soft_threshold_pct"), 80))
+                ),
             ),
             slack=SlackConfig(
                 allowed_users=[
@@ -2613,6 +2702,7 @@ class KiroClawConfig:
             "session": asdict(self.session),
             "memory": asdict(self.memory),
             "slack": asdict(self.slack),
+            "telegram": asdict(self.telegram),
             "dashboard": asdict(self.dashboard),
             "tunnel": asdict(self.tunnel),
             "hooks": self.hooks,

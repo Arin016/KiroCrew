@@ -1,0 +1,422 @@
+"""Full new-path dispatch: TelegramTransport -> TurnDriver -> TelegramRenderer.
+
+``TelegramTransport.receive()`` authorizes + normalizes an inbound update and
+hands the ``InboundMessage`` to :meth:`TelegramDispatcher.handle_message`,
+which mirrors the Slack transport dispatch:
+
+    command intercept (/new, /compact, /help)
+    -> construct TelegramRenderer + on_turn_start (immediate ack placeholder)
+    -> session acquire -> context build
+    -> TurnDriver.run(provider, renderer)   # shared redaction + approval ladder
+    -> post-turn (record_success, persist, soft-threshold notice)  # each guarded
+    -> renderer.close() + session release   # in finally
+
+``on_callback`` resolves interactive tool approvals (``a:<rid>:<1|0>`` ->
+``TelegramApprovalDecider.resolve_global``) and re-injects ``[OPTIONS:]``
+choices (``opt:<i>``) as fresh turns.
+
+Dependency direction is ``telegram -> messaging`` (allowed). The security
+``tool_gate`` and spawn auto-approve are wired inline off ``ctx_builder.hooks``
+(channel-neutral) so this module never imports ``kiro_claw.slack``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import TYPE_CHECKING, Any
+
+from kiro_claw.acp.types import EVENT_COMPACTION_STATUS, EVENT_COMPLETE
+from kiro_claw.hooks import TOOL_AUTO_APPROVE, TOOL_DENY
+from kiro_claw.messaging.driver import APPROVAL_INTERACTIVE, TurnDriver
+from kiro_claw.messaging.link import canonical_key
+from kiro_claw.messaging.transport import InboundMessage
+from kiro_claw.sel import sel
+from kiro_claw.telegram.commands import ConversationState, parse_command
+from kiro_claw.telegram.renderer import TelegramApprovalDecider, TelegramRenderer
+from kiro_claw.telegram.transport import TELEGRAM_CAPABILITIES
+
+if TYPE_CHECKING:
+    from kiro_claw.config.loader import KiroClawConfig
+    from kiro_claw.context import ContextBuilder
+    from kiro_claw.history import ConversationLog
+    from kiro_claw.session import SessionManager
+    from kiro_claw.telegram.client import TelegramCallback, TelegramClient
+
+logger = logging.getLogger(__name__)
+
+# Canonical kiro-cli agent fallback so Telegram sessions load kiroclaw-core
+# (spawn_run etc.) instead of kiro-cli's bare built-in default when neither an
+# explicit override nor agent.default_agent is configured. Mirrors the Slack
+# path's _DEFAULT_KIROCLAW_AGENT.
+_DEFAULT_KIROCLAW_AGENT = "kiroclaw"
+
+_HELP_TEXT = """\
+🦞 KiroClaw — Telegram
+
+Commands:
+/new — Start a fresh conversation
+/compact — Compress context (when it gets long)
+/help — Show this message
+
+Just send a message to chat. Replies stream in real-time.
+"""
+
+
+class TelegramDispatcher:
+    """Coordinates Telegram turns onto the shared ``TurnDriver``.
+
+    One instance per gateway lifetime. Holds the per-user conversation state
+    (generation counter + soft-threshold flag). ``handle_message`` is wired as
+    the transport's dispatch callback; ``on_callback`` is wired as the client's
+    inline-button handler. ``client`` is set by the gateway after construction.
+    """
+
+    def __init__(
+        self,
+        *,
+        sessions: "SessionManager",
+        ctx_builder: "ContextBuilder",
+        cfg: "KiroClawConfig",
+        allowed_user_ids: set[int],
+        agent: str | None = None,
+        conv_log: "ConversationLog | None" = None,
+        approval_mode: str = APPROVAL_INTERACTIVE,
+    ) -> None:
+        self.sessions = sessions
+        self.ctx_builder = ctx_builder
+        self.cfg = cfg
+        self._allowed = set(allowed_user_ids or ())
+        self.agent = agent
+        self.conv_log = conv_log
+        self.approval_mode = approval_mode
+        self.client: "TelegramClient | None" = None
+        self._conv = ConversationState()
+
+    # ── Turn dispatch (transport's dispatch callback) ──────────────────────
+
+    async def handle_message(self, msg: InboundMessage) -> None:
+        """Drive one authorized inbound message through TurnDriver end-to-end."""
+        assert self.client is not None, "TelegramDispatcher.client must be set"
+        user_id = int(msg.user_id)
+        chat_id = int(msg.conversation_id)
+        text = msg.text
+
+        # ── Command intercept (no LLM session needed) ──
+        cmd = parse_command(text)
+        if cmd == "new":
+            self._conv.bump_gen(user_id)
+            await self.client.send_message(chat_id, "✅ New conversation started.")
+            return
+        if cmd == "compact":
+            self._conv.clear_awaiting(user_id)
+            await self._handle_compact(user_id, chat_id)
+            return
+        if cmd == "help":
+            await self.client.send_message(chat_id, _HELP_TEXT)
+            return
+
+        session_key = self._session_key(user_id)
+        channel_id = f"telegram:{user_id}"
+        # Resolve the kiro-cli agent: an explicit override wins, else the
+        # configured default, else the canonical "kiroclaw" agent — so the
+        # session loads kiroclaw-core (spawn_run) instead of kiro-cli's bare
+        # built-in default. Mirrors slack/transport_dispatch.py.
+        agent = self.agent or self.cfg.agent.default_agent or _DEFAULT_KIROCLAW_AGENT
+
+        decider = (
+            TelegramApprovalDecider(session_key=session_key)
+            if self.approval_mode == APPROVAL_INTERACTIVE
+            else None
+        )
+        renderer = TelegramRenderer(
+            self.client, chat_id, TELEGRAM_CAPABILITIES, session_key=session_key
+        )
+
+        # Everything acquire-dependent runs INSIDE the try so the finally always
+        # finalizes the placeholder (renderer.close -> no perma-"🤔 …"), even if
+        # get_or_create itself raises on a cold-start failure. release() is gated
+        # on _acquired so we never release a semaphore we didn't hold. Mirrors
+        # slack/transport_dispatch.py.
+        _acquired = False
+        try:
+            # Ack placeholder first (before the potentially slow cold-start);
+            # on_turn_start is idempotent so the driver's later call no-ops.
+            await renderer.on_turn_start()
+            provider, is_new, resumed = await self.sessions.get_or_create(
+                session_key, agent=agent, channel_id=channel_id
+            )
+            _acquired = True
+            if is_new:
+                await self.sessions.set_channel(session_key, channel_id)
+            full_message, _ = self.ctx_builder.build_message(
+                text,
+                is_new,
+                session_key,
+                channel_id=channel_id,
+                agent=agent,
+                resumed=resumed,
+            )
+
+            # PreToolUse security gate (channel-neutral, off ctx_builder.hooks):
+            # sensitive-path keystone + governance ceiling + deny-list. Returns
+            # "deny" (un-overridable), "auto_approve", or "" (passthrough).
+            def _tool_gate(event: Any) -> str:
+                result = self.ctx_builder.hooks.on_tool_call(
+                    getattr(event, "title", "") or "",
+                    session_key=session_key,
+                    agent=agent,
+                    tool_kind=getattr(event, "tool_kind", "") or "",
+                    raw_params=getattr(event, "raw_tool_params", None),
+                )
+                if result.action == TOOL_DENY:
+                    return "deny"
+                if result.action == TOOL_AUTO_APPROVE:
+                    return "auto_approve"
+                return ""
+
+            driver = TurnDriver(
+                provider,
+                renderer,
+                approval_mode=self.approval_mode,
+                decider=decider,
+                # Preserve the auto_approve_subagent_spawn hook for spawn_run
+                # (replicated inline to avoid a telegram -> slack import).
+                auto_approve_tool=lambda title: bool(
+                    self.ctx_builder
+                    and self.ctx_builder.hooks
+                    and self.ctx_builder.hooks.auto_approve_subagent_spawn
+                    and title == "spawn_run"
+                ),
+                tool_gate=_tool_gate,
+            )
+            accumulated = await driver.run(full_message)
+
+            # ── Post-turn bookkeeping (each guarded so a failure here can't
+            # fall through to the except and re-record the successful turn). ──
+            self.sessions.record_success(session_key)
+            try:
+                self._persist_turn(session_key, text, accumulated, is_new)
+            except Exception:
+                logger.warning(
+                    "Telegram: persist_turn failed session=%s", session_key, exc_info=True
+                )
+            try:
+                await self._maybe_notice(chat_id, user_id, session_key, provider)
+            except Exception:
+                logger.warning(
+                    "Telegram: maybe_notice failed session=%s", session_key, exc_info=True
+                )
+            try:
+                sel().log_api_access(
+                    caller=f"telegram:{user_id}",
+                    operation="transport_dispatch.handle",
+                    outcome="success",
+                    source="telegram",
+                    resources=f"session={session_key}",
+                )
+            except Exception:
+                logger.debug("Telegram: success audit failed", exc_info=True)
+        except Exception:
+            logger.exception("Telegram transport_dispatch: error handling message")
+            if _acquired:
+                await self.sessions.record_failure(session_key)
+        finally:
+            # Always finalize the placeholder (no perma-"🤔 …"), even if
+            # get_or_create raised before the semaphore was held. Only release
+            # the semaphore if we actually acquired it.
+            await renderer.close()
+            if _acquired:
+                self.sessions.release(session_key)
+
+    # ── Inline-button handler (client's on_callback) ───────────────────────
+
+    async def on_callback(self, cb: "TelegramCallback") -> None:
+        """Route an inline-keyboard press: approval decisions or [OPTIONS:]."""
+        assert self.client is not None
+        # Auth first (deny-by-default short-circuit): don't even ack an
+        # unauthorized user's press — avoids a wasted Bot API round-trip.
+        if not self._authorized(cb.user_id):
+            return
+        # Private-chat-only (mirrors receive()): buttons live on messages the
+        # bot sent, and turns are blocked in non-private chats, so a non-private
+        # callback shouldn't occur — deny defensively before acting on it.
+        if cb.chat_type != "private":
+            return
+        # Answer to dismiss the button spinner for the authorized user.
+        await self.client.answer_callback(cb.callback_query_id)
+
+        data = cb.data or ""
+
+        # Tool-approval decision: "a:<request_id>:<1|0>".
+        if data.startswith("a:"):
+            body = data[2:]
+            rid, _, flag = body.rpartition(":")
+            approved = flag == "1"
+            key = TelegramApprovalDecider.key(self._session_key(cb.user_id), rid)
+            resolved = TelegramApprovalDecider.resolve_global(key, approved)
+            if resolved:
+                verdict = "✅ Approved" if approved else "🚫 Denied"
+            else:
+                # No pending decision to resolve — the request already timed out
+                # (decider denies by default and pops the key) or was answered.
+                # Don't imply the press took effect: a post-timeout "Approve" on
+                # an already-denied tool must not display "Approved".
+                verdict = "⌛ This approval already expired."
+            await self.client.edit_message(
+                cb.chat_id, cb.message_id, verdict, reply_markup={"inline_keyboard": []}
+            )
+            return
+
+        # [OPTIONS:] choice: "opt:<i>" — label recovered from the button text.
+        if data.startswith("opt:"):
+            choice_text = cb.label
+            if not choice_text:
+                await self.client.edit_message(
+                    cb.chat_id,
+                    cb.message_id,
+                    "⚠️ Couldn't read that choice — please type it instead.",
+                    reply_markup={"inline_keyboard": []},
+                )
+                return
+            await self.client.edit_message(
+                cb.chat_id,
+                cb.message_id,
+                f"✓ {choice_text}",
+                reply_markup={"inline_keyboard": []},
+            )
+            # Re-inject the choice as a fresh turn via the normal path.
+            synthetic = InboundMessage(
+                channel_type="telegram",
+                user_id=str(cb.user_id),
+                conversation_id=str(cb.chat_id),
+                text=choice_text,
+            )
+            await self.handle_message(synthetic)
+
+    # ── Helpers ────────────────────────────────────────────────────────────
+
+    def _authorized(self, user_id: int) -> bool:
+        # Deny-by-default (callbacks bypass transport.receive, so re-check here).
+        return bool(user_id) and bool(self._allowed) and user_id in self._allowed
+
+    def _session_key(self, user_id: int) -> str:
+        gen = self._conv.current_gen(user_id)
+        return canonical_key(f"telegram:{user_id}:{gen}")
+
+    def _persist_turn(
+        self, session_key: str, user_text: str, reply_text: str, is_new: bool
+    ) -> None:
+        """Record the turn to conversation_log (dashboard visibility + restart)."""
+        if self.conv_log is None:
+            return
+        self.conv_log.append(session_key, "user", user_text)
+        if reply_text:
+            self.conv_log.append(session_key, "assistant", reply_text)
+        if is_new:
+            title = (user_text or "").strip().replace("\n", " ")[:40] or "Telegram"
+            self.conv_log.set_title(session_key, title)
+
+    async def _maybe_notice(
+        self, chat_id: int, user_id: int, session_key: str, provider: Any
+    ) -> None:
+        """Soft-threshold context warning as a SEPARATE message (not persisted).
+
+        Kept out of the streamed answer buffer so it is never persisted into the
+        assistant turn and replayed next turn as though the assistant said it.
+        """
+        pct = self.sessions.check_context_usage(session_key, provider)
+        soft_pct = self.cfg.telegram.soft_threshold_pct
+        if pct >= soft_pct and not self._conv.is_awaiting(user_id):
+            self._conv.set_awaiting(user_id)
+            assert self.client is not None
+            await self.client.send_message(
+                chat_id,
+                "⚠️ Context is getting long. Use /compact to compress or "
+                "/new to start fresh.",
+            )
+
+    async def _handle_compact(self, user_id: int, chat_id: int) -> None:
+        """In-place ACP ``/compact`` on the user's session (mirrors Slack).
+
+        Holds the per-session semaphore for the WHOLE compaction. Each Telegram
+        update is dispatched as its own task, so a bare ``locked()`` check
+        followed by ``stream_command`` would race: a normal turn could take the
+        semaphore in the window between the check and the stream, and the two
+        would then interleave JSON-RPC on one stdio channel and corrupt session
+        state. ``try_acquire()`` takes the semaphore atomically (or refuses if a
+        turn is already in flight); the ``finally`` always releases it.
+        """
+        assert self.client is not None
+        session_key = self._session_key(user_id)
+        # Atomically take the turn semaphore, or refuse. Distinguish "busy" (a
+        # turn is streaming) from "no session yet" for the user-facing note.
+        if not await self.sessions.try_acquire(session_key):
+            if self.sessions.has_session(session_key):
+                await self.client.send_message(
+                    chat_id,
+                    "⏳ Still working on your last message — try /compact once it finishes.",
+                )
+            else:
+                await self.client.send_message(chat_id, "No active session to compact.")
+            return
+        try:
+            provider = self.sessions.get_provider(session_key)
+            if provider is None:
+                await self.client.send_message(chat_id, "No active session to compact.")
+                return
+
+            status_id = await self.client.send_message(chat_id, "🔄 Compacting context…")
+            result_text: str | None = None
+            try:
+
+                async def _run() -> None:
+                    nonlocal result_text
+                    async for ev in provider.stream_command("/compact"):
+                        if ev.kind == EVENT_COMPACTION_STATUS:
+                            if ev.text == "completed":
+                                summary = ev.title or ""
+                                result_text = (
+                                    f"✅ Compacted: {summary}"
+                                    if summary
+                                    else "✅ Context compacted."
+                                )
+                            elif ev.text == "failed":
+                                result_text = (
+                                    f"❌ Compaction failed: {ev.title or 'unknown error'}"
+                                )
+                        elif ev.kind == EVENT_COMPLETE:
+                            break
+
+                await asyncio.wait_for(_run(), timeout=120)
+                if not result_text:
+                    cr = await provider.wait_for_compaction(timeout=120.0)
+                    if cr["type"] == "completed":
+                        summary = cr.get("summary", "")
+                        result_text = (
+                            f"✅ Compacted: {summary}" if summary else "✅ Context compacted."
+                        )
+                    elif cr["type"] == "failed":
+                        err = cr.get("summary", "")
+                        result_text = (
+                            f"❌ Compaction failed: {err}" if err else "❌ Compaction failed."
+                        )
+                    else:
+                        result_text = "⚠️ Compaction timed out."
+            except Exception:
+                logger.warning("Telegram /compact failed for %s", session_key, exc_info=True)
+                result_text = "❌ Compaction failed unexpectedly."
+                try:
+                    await self.sessions.destroy(session_key)
+                except Exception:
+                    logger.debug("Telegram: destroy after compact failure failed", exc_info=True)
+
+            final = result_text or "✅ Context compacted."
+            if status_id:
+                await self.client.edit_message(chat_id, status_id, final)
+            else:
+                await self.client.send_message(chat_id, final)
+        finally:
+            # Always release the semaphore we took. No-op if the except path
+            # already destroyed the session (release() looks up by key).
+            self.sessions.release(session_key)

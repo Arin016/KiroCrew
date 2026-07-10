@@ -2615,3 +2615,42 @@ class TestConfigEditToolBlocked:
             raw_params={"path": "~/.kiroclaw/workspace/notes.md"},
         )
         assert result.action != "deny"
+
+
+class TestTelegramAllowedUserIdsGuard:
+    """Finding: a non-list allowed_user_ids must not iterate char-by-char."""
+
+    def test_string_value_yields_empty_not_char_list(self) -> None:
+        cfg = _load_from_dict(
+            {"telegram": {"enabled": True, "allowed_user_ids": "12345"}}
+        )
+        # A hand-edited string must NOT become [1, 2, 3, 4, 5]; treat non-list
+        # as empty (fail closed).
+        assert cfg.telegram.allowed_user_ids == []
+
+    def test_real_list_is_preserved(self) -> None:
+        cfg = _load_from_dict(
+            {"telegram": {"enabled": True, "allowed_user_ids": [8743158320, -100]}}
+        )
+        assert cfg.telegram.allowed_user_ids == [8743158320, -100]
+
+    def test_malformed_entries_skipped_not_crash(self) -> None:
+        # "--100"/"1.5"/"abc" would raise in int() and crash config load; a
+        # bool must not sneak in. Only clean base-10 ints survive.
+        cfg = _load_from_dict(
+            {
+                "telegram": {
+                    "enabled": True,
+                    "allowed_user_ids": ["--100", "1.5", "abc", 42, "-7", True],
+                }
+            }
+        )
+        assert cfg.telegram.allowed_user_ids == [42, -7]
+
+    def test_non_numeric_soft_threshold_defaults_not_crash(self) -> None:
+        # "abc" would raise in int() and crash config load; must fall back to
+        # the default (80) instead.
+        cfg = _load_from_dict(
+            {"telegram": {"enabled": True, "soft_threshold_pct": "abc"}}
+        )
+        assert cfg.telegram.soft_threshold_pct == 80

@@ -869,6 +869,16 @@ _CREDENTIAL_PATTERNS = re.compile(
     r'|(?:AccessKeyId|aws_access_key_id)["\']?\s*[:=]\s*["\']?[^\s"\',}]+'
     r"|BEGIN[\s](?:RSA|DSA|EC|OPENSSH)[\s]PRIVATE[\s]KEY"
     r"|xox[bpas]-[0-9a-zA-Z-]{10,}"  # Slack token
+    # Telegram bot token: ``<bot_id>:<secret>`` — bot_id is 6+ digits, secret is
+    # ~35 URL-safe base64 chars. The ``{30,}`` floor sits deliberately below the
+    # real length so shortened/rotated test tokens are still caught. Analogue to
+    # the Slack token above. Telegram tokens can live in ``config.json``
+    # (agent-readable), so an echoed config would otherwise leak a full
+    # bot-control credential unredacted. The value class ``[A-Za-z0-9_-]`` stops
+    # at structural delimiters (space, quote, comma, brace), so it can't swallow
+    # adjacent fields; over-redacting a rare ``digits:token`` lookalike is the
+    # safe direction.
+    r"|[0-9]{6,}:[A-Za-z0-9_-]{30,}"  # Telegram bot token
     # ── Third-party developer credentials (AWS-345 / AWS-59) ──
     # Distinctive, fixed-case prefixes → very low false-positive risk.  Minimum
     # lengths are kept slightly below the real token lengths so shortened test /

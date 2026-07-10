@@ -372,6 +372,26 @@ class SessionManager:
         sess = self._sessions.get(key)
         return sess.provider if sess else None
 
+    async def try_acquire(self, key: str) -> bool:
+        """Atomically take *key*'s turn semaphore iff a session exists and is idle.
+
+        For out-of-band commands (e.g. ``/compact``) that must drive the SAME
+        provider without interleaving JSON-RPC with a normal turn. Returns
+        ``False`` if there is no session, or a turn already holds the semaphore.
+
+        Atomic wrt other coroutines: the ``locked()`` check and ``acquire()``
+        run with no intervening ``await`` suspension — ``acquire()`` on an idle
+        ``Semaphore(1)`` decrements and returns synchronously (its ``while``
+        loop never runs), so nothing else can slip in between. This closes the
+        check-then-act race a bare ``locked()`` check + ``stream_command`` has.
+        Pair every ``True`` return with ``release(key)``.
+        """
+        sess = self._sessions.get(key)
+        if sess is None or sess.semaphore.locked():
+            return False
+        await sess.semaphore.acquire()
+        return True
+
     def active_providers(self) -> list[LLMProvider]:
         """Return the providers of all currently-active sessions.
 

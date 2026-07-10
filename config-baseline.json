@@ -2365,6 +2365,105 @@
       "defaultValue": 95
     },
     {
+      "path": "telegram",
+      "kind": "core",
+      "type": "object",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [
+        "telegram"
+      ],
+      "label": "Telegram",
+      "help": "Telegram Bot API integration settings.",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": {
+        "enabled": false,
+        "bot_token": "",
+        "allowed_user_ids": [],
+        "soft_threshold_pct": 80
+      }
+    },
+    {
+      "path": "telegram.enabled",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [
+        "telegram"
+      ],
+      "label": "Enabled",
+      "help": "Enable the Telegram Bot API channel (long-polling). Requires TELEGRAM_BOT_TOKEN (env/.env) or telegram.bot_token.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
+    },
+    {
+      "path": "telegram.bot_token",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": true,
+      "tags": [
+        "telegram"
+      ],
+      "label": "Bot Token",
+      "help": "Telegram Bot API token from @BotFather. Prefer the TELEGRAM_BOT_TOKEN credential (env/.env) over storing it here.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": ""
+    },
+    {
+      "path": "telegram.allowed_user_ids",
+      "kind": "core",
+      "type": "array",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [
+        "telegram"
+      ],
+      "label": "Allowed User IDs",
+      "help": "Numeric Telegram user IDs permitted to DM the bot. Empty = deny all (fail closed): a Telegram bot is globally reachable by @username.",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": []
+    },
+    {
+      "path": "telegram.allowed_user_ids.*",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "*",
+      "help": "",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": null
+    },
+    {
+      "path": "telegram.soft_threshold_pct",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [
+        "telegram"
+      ],
+      "label": "Soft Context Threshold %",
+      "help": "Prompt the user to /compact or /new when context passes this percentage.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 80
+    },
+    {
       "path": "dashboard",
       "kind": "core",
       "type": "object",

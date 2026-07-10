@@ -51,6 +51,7 @@ from kiro_claw.config.loader import (
     CRED_OWNER_ID,
     CRED_SLACK_APP_TOKEN,
     CRED_SLACK_BOT_TOKEN,
+    CRED_TELEGRAM_BOT_TOKEN,
     CRED_WECOM_BOT_ID,
     CRED_WECOM_SECRET,
     _session_work_dir,
@@ -123,6 +124,7 @@ from kiro_claw.taskrunner import TaskRunner
 if TYPE_CHECKING:
     from kiro_claw.dashboard.state import _ChatSlot
     from kiro_claw.task_models import Task
+    from kiro_claw.telegram.client import TelegramClient
     from kiro_claw.wechat.client import WeComClient
 
 logger = logging.getLogger(__name__)
@@ -485,6 +487,15 @@ class GatewayOrchestrator:
         self._wecom_enabled = bool(
             cfg.wechat.enabled and self._wecom_bot_id and self._wecom_secret
         )
+        # Telegram — the TELEGRAM_BOT_TOKEN credential (env/.env) overrides
+        # cfg.telegram.bot_token; all other settings come from the typed
+        # cfg.telegram dataclass (no ad-hoc config.json re-parse).
+        self._telegram_bot_token = (
+            creds.get(CRED_TELEGRAM_BOT_TOKEN, "") or cfg.telegram.bot_token
+        )
+        self._telegram_enabled = bool(cfg.telegram.enabled and self._telegram_bot_token)
+        self._telegram_allowed_user_ids: list[int] = list(cfg.telegram.allowed_user_ids)
+        self._telegram_client: "TelegramClient | None" = None
         self.slack_command = cfg.slack.command
 
         # Services (initialized in start())
@@ -3322,6 +3333,8 @@ class GatewayOrchestrator:
             cleanup_tasks.append(asyncio.wait_for(self._socket_client.close(), timeout=1.0))
         if self._wecom_client:
             cleanup_tasks.append(asyncio.wait_for(self._wecom_client.close(), timeout=2.0))
+        if self._telegram_client:
+            cleanup_tasks.append(asyncio.wait_for(self._telegram_client.close(), timeout=2.0))
         # Stop Ollama server if we started it
         if self._ollama_manager is not None:
             if isinstance(self._ollama_manager, OllamaManager):
@@ -3671,6 +3684,10 @@ class GatewayOrchestrator:
         from kiro_claw.wechat.gateway import maybe_start_wecom
 
         self._wecom_client = await maybe_start_wecom(self)
+        # Telegram channel — guarded no-op unless enabled + token present.
+        from kiro_claw.telegram.gateway import maybe_start_telegram
+
+        self._telegram_client = await maybe_start_telegram(self)
 
         # Check for updates before printing URLs
         print("🐾 Checking for updates…")

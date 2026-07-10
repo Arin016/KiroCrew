@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hmac
 import json
 import logging
@@ -38,6 +39,39 @@ _STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
 _DIST_DIR = _STATIC_DIR / "dist"
 _HTML_PATH = _STATIC_DIR / "dashboard.html"
 _SSE_INTERVAL_SECS = 5
+
+# Sentinel returned in place of sensitive config values in API responses. Kept
+# distinct from "" so the UI can render a "set (hidden)" placeholder.
+_SENSITIVE_MASK = "••••••••"
+
+
+def _masked_config_dict(cfg: KiroClawConfig) -> dict:
+    """Return ``cfg.to_dict()`` with sensitive string values masked.
+
+    Applied ONLY to the GET /api/config/kiroclaw response — never to the value
+    ``cfg.to_dict()`` / ``cfg.save()`` serialize, since masking there would
+    persist the sentinel and destroy the real secret (e.g. ``telegram.bot_token``).
+    Safe here because no config write endpoint accepts sensitive fields; if one
+    is ever added it MUST treat ``_SENSITIVE_MASK`` as "unchanged" and keep the
+    stored value. Sensitivity is schema-driven (``sensitive=True`` field
+    metadata), so newly added sensitive fields are masked automatically.
+    """
+    from kiro_claw.config.schema import JSON_SCHEMA
+    from kiro_claw.config.validation import _is_sensitive_path
+
+    masked = copy.deepcopy(cfg.to_dict())
+
+    def _walk(node: object, prefix: str) -> None:
+        if isinstance(node, dict):
+            for key, val in list(node.items()):
+                path = f"{prefix}.{key}" if prefix else key
+                if isinstance(val, dict):
+                    _walk(val, path)
+                elif isinstance(val, str) and val and _is_sensitive_path(JSON_SCHEMA, path):
+                    node[key] = _SENSITIVE_MASK
+
+    _walk(masked, "")
+    return masked
 
 
 def _sel():
@@ -791,7 +825,7 @@ async def api_kiroclaw_config(request: web.Request) -> web.Response:
         return web.json_response({"ok": True})
 
     cfg = KiroClawConfig.load()
-    return web.json_response(cfg.to_dict())
+    return web.json_response(_masked_config_dict(cfg))
 
 
 # Allowed editable config paths and their validators
@@ -974,7 +1008,7 @@ async def api_kiroclaw_config_patch(request: web.Request) -> web.Response:
                 cfg.agent.completion_keep_chars,
             )
 
-    return web.json_response(cfg.to_dict())
+    return web.json_response(_masked_config_dict(cfg))
 
 
 # ── Local token bootstrap (Electron / local apps) ─────────────────────
