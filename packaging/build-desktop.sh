@@ -139,6 +139,32 @@ log "Verifying self-containment…"
 PYTHONNOUSERSITE=1 "$BACKEND_OUT/bin/python3.12" -m kiro_claw --version >/dev/null \
   || { echo "ERROR: bundled backend is NOT self-contained (missing dep under PYTHONNOUSERSITE=1)" >&2; exit 1; }
 
+# Resolver-agreement gate: the Electron launcher (find-bin.js) must be able to
+# locate the launcher we just wrote. This catches contract drift between this
+# builder's output layout (BACKEND_OUT/bin/kiroclaw) and find-bin.js's candidate
+# list — a silent mismatch there ships an app that can't spawn its backend
+# (falls through to the bare "kiroclaw" PATH fallback -> spawn ENOENT).
+if command -v node >/dev/null 2>&1; then
+  log "Verifying find-bin.js resolves the bundled launcher…"
+  node -e '
+    const fs=require("fs"), os=require("os"), path=require("path");
+    const { findKiroclawBin } = require(path.join(process.argv[1], "find-bin"));
+    // Simulate the packaged app: resourcesPath and __dirname both point at the
+    // electron dir where backend-dist currently lives.
+    const resolved = findKiroclawBin(fs, os, path, process.argv[1], process.argv[1]);
+    const expected = process.argv[2];
+    if (resolved !== expected) {
+      console.error("ERROR: find-bin.js resolved \x27" + resolved + "\x27, expected the bundled launcher \x27" + expected + "\x27.");
+      console.error("       The builder output layout and find-bin.js candidate list have drifted apart.");
+      process.exit(1);
+    }
+    console.log("    find-bin.js -> " + resolved);
+  ' "$ELECTRON_DIR" "$BACKEND_OUT/bin/kiroclaw" \
+    || { echo "ERROR: find-bin.js cannot locate the bundled backend launcher" >&2; exit 1; }
+else
+  echo "    (node not found; skipping find-bin.js resolver-agreement gate)"
+fi
+
 # --- 4. Prune to shrink the bundle ------------------------------------------
 log "Pruning bundle…"
 ( cd "$BACKEND_OUT"

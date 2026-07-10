@@ -15,9 +15,18 @@
 function findKiroclawBin(fs, os, path, resourcesPath, dirname) {
   const home = os.homedir();
   const candidates = [
-    // 1. Bundled PyInstaller binary (inside .app or dev electron/backend-dist)
+    // 1. Legacy PyInstaller layout: a flat frozen executable at the root of the
+    //    bundle. The current builder (packaging/build-desktop.sh) no longer
+    //    emits this; kept first only for backward-compat with older bundles.
     path.join(resourcesPath || "", "backend-dist", "kiroclaw-backend", "kiroclaw-backend"),
     path.resolve(dirname, "backend-dist", "kiroclaw-backend", "kiroclaw-backend"),
+    // 1b. CURRENT bundled layout (packaging/build-desktop.sh): a
+    //     python-build-standalone interpreter copied into backend-dist with a
+    //     `bin/kiroclaw` launcher wrapper (exec python3.12 -s -m kiro_claw).
+    //     This is what a freshly-built .app actually ships. Keep this in sync
+    //     with build-desktop.sh's BACKEND_OUT/bin/kiroclaw path.
+    path.join(resourcesPath || "", "backend-dist", "kiroclaw-backend", "bin", "kiroclaw"),
+    path.resolve(dirname, "backend-dist", "kiroclaw-backend", "bin", "kiroclaw"),
     path.resolve(dirname, "..", "bin", "kiroclaw"),
     // 2. Well-known install paths (toolbox, installer symlink, and venv)
     path.join(home, ".toolbox", "bin", "kiroclaw"),

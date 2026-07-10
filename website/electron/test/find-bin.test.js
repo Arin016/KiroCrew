@@ -28,6 +28,24 @@ describe("findKiroclawBin", () => {
     assert.equal(result, bundled);
   });
 
+  it("returns bundled venv layout (backend-dist/.../bin/kiroclaw) when the flat PyInstaller exe is absent", () => {
+    const venvLayout = path.join(RESOURCES, "backend-dist", "kiroclaw-backend", "bin", "kiroclaw");
+    const fakeFs = only(venvLayout);
+    const result = findKiroclawBin(fakeFs, fakeOs, path, RESOURCES, DIRNAME);
+    assert.equal(result, venvLayout);
+  });
+
+  it("prefers the flat PyInstaller exe over the venv-layout bin/kiroclaw", () => {
+    const bundled = path.join(RESOURCES, "backend-dist", "kiroclaw-backend", "kiroclaw-backend");
+    const venvLayout = path.join(RESOURCES, "backend-dist", "kiroclaw-backend", "bin", "kiroclaw");
+    const fakeFs = {
+      accessSync: (p) => { if (p !== bundled && p !== venvLayout) throw new Error("ENOENT"); },
+      constants: { X_OK: fs.constants.X_OK },
+    };
+    const result = findKiroclawBin(fakeFs, fakeOs, path, RESOURCES, DIRNAME);
+    assert.equal(result, bundled);
+  });
+
   it("returns ~/.toolbox/bin/kiroclaw when bundled paths don't exist", () => {
     const toolboxBin = path.join(HOME, ".toolbox", "bin", "kiroclaw");
     const fakeFs = only(toolboxBin);
