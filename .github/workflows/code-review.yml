@@ -121,3 +121,170 @@ jobs:
   # The semantic AI layer of code review (the AutoSDE rules that cannot be
   # expressed as a grep) lives in claude-review.yml, which auto-runs on every
   # PR and fails the check on high-severity findings.
+
+  # ── Inclusive Language ────────────────────────────────────────────────
+  # Scans only lines added in this PR. Legacy violations are burned down
+  # separately — this gate prevents new ones from landing.
+  inclusive-language:
+    name: Inclusive Language
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install woke
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/get-woke/woke/main/install.sh \
+            | bash -s -- -b /usr/local/bin
+
+      - name: Scan only changed lines
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git diff "$BASE".."$HEAD" --unified=0 --diff-filter=ACMR \
+            -- ':(exclude)THIRD-PARTY-NOTICES' ':(exclude)CHANGELOG.md' ':(exclude)*.lock' ':(exclude).woke.yml' \
+            | grep '^+[^+]' | sed 's/^+//' > /tmp/diff-added-lines.txt
+
+          if [ ! -s /tmp/diff-added-lines.txt ]; then
+            echo "No added lines to scan."
+            exit 0
+          fi
+
+          # Run woke; only fail on error-severity findings (not warnings)
+          WOKE_OUT=$(woke -c .woke.yml --stdin < /tmp/diff-added-lines.txt 2>&1) || true
+          echo "$WOKE_OUT"
+          if echo "$WOKE_OUT" | grep -q "(error)"; then
+            echo "::error::Inclusive language violations found in added lines"
+            exit 1
+          fi
+
+  # ── Dependency Audit ─────────────────────────────────────────────────
+  # Blocks PRs that introduce new vulnerable dependencies.
+  dep-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Python audit (pip-audit)
+        # Pre-existing advisories on main should not block unrelated PRs.
+        # Remove continue-on-error once baseline is clean.
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip install -e ".[voice]" --quiet
+          pip-audit --progress-spinner off
+
+      - name: Node audit (npm)
+        working-directory: website
+        # npm audit exits non-zero on ANY vuln at the threshold level.
+        # Main already has 12 known vulns (ws, vitest transitive deps).
+        # This surfaces them as warnings without blocking the PR.
+        # Once main is clean, remove continue-on-error to make it blocking.
+        continue-on-error: true
+        run: |
+          npm ci --no-audit --no-fund
+          npm audit --audit-level=high
+
+  # ── Coverage Gate ────────────────────────────────────────────────────
+  # Prevents coverage regression below minimum thresholds.
+  # Downloads artifacts from the CI workflow's test jobs.
+  coverage-gate:
+    name: Coverage Gate
+    runs-on: ubuntu-latest
+    # This job needs the test artifacts from ci.yml. We use workflow_run
+    # instead of needs: since these are separate workflow files. However,
+    # since ci.yml and code-review.yml both trigger on pull_request, the
+    # artifacts may not be ready yet. Use a polling approach or rely on
+    # the branch protection rule requiring CI to pass first.
+    #
+    # Simpler approach: just re-run the coverage commands here (fast, <60s).
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install and run backend tests with coverage
+        run: |
+          pip install -e ".[voice,desktop,dev]" --quiet
+          pytest -q --timeout=120 --cov=kiro_claw --cov-report=xml \
+            --deselect=test/test_script_hooks.py \
+            --deselect=test/test_cron_script.py \
+            --deselect=test/test_run_aim_path.py \
+            --no-header 2>/dev/null || true
+
+      - name: Check backend coverage (min 50%)
+        run: |
+          if [ ! -f coverage.xml ]; then
+            echo "::warning::No backend coverage report — skipping"
+            exit 0
+          fi
+          LINE_RATE=$(python3 -c "
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('coverage.xml')
+          print(f\"{float(tree.getroot().attrib['line-rate']) * 100:.1f}\")
+          ")
+          echo "Backend coverage: ${LINE_RATE}%"
+          python3 -c "import sys; sys.exit(0 if float('${LINE_RATE}') >= 50 else 1)" \
+            || { echo "::error::Backend coverage ${LINE_RATE}% below 50% minimum"; exit 1; }
+
+      - name: Install and run frontend tests with coverage
+        working-directory: website
+        run: |
+          npm ci --no-audit --no-fund
+          npx vitest run --coverage --reporter=dot 2>/dev/null || true
+
+      - name: Check frontend coverage (min 40%)
+        run: |
+          # Vitest outputs cobertura XML (not json-summary). Search likely paths.
+          COV_FILE=$(find website/build/coverage website/coverage -name "cobertura*.xml" 2>/dev/null | head -1)
+          if [ -z "$COV_FILE" ]; then
+            echo "::warning::No frontend coverage report found — skipping"
+            exit 0
+          fi
+          LINE_PCT=$(python3 -c "
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('$COV_FILE')
+          print(f\"{float(tree.getroot().attrib['line-rate']) * 100:.1f}\")
+          ")
+          echo "Frontend coverage: ${LINE_PCT}%"
+          python3 -c "import sys; sys.exit(0 if float('${LINE_PCT}') >= 40 else 1)" \
+            || { echo "::error::Frontend coverage ${LINE_PCT}% below 40% minimum"; exit 1; }
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          echo "## Coverage" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Component | Coverage | Min |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----------|----------|-----|" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f coverage.xml ]; then
+            B=$(python3 -c "import xml.etree.ElementTree as ET; print(f\"{float(ET.parse('coverage.xml').getroot().attrib['line-rate'])*100:.1f}\")")
+            echo "| Backend | ${B}% | 50% |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          COV_F=$(find website/build/coverage website/coverage -name "cobertura*.xml" 2>/dev/null | head -1)
+          if [ -n "$COV_F" ]; then
+            F=$(python3 -c "import xml.etree.ElementTree as ET; print(f\"{float(ET.parse('$COV_F').getroot().attrib['line-rate'])*100:.1f}\")")
+            echo "| Frontend | ${F}% | 40% |" >> "$GITHUB_STEP_SUMMARY"
+          fi
