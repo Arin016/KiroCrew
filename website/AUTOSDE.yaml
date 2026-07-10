@@ -274,8 +274,9 @@ custom-rules:
 
       Exception: do not flag emoji usage in
       SecretaryPage.tsx (inline emoji reaction picker),
+      ChatSidebar.tsx (folder icon picker — FOLDER_EMOJIS grid + FolderGlyph data),
       scene components (src/pages/scenes/), useTheme.ts, or themeEditor.tsx
-      (theme display names). These are intentional decorative uses.
+      (theme display names). These are intentional decorative/data uses.
 
       Bad:
       ```tsx

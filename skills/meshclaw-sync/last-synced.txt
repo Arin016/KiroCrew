@@ -23,6 +23,14 @@ mainline 45dcb603f117886648d79c7dde05e82d2d8cda2d  # 2026-07-10 MeshClaw mainlin
 # candidate check), NOT the fork's mainline — batch-12 mistakenly recorded the fork SHA
 # (796e21c5) here, which broke the `$MAIN..origin/mainline` scan. Corrected in batch-13.
 
+# --- Batch-27 follow-up (2026-07-10): folder icon picker (46c7a01) ---
+# Ported the un-triaged-tail item "folder icon picker" (MeshClawWebsite 46c7a01,
+# 2026-06-13, pre-window) as a batch-27 follow-up per Zezhen's ask. Adapted the
+# upstream fixed-portal picker to the fork's Radix DropdownMenu idiom (6d8008a migration);
+# curated FOLDER_EMOJIS grid + isSingleEmoji free-input + reset-to-auto, wired into both
+# list-view and board-view hover action groups. Emoji support intentional per Zezhen; AGENTS.md
+# + AUTOSDE exception documented. No boundary advance (commit is within the pre-window tail).
+
 # --- Batch-27 (dual-repo sync 2026-07-10, ultracode comprehensive, FIRST on the GitHub fork) ---
 # RUN IN THE PUBLIC GITHUB CHECKOUT /workplace/bolichen/KiroClawGitHub (origin github.com/
 # kirodotdev-labs/kiroclaw), which ships via PULL REQUEST — NOT the internal Brazil workspace/CRUX

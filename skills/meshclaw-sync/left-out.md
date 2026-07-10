@@ -52,8 +52,8 @@ commits (`570a9ccf..5de9411e`) and **8 new frontend** commits
 (`ecc6e5a5..314a69e`) that no batch has triaged yet — they postdate batch-18.
 These are the next sync's input, not omissions. (e.g. backend: Code Review Sage
 built-in app, folder emoji, artifact comments, `subagent_auto_max` config;
-frontend: folder icon picker, paste-token chips, artifact-comments CX, masonry
-guard.)
+frontend: ~~folder icon picker~~ (PORTED 2026-07-10 batch-27 follow-up),
+paste-token chips, artifact-comments CX, masonry guard.)
 
 ### Source of truth & a caveat on completeness
 

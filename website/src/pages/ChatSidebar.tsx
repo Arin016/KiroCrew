@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, memo, useMemo, useCallback, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import { LayoutGroup, AnimatePresence, motion } from 'framer-motion'
-import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, MessageSquare, MessageSquarePlus, Folder, FolderOpen, ChevronRight, ChevronDown, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns2, Columns3, GripVertical, Zap, Check, Copy, ListFilter, Loader2 } from 'lucide-react'
+import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, MessageSquare, MessageSquarePlus, Folder, FolderOpen, ChevronRight, ChevronDown, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns2, Columns3, GripVertical, Zap, Check, Copy, ListFilter, Loader2, Smile, RotateCcw } from 'lucide-react'
 import { DndContext, closestCenter, pointerWithin, KeyboardSensor, PointerSensor, useSensor, useSensors, useDraggable, useDroppable, DragOverlay, MeasuringStrategy, type DragEndEvent, type DragStartEvent, type DragOverEvent, type CollisionDetection } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy, useSortable, sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -221,6 +221,73 @@ function dateSegment(ts: number | string | undefined): string {
   if (d >= daysAgo30) return 'Last 30 Days'
   if (d.getFullYear() === now.getFullYear()) return d.toLocaleDateString([], { month: 'long' })
   return d.toLocaleDateString([], { year: 'numeric', month: 'long' })
+}
+
+// Folder icons are a deliberate emoji surface (see website/AGENTS.md exceptions
+// + AUTOSDE no-emoji-as-icons): the backend auto-generates a single-emoji folder
+// icon and FolderGlyph renders it, so this curated grid + free-input picker lets
+// the user pick one. Not a status/UI icon — the emoji IS the folder's data.
+/** Curated emoji set for the folder icon picker (folder / work / project themed). */
+const FOLDER_EMOJIS = ['📁', '📂', '🗂️', '📋', '📝', '💼', '🚀', '⭐', '🔥', '💡', '🎯', '✅', '🐛', '🔧', '🧪', '📦', '🎨', '🔬', '🌟', '🧠', '⚙️', '🛠️', '📊', '🔒', '🌈', '🎉', '🤖', '☁️', '🧩', '📌'] as const
+
+/** True if `s` is exactly one emoji grapheme — no letters, digits, or multiple emoji. */
+function isSingleEmoji(s: string): boolean {
+  if (!s) return false
+  if (/[\p{L}\p{N}]/u.test(s)) return false // reject any letter/digit (i.e. text)
+  const hasEmoji = /\p{Extended_Pictographic}/u.test(s) || /[\u{1F1E6}-\u{1F1FF}]/u.test(s)
+  if (!hasEmoji) return false
+  const Seg = (Intl as unknown as { Segmenter?: new (l?: string, o?: { granularity: string }) => { segment: (x: string) => Iterable<unknown> } }).Segmenter
+  if (Seg) return [...new Seg(undefined, { granularity: 'grapheme' }).segment(s)].length === 1
+  return true // older engines: backend remains authoritative
+}
+
+/** Folder icon picker: a Radix dropdown (fork idiom — the folder menu was
+ *  migrated to Radix in the sidebar to fix viewport clipping) holding a curated
+ *  emoji grid, a validated free-emoji input (single emoji only), and
+ *  reset-to-auto. The trigger is a small Smile button that slots into the
+ *  folder header's hover action group; picking closes the menu. Errors clear
+ *  when the menu closes or the input changes. */
+function FolderIconPicker({ currentIcon, onPick, onReset, size = 12 }: { currentIcon?: string; onPick: (icon: string) => void; onReset: () => void; size?: number }) {
+  const [open, setOpen] = useState(false)
+  const [iconErr, setIconErr] = useState(false)
+  const pick = (em: string) => { onPick(em); setIconErr(false); setOpen(false) }
+  return (
+    <DropdownMenu open={open} onOpenChange={o => { setOpen(o); if (!o) setIconErr(false) }}>
+      <DropdownMenuTrigger asChild>
+        <button type="button" title="Folder icon" aria-label="Set folder icon"
+          className="cursor-pointer p-[4px] rounded text-muted hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none"
+          onClick={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()}>
+          <Smile size={size} />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-[240px] p-2" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center gap-2 text-muted mb-1.5 px-1">
+          <Smile size={13} className="shrink-0" />
+          <span className="shrink-0 text-[12px]">Icon</span>
+          <button type="button" title="Reset to an auto-generated emoji"
+            className="ml-auto flex items-center gap-1 text-[11px] text-muted hover:text-accent bg-transparent border-none cursor-pointer p-0"
+            onClick={() => { onReset(); setIconErr(false); setOpen(false) }}>
+            <RotateCcw size={11} /> Reset
+          </button>
+        </div>
+        <div className="grid grid-cols-6 gap-0.5">
+          {FOLDER_EMOJIS.map(em => (
+            <button key={em} type="button" aria-label={`Set folder icon to ${em}`}
+              className={`h-7 flex items-center justify-center rounded cursor-pointer bg-transparent border-none text-[15px] leading-none hover:bg-bg-hover ${currentIcon === em ? 'bg-accent-subtle ring-1 ring-accent' : ''}`}
+              onClick={() => pick(em)}>
+              {em}
+            </button>
+          ))}
+        </div>
+        <input type="text" maxLength={16} placeholder="or type / paste an emoji" aria-label="Custom folder emoji"
+          className={`mt-1.5 w-full text-[12px] text-text bg-bg border rounded px-2 py-1 outline-none ${iconErr ? 'border-danger focus:border-danger' : 'border-border focus:border-accent'}`}
+          onClick={e => e.stopPropagation()}
+          onChange={() => { if (iconErr) setIconErr(false) }}
+          onKeyDown={e => { e.stopPropagation(); if (e.key !== 'Enter') return; const v = (e.target as HTMLInputElement).value.trim(); if (!v) return; if (!isSingleEmoji(v)) { setIconErr(true); return } pick(v) }} />
+        {iconErr && <div className="mt-1 px-1 text-[11px] text-danger">Enter a single emoji (no text).</div>}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
 }
 
 /** A folder's icon: a Lucide folder glyph as a uniform base. When collapsed
@@ -1033,6 +1100,7 @@ function ChatSidebar({
             <button type="button" data-testid={`col-${columnId}-folder-${folder.id}-new-sub`} className="text-muted hover:text-accent bg-transparent border-none cursor-pointer p-[2px]" title="New subfolder" aria-label="New subfolder" onClick={e => { e.stopPropagation(); setCreatingIn(folder.id); setNewName('') }}>
               <FolderPlus size={10} />
             </button>
+            <FolderIconPicker currentIcon={folder.icon} size={10} onPick={icon => updateFolderMutation.mutate({ id: folder.id, body: { icon } })} onReset={() => updateFolderMutation.mutate({ id: folder.id, body: { regenerate_icon: true } })} />
             <button type="button" className="text-muted hover:text-danger bg-transparent border-none cursor-pointer p-[2px]" title={`Delete folder "${folder.name}"`} aria-label={`Delete folder ${folder.name}`} onClick={e => { e.stopPropagation(); if (confirm(`Delete folder "${folder.name}"? Sessions will be ungrouped.`)) deleteFolderMutation.mutate(folder.id) }}>
               <X size={10} />
             </button>
@@ -1291,6 +1359,7 @@ function ChatSidebar({
           <button type="button" className="cursor-pointer p-[4px] rounded text-muted hover:text-text hover:bg-bg-hover transition-all bg-transparent border-none" title="Rename folder" aria-label="Rename folder" data-testid={`folder-rename-${folder.id}`} onClick={e => { e.stopPropagation(); setEditingId(folder.id); setEditName(folder.name) }}><Pencil size={12} /></button>
           <button type="button" className="cursor-pointer p-[4px] rounded text-muted hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none" title="New chat in folder" aria-label="New chat in folder" onClick={e => { e.stopPropagation(); createChatInFolder(folder.id) }}><MessageSquarePlus size={12} /></button>
           <button type="button" className="cursor-pointer p-[4px] rounded text-muted hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none" title="New subfolder" aria-label="New subfolder" onClick={e => { e.stopPropagation(); setCreatingIn(folder.id); setNewName('') }}><FolderPlus size={12} /></button>
+          <FolderIconPicker currentIcon={folder.icon} size={12} onPick={icon => updateFolderMutation.mutate({ id: folder.id, body: { icon } })} onReset={() => updateFolderMutation.mutate({ id: folder.id, body: { regenerate_icon: true } })} />
           {folderOffersHide(folder, foldersWithActiveSubtree) && (
             <button type="button" className="cursor-pointer p-[4px] rounded text-muted hover:text-text hover:bg-bg-hover transition-all bg-transparent border-none" data-testid={`folder-hide-${folder.id}`} title="Hide when empty" aria-label="Hide when empty" onClick={e => { e.stopPropagation(); updateFolderMutation.mutate({ id: folder.id, body: { hidden: true } }) }}><EyeOff size={12} /></button>
           )}
