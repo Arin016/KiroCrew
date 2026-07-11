@@ -2,7 +2,7 @@ name: Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
@@ -288,3 +288,87 @@ jobs:
             F=$(python3 -c "import xml.etree.ElementTree as ET; print(f\"{float(ET.parse('$COV_F').getroot().attrib['line-rate'])*100:.1f}\")")
             echo "| Frontend | ${F}% | 40% |" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+  # ── SAST (Semgrep) ───────────────────────────────────────────────────
+  # Static Application Security Testing. Catches vulnerability patterns
+  # that grep rules miss: SQL injection, path traversal, SSRF, insecure
+  # deserialization, hardcoded secrets, etc.
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:1.78
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Semgrep scan (diff only)
+        env:
+          SEMGREP_BASELINE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          semgrep scan \
+            --config p/python \
+            --config p/typescript \
+            --config p/security-audit \
+            --config p/secrets \
+            --baseline-commit "$SEMGREP_BASELINE_REF" \
+            --error
+
+  # ── PR Hygiene ───────────────────────────────────────────────────────
+  # Enforces: (1) conventional commit message format on PR title,
+  # (2) single commit per PR (squash before merge).
+  pr-hygiene:
+    name: PR Hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Conventional commit format on PR title ──────────────────────
+      # PR title becomes the squash-merge commit message, so it must
+      # follow conventional commits: type(scope): description
+      # Types: feat, fix, docs, style, refactor, perf, test, chore, ci
+      - name: Validate PR title (conventional commits)
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          PATTERN='^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\([a-z0-9_-]+\))?!?: .+'
+          if ! echo "$PR_TITLE" | grep -qE "$PATTERN"; then
+            echo "::error::PR title must follow conventional commits format."
+            echo ""
+            echo "  Expected: type(scope): description"
+            echo "  Examples:"
+            echo "    feat(auth): add OAuth2 PKCE flow"
+            echo "    fix: resolve race condition in session cleanup"
+            echo "    ci: add Semgrep SAST scanning"
+            echo ""
+            echo "  Valid types: feat, fix, docs, style, refactor, perf, test, chore, ci, build, revert"
+            echo ""
+            echo "  Got: $PR_TITLE"
+            exit 1
+          fi
+          echo "PR title follows conventional commits: $PR_TITLE"
+
+      # ── Single commit per PR ────────────────────────────────────────
+      # Contributors must squash into one commit before pushing.
+      # This keeps PRs atomic and reviewable as a single logical change.
+      - name: Enforce single commit
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          COMMIT_COUNT=$(git rev-list --count "$BASE".."$HEAD")
+          if [ "$COMMIT_COUNT" -ne 1 ]; then
+            echo "::error::PR must contain exactly 1 commit (has $COMMIT_COUNT). Squash before pushing:"
+            echo ""
+            echo "  git fetch origin"
+            echo "  git rebase origin/main"
+            echo "  git reset --soft origin/main"
+            echo "  git commit -m 'type(scope): description'"
+            echo "  git push --force-with-lease"
+            echo ""
+            exit 1
+          fi
+          echo "Single commit verified."
