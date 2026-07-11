@@ -130,6 +130,7 @@ class TelegramClient:
         *,
         parse_mode: str | None = None,
         reply_markup: dict | None = None,
+        retry_plain: bool = True,
     ) -> int | None:
         """Send a new message. Returns the message_id on success.
 
@@ -149,11 +150,35 @@ class TelegramClient:
         result = await self._api("sendMessage", params)
         if result:
             return result.get("message_id")
-        # Only retry (drop parse_mode) when a parse_mode was actually requested.
-        if parse_mode:
+        # Only retry (drop parse_mode) when a parse_mode was actually requested
+        # AND the caller allows it. Renderers that send HTML pass
+        # retry_plain=False so a parse failure never re-sends the literal tags.
+        if parse_mode and retry_plain:
             params.pop("parse_mode", None)
             result = await self._api("sendMessage", params)
         return result.get("message_id") if result else None
+
+    async def send_message_draft(
+        self, chat_id: int, draft_id: int, text: str, *, parse_mode: str | None = None
+    ) -> bool:
+        """Stream an ephemeral partial-message draft (Bot API 9.3+ sendMessageDraft).
+
+        Reusing the same non-zero ``draft_id`` animates the update in place, which
+        is native, smooth streaming with no editMessageText reflow. The draft is a
+        ~30s preview -- the finished message must still be sent via send_message.
+        Requires the bot to have Forum Topic Mode enabled in BotFather; returns
+        False (so the caller can fall back) if the API rejects it. Sent as
+        plaintext (no parse_mode by default) so partial markdown never 400s.
+        """
+        params: dict[str, Any] = {
+            "chat_id": chat_id,
+            "draft_id": draft_id,
+            "text": text[:TELEGRAM_MAX_TEXT],
+        }
+        if parse_mode:
+            params["parse_mode"] = parse_mode
+        result = await self._api("sendMessageDraft", params)
+        return result is not None
 
     async def edit_message(
         self,
@@ -163,6 +188,7 @@ class TelegramClient:
         *,
         parse_mode: str | None = None,
         reply_markup: dict | None = None,
+        retry_plain: bool = True,
     ) -> bool:
         """Edit an existing message in-place (for streaming). Returns True on success.
 
@@ -181,9 +207,24 @@ class TelegramClient:
         result = await self._api("editMessageText", params)
         if result is not None:
             return True
-        if parse_mode:
+        if parse_mode and retry_plain:
             params.pop("parse_mode", None)
             result = await self._api("editMessageText", params)
+        return result is not None
+
+    async def edit_message_reply_markup(
+        self, chat_id: int, message_id: int, reply_markup: dict | None = None
+    ) -> bool:
+        """Edit ONLY a message's inline keyboard, leaving its text intact.
+
+        Used to retire an ``[OPTIONS:]`` keyboard after a choice is tapped
+        without clobbering the answer text that carried it. Pass
+        ``{"inline_keyboard": []}`` to remove the buttons.
+        """
+        params: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id}
+        if reply_markup is not None:
+            params["reply_markup"] = reply_markup
+        result = await self._api("editMessageReplyMarkup", params)
         return result is not None
 
     async def send_typing(self, chat_id: int) -> None:
@@ -343,38 +384,59 @@ class TelegramClient:
         return self._session
 
     async def _api(self, method: str, params: dict, timeout: int = 30) -> Any:
-        """Call a Bot API method. Returns the 'result' field or None on error."""
+        """Call a Bot API method. Returns the 'result' field or None on error.
+
+        Honors a single 429 ``retry_after`` back-off: a rate-limited edit that
+        we simply dropped would freeze the streaming bubble until the next
+        chunk, which reads as a stutter -- so we wait out the (usually short)
+        cool-down once and retry instead.
+        """
         session = await self._ensure_session()
 
         url = _API_BASE.format(token=self._token, method=method)
-        try:
-            async with session.post(
-                url,
-                json=params,
-                proxy=self._proxy,
-                timeout=aiohttp.ClientTimeout(total=timeout),
-            ) as resp:
-                data = await resp.json(content_type=None)
-                if data and data.get("ok"):
-                    return data.get("result")
-                # Log Telegram API errors.
-                err_code = data.get("error_code") if data else None
-                err_desc = data.get("description") if data else None
-                # 400 "message is not modified" is benign during streaming.
-                if err_code == 400 and "not modified" in (err_desc or "").lower():
-                    return {}  # treat as success (no change needed)
+        for attempt in range(2):
+            try:
+                async with session.post(
+                    url,
+                    json=params,
+                    proxy=self._proxy,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                ) as resp:
+                    data = await resp.json(content_type=None)
+                    if data and data.get("ok"):
+                        return data.get("result")
+                    # Log Telegram API errors.
+                    err_code = data.get("error_code") if data else None
+                    err_desc = data.get("description") if data else None
+                    # 400 "message is not modified" is benign during streaming.
+                    if err_code == 400 and "not modified" in (err_desc or "").lower():
+                        return {}  # treat as success (no change needed)
+                    # 429: respect the server's retry_after once, then give up.
+                    if err_code == 429 and attempt == 0:
+                        retry_after = 1.0
+                        try:
+                            retry_after = float(
+                                (data.get("parameters") or {}).get("retry_after", 1.0)
+                            )
+                        except (TypeError, ValueError):
+                            pass
+                        await asyncio.sleep(min(max(retry_after, 0.5), 5.0))
+                        continue
+                    logger.warning(
+                        "Telegram API %s failed: code=%s desc=%s",
+                        method,
+                        err_code,
+                        err_desc,
+                    )
+                    return None
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                # Log only the exception type — its str() can embed the request
+                # URL, which contains the bot token (a registered credential).
                 logger.warning(
-                    "Telegram API %s failed: code=%s desc=%s",
-                    method,
-                    err_code,
-                    err_desc,
+                    "Telegram API %s transport error: %s", method, type(exc).__name__
                 )
                 return None
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            # Log only the exception type — its str() can embed the request URL,
-            # which contains the bot token (a registered credential).
-            logger.warning("Telegram API %s transport error: %s", method, type(exc).__name__)
-            return None
+        return None
 
 
 def _resolve_proxy() -> str | None:

@@ -24,6 +24,7 @@ Dependency direction is ``telegram -> messaging`` (allowed).
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import re
 import time
@@ -37,12 +38,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Min seconds between intermediate edit calls: paces the typewriter effect and
-# avoids the Bot API's ~30 edits/min/chat rate limit.
-_STREAM_THROTTLE_S = 1.0
+# Telegram has no native token streaming: "streaming" meant editing one message
+# on every chunk, and each edit is a full HTTP round-trip + a whole-bubble
+# re-render, which reads as a stutter (WeCom streams frames over a persistent
+# WebSocket, so it stays smooth). Instead we do "block streaming": hold a live
+# "typing…" indicator while the answer forms, then post the finished answer as
+# one clean block. This kills the edit-jank entirely and only touches this
+# renderer -- the shared messaging event stream (and Slack/WeCom) is untouched.
+#
+# Telegram's "typing" chat action lasts ~5s, so refresh it just under that
+# (used only as the fallback when native draft streaming is unavailable).
+_TYPING_REFRESH_S = 4.0
 
-# Placeholder shown immediately while the agent is still generating.
-_THINKING = "🤔 …"
+# How often to push an animated draft update while streaming. Drafts animate in
+# place and are cheap, so a brisk cadence stays smooth; the client's 429
+# backstop covers the rare long turn.
+_DRAFT_THROTTLE_S = 0.5
 
 # Interactive approval wait; deny-by-default when it elapses with no press.
 _APPROVAL_TIMEOUT_S = 300.0
@@ -106,6 +117,90 @@ def _split_text(text: str, limit: int) -> list[str]:
     return chunks
 
 
+def _split_markdown(text: str, limit: int) -> list[str]:
+    """Split markdown into <=``limit`` chunks, keeping fenced code blocks balanced.
+
+    ``_split_text`` can cut inside a ``` fence (a long code block has internal
+    newlines it splits on). An unbalanced fence in a chunk means the per-chunk
+    HTML pass never matches it -- the literal ``` shows and, worse, the code body
+    is sent unescaped and 400s the HTML request. Rebalance by closing a dangling
+    fence at a chunk's end and reopening it at the next chunk's start, so every
+    chunk is self-contained markdown.
+    """
+    chunks = _split_text(text, limit)
+    if len(chunks) <= 1:
+        return chunks
+    out: list[str] = []
+    carry_open = False
+    for ch in chunks:
+        if carry_open:
+            ch = "```\n" + ch  # reopen the fence carried from the previous chunk
+        if ch.count("```") % 2 == 1:
+            ch = ch.rstrip() + "\n```"  # close the fence left dangling here
+            carry_open = True
+        else:
+            carry_open = False
+        out.append(ch)
+    return out
+
+
+# Telegram renders a small HTML subset (<b>/<i>/<code>/<pre>/<a>) far more
+# reliably than MarkdownV2 (which needs every '.', '-', '!', '(' escaped). The
+# agent emits generic Markdown, so we translate it to Telegram HTML for the
+# final message. Code spans are stashed first so their contents are never
+# treated as markup, then the remaining text is HTML-escaped before any tags
+# are introduced -- so raw '<', '>' and '&' in the answer can't break the parse.
+_FENCE_RE = re.compile(r"```[^\n]*\n?(.*?)```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*)$", re.MULTILINE)
+_BOLD_STAR_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+_BOLD_USCORE_RE = re.compile(r"__(.+?)__", re.DOTALL)
+_ITALIC_STAR_RE = re.compile(r"(?<!\w)\*(?!\s)([^*\n]+?)(?<!\s)\*(?!\w)")
+_ITALIC_USCORE_RE = re.compile(r"(?<!\w)_(?!\s)([^_\n]+?)(?<!\s)_(?!\w)")
+_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
+_BULLET_RE = re.compile(r"^(\s*)[-*+]\s+", re.MULTILINE)
+
+
+def _md_to_telegram_html(text: str) -> str:
+    """Translate the agent's Markdown into Telegram's supported HTML subset."""
+    stash: list[str] = []
+
+    def _keep(fragment: str) -> str:
+        stash.append(fragment)
+        return f"\x00{len(stash) - 1}\x00"
+
+    text = _FENCE_RE.sub(
+        lambda m: _keep(f"<pre>{html.escape(m.group(1).rstrip(chr(10)))}</pre>"), text
+    )
+    text = _INLINE_CODE_RE.sub(
+        lambda m: _keep(f"<code>{html.escape(m.group(1))}</code>"), text
+    )
+    text = html.escape(text)
+    text = _HEADING_RE.sub(lambda m: f"<b>{m.group(1).strip()}</b>", text)
+    text = _BOLD_STAR_RE.sub(lambda m: f"<b>{m.group(1)}</b>", text)
+    text = _BOLD_USCORE_RE.sub(lambda m: f"<b>{m.group(1)}</b>", text)
+    text = _ITALIC_STAR_RE.sub(lambda m: f"<i>{m.group(1)}</i>", text)
+    text = _ITALIC_USCORE_RE.sub(lambda m: f"<i>{m.group(1)}</i>", text)
+    text = _LINK_RE.sub(lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', text)
+    text = _BULLET_RE.sub(lambda m: f"{m.group(1)}\u2022 ", text)
+    text = re.sub(r"\x00(\d+)\x00", lambda m: stash[int(m.group(1))], text)
+    return text
+
+
+def _strip_md(text: str) -> str:
+    """Flatten Markdown to clean plaintext for the streaming typewriter frames
+    (and as the safe fallback if an HTML final edit is ever rejected) -- avoids
+    showing raw ``**``/``##``/``[x](url)`` noise while the answer is forming."""
+    text = _FENCE_RE.sub(lambda m: m.group(1), text)
+    text = _INLINE_CODE_RE.sub(lambda m: m.group(1), text)
+    text = _HEADING_RE.sub(lambda m: m.group(1).strip(), text)
+    text = _BOLD_STAR_RE.sub(lambda m: m.group(1), text)
+    text = _BOLD_USCORE_RE.sub(lambda m: m.group(1), text)
+    text = _LINK_RE.sub(lambda m: f"{m.group(1)} ({m.group(2)})", text)
+    text = _BULLET_RE.sub(lambda m: f"{m.group(1)}\u2022 ", text)
+    return text
+
+
 class TelegramApprovalDecider:
     """Awaits an inline-button approval for a tool-permission request.
 
@@ -161,25 +256,71 @@ class TelegramRenderer(Renderer):
         self._client = client
         self._chat_id = chat_id
         self._session_key = session_key
-        self._msg_id: int | None = None
         self._buf: list[str] = []
-        self._last_send = 0.0
-        self._tool = ""
         self._last_tool = ""
         self._finalized = False
+        self._closed = False
+        self._typing_task: "asyncio.Task[None] | None" = None
+        # Native draft streaming (smooth, no editMessageText reflow). draft_id
+        # must be non-zero and stable across the turn so updates animate in
+        # place. _draft_ok: None=untried, True=streaming, False=fell back.
+        self._draft_id = abs(id(self)) % 1_000_000_000 + 1
+        self._draft_ok: bool | None = None
+        self._last_draft = 0.0
 
     # -- lifecycle ----------------------------------------------------------
     async def on_turn_start(self) -> None:
-        if self._msg_id is not None:  # idempotent (dispatch + driver both call)
+        # Prefer native draft streaming (smooth, animated, no edit reflow). An
+        # empty draft renders a "Thinking…" placeholder. If drafts are rejected
+        # (e.g. Forum Topic Mode off), fall back to a live "typing…" indicator.
+        # Idempotent (dispatch + driver both call this).
+        if self._draft_ok is not None or self._closed:
             return
-        await self._client.send_typing(self._chat_id)
-        self._msg_id = await self._client.send_message(self._chat_id, _THINKING)
-        self._last_send = time.monotonic()
+        self._draft_ok = await self._client.send_message_draft(
+            self._chat_id, self._draft_id, ""
+        )
+        self._last_draft = time.monotonic()
+        if not self._draft_ok and self._typing_task is None:
+            self._typing_task = asyncio.create_task(self._typing_loop())
+
+    async def _typing_loop(self) -> None:
+        """Keep the 'typing…' chat action alive (it expires after ~5s) for the
+        duration of the turn. Cancelled by ``_stop_typing``."""
+        try:
+            while not self._closed:
+                try:
+                    await self._client.send_typing(self._chat_id)
+                except Exception:
+                    logger.debug("Telegram: typing refresh failed", exc_info=True)
+                await asyncio.sleep(_TYPING_REFRESH_S)
+        except asyncio.CancelledError:
+            pass
+
+    def _stop_typing(self) -> None:
+        self._closed = True
+        task, self._typing_task = self._typing_task, None
+        if task is not None and not task.done():
+            task.cancel()
 
     async def on_text_chunk(self, text: str) -> None:
         self._buf.append(text)
-        self._tool = ""  # text resumed -> drop the transient tool footer
-        await self._push(force=False)
+        # Stream the growing answer as an animated draft (plaintext, so partial
+        # markdown never 400s). The finished, formatted message is posted in
+        # on_done. If a draft update is rejected mid-turn, fall back to typing.
+        if not self._draft_ok:
+            return
+        now = time.monotonic()
+        if now - self._last_draft < _DRAFT_THROTTLE_S:
+            return
+        self._last_draft = now
+        body = _strip_md(self._text())
+        if not body:
+            return
+        ok = await self._client.send_message_draft(self._chat_id, self._draft_id, body)
+        if not ok:
+            self._draft_ok = False
+            if self._typing_task is None and not self._closed:
+                self._typing_task = asyncio.create_task(self._typing_loop())
 
     async def on_thinking(self, text: str) -> None:
         # Telegram does not surface reasoning inline (parity with prior behavior).
@@ -188,9 +329,9 @@ class TelegramRenderer(Renderer):
     async def on_tool_call(
         self, tool_call_id: str, title: str, tool_kind: str = "", tool_purpose: str = ""
     ) -> None:
-        self._tool = title or tool_kind or "tool"
-        self._last_tool = self._tool
-        await self._push(force=True)
+        # Remember the tool for a possible approval prompt; the live typing
+        # indicator already signals "working", so nothing is posted here.
+        self._last_tool = title or tool_kind or "tool"
 
     async def on_prompt_choice(
         self, options: list[dict[str, Any]], request_id: str | int
@@ -223,38 +364,41 @@ class TelegramRenderer(Renderer):
         if self._finalized:
             return
         self._finalized = True
-        self._tool = ""
+        self._stop_typing()
         ok = stop_reason != "error"
         body = self._text()
         full = body or ("…" if ok else "⚠️ Error — please try again")
         opts = self._options()
         keyboard = build_inline_keyboard(opts) if opts else None
-        limit = self.capabilities.max_message_chars or 4000
+        # Leave headroom below the char cap for the HTML tags we add, so a
+        # formatted chunk can't overflow Telegram's 4096 limit and get cut
+        # mid-tag.
+        cap = self.capabilities.max_message_chars or 4000
+        limit = max(500, cap - 256)
 
-        if len(full) <= limit:
-            if self._msg_id:
-                await self._client.edit_message(
-                    self._chat_id, self._msg_id, full, reply_markup=keyboard
-                )
-            else:
-                await self._client.send_message(
-                    self._chat_id, full, reply_markup=keyboard
-                )
-            return
-
-        # Long answer: first chunk reuses the streaming message; keyboard on
-        # the last chunk only.
-        chunks = _split_text(full, limit)
+        # Post the finished answer as Telegram HTML (real bold/code/links).
+        # Split the RAW markdown into <=limit chunks with fenced code blocks kept
+        # balanced (_split_markdown), then format each chunk -- so a fence never
+        # straddles a chunk edge and leaks a literal ``` / unescaped body.
+        # Keyboard on the last chunk only.
+        chunks = _split_markdown(full, limit) or [full]
         last = len(chunks) - 1
         for i, chunk in enumerate(chunks):
             kb = keyboard if i == last else None
-            if i == 0 and self._msg_id:
-                await self._client.edit_message(self._chat_id, self._msg_id, chunk, reply_markup=kb)
-            else:
-                await self._client.send_message(self._chat_id, chunk, reply_markup=kb)
+            html_chunk = _md_to_telegram_html(chunk)
+            mid = await self._client.send_message(
+                self._chat_id, html_chunk,
+                parse_mode="HTML", reply_markup=kb, retry_plain=False,
+            )
+            if mid is None:  # malformed HTML -> clean plaintext, never raw tags
+                await self._client.send_message(
+                    self._chat_id, _strip_md(chunk), reply_markup=kb
+                )
 
     async def close(self) -> None:
-        """Idempotent teardown: finalize the turn if it never reached on_done."""
+        """Idempotent teardown: stop the typing indicator and finalize the turn
+        if it never reached on_done."""
+        self._stop_typing()
         if not self._finalized:
             await self.on_done(stop_reason="error")
 
@@ -268,23 +412,3 @@ class TelegramRenderer(Renderer):
         raw = "".join(self._buf).strip()
         _, opts = _extract_options(raw)
         return opts
-
-    def _compose(self) -> str:
-        body = self._text()
-        if self._tool:
-            footer = f"🔧 {self._tool}…"
-            return f"{body}\n\n{footer}" if body else footer
-        return body
-
-    async def _push(self, *, force: bool) -> None:
-        if self._msg_id is None:
-            return
-        now = time.monotonic()
-        if not force and now - self._last_send < _STREAM_THROTTLE_S:
-            return
-        content = self._compose()
-        if not content:
-            return
-        limit = self.capabilities.max_message_chars or 4000
-        await self._client.edit_message(self._chat_id, self._msg_id, content[:limit])
-        self._last_send = now

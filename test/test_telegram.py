@@ -22,6 +22,8 @@ from kiro_claw.telegram.renderer import (
     TelegramApprovalDecider,
     TelegramRenderer,
     _extract_options,
+    _md_to_telegram_html,
+    _split_markdown,
     _split_text,
     build_inline_keyboard,
 )
@@ -37,11 +39,19 @@ class FakeClient:
     def __init__(self) -> None:
         self.sent: list[tuple[str, Any]] = []
         self.edits: list[tuple[int, str, Any]] = []
+        self.drafts: list[tuple[int, str]] = []
+        self.markup_edits: list[tuple[int, Any]] = []
         self.answered: list[str] = []
         self._mid = 100
 
     async def send_typing(self, chat_id: int) -> None:
         return None
+
+    async def send_message_draft(
+        self, chat_id: int, draft_id: int, text: str, *, parse_mode: Any = None
+    ) -> bool:
+        self.drafts.append((draft_id, text))
+        return True
 
     async def send_message(
         self, chat_id: int, text: str, *, parse_mode: Any = None,
@@ -56,6 +66,12 @@ class FakeClient:
         reply_markup: Any = None, retry_plain: bool = True
     ) -> bool:
         self.edits.append((message_id, text, reply_markup))
+        return True
+
+    async def edit_message_reply_markup(
+        self, chat_id: int, message_id: int, reply_markup: Any = None
+    ) -> bool:
+        self.markup_edits.append((message_id, reply_markup))
         return True
 
     async def answer_callback(self, callback_query_id: str, text: str = "") -> None:
@@ -293,6 +309,20 @@ class TestSplitText:
         assert all(len(c) <= TELEGRAM_CHUNK_LIMIT for c in chunks)
         assert "".join(chunks) == text
 
+    def test_split_markdown_keeps_fences_balanced_and_escaped(self) -> None:
+        # A fenced code block longer than the limit must split into chunks that
+        # each carry balanced ``` fences, so the per-chunk HTML pass wraps the
+        # code in <pre> and escapes <,>,& instead of leaking a literal ``` and
+        # 400-ing the send.
+        code = "\n".join(f"row <{i}> & 'v'" for i in range(200))
+        full = f"code:\n\n```python\n{code}\n```\n\ndone"
+        chunks = _split_markdown(full, 400)
+        assert len(chunks) > 1
+        assert all(ch.count("```") % 2 == 0 for ch in chunks)  # balanced fences
+        htmls = [_md_to_telegram_html(ch) for ch in chunks]
+        assert all("```" not in h for h in htmls)  # no literal fence leaked
+        assert any("<pre>" in h and "&lt;" in h for h in htmls)  # wrapped + escaped
+
 
 class TestInlineKeyboard:
     def test_none_when_no_options(self) -> None:
@@ -426,15 +456,33 @@ class TestRenderer:
                 OutputEvent(kind=DONE, stop_reason=""),
             ]
         )
-        assert cli.sent[0][0] == "🤔 …"  # placeholder
-        _, final_text, final_kb = cli.edits[-1]
+        # Block streaming: no placeholder edit-stream; the finished answer is
+        # sent as one block with the [OPTIONS:] keyboard attached.
+        final_text, final_kb = cli.sent[-1]
         assert final_text == "Hello. Pick."  # [OPTIONS:] stripped
         labels = [b["text"] for row in final_kb["inline_keyboard"] for b in row]
         assert labels == ["A", "B"]
 
+    def test_streams_via_drafts_and_persists_once_without_edits(self) -> None:
+        # The core of the fix: growing text streams as native animated drafts,
+        # the finished answer is persisted with ONE sendMessage, and
+        # editMessageText is never used (no reflow stutter).
+        cli = self._drive(
+            [
+                OutputEvent(kind=TEXT_CHUNK, text="one "),
+                OutputEvent(kind=TEXT_CHUNK, text="two "),
+                OutputEvent(kind=TEXT_CHUNK, text="three"),
+                OutputEvent(kind=DONE, stop_reason=""),
+            ]
+        )
+        assert cli.edits == []  # never edits -> no reflow stutter
+        assert cli.drafts  # streamed as native animated drafts
+        assert len(cli.sent) == 1  # one persisted block
+        assert cli.sent[-1][0] == "one two three"
+
     def test_error_done_renders_error_when_no_text(self) -> None:
         cli = self._drive([OutputEvent(kind=DONE, stop_reason="error")])
-        assert "Error" in cli.edits[-1][1]
+        assert "Error" in cli.sent[-1][0]
 
     def test_close_is_idempotent_after_done(self) -> None:
         cli = FakeClient()
@@ -444,9 +492,9 @@ class TestRenderer:
             await r.on_turn_start()
             await r.dispatch(OutputEvent(kind=TEXT_CHUNK, text="hi"))
             await r.dispatch(OutputEvent(kind=DONE, stop_reason=""))
-            n = len(cli.edits)
+            n = len(cli.sent)
             await r.close()  # should no-op
-            return len(cli.edits) - n
+            return len(cli.sent) - n
 
         assert asyncio.run(_go()) == 0
 
@@ -482,7 +530,7 @@ class TestDispatcher:
             )
 
         asyncio.run(_go())
-        assert cli.edits[-1][1] == "Answer: hello world"
+        assert cli.sent[-1][0] == "Answer: hello world"
         assert sess.successes == ["telegram:kiroclaw:direct:7"]
         assert sess.released == ["telegram:kiroclaw:direct:7"]
 
@@ -499,10 +547,10 @@ class TestDispatcher:
         asyncio.run(_go())
         assert sess.last_agent == "kiroclaw"
 
-    def test_cold_start_failure_finalizes_placeholder_and_skips_release(self) -> None:
-        # If get_or_create raises (cold-start), the placeholder must still be
-        # finalized (no perma-"🤔 …") and the semaphore must NOT be released
-        # (it was never acquired).
+    def test_cold_start_failure_finalizes_and_skips_release(self) -> None:
+        # If get_or_create raises (cold-start), the turn must still be finalized
+        # (block streaming sends an error block, no silent dead turn) and the
+        # semaphore must NOT be released (it was never acquired).
         d, cli, sess = _dispatcher({7}, raise_on_get=True)
 
         async def _go() -> None:
@@ -511,8 +559,7 @@ class TestDispatcher:
             )
 
         asyncio.run(_go())
-        assert cli.sent[0][0] == "🤔 …"  # placeholder was posted
-        assert cli.edits and "Error" in cli.edits[-1][1]  # finalized by close()
+        assert cli.sent and "Error" in cli.sent[-1][0]  # finalized by close()
         assert sess.released == []  # never acquired -> never released
         assert sess.failures == []  # not acquired -> not recorded as a failed turn
 
@@ -575,7 +622,7 @@ class TestDispatcher:
             "Compact" in e[1] for e in cli.edits
         )
 
-    def test_callback_option_rewrites_and_redispatches(self) -> None:
+    def test_callback_option_echoes_choice_and_redispatches(self) -> None:
         d, cli, sess = _dispatcher({7})
         cb = SimpleNamespace(
             callback_query_id="q1", user_id=7, chat_id=7, message_id=99, data="opt:0", label="Say Hi", chat_type="private"
@@ -585,10 +632,13 @@ class TestDispatcher:
             await d.on_callback(cb)  # type: ignore[arg-type]
 
         asyncio.run(_go())
-        # First edit strips the keyboard + confirms the choice; the re-dispatched
-        # turn then produces the streamed answer.
-        assert cli.edits[0][1] == "✓ Say Hi"
-        assert cli.edits[-1][1] == "Answer: Say Hi"
+        # Tapping an option retires the keyboard on the original message WITHOUT
+        # overwriting its text, echoes the picked choice as its own block, then
+        # re-dispatches the choice so the answer arrives as a NEW message.
+        assert cli.markup_edits[-1] == (99, {"inline_keyboard": []})
+        assert cli.edits == []  # original answer text is never clobbered
+        assert "Say Hi" in cli.sent[0][0]  # choice echoed as its own block first
+        assert cli.sent[-1][0] == "Answer: Say Hi"  # answer arrives as a new message
 
     def test_callback_approval_resolves_decider(self) -> None:
         d, cli, _ = _dispatcher({7})

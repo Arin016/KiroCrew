@@ -23,6 +23,7 @@ Dependency direction is ``telegram -> messaging`` (allowed). The security
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -356,20 +357,30 @@ class TelegramDispatcher:
         # [OPTIONS:] choice: "opt:<i>" — label recovered from the button text.
         if data.startswith("opt:"):
             choice_text = cb.label
+            # Retire the keyboard but KEEP the original answer text intact --
+            # tapping an option must not overwrite the answer bubble. The choice
+            # is handled as a fresh turn whose reply arrives as a NEW message.
+            await self.client.edit_message_reply_markup(
+                cb.chat_id, cb.message_id, {"inline_keyboard": []}
+            )
             if not choice_text:
-                await self.client.edit_message(
+                await self.client.send_message(
                     cb.chat_id,
-                    cb.message_id,
                     "⚠️ Couldn't read that choice — please type it instead.",
-                    reply_markup={"inline_keyboard": []},
                 )
                 return
-            await self.client.edit_message(
+            # Echo the picked option as its own block (a quoted bubble) so the
+            # user can see what they chose -- a button tap can't render as a
+            # real user message, so this stands in for it. Then re-dispatch the
+            # choice as a fresh turn whose answer streams in as a NEW message.
+            echoed = await self.client.send_message(
                 cb.chat_id,
-                cb.message_id,
-                f"✓ {choice_text}",
-                reply_markup={"inline_keyboard": []},
+                f"<blockquote>{html.escape(choice_text)}</blockquote>",
+                parse_mode="HTML",
+                retry_plain=False,
             )
+            if echoed is None:  # malformed HTML -> plain fallback
+                await self.client.send_message(cb.chat_id, f"» {choice_text}")
             # Re-inject the choice as a fresh turn via the normal path.
             synthetic = InboundMessage(
                 channel_type="telegram",
