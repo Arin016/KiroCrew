@@ -1,0 +1,9 @@
+# KiroClaw Code Owners
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Owners are auto-requested for review. Branch protection enforces approval.
+# General code review: any team member can approve (via branch protection rule).
+# Frontend: requires @CrysisDeu approval specifically.
+
+# ── Frontend (dashboard, Electron shell, UI components) ──────────────
+website/                            @CrysisDeu
