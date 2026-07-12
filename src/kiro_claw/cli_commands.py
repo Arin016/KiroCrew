@@ -1550,3 +1550,11 @@ def _handle_aim(args: argparse.Namespace) -> None:
 
     print("Usage: kiroclaw aim {sync-cc}", file=sys.stderr)
     sys.exit(2)
+
+
+def _pod(args: argparse.Namespace) -> None:
+    """Dispatch ``kiroclaw pod <verb>`` to the pod verb layer (isolated worktree
+    test instances)."""
+    from kiro_claw.pod.cli import dispatch
+
+    dispatch(args)

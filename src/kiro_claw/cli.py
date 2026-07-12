@@ -1050,6 +1050,54 @@ Examples:
         "--apply", action="store_true",
         help="Apply the deletions (default: dry-run preview that changes nothing)")
 
+    # pod — isolated, throwaway, full-stack test instances per worktree (kubectl-style)
+    pod_parser = sub.add_parser(
+        "pod",
+        help="Isolated, throwaway, full-stack test instances per worktree (kubectl-style)",
+    )
+    pod_sub = pod_parser.add_subparsers(
+        dest="pod_action",
+        metavar="{up,down,ls,status,token,url,logs,provision,install}",
+    )
+    pod_up = pod_sub.add_parser("up", help="Schedule an isolated pod for a worktree")
+    pod_up.add_argument("name", help="Worktree name")
+    pod_up.add_argument("--json", action="store_true", help="Emit {base_url, token, port} as JSON")
+    pod_up.add_argument(
+        "--provision",
+        action="store_true",
+        help="Provision (venv + SPA dist) if needed before bringing the pod up",
+    )
+    pod_up.add_argument("--ttl", default="2h", help="Token TTL (default: 2h)")
+    pod_up.add_argument("--seed", default="", help="Seed config dir (tunnel is forced off)")
+    pod_down = pod_sub.add_parser("down", help="Evict a pod (zero residue)")
+    pod_down.add_argument("name", help="Worktree name")
+    pod_ls = pod_sub.add_parser("ls", help="List running pods")
+    pod_ls.add_argument("--json", action="store_true", help="Emit rows as JSON")
+    pod_status = pod_sub.add_parser("status", help="Up/down + health for one pod")
+    pod_status.add_argument("name", help="Worktree name")
+    pod_status.add_argument("--json", action="store_true", help="Emit status as JSON")
+    pod_token = pod_sub.add_parser("token", help="(Re)mint a dashboard token for a running pod")
+    pod_token.add_argument("name", help="Worktree name")
+    pod_token.add_argument("--ttl", default="2h", help="Token TTL (default: 2h)")
+    pod_url = pod_sub.add_parser("url", help="Print a pod's base URL")
+    pod_url.add_argument("name", help="Worktree name")
+    pod_logs = pod_sub.add_parser("logs", help="Tail a pod's journal")
+    pod_logs.add_argument("name", help="Worktree name")
+    pod_logs.add_argument("-n", "--lines", type=int, default=50, help="Lines to tail (default: 50)")
+    pod_prov = pod_sub.add_parser("provision", help="Build a worktree's venv + SPA dist")
+    pod_prov.add_argument("name", help="Worktree name")
+    pod_prov.add_argument(
+        "--venv-only", action="store_true", help="Build only the venv (skip the slow dist)"
+    )
+    pod_sub.add_parser("install", help="Lay down the systemd --user template unit (once)")
+    # Hidden verbs re-entered by the systemd unit (ExecStart / ExecStopPost).
+    # Registered without `help=` so they stay out of `pod --help` while remaining
+    # dispatchable (the metavar above also omits them from the usage line).
+    pod_run = pod_sub.add_parser("_run")
+    pod_run.add_argument("name")
+    pod_cleanup = pod_sub.add_parser("_cleanup")
+    pod_cleanup.add_argument("name")
+
     sub.add_parser("update", help="Update KiroClaw to the latest version")
 
     # stop
@@ -1616,6 +1664,8 @@ Examples:
         _policy(args)
     elif args.command == "knowledge":
         _knowledge(args)
+    elif args.command == "pod":
+        _pod(args)
     elif args.command == "update":
         _update()
     elif args.command == "stop":
@@ -1677,6 +1727,7 @@ from kiro_claw.cli_commands import (  # noqa: E402
     _handle_workspace,
     _learn,
     _memory_cmd,
+    _pod,
     _run_eval,
     _security,
     _spawn,
