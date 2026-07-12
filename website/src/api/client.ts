@@ -4,6 +4,16 @@ import type { McpApplyChange } from '../types'
 import { refreshOnce, __resetRefreshOnceForTests } from './refreshOnce'
 import { queryClient } from './queryClient'
 
+export type McpPoolableServer = {
+  name: string
+  poolable: boolean        // effective: stdio AND not denylisted AND (in_allowlist OR entry_poolable)
+  in_allowlist: boolean    // present in config mcp_gateway.poolable_servers
+  entry_poolable: boolean  // some agent entry sets poolable:true (third-party escape hatch)
+  agents: string[]         // agent configs that declare this server
+  transport: string        // "stdio" (poolable-eligible) or "http"
+  denylisted: boolean      // in UNPOOLABLE_SERVERS — can never be pooled
+}
+
 export const SEARCH_MIN_CHARS = 2  // backend session search threshold (must match kiro_claw.history.SEARCH_MIN_CHARS)
 
 /**
@@ -434,6 +444,12 @@ export const api = {
   mcpToggleTool: (server: string, tool: string, enabled: boolean) => post('/api/mcp/toggle-tool', { server, tool, enabled }).then(j),
   mcpToggleAll: (enabled: boolean) => post('/api/mcp/toggle-all', { enabled }).then(j),
   mcpRemove: (name: string) => post('/api/mcp/remove', { name }).then(j),
+  // MCP Gateway (shared pool)
+  mcpGatewayStatus: () => fetch('/api/mcp-gateway/status').then(j) as Promise<{ enabled: boolean; running: boolean; ping_ok: boolean }>,
+  mcpGatewayEnable: (enabled: boolean) => post('/api/mcp-gateway/enable', { enabled }).then(j) as Promise<{ ok: boolean; enabled: boolean; running: boolean; ping_ok: boolean }>,
+  mcpGatewayMetrics: () => fetch('/api/mcp-gateway/metrics').then(j) as Promise<{ running: boolean; size?: number; max_backends?: number; backends: { server: string; agent: string; pid: number | null; sessions: number; idle_s: number; rss_kb: number }[] }>,
+  mcpGatewayServers: () => fetch('/api/mcp-gateway/servers').then(j) as Promise<{ servers: McpPoolableServer[] }>,
+  mcpGatewaySetPoolable: (name: string, poolable: boolean) => post('/api/mcp-gateway/servers/poolable', { name, poolable }).then(j) as Promise<{ ok: boolean; name: string; poolable: boolean; enabled?: boolean; applied?: boolean; poolable_servers?: string[] }>,
   // Agent config
   agentConfig: () => fetch('/api/agent/config').then(j),
   saveAgentConfig: (config: object) => put('/api/agent/config', { config }).then(j),

@@ -77,6 +77,7 @@ from kiro_claw.instances.constants import MAX_RECOVERY_ATTEMPTS_CEILING as _MAX_
 from kiro_claw.instances.constants import (
     RECOVER_BACKOFF_MAX_CEILING_SECS as _RECOVER_BACKOFF_CEILING,
 )
+from kiro_claw.mcp_gateway.rewriter import default_overlay_dir, default_socket_path  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -1831,6 +1832,75 @@ class TaskKeeperConfig:
 
 
 @dataclass
+class McpGatewayConfig:
+    """Sidecar MCP broker daemon — shares MCP backends across sessions."""
+
+    enabled: bool = field(
+        default=False,
+        metadata=_meta(
+            "Enabled",
+            "Route MCP traffic through the shared sidecar broker. Default False — opt-in.",
+        ),
+    )
+    socket_path: str = field(
+        default="",
+        metadata=_meta(
+            "Socket Path",
+            "Unix socket for the broker. Empty -> $KIROCLAW_HOME/mcp-gateway/gateway.sock.",
+        ),
+    )
+    overlay_dir: str = field(
+        default="",
+        metadata=_meta(
+            "Overlay Dir",
+            "Directory of rewritten agent JSON, bind-mounted over ~/.kiro/agents per session. "
+            "Empty -> $KIROCLAW_HOME/mcp-gateway/agents.",
+        ),
+    )
+    idle_timeout_secs: int = field(
+        default=300,
+        metadata=_meta("Idle Timeout", "Seconds a refcount=0 MCP backend is kept before drain."),
+    )
+    max_backends: int = field(
+        default=64,
+        metadata=_meta(
+            "Max Backends",
+            "Max concurrent pooled MCP backends before the pool refuses a new one. "
+            "Must be >= the number of distinct (agent x server) backends that can be "
+            "live at once: each agent keeps its own backend per server, so N concurrent "
+            "agents with ~S servers each need N*S slots. Bounded by design: idle "
+            "backends drain after idle_timeout_secs, so steady-state RAM tracks real "
+            "concurrency, not this ceiling.",
+        ),
+    )
+    poolable_servers: list[str] = field(
+        default_factory=list,
+        metadata=_meta(
+            "Poolable Servers",
+            "MCP server names allowed to share a pooled backend across sessions. "
+            "A stdio server is pooled when its name appears here OR its agent-JSON "
+            "entry sets poolable:true. Safe by default — non-listed servers run "
+            "per-session. Managed from Settings -> Shared MCP gateway.",
+        ),
+    )
+    prewarm_count: int = field(
+        default=0,
+        metadata=_meta(
+            "Prewarm Count",
+            "Number of hottest observed (agent x server x channel) MCP backends "
+            "to spawn at gateway startup, before the first session connects. "
+            "Removes the cold-start latency on the first new-chat after a "
+            "gateway restart or after all backends have idled out — the steady "
+            "state already reuses warm backends within the idle timeout. The "
+            "hot set is learned from prior registers and persisted beside the "
+            "socket; channel_id is a stable id, so a prewarmed backend is "
+            "reused by every later new-chat in that channel. 0 (default) "
+            "disables prewarming — no hot-key file is read or written.",
+        ),
+    )
+
+
+@dataclass
 class InstancesConfig:
     """Multi-instance management (the *Instances* feature).
 
@@ -2185,6 +2255,10 @@ class KiroClawConfig:
         default_factory=TaskKeeperConfig,
         metadata=_meta("TaskKeeper", "TaskKeeper task management with triage and To-Do sync."),
     )
+    mcp_gateway: McpGatewayConfig = field(
+        default_factory=McpGatewayConfig,
+        metadata=_meta("MCP Gateway", "Sidecar MCP broker that shares backends across sessions."),
+    )
     instances: InstancesConfig = field(
         default_factory=InstancesConfig,
         metadata=_meta(
@@ -2439,6 +2513,9 @@ class KiroClawConfig:
         instances_data = data.get("instances", {})
         if not isinstance(instances_data, dict):
             instances_data = {}
+        mcp_gateway_data = data.get("mcp_gateway", {})
+        if not isinstance(mcp_gateway_data, dict):
+            mcp_gateway_data = {}
         heartbeat_data = data.get("heartbeat", {})
         if not isinstance(heartbeat_data, dict):
             heartbeat_data = {}
@@ -2761,6 +2838,17 @@ class KiroClawConfig:
                 ),
                 auto_scan_enabled=bool(taskkeeper_data.get("auto_scan_enabled", False)),
             ),
+            mcp_gateway=McpGatewayConfig(
+                enabled=bool(mcp_gateway_data.get("enabled", False)),
+                socket_path=str(mcp_gateway_data.get("socket_path", "")),
+                overlay_dir=str(mcp_gateway_data.get("overlay_dir", "")),
+                idle_timeout_secs=max(10, int(mcp_gateway_data.get("idle_timeout_secs", 300))),
+                max_backends=max(1, int(mcp_gateway_data.get("max_backends", 64))),
+                poolable_servers=[
+                    s for s in mcp_gateway_data.get("poolable_servers", []) if isinstance(s, str)
+                ],
+                prewarm_count=max(0, int(mcp_gateway_data.get("prewarm_count", 0))),
+            ),
             instances=InstancesConfig(
                 enabled=bool(instances_data.get("enabled", False)),
                 warm_set_cap=int(instances_data.get("warm_set_cap", _DEFAULT_WARM_SET_CAP)),
@@ -2876,6 +2964,7 @@ class KiroClawConfig:
             "secretary": asdict(self.secretary),
             "taskkeeper": asdict(self.taskkeeper),
             "instances": asdict(self.instances),
+            "mcp_gateway": asdict(self.mcp_gateway),
             "taskrunner": asdict(self.taskrunner),
             "orchestrator": asdict(self.orchestrator),
             "messaging": asdict(self.messaging),

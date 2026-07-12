@@ -970,6 +970,12 @@ class DashboardState:
         self.tunnel_manager: Any = None  # lazy-init in server.py (TunnelManager)
         self.instances_manager: Any = None  # lazy-init in server.py (SshTunnelManager)
         self.instances_registry: Any = None  # lazy-init in server.py (InstancesRegistry)
+        # MCP gateway control plane — wired by GatewayOrchestrator AFTER
+        # dashboard init (the broker starts before dashboard_state exists).
+        # Read by the /api/mcp-gateway/* handlers off request.app['state'].
+        self._mcp_gateway_manager: Any = None  # GatewayManager | None
+        self._mcp_gateway_apply: Any = None  # async (enabled: bool) -> dict
+        self._mcp_gateway_apply_poolable: Any = None  # async () -> dict
         # Secretary subsystem removed; kept as permanent None for apps/routes.py
         # builtin-service restart lookup (getattr-based, no-op when None).
         self._secretary_restart: Any = None  # restart callback (always None — service removed)

@@ -1293,3 +1293,264 @@ async def api_mcp_apply(request: web.Request) -> web.Response:
             "rebuild": {"ok": rebuild_ok, "error": rebuild_error},
         }
     )
+
+
+# ─── Shared MCP gateway enable toggle ───────────────────────────────────
+
+
+async def api_mcp_gateway_status(request: web.Request) -> web.Response:
+    """GET /api/mcp-gateway/status — shared MCP gateway state.
+
+    ``enabled`` reflects the persisted config flag; ``running``/``ping_ok``
+    reflect the live broker held by the gateway orchestrator.  The broker is
+    only spawned at startup when the flag is on, so a freshly-flipped flag
+    reads ``enabled=true`` with ``running=false`` until the restart lands.
+    """
+    from kiro_claw.config.loader import KiroClawConfig  # noqa: F811
+
+    state: DashboardState = request.app["state"]
+    manager = getattr(state, "_mcp_gateway_manager", None)
+    running = manager is not None and manager.is_running
+    ping_ok = manager is not None and running and await manager.ping()
+    return web.json_response(
+        {
+            "enabled": KiroClawConfig.load().mcp_gateway.enabled,
+            "running": bool(running),
+            "ping_ok": bool(ping_ok),
+        }
+    )
+
+
+async def api_mcp_gateway_metrics(request: web.Request) -> web.Response:
+    """GET /api/mcp-gateway/metrics — live broker pool snapshot.
+
+    Returns ``{running, size, max_backends, backends:[{server, pid, alive,
+    sessions, idle_s, rss_kb}]}``.  ``running=false`` (empty backends) when
+    the broker isn't up.
+    """
+    state: DashboardState = request.app["state"]
+    manager = getattr(state, "_mcp_gateway_manager", None)
+    if manager is None or not manager.is_running:
+        return web.json_response({"running": False, "backends": []})
+    snap = await manager.stats()
+    snap.pop("type", None)
+    return web.json_response({"running": True, **snap})
+
+
+# Serializes in-process gateway apply operations (enable/disable + set-poolable)
+# so two concurrent dashboard requests cannot interleave broker start/stop and
+# orphan a gatewayd process. The config write is guarded by _get_config_lock();
+# this lock guards the apply() side effect that runs AFTER that lock is released.
+_MCP_GATEWAY_APPLY_LOCK = asyncio.Lock()
+
+
+async def api_mcp_gateway_enable(request: web.Request) -> web.Response:
+    """POST /api/mcp-gateway/enable — persist the flag and apply it in-process.
+
+    Writes ``mcp_gateway.enabled`` to config.json then applies the change
+    live: the broker is started/stopped and all agent sessions are dropped +
+    relinked to the new MCP routing — without restarting the gateway process,
+    so the dashboard session stays authenticated.  Returns the verified state
+    ``{ok, enabled, running, ping_ok}``.
+    """
+    from kiro_claw.agent import _atomic_json_write  # circular import
+    from kiro_claw.config.loader import config_path  # circular import
+    from kiro_claw.dashboard.handlers.agents import _get_config_lock  # circular import
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return web.json_response({"error": "enabled must be a boolean"}, status=400)
+
+    path = config_path()
+    state: DashboardState = request.app["state"]
+    apply = getattr(state, "_mcp_gateway_apply", None)
+    if apply is None:
+        return web.json_response({"error": "gateway apply unavailable"}, status=503)
+
+    # Serialize the whole persist+apply under the apply lock so two racing
+    # toggles cannot interleave (write A, write B, apply B, apply A) and leave
+    # persisted config.json diverged from live broker state. The config lock is
+    # nested inside only for the read-modify-write of config.json itself.
+    async with _MCP_GATEWAY_APPLY_LOCK:
+        async with _get_config_lock():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            except (OSError, json.JSONDecodeError):
+                return web.json_response({"error": "config.json is corrupt"}, status=500)
+            section = data.setdefault("mcp_gateway", {})
+            if not isinstance(section, dict):
+                return web.json_response({"error": "mcp_gateway is not an object"}, status=500)
+            section["enabled"] = enabled
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_json_write(path, data)
+        try:
+            result = await apply(enabled)
+        except Exception as exc:
+            sel().log_api_access(
+                caller=request.get("user", "dashboard"),
+                operation="mcp_gateway_enable",
+                outcome="error",
+                source="dashboard",
+                resources=f"enabled={enabled} error={exc}",
+            )
+            return web.json_response({"error": f"apply failed: {exc}"}, status=500)
+
+    sel().log_api_access(
+        caller=request.get("user", "dashboard"),
+        operation="mcp_gateway_enable",
+        outcome="ok",
+        source="dashboard",
+        resources=f"enabled={enabled}",
+    )
+    return web.json_response({"ok": True, **result})
+
+
+# ─── Per-server poolability management ──────────────────────────────────
+
+
+async def api_mcp_gateway_servers(request: web.Request) -> web.Response:
+    """GET /api/mcp-gateway/servers — enumerate distinct MCP servers.
+
+    Reads ``~/.kiro/agents/*.json`` (the clean source specs — the rewriter
+    never mutates them) and returns one row per distinct server with its
+    effective poolable state.  Pooling is opt-in: a stdio server is pooled
+    only when its name is in the config allowlist
+    (``mcp_gateway.poolable_servers``) OR its agent-JSON entry sets
+    ``poolable:true``.  HTTP/SSE servers are shared by nature (not poolable);
+    denylisted servers (``UNPOOLABLE_SERVERS``) can never be pooled.
+    """
+    from kiro_claw.agent import KIRO_AGENTS_DIR
+    from kiro_claw.config.loader import KiroClawConfig  # noqa: F811
+    from kiro_claw.mcp_gateway.rewriter import UNPOOLABLE_SERVERS
+
+    allowlist = set(KiroClawConfig.load().mcp_gateway.poolable_servers)
+
+    rows: dict[str, dict[str, Any]] = {}
+    if KIRO_AGENTS_DIR.is_dir():
+        for path in sorted(KIRO_AGENTS_DIR.glob("*.json")):
+            try:
+                spec = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(spec, dict):
+                continue
+            agent_name = spec.get("name") or path.stem
+            mcp_servers = spec.get("mcpServers")
+            if not isinstance(mcp_servers, dict):
+                continue
+            for name, entry in mcp_servers.items():
+                if not isinstance(entry, dict):
+                    continue
+                row = rows.get(name)
+                if row is None:
+                    row = {
+                        "agents": set(),
+                        "transport": "stdio" if "command" in entry else "http",
+                        "entry_poolable": False,
+                    }
+                    rows[name] = row
+                row["agents"].add(str(agent_name))
+                if entry.get("poolable") is True:
+                    row["entry_poolable"] = True
+
+    result: list[dict[str, Any]] = []
+    for name in sorted(rows):
+        row = rows[name]
+        is_stdio = row["transport"] == "stdio"
+        denylisted = name in UNPOOLABLE_SERVERS
+        effective = (
+            is_stdio
+            and not denylisted
+            and (name in allowlist or row["entry_poolable"])
+        )
+        result.append(
+            {
+                "name": name,
+                "poolable": effective,
+                "in_allowlist": name in allowlist,
+                "entry_poolable": row["entry_poolable"],
+                "agents": sorted(row["agents"]),
+                "transport": row["transport"],
+                "denylisted": denylisted,
+            }
+        )
+    return web.json_response({"servers": result})
+
+
+async def api_mcp_gateway_set_poolable(request: web.Request) -> web.Response:
+    """POST /api/mcp-gateway/servers/poolable — toggle a server's poolable flag.
+
+    Body ``{"name": "slack-mcp", "poolable": true}``.  Adds/removes ``name``
+    from ``mcp_gateway.poolable_servers`` in config.json (same config lock +
+    atomic write as the enable toggle), then re-applies the change in-process
+    so new sessions pick up the new MCP routing without a restart.  When the
+    gateway is disabled, the allowlist is persisted only (it takes effect when
+    the gateway is enabled).  Returns ``{ok, name, poolable, ...}``.
+    """
+    from kiro_claw.agent import _atomic_json_write
+    from kiro_claw.config.loader import config_path  # noqa: F811
+    from kiro_claw.dashboard.handlers.agents import _get_config_lock  # circular: agents imports mcp
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    name = str(body.get("name", "")).strip()
+    poolable = body.get("poolable")
+    if not name:
+        return web.json_response({"error": "name is required"}, status=400)
+    if not _is_valid_mcp_name(name):
+        return web.json_response({"error": "invalid server name"}, status=400)
+    if not isinstance(poolable, bool):
+        return web.json_response({"error": "poolable must be a boolean"}, status=400)
+
+    path = config_path()
+    async with _get_config_lock():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (OSError, json.JSONDecodeError):
+            return web.json_response({"error": "config.json is corrupt"}, status=500)
+        section = data.setdefault("mcp_gateway", {})
+        if not isinstance(section, dict):
+            return web.json_response({"error": "mcp_gateway is not an object"}, status=500)
+        current = section.get("poolable_servers")
+        servers_list = (
+            [s for s in current if isinstance(s, str)] if isinstance(current, list) else []
+        )
+        if poolable and name not in servers_list:
+            servers_list.append(name)
+        elif not poolable and name in servers_list:
+            servers_list = [s for s in servers_list if s != name]
+        section["poolable_servers"] = sorted(set(servers_list))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_json_write(path, data)
+
+    state: DashboardState = request.app["state"]
+    apply = getattr(state, "_mcp_gateway_apply_poolable", None)
+    applied: dict[str, Any] = {"applied": False}
+    if apply is not None:
+        try:
+            async with _MCP_GATEWAY_APPLY_LOCK:
+                applied = await apply()
+        except Exception as exc:
+            sel().log_api_access(
+                caller=request.get("user", "dashboard"),
+                operation="mcp_gateway_set_poolable",
+                outcome="error",
+                source="dashboard",
+                resources=f"name={name} poolable={poolable} error={exc}",
+            )
+            return web.json_response({"error": f"apply failed: {exc}"}, status=500)
+
+    sel().log_api_access(
+        caller=request.get("user", "dashboard"),
+        operation="mcp_gateway_set_poolable",
+        outcome="ok",
+        source="dashboard",
+        resources=f"name={name} poolable={poolable}",
+    )
+    return web.json_response({"ok": True, "name": name, "poolable": poolable, **applied})

@@ -838,6 +838,12 @@ async def start_dashboard(
     # REST-style MCP server registration (App Kit)
     app.router.add_put("/api/mcp/servers/{name}", handlers.api_mcp_server_detail)
     app.router.add_delete("/api/mcp/servers/{name}", handlers.api_mcp_server_detail)
+    # Shared MCP gateway (pool)
+    app.router.add_get("/api/mcp-gateway/status", handlers.api_mcp_gateway_status)
+    app.router.add_post("/api/mcp-gateway/enable", handlers.api_mcp_gateway_enable)
+    app.router.add_get("/api/mcp-gateway/metrics", handlers.api_mcp_gateway_metrics)
+    app.router.add_get("/api/mcp-gateway/servers", handlers.api_mcp_gateway_servers)
+    app.router.add_post("/api/mcp-gateway/servers/poolable", handlers.api_mcp_gateway_set_poolable)
     # AIM integration
     app.router.add_get("/api/aim/mcp", handlers.api_aim_mcp_list)
     app.router.add_post("/api/aim/mcp/install", handlers.api_aim_mcp_install)

@@ -15,6 +15,7 @@ live in sibling modules:
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import importlib
 import importlib.util
@@ -79,7 +80,7 @@ from kiro_claw.dashboard.origin import (
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.dashboard.token_auth import MAX_SESSION_TTL_SECS, generate_token
 from kiro_claw.embeddings import OllamaManager, _validate_url, make_sync_embed_fn
-from kiro_claw.executors import cron_executor
+from kiro_claw.executors import cron_executor, maintenance_executor
 from kiro_claw.frontend import build_frontend_async
 from kiro_claw.heartbeat import (
     HEARTBEAT_TASK_TIMEOUT_SECS,
@@ -95,6 +96,15 @@ from kiro_claw.llm_helpers import (
     ToolApprovalPolicy,
     save_conversation_turn,
     stream_and_collect,
+)
+from kiro_claw.mcp_gateway.manager import (
+    GatewayManager,
+    GatewaySpec,
+)
+from kiro_claw.mcp_gateway.rewriter import (
+    default_overlay_dir,
+    default_socket_path,
+    rewrite_agents,
 )
 from kiro_claw.memory import MemoryStore
 from kiro_claw.platform import boot_platform
@@ -524,6 +534,7 @@ class GatewayOrchestrator:
         self._socket_client: WSSocketModeClient | None = None
         self._wecom_client: "WeComClient | None" = None  # set by maybe_start_wecom
         self._ollama_manager: object | None = None  # OllamaManager (lazy import)
+        self._mcp_gateway_manager: GatewayManager | None = None
 
     # ------------------------------------------------------------------
     # Tool approval callback (shared by cron, heartbeat, subagent, task)
@@ -3294,6 +3305,130 @@ class GatewayOrchestrator:
             )
 
     # ------------------------------------------------------------------
+    # MCP Gateway
+    # ------------------------------------------------------------------
+
+    async def _init_mcp_gateway(self) -> None:
+        """Start the MCP gateway sidecar and populate the agent-JSON overlay.
+
+        Gated on ``config.mcp_gateway.enabled``.  Any failure downgrades to
+        today's per-session MCP path — the stub's graceful fallback keeps
+        kiro-cli sessions working even when the broker is unreachable.
+        """
+        cfg_gw = self._cfg.mcp_gateway
+        if not cfg_gw.enabled:
+            return
+        if sys.platform != "linux":
+            return
+
+        overlay_dir = Path(cfg_gw.overlay_dir) if cfg_gw.overlay_dir else default_overlay_dir()
+        socket_path = Path(cfg_gw.socket_path) if cfg_gw.socket_path else default_socket_path()
+        kiro_agents_dir = Path.home() / ".kiro" / "agents"
+        workspace_default = _session_work_dir(None)
+
+        try:
+            # rewrite_agents() walks ~/.kiro/agents, parses every JSON spec and
+            # rewrites the overlay — pure-sync file I/O.  Offload to the bounded
+            # maintenance pool so it can't block the event loop when triggered
+            # post-startup.
+            _rewrite_result, target_env = await asyncio.get_running_loop().run_in_executor(
+                maintenance_executor(),
+                functools.partial(
+                    rewrite_agents,
+                    source_dir=kiro_agents_dir,
+                    overlay_dir=overlay_dir,
+                    socket_path=socket_path,
+                    work_dir=workspace_default,
+                    sandbox_mode=self._cfg.agent.sandbox,
+                    approval_mode=self._cfg.agent.approval_mode,
+                    poolable_servers=frozenset(cfg_gw.poolable_servers),
+                ),
+            )
+        except Exception:
+            logger.exception("mcp-gateway rewriter failed — falling back")
+            return
+
+        manager = GatewayManager(
+            GatewaySpec(
+                socket_path=socket_path,
+                idle_timeout_secs=cfg_gw.idle_timeout_secs,
+                max_backends=cfg_gw.max_backends,
+                mcp_target_env=target_env,
+                prewarm_count=cfg_gw.prewarm_count,
+            )
+        )
+        if await manager.start():
+            self._mcp_gateway_manager = manager
+            logger.info("mcp-gateway: broker ready (socket=%s)", socket_path)
+
+    async def _stop_mcp_broker(self) -> None:
+        """Stop the MCP gateway broker if running and clear the handle."""
+        mgr = self._mcp_gateway_manager
+        self._mcp_gateway_manager = None
+        if mgr is not None:
+            try:
+                await mgr.shutdown()
+            except Exception:
+                logger.exception("mcp-gateway: broker shutdown failed")
+
+    async def _apply_mcp_gateway_enabled(self, enabled: bool) -> dict:
+        """Dashboard callback: apply the persisted ``mcp_gateway.enabled``
+        flag in-process (start/stop the broker), no gateway restart.
+
+        Reloads config so it acts on the value the handler just wrote.
+        Returns ``{enabled, running, ping_ok}``.
+        """
+        from kiro_claw.config.loader import KiroClawConfig
+
+        self._cfg = KiroClawConfig.load()
+        if enabled:
+            if self._mcp_gateway_manager is None:
+                await self._init_mcp_gateway()
+        else:
+            await self._stop_mcp_broker()
+        mgr = self._mcp_gateway_manager
+        if self.dashboard_state is not None:
+            self.dashboard_state._mcp_gateway_manager = mgr
+        if mgr is None:
+            return {"enabled": enabled, "running": False, "ping_ok": False}
+        running = bool(mgr.is_running)
+        ping_ok = bool(running and await mgr.ping())
+        return {"enabled": enabled, "running": running, "ping_ok": ping_ok}
+
+    async def _apply_mcp_poolable(self) -> dict:
+        """Dashboard callback: re-apply a poolable-server change in-process.
+
+        Restarts the broker so the rewriter re-runs with the new allowlist
+        and the daemon re-spawns with the updated ``MC_MCP_TARGET_*`` env.
+        """
+        from kiro_claw.config.loader import KiroClawConfig
+
+        self._cfg = KiroClawConfig.load()
+        if self._mcp_gateway_manager is not None:
+            await self._stop_mcp_broker()
+            await self._init_mcp_gateway()
+            if self.dashboard_state is not None:
+                self.dashboard_state._mcp_gateway_manager = self._mcp_gateway_manager
+        return {
+            "applied": self._mcp_gateway_manager is not None,
+            "poolable_servers": sorted(self._cfg.mcp_gateway.poolable_servers),
+        }
+
+    def _wire_mcp_gateway_dashboard(self) -> None:
+        """Publish the broker + apply callbacks onto DashboardState.
+
+        _init_mcp_gateway runs at boot before dashboard_state exists, so
+        the manager and the enable/poolable callbacks are attached here
+        (post dashboard init). The /api/mcp-gateway/* handlers read these
+        off ``request.app['state']``.
+        """
+        if self.dashboard_state is None:
+            return
+        self.dashboard_state._mcp_gateway_manager = self._mcp_gateway_manager
+        self.dashboard_state._mcp_gateway_apply = self._apply_mcp_gateway_enabled
+        self.dashboard_state._mcp_gateway_apply_poolable = self._apply_mcp_poolable
+
+    # ------------------------------------------------------------------
     # Shutdown
     # ------------------------------------------------------------------
 
@@ -3334,6 +3469,12 @@ class GatewayOrchestrator:
             await self.cron_svc.stop()
         if self.heartbeat_svc:
             self.heartbeat_svc.stop()
+
+        # Stop the pooled MCP gateway broker + its backends. gatewayd is
+        # spawned with start_new_session (and no PR_SET_PDEATHSIG), so on a
+        # clean KiroClaw exit it and its pooled MCP subprocesses would
+        # otherwise leak orphaned until the next start's flock adoption.
+        await self._stop_mcp_broker()
 
         # Kill all ACP processes and close connections
         cleanup_tasks: list = []
@@ -3663,6 +3804,12 @@ class GatewayOrchestrator:
         if self._cfg.memory.embedding_provider == "ollama":
             await self._start_ollama()
 
+        # Start MCP gateway sidecar before any ACP session can spawn.  The
+        # rewriter writes the agent-JSON overlay first so kiro-cli picks up
+        # the broker-wired MCP entries the moment a session starts.  No-op
+        # when ``mcp_gateway.enabled`` is False.
+        await self._init_mcp_gateway()
+
         await self._init_cron()
         await self._init_heartbeat()
         self._init_mcp_discovery()
@@ -3672,6 +3819,10 @@ class GatewayOrchestrator:
             await self._init_dashboard()
         else:
             await self._init_api_server()
+
+        # Publish the MCP-gateway broker + apply callbacks onto
+        # DashboardState now that it exists (the broker started earlier).
+        self._wire_mcp_gateway_dashboard()
 
         # Emit machine-readable READY line for test harnesses (--json-ready).
         # Printed BEFORE bg_session and other startup chatter so the harness
