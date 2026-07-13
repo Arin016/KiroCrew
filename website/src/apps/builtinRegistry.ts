@@ -30,6 +30,7 @@ export const BUILTIN_COMPONENT_REGISTRY: Record<string, LazyComponent> = {
   '/deploy-web': lazy(() => import('./deploy-web/DeployWebPage')),
   '/file-explorer': lazy(() => import('./file-explorer/FileExplorerPage')),
   '/code-review-sage': lazy(() => import('./code-review-sage/CodeReviewSagePage')),
+  '/workflows': lazy(() => import('./workflows/WorkflowsPage')),
 }
 
 /**

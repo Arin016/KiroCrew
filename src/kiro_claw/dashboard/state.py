@@ -1097,6 +1097,7 @@ class DashboardState:
         # Secretary subsystem removed; kept as permanent None for apps/routes.py
         # builtin-service restart lookup (getattr-based, no-op when None).
         self._secretary_restart: Any = None  # restart callback (always None — service removed)
+        self.workflow_service: Any = None  # lazy-init in server.py (WorkflowService, M6)
         self.context_builder = context_builder
         self.conversation_log = conversation_log
         self.consolidator = consolidator

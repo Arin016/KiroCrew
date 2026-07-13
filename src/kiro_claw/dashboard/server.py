@@ -351,6 +351,28 @@ def _register_mcp_routes(app: web.Application) -> None:
 
     # Artifacts — persistent, versioned LLM-generated UI
     app.router.add_get("/api/artifacts", api_artifacts_list)
+
+    # Dynamic Workflows (M6) — author, run, monitor, cancel, rerun
+    from kiro_claw.dashboard.handlers.workflows import (
+        api_workflow_author,
+        api_workflow_run,
+        api_workflow_run_cancel,
+        api_workflow_run_get,
+        api_workflow_run_intent,
+        api_workflow_run_rerun,
+        api_workflow_runs,
+    )
+
+    app.router.add_post("/api/workflows/author", api_workflow_author)
+    app.router.add_post("/api/workflows/run", api_workflow_run)
+    app.router.add_post("/api/workflows/run_intent", api_workflow_run_intent)
+    app.router.add_get("/api/workflows/runs", api_workflow_runs)
+    app.router.add_get("/api/workflows/runs/{run_id}", api_workflow_run_get)
+    app.router.add_post("/api/workflows/runs/{run_id}/cancel", api_workflow_run_cancel)
+    app.router.add_post("/api/workflows/runs/{run_id}/rerun", api_workflow_run_rerun)
+
+    # Artifacts — persistent, versioned LLM-generated UI
+    app.router.add_get("/api/artifacts", api_artifacts_list)
     app.router.add_post("/api/artifacts", api_artifacts_create)
     app.router.add_get("/api/artifacts/{slug}", api_artifact_detail)
     app.router.add_patch("/api/artifacts/{slug}", api_artifact_update)
@@ -742,6 +764,75 @@ async def start_dashboard(
         slack_client=slack_client,
         owner_id=owner_id,
     )
+
+    # --- Dynamic Workflows (M6) ---
+    try:
+        from kiro_claw.dashboard.handlers import workflows as wf_handlers
+        from kiro_claw.dashboard.workflow_inject import inject_workflow_result
+        from kiro_claw.security import redact_credentials, redact_exfiltration_urls
+        from kiro_claw.workflows.service import WorkflowService
+
+        def _wf_on_event(run_id: str, event_json: dict) -> None:
+            try:
+                sess = ""
+                svc = getattr(state, "workflow_service", None)
+                if svc is not None:
+                    h = svc.registry.get(run_id)
+                    if h is not None:
+                        sess = h.session_key
+                safe_event = wf_handlers._redact_obj(event_json)
+                state.broadcast_ws(
+                    "workflow_run_event",
+                    {"run_id": run_id, "session_key": sess, **safe_event},
+                )
+            except Exception:
+                logger.debug("workflow on_event broadcast failed", exc_info=True)
+
+        def _wf_on_done(run_id: str, snapshot: dict) -> None:
+            def _auto_turn(slot: Any, snap: dict) -> None:
+                try:
+                    from kiro_claw.dashboard.chat import _run_chat
+
+                    raw_name = snap.get("name") or snap.get("run_id", run_id)
+                    name, _ = redact_exfiltration_urls(str(raw_name))
+                    name, _ = redact_credentials(name)
+                    status, _ = redact_exfiltration_urls(str(snap.get("status", "")))
+                    status, _ = redact_credentials(status)
+                    prompt = (
+                        f"[Workflow `{name}` finished: {status}] Its result was just "
+                        "posted above. Interpret that result and continue with the "
+                        "task it was launched for — summarize the outcome, act on any "
+                        "artifacts, and surface anything the user needs to decide."
+                    )
+                    started = slot.enqueue_or_run_prompt(prompt, _run_chat, state)
+                    state.push_slots_update()
+                    logger.info(
+                        "workflow %s result -> chat slot %s: agent turn %s",
+                        run_id, getattr(slot, "key", "?"),
+                        "started" if started else "queued",
+                    )
+                except Exception:
+                    logger.warning(
+                        "workflow %s auto-turn failed", run_id, exc_info=True
+                    )
+
+            try:
+                inject_workflow_result(state, run_id, snapshot, on_injected=_auto_turn)
+            except Exception:
+                logger.debug("workflow on_done injection failed", exc_info=True)
+
+        _wf_concurrency = 4
+        state.workflow_service = WorkflowService(
+            sessions=sessions,
+            on_done=_wf_on_done,
+            on_event=_wf_on_event,
+            now_fn=lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            concurrency=_wf_concurrency,
+        )
+        logger.info("WorkflowService ready (dynamic workflows, max parallel agents=%s)", _wf_concurrency)
+    except Exception:
+        state.workflow_service = None
+        logger.warning("WorkflowService unavailable", exc_info=True)
 
     # Initialize script hook store
     state._hook_store = ScriptHookStore()
@@ -1498,6 +1589,7 @@ async def start_dashboard(
                     # MCP calls fall through to cookie auth and fail with
                     # "Token required".
                     "/api/artifact-folders",
+                    "/api/workflows",  # DW engine: MCP tools + Workflows tab polling
                     "/v1/chat/completions",  # OpenAI-compat API
                 }
             ),

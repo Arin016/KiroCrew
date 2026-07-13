@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Bot, ScrollText, FileText, X, Lock, CheckCircle, AlertCircle, Loader as LoaderIcon, Ban, Handshake, Wrench, FolderOpen, ChevronLeft, ChevronRight, MessageSquare, ArrowUp, ArrowDown } from 'lucide-react'
+import { Bot, ScrollText, FileText, X, Lock, CheckCircle, AlertCircle, Loader as LoaderIcon, Ban, Handshake, Wrench, FolderOpen, ChevronLeft, ChevronRight, MessageSquare, ArrowUp, ArrowDown, Workflow } from 'lucide-react'
 import { api } from '../../api/client'
 import { timeAgo } from '../../utils/timeAgo'
 import { useSortableTable, applySort, type Comparators } from '../../hooks/useSortableTable'
@@ -14,6 +14,8 @@ import { markSubagentApproving, openActivityToTab } from '../../store/chatSlice'
 import SegmentedControl from '../../components/SegmentedControl'
 import { colorForExt, fileIcon } from '../../utils/fileIcons'
 import SideChat from './SideChat'
+import WorkflowSidebarRow, { type WfRunRow } from './WorkflowSidebarRow'
+import { runBelongsToSlot } from '../../apps/workflows/runModel'
 
 const STATUS = {
   pending: <Lock size={12} className="text-muted" />,
@@ -467,11 +469,23 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
   const [browserOpen, setBrowserOpen] = useState(!!projectDir)
   const [browserHeight, setBrowserHeight] = useState(320)
   const [browserDragging, setBrowserDragging] = useState(false)
-  const [tab, setTab] = useState<'subagents' | 'logs' | 'files' | 'side'>(reduxTab === ('nav' as string) ? 'files' : reduxTab)
+  const [tab, setTab] = useState<'subagents' | 'workflows' | 'logs' | 'files' | 'side'>(reduxTab === ('nav' as string) ? 'files' : reduxTab)
   const explicitTab = useRef(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const ids = Object.keys(subagents)
   const hasSubagents = ids.length > 0
+
+  // Dynamic Workflow runs (M6) — dedup + caching + self-managed polling
+  const { data: wfRuns = [] } = useQuery<WfRunRow[]>({
+    queryKey: ['workflow-runs'],
+    queryFn: () =>
+      fetch('/api/workflows/runs', { credentials: 'same-origin' })
+        .then(r => (r.ok ? r.json() : { runs: [] }))
+        .then(d => (Array.isArray(d?.runs) ? d.runs : [])),
+    enabled: open,
+    refetchInterval: 2500,
+  })
+  const wfRunsForSlot = wfRuns.filter(r => runBelongsToSlot(r.session_key, slot))
 
   const visibleLog = toolLog.filter(e => e.type !== 'reasoning')
 
@@ -536,6 +550,23 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
               <span className="text-[24px]"><Bot className="lucide-inline" /></span>
               <span className="text-[13px]">No subagents running</span>
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Workflows tab (M6): live dynamic-workflow runs */}
+      {tab === 'workflows' && (
+        <div className="flex-1 overflow-y-auto py-2 px-3 flex flex-col gap-2">
+          {wfRunsForSlot.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full text-muted/30 gap-2">
+              <span className="text-[24px]"><Workflow className="lucide-inline" /></span>
+              <span className="text-[13px]">No workflow runs</span>
+              <span className="text-[11px] text-center px-4">
+                Ask me to &quot;use a dynamic workflow to …&quot; — runs from this chat appear here live.
+              </span>
+            </div>
+          ) : (
+            wfRunsForSlot.map(r => <WorkflowSidebarRow key={r.run_id} row={r} />)
           )}
         </div>
       )}

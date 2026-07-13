@@ -22,6 +22,18 @@ export const missedChunkMarker = (prevSeq: number, curSeq: number): string => {
 
 type SlotState = 'idle' | 'streaming' | 'tool_running' | 'stopping' | 'compacting'
 
+/** Live progress entry for a dynamic-workflow run. Folded from workflow_run_event
+ *  WS messages so the chat can show status while a run executes. */
+export interface WorkflowRunProgress {
+  run_id: string
+  name: string
+  phase: string
+  lastLog: string
+  status: 'running' | 'finished' | 'failed' | 'cancelled'
+  error?: string
+  sessionKey?: string
+}
+
 export interface SideMessage {
   role: 'user' | 'assistant'
   content: string
@@ -67,12 +79,15 @@ interface ChatState {
   voiceAudio: string | null  // base64 stitched MP3 for replay
   subagents: Record<string, SubagentActivity>
   toolLog: ToolActivity[]
+  /** Live dynamic-workflow runs keyed by run_id. Populated from
+   *  `workflow_run_event` WS broadcasts; consumed by WorkflowProgressBar. */
+  workflowRuns: Record<string, WorkflowRunProgress>
   activityOpen: boolean
-  activityTab: 'subagents' | 'logs' | 'files' | 'side'
+  activityTab: 'subagents' | 'workflows' | 'logs' | 'files' | 'side'
   /** Tool call to highlight & auto-expand inline. Set by openActivityToTool;
    *  consumed (cleared) once the matching ToolCallLine has expanded itself. */
   focusToolCallId: string | null
-  slotActivity: Record<string, { toolLog: ToolActivity[]; subagents: Record<string, SubagentActivity>; activityTab?: 'subagents' | 'logs' | 'files' | 'side' }>
+  slotActivity: Record<string, { toolLog: ToolActivity[]; subagents: Record<string, SubagentActivity>; activityTab?: 'subagents' | 'workflows' | 'logs' | 'files' | 'side' }>
   slotSide: Record<string, SideState>
   slotSideClosed: Record<string, boolean>
   slotMessages: Record<string, ChatMessage[]>
@@ -115,6 +130,7 @@ const initialState: ChatState = {
   voiceAudio: null,
   subagents: {},
   toolLog: [],
+  workflowRuns: {},
   activityOpen: false,
   activityTab: 'files' as const,
   focusToolCallId: null,
@@ -653,7 +669,7 @@ const chatSlice = createSlice({
     setVoicePlaying(state, action: PayloadAction<boolean>) { state.voicePlaying = action.payload },
     setVoiceAudio(state, action: PayloadAction<string | null>) { state.voiceAudio = action.payload },
     toggleActivity(state) { state.activityOpen = !state.activityOpen; if (!state.activityOpen) state.focusToolCallId = null },
-    openActivityToTab(state, action: PayloadAction<'subagents' | 'logs' | 'files' | 'side'>) { state.activityOpen = true; state.activityTab = action.payload; state.focusToolCallId = null },
+    openActivityToTab(state, action: PayloadAction<'subagents' | 'workflows' | 'logs' | 'files' | 'side'>) { state.activityOpen = true; state.activityTab = action.payload; state.focusToolCallId = null },
     /** Tools tab is deprecated — tool details now expand inline in the chat. This action
      *  signals the matching ToolCallLine pill to auto-expand and scroll into view. */
     openActivityToTool(state, action: PayloadAction<string>) { state.focusToolCallId = action.payload },
@@ -805,6 +821,46 @@ const chatSlice = createSlice({
         startedAt: d.started * 1000, elapsed: 0,
         approval_id: existing?.approval_id, approving: existing?.approving,
       }
+    },
+    /** Fold a single dynamic-workflow run event into workflowRuns. */
+    sseWorkflowEvent(state, action: PayloadAction<{ run_id: string; session_key?: string; seq?: number; ts?: number; type: string; data?: Record<string, unknown> }>) {
+      const { run_id, type, data, session_key } = action.payload
+      if (!run_id) return
+      const d = (data || {}) as Record<string, unknown>
+      const cur = state.workflowRuns[run_id] ?? {
+        run_id, name: '', phase: '', lastLog: '', status: 'running' as const,
+      }
+      if (session_key && !cur.sessionKey) cur.sessionKey = session_key
+      switch (type) {
+        case 'run_started':
+          cur.name = (d.name as string) || cur.name || run_id
+          cur.status = 'running'
+          break
+        case 'phase_started':
+          cur.phase = (d.title as string) || cur.phase
+          break
+        case 'log': {
+          const msg = (d.message as string) || ''
+          if (msg) cur.lastLog = msg
+          break
+        }
+        case 'run_finished':
+          cur.status = 'finished'
+          break
+        case 'run_failed':
+          cur.status = 'failed'
+          cur.error = (d.error as string) || cur.error
+          break
+        case 'run_cancelled':
+          cur.status = 'cancelled'
+          break
+        default:
+          break
+      }
+      state.workflowRuns[run_id] = cur
+    },
+    clearWorkflowRun(state, action: PayloadAction<string>) {
+      delete state.workflowRuns[action.payload]
     },
     sseChatMessageUpdate(state, action: PayloadAction<{ slot: string; tool_call_id?: string; ts?: string; content?: string; meta?: Record<string, unknown> }>) {
       const { slot, tool_call_id: tcid, ts, content, meta } = action.payload
@@ -1357,6 +1413,7 @@ export const {
   sseContextUsage, setVoicePlaying, setVoiceAudio,
   toggleActivity, openActivityToTab, openActivityToTool, clearFocusToolCallId, sseSubagentPending, markSubagentApproving, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentDone,
   sseSubagentSnapshot, sseToolActivity, sseToolResult, sseActivityEvent,
+  sseWorkflowEvent, clearWorkflowRun,
   sseSideResult, sideClose, sideOptimisticAppend, sideOptimisticRollback,
 } = chatSlice.actions
 export default chatSlice.reducer

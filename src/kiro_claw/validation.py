@@ -495,6 +495,43 @@ SET_PROJECT_SCHEMA = ToolSchema(
     custom_validator=_validate_set_project,
 )
 
+# --- Dynamic Workflows (M6) ---
+_WF_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+
+WORKFLOW_AUTHOR_SCHEMA = ToolSchema(
+    tool_name="workflow_author",
+    fields=[
+        FieldSpec("intent", str, required=True, max_len=MAX_MEDIUM_STRING),
+    ],
+)
+
+WORKFLOW_RUN_SCHEMA = ToolSchema(
+    tool_name="workflow_run",
+    fields=[
+        # Either an authored Python script (source) or a NL intent to author one.
+        FieldSpec("source", str, max_len=MAX_LONG_STRING),
+        FieldSpec("intent", str, max_len=MAX_MEDIUM_STRING),
+        FieldSpec("name", str, max_len=MAX_SHORT_STRING),
+        FieldSpec("args", dict),
+        FieldSpec("budget_total", int, min_val=0, max_val=100_000_000),
+    ],
+)
+
+WORKFLOW_RUN_ID_SCHEMA = ToolSchema(
+    tool_name="workflow_status",
+    fields=[
+        FieldSpec("run_id", str, required=True, max_len=64, pattern=_WF_RUN_ID_RE),
+    ],
+)
+
+WORKFLOW_RERUN_SCHEMA = ToolSchema(
+    tool_name="workflow_rerun_subtree",
+    fields=[
+        FieldSpec("run_id", str, required=True, max_len=64, pattern=_WF_RUN_ID_RE),
+        FieldSpec("from_index", int, min_val=0, max_val=1_000_000),
+    ],
+)
+
 # Artifact tools — slug pattern matches kiro_claw.artifacts._SLUG_RE.
 _ARTIFACT_SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
 _ARTIFACT_TAG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_:.-]{0,63}$")
