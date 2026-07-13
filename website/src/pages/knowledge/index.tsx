@@ -304,6 +304,20 @@ export default function KnowledgePage() {
     queryFn: () => knowledgeApi<NamespaceInfo[]>('/namespaces'),
   })
 
+  const { data: config } = useQuery({
+    queryKey: ['knowledge-config'],
+    queryFn: () => knowledgeApi<{ enabled: boolean; supported_formats: string[]; accepts_no_extension?: boolean }>('/config'),
+  })
+  // Build the upload accept filter from the backend's advertised formats
+  // (single source of truth) so it never drifts from FileReader.SUPPORTED.
+  // Falls back to a superset that includes .pdf if config hasn't loaded yet.
+  const uploadAccept = (config?.supported_formats && config.supported_formats.length
+    ? config.supported_formats
+    : ['.md', '.txt', '.py', '.java', '.ts', '.js', '.rs', '.go', '.html', '.htm',
+       '.csv', '.log', '.json', '.yaml', '.yml', '.sh', '.rb', '.c', '.cpp', '.h', '.docx', '.pdf']
+  ).filter(Boolean).join(',')
+  const acceptsNoExtension = config?.accepts_no_extension ?? true
+
   const { data: sources = [] } = useQuery({
     queryKey: ['knowledge-sources'],
     queryFn: () => knowledgeApi<Source[]>('/sources'),
@@ -599,7 +613,7 @@ export default function KnowledgePage() {
             )}
           </div>
         ) : (
-          <SourcesList onIngest={handleFiles} uploadNamespace={uploadNamespace} setUploadNamespace={setUploadNamespace} namespaces={namespaces} ingestionJobs={ingestionJobs} />
+          <SourcesList onIngest={handleFiles} uploadNamespace={uploadNamespace} setUploadNamespace={setUploadNamespace} namespaces={namespaces} ingestionJobs={ingestionJobs} uploadAccept={uploadAccept} acceptsNoExtension={acceptsNoExtension} />
         )}
       </div>
 

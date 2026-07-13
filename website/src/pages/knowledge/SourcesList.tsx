@@ -201,9 +201,10 @@ function FolderProgress({ sourceId }: { sourceId: string }) {
   )
 }
 
-export default function SourcesList({ onIngest, uploadNamespace, setUploadNamespace, namespaces, ingestionJobs }: {
+export default function SourcesList({ onIngest, uploadNamespace, setUploadNamespace, namespaces, ingestionJobs, uploadAccept, acceptsNoExtension }: {
   onIngest: (files: File[]) => void; uploadNamespace: string; setUploadNamespace: (v: string) => void
   namespaces: NamespaceInfo[]; ingestionJobs: IngestionJob[]
+  uploadAccept?: string; acceptsNoExtension?: boolean
 }) {
   const queryClient = useQueryClient()
   const [showAdd, setShowAdd] = useState(false)
@@ -368,10 +369,11 @@ export default function SourcesList({ onIngest, uploadNamespace, setUploadNamesp
           <NamespacePicker value={uploadNamespace} onChange={setUploadNamespace} namespaces={namespaces} />
           {addType === 'local_file' ? (
             <>
-              <DropZone onFiles={(files) => { onIngest(files); setShowAdd(false) }} accept=".md,.txt,.py,.java,.ts,.js,.rs,.go,.html,.htm,.csv,.log,.json,.yaml,.yml,.sh,.rb,.c,.cpp,.h,.docx" />
+              <DropZone onFiles={(files) => { onIngest(files); setShowAdd(false) }} accept={uploadAccept ?? ".md,.txt,.py,.java,.ts,.js,.rs,.go,.html,.htm,.csv,.log,.json,.yaml,.yml,.sh,.rb,.c,.cpp,.h,.docx,.pdf"} />
               <IngestionProgress jobs={ingestionJobs} />
               <div className="text-[11px] text-muted bg-bg rounded border border-border p-2">
-                Supports: Markdown, plain text, code files, HTML, JSON, YAML, CSV, DOCX. Max 50 MB per file.
+                Supports: Markdown, plain text, code files, HTML, JSON, YAML, CSV, DOCX, PDF. Max 50 MB per file.
+                {acceptsNoExtension && ' Files with no extension (e.g. README) are ingested as plain text — drag-and-drop them here, since the file picker cannot list extensionless files.'}
               </div>
             </>
           ) : (

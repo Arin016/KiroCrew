@@ -954,9 +954,16 @@ async def ingest_text(request: web.Request) -> web.Response:
 async def get_config(request: web.Request) -> web.Response:
     """GET /api/knowledge/config -- returns supported formats and status."""
     pipeline = request.app.get("knowledge_pipeline")
+    # ``FileReader.SUPPORTED`` contains '' (the empty suffix) to mark that
+    # extensionless files (e.g. ``README``, ``Makefile``) are ingestable as
+    # plain text. An empty string is not a valid HTML ``accept`` token, so we
+    # keep ``supported_formats`` as the clean extension list and surface the
+    # no-extension capability via an explicit boolean instead of stripping the
+    # information away entirely.
     return web.json_response({
         "enabled": pipeline is not None,
         "supported_formats": sorted(FileReader.SUPPORTED - {''}),
+        "accepts_no_extension": '' in FileReader.SUPPORTED,
         "folder_picker": _folder_picker_available(request),
     })
 
