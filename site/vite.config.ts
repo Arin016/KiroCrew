@@ -2,11 +2,12 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
-// Public GitHub Pages build. Served from https://<org>.github.io/kiroclaw/,
-// so assets resolve under the /kiroclaw/ base. Switch base to "/" if a custom
-// domain is attached later.
+// Public-facing landing site. The repo is currently private, so GitHub Pages
+// serves it at the root of a *.pages.github.io subdomain. A relative base keeps
+// assets resolving at that root and also survives a move to a /kiroclaw/ subpath
+// if the repo goes public later.
 export default defineConfig({
-  base: "/kiroclaw/",
+  base: "./",
   plugins: [react(), tailwindcss()],
   server: { port: 3000 },
   build: { outDir: "dist" },
