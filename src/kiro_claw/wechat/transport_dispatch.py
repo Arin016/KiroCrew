@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from kiro_claw.hooks import TOOL_AUTO_APPROVE, TOOL_DENY
 from kiro_claw.messaging.driver import APPROVAL_INTERACTIVE, TurnDriver
-from kiro_claw.messaging.link import build_dm_session_key
+from kiro_claw.messaging.link import build_dm_session_key, seed_generation
 from kiro_claw.sel import sel
 from kiro_claw.wechat.client import new_stream_id
 from kiro_claw.wechat.commands import ConversationState, parse_command
@@ -80,7 +80,7 @@ class WeComDispatcher:
         self.conv_log = conv_log
         self.approval_mode = approval_mode
         self.client: "WeComClient | None" = None
-        self._conv = ConversationState()
+        self._conv = ConversationState(seed_fn=self._seed_gen)
 
     # ── Turn dispatch (transport's dispatch callback) ──────────────────────
 
@@ -100,6 +100,16 @@ class WeComDispatcher:
         if cmd == "compact":
             self._conv.clear_awaiting(userid)
             await self._handle_compact(inbound)
+            return
+        if cmd in ("link", "unlink"):
+            # WeCom replies are bound to an inbound request (no proactive send),
+            # so a dashboard->channel mirror can never be delivered here. Reject
+            # explicitly rather than silently record an inert link.
+            await self.client.send_reply(
+                inbound.response_url,
+                "ℹ️ 本渠道回复绑定在收到的消息上,不支持从 dashboard 主动推送,"
+                "/link 暂不可用。",
+            )
             return
 
         # ── Mid-turn concurrency: check the CURRENT-generation key for an
@@ -275,6 +285,15 @@ class WeComDispatcher:
             self._resolve_agent(),
             userid,
             gen=gen,
+            dm_scope=self.cfg.messaging.dm_scope,
+        )
+
+    def _seed_gen(self, userid: str) -> int:
+        return seed_generation(
+            self.sessions,
+            channel="wecom",
+            agent=self._resolve_agent(),
+            user_id=userid,
             dm_scope=self.cfg.messaging.dm_scope,
         )
 

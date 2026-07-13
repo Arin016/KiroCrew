@@ -66,6 +66,10 @@ from kiro_claw.dashboard.chat_handlers import (  # noqa: F401
     api_chat_slots_cleanup,
     api_recent_projects,
 )
+from kiro_claw.dashboard.chat_mirror import (  # noqa: F401
+    api_chat_slot_mirror_link,
+    api_chat_slot_mirror_unlink,
+)
 from kiro_claw.dashboard.chat_nav import (  # noqa: F401
     api_chat_nav_resolve_links,
 )

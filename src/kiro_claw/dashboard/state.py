@@ -39,6 +39,7 @@ if TYPE_CHECKING:
         TaskRunner,
     )
     from kiro_claw.dashboard.loop_watchdog import LoopStallWatchdog  # noqa: F401
+    from kiro_claw.messaging.transport import MessagingTransport  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -984,6 +985,11 @@ class DashboardState:
         self.consolidator = consolidator
         self.task_runner = task_runner
         self.slack_client = slack_client
+        # Live channel transports (Telegram/WeCom/...) for channel-neutral
+        # cross-surface mirror delivery — registered at boot by each channel's
+        # gateway via ``register_channel_transport``. Slack keeps its dedicated
+        # ``slack_client`` above (rich streaming mirror), so it is not stored here.
+        self.channel_transports: dict[str, "MessagingTransport"] = {}
         self.owner_id = owner_id
         self._owner_hash: str | None = None
         # Branch+commit are resolved once by the CLI entrypoint (set_build_info,
@@ -1046,6 +1052,21 @@ class DashboardState:
         # Per-project file index registry (shared across slots)
         from kiro_claw.dashboard.file_index import FileIndexRegistry
         self.file_indexes = FileIndexRegistry()
+
+    def register_channel_transport(self, transport: "MessagingTransport") -> None:
+        """Register a live channel transport for cross-surface mirror delivery.
+
+        Called by each channel's gateway at boot, keyed by ``channel_type`` so
+        the dashboard turn path can resolve the transport for a session's
+        outbound mirror link and deliver a reply via ``send_message``.
+        """
+        ct = getattr(transport, "channel_type", "")
+        if transport is not None and ct:
+            self.channel_transports[ct] = transport
+
+    def get_channel_transport(self, channel_type: str) -> "MessagingTransport | None":
+        """Return the registered transport for *channel_type*, or None."""
+        return self.channel_transports.get(channel_type)
 
     def wire_session_compact_callback(self) -> None:
         """Register the dashboard's compaction callback on the session manager."""

@@ -96,6 +96,8 @@ async def maybe_start_wecom(orch: "GatewayOrchestrator") -> "WeComClient | None"
         dispatcher.client = client
 
         await transport.connect()  # opens the outbound WS connect/serve loop
+        if orch.dashboard_state is not None:
+            orch.dashboard_state.register_channel_transport(transport)
         logger.info("WeChat (WeCom AI-bot) channel started (transport path).")
         return client
     except Exception:

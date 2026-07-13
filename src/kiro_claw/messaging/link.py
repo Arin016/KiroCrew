@@ -135,6 +135,47 @@ def build_dm_session_key(
     return f"{bucket}:gen{gen}" if gen else bucket
 
 
+def dashboard_mirror_key(channel_session_key: str) -> str:
+    """The dashboard-side session key that mirrors a channel conversation.
+
+    A channel session (e.g. ``telegram:kiroclaw:direct:123:gen3``) is surfaced
+    in the dashboard as a slot whose name is sanitized by ``history._safe_key``
+    (``re.sub(r"[^\\w\\-.]", "_", key)`` — every non-word char, not only ``:``);
+    that slot's runtime session key is ``dashboard:<slot>`` (the shape produced
+    by ``dashboard.chat_utils._history_key_for``). A cross-surface mirror link
+    set by an in-channel ``/link`` must be stored on THIS exact key so the
+    dashboard turn loop's ``_deliver_cross_surface_*`` helpers read it back.
+    Using the same ``_safe_key`` sanitizer is required for correctness: a channel
+    key with any non-word char (an agent name with a space, or unicode) would
+    otherwise sanitize differently here than in the slot path and silently
+    mismatch, so the mirror never fires despite ``/link`` reporting success.
+    """
+    from kiro_claw.history import _safe_key
+
+    return "dashboard:" + _safe_key(channel_session_key)
+
+
+def seed_generation(
+    sessions: Any,
+    *,
+    channel: str,
+    agent: str,
+    user_id: str,
+    dm_scope: str,
+) -> int:
+    """Seed a DM ``ConversationState`` generation from the persisted session map.
+
+    The generation counter is in-memory (reset on restart); this returns the
+    highest generation already persisted for the conversation's durable bucket
+    (the ``gen=0`` key) so ``/new`` (and idle/daily rotation) always advance past
+    a stale on-disk generation instead of colliding with and resurrecting it.
+    Shared by every DM dispatcher so the restart-safe seeding lives in one place
+    rather than being copy-pasted per channel.
+    """
+    bucket = build_dm_session_key(channel, agent, user_id, gen=0, dm_scope=dm_scope)
+    return sessions.max_generation(bucket)
+
+
 def should_rotate_generation(
     last_active: float,
     now: float,

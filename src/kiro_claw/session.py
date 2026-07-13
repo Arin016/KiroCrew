@@ -88,6 +88,7 @@ from kiro_claw.agent import _enforce_denied_commands
 from kiro_claw.config import KiroClawConfig
 from kiro_claw.config.loader import POOL_SIZE_MAX, build_provider_factory, default_project_dir
 from kiro_claw.executors import maintenance_executor
+from kiro_claw.messaging.link import ChannelLink
 from kiro_claw.providers.base import CancelOutcome, LLMProvider
 from kiro_claw.sel import sel
 from kiro_claw.session_map import _KIRO_SESSIONS_DIR  # noqa: F401
@@ -2281,6 +2282,24 @@ class SessionManager:
         """Return the session key linked to a Slack thread, or None."""
         return self._session_map.get_session_for_thread(thread_ts)
 
+    # ── Channel-neutral outbound mirror (generalizes Slack linking) ──
+
+    def set_mirror_link(self, key: str, link: ChannelLink | None) -> None:
+        """Bind (or clear, when *link* is None) a session's channel-neutral
+        outbound mirror target. Slack routes through the dedicated slack-link
+        fields; other channels store a ``ChannelLink``. Persists via SessionMap.
+        """
+        self._session_map.set_mirror_link(key, link)
+
+    def get_mirror_link(self, key: str) -> ChannelLink | None:
+        """Return a session's outbound mirror target as a channel-neutral link,
+        or None. Legacy Slack sessions surface as a Slack ``ChannelLink``."""
+        return self._session_map.get_mirror_link(key)
+
+    def clear_mirror_link(self, key: str) -> bool:
+        """Remove a session's outbound mirror binding. Returns True iff present."""
+        return self._session_map.clear_mirror_link(key)
+
     # Backward-compat aliases used by callers not yet migrated
     async def set_channel(self, key: str, channel_id: str) -> None:
         """Set channel for a session. Prefer set_slack_link for new code."""
@@ -2296,6 +2315,10 @@ class SessionManager:
 
     def find_key_by_sid(self, sid: str) -> str | None:
         return self._session_map.find_key_by_sid(sid)
+
+    def max_generation(self, bucket: str) -> int:
+        """Highest persisted DM generation for a session bucket (see SessionMap)."""
+        return self._session_map.max_generation(bucket)
 
     def delete_session_map_entry(self, key: str) -> None:
         self._session_map.delete(key)

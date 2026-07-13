@@ -239,6 +239,15 @@ gen, dm_scope)`:
 - **Generation reset** rotates on `/new`, an idle window
   (`MessagingConfig.idle_reset_minutes`), or a daily boundary
   (`daily_reset_hour`), decided by `should_rotate_generation()`.
+- **Restart-safe generation seeding.** The generation counter is in-memory (per
+  `ConversationState`), so it resets on gateway restart. To stop `/new` from
+  bumping a reset counter (0→1) straight onto a still-persisted generation and
+  resurrecting that old conversation, the counter is seeded on first access to a
+  bucket from the highest persisted generation via
+  `SessionMap.max_generation(bucket)` (shared helper
+  `messaging.link.seed_generation`, used by every DM dispatcher). A normal
+  post-restart message then resumes the latest generation (continuity); `/new`
+  always advances past every persisted generation, minting a genuinely fresh sid.
 
 Legacy bare-thread Slack keys are unaffected — they keep the
 `canonical_key`/`legacy_key` shim. The DM channels are recent, so the key shape
@@ -259,6 +268,69 @@ semaphore. When a DM arrives mid-turn, the dispatcher acts on
 WeCom always steers regardless of `queue_mode`: its replies are bound to the
 inbound request, so a queued-then-drained reply can't be delivered later
 (capability-driven, like `supports_proactive_send=False`).
+
+## Cross-Surface Reply Mirror
+
+The same conversation can appear on a channel (Telegram/WeCom) and in the
+dashboard. Two models relate the surfaces:
+
+- **Slack — one session, two surfaces (fold-in).** A linked Slack thread folds
+  into the dashboard session: the handler swaps the session key to the linked
+  dashboard session via `get_session_for_thread`, so there is a single backing
+  sid and Slack is a projection of it (see *Slack Thread Linking*).
+- **Telegram / WeCom — two sessions, bridged by a mirror.** The channel message
+  runs under its own channel session (`{channel}:…:genN` → its own sid); the
+  dashboard surfaces it as a separate slot with its own sid. One logical
+  conversation therefore has two backing sids, bridged by the mirror.
+
+`messaging.link.dashboard_mirror_key(channel_session_key)` computes the
+dashboard-side key: `"dashboard:" + history._safe_key(channel_session_key)`. It
+MUST use the same `_safe_key` sanitizer as the slot-naming path (every non-word
+char → `_`, not only `:`); a narrower sanitizer silently mismatches for keys
+containing spaces/unicode, so the mirror never fires despite `/link` succeeding.
+
+**Directions.** Inbound (channel → dashboard display) is independent of the
+mirror link and always on — the channel turn writes the shared `conv_log`, which
+the dashboard rehydrates as a slot. Outbound (dashboard → channel echo) fires
+only when a `mirror` `ChannelLink` exists on the dashboard-side key:
+
+```
+   Telegram / WeCom                              Dashboard tab
+  ┌────────────────────┐   inbound: ALWAYS ON   ┌────────────────────┐
+  │ channel session    │ ═════════════════════▶ │ dashboard slot     │
+  │ …:genN  (sid A)    │                        │ dashboard:…_genN   │
+  │                    │ ◀── outbound: only ──  │ (sid B)            │
+  └────────────────────┘      when /link is ON   └────────────────────┘
+```
+
+**API:**
+- `SessionManager.set_mirror_link(key, link)` / `clear_mirror_link(key)` /
+  `get_mirror_link(key)` — persist/read the outbound `ChannelLink` (Slack routes
+  to `set_slack_link` so its reverse index stays intact).
+- `POST /api/chat/slots/{name}/mirror-link` | `mirror-unlink` — dashboard-side
+  endpoints (auth posture matches `slack-link`: under the `/api/chat`
+  `mixed_internal_paths` prefix, never the strict `internal_paths` set).
+- In-channel `/link` / `/unlink` — write/clear the link on the current
+  conversation's `dashboard_mirror_key`. `/link` does not control display,
+  history, or the inbound direction — only the outbound echo; `/unlink` changes
+  nothing else, since the two sids already exist independently.
+
+**Delivery** (`chat_runner._deliver_cross_surface_reply` /
+`_deliver_cross_surface_user_message`, via the shared `_resolve_mirror_target`
+preamble) is best-effort and gated on: Slack skipped (its own inline mirror); a
+registered transport with `supports_proactive_send` (WeCom is False → `/link`
+rejected there); and the `channels` governance ceiling via
+`governance_permits("channels", channel_type)`, so an operator policy
+restricting outbound messaging is honored on this egress too (fail-closed on any
+governance error — matching the Slack path). Egress text is redacted through the
+canonical `redact_via_context` shim so a loaded companion's extra
+credential/token regexes apply.
+
+**Known asymmetry / future work.** Slack already runs the unified one-session
+model; Telegram/WeCom run two sessions bridged by the mirror. Folding the
+dashboard channel tab into the channel session (as Slack does) would remove the
+second sid and the live render-duplication it can cause, at the cost of a
+dashboard-turn-loop refactor.
 
 ## Session Lifecycle at Startup
 

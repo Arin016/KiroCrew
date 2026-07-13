@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 
 from kiro_claw.config.paths import config_dir
-from kiro_claw.messaging.link import ChannelLink, canonical_key
+from kiro_claw.messaging.link import SLACK_NAMESPACE, ChannelLink, canonical_key
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +231,11 @@ class SessionMap:
             if entry.get("provider") != "claude_code"
             and (
                 (entry.get("sid") and not (_KIRO_SESSIONS_DIR / f"{entry['sid']}.json").exists())
-                or (not entry.get("sid") and not entry.get("slack_thread_ts"))
+                or (
+                    not entry.get("sid")
+                    and not entry.get("slack_thread_ts")
+                    and not entry.get("mirror")
+                )
             )
         ]
         for k in stale:
@@ -299,6 +303,92 @@ class SessionMap:
     def get_session_for_thread(self, thread_ts: str) -> str | None:
         """Return the session key linked to a Slack thread_ts, or None."""
         return self._thread_to_session.get(thread_ts)
+
+    # ── Channel-neutral outbound mirror binding (generalizes Slack linking) ──
+    # ``set/get/clear_slack_link`` above are the Slack-specific backend of this
+    # API: they own the dedicated ``slack_thread_ts`` / ``slack_channel_id``
+    # fields and the ``_thread_to_session`` reverse index that powers Slack's
+    # inbound leg. The trio below exposes the SAME binding channel-neutrally as
+    # a ``ChannelLink`` so the dashboard turn path can deliver a reply to any
+    # proactive-capable channel via ``Transport.send_message`` without
+    # special-casing Slack. Slack routes back through the dedicated fields;
+    # every other channel stores a ``ChannelLink`` under ``mirror``.
+
+    def set_mirror_link(self, key: str, link: ChannelLink | None) -> None:
+        """Bind (or clear, when *link* is None) a session's outbound mirror target.
+
+        Slack (``channel_type == "slack"``) routes to ``set_slack_link`` so its
+        reverse index stays intact; every other channel stores *link* under
+        ``mirror``. Creates the entry if absent.
+        """
+        if link is None:
+            self.clear_mirror_link(key)
+            return
+        if link.channel_type == SLACK_NAMESPACE:
+            self.set_slack_link(key, link.thread_id or "", link.channel_id)
+            return
+        key = canonical_key(key)
+        entry = self._ensure_entry(key)
+        entry["mirror"] = link.to_dict()
+        self._save()
+
+    def get_mirror_link(self, key: str) -> ChannelLink | None:
+        """Return a session's outbound mirror target as a channel-neutral link.
+
+        Reads the explicit ``mirror`` binding first; for a legacy Slack session
+        that only carries ``slack_thread_ts`` / ``slack_channel_id`` it
+        synthesizes the equivalent Slack ``ChannelLink`` so callers never have
+        to special-case Slack. Returns None when the session mirrors nowhere.
+        """
+        entry = self._data.get(canonical_key(key))
+        if not entry:
+            return None
+        raw = entry.get("mirror")
+        if raw:
+            return ChannelLink.from_dict(raw)
+        ts = entry.get("slack_thread_ts")
+        ch = entry.get("slack_channel_id")
+        if ts or ch:
+            return ChannelLink(channel_type=SLACK_NAMESPACE, channel_id=ch, thread_id=ts)
+        return None
+
+    def clear_mirror_link(self, key: str) -> bool:
+        """Remove a session's outbound mirror binding; return True iff one existed.
+
+        A non-Slack ``mirror`` field is dropped directly; a Slack binding is
+        cleared via ``clear_slack_link`` so its reverse index is evicted too.
+        """
+        entry = self._data.get(canonical_key(key))
+        if not entry:
+            return False
+        if entry.get("mirror") is not None:
+            entry.pop("mirror", None)
+            self._save()
+            return True
+        if entry.get("slack_thread_ts") or entry.get("slack_channel_id"):
+            return self.clear_slack_link(key)
+        return False
+
+    def max_generation(self, bucket: str) -> int:
+        """Return the highest persisted DM generation for a session *bucket*.
+
+        The bucket is the generation-0 key (e.g.
+        ``telegram:<agent>:direct:<user>``); generations persist as ``{bucket}``
+        (gen 0) and ``{bucket}:gen{N}``. Returns the max ``N`` with a persisted
+        entry, or -1 when the bucket has none. Channels seed their in-memory
+        generation counter from this so ``/new`` and idle/daily reset advance
+        past any generation left on disk (restart-safe) instead of colliding
+        with a stale session and resuming it.
+        """
+        bucket = canonical_key(bucket)
+        best = 0 if bucket in self._data else -1
+        prefix = f"{bucket}:gen"
+        for key in self._data:
+            if key.startswith(prefix):
+                suffix = key[len(prefix):]
+                if suffix.isdigit():
+                    best = max(best, int(suffix))
+        return best
 
     def find_key_by_sid(self, session_id: str) -> str | None:
         """Find the session map key for a given kiro-cli session ID."""

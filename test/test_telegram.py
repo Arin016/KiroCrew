@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from kiro_claw.acp.types import EVENT_COMPACTION_STATUS, EVENT_COMPLETE, EVENT_TEXT_CHUNK
+from kiro_claw.messaging.link import ChannelLink, dashboard_mirror_key
 from kiro_claw.messaging.renderer import DONE, TEXT_CHUNK, TOOL_CALL, OutputEvent
 from kiro_claw.messaging.transport import InboundMessage
 from kiro_claw.telegram.client import TELEGRAM_CHUNK_LIMIT, TelegramInbound
@@ -132,6 +133,7 @@ class FakeSessions:
         self._has = True
         self.queued: list = []
         self._gp = FakeProvider()
+        self.mirror_links: dict[str, Any] = {}
 
     async def get_or_create(self, key: str, *, agent: Any = None, channel_id: Any = None) -> Any:
         self.last_agent = agent
@@ -159,6 +161,15 @@ class FakeSessions:
 
     def is_busy(self, key: str) -> bool:
         return self._busy
+
+    def max_generation(self, bucket: str) -> int:
+        return -1
+
+    def set_mirror_link(self, key: str, link: Any) -> None:
+        self.mirror_links[key] = link
+
+    def clear_mirror_link(self, key: str) -> bool:
+        return self.mirror_links.pop(key, None) is not None
 
     def enqueue(self, key: str, ts: str, text: str, *, force: bool = False, **kw: Any) -> bool:
         self.queued.append((ts, text, kw))
@@ -847,3 +858,47 @@ class TestTelegramMidTurn:
             "telegram:kiroclaw:direct:7",
         ]
         assert sess.queued == []
+
+
+class TestLinkCommand:
+    def test_dashboard_mirror_key_transform(self) -> None:
+        # Guards the exact seam _deliver_cross_surface_reply reads at runtime:
+        # dashboard:<channel session key with ':' sanitized to '_'>.
+        assert (
+            dashboard_mirror_key("telegram:kiroclaw:direct:8743158320:gen3")
+            == "dashboard:telegram_kiroclaw_direct_8743158320_gen3"
+        )
+        assert (
+            dashboard_mirror_key("telegram:kiroclaw:direct:7")
+            == "dashboard:telegram_kiroclaw_direct_7"
+        )
+
+    def test_parse_link_unlink(self) -> None:
+        assert parse_command("/link") == "link"
+        assert parse_command("/unlink") == "unlink"
+        assert parse_command("/LINK") == "link"
+        assert parse_command("/new") == "new"
+        assert parse_command("hello") is None
+
+    def test_link_sets_mirror_on_dashboard_key(self) -> None:
+        d, cli, sess = _dispatcher({7})
+        asyncio.run(d._handle_link(7, 7))
+        expected_key = dashboard_mirror_key(d._session_key(7))
+        assert expected_key in sess.mirror_links
+        link = sess.mirror_links[expected_key]
+        assert isinstance(link, ChannelLink)
+        assert link.channel_type == "telegram"
+        assert link.channel_id == "7"
+        assert any("Linked" in t for t, _ in cli.sent)
+
+    def test_unlink_clears_existing(self) -> None:
+        d, cli, sess = _dispatcher({7})
+        asyncio.run(d._handle_link(7, 7))
+        asyncio.run(d._handle_unlink(7, 7))
+        assert sess.mirror_links == {}
+        assert any("Unlinked" in t for t, _ in cli.sent)
+
+    def test_unlink_when_not_linked(self) -> None:
+        d, cli, sess = _dispatcher({7})
+        asyncio.run(d._handle_unlink(7, 7))
+        assert any("wasn't linked" in t for t, _ in cli.sent)

@@ -86,6 +86,9 @@ class FakeSessions:
     def is_busy(self, key) -> bool:
         return getattr(self, "_busy", False)
 
+    def max_generation(self, bucket: str) -> int:
+        return -1
+
 
 class _GateResult:
     def __init__(self, action: str = "") -> None:
@@ -265,11 +268,25 @@ class TestCommands:
         assert provider.compacted is True
         assert client.replies == [("https://r", "🗜️ 已压缩上下文。")]
 
+    @pytest.mark.asyncio
+    async def test_link_rejected_on_wecom(self) -> None:
+        sessions = FakeSessions(FakeProvider([]))
+        client = FakeClient()
+        d = _dispatcher(sessions, FakeCtx(), client)
+
+        await d.handle_message(_inbound("/link"))
+
+        assert len(client.replies) == 1
+        assert "/link" in client.replies[0][1]  # explains it's unavailable here
+        assert sessions.successes == []  # no LLM turn
+
     def test_parse_command(self) -> None:
         assert parse_command("/new") == "new"
         assert parse_command("新对话") == "new"
         assert parse_command("清空") == "new"
         assert parse_command("/compact") == "compact"
+        assert parse_command("/link") == "link"
+        assert parse_command("/unlink") == "unlink"
         assert parse_command("hello") is None
 
     def test_conversation_state(self) -> None:

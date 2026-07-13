@@ -86,6 +86,8 @@ async def maybe_start_telegram(orch: "GatewayOrchestrator") -> "TelegramClient |
         dispatcher.client = client
 
         await transport.connect()  # starts the long-polling loop
+        if orch.dashboard_state is not None:
+            orch.dashboard_state.register_channel_transport(transport)
         logger.info("Telegram channel started (transport path, long-polling).")
         return client
     except Exception:

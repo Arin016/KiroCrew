@@ -31,7 +31,12 @@ from typing import TYPE_CHECKING, Any
 from kiro_claw.acp.types import EVENT_COMPACTION_STATUS, EVENT_COMPLETE
 from kiro_claw.hooks import TOOL_AUTO_APPROVE, TOOL_DENY
 from kiro_claw.messaging.driver import APPROVAL_INTERACTIVE, TurnDriver
-from kiro_claw.messaging.link import build_dm_session_key
+from kiro_claw.messaging.link import (
+    ChannelLink,
+    build_dm_session_key,
+    dashboard_mirror_key,
+    seed_generation,
+)
 from kiro_claw.messaging.transport import InboundMessage
 from kiro_claw.sel import sel
 from kiro_claw.telegram.commands import ConversationState, parse_command
@@ -59,6 +64,8 @@ _HELP_TEXT = """\
 Commands:
 /new — Start a fresh conversation
 /compact — Compress context (when it gets long)
+/link — Mirror this conversation's dashboard tab here
+/unlink — Stop mirroring
 /help — Show this message
 
 Just send a message to chat. Replies stream in real-time.
@@ -93,7 +100,7 @@ class TelegramDispatcher:
         self.conv_log = conv_log
         self.approval_mode = approval_mode
         self.client: "TelegramClient | None" = None
-        self._conv = ConversationState()
+        self._conv = ConversationState(seed_fn=self._seed_gen)
 
     # ── Turn dispatch (transport's dispatch callback) ──────────────────────
 
@@ -113,6 +120,12 @@ class TelegramDispatcher:
         if cmd == "compact":
             self._conv.clear_awaiting(user_id)
             await self._handle_compact(user_id, chat_id)
+            return
+        if cmd == "link":
+            await self._handle_link(user_id, chat_id)
+            return
+        if cmd == "unlink":
+            await self._handle_unlink(user_id, chat_id)
             return
         if cmd == "help":
             await self.client.send_message(chat_id, _HELP_TEXT)
@@ -407,6 +420,42 @@ class TelegramDispatcher:
             str(user_id),
             gen=gen,
             dm_scope=self.cfg.messaging.dm_scope,
+        )
+
+    def _seed_gen(self, user_id: int) -> int:
+        return seed_generation(
+            self.sessions,
+            channel="telegram",
+            agent=self._resolve_agent(),
+            user_id=str(user_id),
+            dm_scope=self.cfg.messaging.dm_scope,
+        )
+
+    async def _handle_link(self, user_id: int, chat_id: int) -> None:
+        """Mirror this conversation's dashboard tab back to Telegram.
+
+        Binds the current session's dashboard mirror slot to this chat so the
+        dashboard turn loop delivers its replies (and the user-message echo)
+        here. ``/new`` starts a fresh, unlinked conversation.
+        """
+        assert self.client is not None
+        key = dashboard_mirror_key(self._session_key(user_id))
+        self.sessions.set_mirror_link(
+            key, ChannelLink("telegram", channel_id=str(chat_id))
+        )
+        await self.client.send_message(
+            chat_id,
+            "✅ Linked. Replies from the dashboard for this conversation will "
+            "also show up here. Send /unlink to stop.",
+        )
+
+    async def _handle_unlink(self, user_id: int, chat_id: int) -> None:
+        assert self.client is not None
+        key = dashboard_mirror_key(self._session_key(user_id))
+        was_linked = self.sessions.clear_mirror_link(key)
+        await self.client.send_message(
+            chat_id,
+            "✅ Unlinked." if was_linked else "This conversation wasn't linked.",
         )
 
     def _persist_turn(

@@ -100,6 +100,9 @@ from kiro_claw.llm_helpers import (
     is_transient_backend_error,
     transient_retry_delay,
 )
+from kiro_claw.messaging.link import SLACK_NAMESPACE
+from kiro_claw.messaging.renderer import chunk_text
+from kiro_claw.platform import redact_via_context
 from kiro_claw.providers.acp import is_claude_backend
 from kiro_claw.providers.base import (
     EVENT_COMPLETE,
@@ -117,7 +120,6 @@ from kiro_claw.security import (
     _EXFIL_PATTERNS,
     StreamRedactor,
     is_sensitive_path,
-    redact_and_truncate,
     redact_credentials,
     redact_exfiltration_urls,
 )
@@ -827,14 +829,148 @@ def _extract_full_command(tool_title: str) -> str:
     return _normalize_tool_name(tool_title)
 
 
-def _prepare_mirror_msg(raw_user_message: str) -> str:
-    """Prepare user message for Slack mirror: truncate then redact.
+def _resolve_mirror_target(state: Any, session_key: str) -> Any:
+    """Resolve ``(link, transport)`` for a session's outbound cross-surface
+    mirror, or ``None`` when the mirror should be skipped.
 
-    Delegates to the canonical security.redact_and_truncate so the mirror stays
-    in lockstep with the rest of the app's redaction (any future redaction step
-    added there applies here too).
+    Shared preamble for both ``_deliver_cross_surface_*`` helpers so the skip
+    ladder stays in lockstep: read the session's mirror link; skip Slack (its
+    dedicated streaming mirror runs inline in the turn loop); require a
+    ``channel_id``; enforce the ``channels`` governance ceiling so an operator
+    policy restricting outbound messaging per transport is honored on this
+    egress surface too (the Slack path gates the same scope — see
+    ``slack/enterprise.py``); resolve the registered transport; and require
+    proactive-send capability (WeCom replies are bound to an inbound token).
+    Fails closed: any governance evaluation error skips the mirror rather than
+    silently emitting to a channel the operator's posture might restrict.
     """
-    return redact_and_truncate(raw_user_message, max_chars=500)
+    link = state.sessions.get_mirror_link(session_key)
+    if link is None or link.channel_type == SLACK_NAMESPACE or not link.channel_id:
+        return None
+    try:
+        from kiro_claw.platform.governance_profiles import governance_permits
+
+        decision = governance_permits(
+            "channels", link.channel_type, session_key=session_key
+        )
+        if not getattr(decision, "permitted", True):
+            logger.info(
+                "cross-surface: outbound to %s denied by governance policy; "
+                "skipping mirror",
+                link.channel_type,
+            )
+            return None
+    except Exception:
+        logger.debug(
+            "cross-surface: governance check failed for %s; skipping mirror "
+            "(fail-closed)",
+            link.channel_type,
+            exc_info=True,
+        )
+        return None
+    transport = state.get_channel_transport(link.channel_type)
+    if transport is None or not transport.capabilities.supports_proactive_send:
+        logger.debug(
+            "cross-surface: skip mirror to %s (transport=%s, proactive=%s)",
+            link.channel_type,
+            transport is not None,
+            getattr(
+                getattr(transport, "capabilities", None),
+                "supports_proactive_send",
+                None,
+            ),
+        )
+        return None
+    return link, transport
+
+
+async def _deliver_cross_surface_reply(
+    state: Any, session_key: str, assistant_text: str
+) -> None:
+    """Deliver a completed dashboard reply to a linked NON-Slack channel.
+
+    The channel-neutral leg of cross-surface sync: reads the session's outbound
+    mirror link, resolves the registered ``MessagingTransport`` for that channel
+    and pushes the reply via ``send_message`` — capability-gated on
+    ``supports_proactive_send``. Slack keeps its dedicated rich streaming mirror
+    inline in the turn loop, so it is skipped here. Silent no-op when the session
+    has no non-Slack mirror, the transport is not registered, or the channel
+    cannot send proactively (e.g. WeCom, whose replies are bound to an inbound
+    token). Best-effort: a delivery failure never disrupts the dashboard turn.
+    """
+    if not assistant_text:
+        return
+    target = _resolve_mirror_target(state, session_key)
+    if target is None:
+        return
+    link, transport = target
+    # Redact through the canonical egress shim so a loaded companion's extra
+    # credential/token regexes apply (not just the OSS baseline).
+    text = redact_via_context(assistant_text)
+    # Split on the channel's max message length so a long reply mirrors in full
+    # rather than being hard-truncated by the transport (Telegram caps at 4096),
+    # matching the Slack leg's split_message chunking.
+    parts = chunk_text(text, transport.capabilities.max_message_chars)
+    try:
+        for part in parts:
+            await transport.send_message(
+                link.channel_id, part, thread_id=link.thread_id
+            )
+        logger.info(
+            "cross-surface: mirrored reply to %s:%s (%d chars, %d part(s))",
+            link.channel_type,
+            link.channel_id,
+            len(text),
+            len(parts),
+        )
+    except Exception:
+        logger.debug("Failed to mirror reply to %s", link.channel_type, exc_info=True)
+
+
+async def _deliver_cross_surface_user_message(
+    state: Any, session_key: str, user_message: str
+) -> None:
+    """Mirror the user's dashboard message to a linked NON-Slack channel.
+
+    The user-message half of the channel-neutral cross-surface leg: before the
+    turn's reply is delivered, push what the user typed in the dashboard to the
+    linked channel so the remote conversation reads coherently (question then
+    reply), matching Slack's ``💬 _msg_`` echo. Capability-gated and best-effort,
+    mirroring ``_deliver_cross_surface_reply``. Slack is handled by its dedicated
+    streaming mirror; the caller guards out slash commands and recovery turns.
+    """
+    if not user_message:
+        return
+    target = _resolve_mirror_target(state, session_key)
+    if target is None:
+        return
+    link, transport = target
+    try:
+        await transport.send_message(
+            link.channel_id,
+            f"💬 {_prepare_mirror_msg(user_message)}",
+            thread_id=link.thread_id,
+        )
+        logger.info(
+            "cross-surface: mirrored user message to %s:%s",
+            link.channel_type,
+            link.channel_id,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to mirror user message to %s", link.channel_type, exc_info=True
+        )
+
+
+def _prepare_mirror_msg(raw_user_message: str) -> str:
+    """Prepare a user message for the cross-surface / Slack mirror echo.
+
+    Truncates first, then redacts through the canonical ``redact_via_context``
+    egress shim so a loaded companion's extra credential/token regexes apply.
+    The shim's standalone fallback is the OSS baseline ``security.redact``, so a
+    standalone host keeps the previous redaction behaviour.
+    """
+    return redact_via_context((raw_user_message or "")[:500])
 
 
 def _flush_segment(
@@ -1551,6 +1687,13 @@ async def _run_chat(
                     metadata={"count": str(_n_skills), "slot": slot.key},
                 )
 
+        # Ensure the mirror-source message is always bound before both the Slack
+        # and channel-neutral user-message mirror legs run. The assignment that
+        # refines it below only executes for non-slash turns that have a
+        # context_builder; without this default, a non-slash turn with no
+        # context_builder would hit UnboundLocalError at the mirror legs.
+        _user_msg_for_mirror = message
+
         if is_slash:
             full_message = message
             sel().log_tool_invocation(
@@ -1760,6 +1903,14 @@ async def _run_chat(
                     )
                 except Exception:
                     logger.debug("Failed to mirror user message to Slack", exc_info=True)
+
+        # Channel-neutral leg: mirror the user message to a linked non-Slack
+        # proactive channel (e.g. Telegram) so the remote conversation reads
+        # coherently (question then reply), matching the Slack echo above.
+        if not is_slash and not _is_recovery:
+            await _deliver_cross_surface_user_message(
+                state, session_key, _user_msg_for_mirror
+            )
 
         _stop_reason = ""
         async for event in event_stream:
@@ -3188,6 +3339,14 @@ async def _run_chat(
                     )
             except Exception:
                 logger.debug("Failed to mirror response to Slack", exc_info=True)
+
+        # Channel-neutral leg: deliver the completed reply to a linked non-Slack
+        # proactive channel (e.g. Telegram) via Transport.send_message. Slack is
+        # handled above by its dedicated streaming mirror. Gated identically to
+        # the user-message leg so a slash/recovery turn never mirrors an orphan
+        # reply with no preceding question.
+        if not is_slash and not _is_recovery:
+            await _deliver_cross_surface_reply(state, session_key, assistant_text)
     except asyncio.CancelledError:
         if assistant_text:
             slot.messages = [m for m in slot.messages if m.get("role") != "chunk"]
