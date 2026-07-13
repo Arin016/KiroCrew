@@ -25,9 +25,10 @@ TOOL_CALL = "tool_call"
 PROMPT_CHOICE = "prompt_choice"
 COMPACTION = "compaction"
 DONE = "done"
+STEER_CONSUMED = "steer_consumed"  # kiro-cli folded a mid-turn steer at a boundary
 
 OUTPUT_KINDS = frozenset(
-    {TEXT_CHUNK, THINKING, TOOL_CALL, PROMPT_CHOICE, COMPACTION, DONE}
+    {TEXT_CHUNK, THINKING, TOOL_CALL, PROMPT_CHOICE, COMPACTION, DONE, STEER_CONSUMED}
 )
 
 
@@ -119,6 +120,14 @@ class Renderer(ABC):
     async def on_done(self, stop_reason: str = "") -> None:
         """Finalize the turn (close any open stream)."""
 
+    async def on_steer_consumed(self) -> None:
+        """kiro-cli folded a mid-turn steer at a generation boundary.
+
+        Default no-op: channels that don't split the steered continuation (or
+        render the ack elsewhere, e.g. the dashboard chip) simply ignore it.
+        """
+        return None
+
     async def dispatch(self, event: OutputEvent) -> None:
         """Route ``event`` to the matching ``on_*`` handler."""
         if event.kind == TEXT_CHUNK:
@@ -135,5 +144,7 @@ class Renderer(ABC):
             await self.on_compaction(event.context_usage_pct)
         elif event.kind == DONE:
             await self.on_done(event.stop_reason)
+        elif event.kind == STEER_CONSUMED:
+            await self.on_steer_consumed()
         else:
             raise ValueError(f"unknown output event kind: {event.kind!r}")

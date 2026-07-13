@@ -27,6 +27,7 @@ from kiro_claw.messaging.renderer import (
     DONE,
     OUTPUT_KINDS,
     PROMPT_CHOICE,
+    STEER_CONSUMED,
     TEXT_CHUNK,
     THINKING,
     TOOL_CALL,
@@ -56,6 +57,7 @@ __all__ = [
     "PROMPT_CHOICE",
     "COMPACTION",
     "DONE",
+    "STEER_CONSUMED",
     # Layer 2 driver
     "TurnDriver",
     "APPROVAL_AUTO",

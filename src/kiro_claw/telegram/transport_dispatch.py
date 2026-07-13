@@ -26,6 +26,7 @@ import asyncio
 import html
 import logging
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from kiro_claw.acp.types import EVENT_COMPACTION_STATUS, EVENT_COMPLETE
@@ -58,6 +59,11 @@ logger = logging.getLogger(__name__)
 # path's _DEFAULT_KIROCLAW_AGENT.
 _DEFAULT_KIROCLAW_AGENT = "kiroclaw"
 
+# Upper bound on how many queued messages collapse into a single combined turn.
+# A single human won't realistically burst past this mid-turn; anything beyond
+# stays queued and drains after the next turn (logged for observability).
+_MAX_COLLAPSE = 50
+
 _HELP_TEXT = """\
 🦞 KiroClaw — Telegram
 
@@ -66,10 +72,51 @@ Commands:
 /compact — Compress context (when it gets long)
 /link — Mirror this conversation's dashboard tab here
 /unlink — Stop mirroring
+/stop — Stop the current reply and clear the queue
 /help — Show this message
 
 Just send a message to chat. Replies stream in real-time.
 """
+
+
+def _short(text: str, limit: int = 40) -> str:
+    """Collapse whitespace and truncate for compact receipt display."""
+    collapsed = " ".join(text.split())
+    return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
+
+
+_RECEIPT_MAX_ITEMS = 5  # verbatim items shown in a receipt before "…and N more"
+
+
+def _receipt_text(
+    texts: list[str],
+    *,
+    answering: bool = False,
+    cancelled: bool = False,
+) -> str:
+    """Render the single collapsing receipt for ``texts`` (order preserved).
+
+    Only the first ``_RECEIPT_MAX_ITEMS`` are listed verbatim (a large mid-turn
+    burst otherwise grows the rendered receipt past Telegram's limit); the count
+    prefix still reflects the true total.
+    """
+    count = len(texts)
+    items = " · ".join(f"“{_short(t)}”" for t in texts[:_RECEIPT_MAX_ITEMS])
+    if count > _RECEIPT_MAX_ITEMS:
+        items += f" · …and {count - _RECEIPT_MAX_ITEMS} more"
+    if cancelled:
+        return f"🛑 Cancelled ({count}): {items}"
+    if answering:
+        return f"▶️ Now answering ({count}): {items}"
+    return f"⏳ Queued ({count}): {items}"
+
+
+@dataclass
+class _QueueReceipt:
+    """The single, in-place receipt bubble tracking messages queued mid-turn."""
+
+    msg_id: int
+    texts: list[str]
 
 
 class TelegramDispatcher:
@@ -101,6 +148,17 @@ class TelegramDispatcher:
         self.approval_mode = approval_mode
         self.client: "TelegramClient | None" = None
         self._conv = ConversationState(seed_fn=self._seed_gen)
+        # session_key -> the single in-place "queued" receipt bubble tracking
+        # messages that arrived mid-turn (collapsed into one record + one turn).
+        self._queue_receipts: dict[str, _QueueReceipt] = {}
+        # session_key -> the live TelegramRenderer for the CURRENTLY-running turn.
+        # A mid-turn steer reaches into it (via _handle_busy) to set the reply
+        # target so the steered continuation threads under the user's message.
+        self._active_renderers: dict[str, TelegramRenderer] = {}
+        # Serializes the check-then-send-then-store receipt bookkeeping so a
+        # burst of concurrently-dispatched mid-turn messages can't each post a
+        # fresh bubble and orphan the earlier one.
+        self._receipt_lock = asyncio.Lock()
 
     # ── Turn dispatch (transport's dispatch callback) ──────────────────────
 
@@ -129,6 +187,9 @@ class TelegramDispatcher:
             return
         if cmd == "help":
             await self.client.send_message(chat_id, _HELP_TEXT)
+            return
+        if cmd == "stop":
+            await self._handle_stop(user_id, chat_id)
             return
 
         # ── Mid-turn concurrency: check the CURRENT-generation key for an
@@ -163,6 +224,9 @@ class TelegramDispatcher:
         renderer = TelegramRenderer(
             self.client, chat_id, TELEGRAM_CAPABILITIES, session_key=session_key
         )
+        # Register the live renderer so a mid-turn steer (_handle_busy) can set
+        # its reply target; cleared in the finally below.
+        self._active_renderers[session_key] = renderer
 
         # Everything acquire-dependent runs INSIDE the try so the finally always
         # finalizes the placeholder (renderer.close -> no perma-"🤔 …"), even if
@@ -259,6 +323,8 @@ class TelegramDispatcher:
             await renderer.close()
             if _acquired:
                 self.sessions.release(session_key)
+            # Drop the live-renderer registration for this turn.
+            self._active_renderers.pop(session_key, None)
 
         # Now that the turn is released, run anything that queued during it
         # (queue_mode == "queue"). ``drain`` is False for drained turns so the
@@ -273,59 +339,203 @@ class TelegramDispatcher:
         if self.cfg.messaging.queue_mode != "queue":
             provider = self.sessions.get_provider(session_key)
             steer = getattr(provider, "steer", None)
+            # Only steer when a turn is GENUINELY in flight. ``is_busy`` stays
+            # True through post-turn bookkeeping (record_success / _persist_turn
+            # / _maybe_notice / SEL audit -- all await points), so without this
+            # guard a steer could reach kiro-cli for a prompt that already ended
+            # -> silently swallowed (no fresh turn, no queue entry), and
+            # ``set_steer_reply_to`` would land on a renderer whose ``on_done``
+            # already ran. When no live turn, fall through to the queue/handle
+            # path below (mirrors the queue path's ``force=False`` fallback), so
+            # the message is re-run or queued instead of lost.
+            has_active = getattr(provider, "has_active_turn", None)
+            live = has_active is None or bool(has_active())
             steered = bool(
-                getattr(provider, "supports_steer", False)
+                live
+                and getattr(provider, "supports_steer", False)
                 and steer is not None
                 and await steer(msg.text)
             )
             if steered:
-                await self.client.send_message(chat_id, "⏳ Folding that into the current reply…")
+                # Thread the steered continuation under the user's message: hand
+                # the inbound message id to the live renderer, which replies to
+                # it when it opens the post-steer bubble (see on_steer_consumed).
+                renderer = self._active_renderers.get(session_key)
+                if renderer is not None:
+                    renderer.set_steer_reply_to(getattr(msg, "message_id", 0))
                 return
-        # queue mode, or steer unavailable. enqueue only if the turn is still in
-        # flight -- enqueue checks the session semaphore atomically (no await), so
-        # if the turn finished during this window we fall through and run the
-        # message now instead of stranding it in a queue nobody will drain.
-        if self.sessions.enqueue(session_key, str(time.time()), msg.text, force=False):
-            await self.client.send_message(
-                chat_id, "⏳ Queued — I'll get to this after the current reply."
-            )
-        else:
+        # queue mode, or steer unavailable. Enqueue + receipt happen atomically
+        # under ``_receipt_lock`` (see ``_enqueue_with_receipt``) so the
+        # end-of-turn drain -- which takes the same lock to dequeue + flip --
+        # cannot interleave between the enqueue and the receipt and orphan a
+        # bubble. If the turn finished in the window the message is not queued,
+        # so we run it now instead of stranding it.
+        if not await self._enqueue_with_receipt(session_key, chat_id, msg.text):
             await self.handle_message(msg)
 
-    async def _drain_queue(
-        self, session_key: str, user_id: int, chat_id: int, *, limit: int = 10
-    ) -> None:
-        """Run messages queued during a turn as fresh turns, iteratively (capped).
+    async def _drain_queue(self, session_key: str, user_id: int, chat_id: int) -> None:
+        """Collapse every message queued during the just-finished turn into ONE
+        combined turn (order preserved, blank-line joined) and answer them
+        together, rather than replaying each as a separate turn.
 
-        Each drained turn runs with ``drain=False`` so it does not re-enter this
-        loop -- draining happens at this single level, bounded by ``limit``,
-        rather than recursing one level per queued message. Overflow beyond
-        ``limit`` is not lost: it drains after the next real turn's own drain.
-
-        Only the queued text is replayed; ``attachments`` / ``thread_id`` /
-        ``is_mention`` are intentionally not carried, matching what ``enqueue``
-        persists for DM channels (text only).
+        The dequeue + receipt flip run together under ``_receipt_lock`` so a
+        concurrent mid-turn ``_enqueue_with_receipt`` (which takes the same lock)
+        cannot interleave and leave an orphaned receipt. The combined turn itself
+        runs OUTSIDE the lock -- messages that arrive during it open a fresh
+        receipt and drain after the next turn. Only the queued text is replayed
+        (matching what ``enqueue`` persists for DM channels: text only).
         """
-        for _ in range(limit):
-            item = self.sessions.dequeue(session_key)
-            if item is None:
-                return
-            _ts, qtext, _ = item
-            await self.handle_message(
-                InboundMessage(
-                    channel_type="telegram",
-                    user_id=str(user_id),
-                    conversation_id=str(chat_id),
-                    text=qtext,
-                ),
-                drain=False,
+        texts: list[str] = []
+        remainder: list[tuple[str, str, dict]] = []
+        async with self._receipt_lock:
+            # Drain the ENTIRE queue under the lock, then split: the first
+            # _MAX_COLLAPSE messages collapse into this turn; the rest are
+            # re-enqueued IN ORIGINAL ORDER (the queue is now empty, so
+            # re-adding preserves FIFO) to drain after the next turn. This
+            # bounds the combined prompt without dropping or reordering surplus.
+            while True:
+                item = self.sessions.dequeue(session_key)
+                if item is None:
+                    break
+                if len(texts) < _MAX_COLLAPSE:
+                    texts.append(item[1])
+                else:
+                    remainder.append(item)
+            for _ts, rtext, _kw in remainder:
+                self.sessions.enqueue(session_key, str(time.time()), rtext, force=True)
+            if texts:
+                await self._receipt_flip_locked(
+                    session_key, chat_id, texts, len(remainder)
+                )
+        if not texts:
+            return
+        if remainder:
+            logger.debug(
+                "telegram: drain hit collapse cap=%d for %s; %d message(s) "
+                "deferred (in order) to the next turn",
+                _MAX_COLLAPSE,
+                session_key,
+                len(remainder),
             )
-        # Hit the cap with the queue not yet drained; the remainder is picked up
-        # by the next real turn's drain. Logged for observability.
-        logger.debug(
-            "telegram: drain hit cap=%d for %s; remainder drains after the next turn",
-            limit,
-            session_key,
+        combined = "\n\n".join(texts)
+        await self.handle_message(
+            InboundMessage(
+                channel_type="telegram",
+                user_id=str(user_id),
+                conversation_id=str(chat_id),
+                text=combined,
+            ),
+            drain=False,
+        )
+
+    # ── Mid-turn queue receipt (single, in-place, persistent record) ───────
+
+    async def _enqueue_with_receipt(
+        self, session_key: str, chat_id: int, text: str
+    ) -> bool:
+        """Atomically enqueue a mid-turn message and create/grow its collapsing
+        "⏳ Queued (N): …" receipt, under ``_receipt_lock``.
+
+        Holding the lock across BOTH the enqueue and the receipt bookkeeping is
+        what makes this race-free against the end-of-turn drain (which takes the
+        same lock to dequeue + flip): the drain either sees this message queued
+        WITH its receipt or sees neither yet -- never a half state that would
+        orphan a bubble. Returns True if queued; False if the turn finished in
+        the window (``enqueue`` is a no-op once the semaphore is free), so the
+        caller runs the message as a fresh turn instead.
+        """
+        assert self.client is not None
+        async with self._receipt_lock:
+            if not self.sessions.enqueue(
+                session_key, str(time.time()), text, force=False
+            ):
+                return False
+            receipt = self._queue_receipts.get(session_key)
+            if receipt is None:
+                msg_id = await self.client.send_message(chat_id, _receipt_text([text]))
+                if msg_id is not None:
+                    self._queue_receipts[session_key] = _QueueReceipt(
+                        msg_id=msg_id, texts=[text]
+                    )
+                return True
+            receipt.texts.append(text)
+            try:
+                await self.client.edit_message(
+                    chat_id, receipt.msg_id, _receipt_text(receipt.texts)
+                )
+            except Exception:
+                logger.debug("telegram: queue receipt grow failed", exc_info=True)
+            return True
+
+    async def _receipt_flip_locked(
+        self, session_key: str, chat_id: int, answered: list[str], deferred: int = 0
+    ) -> None:
+        """Flip the receipt to a durable "▶️ Now answering" record and drop the
+        live entry so the next mid-turn burst opens a fresh receipt. Caller MUST
+        hold ``_receipt_lock`` (the drain holds it across dequeue + flip).
+
+        ``answered`` is the subset actually answered by this turn (capped at
+        ``_MAX_COLLAPSE``); the count reflects it -- not the full queued list --
+        so a >cap burst doesn't overstate what this turn answers. ``deferred``
+        (>0 only past the cap) is noted so the remainder isn't silently implied.
+        """
+        assert self.client is not None
+        receipt = self._queue_receipts.pop(session_key, None)
+        if receipt is None:
+            return
+        body = _receipt_text(answered, answering=True)
+        if deferred:
+            body += f" · +{deferred} deferred"
+        try:
+            await self.client.edit_message(chat_id, receipt.msg_id, body)
+        except Exception:
+            logger.debug("telegram: queue receipt flip failed", exc_info=True)
+
+    async def _receipt_finish_cancelled_locked(
+        self, session_key: str, chat_id: int
+    ) -> None:
+        """Finalize the receipt to a "🛑 Cancelled" record, if present. Caller
+        MUST hold ``_receipt_lock`` (/stop holds it across clear_queue + this)."""
+        assert self.client is not None
+        receipt = self._queue_receipts.pop(session_key, None)
+        if receipt is None:
+            return
+        try:
+            await self.client.edit_message(
+                chat_id, receipt.msg_id, _receipt_text(receipt.texts, cancelled=True)
+            )
+        except Exception:
+            logger.debug("telegram: queue receipt cancel-finalize failed", exc_info=True)
+
+    async def _handle_stop(self, user_id: int, chat_id: int) -> None:
+        """Hard cancel: abort the in-flight turn and clear everything.
+
+        Aborts the running turn via the provider's cooperative ACP cancel,
+        drops every queued message, and finalizes the queue receipt. On a shared
+        runtime the cancel is cooperative (it cannot force-kill a co-tenant), so
+        the turn stops at the next safe point. Fire-and-forget (no ack wait) so
+        the acknowledgement is snappy.
+        """
+        assert self.client is not None
+        session_key = self._session_key(user_id)
+        cancelled_turn = False
+        if self.sessions.is_busy(session_key):
+            provider = self.sessions.get_provider(session_key)
+            cancel = getattr(provider, "cancel", None)
+            if cancel is not None:
+                try:
+                    await cancel(wait_ack_timeout=0)
+                    cancelled_turn = True
+                except Exception:
+                    logger.warning(
+                        "telegram /stop: cancel failed for %s", session_key, exc_info=True
+                    )
+        async with self._receipt_lock:
+            self.sessions.clear_queue(session_key)
+            await self._receipt_finish_cancelled_locked(session_key, chat_id)
+        await self.client.send_message(
+            chat_id,
+            "🛑 Stopped." if cancelled_turn else "🛑 Nothing was running — queue cleared.",
         )
 
     # ── Inline-button handler (client's on_callback) ───────────────────────

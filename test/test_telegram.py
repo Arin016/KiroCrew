@@ -15,7 +15,13 @@ from typing import Any
 
 from kiro_claw.acp.types import EVENT_COMPACTION_STATUS, EVENT_COMPLETE, EVENT_TEXT_CHUNK
 from kiro_claw.messaging.link import ChannelLink, dashboard_mirror_key
-from kiro_claw.messaging.renderer import DONE, TEXT_CHUNK, TOOL_CALL, OutputEvent
+from kiro_claw.messaging.renderer import (
+    DONE,
+    STEER_CONSUMED,
+    TEXT_CHUNK,
+    TOOL_CALL,
+    OutputEvent,
+)
 from kiro_claw.messaging.transport import InboundMessage
 from kiro_claw.telegram.client import TELEGRAM_CHUNK_LIMIT, TelegramInbound
 from kiro_claw.telegram.commands import ConversationState, parse_command
@@ -43,6 +49,7 @@ class FakeClient:
         self.drafts: list[tuple[int, str]] = []
         self.markup_edits: list[tuple[int, Any]] = []
         self.answered: list[str] = []
+        self.reply_targets: list[Any] = []
         self._mid = 100
 
     async def send_typing(self, chat_id: int) -> None:
@@ -56,10 +63,13 @@ class FakeClient:
 
     async def send_message(
         self, chat_id: int, text: str, *, parse_mode: Any = None,
-        reply_markup: Any = None, retry_plain: bool = True
+        reply_markup: Any = None, retry_plain: bool = True,
+        reply_to_message_id: Any = None,
     ) -> int:
+        await asyncio.sleep(0)  # yield like a real network await (exposes races)
         self._mid += 1
         self.sent.append((text, reply_markup))
+        self.reply_targets.append(reply_to_message_id)
         return self._mid
 
     async def edit_message(
@@ -97,10 +107,19 @@ class FakeProvider:
     def __init__(self, reply: str = "Answer") -> None:
         self._reply = reply
         self.steered: list = []
+        self.cancelled = 0
+        self.active_turn = True  # gates _handle_busy's live-turn steer check
+
+    def has_active_turn(self) -> bool:
+        return self.active_turn
 
     async def steer(self, text: str) -> bool:
         self.steered.append(text)
         return True
+
+    async def cancel(self, *, wait_ack_timeout: float = 0.0) -> str:
+        self.cancelled += 1
+        return "acked"
 
     async def stream(self, message: str) -> Any:
         yield _Ev(EVENT_TEXT_CHUNK, text=f"{self._reply}: {message[:16]}")
@@ -172,11 +191,16 @@ class FakeSessions:
         return self.mirror_links.pop(key, None) is not None
 
     def enqueue(self, key: str, ts: str, text: str, *, force: bool = False, **kw: Any) -> bool:
-        self.queued.append((ts, text, kw))
-        return True
+        if force or self._busy:
+            self.queued.append((ts, text, kw))
+            return True
+        return False
 
     def dequeue(self, key: str) -> Any:
         return self.queued.pop(0) if self.queued else None
+
+    def clear_queue(self, key: str) -> None:
+        self.queued.clear()
 
     def has_session(self, key: str) -> bool:
         return self._has
@@ -490,6 +514,78 @@ class TestRenderer:
         assert cli.drafts  # streamed as native animated drafts
         assert len(cli.sent) == 1  # one persisted block
         assert cli.sent[-1][0] == "one two three"
+
+    def test_strips_steering_marker_from_output(self) -> None:
+        # kiro-cli's inline "[STEERING steer-<id>: …]" ack marker must not leak
+        # into the posted message (block renderer posts the final via sendMessage).
+        cli = self._drive(
+            [
+                OutputEvent(kind=TEXT_CHUNK, text="UTC is 09:03. BANANA\n\n"),
+                OutputEvent(
+                    kind=TEXT_CHUNK,
+                    text="[STEERING steer-f0783769b5c44c5a9b40de895109315f: "
+                    "stop, only say BANANA]",
+                ),
+                OutputEvent(kind=DONE, stop_reason=""),
+            ]
+        )
+        final_text = cli.sent[-1][0]
+        assert "STEERING" not in final_text and "steer-f078" not in final_text
+        assert final_text == "UTC is 09:03. BANANA"
+
+    def test_steer_consumed_splits_into_two_messages(self) -> None:
+        # On steer-consumed, on_done posts the pre-steer output and the steered
+        # continuation as SEPARATE messages (block renderer splits at on_done).
+        cli = self._drive(
+            [
+                OutputEvent(kind=TEXT_CHUNK, text="Running date. UTC is 09:03."),
+                OutputEvent(kind=STEER_CONSUMED),
+                OutputEvent(kind=TEXT_CHUNK, text="BANANA"),
+                OutputEvent(kind=DONE, stop_reason=""),
+            ]
+        )
+        assert len(cli.sent) == 2
+        assert "UTC is 09:03." in cli.sent[0][0] and "BANANA" not in cli.sent[0][0]
+        assert cli.sent[-1][0] == "BANANA"
+
+    def test_steer_consumed_threads_reply_to_steer_message(self) -> None:
+        # M1: the steered-continuation message replies to the user's steer
+        # message (set_steer_reply_to); the pre-steer message does not.
+        cli = FakeClient()
+        r = TelegramRenderer(cli, 55, TELEGRAM_CAPABILITIES, session_key="telegram:1:0")  # type: ignore[arg-type]
+        r.set_steer_reply_to(4242)  # the user's steer message id
+
+        async def _go() -> None:
+            await r.on_turn_start()
+            await r.dispatch(OutputEvent(kind=TEXT_CHUNK, text="date answer"))
+            await r.dispatch(OutputEvent(kind=STEER_CONSUMED))
+            await r.dispatch(OutputEvent(kind=TEXT_CHUNK, text="BANANA"))
+            await r.dispatch(OutputEvent(kind=DONE, stop_reason=""))
+
+        asyncio.run(_go())
+        # Two posted messages: pre-steer (reply_to=None), steered (reply_to=4242).
+        assert cli.reply_targets == [None, 4242]
+
+    def test_multi_steer_reply_targets_first_steer_message(self) -> None:
+        # First-steer-wins: on a rapid multi-steer burst the dispatcher calls
+        # set_steer_reply_to for every steer, but the split is recorded at the
+        # first boundary, so the reply target must stay on the FIRST steer id
+        # (100), not the last (200) -- keeping cause->effect consistent.
+        cli = FakeClient()
+        r = TelegramRenderer(cli, 55, TELEGRAM_CAPABILITIES, session_key="telegram:1:0")  # type: ignore[arg-type]
+        r.set_steer_reply_to(100)  # first steer
+        r.set_steer_reply_to(200)  # second steer (same turn) -- ignored
+
+        async def _go() -> None:
+            await r.on_turn_start()
+            await r.dispatch(OutputEvent(kind=TEXT_CHUNK, text="pre"))
+            await r.dispatch(OutputEvent(kind=STEER_CONSUMED))
+            await r.dispatch(OutputEvent(kind=STEER_CONSUMED))  # second consume
+            await r.dispatch(OutputEvent(kind=TEXT_CHUNK, text="post"))
+            await r.dispatch(OutputEvent(kind=DONE, stop_reason=""))
+
+        asyncio.run(_go())
+        assert cli.reply_targets == [None, 100]
 
     def test_error_done_renders_error_when_no_text(self) -> None:
         cli = self._drive([OutputEvent(kind=DONE, stop_reason="error")])
@@ -808,9 +904,36 @@ class TestTelegramMidTurn:
             )
 
         asyncio.run(_go())
+        # Folded into the running turn (steer called), not queued, and NO receipt
+        # bubble is posted (M1: the steered continuation threads under the user's
+        # message instead — see the renderer reply-linkage test).
         assert sess._gp.steered == ["and also this"]
-        assert any("Folding" in t for t, _ in cli.sent)
         assert sess.queued == []
+        assert not any("Steered" in t for t, _ in cli.sent)
+
+    def test_busy_steer_skipped_when_turn_already_ended(self) -> None:
+        # Race guard: is_busy() stays True through post-turn bookkeeping, but the
+        # turn has actually ended (has_active_turn() False). The steer must NOT
+        # be treated as terminal -- the message falls through to the queue/handle
+        # path so it is never silently swallowed.
+        d, cli, sess = _dispatcher({7})
+        sess._busy = True
+        sess._gp.active_turn = False  # turn ended, semaphore still held
+
+        async def _go() -> None:
+            await d.handle_message(
+                InboundMessage(
+                    channel_type="telegram",
+                    user_id="7",
+                    conversation_id="7",
+                    text="landed after turn",
+                )
+            )
+
+        asyncio.run(_go())
+        # Not steered (dead turn); preserved via the queue path instead of lost.
+        assert sess._gp.steered == []
+        assert [text for _ts, text, _ in sess.queued] == ["landed after turn"]
 
     def test_busy_queue_mode_enqueues(self) -> None:
         d, cli, sess = _dispatcher({7})
@@ -843,7 +966,7 @@ class TestTelegramMidTurn:
         assert sess.successes == ["telegram:kiroclaw:direct:7"]
         assert sess._gp.steered == []
 
-    def test_drain_processes_queued_messages_iteratively(self) -> None:
+    def test_drain_collapses_queued_into_one_turn(self) -> None:
         d, cli, sess = _dispatcher({7})
         sess.queued = [("t1", "first", {}), ("t2", "second", {})]
 
@@ -851,13 +974,131 @@ class TestTelegramMidTurn:
             await d._drain_queue("telegram:kiroclaw:direct:7", 7, 7)
 
         asyncio.run(_go())
-        # Both queued messages ran as full turns (drain=False -> no recursion),
-        # and the queue is empty afterward.
-        assert sess.successes == [
-            "telegram:kiroclaw:direct:7",
-            "telegram:kiroclaw:direct:7",
-        ]
+        # All queued messages collapse into ONE combined turn (drain=False ->
+        # no recursion), and the queue is emptied.
+        assert sess.successes == ["telegram:kiroclaw:direct:7"]
         assert sess.queued == []
+
+    def test_queue_receipt_collapses_into_single_bubble(self) -> None:
+        d, cli, sess = _dispatcher({7})
+        sess._busy = True
+        d.cfg.messaging.queue_mode = "queue"
+
+        async def _go() -> None:
+            for t in ("what time is it", "and the weather?"):
+                await d.handle_message(
+                    InboundMessage(
+                        channel_type="telegram", user_id="7", conversation_id="7", text=t
+                    )
+                )
+
+        asyncio.run(_go())
+        # One receipt bubble is created, then edited in place to grow to (2) --
+        # not one fresh "Queued" bubble per message.
+        receipts = [t for t, _ in cli.sent if "Queued" in t]
+        assert len(receipts) == 1 and "(1)" in receipts[0]
+        grows = [txt for _mid, txt, _ in cli.edits if "Queued" in txt]
+        assert any("(2)" in g for g in grows)
+        assert [text for _ts, text, _ in sess.queued] == [
+            "what time is it",
+            "and the weather?",
+        ]
+
+    def test_stop_cancels_running_turn_and_clears_queue(self) -> None:
+        d, cli, sess = _dispatcher({7})
+        sess._busy = True
+        sess.queued = [("t1", "pending", {})]
+
+        async def _go() -> None:
+            await d.handle_message(
+                InboundMessage(
+                    channel_type="telegram", user_id="7", conversation_id="7", text="/stop"
+                )
+            )
+
+        asyncio.run(_go())
+        assert sess._gp.cancelled == 1  # in-flight turn aborted
+        assert sess.queued == []  # pending queue cleared
+        assert any("Stopped" in t for t, _ in cli.sent)
+
+    def test_concurrent_queue_adds_share_one_receipt(self) -> None:
+        d, cli, sess = _dispatcher({7})
+        sess._busy = True
+        d.cfg.messaging.queue_mode = "queue"
+
+        async def _go() -> None:
+            await asyncio.gather(
+                *[
+                    d.handle_message(
+                        InboundMessage(
+                            channel_type="telegram",
+                            user_id="7",
+                            conversation_id="7",
+                            text=f"m{i}",
+                        )
+                    )
+                    for i in range(4)
+                ]
+            )
+
+        asyncio.run(_go())
+        # The receipt lock serializes the check-then-send: exactly ONE receipt
+        # bubble is created; the other three grow it via edits (no orphans).
+        sends = [t for t, _ in cli.sent if "Queued" in t]
+        grows = [txt for _mid, txt, _ in cli.edits if "Queued" in txt]
+        assert len(sends) == 1
+        assert len(grows) == 3
+
+    def test_drain_caps_collapse_and_defers_remainder(self) -> None:
+        d, cli, sess = _dispatcher({7})
+        # 52 queued -> the collapse cap (50) drains 50 into one turn and leaves
+        # the 2-message remainder queued IN ORDER for the next turn (a 2+ item
+        # remainder is what exposes any FIFO reordering of the surplus).
+        sess.queued = [(f"t{i}", f"m{i}", {}) for i in range(52)]
+
+        async def _go() -> None:
+            await d._drain_queue("telegram:kiroclaw:direct:7", 7, 7)
+
+        asyncio.run(_go())
+        # surplus (m50, m51) is deferred IN ORIGINAL ORDER, not dropped/reordered
+        assert [text for _ts, text, _ in sess.queued] == ["m50", "m51"]
+        assert sess.successes == ["telegram:kiroclaw:direct:7"]  # one combined turn
+
+    def test_flip_count_reflects_answered_not_full_queue(self) -> None:
+        d, cli, sess = _dispatcher({7})
+        key = "telegram:kiroclaw:direct:7"
+        sess._busy = True
+        d.cfg.messaging.queue_mode = "queue"
+
+        async def _go() -> None:
+            # Build the receipt + queue via the real enqueue path (52 > cap 50).
+            for i in range(52):
+                await d._enqueue_with_receipt(key, 7, f"m{i}")
+            sess._busy = False  # turn finished
+            await d._drain_queue(key, 7, 7)
+
+        asyncio.run(_go())
+        flips = [txt for _mid, txt, _ in cli.edits if "Now answering" in txt]
+        assert flips, "receipt should flip to answering"
+        # Count reflects what THIS turn answers (50), not the full 52 queued,
+        # and the 2-message remainder is called out rather than silently implied.
+        assert "(50)" in flips[-1] and "+2 deferred" in flips[-1]
+
+    def test_no_receipt_when_turn_finished_before_enqueue(self) -> None:
+        d, cli, sess = _dispatcher({7})
+        sess._busy = False  # turn ended before the mid-turn message could queue
+
+        async def _go() -> bool:
+            return await d._enqueue_with_receipt(
+                "telegram:kiroclaw:direct:7", 7, "late message"
+            )
+
+        queued = asyncio.run(_go())
+        # enqueue is a no-op once the semaphore is free -> not queued, and no
+        # stale "Queued" receipt bubble is posted (the caller runs it fresh).
+        assert queued is False
+        assert sess.queued == []
+        assert not any("Queued" in t for t, _ in cli.sent)
 
 
 class TestLinkCommand:
@@ -902,3 +1143,16 @@ class TestLinkCommand:
         d, cli, sess = _dispatcher({7})
         asyncio.run(d._handle_unlink(7, 7))
         assert any("wasn't linked" in t for t, _ in cli.sent)
+
+
+def test_receipt_text_caps_displayed_items() -> None:
+    # A large mid-turn burst must not grow the rendered receipt unbounded: only
+    # the first _RECEIPT_MAX_ITEMS are listed verbatim; the count stays true.
+    from kiro_claw.telegram.transport_dispatch import _RECEIPT_MAX_ITEMS, _receipt_text
+
+    texts = [f"msg number {i}" for i in range(_RECEIPT_MAX_ITEMS + 3)]
+    out = _receipt_text(texts)
+    surplus = len(texts) - _RECEIPT_MAX_ITEMS
+    assert f"({len(texts)})" in out  # count prefix shows the true total
+    assert f"…and {surplus} more" in out  # surplus collapsed, not listed verbatim
+    assert texts[-1] not in out  # a beyond-cap item is not rendered verbatim

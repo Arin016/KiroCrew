@@ -769,6 +769,16 @@ class AcpProvider(LLMProvider):
             logger.debug("provider.cancel: wait_turn_done timed out after %.1fs", wait_ack_timeout)
             return "timeout"
 
+    async def steer(self, message: str) -> bool:
+        """Delegate a mid-turn steer to the inner client (kiro-cli
+        ``_session/steer``). Fire-and-forget; returns False if not steerable."""
+        return await self._client.steer(message)
+
+    @property
+    def supports_steer(self) -> bool:
+        """True when the inner client supports mid-turn steer."""
+        return bool(getattr(self._client, "supports_steer", False))
+
     async def wait_for_compaction(self, timeout: float = 120.0) -> dict:
         """Wait for compaction completed/failed after stream ends."""
         return await self._client.wait_for_compaction(timeout)

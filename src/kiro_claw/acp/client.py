@@ -3050,6 +3050,31 @@ class AcpClient:
         except Exception:
             logger.debug("Cancel notification failed", exc_info=True)
 
+    async def steer(self, message: str) -> bool:
+        """Inject a mid-turn steer into the running turn via kiro-cli's
+        ``_session/steer`` ext-method. Fire-and-forget: the request is written
+        but the response is NOT awaited, because the in-flight turn's read loop
+        is the single consumer of this client's stdout and a concurrent wait
+        would steal the turn's messages. kiro-cli answers ``{queued: true}`` and
+        the authoritative signal is the ``steering_consumed`` notification; the
+        steered reply streams back inside the SAME in-flight prompt. Returns
+        False for an empty message or when there is no active session.
+        """
+        text = (message or "").strip()
+        if not text or not self._session_id:
+            return False
+        wrapped = f"<user_message>\n{text}\n</user_message>"
+        await self._send_request(
+            "_session/steer", {"sessionId": self._session_id, "message": wrapped}
+        )
+        return True
+
+    @property
+    def supports_steer(self) -> bool:
+        """True when the backend supports mid-turn steer (kiro-cli only;
+        claude-agent-acp has no ``_session/steer``)."""
+        return not self._is_claude
+
     async def wait_turn_done(self, timeout: float) -> str:
         """Wait for the current prompt to finish. Returns stop_reason or raises TimeoutError."""
         await asyncio.wait_for(self._turn_done.wait(), timeout=timeout)

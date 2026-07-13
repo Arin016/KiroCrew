@@ -16,6 +16,7 @@ authorize nobody (fail closed), never everybody.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from kiro_claw.messaging.transport import (
@@ -29,6 +30,19 @@ from kiro_claw.telegram.client import (
     TelegramClient,
     TelegramInbound,
 )
+
+
+@dataclass
+class TelegramInboundMessage(InboundMessage):
+    """Inbound message enriched with the raw Telegram ``message_id`` so a
+    mid-turn steer can thread its continuation under the user's message (M1).
+
+    Telegram-local: the neutral ``InboundMessage`` stays unchanged; consumers
+    read the id via ``getattr(msg, "message_id", 0)``.
+    """
+
+    message_id: int = 0
+
 
 # A dispatch callback consumes a normalized, already-authorized message and
 # drives a turn. The gateway supplies the real implementation.
@@ -142,12 +156,13 @@ class TelegramTransport(MessagingTransport):
                 source="telegram",
             )
             return
-        msg = InboundMessage(
+        msg = TelegramInboundMessage(
             channel_type="telegram",
             user_id=str(inbound.user_id),
             conversation_id=str(inbound.chat_id),
             text=inbound.text,
             thread_id=None,
+            message_id=inbound.message_id,
         )
         if not self.authorize(msg):
             return

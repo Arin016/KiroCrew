@@ -11,6 +11,7 @@ from kiro_claw.messaging import (
     DONE,
     OUTPUT_KINDS,
     PROMPT_CHOICE,
+    STEER_CONSUMED,
     TEXT_CHUNK,
     THINKING,
     TOOL_CALL,
@@ -135,6 +136,7 @@ class TestRendererDispatch:
     def test_kinds_registered(self):
         assert OUTPUT_KINDS == {
             TEXT_CHUNK, THINKING, TOOL_CALL, PROMPT_CHOICE, COMPACTION, DONE,
+            STEER_CONSUMED,
         }
 
     def test_routes_each_kind(self):

@@ -76,6 +76,21 @@ def _extract_options(text: str) -> tuple[str, list[str]]:
     return text, []
 
 
+# kiro-cli emits an inline "[STEERING steer-<id>: …]" ack marker when it folds a
+# mid-turn steer at a boundary. The dashboard parses it into a chip; Telegram has
+# no parser, so strip it — the user's own steer message (which the steered reply
+# threads under, see on_steer_consumed) already shows the instruction, so the raw
+# inline marker is redundant noise in the bubble.
+_STEER_MARKER_RE = re.compile(r"\[STEERING\b[^\]]*\]", re.IGNORECASE)
+
+
+def _strip_steering(text: str) -> str:
+    """Remove kiro-cli's inline ``[STEERING …]`` steer-ack marker from output."""
+    cleaned = _STEER_MARKER_RE.sub("", text)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)  # collapse gaps left behind
+    return cleaned.strip()
+
+
 def build_inline_keyboard(options: list[str]) -> dict | None:
     """Build an InlineKeyboardMarkup from ``[OPTIONS:]`` labels.
 
@@ -267,6 +282,23 @@ class TelegramRenderer(Renderer):
         self._draft_id = abs(id(self)) % 1_000_000_000 + 1
         self._draft_ok: bool | None = None
         self._last_draft = 0.0
+        # Mid-turn steer (M1): the user's steer message id (reply target) and the
+        # pre/post-steer split offset in _buf, so on_done renders the steered
+        # continuation as its own message threaded under the user's message.
+        self._steer_reply_to: int | None = None
+        self._steer_split_at: int | None = None
+
+    def set_steer_reply_to(self, message_id: int) -> None:
+        """Dispatcher hook: record the user's steer message id so the post-steer
+        continuation threads under it (M1 reply-linkage).
+
+        First-steer-wins: on a rapid multi-steer burst the dispatcher calls this
+        for every steer, but ``on_steer_consumed`` records the split only at the
+        first consumed boundary. Keeping the *first* steer's id here aligns the
+        reply target with that split so the cause->effect link stays consistent.
+        """
+        if self._steer_reply_to is None:
+            self._steer_reply_to = message_id or None
 
     # -- lifecycle ----------------------------------------------------------
     async def on_turn_start(self) -> None:
@@ -366,34 +398,67 @@ class TelegramRenderer(Renderer):
         self._finalized = True
         self._stop_typing()
         ok = stop_reason != "error"
-        body = self._text()
-        full = body or ("…" if ok else "⚠️ Error — please try again")
-        opts = self._options()
-        keyboard = build_inline_keyboard(opts) if opts else None
         # Leave headroom below the char cap for the HTML tags we add, so a
         # formatted chunk can't overflow Telegram's 4096 limit and get cut
         # mid-tag.
         cap = self.capabilities.max_message_chars or 4000
         limit = max(500, cap - 256)
 
-        # Post the finished answer as Telegram HTML (real bold/code/links).
-        # Split the RAW markdown into <=limit chunks with fenced code blocks kept
-        # balanced (_split_markdown), then format each chunk -- so a fence never
-        # straddles a chunk edge and leaks a literal ``` / unescaped body.
-        # Keyboard on the last chunk only.
-        chunks = _split_markdown(full, limit) or [full]
+        # Mid-turn steer split (M1): render the pre-steer output and the steered
+        # continuation as SEPARATE messages, with the continuation threaded under
+        # the user's steer message. Split the RAW buffer at the boundary recorded
+        # by on_steer_consumed (real messages are only posted here, in on_done).
+        raw = "".join(self._buf)
+        split = self._steer_split_at
+        if split is not None and 0 < split < len(raw.rstrip()):
+            pre = _strip_steering(_extract_options(raw[:split].strip())[0])
+            post_body, opts = _extract_options(raw[split:].strip())
+            post = _strip_steering(post_body)
+            keyboard = build_inline_keyboard(opts) if opts else None
+            if pre:
+                await self._send_blocks(pre, limit, keyboard=None, reply_to=None)
+            await self._send_blocks(
+                post or "…", limit, keyboard=keyboard, reply_to=self._steer_reply_to
+            )
+            return
+
+        body = self._text()
+        full = body or ("…" if ok else "⚠️ Error — please try again")
+        opts = self._options()
+        keyboard = build_inline_keyboard(opts) if opts else None
+        await self._send_blocks(full, limit, keyboard=keyboard, reply_to=None)
+
+    async def _send_blocks(
+        self, text: str, limit: int, *, keyboard: dict | None, reply_to: int | None
+    ) -> None:
+        """Post ``text`` as one or more Telegram HTML blocks. The RAW markdown is
+        split into <=limit chunks with fenced code kept balanced (_split_markdown)
+        then each chunk is formatted -- so a fence never straddles a chunk edge and
+        leaks a literal ``` / unescaped body. Keyboard on the last chunk only;
+        reply threading on the first chunk only."""
+        chunks = _split_markdown(text, limit) or [text]
         last = len(chunks) - 1
         for i, chunk in enumerate(chunks):
             kb = keyboard if i == last else None
+            rt = reply_to if i == 0 else None
             html_chunk = _md_to_telegram_html(chunk)
             mid = await self._client.send_message(
-                self._chat_id, html_chunk,
-                parse_mode="HTML", reply_markup=kb, retry_plain=False,
+                self._chat_id, html_chunk, parse_mode="HTML",
+                reply_markup=kb, reply_to_message_id=rt, retry_plain=False,
             )
             if mid is None:  # malformed HTML -> clean plaintext, never raw tags
                 await self._client.send_message(
-                    self._chat_id, _strip_md(chunk), reply_markup=kb
+                    self._chat_id, _strip_md(chunk),
+                    reply_markup=kb, reply_to_message_id=rt,
                 )
+
+    async def on_steer_consumed(self) -> None:
+        """Record the pre/post-steer boundary in _buf so on_done renders the
+        steered continuation as its own message, threaded under the user's steer.
+        (Block streaming: real messages are only posted in on_done, so we mark
+        the split offset here rather than sealing a live message.)"""
+        if self._steer_split_at is None:  # first steer marks the split
+            self._steer_split_at = len("".join(self._buf))
 
     async def close(self) -> None:
         """Idempotent teardown: stop the typing indicator and finalize the turn
@@ -406,7 +471,7 @@ class TelegramRenderer(Renderer):
     def _text(self) -> str:
         raw = "".join(self._buf).strip()
         body, _ = _extract_options(raw)
-        return body
+        return _strip_steering(body)
 
     def _options(self) -> list[str]:
         raw = "".join(self._buf).strip()

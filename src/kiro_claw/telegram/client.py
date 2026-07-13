@@ -131,6 +131,7 @@ class TelegramClient:
         parse_mode: str | None = None,
         reply_markup: dict | None = None,
         retry_plain: bool = True,
+        reply_to_message_id: int | None = None,
     ) -> int | None:
         """Send a new message. Returns the message_id on success.
 
@@ -147,6 +148,12 @@ class TelegramClient:
             params["parse_mode"] = parse_mode
         if reply_markup:
             params["reply_markup"] = reply_markup
+        if reply_to_message_id:
+            # allow_sending_without_reply: still send if the target was deleted.
+            params["reply_parameters"] = {
+                "message_id": reply_to_message_id,
+                "allow_sending_without_reply": True,
+            }
         result = await self._api("sendMessage", params)
         if result:
             return result.get("message_id")

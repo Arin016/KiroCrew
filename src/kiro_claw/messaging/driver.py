@@ -24,6 +24,7 @@ from kiro_claw.acp.types import (
     EVENT_COMPACTION_STATUS,
     EVENT_COMPLETE,
     EVENT_PERMISSION_REQUEST,
+    EVENT_STEER_CONSUMED,
     EVENT_TEXT_CHUNK,
     EVENT_THINKING_CHUNK,
     EVENT_TOOL_CALL,
@@ -32,6 +33,7 @@ from kiro_claw.messaging.renderer import (
     COMPACTION,
     DONE,
     PROMPT_CHOICE,
+    STEER_CONSUMED,
     TEXT_CHUNK,
     THINKING,
     TOOL_CALL,
@@ -143,6 +145,11 @@ class TurnDriver:
                 await self.renderer.dispatch(
                     OutputEvent(kind=THINKING, text=_redact(event.text))
                 )
+            elif kind == EVENT_STEER_CONSUMED:
+                # kiro-cli folded a mid-turn steer at a boundary — let the
+                # renderer seal the pre-steer message so the steered
+                # continuation opens as its own message.
+                await self.renderer.dispatch(OutputEvent(kind=STEER_CONSUMED))
             elif kind == EVENT_TOOL_CALL:
                 # Native handle_message treats every EVENT_TOOL_CALL uniformly
                 # (complete previous task + start new), regardless of tool_final;
