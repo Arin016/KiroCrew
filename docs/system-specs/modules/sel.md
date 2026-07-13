@@ -1,6 +1,6 @@
 # Security Event Log (SEL) Module
 
-Last Updated: 2026-07-03 (added `acp`, `token_auth`, and `refresh_tokens` audit sources)
+Last Updated: 2026-07-13 (added `config_bounds_clamped` event + `clamped` outcome and ACP worker-pool per-tool audit; prior: `acp`, `token_auth`, and `refresh_tokens` audit sources)
 
 ## Overview
 
@@ -18,13 +18,13 @@ Each entry records:
 |-------|-------------|
 | `event_id` | Unique 16-char hex identifier |
 | `timestamp` | ISO 8601 UTC |
-| `event_type` | `tool_invocation`, `api_access`, `governance_decision`, `governance_degraded` |
+| `event_type` | `tool_invocation`, `api_access`, `config_bounds_clamped`, `governance_decision`, `governance_degraded` |
 | `caller_identity` | Session key (e.g. `dashboard:abc`, `cron:xyz`, `subagent:123`) |
 | `agent` | Agent name (`kiroclaw`, custom agent name) |
 | `source` | Interface: `slack`, `dashboard`, `cli`, `cron`, `subagent`, `taskrunner`, `mcp`, `background`, `acp` (ACP-transport events, e.g. `tool_interrupted`), `token_auth` / `refresh_tokens` (dashboard auth), `host` (the `_host` sentinel — an in-process host action like app activation / workspace admission), `unknown` (empty/unrecognized session key, which must NOT be mis-tagged `slack`) |
 | `operation` | Tool name or `METHOD /api/path` |
 | `tool_kind` | Tool category (`execute_bash`, `fs_write`, `mcp_core`, `mcp_cron`, etc.) |
-| `outcome` | `invoked`, `auto_approved`, `approved`, `rejected`, `denied`, `completed`, `failed`, `degraded` (a governance chokepoint failed OPEN) |
+| `outcome` | `invoked`, `auto_approved`, `approved`, `rejected`, `denied`, `completed`, `failed`, `clamped`, `degraded` (a governance chokepoint failed OPEN) |
 | `resources` | Affected resources summary (truncated to 500 chars) |
 | `downstream_service` | MCP server name if applicable (`kiroclaw-core`, `kiroclaw-cron`, `builder-mcp`) |
 | `request_id` | ACP permission request ID |
@@ -32,6 +32,8 @@ Each entry records:
 | `prev_hash` | HMAC of previous entry (chain link) |
 | `entry_hash` | HMAC-SHA256 of this entry |
 | `metadata` | Additional context (approval reason, step index, etc.) |
+
+The `config_bounds_clamped` event (`outcome=clamped`, `source=background`, `operation=config.load`, `caller_identity=config_loader`) is emitted by `config/loader.py`'s `_log_config_clamp_event` when an out-of-range security-bounded knob (`agent.subagent_auto_max` / `agent.max_subagents` / `agent.subagent_max_turns` / `session.pool_size`) is clamped to its API-enforced ceiling at load time, recording `metadata` `{file_value, clamped_to, min, max}`. Best-effort: a SEL failure never makes config loading raise.
 
 ## Integrity
 
@@ -77,6 +79,7 @@ Default 365 days. Pruned daily by heartbeat service (`_PRUNE_TICKS`).
 | MCP core tools | `spawn_run`, `learn_add`, `task_run` calls and outcomes | `mcp_core.py` |
 | MCP cron tools | `cron_add`, `cron_remove`, etc. calls and outcomes | `mcp_cron.py` |
 | Dashboard API | All POST/PUT/DELETE operations via middleware | `dashboard/server.py` |
+| ACP worker-pool audit | Per-tool_call `auto_approved` `tool_invocation` via `_maybe_audit_tool_call`, gated on the `audit_source` ctor param (code-review-sage ReviewPool + knowledge LLMPool, `source=subagent`); offloaded to `subprocess_executor()` and bounded by `_SEL_AUDIT_TIMEOUT_SECONDS` (5.0s) so a wedged SEL backend never gates dispatch | `acp/client.py` |
 | Token auth | `internal_auth`, `app_scope_check`, `dashboard_sessions_revoked`, `refresh_token_initial_mint`, `nonce_evicted` (`source=token_auth`) | `dashboard/token_auth.py` |
 | Refresh tokens | `refresh_token_use`, `refresh_token_logout`, `access_cookie_revoked` (`source=refresh_tokens`) | `dashboard/handlers/auth_refresh.py` |
 | ACP transport | `tool_interrupted` per-turn cancellation audit (`source=acp`) | `acp/client.py` |

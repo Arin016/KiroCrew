@@ -1,6 +1,6 @@
 # Dashboard Token Authentication — Design Document
 
-Last Updated: 2026-06-27
+Last Updated: 2026-07-13 (doc-sync: note `/api/theme/boot` bypass & static cold-start fallback body)
 
 ## Overview
 
@@ -57,7 +57,7 @@ Middleware chain (explicit ordering in `server.py`):
 
 ```mermaid
 graph LR
-    A[no_cache] --> B[csrf] --> C[token_auth] --> D[sel_audit] --> E[spa_fallback]
+    A[host_canonical_redirect] --> B[host_validation] --> C[no_cache] --> D[csrf] --> E[token_auth] --> F[sel_audit] --> G[spa_fallback]
 ```
 
 1. CSRF checks run first (reject cross-origin mutating requests)
@@ -127,7 +127,7 @@ The `local_only` parameter is accepted for backward compatibility but no longer 
 
 Request flow:
 1. If request is from loopback → pass through (always trusted)
-2. Bypass static assets (`/assets/`, `/static/`, `/logo.png`, `/manifest.json`, `/sw.js`, `/icon-*.png`)
+2. Bypass static assets (`/assets/`, `/static/`, `/logo.png`, `/manifest.json`, `/sw.js`, `/icon-*.png`, `/api/token/local`, `/api/shutdown`, `/api/theme/boot` — a GET-only, secret-free theme-boot endpoint the SPA reads before the token flow completes)
 3. Extract token from `?token=` query param or `mc_token_{port}` cookie
 4. Validate signature + expiry (link window for query param, session_exp for cookie)
 5. Check IP binding
@@ -155,6 +155,9 @@ SPA navigation, and the middleware serves the shell **directly** (an injected
 the matched route handler. The booted app then runs its cold-start
 `GET /api/auth/me` → `POST /api/auth/refresh` recovery using the 30-day refresh
 cookie. Without this, the refresh JS never loads and the app can never recover.
+If `index()` cannot read the static bundle, its `FileNotFoundError` fallback
+body (`_DASHBOARD_HTML_NOT_FOUND` in `handlers/core.py`) is likewise static and
+secret-free, honoring the same unauthenticated cold-start contract.
 
 **One exclusion list, no drift:** `SPA_FALLBACK_EXCLUDED_PREFIXES` in
 `token_auth.py` is the single source of truth for "paths that are never the SPA
@@ -278,6 +281,8 @@ async def send_dashboard_link(slack, user_id, ttl=3600) -> str:
 
 ```python
 app.middlewares[:] = [
+    host_canonical_redirect,
+    host_validation_middleware,
     no_cache_middleware,
     csrf_middleware,
     token_auth_middleware(local_only=local_only),

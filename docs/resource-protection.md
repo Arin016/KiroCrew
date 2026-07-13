@@ -35,11 +35,12 @@ of failure.
 | Empty dir cleanup | `session.py` | `sessions/` subdirs | Startup | No | Removes empty dirs from timed-out subagents |
 | `cleanup_orphaned_sessions` | `session.py` | All kiro-cli PIDs | Startup + shutdown only | No | Reads `kiro_pids.txt`, validates via `/proc`, sends SIGKILL, clears file. Also calls `_cleanup_orphaned_mcp_servers()` internally at startup |
 | `_cleanup_orphaned_mcp_servers` | `session.py` | MCP child PIDs | Every ~5 min (periodic sweep) | Yes — runs in `_cleanup_loop` | Scans for orphaned MCP processes, sends SIGKILL |
-| Idle session expiry | `session.py` | All sessions | 30 min idle (configurable via `session.timeout_secs`) | Yes — runs in `_cleanup_loop` (~5 min interval) | Calls `provider.shutdown()`, removes session |
+| Idle session expiry | `session.py` | All sessions | 60 min idle (configurable via `session.timeout_secs`) | Yes — runs in `_cleanup_loop` (~5 min interval) | Calls `provider.shutdown()`, removes session |
 | Circuit breaker | `session.py` | Per-session | 5 consecutive failures (`_CIRCUIT_BREAKER_THRESHOLD`) | No | Auto-resets session (kills process, creates fresh) |
 | Context compaction | `session.py` | Chat sessions | Configurable (`session.autocompact_pct`, default 90%) | No | Sends `/compact` to kiro-cli to free context window |
 | Background session recycle | `session.py` | Background sessions (cron, subagent) | 70% context usage (`_BG_RECYCLE_PCT`) | No | Recycles session before context overflow |
 | Watchdog process liveness | `taskrunner.py` | Task runner steps | 2 consecutive dead checks (`_DEAD_THRESHOLD`) at 30s intervals | Yes — part of watchdog loop | Resets session to trigger crash recovery |
+| Config bound clamp | `config/loader.py` | Subagent count / turns / pool size at load time | `subagent_auto_max` 1..64, `max_subagents` 0..64, `subagent_max_turns` 1..200, `pool_size` 0..10 (`_SECURITY_BOUNDED_FIELDS`) | No | `_clamp_security_bounds` clamps out-of-range ints, logs WARNING, emits SEL `config_bounds_clamped` (`outcome=clamped`) |
 
 ## Per-Workflow Coverage Matrix
 
@@ -48,7 +49,7 @@ of failure.
 | **Chat subagents** | ✅ `wait_for` 30 min | ✅ Reaper (60s sweep) | ✅ `reset()` + SIGKILL fallback | ✅ `_BG_RECYCLE_PCT` 70% recycle |
 | **Cron jobs** | ✅ `wait_for` 30 min | ✅ Reaper (60s sweep) | ✅ `reset()` + SIGKILL fallback | ✅ `_BG_RECYCLE_PCT` 70% recycle |
 | **Task runner** | ✅ Global timeout + stall detection | ✅ Watchdog (30s heartbeat) | ✅ `_cleanup_run_sessions` + `asyncio.shield` | ✅ Compaction at 90% |
-| **Background sessions** (shared: cron, heartbeat, lessons) | ⚠️ Idle expiry only (30 min) | ✅ Periodic sweep (~5 min) | ✅ `cleanup_orphaned_sessions` at startup | ✅ `_BG_RECYCLE_PCT` 70% recycle |
+| **Background sessions** (shared: cron, heartbeat, lessons) | ⚠️ Idle expiry only (60 min) | ✅ Periodic sweep (~5 min) | ✅ `cleanup_orphaned_sessions` at startup | ✅ `_BG_RECYCLE_PCT` 70% recycle |
 
 ## Known Gaps
 
@@ -63,9 +64,9 @@ of failure.
 
 3. **No per-process resource limits (cgroups/ulimits).** Agent subprocesses and MCP servers
    run without CPU, memory, or file descriptor caps. A runaway process can consume unlimited
-   host resources. Mitigation: `apply_resource_limits()` helper exists in `security.py` for
-   use as `preexec_fn` but is not yet wired to subprocess spawn sites. Tracked as Shepherd
-   finding 444f0e03.
+   host resources. No per-process cgroup/ulimit wiring exists today; the load-time config
+   clamp (see the Mechanism Table) only bounds process *counts* (subagent count, turn budget,
+   pool size), not per-process CPU/memory. Tracked as Shepherd finding 444f0e03.
 
 ## Interaction Notes
 
@@ -92,3 +93,26 @@ of failure.
 - **ACP read timeout enables cooperative cancellation.** The 20s `_READ_TIMEOUT` on each
   `readline()` in the prompt loop ensures `CancelledError` can be delivered at every yield
   point, which is what makes the reaper's `task.cancel()` effective.
+
+- **The periodic sweep's active set unions live shared-runtime PIDs.** Every `AcpRuntime`
+  records its PID at spawn, so the orphan sweep would SIGKILL any tracked PID missing from
+  the active set (surfacing as `process exited (rc=-9)` mid-chat). To protect runtimes that
+  live outside `self._sessions` — companion subagent runtimes and the background
+  `kiroclaw-lite` runtime — the sweep unions `SessionManager._companion_runtime_pids()`
+  (`session.py`) into the active set in both the candidate-collection and the phase-2 re-check
+  passes, so live shared runtimes are never swept.
+
+- **Direct worker-pool ACP sessions are shielded from the sweep by the pool engine.** Pool
+  workers are long-lived agent sessions the sweep cannot see via `_collect_active_pids`.
+  The shared `WorkerPool` engine (`acp/worker_pool.py`) registers each worker's PID via
+  `register_protected_pid` / `unregister_protected_pid` (from `session_pid.py`) as part of
+  the worker lifecycle, so every pool built on it — the knowledge `LLMPool` worker
+  (`AcpWorker`, `knowledge/llm_pool.py`) and the code-review-sage `ReviewPool` worker
+  (`AcpReviewWorker`, `sage_lib/review_pool.py`) — is protected by construction, and the
+  periodic orphan sweep won't SIGKILL a busy worker mid-task.
+
+- **Browser-triggerable read-only FS scans run on an isolated pool.** Dashboard list
+  endpoints (`GET /api/skills`, `/api/agents/installed`, `/api/prompts`) do `os.walk`-style
+  filesystem discovery on the dedicated `discovery_executor` pool (`executors.py`), kept
+  separate from the reaper-critical `maintenance_executor` so a burst of concurrent
+  user-triggered scans can never starve the orphan sweeps.

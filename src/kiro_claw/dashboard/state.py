@@ -309,6 +309,19 @@ SUBAGENT_COMPLETION_PREFIX = "[Subagent completion event]"
 # user. Rendered as an "inject" message (not a user bubble) and never mirrored
 # to a linked Slack thread as user input.
 REFUSAL_RECOVERY_PREFIX = "[Tool refusal — automatic recovery]"
+# Synthetic continuation injected after a genuinely-wedged (stale) turn was
+# detected + reset. Tells the model its previous turn was interrupted by a
+# system stall — NOT the user — and to resume from its last committed step
+# rather than restart. Rendered as an "inject" message (not a user bubble) and
+# never mirrored to a linked Slack thread as user input.
+STALE_RECOVERY_PREFIX = "[Stalled turn — automatic recovery]"
+# Synthetic continuation injected after the per-session watchdog judged an
+# in-flight tool dead/stuck and cancelled the session. Unlike the legacy path
+# (which re-queued the ORIGINAL user message verbatim — restarting the whole
+# task from scratch), this hands the model the stall context so it can check
+# partial results and continue. Rendered as an "inject" message (not a user
+# bubble) and never mirrored to a linked Slack thread as user input.
+TOOL_STALL_RECOVERY_PREFIX = "[Tool stall — automatic recovery]"
 
 
 def should_queue_refusal_recovery(
@@ -365,6 +378,97 @@ def build_refusal_recovery_prompt(refusals: list[tuple[str, str]]) -> str:
         "a read-only variant), a different tool, or — if the block is correct and "
         "you genuinely cannot proceed — say so and stop. Otherwise continue the "
         "task where you left off.",
+    ]
+    return "\n".join(lines)
+
+
+def build_stale_recovery_prompt() -> str:
+    """Body of the continuation injected after an auto-recovered stalled turn.
+
+    A previous turn wedged: the ACP layer detected a genuinely stale turn (total
+    stdout+stderr silence past the timeout), probed it via ``session/cancel``, got
+    no ack, and the dashboard reset the session. The prior work already committed
+    to the conversation is restored by ``session/load`` resume; this nudge tells
+    the model to CONTINUE from that last committed step rather than restart the
+    task from scratch. The caller prepends :data:`STALE_RECOVERY_PREFIX`. Framed
+    as a system stall — NOT a user cancellation — so the agent doesn't stop.
+    """
+    return (
+        "Your previous turn was interrupted by a system stall and has been "
+        "automatically recovered. This was NOT a user action — do not treat it "
+        "as a cancellation or interruption by the user. The work you already "
+        "completed is preserved in the conversation above. Continue from where "
+        "you left off and finish the task; do not restart it or repeat steps "
+        "that already succeeded."
+    )
+
+
+# Shell output-redirection target, e.g. `> build.log` / `>> build.log`. The
+# character class excludes `&` so fd-dup forms (`2>&1`, `>&2`) self-exclude.
+_REDIRECT_TARGET_RE = re.compile(r">>?\s*([^\s;|&]+)")
+
+
+def extract_log_redirect_target(command: str) -> str:
+    """The first real file a shell command redirects output into, or "".
+
+    Used by the tool-stall recovery nudge: when a long command redirected its
+    output (long commands typically redirect, e.g. ``> build.log 2>&1``), the model
+    should inspect that file's tail instead of blindly re-running the command.
+    ``/dev/null`` and fd-dups (``2>&1``) are ignored.
+    """
+    for m in _REDIRECT_TARGET_RE.finditer(command or ""):
+        target = m.group(1).strip("\"'")
+        if not target or target == "/dev/null":
+            continue
+        return target
+    return ""
+
+
+def build_tool_stall_recovery_prompt(
+    tool_title: str,
+    idle_secs: int,
+    command: str = "",
+    stuck_input: bool = False,
+) -> str:
+    """Body of the continuation injected after a watchdog tool-stall cancel.
+
+    The per-session watchdog judged an in-flight tool dead (its process exited
+    without a result frame), stuck on interactive input, or opaque past the
+    UNKNOWN budget, and cancelled the session's turn. This nudge is a SYSTEM
+    action — NOT a user cancellation — and replaces the legacy behavior of
+    re-queuing the original user message verbatim (which restarted the entire
+    task and re-ran the very command that stalled). The caller prepends
+    :data:`TOOL_STALL_RECOVERY_PREFIX`.
+    """
+    idle_mins = max(1, round(idle_secs / 60))
+    tool_label = tool_title or "a tool call"
+    lines = [
+        f"Your previous turn stalled: {tool_label} produced no response for "
+        f"~{idle_mins} minute(s) and the turn was ended by a KiroClaw watchdog. "
+        "This was NOT a user action — do not treat it as a cancellation or "
+        "interruption by the user.",
+        "",
+        "Before doing anything else, check whether the tool actually completed "
+        "or left partial results — do NOT blindly re-run the whole task or "
+        "repeat steps that already succeeded.",
+    ]
+    log_target = extract_log_redirect_target(command)
+    if log_target:
+        lines += [
+            "",
+            f"The command's output was redirected to `{log_target}` — inspect it "
+            "with tail (last ~50 lines); do NOT cat the whole file.",
+        ]
+    if stuck_input:
+        lines += [
+            "",
+            "The command appeared to be waiting for interactive input it will "
+            "never receive. Re-run it non-interactively (e.g. with -y, "
+            "--no-input, or </dev/null) instead of repeating it as-is.",
+        ]
+    lines += [
+        "",
+        "Then continue the task from where you left off.",
     ]
     return "\n".join(lines)
 
@@ -461,6 +565,8 @@ class _ChatSlot:
         "_recovery_retrigger_count",
         "_prompt_busy_retries",
         "_acp_pipe_death_retries",
+        "_stale_recovery_retries",
+        "_tool_stall_retries",
         "_transient_5xx_retries",
         "_empty_response_retries",
         "_batch_rejected",
@@ -554,6 +660,17 @@ class _ChatSlot:
         self._recovery_retrigger_count: int = 0
         self._prompt_busy_retries: int = 0
         self._acp_pipe_death_retries: int = 0
+        # Auto-recovery of a genuinely-wedged (stale) turn: bumped when the ACP
+        # layer signals STOP_REASON_STALE_RECOVER; bounded (3) so a permanently
+        # broken session surfaces "start a new chat" instead of looping. Reset on
+        # a completed turn (alongside the other retry budgets).
+        self._stale_recovery_retries: int = 0
+        # Tool-stall recovery: bumped when the ACP layer ends a turn with
+        # STOP_REASON_TOOL_STALL. A SEPARATE budget from pipe-death (the legacy
+        # path charged stalls against _acp_pipe_death_retries and re-queued the
+        # original message verbatim — one false positive burned the whole
+        # session budget). Bounded (3); reset on a completed turn.
+        self._tool_stall_retries: int = 0
         # Transient backend 5xx (InternalServerError / DispatchFailure /
         # ConnectionReset) retries on the interactive stream path. Distinct
         # budget from prompt-busy / pipe-death; reset on a completed turn.
@@ -1478,11 +1595,11 @@ class DashboardState:
         collisions (e.g. a bare ``chat`` binding to any ``chat-*`` slot).
 
         Tie-break: when multiple slots share the same ``chat-N-`` prefix
-        (e.g. after a resume creates a second timestamped slot), returns
-        the first slot in dict iteration order. Under normal operation
-        that's also the oldest slot, but callers should not rely on it
-        after ad-hoc removals and re-adds. In practice only one active
-        slot per chat-N label exists at a time.
+        (e.g. a stale slot re-created by a resume/restart alongside the live
+        one), return the slot with the largest trailing ``<timestamp>`` — the
+        newest. Iteration-order tie-break previously returned whichever slot
+        happened to be first in the dict, which could route a ``chat-N``
+        message to a long-closed slot after a restart.
 
         Use this from trusted delivery paths (heartbeat, cron) where the
         caller wants short-label addressing. Do NOT use from HTTP handlers
@@ -1495,10 +1612,20 @@ class DashboardState:
         if not _CHAT_N_RE.fullmatch(name):
             return None
         prefix = name + "-"
+        best_ts = -1
+        best_slot: _ChatSlot | None = None
         for key, s in self._slots.items():
-            if key.startswith(prefix):
-                return s
-        return None
+            if not key.startswith(prefix):
+                continue
+            tail = key[len(prefix):]
+            try:
+                ts = int(tail)
+            except ValueError:
+                ts = -1
+            # Prefer the newest timestamp; on a genuine tie keep the first seen.
+            if best_slot is None or ts > best_ts:
+                best_ts, best_slot = ts, s
+        return best_slot
 
     def link_slack(self, slot_name: str, thread_ts: str, channel_id: str) -> None:
         """Update a slot's Slack link state and persist to SessionStore."""

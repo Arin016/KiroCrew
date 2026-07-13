@@ -1,6 +1,6 @@
 # Memory, Skills & Hooks Modules
 
-Last Updated: 2026-04-21 (pysqlite3, Snowball stemming, Docker fallback simplified)
+Last Updated: 2026-07-13 (skills lazy-load usage-ranked top-K + skill_search + SkillUsageLedger, /api/skills discovery_executor offload; pysqlite3, Snowball stemming, Docker fallback simplified)
 
 ## Overview
 
@@ -78,7 +78,7 @@ SQLite table `semantic_memory` — structured key-value store with:
 - **Injection detection**: 14 regex patterns scanned on every value write
 - **Audit trail**: `memory_events` table logs every create/update/delete with old+new values
 
-Context injection: formatted as `key: value` pairs in `[Semantic Memory]` block, capped at 1500 chars. Injected at session start via `get_context()`. Excludes `lesson.*` keys (they have their own `[Learned corrections]` block). Uses hybrid retrieval when embeddings are available: `0.6 × vector_score + 0.4 × keyword_score`. Falls back to keyword-only scoring (word overlap on keys and values, with Snowball stemming) without embeddings.
+Context injection: formatted as `key: value` pairs in `[Semantic Memory]` block, capped at `_SEMANTIC_MEMORY_CAP` (≈12.7k chars) when injected at session start via `get_context()`. Excludes `lesson.*` keys (they have their own `[Learned corrections]` block). Uses hybrid retrieval when embeddings are available: `0.6 × vector_score + 0.4 × keyword_score`. Falls back to keyword-only scoring (word overlap on keys and values, with Snowball stemming) without embeddings.
 
 ### Episodic Memory
 
@@ -90,7 +90,7 @@ SQLite table `episodic_memories` — conversation fragments with optional embedd
 - **Fallback**: keyword search (OR logic, LIKE on text + tags) when embeddings unavailable
 - **Cap**: 10,000 active entries; lowest-importance oldest pruned when exceeded
 
-Context injection: top-8 results in `[Episodic Memory]` block, capped at 12000 chars. Injected per-message via `build_message()`.
+Context injection: top-8 results in `[Episodic Memory]` block, capped at 3000 chars (`cap=3000`). Injected on the first message of new sessions via `build_message()` — not at plain session start, since `build_session_context` passes no query to `memory.get_context()`.
 
 ### Embedding Client (`embeddings.py`)
 
@@ -267,6 +267,14 @@ Supports nested directories (e.g. `skills/utils/tiny-url/SKILL.md`). The skill n
 
 Skills with auxiliary files (scripts, assets) include `dir` path so the LLM can `cd` and run them.
 
+**Lazy-load (`skills.lazy_load`, default false — loader `SkillsConfig`):** controls how `get_context(budget)` (`skills.py`) injects the on-demand set.
+- **OFF** (`get_context(budget=None)`): the byte-for-byte legacy full dump — every on-demand skill summarized, unranked and untruncated, under the flat 165k `_CONTEXT_BUDGET_BASE`.
+- **ON** (`get_context(budget)`): `always: true` pinned skills are injected in full, plus a usage-ranked **top-K** of on-demand skills filled up to `budget`. Ranking is by `_rank_key` (`skills.py`) — `(usage_hits, effective_recency)` from the `SkillUsageLedger`, with a recency boost so freshly-added skills escape cold start. The long tail is left discoverable via the `skill_search` tool, the `$skillname` inline token, `cat`, and the per-message trigger auto-loader.
+
+**Usage ledger (`skill_usage.py`, `SkillUsageLedger`):** in-memory per-skill hit tally with debounced, atomic persistence to `skill-usage.json` (`SKILL_USAGE_FILENAME`, co-located with the KiroClaw home). Entries older than a 30-day TTL (`_MAX_AGE_SECS`) are dropped on load/flush so a stale skill stops occupying a top-K slot. Hits are recorded in `get_triggered_skills` (`_record_use`) and `resolve_dollar_skills` **regardless of the `lazy_load` flag**, so ranking data accrues even while the feature is off. Best-effort: ledger init failure falls back to recency-only / unweighted ranking without breaking skill loading.
+
+**`skill_search` MCP tool (`kiroclaw-core`):** greps skill name/description then, only on a metadata miss, the skill body (bounded, tool-call only — never per message). Schema in `mcp_core.py`, validated against `SKILL_SEARCH_SCHEMA` (`validation.py`). Does NOT record usage — searching is not using.
+
 **Trigger matching (`get_triggered_skills`) — per-message hot path.** Runs on
 every non-custom-agent message via the context builder, scoring word-overlap of
 the message against each skill's `triggers` (negative `!`-prefixed triggers
@@ -285,7 +293,7 @@ exclude). To keep it off the per-message filesystem/config hot path:
 - `delete_skill(name)` — removes entire skill directory
 - Path traversal protection: `_safe_name()` rejects `..` and `\` (allows `/` for nesting)
 
-**Dashboard endpoints**: GET/POST `/api/skills`, GET/PUT/DELETE `/api/skills/{name:.+}`. POST sanitizes name to lowercase + hyphens + slashes.
+**Dashboard endpoints**: GET/POST `/api/skills`, GET/PUT/DELETE `/api/skills/{name:.+}`. POST sanitizes name to lowercase + hyphens + slashes. GET `/api/skills` discovery (kiroclaw `list_skills()` os.walk + frontmatter, `list_kiro_skills`, and the skill→agent annotation) is fully offloaded to the dedicated `discovery_executor` pool (`executors.py`) via `collect_skills_blocking`, so it never stalls the event loop past the loop-stall watchdog on large catalogs. The annotation is O(agents) — `annotate_skills_with_agents` parses the agent JSONs and pre-expands each agent's `skill://` globs once, then matches every skill against that in-memory set. The discovery pool is deliberately separate from the reaper-critical `maintenance_executor` so browser-triggered scans can't starve the orphan sweep.
 
 **LLM tool mechanisms:**
 - MCP tools (native): kiro-cli calls directly — **preferred for all LLM-facing operations**
@@ -453,7 +461,7 @@ Assembles all sources into prompts:
 - Every message: channel history, episodic memory, hook transforms, triggered skills, context rules, OPTIONS hint (interactive sessions only)
 - Thread history is injected only at session start (via `build_session_context`). Within the same ACP session, kiro-cli manages conversation history natively — duplicate injection wastes context window and accelerates compaction.
 - `_CRITICAL_RULES` injected for ALL agents (including custom) at session start — ensures diff rendering and OPTIONS buttons work universally
-- Cap: 50k chars max
+- Cap: 165k chars max by default (`_CONTEXT_BUDGET_BASE`, single flat pool). With `skills.lazy_load` opt-in (default off), the single flat pool is replaced by independent per-section percentage caps (`_SKILLS_CAP`=15%, `_STEERING_CAP`=10%, `_LESSONS_CAP`=22.6%, `_MEMORY_HISTORY_CAP`=16%, `_SEMANTIC_MEMORY_CAP`/`_EPISODIC_MEMORY_CAP`=7.7% each, …) whose sum (plus a preamble headroom) is `_MAX_CONTEXT_CHARS` (~190k). This per-section budgeting is used only when `lazy_load` is on, so skills/steering can't crowd out memory/lessons (`context.py`).
 
 ### Session Resume (`resumed=True`)
 

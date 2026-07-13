@@ -1,6 +1,6 @@
 # Claude Code Provider — removed
 
-Last Updated: 2026-06-17 (KiroClaw collapsed to a single KiroACP / kiro-cli provider)
+Last Updated: 2026-07-13 (Fable 5 registry entry + default-first available_models / bare-id alias dedup noted; KiroClaw collapsed to a single KiroACP / kiro-cli provider)
 
 > **This provider no longer exists in KiroClaw.** The public fork drives a single
 > backend — `kiro-cli` over the Agent Client Protocol (`agent.provider` is fixed
@@ -32,3 +32,11 @@ remains the single source of truth for model names and context windows. Its
 per-entry `providers` map keys models under the canonical `claude_code` namespace
 — that is just the canonical key form (the public ACP model-id shape, e.g.
 `global.anthropic.claude-opus-4-8[1m]`); it is not a selectable provider.
+
+Canonical keys include `fable-5-1m` (leads the JSON but is **not** default —
+Opus 4.8 `opus-4.8-1m` remains the sole `"default": true` entry), and
+`available_models()` (`model_registry.py`) is default-first-ordered, so a
+non-default entry sitting ahead of Opus in the file cannot change the
+`auto`-path pick. Each entry's `aliases` also include the bare, prefix-stripped
+provider-id spelling (e.g. `claude-fable-5`) so `from_provider_id` folds bare
+ids onto the canonical key.

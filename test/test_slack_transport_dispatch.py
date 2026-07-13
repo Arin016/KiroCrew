@@ -25,6 +25,7 @@ from kiro_claw.acp.types import (
     EVENT_TEXT_CHUNK,
     STOP_REASON_END_TURN,
 )
+from kiro_claw.messaging.link import canonical_key
 from kiro_claw.slack import transport_dispatch
 
 # Reuse the golden module's fakes without triggering the stdlib 'test' collision.
@@ -67,7 +68,10 @@ def _run_transport(monkeypatch, thread_agent=None, agent_override=None):
 
     thread_map: dict = {}
     if thread_agent is not None:
-        thread_map[_MSG_TS] = thread_agent
+        # Thread overrides are keyed by the canonical namespaced session key
+        # (slack:<ts>), matching handle_message/handle_message_transport
+        # derivation since the session-key canonicalization fix (Mesh-2732).
+        thread_map[canonical_key(_MSG_TS)] = thread_agent
     monkeypatch.setattr(transport_dispatch, "_thread_agents", thread_map)
 
     slack = RecordingSlackClient()
@@ -314,31 +318,35 @@ class TestTransportPrivacyModifiers:
     path (set the durable flag, mark the session restricted) and the modifier
     token must never reach the LLM."""
 
+    # Privacy flags are keyed by the canonical namespaced session key
+    # (slack:<ts>) since the session-key canonicalization fix (Mesh-2732).
+    _KEY = canonical_key(_MSG_TS)
+
     def _clear_flags(self, session_key):
         _handler._thread_temporary.pop(session_key, None)
         _handler._thread_incognito.pop(session_key, None)
 
     def test_incognito_only_marks_and_skips_llm(self, monkeypatch):
-        self._clear_flags(_MSG_TS)
+        self._clear_flags(self._KEY)
         # "!incognito" alone: apply the flag, post confirmation, NO LLM turn.
         slack, sessions = _run_transport_text(monkeypatch, "!incognito")
         assert sessions.agents == []  # no LLM session acquired
-        assert _handler._is_slack_restricted(_MSG_TS) is True
-        assert _handler.is_thread_incognito(_MSG_TS) is True
-        self._clear_flags(_MSG_TS)
+        assert _handler._is_slack_restricted(self._KEY) is True
+        assert _handler.is_thread_incognito(self._KEY) is True
+        self._clear_flags(self._KEY)
 
     def test_temporary_only_marks_and_skips_llm(self, monkeypatch):
-        self._clear_flags(_MSG_TS)
+        self._clear_flags(self._KEY)
         slack, sessions = _run_transport_text(monkeypatch, "!temporary")
         assert sessions.agents == []
-        assert _handler._is_slack_restricted(_MSG_TS) is True
-        assert _handler.is_thread_temporary(_MSG_TS) is True
-        self._clear_flags(_MSG_TS)
+        assert _handler._is_slack_restricted(self._KEY) is True
+        assert _handler.is_thread_temporary(self._KEY) is True
+        self._clear_flags(self._KEY)
 
     def test_incognito_prefix_marks_then_runs_llm_without_token(self, monkeypatch):
         # "!incognito <task>": flag set AND the turn runs, but the LLM sees the
         # task text with the "!incognito" token stripped (no leak).
-        self._clear_flags(_MSG_TS)
+        self._clear_flags(self._KEY)
         captured = {}
 
         class _CtxBuilder:
@@ -370,11 +378,11 @@ class TestTransportPrivacyModifiers:
             user_id="U_OWNER", context_builder=_CtxBuilder(), conversation_log=None,
         ))
         # Flag applied, LLM turn ran, and the token was stripped from the prompt.
-        assert _handler.is_thread_incognito(_MSG_TS) is True
+        assert _handler.is_thread_incognito(self._KEY) is True
         assert sessions.agents == ["kiroclaw"]
         assert "!incognito" not in captured["text"]
         assert "summarize the logs" in captured["text"]
-        self._clear_flags(_MSG_TS)
+        self._clear_flags(self._KEY)
 
 
 # ── reactions_enabled passthrough on the transport path ──
@@ -481,7 +489,8 @@ class TestTransportNativeParity:
             thread_ts=None, msg_ts=_MSG_TS, user_id="U_OWNER",
             context_builder=None, conversation_log=None, consolidator=cons,
         ))
-        assert cons.calls == [_MSG_TS]
+        # maybe_consolidate receives the canonical namespaced session key.
+        assert cons.calls == [canonical_key(_MSG_TS)]
 
     def test_user_display_name_reaches_build_message(self, monkeypatch):
         self._prep(monkeypatch)
@@ -594,7 +603,7 @@ class TestHydrationBeforeHook:
     the conversation log (privacy-parity regression, restart-only)."""
 
     def test_hook_reply_on_hydrated_incognito_thread_is_not_logged(self, monkeypatch):
-        _handler._thread_incognito.pop(_MSG_TS, None)
+        _handler._thread_incognito.pop(canonical_key(_MSG_TS), None)
 
         # Simulate the durable-flag restore: hydration marks the thread incognito
         # (as the real _hydrate_conv_flags would from the conversation log).
@@ -639,5 +648,5 @@ class TestHydrationBeforeHook:
         # turn was NOT written to the conversation log. Pre-fix (hydrate after
         # the hook) `saved` would be non-empty.
         assert saved == []
-        assert _handler.is_thread_incognito(_MSG_TS) is True
-        _handler._thread_incognito.pop(_MSG_TS, None)
+        assert _handler.is_thread_incognito(canonical_key(_MSG_TS)) is True
+        _handler._thread_incognito.pop(canonical_key(_MSG_TS), None)

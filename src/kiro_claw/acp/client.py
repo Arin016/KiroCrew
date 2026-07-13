@@ -87,6 +87,11 @@ from kiro_claw.acp.types import (
 )
 from kiro_claw.env import augmented_path, resolve_krb5_ccname
 from kiro_claw.executors import subprocess_executor
+from kiro_claw.hooks import (
+    HOOK_EVENT_POST_TOOL_USE,
+    fire_tool_hooks,
+    get_global_hook_store,
+)
 from kiro_claw.sandbox import wrap_argv
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
@@ -540,7 +545,19 @@ def _is_shell_kind(kind: str | None) -> bool:
 
 
 class AcpError(Exception):
-    """Base ACP error."""
+    """Base ACP error.
+
+    ``transient`` carries the retry-eligibility verdict computed from the RAW
+    JSON-RPC error at raise time (see :func:`_is_transient_raw_error`), so the
+    retry layer (``llm_helpers``, ``chat_runner``) decides retryability
+    independently of how :func:`_format_acp_error` words the user-facing
+    message. ``None`` means "unclassified" — callers fall back to
+    string-matching the formatted message (Mesh-2356).
+    """
+
+    def __init__(self, *args: object, transient: bool | None = None) -> None:
+        super().__init__(*args)
+        self.transient = transient
 
 
 class AcpTimeoutError(AcpError):
@@ -592,6 +609,67 @@ _NOT_LOGGED_IN_MESSAGE = (
 )
 
 
+# ── Transient-error classification (shared by _format_acp_error and
+# _is_transient_raw_error) ──
+#
+# Single source of truth for "is this ACP backend error a momentary,
+# retry-worthy hiccup?". The user-facing message formatter AND the
+# retry-eligibility classifier both key off these patterns, so the two can
+# never drift again. That drift is exactly the Mesh-2356 bug: the formatter
+# rewrote a generic 5xx into a friendly string that the marker-based retry
+# classifier no longer recognised, so the retry never fired.
+#
+# Scopes mirror _format_acp_error's if/elif chain: model-unavailable matches
+# the provider `data` field only (it extracts the model name from a structured
+# string); throttle, auth, and the 5xx family match the combined
+# `data + message` haystack so a 5xx token in either field is caught.
+_RE_MODEL_UNAVAILABLE = re.compile(r"[Tt]he model '([^']+)' is not available")
+_RE_THROTTLE_NAMED = re.compile(
+    r"\b(ThrottlingException|TooManyRequestsException|ServiceQuotaExceededException)\b"
+)
+_RE_THROTTLE_GENERIC = re.compile(r"\b(rate.?limit|throttl(?:e|ed|ing))\b", re.IGNORECASE)
+_RE_AUTH = re.compile(
+    r"\b(AccessDenied(?:Exception)?|UnauthorizedException|ExpiredToken(?:Exception)?"
+    r"|InvalidSignatureException|UnrecognizedClientException)\b"
+)
+_RE_5XX_NAMED = re.compile(
+    r"\b(InternalServerError|InternalFailure|ServiceUnavailable(?:Exception)?"
+    r"|DispatchFailure|ConnectionReset(?:Error)?)\b"
+)
+_RE_5XX_STATUS = re.compile(r"(?:HTTP|status)\s*(?:code\s*)?(?:50[0234]|529)\b", re.IGNORECASE)
+_RE_5XX_HINT = re.compile(r"(please try again|response stream)", re.IGNORECASE)
+
+
+def _is_transient_raw_error(error: object) -> bool:
+    """True iff a raw ACP JSON-RPC ``error`` is a retryable transient backend
+    failure (Bedrock 5xx / throttle / model-unavailable rollout) rather than an
+    auth/validation/unknown error that a retry cannot fix.
+
+    Classifies from the RAW ``{code, message, data}`` — never the formatted
+    user-facing string — so the retry decision is independent of message
+    wording. :class:`AcpError` carries this verdict (``.transient``) to the
+    retry layer (``llm_helpers``, ``chat_runner``). Precedence mirrors
+    :func:`_format_acp_error`: model-unavailable → throttle → auth(terminal) →
+    generic 5xx → unknown(terminal)."""
+    if not isinstance(error, dict):
+        return False
+    data = str(error.get("data", "") or "")
+    message = str(error.get("message", "") or "")
+    haystack = f"{data} {message}"
+    if _RE_MODEL_UNAVAILABLE.search(data):
+        return True
+    if _RE_THROTTLE_NAMED.search(haystack) or _RE_THROTTLE_GENERIC.search(haystack):
+        return True
+    if _RE_AUTH.search(haystack):
+        # Auth is terminal — a retry can't fix an expired/denied credential.
+        return False
+    return bool(
+        _RE_5XX_NAMED.search(haystack)
+        or _RE_5XX_STATUS.search(haystack)
+        or _RE_5XX_HINT.search(haystack)
+    )
+
+
 def _format_acp_error(error: object) -> str:
     """Format a JSON-RPC error from the ACP backend into actionable user text.
 
@@ -625,7 +703,7 @@ def _format_acp_error(error: object) -> str:
         # Bedrock model alias resolved to a version that is currently
         # unavailable (capacity throttle, region rollout in progress,
         # deprecated, etc.).
-        model_match = re.search(r"[Tt]he model '([^']+)' is not available", data)
+        model_match = _RE_MODEL_UNAVAILABLE.search(data)
         if model_match:
             model = model_match.group(1)
             formatted = (
@@ -636,10 +714,7 @@ def _format_acp_error(error: object) -> str:
                 f"minute and retry."
                 f"{req_id_suffix}"
             )
-        elif re.search(
-            r"\b(ThrottlingException|TooManyRequestsException|ServiceQuotaExceededException)\b",
-            haystack,
-        ) or re.search(r"\b(rate.?limit|throttl(?:e|ed|ing))\b", haystack, re.IGNORECASE):
+        elif _RE_THROTTLE_NAMED.search(haystack) or _RE_THROTTLE_GENERIC.search(haystack):
             # Bedrock throttle / rate limit. Cover both AWS service exception
             # names and the generic phrasing the ACP backend sometimes uses.
             formatted = (
@@ -647,11 +722,7 @@ def _format_acp_error(error: object) -> str:
                 "retry, or (2) switch to a different model in the picker (e.g. sonnet)."
                 f"{req_id_suffix}"
             )
-        elif re.search(
-            r"\b(AccessDenied(?:Exception)?|UnauthorizedException|ExpiredToken(?:Exception)?"
-            r"|InvalidSignatureException|UnrecognizedClientException)\b",
-            haystack,
-        ):
+        elif _RE_AUTH.search(haystack):
             # Bedrock auth failure — almost always missing/expired AWS
             # credentials.
             formatted = (
@@ -661,18 +732,10 @@ def _format_acp_error(error: object) -> str:
                 "Bedrock InvokeModel access."
                 f"{req_id_suffix}"
             )
-        elif re.search(
-            r"\b(InternalServerError|InternalFailure|ServiceUnavailable(?:Exception)?"
-            r"|DispatchFailure|ConnectionReset(?:Error)?)\b",
-            data,
-        ) or re.search(
-            r"(?:HTTP|status)\s*(?:code\s*)?50[023]\b",
-            data,
-            re.IGNORECASE,
-        ) or re.search(
-            r"(please try again|response stream)",
-            data,
-            re.IGNORECASE,
+        elif (
+            _RE_5XX_NAMED.search(haystack)
+            or _RE_5XX_STATUS.search(haystack)
+            or _RE_5XX_HINT.search(haystack)
         ):
             # Transient backend 5xx — Bedrock/Codewhisperer surfaces a
             # momentary InternalServerError (often wrapped in a
@@ -681,16 +744,16 @@ def _format_acp_error(error: object) -> str:
             # server-side blip, not a rate limit, so the guidance is just to
             # retry rather than switch models or back off.
             #
-            # Match only the provider `data` field, never the generic
-            # JSON-RPC `message`: -32603's canonical message is literally
-            # "Internal error", so keying off `message` would sweep *every*
-            # uncaught -32603 (malformed-request, context-length, deterministic
-            # backend bugs) into this transient bucket and tell the user to
-            # retry a condition that will never succeed — while killing the
-            # unknown-shape fallback for the most common error code. We also
-            # require a real transient token (named exception, HTTP/status-50x,
-            # or an explicit retry hint) rather than a bare numeric like
-            # "max_tokens 500", which is not a status code.
+            # Match the combined `data + message` haystack so a 5xx token in
+            # either field is caught (Mesh-2356). Scanning `message` is safe
+            # here precisely because we require a real transient *token* (named
+            # exception, HTTP/status-50[0234]/529, or an explicit retry hint):
+            # -32603's canonical message is literally "Internal error", which
+            # carries no such token, so a bare uncaught -32603 (malformed-
+            # request, context-length, deterministic backend bug) still falls
+            # through to the unknown-shape branch rather than being mis-told to
+            # retry a condition that will never succeed. A bare numeric like
+            # "max_tokens 500" is likewise not a status code and won't match.
             formatted = (
                 "The model backend hit a transient error (HTTP 5xx). This is "
                 "usually momentary — retry in a moment. If it keeps happening, "
@@ -750,7 +813,7 @@ def _raise_acp_error(error: object) -> None:
         raw_data = f"{error.get('data', '')} {error.get('message', '')}"
     if _PROMPT_BUSY_RE.search(raw_data):
         raise AcpPromptBusy(formatted)
-    raise AcpError(formatted)
+    raise AcpError(formatted, transient=_is_transient_raw_error(error))
 
 
 # Matches claude-agent-acp policy-substitution advisories:
@@ -1164,6 +1227,11 @@ class AcpClient:
         # single progress frame.  Gates the _TOOL_STALL_TIMEOUT watchdog so a
         # dispatched-but-never-resolved tool can't hang the whole turn.
         self._tool_dispatched: bool = False
+        # Record every observed tool_call (id -> (title, kind)) so the
+        # PostToolUse hook fire can recover the tool_name from the result's
+        # tool_call_id — the RESULT event carries no title. See
+        # _maybe_fire_post_tool_hooks.
+        self._observed_tool_calls: dict[str, tuple[str, str]] = {}
         self._last_stop_reason: str = ""
         # Dynamic config from ACP session/new response and config_option_update notifications.
         # Only the effort configOptions are consumed (model lists come from
@@ -1948,32 +2016,69 @@ class AcpClient:
         if self._process and self._process.returncode is None and self._session_id:
             return
 
-        # Retry once — kiro-cli first launch can be slow (MCP server init),
-        # and transient failures (MCP crash, bad config read) are recoverable.
-        for attempt in range(2):
-            try:
-                if self._process and self._process.returncode is not None:
-                    self._reset_state()
-
-                if not self._process:
-                    await self._spawn()
-
-                await self._initialize_session()
+        # Telemetry (kiroclaw.session.startup.duration): time the cold-start work
+        # below (spawn + session init) and emit in the finally so every exit path
+        # — success, auth-required, error — is measured. The warm fast-path above
+        # is intentionally NOT measured (no startup work). Best-effort: a
+        # telemetry failure must never affect session startup.
+        _startup_t0 = time.monotonic()
+        _startup_spawned = False
+        # Default "error": any exit that is NOT the explicit success path below
+        # — including an unexpected non-Acp exception propagating through the
+        # finally — is recorded as a failure, never a false "ready".
+        _startup_outcome = "error"
+        try:
+            # Retry once — kiro-cli first launch can be slow (MCP server init),
+            # and transient failures (MCP crash, bad config read) are recoverable.
+            for attempt in range(2):
                 try:
-                    await self._snapshot_process_tree()
-                except Exception:
-                    logger.warning("Failed to snapshot process tree", exc_info=True)
+                    if self._process and self._process.returncode is not None:
+                        self._reset_state()
 
-                return
-            except (AcpTimeoutError, AcpError) as exc:
-                if attempt == 0:
-                    logger.warning("ACP init failed (%s), retrying with fresh process...", exc)
-                    await self._kill_process(force=True)
-                    self._reset_state()
-                else:
-                    await self._kill_process(force=True)
-                    self._reset_state()
-                    raise
+                    if not self._process:
+                        await self._spawn()
+                        _startup_spawned = True
+
+                    await self._initialize_session()
+                    try:
+                        await self._snapshot_process_tree()
+                    except Exception:
+                        logger.warning("Failed to snapshot process tree", exc_info=True)
+
+                    _startup_outcome = "ready"
+                    return
+                except (AcpTimeoutError, AcpError) as exc:
+                    if attempt == 0:
+                        logger.warning("ACP init failed (%s), retrying with fresh process...", exc)
+                        await self._kill_process(force=True)
+                        self._reset_state()
+                    else:
+                        # AcpAuthRequired subclasses AcpError; label it distinctly
+                        # so a not-logged-in exit is never counted as a generic
+                        # startup error. (The fork has no separate auth fail-fast
+                        # branch — retry semantics stay unchanged.)
+                        _startup_outcome = (
+                            "auth_required" if isinstance(exc, AcpAuthRequired) else "error"
+                        )
+                        await self._kill_process(force=True)
+                        self._reset_state()
+                        raise
+        finally:
+            try:
+                # circular import: importing get_recorder at module top would
+                # form config.loader -> acp.types -> acp.client -> metrics.provider
+                # -> config.loader (provider reads KiroClawConfig). Keep it lazy so
+                # provider is never loaded during config.loader's import chain.
+                from kiro_claw.metrics.provider import get_recorder
+
+                get_recorder().histogram(
+                    "kiroclaw.session.startup.duration",
+                    (time.monotonic() - _startup_t0) * 1000.0,
+                    unit="ms",
+                    attrs={"outcome": _startup_outcome, "spawned": _startup_spawned},
+                )
+            except Exception:  # never let telemetry break session startup
+                logger.debug("session startup metric emit failed", exc_info=True)
 
     async def shutdown(self) -> None:
         """Gracefully stop the ACP process."""
@@ -2516,6 +2621,11 @@ class AcpClient:
         self, message: str, timeout: float = _DEFAULT_PROMPT_TIMEOUT
     ) -> AsyncIterator[str]:
         """Send a prompt and yield text chunks as they arrive."""
+        # NOTE: PreToolUse/PostToolUse hooks are intentionally NOT fired on this
+        # streaming path today. No audit_source (worker-pool) consumer uses
+        # send_message_stream — hook instrumentation lives on the _read_prompt_response
+        # path (_maybe_fire_pre_tool_hooks / _maybe_fire_post_tool_hooks). If a future
+        # streaming subagent adopts this method, mirror that Pre/Post instrumentation here.
         self._cancelled = False
         self._turn_done.clear()
         await self.ensure_ready()
@@ -2611,6 +2721,8 @@ class AcpClient:
         self._tool_call_inputs.clear()
         self._tool_call_is_shell.clear()
         self._tool_call_params.clear()
+        # Reset the per-turn observed-tool-call bookkeeping (see __init__).
+        self._observed_tool_calls.clear()
         # Clear stale permission options so an aborted/cancelled request from
         # a prior turn cannot leak into this one (memory + correctness).
         self._permission_options.clear()
@@ -2697,12 +2809,26 @@ class AcpClient:
                     # within _TOOL_STALL_TIMEOUT, _prompt_loop treats the turn
                     # as dead instead of hanging to the full prompt timeout.
                     self._tool_dispatched = True
+                    # Record every observed tool_call so PostToolUse can recover
+                    # tool_name from _observed_tool_calls (see
+                    # _maybe_fire_post_tool_hooks).
+                    if tool_event.tool_call_id:
+                        self._observed_tool_calls[tool_event.tool_call_id] = (
+                            tool_event.title or "unknown",
+                            tool_event.tool_kind or "",
+                        )
                     # Check for results from previous tool before yielding new tool_call
                     for tr_event in await asyncio.to_thread(self._read_new_tool_results_sync):
                         yield tr_event
                     # ACP-layer tool audit for clients with no external audit
                     # loop (e.g. app worker pools). No-op unless audit_source is set.
                     await self._maybe_audit_tool_call(tool_event)
+                    # Co-located with the SEL audit Pre-side: fire the PreToolUse
+                    # HOOK ENGINE so app/worker-pool subagents reach hook parity
+                    # with the main agent / SubagentManager. PostToolUse fires
+                    # separately on the tool_result branch below (fire_tool_hooks
+                    # is Pre-only). No-op unless audit_source is set.
+                    await self._maybe_fire_pre_tool_hooks(tool_event)
                     yield tool_event
                 # Real-time tool result from `tool_call_update` session updates.
                 # kiro-cli emits these the moment a tool completes — fires before
@@ -2717,6 +2843,11 @@ class AcpClient:
                     # tool that streams progress then silently stalls is still
                     # caught.)
                     self._tool_dispatched = False
+                    # Fire the PostToolUse HOOK ENGINE now that the tool RESULT
+                    # (and its output) exists — the Pre-vs-Post split is required
+                    # because fire_tool_hooks above is PreToolUse-only. No-op
+                    # unless audit_source is set.
+                    await self._maybe_fire_post_tool_hooks(tool_result_event)
                     yield tool_result_event
                 # claude-agent-acp emits a separate `tool_call_update` carrying
                 # the refined title / kind / rawInput once `chunk.input` finishes
@@ -3163,6 +3294,26 @@ class AcpClient:
                         self._emit_tool_interrupted_sel("_read_prompt_response")
                         return "".join(output)  # see _dispatch_events for rationale
                 self._track_tool_call(msg)
+                # Mirror _dispatch_events for the send_message (worker-pool)
+                # dispatch path: send_message drives tools through here, not
+                # through the stream _dispatch_events, so without this
+                # app/worker-pool subagents never reached hook/SEL parity. All
+                # gating stays inside the _maybe_* methods (self._audit_source),
+                # so main-chat send_message callers (audit_source=None) are no-op.
+                tool_event = self._extract_tool_event(msg)
+                if tool_event:
+                    # Record every observed tool_call so PostToolUse can recover
+                    # tool_name from _observed_tool_calls (see _maybe_fire_post_tool_hooks).
+                    if tool_event.tool_call_id:
+                        self._observed_tool_calls[tool_event.tool_call_id] = (
+                            tool_event.title or "unknown",
+                            tool_event.tool_kind or "",
+                        )
+                    await self._maybe_audit_tool_call(tool_event)
+                    await self._maybe_fire_pre_tool_hooks(tool_event)
+                tool_result_event = self._extract_tool_call_update(msg)
+                if tool_result_event:
+                    await self._maybe_fire_post_tool_hooks(tool_result_event)
             elif action == "metadata":
                 self._track_metadata(msg)
             elif action == "compaction":
@@ -3295,6 +3446,113 @@ class AcpClient:
             )
         except Exception:
             logger.warning("ACP-layer SEL audit failed", exc_info=True)
+
+    async def _maybe_fire_pre_tool_hooks(self, tool_event: "AcpEvent") -> None:
+        """Fire the PreToolUse HOOK ENGINE for a tool_call, for audit-source clients.
+
+        App/worker-pool clients (code-review-sage, knowledge llm_pool) run their
+        tools through this AcpClient without going through chat_runner or
+        SubagentManager, so — until this method existed — the script-hook engine
+        never fired for them. That silently dropped skill-usage telemetry (a
+        PostToolUse hook matching 'Reading *SKILL.md*') for /add_context and every
+        other subagent skill load. This brings those clients to hook parity with
+        the main agent and SubagentManager subagents.
+
+        Gated on ``audit_source`` (None for chat / subagent clients) so the
+        chat/main client is completely unaffected — it fires its own hooks via
+        chat_runner and must never double-fire. No-ops if the global hook store is
+        not initialized. Best-effort + NON-FATAL: any hook-engine error is caught
+        and logged at WARNING (mirroring the SEL audit handler above) and NEVER
+        breaks tool dispatch — the hook fire is awaited directly, exactly as
+        ``subagent.py`` awaits ``fire_tool_hooks`` (the underlying
+        ``run_script_hook`` bounds each script with its own timeout).
+
+        ``fire_tool_hooks`` fires PreToolUse ONLY (see hooks.py) — PostToolUse is
+        fired separately in ``_maybe_fire_post_tool_hooks`` once the tool RESULT
+        (and its output) is available.
+        """
+        if not self._audit_source:
+            return
+        hook_store = get_global_hook_store()
+        if hook_store is None:
+            return
+        try:
+            # Redact tool_input before firing user hooks (parity with Post path); addresses AutoSDE security-controls.
+            _redacted_input = tool_event.tool_input
+            if isinstance(_redacted_input, str):
+                _redacted_input, _ = redact_credentials(_redacted_input)
+                _redacted_input, _ = redact_exfiltration_urls(_redacted_input)
+            elif _redacted_input is not None:
+                # Non-str (dict/list) inputs must ALSO be redacted, not bypassed by
+                # the isinstance(str) guard. Serialize to JSON, redact the string,
+                # and pass the redacted JSON string (fire_tool_hooks json.loads it,
+                # so it expects a str | None — do NOT deserialize back to an object).
+                _serialized = json.dumps(_redacted_input)
+                _serialized, _ = redact_credentials(_serialized)
+                _serialized, _ = redact_exfiltration_urls(_serialized)
+                _redacted_input = _serialized
+            await fire_tool_hooks(
+                hook_store,
+                # Fall back to 'unknown' when the event carries no title, matching
+                # the Post path's tool_name recovery so a hook matcher sees a
+                # consistent name across Pre/Post; addresses AutoSDE finding.
+                tool_event.title or "unknown",
+                _redacted_input,
+                agent_role=self._agent or None,
+            )
+        except Exception:
+            logger.warning("ACP-layer PreToolUse hook failed", exc_info=True)
+
+    async def _maybe_fire_post_tool_hooks(self, tool_result_event: "AcpEvent") -> None:
+        """Fire the PostToolUse HOOK ENGINE for a tool RESULT, for audit-source clients.
+
+        Companion to ``_maybe_fire_pre_tool_hooks``. The Pre-vs-Post split is
+        forced by the hook engine: ``fire_tool_hooks`` fires PreToolUse ONLY (at
+        tool_call time the tool has not run and has no output), so PostToolUse must
+        fire here, on the RESULT branch. The output MUST be carried on
+        ``tool_response={'output': ...}`` — the IDENTICAL shape used by chat_runner
+        (main agent) and subagent.py — because the skill-usage emit.sh reads the
+        SKILL.md frontmatter out of ``tool_response.output`` (and matches the
+        'Reading *SKILL.md*' tool_name). Without the output payload the telemetry
+        hook fires blind and captures nothing.
+
+        Gated on ``audit_source`` and no-ops if the global hook store is
+        uninitialized. Best-effort + NON-FATAL: any error is caught + logged and
+        never breaks dispatch. The tool RESULT event carries no title (see
+        ``_build_tool_result_event``), so the tool_name is recovered from
+        ``_observed_tool_calls`` (populated on the tool_call above) with the same
+        'Running: ' strip ``fire_tool_hooks`` / subagent.py apply, so Pre and Post
+        agree on the tool_name a hook matcher sees. ``tool_output`` is already
+        redacted at the ACP boundary by ``_build_tool_result_event``.
+        """
+        if not self._audit_source:
+            return
+        hook_store = get_global_hook_store()
+        if hook_store is None:
+            return
+        # Fall back to "unknown" to match the Pre path (AutoSDE Pre/Post tool_name consistency).
+        tool_name = self._observed_tool_calls.get(
+            tool_result_event.tool_call_id or "", ("unknown", "")
+        )[0] or "unknown"
+        if tool_name.startswith("Running: "):
+            tool_name = tool_name[9:]
+        try:
+            # Redact before firing user hooks (parity with chat_runner PostToolUse); addresses AutoSDE security-controls.
+            _redacted_output, _ = redact_credentials(tool_result_event.tool_output or "")
+            _redacted_output, _ = redact_exfiltration_urls(_redacted_output)
+            # Bound the payload handed to user hook scripts to the first 2000 chars
+            # (parity with chat_runner/subagent.py [:2000]). Redact-then-truncate is
+            # deliberate: redact the FULL output first so secrets anywhere are scrubbed,
+            # only THEN truncate — truncating first could leave a secret past char 2000.
+            _redacted_output = _redacted_output[:2000]
+            await hook_store.fire(
+                HOOK_EVENT_POST_TOOL_USE,
+                tool_name=tool_name,
+                tool_response={"output": _redacted_output},
+                agent_role=self._agent or None,
+            )
+        except Exception:
+            logger.warning("ACP-layer PostToolUse hook failed", exc_info=True)
 
     def _emit_tool_interrupted_sel(self, site: str) -> None:
         """Emit a SEL audit event when kiro-cli cancels tool uses via its security filter.

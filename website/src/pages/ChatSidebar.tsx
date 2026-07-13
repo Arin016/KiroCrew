@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect, memo, useMemo, useCallback, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import { LayoutGroup, AnimatePresence, motion } from 'framer-motion'
-import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, MessageSquare, MessageSquarePlus, Folder, FolderOpen, ChevronRight, ChevronDown, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns2, Columns3, GripVertical, Zap, Check, Copy, ListFilter, Loader2, Smile, RotateCcw } from 'lucide-react'
-import { DndContext, closestCenter, pointerWithin, KeyboardSensor, PointerSensor, useSensor, useSensors, useDraggable, useDroppable, DragOverlay, MeasuringStrategy, type DragEndEvent, type DragStartEvent, type DragOverEvent, type CollisionDetection } from '@dnd-kit/core'
+import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, MessageSquare, MessageSquarePlus, Folder, FolderOpen, ChevronRight, ChevronDown, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns2, Columns3, GripVertical, Zap, Check, Copy, ListFilter, Loader2, Smile, RotateCcw, Bot, ExternalLink } from 'lucide-react'
+import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragOverlay, MeasuringStrategy, type DragEndEvent, type DragStartEvent, type DragOverEvent } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy, useSortable, sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -15,18 +15,21 @@ import { switchSlot, createSlot, deleteSlot, fetchHistory, resumeFromHistory, de
 import { sseSlotTitle } from '../store/dashboardSlice'
 import { api, SEARCH_MIN_CHARS } from '../api/client'
 import { computeReorderedFolders } from '../utils/reorderFolders'
+import { RECENT_TINT_COUNT, computeRecentRank, recencyTintShadow } from '../utils/recencyTint'
 import { computeActiveSubtree, folderIsHidden, folderOffersHide } from '../utils/folderVisibility'
 import { groupHistoryByFolder } from '../utils/groupHistoryByFolder'
 import { SearchInput, Input, Btn, IconButton, IconButtonGroup } from '../components/ui'
 import { useSessionPalette } from '../hooks/useSessionPalette'
 import { useMoveSlotToFolder } from '../hooks/useMoveSlotToFolder'
 import { useSessionActions } from '../hooks/useSessionActions'
+import { useChatPopouts } from '../hooks/useChatPopouts'
 import { useImeGuard } from '../hooks/useImeGuard'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { safeSetItem } from '../utils/safeStorage'
 import { resolveFolderAgent } from '../utils/folderAgent'
 import SessionActionsMenu from '../components/SessionActionsMenu'
-import type { ChatFolder, ChatTag, TagColumn, TagColumnMode } from '../types'
+import { folderAwareCollision, DndDraggable, DndDroppable } from '../components/dnd'
+import type { ChatFolder, ChatTag, TagColumn, TagColumnMode, SubagentActivity } from '../types'
 import { decideUnreadDrain } from './unreadDrain'
 import { loadChatConfig, saveChatConfig } from './chat/ChatSettings'
 
@@ -50,47 +53,10 @@ function fmtRelativeTime(ts: string | number | undefined): string {
 }
 
 /** Sortable wrapper for a folder block — enables drag-to-reorder */
-/**
- * Folder reordering and session-to-folder assignment share one DndContext but
- * want different collision behavior:
- *  - Dragging a folder: restrict collisions to folder sortable containers so
- *    verticalListSortingStrategy animates cleanly and `over.id` is a folder id.
- *  - Dragging a session: prefer the innermost droppable under the pointer
- *    (folder/root drop target), falling back to closestCenter.
- */
-const sidebarCollision: CollisionDetection = (args) => {
-  const activeType = (args.active?.data?.current as { type?: string } | undefined)?.type
-  if (activeType === 'folder') {
-    const folderContainers = args.droppableContainers.filter(
-      c => (c.data?.current as { type?: string } | undefined)?.type === 'folder'
-    )
-    return closestCenter({ ...args, droppableContainers: folderContainers })
-  }
-  const within = pointerWithin(args)
-  return within.length ? within : closestCenter(args)
-}
-
-/** Render-prop wrapper exposing a dnd-kit draggable to inline JSX without
- *  defining a component per row (which would remount on every render). */
-function DndDraggable({ id, data, disabled, children }: {
-  id: string
-  data: Record<string, unknown>
-  disabled?: boolean
-  children: (p: { setNodeRef: (el: HTMLElement | null) => void; listeners: ReturnType<typeof useDraggable>['listeners']; attributes: ReturnType<typeof useDraggable>['attributes']; isDragging: boolean }) => React.ReactNode
-}) {
-  const { setNodeRef, listeners, attributes, isDragging } = useDraggable({ id, data, disabled })
-  return <>{children({ setNodeRef, listeners, attributes, isDragging })}</>
-}
-
-/** Render-prop wrapper exposing a dnd-kit droppable to inline JSX. */
-function DndDroppable({ id, data, children }: {
-  id: string
-  data: Record<string, unknown>
-  children: (p: { setNodeRef: (el: HTMLElement | null) => void; isOver: boolean }) => React.ReactNode
-}) {
-  const { setNodeRef, isOver } = useDroppable({ id, data })
-  return <>{children({ setNodeRef, isOver })}</>
-}
+// Folder reordering and session-to-folder assignment share one DndContext but
+// want different collision behavior — see `folderAwareCollision` in
+// components/dnd.tsx (shared with the artifact library, Mesh-2720).
+const sidebarCollision = folderAwareCollision
 
 function SortableFolderBlock({ folder, renderFolderBlock }: { folder: ChatFolder; renderFolderBlock: (f: ChatFolder, depth: number, visited?: Set<string>, dragHandleProps?: React.HTMLAttributes<HTMLElement>, forceCollapsed?: boolean) => React.ReactNode[] }) {
   const { listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: folder.id, data: { type: 'folder' } })
@@ -106,6 +72,43 @@ function SortableFolderBlock({ folder, renderFolderBlock }: { folder: ChatFolder
   return (
     <div ref={setNodeRef} style={style} className="relative" data-folder-sortable={folder.id}>
       {renderFolderBlock(folder, 0, undefined, listeners as unknown as React.HTMLAttributes<HTMLElement>, isDragging)}
+    </div>
+  )
+}
+
+/** Sortable wrapper for a board/column-view folder — the board sibling of
+ *  SortableFolderBlock. Each column owns its own DndContext, so the bare folder
+ *  id is a unique sortable id within that column even though every column
+ *  renders the same root folders. Only pointer listeners are forwarded (the
+ *  folder header becomes the drag handle); setNodeRef wraps the whole block for
+ *  sortable positioning — identical to the list-view pattern. Reorders route
+ *  through the same global reorderFolders() path, so order stays consistent
+ *  across every column and the list view. */
+function SortableColumnFolder({ folder, columnId, colSlotKeys, renderColumnFolder }: {
+  folder: ChatFolder
+  columnId: string
+  colSlotKeys: Set<string>
+  renderColumnFolder: (f: ChatFolder, columnId: string, colSlotKeys: Set<string>, dragHandleProps?: React.HTMLAttributes<HTMLElement>, forceCollapsed?: boolean) => React.ReactNode
+}) {
+  const { listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: folder.id, data: { type: 'folder' } })
+  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1, position: 'relative' as const }
+  // While dragging, the body is force-collapsed so the source shrinks to a
+  // single row — the drop-target gap (and the DragOverlay ghost) stay compact,
+  // matching the list-view drag feel.
+  return (
+    <div ref={setNodeRef} style={style} data-col-folder-sortable={folder.id}>
+      {renderColumnFolder(folder, columnId, colSlotKeys, listeners as unknown as React.HTMLAttributes<HTMLElement>, isDragging)}
+    </div>
+  )
+}
+
+/** Compact drag-preview ghost for a folder, rendered inside a DragOverlay.
+ *  Shared by the list-view overlay and each board-column overlay so the drag
+ *  visual is identical in both layouts. */
+function FolderDragGhost({ folder }: { folder?: ChatFolder }) {
+  return (
+    <div className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-[13px] text-text shadow-lg max-w-[240px] truncate pointer-events-none flex items-center gap-2">
+      <FolderGlyph icon={folder?.icon} size={14} />{folder?.name ?? 'Folder'}
     </div>
   )
 }
@@ -429,22 +432,56 @@ function ChatSidebar({
     sessions => new Set(sessions.map(s => s.key.replace(/^dashboard_/, ''))),
   )
   const [renamingSlot, setRenamingSlot] = useState<string | null>(null)
+  // In board view a multi-tag chat renders once per matching column, so
+  // `renamingSlot === s.key` alone is true in every copy at once — the rename
+  // input would mount in all columns and the shared ref would bind to the last.
+  // renameScope pins the edit to the clicked render instance (the row's `scope`:
+  // 'list' or the column id) so exactly one input mounts. Same idea as the
+  // Framer layoutId `scope` note below.
+  const [renameScope, setRenameScope] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const cancelRenameRef = useRef(false)
   const renameInputRef = useRef<HTMLInputElement | null>(null)
-  // The rename menus are Radix (ContextMenu/DropdownMenu); on close Radix
-  // restores focus to its trigger (the card) AFTER the input mounts, so a plain
-  // autoFocus loses the race. Grab focus on the next frame instead (same rAF
-  // pattern as the new-chat textarea below) so it lands after Radix's restore,
-  // and select the text for immediate overtype.
+  // Set by any menu's Rename item (session rows + folder headers) so the closing
+  // menu's onCloseAutoFocus knows to skip Radix's trigger-focus-restore for this
+  // one close (see the menu Content handlers below). One-shot: read and cleared
+  // on the next close.
+  const suppressMenuRestoreRef = useRef(false)
+  // The rename menus are Radix (ContextMenu/DropdownMenu). On close, Radix's
+  // FocusScope restores focus to its trigger (the card) AFTER the input mounts.
+  // That restore blurs the freshly-mounted input, firing its onBlur, which
+  // cancels the edit before you can type — so the box flickers open and reverts.
+  // The trigger-restore is suppressed on the rename path via onCloseAutoFocus
+  // (below); this effect then focuses + selects the input on the next frame so
+  // the caret lands ready to overtype (same rAF pattern as the new-chat textarea).
+  // Keyed on both the slot AND its scope: a same-slot, scope-only change (retarget
+  // the rename to a different column before the first column's blur-commit fires)
+  // must re-run so focus lands in the newly-mounted column's input, not stay on
+  // the old one. Re-running when only the scope changes is harmless (idempotent
+  // focus+select). When the slot clears (commit/cancel/escape/blur), also clear
+  // renameScope so no stale column identity lingers.
   useEffect(() => {
-    if (!renamingSlot) return
+    if (!renamingSlot) { setRenameScope(null); return }
     const raf = requestAnimationFrame(() => {
       const el = renameInputRef.current
-      if (el) { el.focus(); el.select() }
+      if (el) { el.focus({ preventScroll: true }); el.select() }
     })
     return () => cancelAnimationFrame(raf)
-  }, [renamingSlot])
+  }, [renamingSlot, renameScope])
+  // Folder rename + folder create refs; the focus effects live after the
+  // editingId/creatingIn useState declarations below (they can't be referenced
+  // here — TDZ). See those effects for why the rAF re-grab is needed.
+  const folderEditInputRef = useRef<HTMLInputElement | null>(null)
+  const folderCreateInputRef = useRef<HTMLInputElement | null>(null)
+  // Shared onCloseAutoFocus for every rename-hosting menu (session row context +
+  // ⋯ dropdowns, and both folder-header ⋯ dropdowns). When Rename was the chosen
+  // item it armed suppressMenuRestoreRef, so we preventDefault to stop Radix from
+  // yanking focus back to the trigger — that restore would otherwise blur the
+  // just-mounted rename input and cancel the edit. Every other item keeps the
+  // default focus-restore intact.
+  const onMenuCloseAutoFocus = useCallback((e: Event) => {
+    if (suppressMenuRestoreRef.current) { suppressMenuRestoreRef.current = false; e.preventDefault() }
+  }, [])
   const [sortKey, setSortKey] = useState<SortKey>(() => {
     const saved = localStorage.getItem(SORT_LS_KEY)
     return SORT_OPTIONS.some(o => o.value === saved) ? saved as SortKey : 'date-desc'
@@ -478,6 +515,39 @@ function ChatSidebar({
   // loaded" from "data loaded and genuinely empty".
   const slotsLoaded = useAppSelector(s => s.dashboard.slotsLoaded)
   const slotStatusDetail = useAppSelector(s => s.chat.slotStatusDetail)
+  // Live subagent activity per slot, for the sidebar row's "N agents running"
+  // subtitle. Mirrors SubagentProgressBar's source of truth: chatSlice.subagents
+  // for the store's active slot, slotActivity[slot].subagents for background
+  // slots (both populated by the globally-subscribed subagent_spawn/tool/done WS
+  // events). We deliberately do NOT use dashboardSlice.subagentRunning — that
+  // count is only broadcast on the subagent_status "done" event
+  // (gateway._broadcast_subagent_status), never on spawn, so it under-reports
+  // while agents are still running.
+  const storeActiveSlot = useAppSelector(s => s.chat.activeSlot)
+  const activeSlotSubagents = useAppSelector(s => s.chat.subagents)
+  const slotActivity = useAppSelector(s => s.chat.slotActivity)
+  const subagentCounts = useMemo(() => {
+    const countActive = (m?: Record<string, SubagentActivity>) => {
+      if (!m) return 0
+      let n = 0
+      for (const a of Object.values(m)) {
+        if (a.status === 'running' || a.status === 'tool' || a.status === 'pending') n++
+      }
+      return n
+    }
+    const counts: Record<string, number> = {}
+    if (storeActiveSlot) { const n = countActive(activeSlotSubagents); if (n > 0) counts[storeActiveSlot] = n }
+    for (const [slot, act] of Object.entries(slotActivity ?? {})) {
+      // Load-bearing: on switchSlot the active slot's subagents map is aliased
+      // into BOTH state.subagents and slotActivity[active].subagents (same
+      // object reference), so skipping the active slot here is what prevents
+      // double-counting it. Do not drop this guard.
+      if (slot === storeActiveSlot) continue
+      const n = countActive(act.subagents)
+      if (n > 0) counts[slot] = n
+    }
+    return counts
+  }, [storeActiveSlot, activeSlotSubagents, slotActivity])
   const creatingSlot = useAppSelector(s => s.chat.creatingSlot)
   const connected = useConnected()
   // O(1) lookup set for the filter predicate (mirrors the `pinned` and
@@ -587,13 +657,62 @@ function ChatSidebar({
 
   // Pinned: derived from server-persisted slot.pinned
   const pinned = useMemo(() => new Set(slots.filter(s => s.pinned).map(s => s.key)), [slots])
+  // Ranks up to RECENT_TINT_COUNT sessions by recency (last_ts) for the sidebar tint —
+  // see ../utils/recencyTint. Recomputes whenever the slot list changes.
+  const recentRank = useMemo(() => computeRecentRank(slots, RECENT_TINT_COUNT), [slots])
 
   // Folder editing state
   const [creatingIn, setCreatingIn] = useState<string | null>(null)
   const [newName, setNewName] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
+  // Board view renders a folder once per column, so `editingId === folder.id`
+  // (and the `creatingIn` gate) is true in every column at once — the input
+  // would mount in all of them and the shared ref would bind to the last. These
+  // scopes pin the folder rename / subfolder-create to the clicked column's
+  // render instance (the columnId, or 'list' in list view) so exactly one input
+  // mounts. renderFolderHeader passes 'list'; renderColumnFolder passes columnId.
+  const [editScope, setEditScope] = useState<string | null>(null)
+  const [createScope, setCreateScope] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
   const cancelledRef = useRef(false)
+  // Folder rename (renderFolderHeader + board renderColumnFolder) and folder
+  // creation (New folder / New subfolder) mount their inputs from a Radix menu,
+  // so plain autoFocus loses the same race as the session rename: focus lands on
+  // the trigger/body after the menu tears down (caret never in the box) and the
+  // default scroll-into-view yanks the horizontally-scrolling board sideways.
+  // Re-grab focus on the next frame with preventScroll so the board doesn't jump;
+  // rename selects the text for overtype, create leaves the empty field as-is.
+  // Each effect keys on both its id AND companion scope: a same-id, scope-only
+  // change (retarget to a different column before the first column's commit
+  // fires) must re-run so focus lands in the newly-mounted column's input. The
+  // re-focus is idempotent so re-running is harmless. When the id clears
+  // (commit/cancel/escape/blur), clear the scope so no stale column identity
+  // lingers.
+  useEffect(() => {
+    if (!editingId) { setEditScope(null); return }
+    const raf = requestAnimationFrame(() => {
+      const el = folderEditInputRef.current
+      if (el) { el.focus({ preventScroll: true }); el.select() }
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [editingId, editScope])
+  useEffect(() => {
+    if (!creatingIn) { setCreateScope(null); return }
+    const raf = requestAnimationFrame(() => {
+      folderCreateInputRef.current?.focus({ preventScroll: true })
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [creatingIn, createScope])
+  // Belt-and-suspenders disarm of the one-shot suppress ref. It's normally
+  // consumed by the very next onCloseAutoFocus, but if a menu is ever dismissed
+  // without firing that (an outside-dismiss race), the ref would stay armed and
+  // wrongly preventDefault the NEXT menu close. Whenever the sidebar is idle (no
+  // edit open), force-disarm: no legitimate pending suppression can exist then.
+  // Safe against the normal flow — during a live edit an id is non-null, so this
+  // hasn't run yet; by the time all ids clear the real close already consumed it.
+  useEffect(() => {
+    if (!renamingSlot && !editingId && !creatingIn) suppressMenuRestoreRef.current = false
+  }, [renamingSlot, editingId, creatingIn])
 
   // Resize logic
   const sidebarDragging = useRef(false)
@@ -906,6 +1025,8 @@ function ChatSidebar({
   // each behaviour has one definition. Rename + Tags stay local (they drive this
   // component's inline-edit + tag-popover state).
   const sessionActions = useSessionActions(mode)
+  // Which sessions are currently open in a popped-out window (shared singleton).
+  const { poppedOut } = useChatPopouts()
   // Unified dnd-kit handlers for the legacy single-lane layout. One DndContext
   // owns both folder reordering (sortable) and session drag-to-assign
   // (draggable rows + droppable folder/root targets); the active item's
@@ -1035,7 +1156,7 @@ function ChatSidebar({
 
   // Render a folder block scoped to a single column: only slots matching the column predicate.
   // Always render the folder header (even with 0 matches) so users can see + drop into it.
-  const renderColumnFolder = (folder: ChatFolder, columnId: string, colSlotKeys: Set<string>): React.ReactNode => {
+  const renderColumnFolder = (folder: ChatFolder, columnId: string, colSlotKeys: Set<string>, dragHandleProps?: React.HTMLAttributes<HTMLElement>, forceCollapsed?: boolean): React.ReactNode => {
     const childFolders = folders.filter(f => f.parent_id === folder.id)
     const childSlots = filteredSlots.filter(s => colSlotKeys.has(s.key) && slotFolders[s.key] === folder.id)
     const deepChildren = childFolders
@@ -1043,6 +1164,12 @@ function ChatSidebar({
       const cfSlots = filteredSlots.filter(s => colSlotKeys.has(s.key) && slotFolders[s.key] === cf.id)
       return cfSlots.length > 0 || descendantMatch(folders, cf.id, filteredSlots.filter(s => colSlotKeys.has(s.key)), slotFolders)
     }).length
+    // Board-view folders become sortable only when a drag handle is supplied
+    // (root folders wrapped in SortableColumnFolder). Subfolders render without
+    // it (parity with list view, where only root folders reorder). Disabled
+    // while renaming in THIS column (rename is per-column via editScope) so
+    // the inline input stays usable.
+    const draggable = !!dragHandleProps && !(editingId === folder.id && editScope === columnId)
     return (
       // Drag-and-drop folder drop zone: the drag handlers make this a mouse-only
       // drop target with no keyboard analogue, so scope-disable the static-interaction rule.
@@ -1060,12 +1187,13 @@ function ChatSidebar({
         }}
       >
         <div
-          className="group relative flex items-center gap-2 pr-2 py-1 rounded-md cursor-pointer text-[12px] text-muted hover:text-text hover:bg-bg-hover transition-all"
+          className={`group relative flex items-center gap-2 pr-2 py-1 rounded-md ${draggable ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} text-[12px] text-muted hover:text-text hover:bg-bg-hover transition-all`}
           style={{ paddingLeft: '6px' }}
           role="button"
           tabIndex={0}
           aria-expanded={!folder.collapsed}
           aria-label={`${folder.collapsed ? 'Expand' : 'Collapse'} folder ${folder.name}`}
+          {...(draggable ? dragHandleProps : {})}
           onClick={() => toggleCollapse(folder.id)}
           onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCollapse(folder.id) } }}
         >
@@ -1073,22 +1201,22 @@ function ChatSidebar({
             <ChevronRight size={12} />
           </span>
           <FolderGlyph icon={folder.icon} size={11} open={!folder.collapsed} className="shrink-0 text-muted" />
-          {editingId === folder.id ? (
+          {editingId === folder.id && editScope === columnId ? (
             /* Inline rename input — board-view parity with renderFolderHeader.
              *  Without this branch the ⋯-menu "Rename" set editingId but no
              *  field ever appeared, so rename silently did nothing here. The
              *  collapse handler is on the OUTER div, so the input's onClick +
              *  onMouseDown stopPropagation are load-bearing (they keep typing/
              *  clicking the field from bubbling to toggleCollapse). */
-            <Input className="flex-1 py-0.5 text-[12px] min-w-0" autoFocus value={editName} onChange={e => setEditName(e.target.value)} onClick={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => renameCommit(folder.id, editName), onEscape: () => setEditingId(null), onBlur: () => renameCommit(folder.id, editName) })} />
+            <Input ref={folderEditInputRef} className="flex-1 py-0.5 text-[12px] min-w-0" value={editName} onChange={e => setEditName(e.target.value)} onClick={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => renameCommit(folder.id, editName), onEscape: () => setEditingId(null), onBlur: () => renameCommit(folder.id, editName) })} />
           ) : (
             // Double-click rename is a mouse-only power shortcut; the accessible
             // path is the ⋯-menu Rename item, so scope-disable the interaction rule.
             // eslint-disable-next-line jsx-a11y/no-static-element-interactions
-            <span className="flex-1 truncate" title="Double-click to rename" onDoubleClick={e => { e.stopPropagation(); setEditingId(folder.id); setEditName(folder.name) }}>{folder.name}</span>
+            <span className="flex-1 truncate" title="Double-click to rename" onDoubleClick={e => { e.stopPropagation(); setEditingId(folder.id); setEditScope(columnId); setEditName(folder.name) }}>{folder.name}</span>
           )}
           <span className="text-[10px] text-muted shrink-0">{count}</span>
-          {editingId !== folder.id && (
+          {!(editingId === folder.id && editScope === columnId) && (
           <span className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5">
             <select className="text-[10px] text-muted bg-transparent border-none cursor-pointer outline-none max-w-[60px]" title="Default agent" value={folder.default_agent || ''} onClick={e => e.stopPropagation()} onChange={e => { e.stopPropagation(); updateFolderMutation.mutate({ id: folder.id, body: { default_agent: e.target.value } }) }}>
               <option value="">agent…</option>
@@ -1097,7 +1225,7 @@ function ChatSidebar({
             <button type="button" data-testid={`col-${columnId}-folder-${folder.id}-new-chat`} className="text-muted hover:text-accent bg-transparent border-none cursor-pointer p-[2px]" title="New chat in folder" aria-label={`New chat in folder ${folder.name}`} onClick={e => { e.stopPropagation(); createChatInFolder(folder.id, columnId) }} onMouseDown={e => { e.stopPropagation() }}>
               <MessageSquarePlus size={11} />
             </button>
-            <button type="button" data-testid={`col-${columnId}-folder-${folder.id}-new-sub`} className="text-muted hover:text-accent bg-transparent border-none cursor-pointer p-[2px]" title="New subfolder" aria-label="New subfolder" onClick={e => { e.stopPropagation(); setCreatingIn(folder.id); setNewName('') }}>
+            <button type="button" data-testid={`col-${columnId}-folder-${folder.id}-new-sub`} className="text-muted hover:text-accent bg-transparent border-none cursor-pointer p-[2px]" title="New subfolder" aria-label="New subfolder" onClick={e => { e.stopPropagation(); setCreatingIn(folder.id); setCreateScope(columnId); setNewName('') }}>
               <FolderPlus size={10} />
             </button>
             <FolderIconPicker currentIcon={folder.icon} size={10} onPick={icon => updateFolderMutation.mutate({ id: folder.id, body: { icon } })} onReset={() => updateFolderMutation.mutate({ id: folder.id, body: { regenerate_icon: true } })} />
@@ -1107,7 +1235,7 @@ function ChatSidebar({
           </span>
           )}
         </div>
-        <FolderBody open={!folder.collapsed}>
+        <FolderBody open={!folder.collapsed && !forceCollapsed}>
           <div className="border-l border-border ml-2 pl-1">
             {/* Inline "New chat" affordance at the top of the column folder's
              *  body, mirroring the list-view folder body. */}
@@ -1121,9 +1249,9 @@ function ChatSidebar({
               <div className="mx-3 border-b border-border" />
             )}
             {deepChildren.map(cf => renderColumnFolder(cf, columnId, colSlotKeys))}
-            {creatingIn === folder.id && (
+            {creatingIn === folder.id && createScope === columnId && (
               <div className="px-2 py-1">
-                <Input className="w-full py-1 text-[12px]" autoFocus placeholder="Subfolder name…"
+                <Input ref={folderCreateInputRef} className="w-full py-1 text-[12px]" placeholder="Subfolder name…"
                   value={newName}
                   onChange={e => setNewName(e.target.value)}
                   {...ime.bindEnter<HTMLInputElement>({
@@ -1155,6 +1283,9 @@ function ChatSidebar({
     const isBuiltin = agentMeta?.source === 'builtin'
     const agentColor = isAim ? 'text-[var(--aim)]' : isBuiltin ? 'text-muted' : 'text-accent'
     const isActive = activeSlot === s.key
+    const isOut = poppedOut.has(s.key)
+    const recent = recentRank.get(s.key)
+    const subagentCount = subagentCounts[s.key] || 0
     const ci = s.color_index != null && s.color_index >= 0 && s.color_index < paletteColors.length ? s.color_index : null
     const rowColor = ci != null ? paletteColors[ci] : null
     const boostStyle: Record<string, string> = {}
@@ -1162,6 +1293,10 @@ function ChatSidebar({
       boostStyle['--session-color'] = rowColor
       if (boost.mutedColors[ci]) boostStyle['--session-muted'] = boost.mutedColors[ci]
     }
+    if (recent) boostStyle.boxShadow = recencyTintShadow(recent, RECENT_TINT_COUNT)
+    // A session that's open in its own window is dimmed here so the main
+    // sidebar reads as "handed off" (skipped while active — you may be viewing it).
+    if (isOut && !isActive) boostStyle.opacity = '0.6'
     // The shared menu is connected: it pulls read/pin/move/copy/colour/close/tags
     // straight from the store keyed on slotKey (Tags opens the shared popover via
     // the TagPopover context). This row only supplies the one genuinely
@@ -1169,7 +1304,7 @@ function ChatSidebar({
     const rowMenuProps = {
       slotKey: s.key,
       mode,
-      onRename: () => { const sl = slots.find(x => x.key === s.key); setRenamingSlot(s.key); setRenameValue(sl?.title && sl.title !== sl.key ? sl.title : '') },
+      onRename: () => { const sl = slots.find(x => x.key === s.key); suppressMenuRestoreRef.current = true; setRenamingSlot(s.key); setRenameScope(scope); setRenameValue(sl?.title && sl.title !== sl.key ? sl.title : '') },
     }
     return (
       <motion.div key={s.key} layout="position" layoutId={`slot-${scope}-${s.key}`}
@@ -1224,6 +1359,7 @@ function ChatSidebar({
               <AnimatePresence mode="wait">
                 <motion.span key={agentName || 'empty'} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="truncate">{agentName || '\u00A0'}</motion.span>
               </AnimatePresence>
+              {isOut && <span className="text-accent" title="Popped out to a separate window"><ExternalLink size={10} /></span>}
               {s.slack_linked && <span className="text-[10px]" title="Linked to Slack"><Link size={10} /></span>}
               {s.clean_mode
                 ? <span className="text-accent" title="Clean — agent-only, no KiroClaw context or MCP"><Droplet size={10} /></span>
@@ -1238,7 +1374,7 @@ function ChatSidebar({
               {s.forked_from && slots.some(x => x.key === s.forked_from!.replace(/^dashboard:/, '')) && (
                 <span className="text-accent mr-0.5" title="Forked child session">↳</span>
               )}
-              {renamingSlot === s.key ? (
+              {renamingSlot === s.key && renameScope === scope ? (
                 <Input ref={renameInputRef} className="w-full bg-transparent border border-accent rounded px-1 py-0 text-text-strong outline-none text-[13px] select-text" value={renameValue} onChange={e => setRenameValue(e.target.value)} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => { (document.activeElement as HTMLInputElement)?.blur() }, onEscape: () => { cancelRenameRef.current = true; setRenamingSlot(null) }, onBlur: () => { if (!cancelRenameRef.current && renameValue.trim()) { dispatch(sseSlotTitle({ key: s.key, title: renameValue.trim() })); api.renameSlot(s.key, renameValue.trim()).catch(() => { queryClient.invalidateQueries({ queryKey: ['chat-slots'] }) }) } cancelRenameRef.current = false; setRenamingSlot(null) } })} onMouseDown={e => e.stopPropagation()} />
               ) : (s.title && s.title !== s.key ? s.title : s.key)}
             </div>
@@ -1251,6 +1387,15 @@ function ChatSidebar({
               <div className="text-[12px] leading-snug mt-0.5 flex items-center gap-1.5 min-w-0">
                 <span className="w-2 h-2 rounded-full shrink-0" style={{ background: 'var(--warn)' }} title="Needs approval" />
                 <span className="truncate"><span className="font-medium" style={{ color: 'var(--warn)' }}>Needs approval</span>{s.last_message ? <span className="text-muted"> · {s.last_message}</span> : null}</span>
+              </div>
+            ) : subagentCount > 0 ? (
+              // A spawned subagent is still running — surface it even if the
+              // parent turn has ended (s.running === false while it waits for
+              // completion events), so the sidebar shows live activity instead
+              // of a stale last message. Outranks the generic "Thinking…".
+              <div className="text-[12px] text-accent leading-snug truncate mt-0.5 flex items-center gap-1" title={`${subagentCount} subagent${subagentCount > 1 ? 's' : ''} running`}>
+                <Bot size={11} className="shrink-0 animate-pulse" aria-hidden />
+                <span className="truncate">{subagentCount} agent{subagentCount > 1 ? 's' : ''} running</span>
               </div>
             ) : s.running ? (
               <div className="text-[12px] text-accent leading-snug truncate mt-0.5 flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse shrink-0" />{slotStatusDetail[s.key]?.text || 'Thinking…'}</div>
@@ -1277,7 +1422,7 @@ function ChatSidebar({
                 <DropdownMenuTrigger asChild>
                   <button type="button" className="text-muted/50 active:text-text p-1 cursor-pointer bg-transparent border-none" aria-label="More options" onMouseDown={e => e.stopPropagation()}><MoreVertical size={14} /></button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="min-w-[160px]">
+                <DropdownMenuContent align="end" className="min-w-[160px]" onCloseAutoFocus={onMenuCloseAutoFocus}>
                   <SessionActionsMenu variant="dropdown" {...rowMenuProps} />
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -1288,7 +1433,7 @@ function ChatSidebar({
                 <DropdownMenuTrigger asChild>
                   <IconButton title="More" aria-label="More options" onMouseDown={e => e.stopPropagation()}><MoreVertical size={12} /></IconButton>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="min-w-[160px]">
+                <DropdownMenuContent align="end" className="min-w-[160px]" onCloseAutoFocus={onMenuCloseAutoFocus}>
                   <SessionActionsMenu variant="dropdown" {...rowMenuProps} />
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -1298,7 +1443,7 @@ function ChatSidebar({
           )}
         </div>
           </ContextMenuTrigger>
-          <ContextMenuContent className="min-w-[160px]">
+          <ContextMenuContent className="min-w-[160px]" onCloseAutoFocus={onMenuCloseAutoFocus}>
             <SessionActionsMenu variant="context" {...rowMenuProps} />
           </ContextMenuContent>
         </ContextMenu>
@@ -1339,26 +1484,26 @@ function ChatSidebar({
           <ChevronRight size={14} />
         </span>
         <FolderGlyph icon={folder.icon} size={14} open={!folder.collapsed} />
-        {editingId === folder.id ? (
-          <Input className="flex-1 py-0.5 text-[13px] min-w-0" autoFocus value={editName} onChange={e => setEditName(e.target.value)} onClick={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => renameCommit(folder.id, editName), onEscape: () => setEditingId(null), onBlur: () => renameCommit(folder.id, editName) })} />
+        {editingId === folder.id && editScope === 'list' ? (
+          <Input ref={folderEditInputRef} className="flex-1 py-0.5 text-[13px] min-w-0" value={editName} onChange={e => setEditName(e.target.value)} onClick={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => renameCommit(folder.id, editName), onEscape: () => setEditingId(null), onBlur: () => renameCommit(folder.id, editName) })} />
         ) : (
           // Double-click rename is a mouse-only power shortcut; the hover Rename
           // button is the accessible path, so scope-disable the interaction rule.
           // eslint-disable-next-line jsx-a11y/no-static-element-interactions
-          <span className="flex-1 text-[13px] font-medium text-text truncate" title="Double-click to rename" onDoubleClick={e => { e.stopPropagation(); setEditingId(folder.id); setEditName(folder.name) }}>{folder.name}</span>
+          <span className="flex-1 text-[13px] font-medium text-text truncate" title="Double-click to rename" onDoubleClick={e => { e.stopPropagation(); setEditingId(folder.id); setEditScope('list'); setEditName(folder.name) }}>{folder.name}</span>
         )}
         {hasUnread && folder.collapsed && <span className="w-2 h-2 rounded-full shrink-0" style={{ background: 'var(--info)' }} />}
         <span className="text-[11px] text-muted tabular-nums shrink-0">{count}</span>
         {folder.default_agent && <span className="text-[10px] text-accent bg-accent/10 px-1.5 py-0.5 rounded-full shrink-0 truncate max-w-[60px]" title={`Default agent: ${folder.default_agent}`}>{folder.default_agent}</span>}
-        {editingId !== folder.id && (
+        {!(editingId === folder.id && editScope === 'list') && (
         <div className="absolute top-1/2 -translate-y-1/2 right-1.5 opacity-0 group-hover:opacity-100 transition-all flex items-center gap-0.5 rounded-md p-1 bg-card border border-border shadow-sm">
           <select className="text-[10px] text-muted bg-transparent border-none cursor-pointer outline-none max-w-[70px]" title="Default agent for new chats" value={folder.default_agent || ''} onClick={e => e.stopPropagation()} onChange={e => { e.stopPropagation(); updateFolderMutation.mutate({ id: folder.id, body: { default_agent: e.target.value } }) }}>
             <option value="">agent…</option>
             {installedAgents.map(a => <option key={a.name} value={a.name}>{a.name}</option>)}
           </select>
-          <button type="button" className="cursor-pointer p-[4px] rounded text-muted hover:text-text hover:bg-bg-hover transition-all bg-transparent border-none" title="Rename folder" aria-label="Rename folder" data-testid={`folder-rename-${folder.id}`} onClick={e => { e.stopPropagation(); setEditingId(folder.id); setEditName(folder.name) }}><Pencil size={12} /></button>
+          <button type="button" className="cursor-pointer p-[4px] rounded text-muted hover:text-text hover:bg-bg-hover transition-all bg-transparent border-none" title="Rename folder" aria-label="Rename folder" data-testid={`folder-rename-${folder.id}`} onClick={e => { e.stopPropagation(); setEditingId(folder.id); setEditScope('list'); setEditName(folder.name) }}><Pencil size={12} /></button>
           <button type="button" className="cursor-pointer p-[4px] rounded text-muted hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none" title="New chat in folder" aria-label="New chat in folder" onClick={e => { e.stopPropagation(); createChatInFolder(folder.id) }}><MessageSquarePlus size={12} /></button>
-          <button type="button" className="cursor-pointer p-[4px] rounded text-muted hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none" title="New subfolder" aria-label="New subfolder" onClick={e => { e.stopPropagation(); setCreatingIn(folder.id); setNewName('') }}><FolderPlus size={12} /></button>
+          <button type="button" className="cursor-pointer p-[4px] rounded text-muted hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none" title="New subfolder" aria-label="New subfolder" onClick={e => { e.stopPropagation(); setCreatingIn(folder.id); setCreateScope('list'); setNewName('') }}><FolderPlus size={12} /></button>
           <FolderIconPicker currentIcon={folder.icon} size={12} onPick={icon => updateFolderMutation.mutate({ id: folder.id, body: { icon } })} onReset={() => updateFolderMutation.mutate({ id: folder.id, body: { regenerate_icon: true } })} />
           {folderOffersHide(folder, foldersWithActiveSubtree) && (
             <button type="button" className="cursor-pointer p-[4px] rounded text-muted hover:text-text hover:bg-bg-hover transition-all bg-transparent border-none" data-testid={`folder-hide-${folder.id}`} title="Hide when empty" aria-label="Hide when empty" onClick={e => { e.stopPropagation(); updateFolderMutation.mutate({ id: folder.id, body: { hidden: true } }) }}><EyeOff size={12} /></button>
@@ -1380,10 +1525,10 @@ function ChatSidebar({
     // New-subfolder name input sits after the existing subfolders, just above the
     // sessions — a new folder is appended (order = folder count), so it lands at the
     // bottom of the sibling folders, above the chats. The placeholder matches that.
-    if (creatingIn === folder.id) {
+    if (creatingIn === folder.id && createScope === 'list') {
       childNodes.push(
         <div key={`new-sub-${folder.id}`} className="py-1 pr-2" style={{ paddingLeft: '8px' }}>
-          <Input className="w-full py-1 text-[13px]" autoFocus placeholder="Folder name…" value={newName} onChange={e => setNewName(e.target.value)} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => createFolder(newName, folder.id), onEscape: () => { cancelledRef.current = true; setCreatingIn(null); setNewName('') }, onBlur: () => { if (cancelledRef.current) { cancelledRef.current = false; return } if (newName.trim()) createFolder(newName, folder.id); else setCreatingIn(null) } })} />
+          <Input ref={folderCreateInputRef} className="w-full py-1 text-[13px]" placeholder="Folder name…" value={newName} onChange={e => setNewName(e.target.value)} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => createFolder(newName, folder.id), onEscape: () => { cancelledRef.current = true; setCreatingIn(null); setNewName('') }, onBlur: () => { if (cancelledRef.current) { cancelledRef.current = false; return } if (newName.trim()) createFolder(newName, folder.id); else setCreatingIn(null) } })} />
         </div>
       )
     }
@@ -1507,12 +1652,12 @@ function ChatSidebar({
                   className="flex items-center justify-center w-6 h-7 cursor-pointer bg-transparent border-none text-accent-fg hover:bg-black/10 active:scale-95 transition-all"
                   title="Create…" aria-label="More create options"><ChevronDown size={13} /></button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="min-w-[200px]">
+              <DropdownMenuContent align="end" className="min-w-[200px]" onCloseAutoFocus={onMenuCloseAutoFocus}>
                 <DropdownMenuItem onClick={() => { createAutopilotMutation.mutate() }}>
                   <Zap size={14} className="text-accent" /> New autopilot chat
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => { setCreatingIn('__root__'); setNewName('') }}>
+                <DropdownMenuItem onClick={() => { suppressMenuRestoreRef.current = true; setCreatingIn('__root__'); setNewName('') }}>
                   <FolderPlus size={14} className="text-muted" /> New folder
                 </DropdownMenuItem>
                 {folders.length > 0 && (
@@ -1719,7 +1864,7 @@ function ChatSidebar({
                     </SortableContext>
                     {creatingIn === '__root__' && (
                       <div className="px-2 py-1">
-                        <Input className="w-full py-1 text-[13px]" autoFocus placeholder="Folder name…" value={newName} onChange={e => setNewName(e.target.value)} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => createFolder(newName), onEscape: () => { cancelledRef.current = true; setCreatingIn(null); setNewName('') }, onBlur: () => { if (cancelledRef.current) { cancelledRef.current = false; return } if (newName.trim()) createFolder(newName); else setCreatingIn(null) } })} />
+                        <Input ref={folderCreateInputRef} className="w-full py-1 text-[13px]" placeholder="Folder name…" value={newName} onChange={e => setNewName(e.target.value)} {...ime.bindEnter<HTMLInputElement>({ onEnter: () => createFolder(newName), onEscape: () => { cancelledRef.current = true; setCreatingIn(null); setNewName('') }, onBlur: () => { if (cancelledRef.current) { cancelledRef.current = false; return } if (newName.trim()) createFolder(newName); else setCreatingIn(null) } })} />
                       </div>
                     )}
                     {/* Ungrouped sessions live in a headerless droppable bucket
@@ -1764,8 +1909,7 @@ function ChatSidebar({
               <DragOverlay dropAnimation={null}>
                 {activeDrag ? (() => {
                   if (activeDrag.type === 'folder') {
-                    const f = folders.find(x => x.id === activeDrag.id)
-                    return <div className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-[13px] text-text shadow-lg max-w-[240px] truncate pointer-events-none flex items-center gap-2"><FolderGlyph icon={f?.icon} size={14} />{f?.name ?? 'Folder'}</div>
+                    return <FolderDragGhost folder={folders.find(x => x.id === activeDrag.id)} />
                   }
                   const ds = slots.find(x => x.key === activeDrag.id)
                   const label = ds?.title && ds.title !== ds.key ? ds.title : (ds?.key ?? activeDrag.id)
@@ -1969,15 +2113,38 @@ function ChatSidebar({
                       const colSlotKeys = new Set(colSlots.map(s => s.key))
                       // Show ALL root folders as drop targets, not only those with matching slots.
                       // Empty folders render with "0" count so users see the structure they built.
-                      const relevantFolders = folders.filter(f => !f.parent_id)
+                      // Root folders in explicit `order`-field order (the sorted
+                      // rootFolders memo, same source as list view). Rendering the
+                      // raw cache array here made drops appear to revert: a reorder
+                      // only rewrites `order` values (array positions are
+                      // unchanged), so an unsorted render ignored the new order.
+                      const relevantFolders = rootFolders
                       const ungrouped = colSlots.filter(s => !slotFolders[s.key] || !folders.find(f => f.id === slotFolders[s.key]))
                       const hasAny = colSlots.length > 0 || folders.length > 0
                       return (
                         <>
-                          {relevantFolders.map(f => renderColumnFolder(f, col.id, colSlotKeys))}
+                          {/* Folder reorder in board view: one DndContext per
+                           *  column (folder ids stay unique within it) + the
+                           *  header as drag handle. Reorders flow through the
+                           *  same global reorderFolders() as list view, so order
+                           *  is consistent across columns. Native session-card
+                           *  drop (HTML5 DnD) is untouched — it uses drag events,
+                           *  not the pointer sensor. */}
+                          <DndContext sensors={dndSensors} collisionDetection={closestCenter} measuring={{ droppable: { strategy: MeasuringStrategy.Always } }} onDragStart={handleSidebarDragStart} onDragEnd={handleSidebarDragEnd} onDragCancel={handleSidebarDragCancel}>
+                            <SortableContext items={relevantFolders.map(f => f.id)} strategy={verticalListSortingStrategy}>
+                              {relevantFolders.map(f => <SortableColumnFolder key={f.id} folder={f} columnId={col.id} colSlotKeys={colSlotKeys} renderColumnFolder={renderColumnFolder} />)}
+                            </SortableContext>
+                            {/* Compact ghost follows the pointer while a folder drags —
+                             *  same visual as the list-view overlay. DragOverlay renders
+                             *  null unless THIS column's DndContext has an active drag,
+                             *  so per-column overlays never stack. */}
+                            <DragOverlay dropAnimation={null}>
+                              {activeDrag?.type === 'folder' ? <FolderDragGhost folder={folders.find(x => x.id === activeDrag.id)} /> : null}
+                            </DragOverlay>
+                          </DndContext>
                           {(creatingIn === `__col_${col.id}__` || (creatingIn === '__root__' && colIdx === 0)) && (
                             <div className="px-2 py-1">
-                              <Input className="w-full py-1 text-[12px]" autoFocus placeholder="Folder name…"
+                              <Input ref={folderCreateInputRef} className="w-full py-1 text-[12px]" placeholder="Folder name…"
                                 value={newName}
                                 onChange={e => setNewName(e.target.value)}
                                 {...ime.bindEnter<HTMLInputElement>({

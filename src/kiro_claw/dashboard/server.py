@@ -47,7 +47,12 @@ from kiro_claw.dashboard.handlers.artifacts import (
     api_artifact_delete,
     api_artifact_detail,
     api_artifact_events,
+    api_artifact_folder_create,
+    api_artifact_folder_delete,
+    api_artifact_folder_update,
+    api_artifact_folders,
     api_artifact_record_event,
+    api_artifact_set_folder,
     api_artifact_update,
     api_artifact_version_detail,
     api_artifact_versions,
@@ -91,6 +96,7 @@ from kiro_claw.platform import (
     safe_context_call,
 )
 from kiro_claw.safety_override import safety_override
+from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
 from kiro_claw.suggestions import api_suggestions
 from kiro_claw.tunnel.setup import setup_tunnel
@@ -301,6 +307,7 @@ def _register_mcp_routes(app: web.Application) -> None:
     app.router.add_delete("/api/lessons", handlers.api_lessons_delete)
     app.router.add_get("/api/crons", handlers.api_crons)
     app.router.add_post("/api/crons", handlers.api_crons_create)
+    app.router.add_delete("/api/crons", handlers.api_cron_batch_delete)
     app.router.add_get("/api/crons/history", handlers.api_cron_history_all)
     app.router.add_delete("/api/crons/{job_id}", handlers.api_cron_delete)
     app.router.add_patch("/api/crons/{job_id}", handlers.api_cron_update)
@@ -354,6 +361,14 @@ def _register_mcp_routes(app: web.Application) -> None:
     )
     app.router.add_get("/api/artifacts/{slug}/events", api_artifact_events)
     app.router.add_post("/api/artifacts/{slug}/events", api_artifact_record_event)
+
+    # Artifact folders (Mesh-2720). ``/api/artifact-folders`` (hyphen) never
+    # collides with the ``/api/artifacts/{slug}`` dynamic route.
+    app.router.add_get("/api/artifact-folders", api_artifact_folders)
+    app.router.add_post("/api/artifact-folders", api_artifact_folder_create)
+    app.router.add_patch("/api/artifact-folders/{id}", api_artifact_folder_update)
+    app.router.add_delete("/api/artifact-folders/{id}", api_artifact_folder_delete)
+    app.router.add_patch("/api/artifacts/{slug}/folder", api_artifact_set_folder)
 
 
 async def _start_site(
@@ -527,6 +542,50 @@ def _dispatch_override_expiry_notification(state: DashboardState, notify_coro_fa
     state._background_tasks.add(task)
     task.add_done_callback(state._background_tasks.discard)
     return True
+
+
+async def _dm_owner(state: DashboardState, text: str) -> None:
+    """Best-effort owner Slack DM. No-op if Slack/owner are not configured.
+
+    The shared owner-notification exit point to Slack (currently the
+    safety-override-expiry path), so the open_dm → post_message →
+    swallow-and-log idiom lives in one place.
+
+    Defense-in-depth: because this is the single exit point to Slack for owner
+    notifications and is intended for reuse, ``text`` is passed through
+    ``redact_exfiltration_urls()`` then ``redact_credentials()`` (same order as
+    the rest of the Slack surface) so a future caller that forwards
+    LLM/user-derived content can never leak credentials or exfil URLs, even
+    though today's callers only pass static constants.
+    """
+    slack_client = state.slack_client
+    owner_id = state.owner_id
+    if not (slack_client and owner_id):
+        return
+    safe_text, _ = redact_exfiltration_urls(text)
+    safe_text, _ = redact_credentials(safe_text)
+    try:
+        dm_channel = await slack_client.open_dm(owner_id)
+        await slack_client.post_message(dm_channel, safe_text)
+    except Exception:
+        logger.debug("Owner Slack DM skipped", exc_info=True)
+
+
+def _dispatch_owner_dm(state: DashboardState, text: str) -> None:
+    """Fire-and-forget an owner DM without blocking the caller.
+
+    Schedules :func:`_dm_owner` as a tracked background task so a slow or
+    unreachable Slack API never stalls the startup / hot path. No-op if there
+    is no running loop.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.debug("No running event loop — owner DM skipped")
+        return
+    task = loop.create_task(_dm_owner(state, text))
+    state._background_tasks.add(task)
+    task.add_done_callback(state._background_tasks.discard)
 
 
 def _register_instances_hooks(
@@ -1112,6 +1171,7 @@ async def start_dashboard(
     app.router.add_get("/api/sessions/usage", handlers.api_sessions_usage)
     app.router.add_get("/api/usage/kiro", handlers.api_kiro_usage)
     app.router.add_get("/api/usage", handlers.api_usage)
+    app.router.add_get("/api/telemetry/startup", handlers.api_telemetry_startup)
     app.router.add_post("/api/sessions/restart", handlers.api_sessions_restart)
     # NOTE: /search must be registered before /{key} to avoid the path param catching "search"
     app.router.add_get("/api/sessions/search", handlers.api_sessions_search)
@@ -1430,6 +1490,14 @@ async def start_dashboard(
                     "/api/crons",  # CLI cron trigger; prefix covers all sub-routes (consistent with spawn/taskrunner)
                     "/api/taskrunner",
                     "/api/artifacts",
+                    # The 5 artifact_folder_* MCP tools authenticate via
+                    # X-Internal-Secret. token_auth prefix-matching is
+                    # (path == p or path.startswith(p + "/")), so
+                    # "/api/artifact-folders" is NOT covered by the
+                    # "/api/artifacts" entry above — without this entry those
+                    # MCP calls fall through to cookie auth and fail with
+                    # "Token required".
+                    "/api/artifact-folders",
                     "/v1/chat/completions",  # OpenAI-compat API
                 }
             ),
@@ -1573,17 +1641,10 @@ async def start_dashboard(
     # Wire safety override expiry notifications
     async def _notify_slack_override_expired() -> None:
         """Post override expiry notice to Slack owner DM."""
-        try:
-            slack_client = state.slack_client
-            owner_id = state.owner_id
-            if slack_client and owner_id:
-                dm_channel = await slack_client.open_dm(owner_id)
-                await slack_client.post_message(
-                    dm_channel,
-                    "\U0001f512 Safety override expired. Tools now require approval. Reply `/kiroclaw yolo` to re-authorize.",
-                )
-        except Exception:
-            logger.debug("Slack expiry notification skipped", exc_info=True)
+        await _dm_owner(
+            state,
+            "\U0001f512 Safety override expired. Tools now require approval. Reply `/kiroclaw yolo` to re-authorize.",
+        )
 
     def _on_override_expired(source: str) -> None:
         """Notify all interfaces when safety override expires."""

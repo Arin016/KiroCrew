@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { ChevronDown, ChevronRight, Check, Circle, Search, Plus, Trash2, HelpCircle, Loader2, ThumbsUp } from 'lucide-react'
 import { GrillNode, GrillAction, nodeDepth } from './grillTreeModel'
 
@@ -11,6 +11,40 @@ interface Props {
   // Calls the backend expand for a node; parent dispatches addChildren. Returns
   // {reason:'max_depth'} when the depth guard refuses.
   onExpand: (nodeId: string) => Promise<{ reason?: string } | void>
+}
+
+// Auto-growing textarea: grows with content so long sub-question text wraps and
+// stays fully readable (replaces the old single-line, truncating <input>). When
+// onSubmit is given, Enter commits and Shift+Enter inserts a newline.
+function AutoGrow({ value, onChange, onSubmit, placeholder, className = '', ariaLabel }: {
+  value: string
+  onChange: (v: string) => void
+  onSubmit?: (v: string) => void
+  placeholder?: string
+  className?: string
+  ariaLabel?: string
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => {
+    const el = ref.current
+    if (el) { el.style.height = 'auto'; el.style.height = `${el.scrollHeight}px` }
+  }, [value])
+  return (
+    <textarea ref={ref} rows={1} aria-label={ariaLabel} placeholder={placeholder}
+              className={`resize-none overflow-hidden ${className}`}
+              value={value} onChange={e => onChange(e.target.value)}
+              onKeyDown={e => { if (onSubmit && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSubmit(value) } }} />
+  )
+}
+
+// Clarifier answer box: buffers input locally (so it doesn't commit per keystroke)
+// and commits on Enter. Shift+Enter inserts a newline. Auto-grows for readability.
+function AnswerBox({ initial, onSubmit }: { initial?: string; onSubmit: (v: string) => void }) {
+  const [val, setVal] = useState(initial || '')
+  return (
+    <AutoGrow value={val} onChange={setVal} onSubmit={onSubmit} placeholder="answer…" ariaLabel="Clarifier answer"
+              className="flex-1 min-w-[18rem] bg-bg border border-border rounded px-1.5 py-0.5 text-text align-top" />
+  )
 }
 
 export default function GrillTree({ tree, dispatch, onExpand }: Props) {
@@ -72,9 +106,9 @@ export default function GrillTree({ tree, dispatch, onExpand }: Props) {
           ) : <span className="text-warn mt-0.5">◆</span>}
 
           {node.kind === 'research' ? (
-            <input className="flex-1 bg-transparent text-text border-b border-transparent focus:border-border outline-none"
-                   aria-label="Research question"
-                   value={node.text} onChange={e => dispatch({ type: 'edit', id: node.id, text: e.target.value })} />
+            <AutoGrow className="flex-1 bg-transparent text-text border-b border-transparent focus:border-border outline-none"
+                      ariaLabel="Research question"
+                      value={node.text} onChange={t => dispatch({ type: 'edit', id: node.id, text: t })} />
           ) : <span className="flex-1 text-text">{node.text}</span>}
 
           <button onClick={() => dispatch({ type: 'prune', id: node.id })} className="text-danger mt-0.5" aria-label="Prune"><Trash2 size={12} /></button>
@@ -95,10 +129,8 @@ export default function GrillTree({ tree, dispatch, onExpand }: Props) {
               </>
             ) : (
               <>
-                <input placeholder="answer…" defaultValue={node.answer}
-                       aria-label="Clarifier answer"
-                       className="bg-bg border border-border rounded px-1.5 py-0.5 text-text"
-                       onKeyDown={e => { if (e.key === 'Enter') dispatch({ type: 'setAnswer', id: node.id, answer: e.currentTarget.value }) }} />
+                <AnswerBox initial={node.answer}
+                           onSubmit={v => dispatch({ type: 'setAnswer', id: node.id, answer: v })} />
                 <button onClick={() => dispatch({ type: 'accept', id: node.id })} className="flex items-center gap-1 text-accent"><ThumbsUp size={12} /> accept</button>
                 <button onClick={() => dispatch({ type: 'investigateInstead', id: node.id })} className="flex items-center gap-1 text-accent"><Search size={12} /> investigate instead</button>
               </>

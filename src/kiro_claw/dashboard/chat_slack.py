@@ -18,6 +18,23 @@ from kiro_claw.sync_bridge import handoff_to_slack
 
 logger = logging.getLogger(__name__)
 
+# Fresh-anchor title fallback (B-lite): when the slot has no LLM title yet
+# (titles land seconds after session creation), fall back to a one-line snippet
+# of the first user prompt, then to a neutral default. The raw slot key must
+# never be user-visible.
+_ANCHOR_TITLE_SNIPPET_CHARS = 60
+_ANCHOR_TITLE_DEFAULT = "New session"
+
+
+def _first_user_prompt(slot) -> str:  # noqa: ANN001 — _ChatSlot (avoids import cycle)
+    """Return the slot's first user prompt collapsed to a single line, or ""."""
+    for m in slot.messages:
+        if m.get("role") == "user":
+            text = " ".join(str(m.get("content") or "").split())
+            if text:
+                return text
+    return ""
+
 
 def _get_channel_resolver(state: DashboardState) -> ChannelNameResolver:
     """Lazily construct the shared ChannelNameResolver on first use.
@@ -77,8 +94,22 @@ async def api_chat_slot_slack_link(request: web.Request) -> web.Response:
     if existing_thread:
         thread_ts = existing_thread
     else:
-        # redact_and_truncate applies both redact_exfiltration_urls + redact_credentials
-        title = redact_and_truncate(slot.title or name, max_chars=200)
+        # redact_and_truncate applies both redact_exfiltration_urls +
+        # redact_credentials. Fallback chain: LLM title → first-prompt snippet
+        # → neutral default. Redaction runs on the full snippet text before
+        # truncation so a truncation boundary can never split (and hide) a
+        # credential. Fork adaptation: slots initialize title to their raw key
+        # (state.py), so gate on display_title — a slot still showing
+        # NEW_SESSION_TITLE has no real title, while cron/plan/handoff slots
+        # (real titles, _titled unset) pass their title through.
+        base = slot.title if slot.display_title != dashboard_state.NEW_SESSION_TITLE else ""
+        title = redact_and_truncate(base, max_chars=200)
+        if not title:
+            title = redact_and_truncate(
+                _first_user_prompt(slot), max_chars=_ANCHOR_TITLE_SNIPPET_CHARS
+            )
+        if not title:
+            title = _ANCHOR_TITLE_DEFAULT
         thread_ts = await state.slack_client.post_message(
             target_channel, f"\U0001f9f5 *{title}*\nSession linked from dashboard."
         )

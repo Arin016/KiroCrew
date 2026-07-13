@@ -61,12 +61,14 @@ CHANNEL_MAX_LEN = 20
 USER_ID_RE = re.compile(r"^[UW][A-Z0-9]{1,19}$")
 USER_MAX_LEN = 20
 
-# Slack thread/message timestamp used verbatim as a session key for Slack
-# threads (e.g. "1781215864.487849"): a 10+ digit epoch seconds component, a
-# dot, then 6+ digits of sub-second precision. Slack threads key their session
-# off the bare thread_ts (see slack/handler.py), unlike the "slack:<chan>:<ts>"
-# delivery-target form, so callers that authorize by session key must accept
-# this shape too.
+# Slack thread/message timestamp (e.g. "1781215864.487849"): a 10+ digit epoch
+# seconds component, a dot, then 6+ digits of sub-second precision. Slack
+# threads now key their session off the canonical namespaced form
+# ``slack:<thread_ts>`` (see messaging/link.py and slack/handler.py), but the
+# legacy bare thread_ts form persists in older session maps, conversation logs,
+# and callers — distinct from the "slack:<chan>:<ts>" delivery-target form —
+# so callers that authorize by session key must accept both the bare shape and
+# the ``slack:`` prefix (see ``is_slack_ns`` in ``api_lessons_create``).
 #
 # Use the explicit ASCII class ``[0-9]`` (not ``\d``): in Python 3 ``\d`` also
 # matches non-ASCII Unicode decimal digits (Arabic-Indic ٠-٩, Devanagari ०-९,
@@ -75,6 +77,37 @@ USER_MAX_LEN = 20
 # digits pass as a Slack thread_ts, matching the ASCII-only intent of the other
 # patterns in this file (e.g. ``CHANNEL_ID_RE``).
 SLACK_THREAD_TS_RE = re.compile(r"^[0-9]{10,}\.[0-9]{6,}$")
+
+
+def infer_use_case(session_key: str) -> str:
+    """Map a KiroClaw session_key to a categorical useCase label.
+
+    Returns ``"unknown"`` for unrecognized shapes — never raises. Pure string
+    matching on the session key; lives here next to ``SLACK_THREAD_TS_RE`` so
+    authorization (learn_add) and classification stay in lockstep.
+
+    Phase 1 limitations: ``cli_chat`` and ``_bg`` collapse multiple
+    invocations into one session each. Both can be fixed in a follow-up
+    by appending a ``:<uuid>`` suffix at the entry point.
+    """
+    if not session_key:
+        return "unknown"
+    if session_key.startswith("cron:") or session_key.startswith("cron_"):
+        return "cron"
+    if session_key.startswith("subagent:") or session_key.startswith("subagent_"):
+        return "subagent"
+    if session_key == "_bg":
+        return "subagent"
+    if session_key.startswith("taskrunner_") or session_key.startswith("taskrunner:"):
+        return "task-runner"
+    if session_key.startswith("dashboard:") or session_key.startswith("chat-"):
+        return "dashboard"
+    if session_key == "cli_chat" or session_key.startswith("cli_chat:"):
+        return "cli"
+    if SLACK_THREAD_TS_RE.match(session_key):
+        return "slack"
+    return "unknown"
+
 
 # Valid Jira project key pattern (e.g. PROJ, TEAM_X)
 JIRA_PROJECT_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
@@ -486,6 +519,7 @@ ARTIFACT_SAVE_SCHEMA = ToolSchema(
             item_pattern=_ARTIFACT_TAG_RE,
             max_items=16,
         ),
+        FieldSpec("folder", str, max_len=4096),
     ],
 )
 
@@ -543,6 +577,57 @@ ARTIFACT_REVERT_SCHEMA = ToolSchema(
     fields=[
         FieldSpec("slug", str, required=True, max_len=80, pattern=_ARTIFACT_SLUG_RE),
         FieldSpec("target_version", int, required=True, min_val=1, max_val=10_000),
+    ],
+)
+
+# Artifact folders (Mesh-2720). A folder reference is a folder id OR a
+# ``/``-separated human path, so it can't share the slug regex — only bound
+# the length. Folder names cap at 100 chars (matches ArtifactFolderStore).
+_ARTIFACT_FOLDER_NAME_MAX = 100
+_ARTIFACT_FOLDER_REF_MAX = 4096
+
+ARTIFACT_FOLDER_LIST_SCHEMA = ToolSchema(
+    tool_name="artifact_folder_list",
+    fields=[],
+)
+
+ARTIFACT_FOLDER_CREATE_SCHEMA = ToolSchema(
+    tool_name="artifact_folder_create",
+    fields=[
+        FieldSpec("name", str, required=True, max_len=_ARTIFACT_FOLDER_NAME_MAX),
+        FieldSpec("parent", str, max_len=_ARTIFACT_FOLDER_REF_MAX),
+    ],
+)
+
+ARTIFACT_FOLDER_RENAME_SCHEMA = ToolSchema(
+    tool_name="artifact_folder_rename",
+    fields=[
+        FieldSpec("folder", str, required=True, max_len=_ARTIFACT_FOLDER_REF_MAX),
+        FieldSpec("name", str, required=True, max_len=_ARTIFACT_FOLDER_NAME_MAX),
+    ],
+)
+
+ARTIFACT_FOLDER_MOVE_SCHEMA = ToolSchema(
+    tool_name="artifact_folder_move",
+    fields=[
+        FieldSpec("folder", str, required=True, max_len=_ARTIFACT_FOLDER_REF_MAX),
+        FieldSpec("new_parent", str, max_len=_ARTIFACT_FOLDER_REF_MAX),
+    ],
+)
+
+ARTIFACT_FOLDER_DELETE_SCHEMA = ToolSchema(
+    tool_name="artifact_folder_delete",
+    fields=[
+        FieldSpec("folder", str, required=True, max_len=_ARTIFACT_FOLDER_REF_MAX),
+        FieldSpec("delete_contents", bool),
+    ],
+)
+
+ARTIFACT_MOVE_SCHEMA = ToolSchema(
+    tool_name="artifact_move",
+    fields=[
+        FieldSpec("slug", str, required=True, max_len=80, pattern=_ARTIFACT_SLUG_RE),
+        FieldSpec("folder", str, max_len=_ARTIFACT_FOLDER_REF_MAX),
     ],
 )
 
@@ -801,6 +886,12 @@ MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
     "artifact_list": ARTIFACT_LIST_SCHEMA,
     "artifact_versions": ARTIFACT_VERSIONS_SCHEMA,
     "artifact_revert": ARTIFACT_REVERT_SCHEMA,
+    "artifact_folder_list": ARTIFACT_FOLDER_LIST_SCHEMA,
+    "artifact_folder_create": ARTIFACT_FOLDER_CREATE_SCHEMA,
+    "artifact_folder_rename": ARTIFACT_FOLDER_RENAME_SCHEMA,
+    "artifact_folder_move": ARTIFACT_FOLDER_MOVE_SCHEMA,
+    "artifact_folder_delete": ARTIFACT_FOLDER_DELETE_SCHEMA,
+    "artifact_move": ARTIFACT_MOVE_SCHEMA,
 }
 
 MCP_CRON_SCHEMAS: dict[str, ToolSchema] = {

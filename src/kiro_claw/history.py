@@ -11,14 +11,17 @@ import asyncio
 import json
 import logging
 import math
+import os
 import re
 import time as _time
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import KiroClawConfig, config_dir
 from kiro_claw.llm_helpers import ToolApprovalPolicy, stream_and_collect_json
+from kiro_claw.messaging.link import legacy_key
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
 from kiro_claw.session import BACKGROUND_KEY
@@ -43,6 +46,37 @@ _SESSION_KEEP_LINES = 200
 SEARCH_MIN_CHARS = 2  # shortest query string that triggers backend search
 _TITLE_BOOST = 10  # field-boost multiplier for title matches in search_sessions
 _SEARCH_SCAN_WINDOW = 500  # cap files scanned per search to bound I/O
+
+
+def _safe_mtime(path: Path) -> float | None:
+    """Return a file's mtime, or None if it can't be stat'd."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _restore_mtime(path: Path, prev_mtime: float | None) -> None:
+    """Restore a session file's mtime after a *housekeeping* rewrite.
+
+    ``list_sessions`` orders sessions by file mtime as a proxy for "last
+    activity", and only a genuine message :meth:`ConversationLog.append`
+    should advance that. Consolidation, rotation, and metadata updates
+    (tab_id backfill on restore, title/agent/folder edits, last_consolidated
+    bookkeeping) are background housekeeping — they rewrite the file but do
+    NOT represent new conversation activity. Left unchecked they bump the
+    mtime to "now", so every gateway restart (which consolidates + rehydrates
+    open slots) floats long-closed sessions to the top of the session list and
+    the "most recent session" a new dashboard/Slack session resolves to becomes
+    a stale, unrelated thread. Restoring the pre-write mtime keeps ordering
+    faithful to real activity. No-op when ``prev_mtime`` is None (fresh file).
+    """
+    if prev_mtime is None:
+        return
+    try:
+        os.utime(path, (prev_mtime, prev_mtime))
+    except OSError:
+        pass
 
 
 def _sessions_dir() -> Path:
@@ -167,7 +201,19 @@ class ConversationLog:
         self._dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, key: str) -> Path:
-        return self._dir / f"{_safe_key(key)}.jsonl"
+        p = self._dir / f"{_safe_key(key)}.jsonl"
+        if not p.exists():
+            # Back-compat: Slack threads created before the canonical
+            # ``slack:<ts>`` session-key migration logged under the bare
+            # thread_ts filename. Keep reading/appending the legacy file for
+            # those threads so a thread active across the migration doesn't
+            # split its log; brand-new threads create the canonical file.
+            bare = legacy_key(key)
+            if bare is not None:
+                legacy = self._dir / f"{_safe_key(bare)}.jsonl"
+                if legacy.exists():
+                    return legacy
+        return p
 
     def has_log(self, key: str) -> bool:
         """Return True if a conversation log file exists for *key*."""
@@ -311,6 +357,7 @@ class ConversationLog:
         path = self._path(key)
         if not path.exists():
             return
+        prev_mtime = _safe_mtime(path)
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         if not lines:
             return
@@ -319,6 +366,10 @@ class ConversationLog:
         meta["updated_at"] = datetime.now().isoformat()
         lines[0] = json.dumps(meta) + "\n"
         path.write_text("".join(lines), encoding="utf-8")
+        # Housekeeping bookkeeping — must not advance the session's mtime
+        # (see _restore_mtime). Otherwise consolidation floats stale sessions
+        # to the top of list_sessions on every gateway restart.
+        _restore_mtime(path, prev_mtime)
         self._invalidate_cache(key)
 
     def unconsolidated_count(self, key: str) -> int:
@@ -674,6 +725,11 @@ class ConversationLog:
         with the default toolset.
         """
         path = self._path(key)
+        # A metadata-only edit (title/agent/folder/tab_id/pin) is not new
+        # conversation activity — preserve the pre-write mtime so it doesn't
+        # reorder list_sessions. None when the file is absent (upsert): a
+        # genuinely new session should get a natural mtime. See _restore_mtime.
+        prev_mtime = _safe_mtime(path)
         lines = (
             path.read_text(encoding="utf-8").splitlines(keepends=True)
             if path.exists()
@@ -718,6 +774,7 @@ class ConversationLog:
             except OSError:
                 pass
             raise
+        _restore_mtime(path, prev_mtime)
         self._invalidate_cache(key)
 
     def _read_messages(self, key: str) -> list[dict]:
@@ -802,6 +859,9 @@ class ConversationLog:
         """Rewrite session JSONL with only the given messages."""
         path = self._path(key)
         self._dir.mkdir(parents=True, exist_ok=True)
+        # Compaction is housekeeping, not new activity — preserve the pre-write
+        # mtime so it doesn't reorder list_sessions (see _restore_mtime).
+        prev_mtime = _safe_mtime(path)
         # Archive only messages being dropped (old content minus what's being kept).
         # Compare by normalized JSON (sort_keys) to be resilient to key ordering changes.
         if path.exists():
@@ -837,9 +897,8 @@ class ConversationLog:
         lines = [json.dumps(meta) + "\n"]
         for m in messages:
             lines.append(json.dumps(m) + "\n")
-        from kiro_claw.atomic_write import atomic_write
-
         atomic_write(path, "".join(lines))
+        _restore_mtime(path, prev_mtime)
         self._invalidate_cache(key)
 
     def _maybe_rotate(self, path: Path) -> None:
@@ -849,6 +908,9 @@ class ConversationLog:
                 return
         except OSError:
             return
+        # Rotation is triggered right after a genuine append; preserve that
+        # append's mtime rather than re-stamping to "now" (see _restore_mtime).
+        prev_mtime = _safe_mtime(path)
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         if len(lines) <= _SESSION_KEEP_LINES:
             return
@@ -875,10 +937,9 @@ class ConversationLog:
             except json.JSONDecodeError:
                 pass
 
-        from kiro_claw.atomic_write import atomic_write
-
         content = meta_line + "".join(kept)
         atomic_write(path, content)
+        _restore_mtime(path, prev_mtime)
         # Invalidate cache — offsets changed
         safe = path.stem
         self._invalidate_cache(safe)
@@ -1295,10 +1356,13 @@ class HistoryConsolidator:
                     if projects.strip() != current_projects.strip():
                         memory.write_projects(projects)
 
+            # Lesson extraction: _save_lessons calls write_lesson which embeds
+            # each rule (+ up to 5 lazy backfills) via blocking urllib to Ollama.
+            # Same rationale as _write_structured_memory above — must offload.
             if (self._lesson_store or self._vector_store) and (
                 raw_lessons := result.get("lessons")
             ):
-                self._save_lessons(raw_lessons)
+                await asyncio.to_thread(self._save_lessons, raw_lessons)
 
             # Auto skill creation / refinement (Mesh-677, Hermes loop).
             # Guarded by flag + eligibility — failures are logged, never fatal.

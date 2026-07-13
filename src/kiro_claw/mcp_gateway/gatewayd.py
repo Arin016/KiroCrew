@@ -61,9 +61,48 @@ from kiro_claw.mcp_gateway.prewarm import (
     default_hot_keys_path,
     prewarm_from_payloads,
 )
+from kiro_claw.metrics.provider import get_recorder
 from kiro_claw.sel import SecurityEventLog
 
 logger = logging.getLogger(__name__)
+
+
+def _emit_backend_acquire_metric(acquire_ms: float, *, warm: bool) -> None:
+    """Emit kiroclaw.mcp.backend.acquire.duration (best-effort).
+
+    Shared by the ensure_backend + lazy-spawn paths and their unit tests so the
+    metric name / attrs live in production, not duplicated in the test
+    (tests must drive real production code).
+    """
+    try:
+        get_recorder().histogram(
+            "kiroclaw.mcp.backend.acquire.duration",
+            acquire_ms,
+            unit="ms",
+            attrs={"warm": warm},
+        )
+    except Exception:  # telemetry must never break the gateway hot path
+        logger.debug("backend.acquire metric emit failed", exc_info=True)
+
+
+def _emit_lazy_load_metrics(elapsed_ms: float, *, warm: bool) -> None:
+    """Emit MCP lazy-load count + duration (+ backend.acquire), best-effort.
+
+    Shared by the lazy-spawn path and its unit test.
+    """
+    try:
+        rec = get_recorder()
+        rec.counter("kiroclaw.mcp.lazy_load.count", attrs={"transport": "stdio"})
+        rec.histogram(
+            "kiroclaw.mcp.lazy_load.duration",
+            elapsed_ms,
+            unit="ms",
+            attrs={"transport": "stdio"},
+        )
+    except Exception:  # telemetry must never break the gateway hot path
+        logger.debug("lazy_load metric emit failed", exc_info=True)
+    _emit_backend_acquire_metric(elapsed_ms, warm=warm)
+
 
 # Max bytes accepted for any single stub->gateway frame. Registration
 # payloads from the stub are well under 4 KiB; 1 MiB is a very loose cap
@@ -781,6 +820,59 @@ def _audit_peer_allowed(caller: str, pool_label: str) -> None:
         logger.debug("SEL audit emit for gateway accept failed", exc_info=True)
 
 
+def _audit_caller_rekey(caller: str, pool_label: str) -> None:
+    """Emit a SEL audit event when a stub's caller identity is updated
+    mid-connection via a ``recaller`` frame (warm-pool caller repair).
+
+    Re-binding the connection's caller from key-less to a real session
+    identity is a security-relevant authorization change: it moves the
+    connection from effectively unauthorized (no ``_meta.kiroclaw.caller`` on
+    forwarded tool calls, so pooled state-mutating tools are refused) to acting
+    as a specific session. Recording it in the HMAC-chained SEL gives an
+    auditable trail of identity transitions alongside the
+    :func:`_audit_peer_allowed` event from the original register — so a stub
+    that sends a spoofed recaller claiming another session leaves a record.
+    Wrapped defensively -- an audit-log failure must never break connection
+    handling.
+    """
+    try:
+        SecurityEventLog().log_api_access(
+            caller=caller or "unknown",
+            operation="mcp-gateway.caller-rekey",
+            outcome="allowed",
+            source="gateway",
+            resources=pool_label,
+        )
+    except Exception:  # pragma: no cover — audit must never break the handler
+        logger.debug("SEL audit emit for gateway caller-rekey failed", exc_info=True)
+
+
+def _audit_recaller_rejected(existing_caller: str, pool_label: str, reason: str) -> None:
+    """Emit a SEL audit event when a ``recaller`` frame is REJECTED — either a
+    pivot attempt (the connection already carries a session identity) or a
+    malformed/empty ``session_key`` claim.
+
+    Rejecting an identity claim is a security-relevant permission decision —
+    potentially a compromised or misbehaving stub — so EVERY rejection is
+    recorded in the HMAC-chained SEL alongside the accept path
+    (:func:`_audit_caller_rekey`), mirroring the :func:`_audit_peer_allowed` /
+    :func:`_audit_peer_denied` pairing. ``reason`` describes the rejection (and
+    any attempted target) for the trail. Wrapped defensively -- an audit-log
+    failure must never break connection handling.
+    """
+    try:
+        SecurityEventLog().log_api_access(
+            caller=existing_caller or "unknown",
+            operation="mcp-gateway.caller-rekey",
+            outcome="denied",
+            source="gateway",
+            resources=pool_label,
+            error=reason,
+        )
+    except Exception:  # pragma: no cover — audit must never break the handler
+        logger.debug("SEL audit emit for gateway recaller reject failed", exc_info=True)
+
+
 def _audit_pool_fallback(caller: str, pool_label: str, reason: str) -> None:
     """Emit a SEL audit event when the gateway directs a stub to fall back to a
     direct, unpooled per-session exec.
@@ -1043,6 +1135,65 @@ async def _handle_connection(
                 logger.info("stub %s sent Unregister; closing", stub_uuid)
                 return
 
+            # Warm-pool caller repair: a stub that registered key-less (its
+            # kiro-cli was pool-spawned before the session was claimed) sends
+            # this once its session key materializes. Update the caller used
+            # for subsequent forwards so ``_meta.kiroclaw.caller`` carries the
+            # real identity — without it, pooled state-mutating tools see an
+            # empty session key. Never forwarded to the backend. An empty /
+            # malformed key yields ``None`` from ``_caller_from_register`` and
+            # is ignored, so a bad recaller can never clobber a good caller.
+            if msg.get("type") == "recaller":
+                # Deny-by-default: the ONLY permitted transition is a key-less
+                # connection adopting a valid session key. Compute the current
+                # identity up front, reject every non-permitted case with an
+                # explicit ``continue``, and accept only on positive
+                # confirmation of that one transition (the final branch) — any
+                # unexpected state falls through to rejection, not acceptance.
+                # Never forwarded to the backend. Legit warm-pool stubs only
+                # ever send a recaller when their Register was key-less, so this
+                # never blocks the intended path.
+                existing_key = caller.session_key if caller is not None else ""
+                if existing_key:
+                    # Connection already carries an identity — reject the pivot
+                    # (a compromised stub must not re-bind to another session).
+                    attempted = _caller_from_register(msg)
+                    attempted_key = (
+                        attempted.session_key if attempted is not None else "<none>"
+                    )
+                    logger.warning(
+                        "stub %s sent recaller but caller already set "
+                        "(session_key=%s); ignoring",
+                        stub_uuid, existing_key,
+                    )
+                    _audit_recaller_rejected(
+                        existing_key, pool_key.human_readable(),
+                        f"recaller pivot attempt to session_key={attempted_key}",
+                    )
+                    continue
+                updated = _caller_from_register(msg)
+                if updated is None or not updated.session_key:
+                    # Empty/malformed identity claim — reject and audit so ALL
+                    # recaller outcomes land on the SEL trail, not just pivots.
+                    logger.warning(
+                        "stub %s sent recaller with no usable session_key; ignoring",
+                        stub_uuid,
+                    )
+                    _audit_recaller_rejected(
+                        "", pool_key.human_readable(),
+                        "recaller frame with empty/malformed session_key",
+                    )
+                    continue
+                # Positive confirmation: key-less connection + valid recaller
+                # key — the one allowed transition. Audit the identity change.
+                caller = updated
+                _audit_caller_rekey(caller.session_key, pool_key.human_readable())
+                logger.info(
+                    "stub %s recaller → session_key=%s type=%s",
+                    stub_uuid, caller.session_key, caller.session_type,
+                )
+                continue
+
             # B1 pre-flight: the stub sends ``ensure_backend``
             # before forwarding any real MCP frame. Spawning (or reusing)
             # the backend here — instead of lazily on the first real frame —
@@ -1053,8 +1204,12 @@ async def _handle_connection(
             # downstream to the backend.
             if msg.get("type") == "ensure_backend":
                 if backend is None:
+                    _acquire_t0 = time.monotonic()
                     try:
-                        backend, _ = await _acquire_backend(pool, pool_key, resolver)
+                        backend, _was_spawned = await _acquire_backend(pool, pool_key, resolver)
+                        # acquire-only duration, captured before the attach_stub
+                        # + create_task overhead so the metric stays true to name.
+                        _acquire_ms = (time.monotonic() - _acquire_t0) * 1000.0
                     except _TargetUnknown as exc:
                         _audit_pool_rejected(
                             caller.session_key if caller else "",
@@ -1130,6 +1285,9 @@ async def _handle_connection(
                         _drain_inbox_to_stub(inbox, writer),
                         name=f"mcp-gateway-stub-writer-{stub_uuid[:8]}",
                     )
+                    # OTEL metric: acquire-only duration (captured above, before
+                    # attach_stub + create_task overhead).
+                    _emit_backend_acquire_metric(_acquire_ms, warm=not _was_spawned)
                 await _write_json_line(writer, {"type": "ready"})
                 continue
 
@@ -1137,8 +1295,12 @@ async def _handle_connection(
             # dedups concurrent first-attaches so even if two stubs race
             # into this block at the same tick they share one backend.
             if backend is None:
+                _lazy_t0 = time.monotonic()
                 try:
-                    backend, _ = await _acquire_backend(pool, pool_key, resolver)
+                    backend, _lazy_was_spawned = await _acquire_backend(pool, pool_key, resolver)
+                    # acquire/spawn-only duration, captured before the attach +
+                    # create_task overhead.
+                    _lazy_elapsed_ms = (time.monotonic() - _lazy_t0) * 1000.0
                 except _TargetUnknown as exc:
                     _audit_pool_rejected(
                         caller.session_key if caller else "",
@@ -1186,6 +1348,9 @@ async def _handle_connection(
                     _drain_inbox_to_stub(inbox, writer),
                     name=f"mcp-gateway-stub-writer-{stub_uuid[:8]}",
                 )
+                # OTEL metrics: lazy-load count + duration + acquire duration
+                # (elapsed captured above, before attach + task overhead).
+                _emit_lazy_load_metrics(_lazy_elapsed_ms, warm=not _lazy_was_spawned)
 
             # Stash the initialize frame so a transparent respawn can re-prime
             # a fresh backend without kiro-cli re-sending initialize.

@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from kiro_claw.mcp_gateway.pool import PoolKey
+from kiro_claw.metrics.provider import get_recorder
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,11 @@ class HotKeyStore:
             else:
                 self._misses += 1
             self._dirty = True
+        # OTEL metric: warm-pool acquire counter (hit vs miss).
+        get_recorder().counter(
+            "kiroclaw.mcp.warm_pool.acquire",
+            attrs={"result": "hit" if hit else "miss"},
+        )
 
     def hit_stats(self) -> dict[str, int]:
         """Point-in-time warm-pool hit tally for the dashboard / tests.

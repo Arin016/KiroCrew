@@ -126,10 +126,17 @@ class TestGetPpid:
             assert _get_ppid(99999) == 0
 
     def test_linux_returns_0_on_malformed(self):
-        """On Linux, returns 0 when PPid line is missing."""
+        """On Linux, returns 0 when PPid line is missing.
+
+        The malformed ``/proc/<pid>/status`` (no ``PPid:`` line) falls through
+        to the last-resort ``ps`` fallback, so that MUST also be stubbed —
+        otherwise the test reads the *real* ppid of pid 100 on the host (e.g.
+        ``2``/kthreadd) and is non-deterministic. With ``ps`` unavailable the
+        contract is: unresolved → 0.
+        """
         with patch("platform.system", return_value="Linux"), patch(
             "pathlib.Path.read_text", return_value="Name:\ttest\nTgid:\t1\n"
-        ):
+        ), patch("subprocess.check_output", side_effect=OSError("ps unavailable")):
             assert _get_ppid(100) == 0
 
     def test_macos_prefers_libproc_over_ps(self):

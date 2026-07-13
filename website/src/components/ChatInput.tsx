@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, memo } from 'react'
-import { ArrowUpFromLine, ArrowUp, Loader2, Plus, Crop, Bot, Mic, Square, ShieldCheck, BookOpen, Handshake, Rocket, X, ClipboardList, CheckCircle, Check, Ban, Sparkles, Goal, Target, Lock, Globe, FolderOpen, FileText } from 'lucide-react'
+import { ArrowUpFromLine, ArrowUp, Loader2, Plus, Crop, Bot, Mic, Square, ShieldCheck, BookOpen, Handshake, Rocket, X, ClipboardList, CheckCircle, Check, Ban, Sparkles, Goal, Target, Lock, Globe, FolderOpen, FileText, PawPrint } from 'lucide-react'
 import { Toggle } from './ui'
 import VoiceStatusBar from './VoiceStatusBar'
 import { createPortal } from 'react-dom'
@@ -66,6 +66,7 @@ import { effortLabel } from '../lib/effort'
 import SlashCommandMenu from './SlashCommandMenu'
 import FilePickerMenu from './FilePickerMenu'
 import SkillPickerMenu from './SkillPickerMenu'
+import { matchFileToken, matchSkillToken, replaceTokenAtCaret } from './composerTokens'
 
 const INPUT_MIN_H = 44
 const INPUT_DEFAULT_MAX_H = 140
@@ -140,6 +141,14 @@ interface ChatInputProps {
   /** Inject a mid-turn steer with the given text into the running turn. */
   onSteer?: (text: string) => void
   disabled?: boolean
+  /** Hard-lock the composer while background sub-agents run for this slot
+   *  (Decision B). Distinct from `disabled` (stopping) — steers tangential
+   *  questions to the Activity-panel side chat to keep the main thread's
+   *  plan/synthesis context clean. */
+  subagentsRunning?: boolean
+  /** Opens the Activity-panel side chat; wired to the lock banner button so the
+   *  user can ask tangential questions without unlocking the main composer. */
+  onOpenSideChat?: () => void
   placeholder?: string
   prefillHint?: boolean
   onDismissHint?: () => void
@@ -294,6 +303,8 @@ function ChatInput({
   canSteer,
   onSteer,
   disabled = false,
+  subagentsRunning = false,
+  onOpenSideChat,
   placeholder = '',
   prefillHint,
   onScreenshot,
@@ -548,6 +559,15 @@ function ChatInput({
       staleTime: 5 * 60 * 1000,
     })
   }, [queryClient])
+  // Shared caret-relative token insertion for the @/$ pickers: replace the
+  // sigil-token ending at the caret with `token`, commit, and restore the caret
+  // just after it. One copy keeps the two onSelect handlers duplication-free.
+  const applyPickedToken = useCallback((tokenRe: RegExp, token: string) => {
+    const el = inputRef.current
+    const next = replaceTokenAtCaret(value, el?.selectionStart ?? value.length, tokenRe, token)
+    onChange(next.value)
+    requestAnimationFrame(() => { const e2 = inputRef.current; if (e2) { e2.focus(); e2.setSelectionRange(next.caret, next.caret) } })
+  }, [value, onChange])
   const chatMessages = useAppSelector(s => s.chat.messages)
   const [manualHeight, setManualHeight] = useState<number | null>(() => {
     const saved = localStorage.getItem(INPUT_HEIGHT_LS_KEY)
@@ -1186,7 +1206,7 @@ function ChatInput({
       // through when the gateway is offline. The send itself is gated on
       // `connected` to match the disabled-state on the Send button.
       e.preventDefault()
-      if (connected) onSend()
+      if (connected && !subagentsRunning) onSend()
       return
     }
     // Prompt history: ↑/↓ cycles through prior user messages.
@@ -1589,9 +1609,7 @@ function ChatInput({
           project={project}
           onFileOpen={onFileOpen}
           onSelect={({ path, relativePath }) => {
-            // Replace @query with @relative/path inline in the textarea
-            const newVal = value.replace(/(^|[\s])@\S*$/, (_, prefix) => `${prefix}@${relativePath} `)
-            onChange(newVal)
+            applyPickedToken(/(^|[\s])@\S*$/, `@${relativePath} `)
             setFilePickerOpen(false); setFileQuery('')
             onFileSelect(path)
           }}
@@ -1604,10 +1622,9 @@ function ChatInput({
         anchorRef={inputRef as React.RefObject<HTMLElement>}
         open={skillPickerOpen}
         onSelect={({ leaf }) => {
-          // Replace the trailing $query with $leaf (token left literal — backend
-          // appends the skill body and the user still sees their $token marker).
-          const newVal = value.replace(/(^|[\s])\$[a-z0-9/_-]*$/, (_, prefix) => `${prefix}$${leaf} `)
-          onChange(newVal)
+          // Token left literal — backend appends the skill body; the user still
+          // sees their $token marker. Caret-relative replace via shared helper.
+          applyPickedToken(/(^|[\s])\$[a-z0-9/_-]*$/, `$${leaf} `)
           setSkillPickerOpen(false); setSkillQuery('')
         }}
         onClose={() => { setSkillPickerOpen(false); setSkillQuery('') }}
@@ -1643,15 +1660,16 @@ function ChatInput({
         <VoiceStatusBar recording={voiceRecording} level={voiceLevel} deviceLabel={voiceDeviceLabel} error={voiceError} onDismissError={onClearVoiceError} />
 
         {optimizing && <span className="absolute inset-0 flex items-start px-4 pt-3 text-sm text-white font-medium pointer-events-none z-10 bg-black/60 rounded-2xl"><Sparkles size={14} className="inline mr-1 text-yellow-400" /> Optimizing prompt…</span>}
+        {subagentsRunning && !optimizing && <div className="absolute inset-0 flex items-center justify-between gap-2 px-4 text-sm font-medium pointer-events-none z-10 bg-black/60 rounded-2xl text-white"><span className="flex items-center gap-1"><PawPrint size={14} className="lucide-inline" /> Sub-agents running — use the side chat for other questions</span>{onOpenSideChat && <button type="button" onClick={onOpenSideChat} className="pointer-events-auto shrink-0 text-xs py-1 px-2.5 rounded-md bg-accent text-accent-fg hover:bg-accent-hover transition-colors">Open side chat</button>}</div>}
         <div className={`relative ${manualHeight !== null ? 'flex-1 min-h-0 flex flex-col' : ''}`}>
         <PasteHighlightLayer ref={mirrorRef} value={value} blocks={pasteBlocks} />
         <textarea
           ref={inputRef}
           aria-label="Message input"
-          className={`relative w-full bg-transparent border-none ${INPUT_TYPO} text-text outline-none min-h-[44px] max-h-[calc(var(--mc-vh,100vh)*0.5)] placeholder:text-muted resize-none ${manualHeight !== null ? 'flex-1' : ''} ${disabled ? 'opacity-40 pointer-events-none' : ''} ${optimizing ? 'opacity-30' : ''}`}
+          className={`relative w-full bg-transparent border-none ${INPUT_TYPO} text-text outline-none min-h-[44px] max-h-[calc(var(--mc-vh,100vh)*0.5)] placeholder:text-muted resize-none ${manualHeight !== null ? 'flex-1' : ''} ${(disabled || subagentsRunning) ? 'opacity-40 pointer-events-none' : ''} ${optimizing ? 'opacity-30' : ''}`}
           style={manualHeight !== null ? { height: '100%' } : undefined}
-          placeholder={!connected ? 'Gateway offline — message will not send' : disabled ? 'Stopping…' : voiceRecording ? 'Recording… click mic to stop' : voiceTranscribing ? 'Transcribing, please wait…' : resolvedPlaceholder}
-          readOnly={optimizing}
+          placeholder={!connected ? 'Gateway offline — message will not send' : subagentsRunning ? 'Sub-agents running — use the Activity panel side chat for other questions' : disabled ? 'Stopping…' : voiceRecording ? 'Recording… click mic to stop' : voiceTranscribing ? 'Transcribing, please wait…' : resolvedPlaceholder}
+          readOnly={optimizing || subagentsRunning}
           rows={1}
           value={value}
           onDragOver={e => { e.preventDefault(); onDragOver?.(e); e.stopPropagation() }}
@@ -1660,16 +1678,19 @@ function ChatInput({
           onChange={e => {
             valueFromUserRef.current = true // real DOM edit, not a parent-driven draft restore
             const val = e.target.value; onChange(val); setSlashMenuOpen(val.startsWith('/'))
-            // Detect @query at word boundary for file picker
-            const m = val.match(/(^|[\s])@(\S*)$/)
-            if (m && onFileSelect) { setFilePickerOpen(true); setFileQuery(m[2]) }
+            // Anchor @/$ detection to the token being edited AT THE CARET, not the
+            // end of the whole input. `before` ends at the caret, so a match means
+            // "the token ends where my cursor is" — which makes both pickers fire
+            // mid-sentence and when trailing text/newlines follow the token
+            // (previously they only opened when the token was the last thing in the
+            // message). Matchers live in composerTokens.ts (unit-tested there).
+            const before = val.slice(0, e.target.selectionStart ?? val.length)
+            const fileQ = onFileSelect ? matchFileToken(before) : null
+            if (fileQ !== null) { setFilePickerOpen(true); setFileQuery(fileQ) }
             else { setFilePickerOpen(false); setFileQuery('') }
-            // Detect $query at word boundary for skill picker.
-            // Charset mirrors the backend $skill token: lowercase-led slug, so
-            // shell-style $PATH / $5 won't trigger the menu. Mutually exclusive
-            // with the @ file picker (a token starts with one sigil or the other).
-            const sm = val.match(/(^|[\s])\$([a-z0-9][a-z0-9/_-]*)?$/)
-            if (sm && !m) { setSkillPickerOpen(true); setSkillQuery(sm[2] || '') }
+            // $ and @ are mutually exclusive (a token starts with one sigil); @ wins.
+            const skillQ = fileQ === null ? matchSkillToken(before) : null
+            if (skillQ !== null) { setSkillPickerOpen(true); setSkillQuery(skillQ) }
             else { setSkillPickerOpen(false); setSkillQuery('') }
           }}
           onKeyDown={handleKeyDown}
@@ -1878,7 +1899,7 @@ function ChatInput({
                       {steerFlash ? <Check size={16} /> : <Target size={16} />}
                     </button>
                   )}
-                  <button className="w-8 h-8 rounded-full bg-warn text-warn-fg border-none flex items-center justify-center cursor-pointer hover:bg-warn/80 transition-all" onClick={onSend} title="Queue message" aria-label="Queue message">
+                  <button className="w-8 h-8 rounded-full bg-warn text-warn-fg border-none flex items-center justify-center cursor-pointer hover:bg-warn/80 disabled:opacity-30 disabled:cursor-not-allowed transition-all" onClick={onSend} disabled={subagentsRunning} title="Queue message" aria-label="Queue message">
                     <ArrowUpFromLine size={18} />
                   </button>
                 </>
@@ -1908,7 +1929,7 @@ function ChatInput({
               <button
                 className="w-8 h-8 rounded-full bg-accent text-accent-fg border-none flex items-center justify-center cursor-pointer hover:bg-accent-hover disabled:opacity-30 disabled:cursor-not-allowed transition-all"
                 onClick={onSend}
-                disabled={(!value.trim() && !pendingFiles.length) || disabled || optimizing || !connected}
+                disabled={(!value.trim() && !pendingFiles.length) || disabled || subagentsRunning || optimizing || !connected}
                 aria-label="Send"
                 {...offlineProps(connected, 'send', 'Send')}
               >

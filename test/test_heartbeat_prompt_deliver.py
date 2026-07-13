@@ -444,19 +444,21 @@ class TestSlotPrefixMatch:
         state = self._state_with_slots({})
         assert DashboardState.resolve_slot(state, "chat-99") is None
 
-    def test_resolve_slot_tie_break_first_insertion(self):
-        """When multiple slots share the prefix, return the first in insertion
-        order (oldest). Documents the tie-break rule called out in the
-        resolve_slot docstring.
+    def test_resolve_slot_tie_break_prefers_newest_timestamp(self):
+        """When multiple slots share the prefix, return the one with the largest
+        trailing <timestamp> (newest) — NOT dict-insertion order. A gateway
+        restart can leave a stale slot alongside the live one; iteration-order
+        tie-break used to route chat-N to the stale slot.
         """
         from kiro_claw.dashboard.state import DashboardState, _ChatSlot
 
-        oldest = _ChatSlot(key="chat-2-100")
         newer = _ChatSlot(key="chat-2-200")
-        # dict preserves insertion order (Python 3.7+)
+        oldest = _ChatSlot(key="chat-2-100")
+        # Insert the STALE (oldest) slot FIRST so a first-insertion tie-break
+        # would wrongly return it; the fix must return the newest instead.
         slots = {"chat-2-100": oldest, "chat-2-200": newer}
         state = self._state_with_slots(slots)
-        assert DashboardState.resolve_slot(state, "chat-2") is oldest
+        assert DashboardState.resolve_slot(state, "chat-2") is newer
 
     def test_resolve_slot_does_not_match_cross_prefix(self):
         """chat-2 must not match chat-20-... — prefix requires trailing '-'."""

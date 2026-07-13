@@ -467,12 +467,13 @@ class AgentConfig:
         ),
     )
     max_subagents: int = field(
-        default=3,
+        default=0,
         metadata=_meta(
             "Max SubAgents",
             "Maximum amount of subagents at one time. 0 = auto-size the cap at "
             "startup from host memory/CPU and a learned per-agent cost "
-            "(see dynamic-subagent-sizing docs).",
+            "(see dynamic-subagent-sizing docs). Default; set a positive integer "
+            "to pin a fixed cap.",
         ),
     )
     spawn_min_memory_gb: float = field(
@@ -507,7 +508,7 @@ class AgentConfig:
         ),
     )
     subagent_auto_max: int = field(
-        default=16,
+        default=32,
         metadata=_meta(
             "SubAgent Auto-Size Max",
             "Ceiling on the auto-sized subagent cap (only applies when "
@@ -663,6 +664,7 @@ class SessionConfig:
             "Archive Retention (days)",
             "Days to keep compacted/rotated session archives before auto-cleanup. "
             "-1 disables cleanup (manage deletion manually).",
+            nullable=True,
         ),
     )
 
@@ -1288,6 +1290,50 @@ class SkillsConfig:
                 "disabling auto_refine_on_deviation"
             )
             object.__setattr__(self, "auto_refine_on_deviation", False)
+
+
+@dataclass
+class TelemetryConfig:
+    """Metrics telemetry settings (Wave 0 trunk).
+
+    Default OFF: when disabled, metric call sites are cheap no-ops and nothing is
+    written or exported (byte-identical to no telemetry), mirroring the
+    ``mcp_gateway.enabled`` / ``skills.lazy_load`` opt-in convention. When
+    enabled, a local-first JSONL sink under ``~/.kiroclaw/metrics`` is activated;
+    remote / OTLP egress is a separate opt-in (not wired yet).
+    """
+
+    enabled: bool = field(
+        default=False,
+        metadata=_meta(
+            "Enabled",
+            "Main switch for KiroClaw metrics telemetry. Off by default: metric "
+            "call sites are no-ops and nothing is written. When on, a local-first "
+            "JSONL sink under ~/.kiroclaw/metrics is enabled (no network egress).",
+        ),
+    )
+    local_dir: str = field(
+        default="",
+        metadata=_meta(
+            "Local Metrics Dir",
+            "Directory for local JSONL metric shards. Empty = ~/.kiroclaw/metrics. "
+            "Supports ~ expansion.",
+        ),
+    )
+    export_interval_seconds: int = field(
+        default=60,
+        metadata=_meta(
+            "Export Interval (s)",
+            "How often the local exporter flushes aggregated metrics to disk (>=1).",
+        ),
+    )
+
+    def __post_init__(self) -> None:
+        if self.export_interval_seconds < 1:
+            logger.warning(
+                "export_interval_seconds %d < 1, using 1", self.export_interval_seconds
+            )
+            object.__setattr__(self, "export_interval_seconds", 1)
 
 
 # ---------------------------------------------------------------------------
@@ -2052,6 +2098,71 @@ class HeartbeatConfig:
 
 
 @dataclass
+class WatchdogConfig:
+    """ACP per-session watchdog / liveness-oracle tuning (acp/session_handle.py).
+
+    Wellness (the liveness oracle) is the primary detector; these windows govern
+    only the UNKNOWN-verdict backstop class. A WORKING verdict is never acted on
+    at any elapsed time, and every watchdog action is non-lethal (auto-recovery,
+    never a silent kill).
+    """
+
+    check_after_secs: float = field(
+        default=60.0,
+        metadata=_meta(
+            "Check after (s)",
+            "Idle seconds on a turn before the liveness oracle is consulted at all. "
+            "Below this, the dispatch loop does no watchdog work.",
+        ),
+    )
+    stale_window_secs: float = field(
+        default=300.0,
+        metadata=_meta(
+            "Stale probe window (s)",
+            "Idle seconds before an UNKNOWN-verdict model-wait turn is safe-probed "
+            "via session/cancel. Probes are non-lethal: a live turn auto-recovers.",
+        ),
+    )
+    tool_stall_suspect_secs: float = field(
+        default=600.0,
+        metadata=_meta(
+            "Tool stall suspect (s)",
+            "Idle seconds before an UNKNOWN-verdict in-flight tool is cancelled and "
+            "the turn routed to tool-stall recovery (continue-nudge, no re-run of "
+            "the original message). WORKING tools (e.g. a matched live build child) "
+            "are never cancelled regardless of duration.",
+        ),
+    )
+    tool_stall_hard_cap_secs: float = field(
+        default=2700.0,
+        metadata=_meta(
+            "Hard cap (s)",
+            "Absolute ceiling for UNKNOWN-verdict forbearance (e.g. the extended "
+            "probably-thinking window). Applies ONLY to UNKNOWN verdicts — never "
+            "to a WORKING session.",
+        ),
+    )
+    model_silent_probe_secs: float = field(
+        default=900.0,
+        metadata=_meta(
+            "Silent-think probe window (s)",
+            "Extended probe window for a model-wait with an established backend "
+            "connection but flat counters (non-streamed server-side reasoning, "
+            "e.g. long xhigh thinks). Probing a live think cancels and regenerates "
+            "it, so this window is deliberately generous.",
+        ),
+    )
+    wellness_sample_secs: float = field(
+        default=3.0,
+        metadata=_meta(
+            "Wellness sample interval (s)",
+            "Minimum spacing between CPU/IO counter samples used for movement "
+            "deltas in the liveness oracle.",
+        ),
+    )
+
+
+@dataclass
 class TunnelConfig:
     enabled: bool = field(
         default=False,
@@ -2243,6 +2354,13 @@ class KiroClawConfig:
         default_factory=SkillsConfig,
         metadata=_meta("Skills", "Skill loading and matching configuration."),
     )
+    telemetry: TelemetryConfig = field(
+        default_factory=TelemetryConfig,
+        metadata=_meta(
+            "Telemetry",
+            "Metrics telemetry (local-first JSONL sink). Off by default.",
+        ),
+    )
     stt: SttConfig = field(
         default_factory=SttConfig,
         metadata=_meta("STT", "Speech-to-text transcription settings."),
@@ -2268,6 +2386,12 @@ class KiroClawConfig:
     heartbeat: HeartbeatConfig = field(
         default_factory=HeartbeatConfig,
         metadata=_meta("Heartbeat", "Heartbeat background task queue delivery defaults."),
+    )
+    watchdog: WatchdogConfig = field(
+        default_factory=WatchdogConfig,
+        metadata=_meta(
+            "Watchdog", "ACP per-session watchdog / liveness-oracle windows."
+        ),
     )
 
     slack: SlackConfig = field(
@@ -2533,6 +2657,9 @@ class KiroClawConfig:
         messaging_data = data.get("messaging", {})
         if not isinstance(messaging_data, dict):
             messaging_data = {}
+        telemetry_data = data.get("telemetry", {})
+        if not isinstance(telemetry_data, dict):
+            telemetry_data = {}
 
         # Parse agents section into dict[str, KiroClawAgentConfig]
         raw_agents = data.get("agents", {})
@@ -2592,11 +2719,11 @@ class KiroClawConfig:
                 conductor_skill=agent_data.get("conductor_skill", False),
                 tool_search=bool(agent_data.get("tool_search", True)),
                 session_sharing=bool(agent_data.get("session_sharing", True)),
-                max_subagents=agent_data.get("max_subagents", 3),
+                max_subagents=agent_data.get("max_subagents", 0),
                 subagent_mem_buffer_pct=int(agent_data.get("subagent_mem_buffer_pct", 20)),
                 subagent_cost_gb=float(agent_data.get("subagent_cost_gb", 0.5)),
                 subagent_cpu_cost_cores=float(agent_data.get("subagent_cpu_cost_cores", 1.0)),
-                subagent_auto_max=int(agent_data.get("subagent_auto_max", 16)),
+                subagent_auto_max=int(agent_data.get("subagent_auto_max", 32)),
                 subagent_spawn_stagger_secs=float(
                     agent_data.get("subagent_spawn_stagger_secs", 2.0)
                 ),
@@ -2653,6 +2780,13 @@ class KiroClawConfig:
                 idle_reset_minutes=_coerce_int(messaging_data.get("idle_reset_minutes"), 0),
                 daily_reset_hour=_coerce_int(messaging_data.get("daily_reset_hour"), -1),
                 queue_mode=str(messaging_data.get("queue_mode", "steer")),
+            ),
+            telemetry=TelemetryConfig(
+                enabled=bool(telemetry_data.get("enabled", False)),
+                local_dir=str(telemetry_data.get("local_dir", "")),
+                export_interval_seconds=int(
+                    telemetry_data.get("export_interval_seconds", 60)
+                ),
             ),
             memory=MemoryConfig(
                 embedding_provider=memory_data.get("embedding_provider", "none"),
@@ -2970,6 +3104,7 @@ class KiroClawConfig:
             "messaging": asdict(self.messaging),
             "cron_history": asdict(self.cron_history),
             "skills": asdict(self.skills),
+            "telemetry": asdict(self.telemetry),
             "snapshot_dir": self.snapshot_dir,
             "timezone": self.timezone,
             "auto_update": self.auto_update,

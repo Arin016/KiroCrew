@@ -18,15 +18,17 @@ describe('UserMessage', () => {
     expect(screen.getByTestId('content')).toHaveTextContent('hello')
   })
 
-  // Mesh-2056: the read-only bubble must carry white-space: pre-wrap so
-  // user-typed line breaks (Shift+Enter) survive. Markdown renders a single
-  // source newline as a literal "\n" text node, which the default
-  // white-space: normal would collapse to a space (run-on paragraph).
-  it('preserves newlines via white-space: pre-wrap on the bubble', () => {
+  // Mesh-2695: the bubble must NOT force white-space: pre-wrap. User-typed
+  // line breaks (Shift+Enter) are now preserved at the markdown level —
+  // renderUserContentCb renders through MarkdownRenderer with `softBreaks`,
+  // turning soft breaks into <br>. Container pre-wrap was removed because it
+  // made react-markdown's inter-block newline text nodes render as literal
+  // blank lines and inflated the gaps between list items and paragraphs.
+  it('does not force white-space: pre-wrap on the bubble (Mesh-2695)', () => {
     const { container } = render(<UserMessage content={'line one\nline two'} renderContent={renderContent} />)
     const bubble = container.querySelector('.msg-content') as HTMLElement
     expect(bubble).toBeInTheDocument()
-    expect(bubble.style.whiteSpace).toBe('pre-wrap')
+    expect(bubble.style.whiteSpace).toBe('')
   })
 
   it('shows timestamp when provided', () => {

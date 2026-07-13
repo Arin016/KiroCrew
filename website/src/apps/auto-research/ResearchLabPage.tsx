@@ -1,4 +1,4 @@
-import { useState, useEffect, useReducer } from 'react'
+import { useState, useEffect, useReducer, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { FlaskConical, Play, Pause, Square, MessageCircle, ChevronDown, ChevronRight, Sparkles, ThumbsUp, ArrowRight, HelpCircle, XCircle, CheckCircle, AlertTriangle, Lock, X, Trash2, GitFork, Flame, BookOpen, FileText, RefreshCw, ExternalLink, Loader2 } from 'lucide-react'
 import { api } from '../../api/client'
@@ -12,6 +12,44 @@ const ACTIVE_STATUSES = ['running', 'paused', 'stagnant', 'needs_input']
 interface Campaign { id: string; name: string; question: string; sub_questions: string; sources: string; max_cycles: number; idle_secs: number; status: string; total_cycles: number; findings?: Finding[]; error_message?: string; pending_question?: string; parent_id?: string; parallel_workers?: number }
 interface Finding { cycle: number; summary: string; sources_checked: string[]; sources_empty: string[]; new_findings_count: number; evidence_strength: string; key_insight: string; verification?: { passed: boolean; detail?: string } }
 interface Validation { can_start: boolean; errors: string[]; warnings: string[]; estimated_cycles: number; estimated_duration_min: number }
+
+// Auto-growing, manually-resizable textarea used for sub-question / guidance
+// entry. Grows with content (so multi-line input is fully visible) and supports
+// Enter-to-submit / Shift+Enter-for-newline when an onSubmit handler is given.
+function GrowTextarea({ value, onChange, onSubmit, placeholder, className = '', ariaLabel }: {
+  value: string
+  onChange: (v: string) => void
+  onSubmit?: () => void
+  placeholder?: string
+  className?: string
+  ariaLabel?: string
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => {
+    const el = ref.current
+    if (el) {
+      el.style.height = 'auto'
+      el.style.height = `${el.scrollHeight}px`
+    }
+  }, [value])
+  return (
+    <textarea
+      ref={ref}
+      rows={1}
+      aria-label={ariaLabel}
+      className={`resize-none overflow-hidden ${className}`}
+      value={value}
+      placeholder={placeholder}
+      onChange={e => onChange(e.target.value)}
+      onKeyDown={e => {
+        if (onSubmit && e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault()
+          onSubmit()
+        }
+      }}
+    />
+  )
+}
 
 function EvidenceBadge({ s }: { s: string }) {
   if (s === 'strong') return <span className="text-xs px-1.5 py-0.5 rounded bg-bg-elevated text-ok inline-flex items-center gap-0.5"><ThumbsUp size={10} /> Strong</span>
@@ -74,7 +112,6 @@ function SetupWizard({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
   const [question, setQuestion] = useState('')
   const [subQs, setSubQs] = useState<string[]>([])
   const [newSub, setNewSub] = useState('')
-  const [sources, setSources] = useState<string[]>(['web', 'knowledge'])
   const [maxCycles, setMaxCycles] = useState(30)
   const [maxCyclesTouched, setMaxCyclesTouched] = useState(false)
   const [idleSecs, setIdleSecs] = useState(120)
@@ -117,25 +154,25 @@ function SetupWizard({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
   // Pre-fill max_cycles from committed sub-question count when reaching Limits,
   // unless the user has already edited it.
   useEffect(() => {
-    if (step === 2 && !maxCyclesTouched && subCount > 0) setMaxCycles(suggestedMaxCycles(subCount))
+    if (step === 1 && !maxCyclesTouched && subCount > 0) setMaxCycles(suggestedMaxCycles(subCount))
   }, [step])  // eslint-disable-line react-hooks/exhaustive-deps
 
   const validate = async () => {
     setError(null)
     try {
-      const r: Validation = await api.researchValidate({ question, sub_questions: buildSubs(), sources, max_cycles: maxCycles })
+      const r: Validation = await api.researchValidate({ question, sub_questions: buildSubs(), max_cycles: maxCycles })
       setValidation(r)
     } catch {
       setError('Validation failed — check your connection and try again.')
     }
   }
-  useEffect(() => { if (step === 3) { validate() } }, [step])  // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (step === 2) { validate() } }, [step])  // eslint-disable-line react-hooks/exhaustive-deps
 
   const submit = async () => {
     setSubmitting(true)
     setError(null)
     try {
-      const c = await api.researchCreate({ question, sub_questions: buildSubs(), scope_constraints: scopeConstraints, sources, max_cycles: maxCycles, idle_secs: idleSecs, success_criteria: successCriteria, auto_approve: autoApprove, parallel_workers: parallelWorkers })
+      const c = await api.researchCreate({ question, sub_questions: buildSubs(), scope_constraints: scopeConstraints, max_cycles: maxCycles, idle_secs: idleSecs, success_criteria: successCriteria, auto_approve: autoApprove, parallel_workers: parallelWorkers })
       if (c?.id) { await api.researchAction(c.id, 'start'); onDone() }
     } catch {
       setError('Failed to start campaign — please try again.')
@@ -144,21 +181,21 @@ function SetupWizard({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
     }
   }
 
-  const steps = ['Question', 'Sources', 'Limits', 'Review']
+  const steps = ['Question', 'Limits', 'Review']
   return (
     <div className="max-w-2xl mx-auto">
       <div className="flex items-center gap-1 mb-6">{steps.map((s, i) => (
         <div key={s} className="flex items-center gap-1">
           <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${i <= step ? 'bg-accent text-white font-bold' : 'bg-border text-muted'}`}>{i + 1}</div>
           <span className={`text-xs ${i === step ? 'text-text' : 'text-muted'}`}>{s}</span>
-          {i < 3 && <div className="w-8 h-px bg-border" />}
+          {i < 2 && <div className="w-8 h-px bg-border" />}
         </div>
       ))}</div>
 
       {step === 0 && <div className="space-y-4">
         <div>
           <label htmlFor="research-question" className="text-sm font-medium">What do you want to research?
-            <textarea id="research-question" aria-label="What do you want to research?" className="w-full mt-1 p-2 rounded-md text-sm bg-bg border border-border" rows={3} value={question} onChange={e => setQuestion(e.target.value)} placeholder="How do other teams handle API rate limiting?" />
+            <textarea id="research-question" aria-label="What do you want to research?" className="w-full mt-1 p-2 rounded-md text-sm bg-bg border border-border resize-y" rows={3} value={question} onChange={e => setQuestion(e.target.value)} placeholder="How do other teams handle API rate limiting?" />
           </label>
           <div className="text-xs text-muted">Min 20 characters.</div>
         </div>
@@ -170,27 +207,19 @@ function SetupWizard({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
           {tree.some(n => n.status !== 'pruned') && <div className="text-xs text-muted mt-1">Answer clarifiers to refine, or just pick sub-questions and go.</div>}
           <div className="mt-2"><GrillTree tree={tree} dispatch={dispatchTree} onExpand={onExpand} /></div>
           {grillUnavailable && <div className="text-xs text-warn mt-2">Grill unavailable — add sub-questions manually below.</div>}
-          {subQs.map((sq, i) => <div key={i} className="flex items-center gap-2 mt-1"><input aria-label={`Sub-question ${i + 1}`} className="flex-1 text-sm p-1.5 rounded bg-bg border border-border" value={sq} onChange={e => { const n = [...subQs]; n[i] = e.target.value; setSubQs(n) }} /><button className="text-xs text-danger" onClick={() => setSubQs(subQs.filter((_, j) => j !== i))} aria-label="Remove sub-question"><X size={12} /></button></div>)}
-          <input aria-label="Add sub-question manually" className="w-full text-sm p-1.5 rounded bg-bg border border-border mt-2" placeholder="Add sub-question manually (Enter)" value={newSub} onChange={e => setNewSub(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && newSub) { setSubQs([...subQs, newSub]); setNewSub('') } }} />
+          {subQs.map((sq, i) => <div key={i} className="flex items-start gap-2 mt-1"><GrowTextarea ariaLabel={`Sub-question ${i + 1}`} className="flex-1 text-sm p-1.5 rounded bg-bg border border-border" value={sq} onChange={v => { const n = [...subQs]; n[i] = v; setSubQs(n) }} /><button className="text-xs text-danger mt-1.5" onClick={() => setSubQs(subQs.filter((_, j) => j !== i))} aria-label="Remove sub-question"><X size={12} /></button></div>)}
+          <GrowTextarea ariaLabel="Add sub-question manually" className="w-full text-sm p-1.5 rounded bg-bg border border-border mt-2" placeholder="Add sub-question manually (Enter; Shift+Enter for newline)" value={newSub} onChange={setNewSub} onSubmit={() => { if (newSub.trim()) { setSubQs([...subQs, newSub.trim()]); setNewSub('') } }} />
         </div>
       </div>}
 
-      {step === 1 && <div className="space-y-3">
-        <span className="text-sm font-medium block">Where should the agent look?</span>
-        <div className="text-xs text-muted">Soft steering — the agent treats the selected sources as its primary tools, but isn't hard-restricted to them (it may use others if needed).</div>
-        {[{ id: 'web', label: 'Web search' }, { id: 'internal', label: 'Internal search' }, { id: 'code', label: 'Local codebase' }, { id: 'knowledge', label: 'Knowledge Library' }].map(s => (
-          <label key={s.id} htmlFor={`source-${s.id}`} className="flex items-center gap-2 text-sm"><input id={`source-${s.id}`} type="checkbox" aria-label={s.label} checked={sources.includes(s.id)} onChange={e => setSources(e.target.checked ? [...sources, s.id] : sources.filter(x => x !== s.id))} />{s.label}</label>
-        ))}
-      </div>}
-
-      {step === 2 && <div className="space-y-4">
+      {step === 1 && <div className="space-y-4">
         <span className="text-sm font-medium block">When should the agent stop?</span>
         <div className="text-xs text-muted">Stops at the cycle cap, when the Definition of Done is met, on stagnation, or when you Stop it.</div>
         <div className="flex items-center gap-2"><span className="text-sm">Max cycles:</span><input type="number" aria-label="Max cycles" min={5} max={100} value={maxCycles} className="w-20 text-sm p-1 rounded bg-bg border border-border" onChange={e => { setMaxCyclesTouched(true); setMaxCycles(Number(e.target.value)) }} />{subCount > 0 && !maxCyclesTouched && <span className="text-xs text-muted">suggested from {subCount} sub-questions</span>}</div>
         <div className="flex items-center gap-2"><span className="text-sm">Idle between cycles:</span><select aria-label="Idle between cycles" value={idleSecs} onChange={e => setIdleSecs(Number(e.target.value))} className="text-sm p-1 rounded bg-bg border border-border"><option value={30}>30s</option><option value={60}>60s</option><option value={120}>120s</option></select></div>
         <div>
           <span className="text-sm font-medium block">Definition of Done (optional)</span>
-          <textarea aria-label="Definition of Done (optional)" className="w-full text-sm p-1.5 rounded bg-bg border border-border mt-1" rows={2} placeholder="e.g. AI code review finds no blocking issues and the test build passes" value={successCriteria} onChange={e => setSuccessCriteria(e.target.value)} />
+          <textarea aria-label="Definition of Done (optional)" className="w-full text-sm p-1.5 rounded bg-bg border border-border mt-1 resize-y" rows={2} placeholder="e.g. AI code review finds no blocking issues and the test build passes" value={successCriteria} onChange={e => setSuccessCriteria(e.target.value)} />
           <div className="text-xs text-muted mt-1">If set, the agent verifies against this each cycle and completes when met.</div>
         </div>
         <label htmlFor="auto-approve" className="flex items-center gap-2 text-sm">
@@ -200,7 +229,7 @@ function SetupWizard({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
         <div className="flex items-center gap-2"><span className="text-sm">Parallel workers:</span><input type="number" aria-label="Parallel workers" min={1} max={5} value={parallelWorkers} className="w-16 text-sm p-1 rounded bg-bg border border-border" onChange={e => setParallelWorkers(Math.min(5, Math.max(1, Number(e.target.value))))} /><span className="text-xs text-muted">{parallelWorkers > 1 ? `${parallelWorkers} sub-questions investigated in parallel each cycle` : 'sequential (default)'}</span></div>
       </div>}
 
-      {step === 3 && <div className="space-y-3">
+      {step === 2 && <div className="space-y-3">
         <span className="text-sm font-medium block">Pre-flight Check:</span>
         {validation ? <>
           {validation.errors.map((e, i) => <div key={i} className="text-sm flex items-center gap-1"><XCircle size={14} className="text-danger" /> {e}</div>)}
@@ -217,7 +246,7 @@ function SetupWizard({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
 
       <div className="flex justify-between mt-6">
         <button className="text-sm text-muted hover:text-text" onClick={step === 0 ? onCancel : () => setStep(step - 1)}>{step === 0 ? 'Cancel' : '← Back'}</button>
-        {step < 3 ? <button className="text-sm px-3 py-1.5 rounded-md bg-accent text-white disabled:opacity-50" disabled={step === 0 && question.length < 20} onClick={() => setStep(step + 1)}>Next →</button>
+        {step < 2 ? <button className="text-sm px-3 py-1.5 rounded-md bg-accent text-white disabled:opacity-50" disabled={step === 0 && question.length < 20} onClick={() => setStep(step + 1)}>Next →</button>
           : <button className="text-sm px-3 py-1.5 rounded-md bg-accent text-white disabled:opacity-50" disabled={!validation?.can_start || submitting} onClick={submit}>{submitting ? 'Starting...' : 'Start Campaign'}</button>}
       </div>
     </div>
@@ -334,8 +363,8 @@ function ForkFlow({ parentId, onCancel, onDone }: { parentId: string; onCancel: 
         <div className="text-xs text-muted">Answer challenges to refine, or just pick sub-questions and fork.</div>
         <GrillTree tree={tree} dispatch={dispatchTree} onExpand={onExpand} />
         <div className="mt-3">
-          {manualSubs.map((sq, i) => <div key={i} className="flex items-center gap-2 mt-1"><input aria-label={`Sub-question ${i + 1}`} className="flex-1 text-sm p-1.5 rounded bg-bg border border-border" value={sq} onChange={e => { const n = [...manualSubs]; n[i] = e.target.value; setManualSubs(n) }} /><button className="text-xs text-danger" onClick={() => setManualSubs(manualSubs.filter((_, j) => j !== i))} aria-label="Remove sub-question"><X size={12} /></button></div>)}
-          <input aria-label="Add your own sub-question or guidance" className="w-full text-sm p-1.5 rounded bg-bg border border-border mt-1" placeholder="Add your own sub-question or guidance (Enter)" value={newSub} onChange={e => setNewSub(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && newSub.trim()) { setManualSubs([...manualSubs, newSub.trim()]); setNewSub('') } }} />
+          {manualSubs.map((sq, i) => <div key={i} className="flex items-start gap-2 mt-1"><GrowTextarea ariaLabel={`Sub-question ${i + 1}`} className="flex-1 text-sm p-1.5 rounded bg-bg border border-border" value={sq} onChange={v => { const n = [...manualSubs]; n[i] = v; setManualSubs(n) }} /><button className="text-xs text-danger mt-1.5" onClick={() => setManualSubs(manualSubs.filter((_, j) => j !== i))} aria-label="Remove sub-question"><X size={12} /></button></div>)}
+          <GrowTextarea ariaLabel="Add your own sub-question or guidance" className="w-full text-sm p-1.5 rounded bg-bg border border-border mt-1" placeholder="Add your own sub-question or guidance (Enter; Shift+Enter for newline)" value={newSub} onChange={setNewSub} onSubmit={() => { if (newSub.trim()) { setManualSubs([...manualSubs, newSub.trim()]); setNewSub('') } }} />
         </div>
         <div className="flex justify-between mt-4">
           <button className="text-sm text-muted" onClick={() => { clearPersisted(); onCancel() }}>Cancel</button>
@@ -467,7 +496,7 @@ function SubQuestionAdder({ id, campaign }: { id: string; campaign: Campaign }) 
       </div>)}
       {ACTIVE_STATUSES.includes(campaign.status) && <div className="mt-2">
         <div className="flex items-center gap-2">
-          <input aria-label="Add guidance or a sub-question" className="flex-1 text-xs p-1.5 rounded bg-bg border border-border" placeholder="Add guidance or a sub-question…" value={text} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && text.trim()) addMut.mutate(text.trim()) }} />
+          <GrowTextarea ariaLabel="Add guidance or a sub-question" className="flex-1 text-xs p-1.5 rounded bg-bg border border-border" placeholder="Add guidance or a sub-question… (Enter; Shift+Enter for newline)" value={text} onChange={setText} onSubmit={() => { if (text.trim()) addMut.mutate(text.trim()) }} />
           <button className="text-xs px-2 py-1 rounded bg-accent text-white disabled:opacity-50" disabled={!text.trim() || addMut.isPending} onClick={() => addMut.mutate(text.trim())}>{addMut.isPending ? '…' : 'Add'}</button>
         </div>
         <div className="text-[10px] text-muted mt-1">Free-form — a sub-question or an instruction the agent should follow next cycle.</div>
@@ -550,7 +579,7 @@ function CampaignDetail({ id, onBack, onFork, onOpen }: { id: string; onBack: ()
     {campaign.status === 'needs_input' && <div className="p-3 rounded-md mb-4 border border-info bg-info/10">
       <div className="text-sm font-medium text-info flex items-center gap-1"><MessageCircle size={14} /> Agent needs input</div>
       <div className="text-sm mt-1">{campaign.pending_question || 'The agent is waiting for your direction.'}</div>
-      <textarea aria-label="Your answer" className="w-full p-2 mt-2 rounded text-sm bg-bg border border-border" rows={2} value={answerText} onChange={e => setAnswerText(e.target.value)} placeholder="Your answer..." />
+      <textarea aria-label="Your answer" className="w-full p-2 mt-2 rounded text-sm bg-bg border border-border resize-y" rows={2} value={answerText} onChange={e => setAnswerText(e.target.value)} placeholder="Your answer..." />
       <div className="flex gap-2 mt-2 justify-end">
         <button className="text-xs px-2 py-1 rounded bg-accent text-white disabled:opacity-50" onClick={() => nudgeMut.mutate(answerText)} disabled={!answerText || nudgeMut.isPending}>{nudgeMut.isPending ? 'Sending…' : 'Answer & resume'}</button>
       </div>
@@ -575,7 +604,7 @@ function CampaignDetail({ id, onBack, onFork, onOpen }: { id: string; onBack: ()
     <SubQuestionAdder id={id} campaign={campaign} />
     {showNudge && <div className="p-3 rounded-md mb-4 border border-border bg-card">
       <div className="text-sm font-medium mb-2 flex items-center gap-1"><MessageCircle size={14} /> Nudge Direction</div>
-      <textarea aria-label="Nudge direction" className="w-full p-2 rounded text-sm bg-bg border border-border" rows={3} value={nudgeText} onChange={e => setNudgeText(e.target.value)} placeholder="Focus on..." />
+      <textarea aria-label="Nudge direction" className="w-full p-2 rounded text-sm bg-bg border border-border resize-y" rows={3} value={nudgeText} onChange={e => setNudgeText(e.target.value)} placeholder="Focus on..." />
       <div className="flex gap-2 mt-2 justify-end">
         <button className="text-xs text-muted" onClick={() => setShowNudge(false)}>Cancel</button>
         <button className="text-xs px-2 py-1 rounded bg-accent text-white disabled:opacity-50" onClick={() => nudgeMut.mutate(nudgeText)} disabled={!nudgeText || nudgeMut.isPending}>{nudgeMut.isPending ? 'Sending…' : 'Send'}</button>
@@ -620,6 +649,7 @@ export default function ResearchLabPage() {
       <h1 className="text-lg font-semibold flex items-center gap-2"><FlaskConical size={20} /> Research Lab</h1>
       <button className="text-sm px-3 py-1.5 rounded-md bg-accent text-white disabled:opacity-50" disabled={!!active} onClick={() => setView('wizard')} title={active ? 'One campaign at a time' : ''}>+ New Campaign</button>
     </div>
+    <div className="text-xs text-muted mb-4 flex items-start gap-1"><Lock size={12} className="mt-0.5 shrink-0" /> <span><span className="font-medium">Research-only.</span> Research Lab investigates and reports — it never takes actions on your systems (no writes, deployments, or code changes). Any next step that requires acting is handed off to the main agent for you to review and drive.</span></div>
     {isLoading ? <div className="text-sm text-muted">Loading...</div> : campaigns.length === 0 ? (
       <div className="text-center py-12">
         <FlaskConical size={48} className="mx-auto text-muted mb-3" />

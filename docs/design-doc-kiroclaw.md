@@ -1,5 +1,7 @@
 # KiroClaw Design Document
 
+> **Historical design snapshot (drift-reviewed 2026-07-13).** This is a point-in-time architectural narrative — several "Future Directions" ideas have since shipped and some numbers below are illustrative of that era. For authoritative current behavior, see `docs/system-specs/`.
+
 ## 0. Background: kiro-cli, AIM, and Why KiroClaw Exists
 
 ### The Stack
@@ -199,8 +201,8 @@ Every conversation thread gets its own `kiro-cli` child process, identified by a
 
 | Caller | Key Pattern | Lifetime |
 |--------|-------------|----------|
-| Slack thread | `{thread_ts}` | Idle timeout (30 min) |
-| Dashboard tab | `dashboard:{slot_key}` | Idle timeout (30 min) |
+| Slack thread | `{thread_ts}` | Idle timeout (60 min) |
+| Dashboard tab | `dashboard:{slot_key}` | Idle timeout (60 min) |
 | Cron job | `cron:{job_id}` | One-shot (reset after execution) |
 | Sub-agent | `subagent:{uuid}` | Task duration |
 | TaskRunner main | `taskrunner:{task_id}` | Task duration |
@@ -213,7 +215,7 @@ Key behaviors:
 - **Per-session semaphore**: Serializes concurrent messages on the same thread key.
 - **Context compaction**: At ≥ configured threshold (`session.autocompact_pct`, default 90%, valid 5–90), fires `/compact` to kiro-cli. Context re-injected on next message.
 - **Circuit breaker**: 5 consecutive failures → force-reset.
-- **Idle cleanup**: 30 min inactivity → session expired. Background session never expires.
+- **Idle cleanup**: 60 min inactivity → session expired. Background session never expires.
 
 ### 2.2 ACP Protocol Handshake
 
@@ -264,7 +266,7 @@ Sessions are isolated processes, but KiroClaw bridges them:
 | Per-message truncation | 1,500 chars |
 | Hard total cap | 165,000 chars (~55k tokens) |
 
-No single component exceeds 30% of the hard cap. Soft caps sum to ~145k, leaving headroom for agent prompt, skills, and other fixed context.
+The figures above are illustrative point-in-time values from a single flat 165k-char pool. The current model (`context.py`) instead gives each section its OWN independent percentage cap and derives the global ceiling (`_MAX_CONTEXT_CHARS`) as the SUM of those caps so sections never truncate each other; the `_CONTEXT_BUDGET_BASE` of 165k is retained only as the base the percentages are taken from.
 
 Custom agents skip KiroClaw-specific context (skills, memory, lessons) — only conversation history is injected.
 
@@ -408,7 +410,7 @@ Example: "update documentation" graduates to a bash script where `git diff` and 
 
 For parallelism across tasks (not steps within a task), `SubagentManager` spawns isolated sessions:
 
-- Max 3 concurrent, no recursion (subagents can't spawn subagents)
+- Default 3 concurrent, configurable via `agent.max_subagents` (0 = auto-size from host resources, ceiling 64); no recursion (subagents can't spawn subagents)
 - Two modes: wait (blocks until result) and fire-and-forget
 - Sessions are one-shot: released and reset in `finally`
 
@@ -653,7 +655,7 @@ Implement JSON-RPC 2.0 over stdio (`initialize`, `tools/list`, tool calls). Regi
 
 ### 6.1 Defense in Depth
 
-- **54 regex deny patterns** in `deniedCommands` — injected into ALL agent configs at startup, periodically (~60s), and at install. Tamper-resistant: always sourced from bundled package.
+- **Regex deny patterns** in `deniedCommands` (illustrative count at the time of writing: ~54; the bundled set has since expanded to cover protected branches and dangerous push flags like `--mirror`/`--all`) — injected into ALL agent configs at startup, periodically (~60s), and at install. Tamper-resistant: always sourced from bundled package.
 - **Python-level hook deny list** — blocks credential/destructive tool patterns.
 - **MCP tool input validation** — centralized schema-based validation (`validation.py`) for all MCP tool inputs before execution. Type enforcement, length limits, Unicode normalization, hidden character stripping, allow-list enums, regex patterns for IDs, numeric range checks, and unknown field rejection. See §6.6.
 - **MCP response sanitization** — all tool responses pass through `build_tool_response()` which sanitizes and truncates at 100K chars to prevent resource exhaustion.
@@ -661,7 +663,7 @@ Implement JSON-RPC 2.0 over stdio (`initialize`, `tools/list`, tool calls). Regi
 - **Security Event Log (SEL)** — immutable, HMAC-chained audit trail for every tool invocation, permission decision, and API mutation across all 8 surfaces. See §6.7.
 - **Audit logging** — every bash command logged to `~/.kiroclaw/audit.log` via kiro-cli `preToolUse` hook.
 - **Owner lock** — Slack gateway processes only `KIROCLAW_OWNER_ID` messages.
-- **Dashboard auth** — Midway cookie validation on every request. Bound to `127.0.0.1` only.
+- **Dashboard auth** — HMAC-SHA256 token auth (`token_auth.py`) with IP binding. Bound to `127.0.0.1` only.
 
 ### 6.2 Heartbeat
 

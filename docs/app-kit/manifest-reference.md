@@ -97,6 +97,37 @@ The app manifest (`app.json`) declares your app's identity, resources, and requi
 | `ui.sidebar.section` | string | `"Apps"` | Sidebar section name |
 | `ui.sidebar.order` | number | `10` | Sort order within section |
 
+### Hero Images
+
+Top-level manifest fields that supply the artwork rendered on App Store browse
+and detail cards. The path form depends on how the app is distributed:
+
+- **Builtin apps** use an absolute served URL under `/apps/{name}/ui/` (the
+  builtin registry serves the app's bundled `ui/` directory there):
+
+  ```json
+  {
+    "heroImage": "/apps/my-app/ui/hero-light.svg",
+    "heroImageDark": "/apps/my-app/ui/hero-dark.svg"
+  }
+  ```
+
+- **Federated / registry apps** use a repo-relative path (e.g. `ui/hero-light.svg`);
+  `registry.py` rewrites it to a blob-proxy URL (`/api/apps/blob?repo=<repo>&path=<path>`)
+  so the artwork resolves without the app being locally installed:
+
+  ```json
+  {
+    "heroImage": "ui/hero-light.svg",
+    "heroImageDark": "ui/hero-dark.svg"
+  }
+  ```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `heroImage` | string | Hero image shown on the App Store card (light theme) |
+| `heroImageDark` | string | Hero image variant used in dark theme |
+
 ## Backend
 
 ### `backend` — App Backend Process
@@ -118,9 +149,39 @@ The app manifest (`app.json`) declares your app's identity, resources, and requi
 | `backend.port` | string | `"auto"` | Port number or `"auto"` for auto-assignment |
 | `backend.healthCheck` | string | `"/health"` | Health check endpoint path |
 | `backend.routes` | string | | Base route path for the backend |
+| `backend.type` | string | `""` | Backend runtime: `"python"`, `"asgi"`, `"node"`, or `""` (auto-detect from `entryPoint`) |
 
 App backends are accessible through the Gateway's reverse proxy at
 `/apps/{name}/api/{path}`, which avoids CORS issues for dashboard UI pages.
+
+#### `backend.hooks` — In-Gateway Python Entry Points
+
+Instead of (or alongside) a standalone backend process, an app can register
+Python entry points that run **inside** the Gateway process. Each value is a
+dotted path in the format `module.path:callable`, resolved relative to the app
+root (validated against `HooksConfig._HOOK_PATH_RE`).
+
+```json
+{
+  "backend": {
+    "hooks": {
+      "routes": "backend.routes:register_routes",
+      "on_startup": "backend.hooks:on_startup",
+      "on_shutdown": "backend.hooks:on_shutdown"
+    }
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `backend.hooks.routes` | string | `module.path:callable` that registers handlers into the Gateway's in-process `RouteRegistry` catch-all dispatcher |
+| `backend.hooks.on_startup` | string | `module.path:callable` invoked when the app's hooks are wired up |
+| `backend.hooks.on_shutdown` | string | `module.path:callable` invoked when the app is disabled/torn down |
+
+`hooks.routes` handlers are wired up when the app is enabled (via
+`on_app_enable`, also re-run at gateway startup via `on_gateway_startup`), so
+they go live without waiting for a Gateway restart.
 
 ## Permissions
 
@@ -264,6 +325,27 @@ When `installMode` is `"client"`, the App Store shows copy-paste terminal
 instructions instead of running the install on the server. This is used for
 apps that must run on the user's local machine (e.g. Electron desktop apps
 when KiroClaw runs on a remote host).
+
+## Open Command
+
+### `openCommand` — Launch Apps Outside the Dashboard
+
+For apps that run outside the dashboard (e.g. Electron apps), the top-level
+`openCommand` declares a shell string that launches the app.
+
+```json
+{
+  "openCommand": "open ~/Applications/MyApp.app"
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `openCommand` | string | `""` | Shell command launched by `POST /api/apps/{name}/open` |
+
+`POST /api/apps/{name}/open` runs this command in the background. On a
+cloud/remote environment with no display, the endpoint returns the command for
+the user to run locally instead of executing it on the server.
 
 ## Validation Rules
 

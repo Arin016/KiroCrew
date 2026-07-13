@@ -279,6 +279,44 @@ class TestTransientErrorClassifier:
         assert not _is_transient_acp_error("Prompt error: some unknown thing")
 
 
+class TestAcpErrorIsTransient:
+    """acp_error_is_transient prefers the structured AcpError.transient flag and
+    falls back to the string classifier (Mesh-2356)."""
+
+    def test_flag_true_wins_over_nontransient_message(self) -> None:
+        from kiro_claw.llm_helpers import acp_error_is_transient
+
+        # Flag is authoritative: a terminal-looking message is still retried.
+        assert acp_error_is_transient(AcpError("ValidationException", transient=True))
+
+    def test_flag_false_wins_over_transient_message(self) -> None:
+        from kiro_claw.llm_helpers import acp_error_is_transient
+
+        # Flag is authoritative: a transient-looking message still fails fast.
+        assert not acp_error_is_transient(
+            AcpError("ServiceUnavailableException", transient=False)
+        )
+
+    def test_unflagged_5xx_message_falls_back_to_string(self) -> None:
+        from kiro_claw.llm_helpers import acp_error_is_transient
+
+        # The Mesh-2356 regression: _format_acp_error's friendly 5xx string is
+        # now recognised by the string fallback even with no flag set.
+        msg = (
+            "The model backend hit a transient error (HTTP 5xx). This is usually "
+            "momentary — retry in a moment. If it keeps happening, switch to a "
+            "different model in the picker."
+        )
+        assert acp_error_is_transient(AcpError(msg))  # transient defaults to None
+
+    def test_plain_exception_uses_string_fallback(self) -> None:
+        from kiro_claw.llm_helpers import acp_error_is_transient
+
+        # Non-AcpError (no .transient attr) → string classifier.
+        assert acp_error_is_transient(RuntimeError("ServiceUnavailableException"))
+        assert not acp_error_is_transient(RuntimeError("AccessDeniedException"))
+
+
 class TestStreamAndCollectTransient:
     _TRANSIENT = "Prompt error: {'message': 'Internal error: API Error: Internal server error'}"
     _AUTH = "Bedrock authentication failed. Run 'ada credentials update'"

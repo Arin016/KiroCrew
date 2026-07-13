@@ -1402,6 +1402,24 @@ def _load_existing_config(path: Path) -> tuple[dict, bool]:
     return config, False
 
 
+def _norm_mcp_spec(spec: Any) -> Any:
+    """Return the comparison form of an ``mcpServers`` spec for dedup.
+
+    Setup / re-installs re-emit the same server across runs with slightly
+    different optional-key *shapes*: a bare ``{"command": ...}`` one run, then
+    ``"env": {}`` or ``"args": []`` the next. Comparing raw dicts treats those
+    as distinct servers, so ``_normalize_mcp_server_keys`` mints an ever-growing
+    ``-2``/``-3``... suffix on every build / reinstall / update (Mesh-2593).
+    Dropping empty optional collections makes semantically identical re-merges
+    collapse onto the canonical alias. An empty ``env``/``args`` is a launch
+    no-op for kiro-cli (missing == empty), so this is also the cleaner spec to
+    persist.
+    """
+    if not isinstance(spec, dict):
+        return spec
+    return {k: v for k, v in spec.items() if not (k in ("env", "args") and not v)}
+
+
 def _normalize_mcp_server_keys(config: dict) -> None:
     """Rewrite any slash-containing ``mcpServers`` key to its slash-free alias.
 
@@ -1409,31 +1427,78 @@ def _normalize_mcp_server_keys(config: dict) -> None:
     alias key and rewrites (and de-duplicates) the matching ``@oldkey`` ->
     ``@alias`` reference in ``tools``/``allowedTools``.  Migrates already-broken
     existing configs.  Idempotent: slash-free keys are left untouched and a
-    byte-identical re-merged duplicate is overwritten in place (no churn).
+    re-merged duplicate collapses onto the canonical alias (no churn).
 
-    Collision: if the alias is already held by a *different* spec, the server
-    is preserved under a numeric-suffixed alias (``-2``, ``-3``) -- never
-    dropped.  Managed servers (slash-free by construction) are skipped so their
-    dynamic-field refresh is never disturbed.
+    Dedup is by *normalized* spec (:func:`_norm_mcp_spec`), so a re-added key
+    that differs only by an empty ``env``/``args`` reuses the existing alias
+    instead of accumulating a fresh ``-N`` suffix on every build / reinstall /
+    update (Mesh-2593). Convergence: any already-suffixed sibling that is an
+    equivalent duplicate is folded back onto the surviving alias (its ``@ref``
+    is redirected), so a config already polluted by the pre-fix bug self-heals.
+
+    Collision: if the alias is held by a *genuinely different* spec, the server
+    is preserved under the lowest free numeric-suffixed alias (``-2``, ``-3``)
+    -- never dropped. Managed servers (slash-free by construction) are skipped
+    so their dynamic-field refresh is never disturbed.
     """
     servers = config.get("mcpServers")
     if not isinstance(servers, dict):
         return
     managed = set(_MANAGED_MCP_SERVERS)
-    for old_key in [k for k in servers if "/" in k and k not in managed]:
-        spec = servers.pop(old_key)
-        alias = mcp_server_alias(old_key)
-        if alias in servers and servers[alias] != spec:
-            n = 2
-            while f"{alias}-{n}" in servers and servers[f"{alias}-{n}"] != spec:
-                n += 1
-            alias = f"{alias}-{n}"
-        servers[alias] = spec
-        old_ref, new_ref = f"@{old_key}", f"@{alias}"
+
+    def _is_family(key: str, base: str) -> bool:
+        """True if ``key`` is ``base`` or a ``base-<n>`` numeric-suffixed sibling."""
+        return key == base or (
+            key.startswith(f"{base}-") and key[len(base) + 1:].isdigit()
+        )
+
+    def _rewrite_ref(old_ref: str, new_ref: str) -> None:
         for key in ("tools", "allowedTools"):
             lst = config.get(key)
             if isinstance(lst, list):
-                config[key] = list(dict.fromkeys(new_ref if t == old_ref else t for t in lst))
+                config[key] = list(
+                    dict.fromkeys(new_ref if t == old_ref else t for t in lst)
+                )
+
+    for old_key in [k for k in servers if "/" in k and k not in managed]:
+        spec = _norm_mcp_spec(servers.pop(old_key))
+        base = mcp_server_alias(old_key)
+
+        # Reuse an existing home for an equivalent spec — the canonical alias or
+        # any already-suffixed sibling — instead of minting a new suffix, so
+        # repeated re-merges converge rather than accumulate.
+        alias = next(
+            (
+                k
+                for k in servers
+                if _is_family(k, base) and _norm_mcp_spec(servers[k]) == spec
+            ),
+            None,
+        )
+        if alias is None:
+            # Genuinely distinct spec (or nothing here yet): take the canonical
+            # alias if free, else the lowest free numeric suffix (never drop a
+            # distinct server).
+            alias = base
+            if alias in servers:
+                n = 2
+                while f"{alias}-{n}" in servers:
+                    n += 1
+                alias = f"{alias}-{n}"
+        servers[alias] = spec
+        _rewrite_ref(f"@{old_key}", f"@{alias}")
+
+        # Converge any OTHER sibling that duplicates the spec we just placed
+        # (self-heals configs polluted by the pre-fix bug): drop it and redirect
+        # its @ref onto the surviving alias.
+        for dup in [
+            k
+            for k in list(servers)
+            if k != alias and _is_family(k, base) and _norm_mcp_spec(servers[k]) == spec
+        ]:
+            del servers[dup]
+            _rewrite_ref(f"@{dup}", f"@{alias}")
+
         logger.info("Normalized MCP server key %r -> %r (kiro-safe)", old_key, alias)
 
 

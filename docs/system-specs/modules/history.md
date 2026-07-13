@@ -1,6 +1,6 @@
 # Conversation History Module
 
-Last Updated: 2026-04-21 (session archive, configurable autocompact)
+Last Updated: 2026-07-13 (agent_usage roster ordering, folder_id in session metadata, _SEARCH_SCAN_WINDOW relevance search; session archive, configurable autocompact)
 
 ## Overview
 
@@ -14,8 +14,9 @@ Per-thread JSONL files at `~/.kiroclaw/sessions/{safe_key}.jsonl`. First line is
 - Rotation at 2MB (keeps metadata + last 200 messages, atomic write)
 - `recent(key)` — last 20 messages for context injection
 - `recent_with_provenance(key)` — entries with source citations
-- `list_sessions()` — lists all sessions with title (first user message or LLM-generated). Sort key uses ISO `created` string consistently (defaults to ISO from `st_mtime` if no metadata `created` field, ensuring string-only comparisons).
-- `search_sessions(query, limit=50)` — case-insensitive substring content search over session JSONL files. Scans newest first, stops early on first hit per file, caps results. Exposed via `GET /api/sessions/search?q=<q>&limit=<n>` (min 2 chars); used by the dashboard history filter to find sessions by content (CR ids, error messages, file paths) rather than title alone.
+- `list_sessions()` — lists all sessions with title (first user message or LLM-generated). Sort key uses ISO `created` string consistently (defaults to ISO from `st_mtime` if no metadata `created` field, ensuring string-only comparisons). Each returned session's meta dict also carries `folder_id` when present in the persisted metadata line, so sessions can be grouped by the folder they were filed in.
+- `agent_usage()` — returns `{agent_name: (session_count, last_used_mtime)}`; built on `list_sessions()` so it inherits canonical-session dedup + symlink-skip (counts per logical conversation). Used by `GET /api/agents` to order the roster most-used-first, degrading to config order on failure.
+- `search_sessions(query, limit=50)` — case-insensitive substring content search over the newest `_SEARCH_SCAN_WINDOW` session JSONL files. Counts all occurrences per session (length-normalized) to rank by relevance, then caps to `limit` results. Exposed via `GET /api/sessions/search?q=<q>&limit=<n>` (min 2 chars); used by the dashboard history filter to find sessions by content (CR ids, error messages, file paths) rather than title alone. Returns the same meta dicts as `list_sessions()`, so each search hit likewise carries `folder_id` (when present), letting the sidebar group results by folder.
 - `delete_session(key)` — permanently removes a session JSONL file
 ## Dashboard History Persistence — Frozen Prefix + Live Window (`dashboard/chat_persistence.py`)
 
@@ -97,16 +98,21 @@ at construction time; consolidation is silently skipped if no session manager
 is available.
 
 **Loop safety:** the task body runs on the event loop thread, so any blocking
-work inside it must be offloaded. `_write_structured_memory` embeds each
-semantic/episodic item via a blocking `urllib` call to Ollama, so it is invoked
-through `asyncio.to_thread()` — running it inline would freeze the gateway loop
-(heartbeats, Slack, dashboard) whenever the embedding endpoint is slow or hung,
-and can trip the faulthandler hard-kill. Dashboard memory handlers that write
-semantic entries or embed a query (`set_semantic`, `_try_embed`) offload the
-same way. Because these writes now run on worker threads concurrently with
-loop-thread reads (`search_episodic` during context assembly), `VectorMemoryStore`
-serializes its sqlite + FAISS critical sections with `_db_lock` (a `RLock`); the
-lock is never held across the blocking embed itself.
+work inside it must be offloaded. `_write_structured_memory` and `_save_lessons`
+both embed items via blocking `urllib` calls to Ollama (`write_lesson` performs a
+rule embed plus up to `_MAX_BACKFILLS_PER_CALL` lazy backfill embeds per lesson),
+so they are invoked through `asyncio.to_thread()` — running them inline would
+freeze the gateway loop (heartbeats, Slack, dashboard) whenever the embedding
+endpoint is slow or hung, and can trip the faulthandler hard-kill. The same
+applies to `TaskRunner._extract_lesson`, which calls `write_lesson` after a task
+failure. Dashboard memory handlers that write semantic entries or embed a query
+(`set_semantic`, `_try_embed`) offload the same way. Because these writes now run
+on worker threads concurrently with loop-thread reads (`search_episodic` during
+context assembly), `VectorMemoryStore` serializes the semantic UPSERT
+read-modify-write and the FAISS add + id-map append with `_db_lock` (a `RLock`);
+`write_lesson`'s dedup scan and backfill UPDATEs rely on sqlite's serialized-mode
+statement atomicity (WAL + `busy_timeout`) rather than application-level locking
+— the lock is never held across a blocking embed.
 
 ## Stop Events
 

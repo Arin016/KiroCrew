@@ -246,6 +246,29 @@ export interface Artifact {
    * file edits to source_path. Drives the "Snapshot Live" button
    * (Mesh-1654 round 6). */
   live_dirty?: boolean
+  /** Library folder this artifact is filed in ("" / absent = unfiled/root).
+   * Opaque folder id — resolve names via the artifact-folders list (Mesh-2720). */
+  folder_id?: string
+}
+
+/**
+ * A folder in the local artifact library (Mesh-2720). Nested via `parent_id`
+ * (`""`/absent = root). Structurally compatible with `ChatFolder` so the
+ * shared folder utilities (`orderFoldersWithPaths`, `computeReorderedFolders`,
+ * `FolderMoveSubmenu`) work on both without adaptation.
+ */
+export interface ArtifactFolder {
+  id: string
+  name: string
+  order: number
+  parent_id?: string
+  icon?: string
+  /** Optional #rrggbb display color chosen by the user. */
+  color?: string
+  /** Direct artifact count (excludes subfolders) — computed server-side per GET. */
+  item_count?: number
+  /** Full ancestry path root→leaf ("Parent › Child") — computed server-side. */
+  path?: string
 }
 
 export interface ArtifactEvent {

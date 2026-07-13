@@ -62,8 +62,14 @@ from kiro_claw.skills import SkillsLoader
 from kiro_claw.validation import (
     _SLACK_TS_RE,
     ARTIFACT_DELETE_SCHEMA,
+    ARTIFACT_FOLDER_CREATE_SCHEMA,
+    ARTIFACT_FOLDER_DELETE_SCHEMA,
+    ARTIFACT_FOLDER_LIST_SCHEMA,
+    ARTIFACT_FOLDER_MOVE_SCHEMA,
+    ARTIFACT_FOLDER_RENAME_SCHEMA,
     ARTIFACT_GET_SCHEMA,
     ARTIFACT_LIST_SCHEMA,
+    ARTIFACT_MOVE_SCHEMA,
     ARTIFACT_REVERT_SCHEMA,
     ARTIFACT_SAVE_SCHEMA,
     ARTIFACT_UPDATE_SCHEMA,
@@ -675,6 +681,15 @@ def _list_tools() -> list[dict[str, Any]]:
                         "items": {"type": "string"},
                         "description": "Tags for filtering in the library (max 16).",
                     },
+                    "folder": {
+                        "type": "string",
+                        "description": (
+                            "Optional folder to file the artifact in — a folder id "
+                            "OR a '/'-separated human path (e.g. 'Reports/Q3'). "
+                            "Missing path segments are auto-created (mkdir -p). "
+                            "Omit or pass 'root' to leave it unfiled."
+                        ),
+                    },
                 },
                 "required": ["name", "content"],
             },
@@ -824,6 +839,112 @@ def _list_tools() -> list[dict[str, Any]]:
                     "slug": {
                         "type": "string",
                         "description": "Artifact slug to delete.",
+                    },
+                },
+                "required": ["slug"],
+            },
+        },
+        {
+            "name": "artifact_folder_list",
+            "description": (
+                "List the artifact-library folder tree. Returns each folder's id, "
+                "name, parent_id, human path, and direct item_count. Use to "
+                "discover folder ids/paths before moving or organizing artifacts."
+            ),
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "artifact_folder_create",
+            "description": (
+                "Create an artifact-library folder. ``parent`` accepts a folder id "
+                "OR a '/'-separated human path; missing segments are auto-created "
+                "(mkdir -p). Omit ``parent`` (or pass 'root') to create at the top "
+                "level. Returns the new folder id and canonical path."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Folder name (max 100 chars)."},
+                    "parent": {
+                        "type": "string",
+                        "description": "Parent folder id or human path. Omit / 'root' for top level.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+        {
+            "name": "artifact_folder_rename",
+            "description": "Rename an artifact-library folder. ``folder`` = folder id or human path.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "folder": {"type": "string", "description": "Folder id or human path."},
+                    "name": {"type": "string", "description": "New name (max 100 chars)."},
+                },
+                "required": ["folder", "name"],
+            },
+        },
+        {
+            "name": "artifact_folder_move",
+            "description": (
+                "Reparent an artifact-library folder (nest it under another, or move "
+                "to the top level). Cycle-guarded — a folder cannot become its own "
+                "descendant. ``folder`` and ``new_parent`` are each a folder id or "
+                "human path; omit ``new_parent`` (or pass 'root') to move to top level."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "folder": {"type": "string", "description": "Folder to move (id or path)."},
+                    "new_parent": {
+                        "type": "string",
+                        "description": "Destination parent folder (id or path). Omit / 'root' for top level.",
+                    },
+                },
+                "required": ["folder"],
+            },
+        },
+        {
+            "name": "artifact_folder_delete",
+            "description": (
+                "Delete an artifact-library folder. By default (delete_contents=false) "
+                "this is SAFE: the folder's direct child folders and artifacts are "
+                "re-parented up to the folder's parent, and only the folder itself is "
+                "removed. Pass delete_contents=true to permanently delete the entire "
+                "subtree, INCLUDING every descendant artifact — echo the affected "
+                "count to the user before doing so. ``folder`` = folder id or human path."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "folder": {"type": "string", "description": "Folder id or human path."},
+                    "delete_contents": {
+                        "type": "boolean",
+                        "description": (
+                            "false (default) = keep artifacts, re-parent to the folder's "
+                            "parent. true = permanently delete the whole subtree."
+                        ),
+                    },
+                },
+                "required": ["folder"],
+            },
+        },
+        {
+            "name": "artifact_move",
+            "description": (
+                "Move an existing artifact into a folder (or unfile it). ``folder`` = "
+                "a folder id, a '/'-separated human path (missing segments auto-created), "
+                "or ''/'root' to unfile. Metadata-only — does not change the artifact's "
+                "content or version."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "Artifact slug to move."},
+                    "folder": {
+                        "type": "string",
+                        "description": "Destination folder id or human path; ''/'root' to unfile.",
                     },
                 },
                 "required": ["slug"],
@@ -1133,9 +1254,9 @@ def _ppid_via_libproc(pid: int) -> int:
     import ctypes
     import struct
 
-    _PROC_PIDTBSDINFO = 3
+    proc_pidtbsdinfo = 3
     # sizeof(struct proc_bsdinfo) is 232 on 64-bit Darwin; over-allocate.
-    _BUF_SIZE = 256
+    buf_size = 256
     try:
         libproc = ctypes.CDLL("libproc.dylib", use_errno=True)
         libproc.proc_pidinfo.restype = ctypes.c_int
@@ -1146,8 +1267,8 @@ def _ppid_via_libproc(pid: int) -> int:
             ctypes.c_void_p,
             ctypes.c_int,
         ]
-        buf = ctypes.create_string_buffer(_BUF_SIZE)
-        n = libproc.proc_pidinfo(pid, _PROC_PIDTBSDINFO, 0, buf, _BUF_SIZE)
+        buf = ctypes.create_string_buffer(buf_size)
+        n = libproc.proc_pidinfo(pid, proc_pidtbsdinfo, 0, buf, buf_size)
         # pbi_ppid is the 5th uint32 (offset 16); need at least that many bytes.
         if n <= 16:
             return 0
@@ -1598,6 +1719,32 @@ def _get(path: str) -> dict:
         return {"error": str(e)}
 
 
+def _patch(path: str, body: dict | None = None) -> dict:
+    data = json.dumps(body or {}).encode()
+    headers = {"Content-Type": "application/json", "X-Internal-Secret": _internal_secret()}
+    sk = _resolve_session_key()
+    _sk_err = _session_key_header_error(sk)
+    if _sk_err:
+        return {"error": _sk_err}
+    if sk:
+        headers["X-Session-Key"] = sk
+    req = urllib.request.Request(
+        f"{_API}{path}",
+        data=data,
+        headers=headers,
+        method="PATCH",
+    )
+    try:
+        # _API is the hardcoded loopback dashboard base and `path` is a code
+        # literal — never attacker-controlled, so no file:// scheme risk.
+        with urllib.request.urlopen(req, timeout=30) as resp:  # nosemgrep  # noqa: E501
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return _http_error_body(e)
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def _delete(path: str, body: dict | None = None) -> dict:
     data = json.dumps(body or {}).encode() if body else None
     headers = {"X-Internal-Secret": _internal_secret()}
@@ -1699,6 +1846,49 @@ def _artifact_ref_link(slug: str, name: str) -> str:
     if not safe_slug:
         return label
     return f"[{label}](/artifacts/{safe_slug})"
+
+
+def _resolve_artifact_folder_id(ref: str) -> tuple[str, str | None]:
+    """Resolve an artifact-folder reference (id or human path) to a folder id.
+
+    Read-only: fetches ``/api/artifact-folders`` and matches by id, then walks
+    ``/``-separated path segments against folder names (case-insensitive). Used
+    by the rename/move/delete MCP tools, which must address an existing folder
+    (no auto-create — that only happens on save/move to an artifact folder,
+    handled server-side). Returns ``(folder_id, error)``; ``""`` = root.
+    """
+    ref = str(ref or "").strip()
+    if not ref or ref.lower() == "root":
+        return "", None
+    d = _get("/api/artifact-folders")
+    if d.get("error"):
+        return "", d["error"]
+    folders = d.get("folders", [])
+    by_id = {f.get("id"): f for f in folders if isinstance(f, dict) and f.get("id")}
+    if ref in by_id:
+        return ref, None
+    segments = [s.strip().lower() for s in ref.split("/") if s.strip()]
+    if not segments:
+        return "", None
+    parent = ""
+    cur = ""
+    for seg in segments:
+        match = next(
+            (
+                f
+                for f in folders
+                if str(f.get("parent_id") or "") == parent
+                and str(f.get("name", "")).strip().lower() == seg
+            ),
+            None,
+        )
+        if match is None:
+            safe_ref, _ = redact_exfiltration_urls(ref)
+            safe_ref, _ = redact_credentials(safe_ref)
+            return "", f"folder not found: {safe_ref}"
+        cur = str(match.get("id") or "")
+        parent = cur
+    return cur, None
 
 
 def _artifact_reemit_hint(slug: str, name: str, kind: str = "widget") -> str:
@@ -2607,7 +2797,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             "name": args["name"],
             "content": args["content"],
         }
-        for k in ("slug", "kind", "source", "description", "tags"):
+        for k in ("slug", "kind", "source", "description", "tags", "folder"):
             if k in args and args[k] is not None:
                 save_body[k] = args[k]
         # Pre-save dedup probe: when saving a chat-source widget, check for
@@ -2910,6 +3100,99 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         if d.get("error"):
             return f"Error: {d['error']}"
         return f"Deleted artifact: {slug}"
+
+    if name == "artifact_folder_list":
+        validate_tool_args(args, ARTIFACT_FOLDER_LIST_SCHEMA)
+        d = _get("/api/artifact-folders")
+        if d.get("error"):
+            return f"Error: {d['error']}"
+        folder_rows = d.get("folders", [])
+        if not folder_rows:
+            return "No artifact folders."
+        # Present as a path-sorted tree so the agent can pick an id or path.
+        folder_rows.sort(key=lambda fld: str(fld.get("path") or fld.get("name", "")).lower())
+        out_lines = []
+        for fld in folder_rows:
+            fld_path = fld.get("path") or fld.get("name", "?")
+            count = fld.get("item_count", 0)
+            out_lines.append(
+                f"{fld.get('id', '?')}  {fld_path}  ({count} item{'' if count == 1 else 's'})"
+            )
+        return "\n".join(out_lines)
+
+    if name == "artifact_folder_create":
+        args = validate_tool_args(args, ARTIFACT_FOLDER_CREATE_SCHEMA)
+        create_body = {"name": args["name"]}
+        if args.get("parent"):
+            create_body["parent"] = args["parent"]
+        d = _post("/api/artifact-folders", create_body)
+        if d.get("error"):
+            return f"Error: {d['error']}"
+        return f"Created folder `{d.get('path') or d.get('name', '?')}` (id={d.get('id', '?')})."
+
+    if name == "artifact_folder_rename":
+        args = validate_tool_args(args, ARTIFACT_FOLDER_RENAME_SCHEMA)
+        fld_id, fld_err = _resolve_artifact_folder_id(args["folder"])
+        if fld_err:
+            return f"Error: {fld_err}"
+        if not fld_id:
+            return "Error: cannot rename the library root."
+        d = _patch(f"/api/artifact-folders/{fld_id}", {"name": args["name"]})
+        if d.get("error"):
+            return f"Error: {d['error']}"
+        return f"Renamed folder to `{d.get('path') or d.get('name', '?')}` (id={fld_id})."
+
+    if name == "artifact_folder_move":
+        args = validate_tool_args(args, ARTIFACT_FOLDER_MOVE_SCHEMA)
+        fld_id, fld_err = _resolve_artifact_folder_id(args["folder"])
+        if fld_err:
+            return f"Error: {fld_err}"
+        if not fld_id:
+            return "Error: cannot move the library root."
+        parent_fid, parent_err = _resolve_artifact_folder_id(args.get("new_parent") or "")
+        if parent_err:
+            return f"Error: {parent_err}"
+        d = _patch(f"/api/artifact-folders/{fld_id}", {"parent_id": parent_fid})
+        if d.get("error"):
+            return f"Error: {d['error']}"
+        move_dest = d.get("path") or "(root)"
+        return f"Moved folder (id={fld_id}) to `{move_dest}`."
+
+    if name == "artifact_folder_delete":
+        args = validate_tool_args(args, ARTIFACT_FOLDER_DELETE_SCHEMA)
+        fld_id, fld_err = _resolve_artifact_folder_id(args["folder"])
+        if fld_err:
+            return f"Error: {fld_err}"
+        if not fld_id:
+            return "Error: cannot delete the library root."
+        cascade = bool(args.get("delete_contents"))
+        del_qs = "?delete_contents=true" if cascade else ""
+        d = _delete(f"/api/artifact-folders/{fld_id}{del_qs}")
+        if d.get("error"):
+            return f"Error: {d['error']}"
+        if cascade:
+            n_del = len(d.get("deleted_artifact_slugs", []))
+            n_folders = len(d.get("deleted_folder_ids", []))
+            return (
+                f"Deleted folder (id={fld_id}) and its entire subtree "
+                f"({n_folders} folders, {n_del} artifacts)."
+            )
+        n_kept = len(d.get("reparented_artifact_slugs", []))
+        return (
+            f"Deleted folder (id={fld_id}); kept {n_kept} artifact"
+            f"{'' if n_kept == 1 else 's'} (re-parented to the folder's parent)."
+        )
+
+    if name == "artifact_move":
+        args = validate_tool_args(args, ARTIFACT_MOVE_SCHEMA)
+        slug = args["slug"]
+        d = _patch(f"/api/artifacts/{slug}/folder", {"folder": args.get("folder") or ""})
+        if d.get("error"):
+            return f"Error: {d['error']}"
+        moved_fid = d.get("folder_id", "")
+        return f"Moved artifact `{slug}` to " + (
+            f"folder id={moved_fid}." if moved_fid else "the library root (unfiled)."
+        )
 
     if name == "autonudge_stop":
         # Defense-in-depth: _call_tool() already validates via _validate_args;

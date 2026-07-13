@@ -6,6 +6,7 @@ import { useIsMobile } from '../hooks/useIsMobile'
 import { useSwipeEdge } from '../hooks/useSwipeEdge'
 import { useAppSelector, useAppDispatch, store } from '../store'
 import { useConnected } from '../hooks/useConnected'
+import { useChatPopouts } from '../hooks/useChatPopouts'
 import {
   switchSlot, createSlot, deleteSlot, fetchHistory,
   appendMessage, resumeFromHistory, forkSlot,
@@ -97,7 +98,7 @@ import OverlayDrawer from '../components/OverlayDrawer'
 import { loadChatConfig, CONTENT_WIDTH, type ChatConfig } from './chat/ChatSettings'
 import { useKnowledgeFetch, extractKnowledgeQuery, expandKnowledgeBlock } from './chat/useKnowledgeFetch'
 import { KnowledgePicker } from './chat/KnowledgePicker'
-import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, PanelLeftOpen, PanelLeftClose, Pen, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Hash, Undo2, Check, Columns2 } from 'lucide-react'
+import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, PanelLeftOpen, PanelLeftClose, Pen, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Hash, Undo2, Check, Columns2, ExternalLink } from 'lucide-react'
 
 import InfoTip from '../components/InfoTip'
 import { FileCard } from '../components/FileCard'
@@ -333,8 +334,9 @@ function renderFileSegment(content: string, meta: Record<string, unknown> | unde
   const metaFiles = (meta?.files || []) as string[]
 
   // No files — always render markdown (user messages support bold, code, links, etc.)
+  // softBreaks: preserve Shift+Enter line breaks as <br> (see MarkdownRenderer / Mesh-2695).
   if (!parsedFiles.length) {
-    return <MarkdownRenderer content={content} />
+    return <MarkdownRenderer content={content} softBreaks />
   }
 
   let display = content
@@ -371,11 +373,11 @@ function renderFileSegment(content: string, meta: Record<string, unknown> | unde
           title={fullPath} onClick={() => onFileOpen(fullPath)} aria-label={`Open file ${fullPath}`}>@{tok}</Clickable>
       )
     }
-    return part ? <MarkdownRenderer key={`${keyBase}-m${i}`} content={part.trim()} /> : null
+    return part ? <MarkdownRenderer key={`${keyBase}-m${i}`} content={part.trim()} softBreaks /> : null
   })
 }
 
-export default function ChatPage({ mode, embedded, embedMode }: { mode?: string; embedded?: boolean; embedMode?: 'chat' | 'sessions' } = {}) {
+export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?: string; embedded?: boolean; embedMode?: 'chat' | 'sessions'; popout?: boolean } = {}) {
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
   const navigationType = useNavigationType()
@@ -459,6 +461,15 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const contextPct = useAppSelector(s => s.chat.slotContextPct[s.chat.activeSlot ?? ''] ?? 0)
   const contextTokens = useAppSelector(s => s.chat.slotContextTokens?.[s.chat.activeSlot ?? ''])
   const subagents = useAppSelector(s => s.chat.subagents)
+  // Hard-lock the composer while background sub-agents run for the active slot
+  // (Decision B) — matches SubagentProgressBar's "active" derivation. Tangential
+  // questions go to the Activity-panel side chat, not the main thread.
+  const subagentsRunning = useMemo(
+    () => Object.values(subagents).some(
+      a => a.status === 'running' || a.status === 'tool' || a.status === 'pending',
+    ),
+    [subagents],
+  )
   const toolLog = useAppSelector(s => s.chat.toolLog)
   const activityOpen = useAppSelector(s => s.chat.activityOpen)
   const slotHasMore = useAppSelector(s => s.chat.slotHasMore)
@@ -1565,7 +1576,7 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   }, [connected])
   // Sync activeSlot → ?sid= in URL (persistent deep-link)
   // Skip entirely when embedded — URL belongs to the host app
-  const basePath = embedMode === 'chat' || embedMode === 'sessions' ? '/embed/chat' : '/chat'
+  const basePath = popout ? '/popout/chat' : embedMode === 'chat' || embedMode === 'sessions' ? '/embed/chat' : '/chat'
   const searchParamsRef = useRef(searchParams)
   searchParamsRef.current = searchParams
   useEffect(() => {
@@ -1676,6 +1687,9 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
   const { data: dashCfg } = useQuery<{ quick_send?: boolean; session_grid?: boolean }>({ queryKey: ['dashboardConfig'], queryFn: () => api.dashboardConfig(), staleTime: 30_000 })
   // Session grid (split view) is an opt-in feature flag (Settings › Chat › Split View). Gates ⌘D, the Columns2 button, and the grid render.
   const splitFeatureEnabled = dashCfg?.session_grid === true
+  // Pop-out state for the title-bar control (shared singleton — same channel the menus use).
+  const { isPoppedOut: isSlotPoppedOut, open: openActivePopout, focus: focusActivePopout, returnSelfToMain } = useChatPopouts()
+  const activePoppedOut = !!activeSlot && isSlotPoppedOut(activeSlot)
   const planTaskId = useMemo(() => {
     for (const m of messages) {
       const match = m.content?.match(/<!-- plan_task_id:(\S+) -->/)
@@ -2730,18 +2744,40 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
               )}
                 </div>
               {effectiveMode === 'orchestrator' && <span className="pointer-events-auto"><InfoTip text="Autopilot plans before executing. Each stage needs your approval (or select 'Go All' to run autonomously). Sub-agents are delegated automatically. Plan lessons persist across sessions." /></span>}
+              {/* Trailing controls grouped under a single ml-auto so multiple
+                  right-aligned items don't each absorb free space (two ml-auto
+                  siblings split the gap, parking the split icon mid-header). */}
+              <div className="ml-auto flex items-center gap-2 pointer-events-none">
+              {/* Pop-out control, promoted to the title bar (menu items remain for
+                  sidebar parity). Mirrors the split-view pattern to its left: a
+                  dimmed icon to act, an accent chip when the state is active.
+                  Inside the popout window itself the same spot carries Return. */}
+              {popout ? (
+                <Clickable className="flex items-center gap-1 text-muted hover:text-text transition-colors cursor-pointer pointer-events-auto text-[11px] font-medium px-1.5 py-0.5 rounded hover:bg-bg-hover" onClick={returnSelfToMain} title="Return this session to the main window" aria-label="Return to main window">
+                  <Undo2 size={13} /> Return
+                </Clickable>
+              ) : !embedMode && activeSlot && (activePoppedOut ? (
+                <Clickable className="flex items-center gap-1 text-accent bg-accent/10 hover:bg-accent/20 transition-colors cursor-pointer pointer-events-auto text-[11px] font-medium px-1.5 py-0.5 rounded" onClick={() => focusActivePopout(activeSlot)} title="This session is open in its own window — focus it" aria-label="Focus popped-out window">
+                  <ExternalLink size={13} /> Popped out
+                </Clickable>
+              ) : (
+                <Clickable className="flex items-center opacity-40 hover:opacity-100 transition-opacity cursor-pointer pointer-events-auto" onClick={() => openActivePopout(activeSlot, currentSlot?.title)} title="Pop out to window" aria-label="Pop out session to its own window">
+                  <ExternalLink size={14} />
+                </Clickable>
+              ))}
               {!embedMode && splitFeatureEnabled && (splitAnchorForActive && !activeIsSplitAnchor ? (
-                <Clickable className="ml-auto flex items-center gap-1 text-accent bg-accent/10 hover:bg-accent/20 transition-colors cursor-pointer pointer-events-auto text-[11px] font-medium px-1.5 py-0.5 rounded" onClick={() => enterSplit(splitAnchorForActive)} title="This session is open in a split — return to it" aria-label="Return to split view">
+                <Clickable className="flex items-center gap-1 text-accent bg-accent/10 hover:bg-accent/20 transition-colors cursor-pointer pointer-events-auto text-[11px] font-medium px-1.5 py-0.5 rounded" onClick={() => enterSplit(splitAnchorForActive)} title="This session is open in a split — return to it" aria-label="Return to split view">
                 <Columns2 size={13} /> In split
               </Clickable>
               ) : (
-                <Clickable className="ml-auto opacity-40 hover:opacity-100 transition-opacity cursor-pointer pointer-events-auto" onClick={() => enterSplit(activeSlot)} title="Split view (⌘D)" aria-label="Enter split view">
+                <Clickable className="opacity-40 hover:opacity-100 transition-opacity cursor-pointer pointer-events-auto" onClick={() => enterSplit(activeSlot)} title="Split view (⌘D)" aria-label="Enter split view">
                 <Columns2 size={14} />
               </Clickable>
               ))}
-              {embedMode !== 'chat' && !activityOpen && <Clickable className="ml-auto opacity-40 hover:opacity-100 transition-opacity cursor-pointer pointer-events-auto" onClick={toggleAct} aria-label="Toggle activity panel">
+              {embedMode !== 'chat' && !activityOpen && <Clickable className="flex items-center opacity-40 hover:opacity-100 transition-opacity cursor-pointer pointer-events-auto" onClick={toggleAct} aria-label="Toggle activity panel">
                 <SessionStatus />
               </Clickable>}
+              </div>
               </div>
               <div className="h-6 bg-gradient-to-b from-bg to-transparent" />
             </div>
@@ -3032,6 +3068,8 @@ export default function ChatPage({ mode, embedded, embedMode }: { mode?: string;
                    follow-up during the stop window instead of being silently blocked. */
                 false
               }
+              subagentsRunning={subagentsRunning}
+              onOpenSideChat={() => dispatch(openActivityToTab('side'))}
               autoFocusKey={activeSlot}
               prefillHint={prefillHint}
               onDismissHint={() => setPrefillHint(false)}

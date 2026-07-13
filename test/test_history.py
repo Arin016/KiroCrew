@@ -1396,6 +1396,57 @@ class TestConsolidationDoesNotBlockLoop:
             "asyncio.to_thread()."
         )
 
+    @pytest.mark.asyncio
+    async def test_save_lessons_runs_off_loop_thread(self):
+        """_save_lessons calls write_lesson which embeds via blocking urllib.
+
+        Regression guard: 22475ceb offloaded _write_structured_memory but missed
+        _save_lessons 15 lines below — the observed ~26s loop stall that causes
+        learn_add MCP timeouts (collateral damage from the blocked event loop).
+        """
+        import threading
+
+        loop_thread_id = threading.get_ident()
+        save_thread_id: dict[str, int] = {}
+
+        log = MagicMock()
+        log.get_unconsolidated.return_value = ([{"role": "user", "content": "hi"}], 1)
+        log.get_metadata.return_value = {}
+
+        memory = MagicMock()
+        memory.read_preferences.return_value = ""
+        memory.read_projects.return_value = ""
+
+        vector_store = MagicMock()
+        vector_store.get_all_semantic.return_value = []
+        vector_store.write_lesson.return_value = True
+
+        c = HistoryConsolidator(
+            log=log, memory=memory, sessions=None,
+            vector_store=vector_store, migrated=True,
+        )
+
+        original_save = c._save_lessons
+
+        def _instrumented_save(raw):
+            save_thread_id["id"] = threading.get_ident()
+            original_save(raw)
+
+        with patch.object(c, "_call_llm", new_callable=AsyncMock) as llm, \
+                patch.object(c, "_write_structured_memory"), \
+                patch.object(c, "_save_lessons", side_effect=_instrumented_save):
+            llm.return_value = {
+                "lessons": [{"rule": "always check return codes", "category": "tool"}],
+            }
+            await c._consolidate("k", include_history=True)
+
+        assert save_thread_id.get("id") is not None, "_save_lessons was not called"
+        assert save_thread_id["id"] != loop_thread_id, (
+            "_save_lessons ran on the event loop thread — write_lesson embeds via "
+            "blocking urllib here, freezing the gateway loop. It must be offloaded "
+            "via asyncio.to_thread()."
+        )
+
 
 class TestStopEventContextInjection:
     """Tests for context.py stop_event note injection."""

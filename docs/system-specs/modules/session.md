@@ -1,6 +1,6 @@
 # Session Manager Module
 
-Last Updated: 2026-07-10 (DM channel session-key model + dm_scope + generation reset + mid-turn steer/queue; Slack thread linking, bidirectional dashboard-Slack sync, slash commands)
+Last Updated: 2026-07-13 (warm pool / model precedence / orphan-sweep companion runtimes; DM channel session-key model + dm_scope + generation reset + mid-turn steer/queue; Slack thread linking, bidirectional dashboard-Slack sync, slash commands)
 
 ## Overview
 
@@ -8,9 +8,9 @@ Maps thread keys to LLMProvider instances (`session.py`). Each thread gets
 its own kiro-cli session with idle expiry, context compaction, circuit
 breaker, per-session semaphore, and persistent background session.
 
-Chat sessions cold-start on first message via `get_or_create()`. There is
-no warm pool — this avoids race conditions where pre-spawned sessions have
-stale MCP config.
+Chat sessions are served from the warm pool when eligible (default pool
+agent, default cwd, no resume mapping); otherwise they cold-start on first
+message via `get_or_create()`.
 
 ## Background Session
 
@@ -64,6 +64,12 @@ between them. Callers **MUST** call `session.destroy()` in a `finally` block
 when done. See [acp-client.md](acp-client.md) for `AcpRuntime` /
 `AcpSessionHandle`.
 
+**Cheapest-model bg tasks**: the categorical/classification background tasks
+force `claude-haiku-4.5` via a best-effort per-session `set_model` (guarded so
+backends that can't switch fall through to their default): folder-icon
+(`chat_folders.py`), link-summary (`chat_nav.py`), and lesson-contradiction
+check (`dashboard/handlers/cron.py`).
+
 ## Key Behaviors
 
 - **Context compaction**: at ≥ configured threshold (`session.autocompact_pct`, default 90%, valid 5–90), fires `/compact` to kiro-cli. Context re-injected via
@@ -79,7 +85,7 @@ when done. See [acp-client.md](acp-client.md) for `AcpRuntime` /
 - **Per-session semaphore**: serializes concurrent messages on the same
   thread key. `get_or_create()` acquires; caller must `release()` when done.
 - **Idle cleanup**: expires sessions after `session.timeout_secs` (default
-  30min). Never expires `BACKGROUND_KEY`. Dashboard per-tab sessions
+  60min). Never expires `BACKGROUND_KEY`. Dashboard per-tab sessions
   (`dashboard:{slot_key}`) idle-expire like any other session.
 
 ## APIs
@@ -87,7 +93,7 @@ when done. See [acp-client.md](acp-client.md) for `AcpRuntime` /
 | Method | Purpose |
 |--------|---------|
 | `start_pool(blocking=True)` | Pre-spawn warm + background sessions. `blocking=False` for non-blocking mode. |
-| `get_or_create(key, agent=None, approval_policy="")` | Returns `(LLMProvider, is_new, resumed)`. Uses warm pool for new sessions (default agent only). Sessions with a resume mapping skip warm pool (cold start needed for `session/load`). Non-default agents skip warm pool and get `model=None` so kiro-cli uses the agent's own model. `approval_policy` is persisted on the new `_Session` — callers (e.g. subagent) pass parent policy so the session inherits it. |
+| `get_or_create(key, agent=None, approval_policy="")` | Returns `(LLMProvider, is_new, resumed)`. Uses warm pool for new sessions (default agent only). Sessions with a resume mapping skip warm pool (cold start needed for `session/load`). Non-default agents skip warm pool and resolve their model by precedence via `_model_fallback()` — caller model > per-agent pin > global default: `model=None` (defer to kiro's agent-JSON resolution) only when the agent pins its own model, otherwise the global default, unless that default is the `"auto"` sentinel (also `None`). The per-agent pin is resolved off the event loop via `run_in_executor` using `_resolve_named_agent_model`; blank agents inherit the global, and `kiroclaw` is excluded (tracks the global). `approval_policy` is persisted on the new `_Session` — callers (e.g. subagent) pass parent policy so the session inherits it. |
 | `check_context_usage(key, provider)` | Returns %. Triggers compaction at configured threshold (default 90%), warns at 75%. |
 | `record_success(key)` / `record_failure(key)` | Circuit breaker tracking. |
 | `release(key)` | Release per-session semaphore (must call in `finally`). |
@@ -200,11 +206,43 @@ between dashboard chat and Slack.
 **API:**
 - `SessionManager.set_slack_link(key, thread_ts, channel_id)` — persists to session map
 - `SessionManager.get_slack_link(key) -> (thread_ts | None, channel_id | None)`
-- `SessionManager.get_session_for_thread(thread_ts) -> key | None` — reverse lookup
+- `SessionManager.get_session_for_thread(thread_ts) -> key | None` — reverse lookup,
+  keyed by the **bare** Slack `thread_ts`; returns the linked session key
+  (canonical `slack:<ts>` for self-linked Slack threads, `dashboard:chat-N`
+  for dashboard-linked threads)
 - `SessionManager.set_channel(key, channel_id)` — backward-compat alias
 
-**Slack handler:** calls `set_slack_link(session_key, session_key, channel)`
-outside the `if is_new` guard so every message refreshes the link.
+**Slack handler:** calls `set_slack_link(session_key, reply_ts, channel)`
+(where `reply_ts` is the bare Slack thread_ts and `session_key` is the
+canonical `slack:<ts>` form) outside the `if is_new` guard so every message
+refreshes the link.
+
+## Slack Session-Key Alias Fold
+
+Slack thread sessions have two historical key forms: the legacy bare
+`thread_ts` (`"1783733803.877979"`) and the canonical namespaced form
+(`"slack:1783733803.877979"`, `messaging/link.py`). The Slack handler derives
+the canonical form at message entry (`canonical_key(thread_ts or msg_ts)`),
+but legacy callers and persisted state may still present bare keys.
+
+`SessionManager._fold_key(key)` resolves the two alias forms onto whichever
+form is live in the in-memory registry (exact match → canonical alias →
+legacy bare alias; unknown keys pass through unchanged, so non-Slack
+namespaces are never rewritten). Every public key-taking method
+(`get_or_create`, `has_session`, `get_provider`, `get_pid`, `release`,
+`stop_turn`, `enqueue`/`dequeue`/queue helpers, `reset`, `remove`, `destroy`,
+approval-policy accessors, `record_success`/`record_failure`,
+`check_context_usage`, `cancel_current`, `is_provider_alive`) folds at entry.
+
+Without the fold, the thread-index lookup (which returns canonical keys) and
+a live session registered under the bare key disagree, so the second
+in-thread message misses the live session, the disk resume is rejected by
+kiro-cli ("Session is active in another process"), and a brand-new
+context-free session silently splits the thread.
+
+`ConversationLog._path()` applies the same back-compat: a canonical key whose
+file doesn't exist yet falls back to the legacy bare-`thread_ts` filename
+when that exists, so a thread active across the migration keeps one log file.
 
 **Dashboard chat:** mirrors user messages to linked Slack threads via
 `slack_client.post_message()`. The "Send to Slack" button (`slack/blocks.py`)
@@ -395,12 +433,30 @@ parent PID explicitly avoids this.
 - **Periodic**: `_cleanup_loop()` calls it alongside idle session expiry (~60s)
 - **At shutdown**: `cleanup_orphaned_sessions()` on signal/exit
 
+### Orphan Sweep Active Set
+
+The periodic sweep of `kiro_session_pids.txt` (which kills tracked kiro-cli
+PIDs no longer in `self._sessions`) builds its active set as the union of
+`_collect_active_pids(self._sessions)` + `_pool_pids()` + `_in_flight_pids()`
++ `_companion_runtime_pids()`, re-checked against the same union in phase 2
+before any kill. `_companion_runtime_pids()` returns the live PIDs of
+`self._subagent_runtimes` (companion runtimes multiplexing a parent session's
+subagents) and `self._bg_runtime` (the multiplexed `_bg` runtime), each guarded
+on `is_alive()` — only alive runtimes are shielded, so dead ones are still
+reaped.
+
+**Failure it fixes**: since the `AcpRuntime` unify, *every* runtime records its
+PID in `kiro_session_pids.txt` at spawn. These two runtime kinds live outside
+`self._sessions`, so before this union the sweep saw their live PIDs as
+untracked orphans and SIGKILLed them mid-chat (surfacing as
+`process exited (rc=-9)`).
+
 ## Resource Budget (Gateway Mode)
 
 | Session | Key Pattern | Lifetime | Process |
 |---------|-------------|----------|---------|
-| User chat | `{thread_ts}` | Idle timeout (30 min) | Own kiro-cli |
-| Dashboard tab | `dashboard:{slot_key}` | Idle timeout (30 min) | Own kiro-cli (from warm pool) |
+| User chat | `slack:{thread_ts}` (legacy bare `{thread_ts}` folded) | Idle timeout (60 min) | Own kiro-cli |
+| Dashboard tab | `dashboard:{slot_key}` | Idle timeout (60 min) | Own kiro-cli (from warm pool) |
 | Cron job | `cron:{job_id}` | One-shot (reset after) | Own kiro-cli (from warm pool) |
 | Background | `_bg` | Entire runtime (recycled at 70%) | Shared kiro-cli |
 | Heartbeat | `_bg` | Shared | Shared kiro-cli |

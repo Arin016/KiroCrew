@@ -395,3 +395,32 @@ describe('MarkdownRenderer strips leaked <tool_use> protocol markup', () => {
     expect(text).toContain('"x"')
   })
 })
+
+describe('MarkdownRenderer softBreaks (Mesh-2695)', () => {
+  it('converts a soft line break to <br> when softBreaks is set', () => {
+    const { container } = render(<MarkdownRenderer content={'line one\nline two'} softBreaks />)
+    expect(container.querySelectorAll('br').length).toBe(1)
+    expect(container.textContent).toContain('line one')
+    expect(container.textContent).toContain('line two')
+  })
+
+  it('collapses a soft line break by default (no softBreaks, no <br>)', () => {
+    const { container } = render(<MarkdownRenderer content={'line one\nline two'} />)
+    expect(container.querySelector('br')).toBeNull()
+  })
+
+  it('does not inject <br> between loose list items — block spacing stays normal', () => {
+    // A blank line between items makes a "loose" list. The soft-break plugin
+    // must only touch soft breaks inside text; block separators (parsed as
+    // distinct blocks) stay untouched, so list items keep normal spacing and
+    // no literal blank line is rendered between them.
+    const { container } = render(<MarkdownRenderer content={'1. first\n\n2. second'} softBreaks />)
+    expect(container.querySelectorAll('ol > li').length).toBe(2)
+    expect(container.querySelector('br')).toBeNull()
+  })
+
+  it('preserves multiple soft breaks in a paragraph as multiple <br> when softBreaks is set', () => {
+    const { container } = render(<MarkdownRenderer content={'a\nb\nc'} softBreaks />)
+    expect(container.querySelectorAll('br').length).toBe(2)
+  })
+})

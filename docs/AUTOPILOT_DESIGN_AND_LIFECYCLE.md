@@ -29,6 +29,8 @@
 
 Orchestrated Chat (Autopilot) consolidates Chat mode and Task Runner into a single interactive surface.
 
+Autopilot is **not** a separate app or page — it is a per-slot mode of the unified Chat surface, enabled when `_ChatSlot.mode == "orchestrator"` and toggled via `PATCH /api/chat/slots/{slot}/mode` (`chat_folders.py`; `_VALID_MODES = ("", "orchestrator")`, registered in `server.py`). Switching mode returns `409` while the slot is running. The standalone `orchestrated` builtin app was removed — it is deleted on startup via `manager.py`'s `_escalated` list — and there is no `/orchestrated` page or backend route.
+
 - **Simple tasks** (majority): behaves like chat — direct response, no planning overhead.
 - **Complex tasks**: structured plan, stage-by-stage execution, specialist agents — with user interaction between stages.
 - **Over time**: learns from user guidance and past plans, needs less human support for longer autonomous runs.
@@ -71,7 +73,6 @@ Autopilot           ✅ Direct response    ✅ Plan + execute     ✅ Learns to 
 | `agent_metadata.py` | Per-agent routing metadata |
 | `frontend/.../AssistantMessage.tsx` | Parses `[OPTION:]` tags into clickable buttons |
 | `frontend/.../ChatPage.tsx` | Wires button clicks to `api.planAction()` |
-| `frontend/.../OrchestratedChatPage.tsx` | 15-line wrapper around ChatPage |
 | `frontend/.../ActivityViewer.tsx` | Tools/Subagents/Logs tabs |
 
 ### State on `_ChatSlot`
@@ -358,13 +359,13 @@ If `tracker.has_escalated` but user sends a non-stop message:
 | ~~6~~ | ~~No partial stage recovery~~ | Already smart: `_collect_subagent_results()` sends full pass/fail summary to LLM which decides what to retry. Not blind retry. |
 | ~~7~~ | ~~No cross-stage failure memory~~ | Not needed: stages are sequential, next stage only starts when previous completes. `tracker.stage_results` captures status. |
 | ~~8~~ | ~~Stop button doesn't work for orchestrator~~ | Already works: `api_chat_slot_stop` kills kiro-cli process and cancels `slot.task`, which stops everything including auto-run. |
+| ~~10~~ | ~~"Prompt already in progress" drops silently~~ | Fixed: `AcpPromptBusy(AcpError)` is now raised on "already in progress" (`acp/client.py`), and the Slack path auto-resets the wedged session (`slack/handler.py` → `sessions.reset`) so the next message cold-starts cleanly instead of hitting the same wall. |
 
 ### 🔵 Deferred
 
 | # | Issue | Notes |
 |---|-------|-------|
 | 9 | No progress persistence | Gateway crash loses tracker state. Future feature. |
-| 10 | "Prompt already in progress" drops silently | Session appears stuck. Separate fix. |
 
 ---
 

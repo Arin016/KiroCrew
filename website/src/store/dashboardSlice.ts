@@ -98,6 +98,15 @@ const dashboardSlice = createSlice({
     sseConnected(state) { state.connected = true; state.slotsLoaded = false; state.subagentRunning = {}; state.subagentDetails = {}; state.subagentText = {} },
     sseDisconnected(state) { state.connected = false },
     sseSlots(state, action: PayloadAction<ChatSlot[]>) { state.slots = action.payload; state.slotsLoaded = true },
+    // Bump a slot's recency timestamp (last_ts) on live message activity so the sidebar
+    // recency tint re-ranks immediately off the finer-grained chat_message stream (vs
+    // waiting for the next full sseSlots push). last_ts is the last message of any role,
+    // so this covers user sends as well as agent output. Reducer stays pure — the caller
+    // supplies ts (falling back to now at the dispatch site).
+    touchSlotActivity(state, action: PayloadAction<{ key: string; ts: string }>) {
+      const slot = state.slots.find(s => s.key === action.payload.key)
+      if (slot) slot.last_ts = action.payload.ts
+    },
     setChannelTrusted(state, action: PayloadAction<boolean>) { state.channelTrusted = action.payload },
     sseSlotTitle(state, action: PayloadAction<{ key: string; title: string }>) {
       const slot = state.slots.find(s => s.key === action.payload.key)
@@ -198,7 +207,7 @@ const dashboardSlice = createSlice({
   },
 })
 
-export const { sseStatus, sseConnected, sseDisconnected, sseSlots, setChannelTrusted, sseSlotTitle, addSlotOptimistic, removeSlotOptimistic, updateSlot, updateSlotFolder, updateSlotPin, triggerRefresh, markSlotUnread, markSlotRead, setUpdateProgress, sseSubagentStatus, sseSubagentText, sseSlotColor, setSessionDefaultColor, setSessionColorsMode, setSessionColorsPalette, setSessionColorsIntensity, setEnabledAppIds } = dashboardSlice.actions
+export const { sseStatus, sseConnected, sseDisconnected, sseSlots, touchSlotActivity, setChannelTrusted, sseSlotTitle, addSlotOptimistic, removeSlotOptimistic, updateSlot, updateSlotFolder, updateSlotPin, triggerRefresh, markSlotUnread, markSlotRead, setUpdateProgress, sseSubagentStatus, sseSubagentText, sseSlotColor, setSessionDefaultColor, setSessionColorsMode, setSessionColorsPalette, setSessionColorsIntensity, setEnabledAppIds } = dashboardSlice.actions
 
 /**
  * Resolve a slot's surface key. Backend emits `surface` (mirrors `mode` today

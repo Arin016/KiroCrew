@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import json
 import logging
+import math
 import os
 import sys
 from pathlib import Path
@@ -149,9 +150,11 @@ def _get_vector_store(state: DashboardState):
         return mem.vector_store
     # Fallback: create standalone
     if not hasattr(state, "_standalone_vector"):
+        from kiro_claw.config.loader import KiroClawConfig  # noqa: F811
         from kiro_claw.vector_memory import VectorMemoryStore  # noqa: F811
 
-        store = VectorMemoryStore()
+        cfg = KiroClawConfig.load()
+        store = VectorMemoryStore(embedding_dim=cfg.memory.embedding_dim)
         store.init()
         state._standalone_vector = store  # type: ignore[attr-defined]
         mem.vector_store = store
@@ -910,7 +913,53 @@ def _build_memory_graph(mem: Any, lessons: list) -> tuple[list[dict], list[dict]
                 ):
                     edges.append({"from": n["id"], "to": proj_id})
 
+    # Pre-compute node positions server-side so the client never runs a layout.
+    _assign_layout_coords(nodes)
+
     return nodes, edges
+
+
+def _assign_layout_coords(nodes: list[dict]) -> None:
+    """Assign each node a deterministic (x, y) — group-partitioned grid, O(n).
+
+    Replaces the frontend's O(n²) force-directed physics (vis-network
+    ``forceAtlas2Based`` + 150 stabilization iterations), which ran on the
+    browser main thread and froze the UI at thousands of nodes. Each memory
+    group gets its own grid block laid out left-to-right, so the graph reads as
+    color-coded clusters and renders instantly with physics disabled on the
+    client. Mutates ``nodes`` in place (adds ``x``/``y`` keys).
+
+    NOTE: a plain grid is the right tool here precisely because the current
+    graph is almost entirely disconnected (edges only form on full-project-name
+    overlap, which almost never matches). If a future change introduces real
+    edge density, swap this body for a force-directed layout (e.g. a
+    numpy-vectorised Barnes-Hut pass, O(n log n)); the frontend already consumes
+    server-provided x/y, so only this function changes — no client edit needed.
+    """
+    # Fixed group order keeps the layout stable across requests.
+    group_order = ["preference", "project", "semantic", "lesson", "history"]
+    sx, sy = 220, 90  # per-node horizontal / vertical spacing
+    group_gap = 400  # blank gutter between adjacent group blocks
+
+    by_group: dict[str, list[dict]] = {}
+    for n in nodes:
+        by_group.setdefault(n.get("group", "history"), []).append(n)
+
+    # Known groups first (stable), then any unexpected group so nothing is lost.
+    ordered_groups = group_order + [g for g in by_group if g not in group_order]
+
+    x_cursor = 0
+    for group in ordered_groups:
+        members = by_group.get(group)
+        if not members:
+            continue
+        # Slightly wider than tall for a balanced, readable block.
+        cols = max(1, math.ceil(math.sqrt(len(members) * 1.6)))
+        for idx, node in enumerate(members):
+            row, col = divmod(idx, cols)
+            node["x"] = x_cursor + col * sx
+            node["y"] = row * sy
+        x_cursor += cols * sx + group_gap
 
 
 async def api_memory_graph(request: web.Request) -> web.Response:

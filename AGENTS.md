@@ -379,6 +379,12 @@ should always use the MCP tool equivalents.
 | — | `local_knowledge_search` | kiroclaw-core |
 | — | `file_send` | kiroclaw-core |
 | — | `autonudge_stop` | kiroclaw-core |
+| — | `artifact_folder_list` | kiroclaw-core |
+| — | `artifact_folder_create` | kiroclaw-core |
+| — | `artifact_folder_rename` | kiroclaw-core |
+| — | `artifact_folder_move` | kiroclaw-core |
+| — | `artifact_folder_delete` | kiroclaw-core |
+| — | `artifact_move` | kiroclaw-core |
 | — | `browser_navigate` | playwright |
 | — | `browser_click` | playwright |
 | — | `browser_snapshot` | playwright |

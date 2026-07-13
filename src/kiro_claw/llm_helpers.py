@@ -64,6 +64,7 @@ _TRANSIENT_MARKERS = (
     "dispatch failure",        # AWS SDK connector-level I/O failure (conn/DNS/TLS drop)
     "dispatchfailure",         # Rust DispatchFailure variant (unspaced)
     "is unavailable on bedrock",  # capacity/region rollout (formatted message)
+    "transient error (http 5xx)",  # _format_acp_error's generic-5xx message (Mesh-2356)
 )
 
 
@@ -100,6 +101,25 @@ def is_transient_backend_error(msg: str) -> bool:
     backend failure (5xx / throttle / stream-reset) rather than an
     auth/validation error. Public alias of :func:`_is_transient_acp_error`."""
     return _is_transient_acp_error(msg)
+
+
+def acp_error_is_transient(exc: BaseException) -> bool:
+    """Authoritative retry-eligibility decider for an ACP error.
+
+    Prefers the structured verdict carried on ``AcpError.transient`` — classified
+    from the RAW JSON-RPC error at raise time (see
+    ``acp.client._is_transient_raw_error``) — so the retry decision is
+    independent of how the user-facing message is worded. Falls back to
+    string-matching the formatted message for exceptions raised without the flag
+    (legacy raise paths, non-``AcpError`` exceptions, tests).
+
+    Fixes Mesh-2356: ``_format_acp_error`` rewrites a generic 5xx into a friendly
+    string that the marker-based string classifier alone did not recognise, so
+    the retry never fired."""
+    flag = getattr(exc, "transient", None)
+    if isinstance(flag, bool):
+        return flag
+    return is_transient_backend_error(str(exc))
 
 
 def transient_retry_delay(attempt: int) -> float:
@@ -245,7 +265,7 @@ async def stream_and_collect(
             if (
                 retry_transient
                 and not result_text
-                and _is_transient_acp_error(msg)
+                and acp_error_is_transient(exc)
                 and transient_attempts < _TRANSIENT_RETRIES
             ):
                 transient_attempts += 1

@@ -136,6 +136,7 @@ DM KiroClaw in Slack. Each thread gets its own AI session with full tool access.
 - **Steering file auto-load** — workspace `.kiro/steering` files automatically loaded into kiro-cli sessions
 - **Enterprise Grid null-team handling** — graceful handling of null team field in Grid interaction payloads
 - **Bang command validation** — unrecognized `!` commands caught instead of falling through to LLM
+- **Restart from Slack** — owner-only `/kiroclaw restart` slash command and `!restart` bang, gated on systemd (`INVOCATION_ID`); performs a clean `os._exit`-based supervisor respawn
 
 ### Web Dashboard
 
@@ -153,7 +154,7 @@ Full-featured React SPA at `localhost:5476` (or `http://kiroclaw.localhost:5476`
 - **Self-update** — topbar shows version badge; click to check for updates with changelog preview, "Update Now" button to pull + rebuild + auto-restart
 - **Custom domain** — `kiroclaw setup` optionally adds `kiroclaw.localhost` to the hosts file (macOS/Linux)
 - **Branding** — custom bot name and avatar via `dashboard.bot_name` / `dashboard.avatar` config
-- **14-theme color system** — dark/light variants with Color Theme picker in Overview > Display tab
+- **14-theme color system** — dark/light variants with Color Theme picker in Overview > Display tab; theme mode/color and onboarding are workspace-persistent server-side (persist across ports/devices) and served pre-auth via `GET /api/theme/boot`
 - **Session restore** — optionally restore active sessions on gateway restart
 - **Token-based auth** — optional dashboard URL token for remote access; token sessions auto-renew via OAuth-style refresh tokens (`POST /api/auth/refresh`, `GET /api/auth/me`, 30-day max TTL) so long-lived dashboards stay signed in without re-pasting the URL token
 - **Memory Graph Explorer** — vis.js visualization of semantic memory relationships
@@ -169,7 +170,7 @@ Full-featured React SPA at `localhost:5476` (or `http://kiroclaw.localhost:5476`
 - **Colored diff rendering** — tool approval popups and activity viewer render diffs with colored +/- lines
 - **Inline image preview** — drag-drop images show preview strip before sending
 - **Persistent agent channels** — multi-agent collaboration UI with dedicated channel pages
-- **Orchestrated chat** — conductor-driven multi-agent orchestration with activity viewer
+- **Orchestrator mode** — Autopilot is a per-slot mode of Chat (toggle via `PATCH /api/chat/slots/{slot}/mode`, blocked while the slot is running); the standalone orchestrated app was removed
 - **Project folder grouping** — organize sessions into folders with drag-drop, LLM-generated emoji icons, server-persisted pinning
 - **Session colors** — per-session color coding with 4 palette generators and accessibility-aware contrast
 - **Incognito mode** — ephemeral sessions that block `learn_add` and memory consolidation
@@ -303,7 +304,7 @@ Defense-in-depth security controls enforced at multiple layers.
   ```
 
 - **Credential output redaction** — `redact_credentials()` scans all LLM output for credential patterns (AWS access keys, secret keys, session tokens, private key headers, Slack tokens) and base64-encoded variants before posting to Slack or dashboard
-- **deniedCommands** — 91 regex patterns block destructive operations at the kiro-cli level (AWS delete/terminate, git push, rm -rf, SQL drops, IaC destroy, S3 upload exfiltration, env var dumping, IMDS access, script-based credential extraction). Cannot be bypassed by the LLM even in YOLO mode
+- **deniedCommands** — 116 regex patterns block destructive operations at the kiro-cli level (AWS delete/terminate, git push, rm -rf, SQL drops, IaC destroy, S3 upload exfiltration, env var dumping, IMDS access, script-based credential extraction). Cannot be bypassed by the LLM even in YOLO mode
 - **Tamper-resistant config** — deniedCommands always sourced from the bundled package and replaced (not merged) on every update; stale patterns from old versions are automatically cleaned up
 - **Audit logging** — every bash command execution logged to `~/.kiroclaw/audit.log` with UTC timestamps via kiro-cli preToolUse hook
 - **Built-in tool deny list** — `security.py` blocks tool names matching credential/destructive patterns at the Python hook layer
@@ -367,6 +368,9 @@ kiroclaw spawn run --async "check CRs"     # fire-and-forget
 Slack: `spawn <task>`, `bg <task>`, `spawn list`. Max 3 concurrent.
 
 - **Configurable completion truncation** — `agent.completion_keep` (`head`/`tail`/`both`) and `agent.completion_keep_chars` control which end of the subagent transcript survives in the completion event
+- **Completion summary + result_path** — truncated/orchestrator results deliver a first+last-words preview plus a `result_path` instead of a lossy blob; the parent reads the full transcript on demand
+- **Result retention TTL** — `agent.subagent_result_ttl_secs` (default 3600s) reaps delivered-result tombstones; other tombstones keep 7 days
+- **`spawn_status` paging** — `offset`/`limit`/`grep` params for line-oriented paging and case-insensitive regex over subagent output
 - **PostToolUse hook** — subagent loop now fires `PostToolUse` on `EVENT_TOOL_RESULT` (mirrors chat_runner behavior for full hook observability)
 - **Hook payload metadata** — `subagent_id`, `parent_session_key`, and `agent_role` passed into hook payloads for per-subagent attribution
 
@@ -384,6 +388,8 @@ Lessons are injected into every session context automatically. The task runner a
 Markdown skill files teach the LLM which CLI commands exist. Two-tier loading:
 1. **Word-overlap matching** — skill content auto-injected when message words overlap with skill triggers; `!`-prefixed triggers exclude matches
 2. **Semantic fallback** — LLM reads skill summary, `cat`s the file on demand
+
+**Lazy skill injection** (`skills.lazy_load`, default off) — when on, injects `always: true` pinned skills plus a usage-ranked top-K of on-demand skills under per-section context budgets; the long tail is discoverable via the `skill_search` MCP tool.
 
 Edit skills in `skills/` without rebuilding. See `skills/README.md`.
 
@@ -428,6 +434,7 @@ Build and distribute apps that run inside KiroClaw. Apps can be dashboard-hosted
 - **Fix with AI** — failed installs show "Fix with AI" button that sends errors to the agent
 - **Builtin auto-discovery** — frontend automatically discovers and registers routes for builtin apps
 - **App enable/disable metrics** — track app adoption with enable/disable event metrics
+- **Code Review Sage (built-in)** — reviews GitHub PRs; posts a PENDING (human-submitted) review and requires an authenticated `gh` on the gateway host
 
 See [app-kit/getting-started.md](app-kit/getting-started.md) for the full developer guide.
 
@@ -647,6 +654,8 @@ Config: `~/.kiroclaw/config.json`
 > `kiroclaw gateway --port <n>`. The `dashboard.url` config key is for the
 > externally-advertised URL only (remote access / CORS origin).
 
+**Telemetry** (off by default) — `telemetry.enabled` / `telemetry.local_dir` / `telemetry.export_interval_seconds`; when enabled, metrics are written local-only as JSONL under `~/.kiroclaw/metrics` (no network egress).
+
 Manage config via CLI: `kiroclaw config get [key]`, `kiroclaw config set <key> <val>`, `kiroclaw config edit`
 
 Credentials: `~/.kiroclaw/.env` — `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, `KIROCLAW_OWNER_ID`
@@ -732,7 +741,7 @@ kiroclaw setup --agent-only --clean  # nuclear option: fresh config, no merge
 | [kiro-cli/](kiro-cli/) | kiro-cli documentation (installation, chat, MCP, hooks, skills) |
 | [design/SOFT-STOP-DESIGN.md](design/SOFT-STOP-DESIGN.md) | Cooperative soft-stop design |
 | [REMOTE_DESKTOP_SETUP.md](REMOTE_DESKTOP_SETUP.md) | 24/7 remote host setup |
-| [team-communication.md](team-communication.md) | Team communication guidelines |
+| [system-specs/modules/persistent-agent-channels.md](system-specs/modules/persistent-agent-channels.md) | Multi-agent collaboration channels |
 | [system-specs/](system-specs/) | Module-level specifications |
 
 ## Development

@@ -1,21 +1,22 @@
 # Dynamic Sub-Agent Max Count
 
-By default KiroClaw caps concurrent sub-agents at a fixed `agent.max_subagents`
-(3). On a large host that wastes capacity; on a tiny host a fixed number can be
-wrong the other way. **Dynamic sizing** computes a sensible cap at gateway
-startup from the host's actual memory and CPU, plus a per-agent cost KiroClaw
-*learns* from past runs.
+KiroClaw sizes the concurrent sub-agent cap **automatically** by default
+(`agent.max_subagents = 0`): at gateway startup it computes a sensible cap from
+the host's actual memory and CPU, plus a per-agent cost KiroClaw *learns* from
+past runs. A fixed number is wrong in both directions — it wastes capacity on a
+large host and over-commits a tiny one — so auto is the default; set a positive
+integer to pin an explicit cap.
 
 ## Enabling It
 
-Set the cap to the auto sentinel:
+Auto-sizing is the default. To pin an explicit cap instead:
 
 ```
-kiroclaw config set agent.max_subagents 0
+kiroclaw config set agent.max_subagents 8
 ```
 
-- `agent.max_subagents > 0` — explicit cap (unchanged legacy behavior).
-- `agent.max_subagents = 0` — **auto**: compute the cap at startup.
+- `agent.max_subagents = 0` — **auto** (default): compute the cap at startup.
+- `agent.max_subagents > 0` — explicit fixed cap.
 
 The cap is computed once per gateway start. Restart to recompute (e.g. after the
 host's resources change).
@@ -58,6 +59,32 @@ startup and periodically at runtime), so it never grows without limit. Before
 enough samples accumulate, a conservative fallback is used
 (`agent.subagent_cost_gb`, `agent.subagent_cpu_cost_cores`).
 
+### Session-shared sub-agents (AcpRuntime)
+
+With `agent.session_sharing = True` (the default for the kiro-cli backend), an
+eligible sub-agent does **not** spawn its own process — it runs as an extra
+session inside the parent's shared **AcpRuntime** (one process hosts
+everything). Its true incremental cost is small and roughly constant, not the
+whole process.
+
+Because every sharing sub-agent reports the **same** runtime PID, naive per-PID
+sampling would charge the entire shared process to *each* of them and inflate
+the learned cost — pinning the cap to the floor of 3, the opposite of what we
+want now that shared sub-agents are cheap. So the sampler special-cases them:
+
+- **Shared** sub-agents attribute the runtime's measured RSS/CPU **divided by
+  the number of concurrently-live shared sessions** on that PID — an empirical
+  per-session *average share*, not a guessed constant. As concurrency rises the
+  per-agent share falls, so the learned cost tracks reality.
+- **Dedicated** (per-process) spawns — any spawn with model/allowed-tools/bare
+  overrides, or with session sharing off — keep the per-PID subtree sampling
+  above.
+
+The practical effect: for the common session-shared case the memory term no
+longer binds, so the cap rises to the **provider-concurrency ceiling**
+(`agent.subagent_auto_max`) rather than host RAM — which is the real constraint
+when N sessions share one process calling one upstream account.
+
 ## Why a Hard Cap
 
 The formula sizes for **local** resources, but every sub-agent calls the same
@@ -65,7 +92,7 @@ upstream LLM provider under one account. The provider's concurrency / rate
 limit is frequently the *real* bottleneck — a host that fits 48 agents in RAM
 may only get useful throughput from a handful before requests start queueing.
 
-`agent.subagent_auto_max` (default **16**) is an honest ceiling for that
+`agent.subagent_auto_max` (default **32**) is an honest ceiling for that
 unmodeled limit. On a big host the hard cap binds; on a small host memory or
 CPU binds below it. If you've confirmed your provider serves more concurrency,
 raise it. KiroClaw does **not** yet measure provider saturation — that's a
@@ -75,11 +102,11 @@ deliberate v1 simplification we may revisit.
 
 | Key | Default | Effect |
 |-----|---------|--------|
-| `agent.max_subagents` | `3` | `0` = auto-size; `>0` = explicit cap |
+| `agent.max_subagents` | `0` | `0` = auto-size (default); `>0` = explicit cap |
 | `agent.subagent_mem_buffer_pct` | `20` | % of memory/CPU reserved for the OS and other processes |
 | `agent.subagent_cost_gb` | `0.5` | First-boot memory-cost fallback (GB/agent) until learned |
 | `agent.subagent_cpu_cost_cores` | `1.0` | First-boot CPU-cost fallback (cores/agent) until learned |
-| `agent.subagent_auto_max` | `16` | Absolute ceiling on the computed cap |
+| `agent.subagent_auto_max` | `32` | Absolute ceiling on the computed cap (provider-concurrency stand-in) |
 | `agent.spawn_min_memory_gb` | `4.0` | Per-spawn admission gate (separate runtime guard, refuses a spawn when free memory is low) |
 | `session.pool_size` | `0` | Warm-pool size; reserved in the memory term when > 0 |
 

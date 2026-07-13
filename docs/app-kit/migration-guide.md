@@ -115,7 +115,7 @@ pip install kiroclaw-client
 ### Step 2: Replace sync calls with async
 
 ```python
-# Before — kiro_claw.apps.sdk (sync, embedded in main package)
+# Before — kiro_claw.apps.sdk (removed; was a sync client embedded in the main package)
 from kiro_claw.apps.sdk import KiroClawClient
 mc = KiroClawClient(app_name="my-tool")
 result = mc.dispatch_agent("my-agent", "Do something")
@@ -131,7 +131,10 @@ async with KiroClawClient(app_name="my-tool") as mc:
 
 Key differences:
 
-| | Old (`kiro_claw.apps.sdk`) | New (`kiroclaw_client`) |
+> **Note:** `kiro_claw.apps.sdk` no longer ships — it was removed in a prior
+> release. Do not try to import it; use `kiroclaw_client` for all Python apps.
+
+| | Old (`kiro_claw.apps.sdk`, removed) | New (`kiroclaw_client`) |
 |---|---|---|
 | I/O model | Sync (`urllib`) | Async (`aiohttp`) |
 | Dependencies | Requires `kiro_claw` package | Standalone (only `aiohttp`) |
@@ -143,7 +146,7 @@ Key differences:
 
 | Scenario | Recommended |
 |----------|-------------|
-| App backend running inside KiroClaw process | `kiro_claw.apps.sdk` (sync, no extra deps) |
+| App backend managed by KiroClaw (behind the gateway reverse proxy) | `kiroclaw_client` (async) for outbound calls |
 | External CLI tool or service (Python) | `kiroclaw_client` (async, standalone) |
 | Dashboard UI page (TypeScript/React) | `@kiroclaw/app-sdk` hooks (host-provided) |
 | Electron / Node.js app | Call the Gateway REST/WS endpoints directly via `fetch()` / a WebSocket |

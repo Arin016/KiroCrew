@@ -122,13 +122,18 @@ describe('ArtifactsPage', () => {
     })
   })
 
-  it('clicking row navigates to detail page (button is keyboard-reachable)', async () => {
+  it('card action button pops the artifact out into its own window (keyboard-reachable)', async () => {
     vi.mocked(api).artifacts = vi.fn().mockResolvedValue({
       artifacts: [mkArtifact('cr-queue')],
     })
     renderWithProviders(<ArtifactsPage />, { route: '/artifacts' })
     await waitFor(() => expect(screen.getByText('cr queue')).toBeInTheDocument())
-    const openBtn = screen.getByLabelText('Open standalone')
-    expect(openBtn).toBeInTheDocument()
+    const popoutBtn = screen.getByLabelText('Pop out to window')
+    expect(popoutBtn).toBeInTheDocument()
+    const open = vi.spyOn(window, 'open').mockReturnValue({ closed: false, focus: vi.fn() } as unknown as Window)
+    await userEvent.click(popoutBtn)
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(String(open.mock.calls[0][0])).toContain('/popout/artifact/cr-queue')
+    open.mockRestore()
   })
 })

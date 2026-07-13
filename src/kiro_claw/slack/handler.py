@@ -49,6 +49,7 @@ from kiro_claw.hooks import (
     validate_file_path,
 )
 from kiro_claw.llm_helpers import save_conversation_turn
+from kiro_claw.messaging.link import canonical_key
 from kiro_claw.platform import current_context
 from kiro_claw.providers.base import (
     EVENT_COMPACTION_STATUS,
@@ -665,7 +666,8 @@ async def _apply_temporary_modifier(
     )
     # Register thread so follow-up messages pass the in_active_thread
     # gate in mention/observe channels without needing another @mention.
-    sessions.set_slack_link(session_key, session_key, channel)
+    # reply_ts is the bare Slack thread_ts; session_key may be namespaced.
+    sessions.set_slack_link(session_key, reply_ts, channel)
     await slack.post_message(
         channel,
         "🔒 Temporary mode ON — this thread won't read or save memory.",
@@ -696,7 +698,8 @@ async def _apply_incognito_modifier(
         source="slack",
         resources=f"{channel}:{session_key}",
     )
-    sessions.set_slack_link(session_key, session_key, channel)
+    # reply_ts is the bare Slack thread_ts; session_key may be namespaced.
+    sessions.set_slack_link(session_key, reply_ts, channel)
     await slack.post_message(
         channel,
         "🕶️ Incognito mode ON — this thread can read memory but won't save anything.",
@@ -2351,7 +2354,11 @@ async def maybe_route_linked_thread(
     """
     if not (_dashboard_state and hasattr(_dashboard_state, "get_linked_slot")):
         return False
-    _linked_slot = _dashboard_state.get_linked_slot(session_key)
+    # The dashboard _slack_to_slot map is keyed by the bare Slack thread_ts
+    # (reply_ts), NOT the namespaced session key — look up with reply_ts so
+    # canonical ``slack:<ts>`` session keys still hit linked slots. session_key
+    # is kept for the SEL logging below.
+    _linked_slot = _dashboard_state.get_linked_slot(reply_ts)
     if not _linked_slot:
         return False
 
@@ -2445,8 +2452,17 @@ async def handle_message(
     """
     Stats().inc_message_received()
     _t0 = time.monotonic()
-    session_key = thread_ts or msg_ts
+    # reply_ts is the true Slack thread timestamp (used for posting replies and
+    # as the key of thread-indexed maps like SessionMap._thread_to_session and
+    # dashboard _slack_to_slot). session_key is the namespaced form used for
+    # everything session-scoped (registry, conversation log, thread overrides).
+    # Deriving the canonical form HERE keeps the key stable across messages:
+    # previously the first message ran under the bare thread_ts while the
+    # second was rewritten to ``slack:<ts>`` by the linked-thread routing below
+    # (the self-link canonicalizes), splitting the live session, the
+    # conversation log, and the per-thread override maps across two keys.
     reply_ts = thread_ts or msg_ts
+    session_key = canonical_key(reply_ts)
     _hydrate_thread_overrides(session_key, conversation_log)
     _hydrate_conv_flags(sessions, session_key)
 
@@ -2824,8 +2840,12 @@ async def handle_message(
     _acquired = False
 
     # ── Bidirectional sync: check if this Slack thread is linked to a dashboard session ──
-    linked_session_key = sessions.get_session_for_thread(session_key)
-    if linked_session_key:
+    # The thread index is keyed by the bare Slack thread_ts (reply_ts), NOT the
+    # namespaced session key. A self-linked Slack thread resolves to our own
+    # canonical key (no-op rewrite); a dashboard-linked thread resolves to its
+    # ``dashboard:chat-N`` key.
+    linked_session_key = sessions.get_session_for_thread(reply_ts)
+    if linked_session_key and linked_session_key != session_key:
         logger.info(
             "🔗 Slack thread %s linked to dashboard session %s — routing there",
             session_key,
@@ -2844,7 +2864,11 @@ async def handle_message(
         if is_new:
             await sessions.set_channel(session_key, channel)
         if not linked_session_key:
-            sessions.set_slack_link(session_key, session_key, channel)
+            # Self-link: thread index maps the bare Slack thread_ts to this
+            # session's canonical key. reply_ts (not session_key) is the true
+            # Slack timestamp — storing the namespaced key as slack_thread_ts
+            # would corrupt reply routing.
+            sessions.set_slack_link(session_key, reply_ts, channel)
         logger.info(
             "🔍 session state: key=%s is_new=%s resumed=%s",
             session_key,

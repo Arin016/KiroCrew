@@ -276,6 +276,7 @@ export interface AddInstanceBody {
 export const api = {
   status: () => fetch('/api/status').then(j),
   system: () => fetch('/api/system').then(j),
+  telemetryStartup: () => fetch('/api/telemetry/startup').then(j),
   securityStats: () => fetch('/api/security/stats').then(j) as Promise<{ denied_commands: number; suspicious_patterns: number; tool_schemas: number; redaction_paths: number }>,
   suggestions: (force?: boolean) => fetch(`/api/suggestions${force ? '?force=1' : ''}`).then(j) as Promise<{ suggestions: string[]; generated_at: number; stale: boolean }>,
   branding: () => fetch('/api/dashboard/branding').then(j) as Promise<{ bot_name: string; avatar: string }>,
@@ -383,6 +384,7 @@ export const api = {
   crons: () => fetch('/api/crons').then(j),
   createCron: (body: object) => post('/api/crons', body).then(j),
   deleteCron: (id: string) => del('/api/crons/' + id).then(j),
+  batchDeleteCron: (ids: string[]) => del('/api/crons', { ids }).then(j),
   updateCron: (id: string, body: object) =>
     fetch('/api/crons/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j),
   runCron: (id: string) => post('/api/crons/' + id + '/run').then(j),
@@ -789,6 +791,17 @@ export const api = {
   updateArtifact: (slug: string, body: { content?: string; name?: string; description?: string; tags?: string[]; actor?: 'user' | 'agent'; event_type?: 'edited' | 'iterated' | 'reverted'; from_version?: number; snapshot?: boolean }) =>
     patch(`/api/artifacts/${encodeURIComponent(slug)}`, body).then(j),
   deleteArtifact: (slug: string) => del(`/api/artifacts/${encodeURIComponent(slug)}`).then(j),
+  // Artifact library folders (Mesh-2720)
+  artifactFolders: () => get('/api/artifact-folders').then(j),
+  createArtifactFolder: (body: { name: string; parent_id?: string; color?: string }) =>
+    post('/api/artifact-folders', body).then(j),
+  updateArtifactFolder: (id: string, body: { name?: string; parent_id?: string; order?: number; icon?: string; color?: string }) =>
+    patch(`/api/artifact-folders/${encodeURIComponent(id)}`, body).then(j),
+  deleteArtifactFolder: (id: string, deleteContents: boolean) =>
+    del(`/api/artifact-folders/${encodeURIComponent(id)}?delete_contents=${deleteContents ? 'true' : 'false'}`).then(j),
+  /** Move an artifact into a folder ("" = unfile to root). Metadata-only — no version bump. */
+  setArtifactFolder: (slug: string, folderId: string) =>
+    patch(`/api/artifacts/${encodeURIComponent(slug)}/folder`, { folder_id: folderId }).then(j),
   browserAuthRetry: () => post('/api/browser-auth-retry', {}).then(j),
   getBrowserConfig: () => get('/api/browser/config').then(j) as Promise<{extension_mode: boolean; token: boolean}>,
   saveBrowserConfig: (body: {extension_mode: boolean; token: string}) => put('/api/browser/config', body).then(j),

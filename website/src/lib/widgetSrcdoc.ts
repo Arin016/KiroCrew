@@ -86,6 +86,28 @@ const HEIGHT_REPORT_SHRINK_MS = 200
  * continuously animating widget (lava lamp, starry night) reports its height
  * once and then stops posting, instead of feeding a per-frame resize loop back
  * to the parent. */
+/** Guards against the "unsafe centering" clip: artifacts that lay out with
+ * `body { display:flex; align-items:center }` (or grid `place-items:center`)
+ * clip the TOP of their content — unreachable by scrolling — whenever the
+ * content is taller than the iframe viewport (common in shorter windows, e.g.
+ * an artifact popout). CSS solves this with `safe center`: identical to
+ * `center` when the content fits, falls back to start-alignment when it
+ * overflows. Applied only when the body actually uses a centering flex/grid
+ * layout, so non-centered artifacts are untouched. Re-checked on resize since
+ * the overflow condition depends on the viewport. */
+const SAFE_CENTER_GUARD_BODY = `(function(){
+  function apply(){
+    var cs = getComputedStyle(document.body);
+    if(cs.display!=='flex' && cs.display!=='grid' && cs.display!=='inline-flex' && cs.display!=='inline-grid') return;
+    if(cs.alignItems==='center') document.body.style.alignItems='safe center';
+    if(cs.justifyContent==='center') document.body.style.justifyContent='safe center';
+    if(cs.alignContent==='center') document.body.style.alignContent='safe center';
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', apply);
+  else apply();
+  window.addEventListener('resize', apply);
+})();`
+
 const HEIGHT_REPORTER_BODY = `(function(){
   var EPS = ${HEIGHT_REPORT_EPSILON_PX};
   var SHRINK_MS = ${HEIGHT_REPORT_SHRINK_MS};
@@ -291,6 +313,12 @@ export function buildSrcdoc({
     reporter.textContent = HEIGHT_REPORTER_BODY
     body.appendChild(reporter)
   }
+
+  // Unsafe-centering guard: keeps the top of flex/grid-centered artifact
+  // bodies reachable when the content overflows the iframe viewport.
+  const safeCenter = doc.createElement('script')
+  safeCenter.textContent = SAFE_CENTER_GUARD_BODY
+  body.appendChild(safeCenter)
 
   // Serialize the DOM-built document. The remaining template literal here
   // contains only the static DOCTYPE prefix and the *serialized* DOM tree

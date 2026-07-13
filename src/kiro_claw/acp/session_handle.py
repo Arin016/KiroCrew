@@ -22,7 +22,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -44,6 +45,15 @@ from kiro_claw.acp.client import (
     AcpTimeoutError,
     _is_safe_oauth_url,
     _is_tool_interrupted_marker,
+)
+from kiro_claw.acp.liveness import (
+    EVIDENCE_ESTABLISHED_FLAT,
+    VERDICT_DEAD,
+    VERDICT_STUCK_INPUT,
+    VERDICT_UNKNOWN,
+    VERDICT_WORKING,
+    LivenessOracle,
+    ToolCallState,
 )
 from kiro_claw.acp.types import (
     EVENT_AGENT_SWITCHED,
@@ -71,11 +81,14 @@ from kiro_claw.acp.types import (
     OPTION_ALLOW_ONCE,
     OUTCOME_CANCELLED,
     OUTCOME_SELECTED,
-    STOP_REASON_END_TURN,
+    STOP_REASON_CANCELLED,
+    STOP_REASON_STALE_RECOVER,
+    STOP_REASON_TOOL_STALL,
     AcpEvent,
     AcpPromptStats,
     JsonRpcMessage,
 )
+from kiro_claw.executors import subprocess_executor
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
 
@@ -84,8 +97,47 @@ logger = logging.getLogger(__name__)
 # ── Constants ──
 
 _DEFAULT_PROMPT_TIMEOUT = 7200.0  # 2 hours
-_STALE_TURN_TIMEOUT = 90.0
-_TOOL_STALL_TIMEOUT = 600.0
+
+
+@dataclass(frozen=True)
+class WatchdogSettings:
+    """Resolved ``watchdog.*`` config values, read ONCE at handle construction
+    (never inside the dispatch loop). Defaults mirror ``WatchdogConfig`` in
+    ``config/loader.py`` so a config-less context (tests, early bootstrap)
+    behaves identically to a default config."""
+
+    check_after_secs: float = 60.0
+    stale_window_secs: float = 300.0
+    tool_stall_suspect_secs: float = 600.0
+    tool_stall_hard_cap_secs: float = 2700.0
+    model_silent_probe_secs: float = 900.0
+    wellness_sample_secs: float = 3.0
+
+
+def _load_watchdog_settings() -> WatchdogSettings:
+    """Snapshot ``watchdog.*`` from config. Function-level import (mirrors
+    ``_sync_effort_levels``) avoids the config -> dashboard -> acp import
+    cycle; any failure falls back to defaults rather than breaking a handle."""
+    try:
+        # circular import: config.loader -> dashboard -> session -> acp
+        from kiro_claw.config.loader import KiroClawConfig
+
+        w = KiroClawConfig.load().watchdog
+        return WatchdogSettings(
+            check_after_secs=float(w.check_after_secs),
+            stale_window_secs=float(w.stale_window_secs),
+            tool_stall_suspect_secs=float(w.tool_stall_suspect_secs),
+            tool_stall_hard_cap_secs=float(w.tool_stall_hard_cap_secs),
+            model_silent_probe_secs=float(w.model_silent_probe_secs),
+            wellness_sample_secs=float(w.wellness_sample_secs),
+        )
+    except Exception:
+        logger.debug("watchdog settings load failed — using defaults", exc_info=True)
+        return WatchdogSettings()
+
+
+# How often a WORKING-verdict deferral is logged (evidence trail without spam).
+_WORKING_LOG_INTERVAL_SECS = 600.0
 # Unresponsive-cancel budget: after cancel() is sent, if kiro-cli does not
 # ack (via a cancelled stopReason on the prompt response) within this window,
 # the dispatch loop unblocks the caller with a terminal EVENT_COMPLETE. The
@@ -113,6 +165,12 @@ class AcpRuntimeProtocol(Protocol):
     """Minimal interface that AcpSessionHandle needs from AcpRuntime."""
 
     _last_activity: float
+
+    @property
+    def pid(self) -> int | None:
+        """Subprocess pid (sandbox launcher parent under the Linux namespace
+        sandbox) — the liveness oracle scans its descendant tree for evidence."""
+        ...
 
     async def send_request(self, method: str, params: dict[str, Any]) -> int:
         ...
@@ -148,10 +206,22 @@ class AcpSessionHandle:
         session_id: str,
         queue: asyncio.Queue[JsonRpcMessage | None],
         runtime: AcpRuntimeProtocol,
+        watchdog: WatchdogSettings | None = None,
     ) -> None:
         self._session_id = session_id
         self._queue = queue
         self._runtime = runtime
+        # Watchdog windows are snapshotted here (construction time) so the
+        # dispatch loop never reads config; the liveness oracle carries the
+        # per-session evidence state (tracked child, counter samples).
+        self._watchdog = watchdog if watchdog is not None else _load_watchdog_settings()
+        self._oracle = LivenessOracle(sample_min_secs=self._watchdog.wellness_sample_secs)
+        # Snapshot of the most recent EVENT_TOOL_CALL (title/redacted input/
+        # dispatch time/shell flag) — the oracle's attribution key. Cleared on
+        # EVENT_TOOL_RESULT alongside _tool_dispatched.
+        self._inflight_tool: ToolCallState | None = None
+        # Last monotonic ts a WORKING-verdict deferral was logged (rate limit).
+        self._working_logged_ts = 0.0
         self._cancelled = False
         # Unresponsive-cancel tracking (mirrors AcpClient._cancel_ts /
         # _cancel_grace_secs). Set by cancel(); the dispatch loop uses them to
@@ -161,6 +231,10 @@ class AcpSessionHandle:
         self._turn_done = asyncio.Event()
         self._turn_done.set()
         self._stale_eligible = False
+        # Set when a genuine stale turn is probed via session/cancel; read by the
+        # unresponsive-cancel branch to distinguish a confirmed wedge (signal
+        # auto-recovery) from an ordinary unacked cancel (unblock caller).
+        self._stale_probe = False
         self._tool_dispatched = False
         self._last_stop_reason = ""
         # toolCallId -> redacted input string, written by the shared parser so a
@@ -256,7 +330,14 @@ class AcpSessionHandle:
         # hard kill of the shared runtime). Mirrors AcpClient.
         self._last_stop_reason = ""
         self._stale_eligible = False
+        # Set when a genuine stale turn is probed via session/cancel; read by the
+        # unresponsive-cancel branch to distinguish a confirmed wedge (signal
+        # auto-recovery) from an ordinary unacked cancel (unblock caller).
+        self._stale_probe = False
         self._tool_dispatched = False
+        self._inflight_tool = None
+        self._oracle.reset()
+        self._working_logged_ts = 0.0
         self._tool_call_inputs.clear()
         self._tool_call_is_shell.clear()
         self._tool_call_raw_params.clear()
@@ -306,7 +387,7 @@ class AcpSessionHandle:
 
     # ── Cancel ──
 
-    async def cancel(self, grace_secs: float = 0.0) -> None:
+    async def cancel(self, grace_secs: float = 0.0, _stale_probe: bool = False) -> None:
         """Send session/cancel notification.
 
         Records the cancel time + grace budget so the dispatch loop can unblock
@@ -314,7 +395,13 @@ class AcpSessionHandle:
         the prompt response). On a shared runtime we cannot force-kill the
         process (co-tenant sessions would die), so recovery is a synthesized
         terminal event rather than a hard kill.
+
+        ``_stale_probe`` marks a watchdog probe cancel (internal). A genuine
+        (non-probe) cancel SUPERSEDES any pending probe: the flag is cleared so
+        the eventual ack is attributed to the user, not reclassified to
+        auto-recovery.
         """
+        self._stale_probe = _stale_probe
         self._cancelled = True
         self._cancel_ts = time.monotonic()
         self._cancel_grace_secs = max(_CANCEL_GRACE_SECS, grace_secs)
@@ -741,12 +828,33 @@ class AcpSessionHandle:
                     and not self._turn_done.is_set()
                     and (time.monotonic() - self._cancel_ts) > self._cancel_grace_secs
                 ):
+                    self._turn_done.set()
+                    if self._stale_probe:
+                        # Single-shot consumption, mirroring the turn-complete
+                        # reclassification branch.
+                        self._stale_probe = False
+                        # A genuine stale turn was probed via session/cancel and kiro
+                        # never acked within the grace window → CONFIRMED WEDGE (a
+                        # done-but-missing-frame turn would have acked and completed
+                        # normally via the turn-complete branch). Signal the dashboard
+                        # to reset+resume and re-drive with a continue-nudge
+                        # (auto-recovery) instead of orphaning the turn until the
+                        # user's next message collides with "prompt already in
+                        # progress". Complementary to CR-284525375's stuck-session
+                        # surfacing (which handles what this cannot recover).
+                        logger.warning(
+                            "Stale turn on session %s unrecovered after %.1fs cancel "
+                            "grace — signalling auto-recovery",
+                            self._session_id, self._cancel_grace_secs,
+                        )
+                        yield AcpEvent(kind=EVENT_COMPLETE, stop_reason=STOP_REASON_STALE_RECOVER,
+                                       credits=self.last_prompt_stats.credits)
+                        return
                     logger.warning(
                         "Cancel unacked after %.1fs on session %s — unblocking caller "
                         "(runtime kept alive for co-tenants)",
                         self._cancel_grace_secs, self._session_id,
                     )
-                    self._turn_done.set()
                     yield AcpEvent(kind=EVENT_COMPLETE, stop_reason="error: cancel unacked",
                                    credits=self.last_prompt_stats.credits)
                     return
@@ -756,57 +864,81 @@ class AcpSessionHandle:
                         self._queue.get(), timeout=min(remaining, 5.0)
                     )
                 except asyncio.TimeoutError:
-                    # Check staleness
-                    if self._stale_eligible and (time.monotonic() - last_data_ts) > _STALE_TURN_TIMEOUT:
-                        logger.warning("Stale turn on session %s", self._session_id)
-                        self._turn_done.set()
-                        # Stale turn: kiro streamed text but never sent the formal
-                        # `result` response. AcpClient treats this as a NORMAL end
-                        # (end_turn), not an error — matching that avoids a spurious
-                        # "Connection lost" retry on a turn that actually produced
-                        # output.
-                        yield AcpEvent(kind=EVENT_COMPLETE, stop_reason=STOP_REASON_END_TURN,
-                                       credits=self.last_prompt_stats.credits)
+                    # ── Verdict-driven watchdogs ──
+                    # Wellness (the liveness oracle) is the detector; timeouts
+                    # govern only the UNKNOWN class. Idle clocks: the stale clock
+                    # folds in the runtime's stderr/keepalive clock (_last_activity
+                    # — kiro streams thinking_tokens on STDERR during reasoning);
+                    # the tool clock keys off session-queue frames only (keepalive
+                    # and progress frames for the session reset last_data_ts, so a
+                    # legitimately-streaming tool keeps the watchdog satisfied).
+                    if self._cancelled:
+                        continue
+                    wd = self._watchdog
+                    now = time.monotonic()
+
+                    if self._tool_dispatched:
+                        _tool_idle = now - last_data_ts
+                        if _tool_idle <= wd.check_after_secs:
+                            continue
+                        verdict, evidence = await self._consult_oracle_offloaded(model_wait=False)
+                        if verdict == VERDICT_WORKING:
+                            self._log_working_deferral(_tool_idle, evidence)
+                            continue
+                        # UNKNOWN acts at the suspect window; the hard cap governs
+                        # only the stale/model-wait branch below (it bounds the
+                        # extended UNKNOWN deferral windows there).
+                        _acting = (
+                            verdict in (VERDICT_DEAD, VERDICT_STUCK_INPUT)
+                            or _tool_idle > wd.tool_stall_suspect_secs
+                        )
+                        if not _acting:
+                            continue  # UNKNOWN, within budget — keep waiting
+                        async for ev in self._end_stalled_tool(verdict, evidence, _tool_idle):
+                            yield ev
                         return
-                    # Idle since the last frame on THIS session's queue. Keepalive
-                    # and progress frames for the session reset last_data_ts (below),
-                    # so a legitimately-active session keeps the watchdog satisfied.
-                    # NB: the per-session handle has no separate _last_activity clock
-                    # (that attribute lives on AcpRuntime, not here), so last_data_ts
-                    # is the correct — and only — idle signal for this loop.
-                    _tool_idle = time.monotonic() - last_data_ts
-                    if self._tool_dispatched and _tool_idle > _TOOL_STALL_TIMEOUT:
-                        # Session-scoped recovery: this runtime is SHARED (multiplexed
-                        # by sessionId across the bg/lite sessions today, and — once
-                        # main chat + its subagents move onto one per-slot runtime —
-                        # across those too). So we must NOT kill the process here
-                        # (that would take down every co-tenant session in the slot).
-                        # Instead send session/cancel for THIS sessionId only, so
-                        # kiro-cli drops this session's in-flight prompt (preventing a
-                        # "prompt already in progress" wedge on the next turn) while
-                        # siblings keep running. Best-effort: a failed cancel must not
-                        # mask the terminal event below.
+
+                    if self._stale_eligible:
+                        _stale_idle = now - max(last_data_ts, self._runtime._last_activity)
+                        if _stale_idle <= wd.check_after_secs:
+                            continue
+                        verdict, evidence = await self._consult_oracle_offloaded(model_wait=True)
+                        if verdict == VERDICT_WORKING:
+                            self._log_working_deferral(_stale_idle, evidence)
+                            continue
+                        if verdict != VERDICT_DEAD:
+                            # UNKNOWN: probe only past the window. An established-
+                            # but-flat backend connection is probably a non-streamed
+                            # server-side think — probing it cancels + regenerates
+                            # the think, so it gets the extended window. The hard
+                            # cap bounds any UNKNOWN deferral absolutely.
+                            window = (
+                                wd.model_silent_probe_secs
+                                if evidence.startswith(EVIDENCE_ESTABLISHED_FLAT)
+                                else wd.stale_window_secs
+                            )
+                            if _stale_idle <= min(window, wd.tool_stall_hard_cap_secs):
+                                continue
+                        # DEAD, or UNKNOWN past its window: probe via session/cancel.
+                        # The probe is NON-LETHAL either way — a live turn's cancel
+                        # ack is reclassified to STOP_REASON_STALE_RECOVER in the
+                        # turn-complete branch (auto-recovery, never "cancelled by
+                        # user"), and an unacked cancel confirms the wedge via the
+                        # unresponsive-cancel branch at the loop top.
                         logger.warning(
-                            "Tool stall on session %s — cancelling session (runtime kept alive for co-tenants)",
-                            self._session_id,
+                            "Stale turn on session %s (idle %.0fs, verdict=%s: %s) — "
+                            "probing via session/cancel",
+                            self._session_id, _stale_idle, verdict, evidence,
                         )
                         try:
-                            # Bound the cancel: if the runtime is unresponsive (very
-                            # plausible right after a tool stalled on it), send_notification's
-                            # stdin write/drain could hang forever, turning stall recovery
-                            # into a second stall. wait_for guarantees the watchdog always
-                            # completes; its TimeoutError is an Exception, so the handler
-                            # below covers both a timeout and any other cancel failure.
-                            await asyncio.wait_for(self.cancel(), timeout=5.0)
+                            await asyncio.wait_for(
+                                self.cancel(_stale_probe=True), timeout=5.0
+                            )
                         except Exception:
                             logger.debug(
-                                "session/cancel after tool stall failed for %s",
+                                "stale-probe session/cancel failed for %s",
                                 self._session_id, exc_info=True,
                             )
-                        self._turn_done.set()
-                        yield AcpEvent(kind=EVENT_COMPLETE, stop_reason="error: tool stall",
-                                       credits=self.last_prompt_stats.credits)
-                        return
                     continue
 
                 if msg is None:
@@ -824,6 +956,26 @@ class AcpSessionHandle:
                     reason = ""
                     if isinstance(result, dict):
                         reason = result.get("stopReason", "") or ""
+                    if self._stale_probe and reason == STOP_REASON_CANCELLED:
+                        # Probe-ack reclassification (the non-lethal harness for
+                        # every watchdog probe): kiro-cli acks session/cancel on a
+                        # LIVE mid-generation turn too, so a probe-induced
+                        # "cancelled" must NOT surface as a user cancellation (the
+                        # turn would die silently — the original session-killer).
+                        # Rewrite to STOP_REASON_STALE_RECOVER so the dashboard
+                        # auto-recovers (reset + resume + continue-nudge). An
+                        # oracle mistake therefore costs a regeneration, never a
+                        # session. Genuine user cancels (no _stale_probe) pass
+                        # through unchanged.
+                        logger.info(
+                            "Stale-probe cancel acked on session %s — reclassifying "
+                            "to %s for auto-recovery",
+                            self._session_id, STOP_REASON_STALE_RECOVER,
+                        )
+                        reason = STOP_REASON_STALE_RECOVER
+                        # Single-shot: the flag is consumed here so a later genuine
+                        # cancel can never be misattributed to a stale probe.
+                        self._stale_probe = False
                     self._last_stop_reason = reason
                     self._tool_dispatched = False
                     self._turn_done.set()
@@ -1013,6 +1165,86 @@ class AcpSessionHandle:
         finally:
             for _m in _buffered:
                 self._queue.put_nowait(_m)
+
+    async def _consult_oracle_offloaded(self, *, model_wait: bool) -> tuple[str, str]:
+        """Oracle verdict, offloaded off the event loop.
+
+        The oracle's evidence gathering is a synchronous /proc filesystem walk
+        (``iter_descendants`` + per-descendant reads + ``os.readlink`` on
+        ``/proc/<pid>/fd/*``, which can block on a wedged fd), so it runs on
+        ``subprocess_executor()`` — same treatment as the runtime's RSS probe —
+        bounded so a hung /proc read can't wedge the watchdog itself. Any
+        failure degrades to UNKNOWN, never to a kill.
+        """
+        pid = getattr(self._runtime, "pid", None)
+        call: Callable[..., tuple[str, str]]
+        if model_wait:
+            call = self._oracle.check_model_wait
+            args: tuple[Any, ...] = (pid,)
+        else:
+            tool = self._inflight_tool
+            if tool is None:
+                return VERDICT_UNKNOWN, "no in-flight tool state"
+            call = self._oracle.check_tool
+            args = (pid, tool)
+        try:
+            loop = asyncio.get_running_loop()
+            return await asyncio.wait_for(
+                loop.run_in_executor(subprocess_executor(), call, *args),
+                timeout=10.0,
+            )
+        except Exception:
+            logger.debug("oracle consultation failed/timed out", exc_info=True)
+            return VERDICT_UNKNOWN, "oracle offload error"
+
+    def _log_working_deferral(self, idle: float, evidence: str) -> None:
+        """Evidence trail for a WORKING deferral, rate-limited to one line per
+        interval so a 40-minute build doesn't spam the journal."""
+        now = time.monotonic()
+        if now - self._working_logged_ts < _WORKING_LOG_INTERVAL_SECS:
+            return
+        self._working_logged_ts = now
+        logger.info(
+            "Watchdog deferral on session %s: idle %.0fs but verdict WORKING (%s)",
+            self._session_id, idle, evidence,
+        )
+
+    async def _end_stalled_tool(
+        self, verdict: str, evidence: str, idle: float
+    ) -> AsyncIterator[AcpEvent]:
+        """Cancel THIS session and end the turn with the tool-stall stop reason.
+
+        Session-scoped recovery on a SHARED runtime: never kill the process
+        (co-tenant sessions would die) — session/cancel drops only this
+        session's in-flight prompt. Bounded (5s) so an unresponsive runtime
+        can't turn stall recovery into a second stall. The terminal event
+        carries the tool title / redacted command / evidence so chat_runner's
+        dedicated recovery can build a targeted continue-nudge (with log-file
+        hint and, for STUCK_INPUT, the re-run-non-interactively advice)
+        instead of blindly re-running the original user message.
+        """
+        tool = self._inflight_tool
+        logger.warning(
+            "Tool stall on session %s (idle %.0fs, verdict=%s: %s) — cancelling "
+            "session (runtime kept alive for co-tenants)",
+            self._session_id, idle, verdict, evidence,
+        )
+        try:
+            await asyncio.wait_for(self.cancel(), timeout=5.0)
+        except Exception:
+            logger.debug(
+                "session/cancel after tool stall failed for %s",
+                self._session_id, exc_info=True,
+            )
+        self._turn_done.set()
+        yield AcpEvent(
+            kind=EVENT_COMPLETE,
+            stop_reason=STOP_REASON_TOOL_STALL,
+            title=(tool.title if tool else ""),
+            tool_input=(tool.command if tool else ""),
+            text=f"verdict={verdict}; idle_secs={int(idle)}; {evidence}",
+            credits=self.last_prompt_stats.credits,
+        )
 
     def _track_metadata(self, msg: JsonRpcMessage) -> None:
         """Capture per-turn context usage + kiro billing credits from _kiro.dev/metadata.
@@ -1215,6 +1447,18 @@ class AcpSessionHandle:
             elif ev.kind == EVENT_TOOL_CALL:
                 self._stale_eligible = False
                 self._tool_dispatched = True
+                # Attribution snapshot for the liveness oracle: title + the
+                # already-redacted input + dispatch time + the trusted shell
+                # flag. A new dispatch resets the oracle's tracked child and
+                # counter samples so evidence never bleeds across tools.
+                self._inflight_tool = ToolCallState(
+                    title=ev.title,
+                    command=ev.tool_input,
+                    dispatch_ts=time.monotonic(),
+                    is_shell=ev.is_shell,
+                )
+                self._oracle.reset()
             elif ev.kind == EVENT_TOOL_RESULT:
                 self._tool_dispatched = False
+                self._inflight_tool = None
         return events

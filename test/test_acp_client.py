@@ -199,6 +199,308 @@ class TestAcpClientToolAudit:
         assert time.monotonic() - start < 4  # returned via timeout, not the 5s sleep
 
 
+class TestAcpClientToolHooks:
+    """Covers the ACP-layer PreToolUse/PostToolUse HOOK ENGINE fire (worker-pool path).
+
+    These fire the script-hook engine (not the SEL audit) so app/worker-pool
+    subagents reach hook parity with the main agent and SubagentManager
+    subagents — e.g. so the skill-usage 'Reading *SKILL.md*' PostToolUse hook
+    fires for their skill loads. Gated on ``audit_source`` so the chat/main
+    client (audit_source=None) never fires here (it fires via chat_runner).
+    """
+
+    @staticmethod
+    def _call_ev(title="Reading /x/SKILL.md", tool_input=None, call_id="tc1"):
+        # Stand-in for an EVENT_TOOL_CALL AcpEvent (reads .title/.tool_input).
+        return types.SimpleNamespace(
+            title=title, tool_input=tool_input, tool_call_id=call_id
+        )
+
+    @staticmethod
+    def _result_ev(output="---\nname: x\n---", call_id="tc1"):
+        # Stand-in for an EVENT_TOOL_RESULT AcpEvent (no .title — matches
+        # _build_tool_result_event, which only carries tool_call_id/tool_output).
+        return types.SimpleNamespace(tool_call_id=call_id, tool_output=output)
+
+    class _Store:
+        """Minimal ScriptHookStore stand-in recording fire() calls."""
+
+        def __init__(self):
+            self.calls = []
+
+        async def fire(self, event, **kw):
+            self.calls.append({"event": event, **kw})
+            return []
+
+    @pytest.mark.asyncio
+    async def test_pre_and_post_fire_when_audit_source_set(self, monkeypatch):
+        store = self._Store()
+        monkeypatch.setattr(acp_client, "get_global_hook_store", lambda: store)
+        client = AcpClient(session_key="sk", agent="code-review-sage",
+                           audit_source="subagent")
+        # Pre-side: fire_tool_hooks (Pre-only) for the tool_call.
+        await client._maybe_fire_pre_tool_hooks(self._call_ev())
+        # Post-side: the result event has no title, so the name is recovered
+        # from _observed_tool_calls (populated on the tool_call in dispatch).
+        client._observed_tool_calls["tc1"] = ("Reading /x/SKILL.md", "read")
+        # tool_output embeds a real AWS-key credential pattern inside SKILL.md
+        # frontmatter: the Post-fire path MUST redact it (parity with chat_runner's
+        # PostToolUse) before handing it to the hook engine — addresses AutoSDE
+        # security-controls.
+        raw_output = "---\nname: x\nsecret: AKIAIOSFODNN7EXAMPLE\n---"
+        await client._maybe_fire_post_tool_hooks(self._result_ev(output=raw_output))
+
+        pre = [c for c in store.calls if c["event"] == "PreToolUse"]
+        post = [c for c in store.calls if c["event"] == "PostToolUse"]
+        assert len(pre) == 1
+        assert pre[0]["tool_name"] == "Reading /x/SKILL.md"
+        assert len(post) == 1
+        assert post[0]["tool_name"] == "Reading /x/SKILL.md"
+        # Post MUST carry the output on tool_response.output so the skill-usage
+        # emit.sh can read the SKILL.md frontmatter — but the credential MUST be
+        # redacted (not the raw form).
+        fired_output = post[0]["tool_response"]["output"]
+        assert fired_output == "---\nname: x\nsecret: [REDACTED: credential]\n---"
+        assert "AKIAIOSFODNN7EXAMPLE" not in fired_output  # raw credential scrubbed
+        # YAML frontmatter (name:) is untouched by redaction → skill capture intact.
+        assert "name: x" in fired_output
+
+    @pytest.mark.asyncio
+    async def test_post_fire_truncates_tool_output_to_2000(self, monkeypatch):
+        """Post-fire MUST bound tool_output to 2000 chars before firing user hooks.
+
+        Regression for CR-288022569 NIT: the redacted tool_output was passed to
+        the hook engine unbounded — chat_runner/subagent.py cap it at [:2000].
+        Redact-then-truncate is deliberate (redact the FULL output first so a
+        secret past char 2000 is still scrubbed, THEN truncate). The credential
+        sits at the START, so after truncation the redaction marker survives and
+        proves the value reaching the hook is BOTH truncated AND redacted.
+        """
+        store = self._Store()
+        monkeypatch.setattr(acp_client, "get_global_hook_store", lambda: store)
+        client = AcpClient(session_key="sk", agent="code-review-sage",
+                           audit_source="subagent")
+        client._observed_tool_calls["tc1"] = ("Reading /x/SKILL.md", "read")
+        # Credential near the front + padding to blow past the 2000-char bound.
+        raw_output = "secret: AKIAIOSFODNN7EXAMPLE\n" + ("x" * 3000)
+        await client._maybe_fire_post_tool_hooks(self._result_ev(output=raw_output))
+
+        post = [c for c in store.calls if c["event"] == "PostToolUse"]
+        assert len(post) == 1
+        fired_output = post[0]["tool_response"]["output"]
+        assert len(fired_output) == 2000  # bounded to first 2000 chars
+        assert "AKIAIOSFODNN7EXAMPLE" not in fired_output  # raw credential scrubbed
+        assert "[REDACTED: credential]" in fired_output  # redaction survives truncation
+
+    @pytest.mark.asyncio
+    async def test_pre_fire_redacts_credential_in_tool_input(self, monkeypatch):
+        """Pre-fire MUST redact tool_input before handing it to the hook engine.
+
+        Regression for CR-288022569 AutoSDE security-controls: tool_event.tool_input
+        is LLM-generated and was passed to user hook scripts RAW. It must be
+        redacted (credentials + exfil URLs) first, mirroring the Post path. A JSON
+        string is used because fire_tool_hooks json.loads the input; the marker
+        keeps it valid JSON so the parsed value reaching store.fire is redacted.
+        """
+        store = self._Store()
+        monkeypatch.setattr(acp_client, "get_global_hook_store", lambda: store)
+        client = AcpClient(session_key="sk", agent="code-review-sage",
+                           audit_source="subagent")
+        raw_input = '{"cmd": "aws configure set key AKIAIOSFODNN7EXAMPLE"}'
+        await client._maybe_fire_pre_tool_hooks(self._call_ev(tool_input=raw_input))
+
+        pre = [c for c in store.calls if c["event"] == "PreToolUse"]
+        assert len(pre) == 1
+        fired_input = pre[0]["tool_input"]  # parsed by fire_tool_hooks
+        fired_str = json.dumps(fired_input)
+        assert "AKIAIOSFODNN7EXAMPLE" not in fired_str  # raw credential scrubbed
+        assert "[REDACTED: credential]" in fired_str  # redaction marker present
+
+    @pytest.mark.asyncio
+    async def test_pre_fire_redacts_credential_in_dict_tool_input(self, monkeypatch):
+        """A DICT tool_input containing a credential MUST also be redacted.
+
+        Regression for CR-288022569 AutoSDE security-controls: the isinstance(str)
+        guard bypassed redaction for dict/list inputs, so LLM-generated dict inputs
+        reached user hook scripts RAW. Non-str inputs are now serialized to JSON,
+        redacted, and passed as a redacted JSON string (fire_tool_hooks json.loads
+        it, yielding a redacted parsed value at store.fire).
+        """
+        store = self._Store()
+        monkeypatch.setattr(acp_client, "get_global_hook_store", lambda: store)
+        client = AcpClient(session_key="sk", agent="code-review-sage",
+                           audit_source="subagent")
+        raw_input = {"cmd": "aws configure set key AKIAIOSFODNN7EXAMPLE"}
+        await client._maybe_fire_pre_tool_hooks(self._call_ev(tool_input=raw_input))
+
+        pre = [c for c in store.calls if c["event"] == "PreToolUse"]
+        assert len(pre) == 1
+        fired_input = pre[0]["tool_input"]  # parsed by fire_tool_hooks
+        fired_str = json.dumps(fired_input)
+        assert "AKIAIOSFODNN7EXAMPLE" not in fired_str  # raw credential scrubbed
+        assert "[REDACTED: credential]" in fired_str  # redaction marker present
+
+    @pytest.mark.asyncio
+    async def test_pre_fire_uses_unknown_tool_name_when_title_none(self, monkeypatch):
+        """A title-less tool_call MUST fire with tool_name 'unknown' (Post parity).
+
+        Regression for CR-288022569: the Pre path passed tool_event.title (which may
+        be None) while the Post path recovers a name and falls back — the Pre path
+        now applies the same 'unknown' fallback so a hook matcher sees a consistent
+        name across Pre and Post.
+        """
+        store = self._Store()
+        monkeypatch.setattr(acp_client, "get_global_hook_store", lambda: store)
+        client = AcpClient(session_key="sk", agent="code-review-sage",
+                           audit_source="subagent")
+        await client._maybe_fire_pre_tool_hooks(self._call_ev(title=None))
+
+        pre = [c for c in store.calls if c["event"] == "PreToolUse"]
+        assert len(pre) == 1
+        assert pre[0]["tool_name"] == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_post_fire_uses_unknown_tool_name_when_call_id_unrecorded(self, monkeypatch):
+        """A tool_result whose tool_call_id is absent from _observed_tool_calls
+        MUST fire Post with tool_name 'unknown' (Pre parity), not '' (empty string).
+
+        Regression for CR-288022569: the Post path previously used a ("", "")
+        default tuple, so a missing/unrecorded tool_call resolved to an empty
+        tool_name — inconsistent with the Pre path's 'unknown' fallback.
+        """
+        store = self._Store()
+        monkeypatch.setattr(acp_client, "get_global_hook_store", lambda: store)
+        client = AcpClient(session_key="sk", agent="code-review-sage",
+                           audit_source="subagent")
+        # Deliberately do NOT populate _observed_tool_calls for this call_id.
+        await client._maybe_fire_post_tool_hooks(self._result_ev(call_id="missing"))
+
+        post = [c for c in store.calls if c["event"] == "PostToolUse"]
+        assert len(post) == 1
+        assert post[0]["tool_name"] == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_noop_when_audit_source_none(self, monkeypatch):
+        store = self._Store()
+        monkeypatch.setattr(acp_client, "get_global_hook_store", lambda: store)
+        client = AcpClient(session_key="sk")  # audit_source defaults to None
+        await client._maybe_fire_pre_tool_hooks(self._call_ev())
+        client._observed_tool_calls["tc1"] = ("Reading /x/SKILL.md", "read")
+        await client._maybe_fire_post_tool_hooks(self._result_ev())
+        # chat / subagent clients must never fire ACP-layer hooks (no double-fire).
+        assert store.calls == []
+
+    @pytest.mark.asyncio
+    async def test_noop_when_hook_store_uninitialized(self, monkeypatch):
+        # get_global_hook_store() returns None before the dashboard registers it.
+        monkeypatch.setattr(acp_client, "get_global_hook_store", lambda: None)
+        client = AcpClient(session_key="sk", audit_source="subagent")
+        # Must not raise despite no store.
+        await client._maybe_fire_pre_tool_hooks(self._call_ev())
+        await client._maybe_fire_post_tool_hooks(self._result_ev())
+
+    @pytest.mark.asyncio
+    async def test_swallows_hook_engine_errors(self, monkeypatch):
+        class _BoomStore:
+            async def fire(self, event, **kw):
+                raise RuntimeError("hook engine down")
+
+        monkeypatch.setattr(acp_client, "get_global_hook_store", lambda: _BoomStore())
+        # fire_tool_hooks awaits store.fire internally; force both paths to raise.
+        client = AcpClient(session_key="sk", audit_source="subagent")
+        client._observed_tool_calls["tc1"] = ("Reading /x/SKILL.md", "read")
+        # A hook-engine failure must never break tool dispatch.
+        await client._maybe_fire_pre_tool_hooks(self._call_ev())
+        await client._maybe_fire_post_tool_hooks(self._result_ev())
+
+    @pytest.mark.asyncio
+    async def test_read_prompt_response_update_fires_hooks(self, monkeypatch):
+        """send_message -> _read_prompt_response (worker-pool path) fires hooks.
+
+        Regression for CR-288022569: worker-pool subagents (knowledge/llm_pool)
+        drive tools through send_message -> _read_prompt_response, not the stream
+        _dispatch_events. Its update branch must fire Pre+Post hooks so those
+        clients reach hook parity — the live gateway test caught an llm_pool
+        worker's auto-approved @builder-mcp/ReadInternalWebsites call firing NO
+        hook because this path was uninstrumented.
+        """
+        store = self._Store()
+        monkeypatch.setattr(acp_client, "get_global_hook_store", lambda: store)
+        client = AcpClient(session_key="sk", agent="knowledge-worker",
+                           audit_source="subagent")
+        # Isolate hook behavior from the SEL audit sink (covered separately).
+        client._maybe_audit_tool_call = AsyncMock()
+
+        # Synthetic ACP session updates: a tool_call then its tool_call_update
+        # result (only .params is read by the update branch; .result by complete).
+        call_msg = types.SimpleNamespace(params={"update": {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "tc9",
+            "title": "@builder-mcp/ReadInternalWebsites",
+            "kind": "read",
+            "rawInput": {"inputs": ["https://w.amazon.com/x"]},
+        }})
+        result_msg = types.SimpleNamespace(params={"update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tc9",
+            "status": "completed",
+            "content": [{"content": {"type": "text", "text": "ok"}}],
+        }})
+        complete_msg = types.SimpleNamespace(result={"stopReason": "end_turn"})
+
+        async def _fake_loop(req_id, timeout):
+            yield "update", call_msg
+            yield "update", result_msg
+            yield "complete", complete_msg
+
+        monkeypatch.setattr(client, "_prompt_loop", _fake_loop)
+
+        out = await client._read_prompt_response(1, 5.0)
+        assert out == ""  # no text chunks, only tool updates
+
+        pre = [c for c in store.calls if c["event"] == "PreToolUse"]
+        post = [c for c in store.calls if c["event"] == "PostToolUse"]
+        assert len(pre) == 1
+        assert pre[0]["tool_name"] == "@builder-mcp/ReadInternalWebsites"
+        # CALL branch populated _observed_tool_calls; Post recovers tool_name from it.
+        assert client._observed_tool_calls["tc9"][0] == "@builder-mcp/ReadInternalWebsites"
+        assert len(post) == 1
+        assert post[0]["tool_name"] == "@builder-mcp/ReadInternalWebsites"
+        # SEL audit invoked once on the CALL branch (mirrors _dispatch_events).
+        assert client._maybe_audit_tool_call.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_read_prompt_response_update_noop_when_audit_source_none(self, monkeypatch):
+        """Main-chat send_message callers (audit_source=None) stay no-op: the
+        _read_prompt_response update branch must NOT double-fire hooks."""
+        store = self._Store()
+        monkeypatch.setattr(acp_client, "get_global_hook_store", lambda: store)
+        client = AcpClient(session_key="sk")  # audit_source defaults to None
+
+        call_msg = types.SimpleNamespace(params={"update": {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "tc9",
+            "title": "SomeTool",
+            "kind": "read",
+        }})
+        result_msg = types.SimpleNamespace(params={"update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tc9",
+            "status": "completed",
+            "content": [{"content": {"type": "text", "text": "ok"}}],
+        }})
+        complete_msg = types.SimpleNamespace(result={"stopReason": "end_turn"})
+
+        async def _fake_loop(req_id, timeout):
+            yield "update", call_msg
+            yield "update", result_msg
+            yield "complete", complete_msg
+
+        monkeypatch.setattr(client, "_prompt_loop", _fake_loop)
+        await client._read_prompt_response(1, 5.0)
+        assert store.calls == []  # gated off in the _maybe_* methods
+
+
 class TestAcpClientSessionKey:
     def test_stores_session_key(self):
         client = AcpClient(session_key="test-key")
@@ -5883,6 +6185,103 @@ class TestFormatAcpError:
         out = _format_acp_error(err)
         assert "transient error" in out.lower()
         assert "aaaa1111-bbbb-2222-cccc-333344445555" in out
+
+
+class TestIsTransientRawError:
+    """_is_transient_raw_error classifies retryability from the RAW JSON-RPC
+    error (Mesh-2356) so the verdict is independent of the formatted message."""
+
+    def test_internal_server_error_is_transient(self):
+        from kiro_claw.acp.client import _is_transient_raw_error
+
+        err = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": (
+                "Encountered an error in the response stream: ... "
+                "CodewhispererChatResponseStream(ServiceError(ServiceError "
+                "{ source: InternalServerError(...) please try again ...)))"
+            ),
+        }
+        assert _is_transient_raw_error(err) is True
+
+    def test_status_50x_and_hint_are_transient(self):
+        from kiro_claw.acp.client import _is_transient_raw_error
+
+        assert _is_transient_raw_error({"data": "HTTP 503 Service Unavailable"}) is True
+        assert _is_transient_raw_error({"data": "HTTP 504 Gateway Timeout"}) is True
+        assert _is_transient_raw_error({"data": "status code 529 overloaded"}) is True
+        assert _is_transient_raw_error({"data": "ServiceUnavailableException"}) is True
+        assert _is_transient_raw_error({"data": "DispatchFailure ConnectionReset"}) is True
+        assert _is_transient_raw_error({"data": "please try again"}) is True
+
+    def test_5xx_token_in_message_field_is_transient(self):
+        from kiro_claw.acp.client import _is_transient_raw_error
+
+        # 5xx signal carried in `message` (not `data`) must still be caught:
+        # the classifier scans the combined haystack, so this no longer fails
+        # fast the way a data-only scan would (Mesh-2356 SHOULD-FIX). Auth is
+        # still checked first, so an auth error with a stray 50x stays terminal.
+        assert _is_transient_raw_error({"message": "InternalServerError", "data": ""}) is True
+        assert _is_transient_raw_error({"message": "HTTP 503", "data": "Internal error"}) is True
+        assert (
+            _is_transient_raw_error(
+                {"message": "please try again", "data": "AccessDeniedException"}
+            )
+            is False
+        )
+
+    def test_throttle_and_model_unavailable_are_transient(self):
+        from kiro_claw.acp.client import _is_transient_raw_error
+
+        assert _is_transient_raw_error({"data": "ThrottlingException: slow down"}) is True
+        assert _is_transient_raw_error({"message": "Rate limit exceeded", "data": ""}) is True
+        assert _is_transient_raw_error({"data": "The model 'opus' is not available."}) is True
+
+    def test_auth_and_unknown_are_not_transient(self):
+        from kiro_claw.acp.client import _is_transient_raw_error
+
+        # Auth is terminal — a retry can't fix an expired/denied credential.
+        assert _is_transient_raw_error({"data": "AccessDeniedException: nope"}) is False
+        assert _is_transient_raw_error({"data": "ExpiredTokenException"}) is False
+        # Unknown shapes and non-dicts are terminal (fail-fast, not retry).
+        assert _is_transient_raw_error({"data": "max_tokens 500 exceeded"}) is False
+        # 501 Not Implemented is terminal — only 500/502/503/504 + 529 retry.
+        assert _is_transient_raw_error({"data": "HTTP 501 Not Implemented"}) is False
+        assert _is_transient_raw_error({"code": -32603, "message": "Internal error", "data": ""}) is False
+        assert _is_transient_raw_error(None) is False
+        assert _is_transient_raw_error("boom") is False
+
+    def test_raise_acp_error_carries_transient_flag_and_formatted_message(self):
+        import pytest
+
+        from kiro_claw.acp.client import AcpError, _raise_acp_error
+
+        transient_err = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": "InternalServerError: please try again (request_id: abc-123)",
+        }
+        with pytest.raises(AcpError) as ei:
+            _raise_acp_error(transient_err)
+        exc = ei.value
+        assert exc.transient is True
+        # Message is the formatted, user-facing string (not the raw dict).
+        assert "transient error (HTTP 5xx)" in str(exc)
+        assert "abc-123" in str(exc)
+
+        auth_err = {"code": -32603, "message": "Internal error", "data": "AccessDeniedException"}
+        with pytest.raises(AcpError) as auth_ei:
+            _raise_acp_error(auth_err)
+        auth_exc = auth_ei.value
+        assert auth_exc.transient is False
+        assert "authentication failed" in str(auth_exc).lower()
+
+    def test_acp_error_default_transient_is_none(self):
+        from kiro_claw.acp.client import AcpError
+
+        assert AcpError("plain").transient is None
+        assert AcpError("flagged", transient=True).transient is True
 
 
 class TestAcpClientDrainEarlyExit:

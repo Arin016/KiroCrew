@@ -1,3 +1,4 @@
+import type React from 'react'
 import { Folder, Check, ChevronRight } from 'lucide-react'
 import type { ChatFolder } from '../types'
 import { orderFoldersWithPaths } from '../utils/folderTree'
@@ -38,6 +39,39 @@ interface FolderMoveSubmenuProps {
  * family as its parent (a DropdownMenuSub can only live inside a DropdownMenu,
  * a ContextMenuSub inside a ContextMenu).
  */
+/**
+ * The picker's item list, shared between the nested submenu below and
+ * root-level menu surfaces (e.g. the artifact detail page's folder chip,
+ * Mesh-2720). `Item` is the Radix menu-item primitive of the hosting menu
+ * family — items must match their parent menu's family.
+ */
+export function FolderPickerItems({ folders, onPick, currentFolderId, rootLabel = 'No folder (root)', Item }: {
+  readonly folders: readonly ChatFolder[]
+  readonly onPick: (folderId: string | null) => void
+  readonly currentFolderId?: string | null
+  readonly rootLabel?: string
+  readonly Item: React.ComponentType<{ title?: string; style?: React.CSSProperties; onSelect?: (event: Event) => void; children?: React.ReactNode }>
+}) {
+  const atRoot = currentFolderId == null || currentFolderId === ''
+  const ordered = orderFoldersWithPaths(folders)
+  return (
+    <>
+      <Item title={rootLabel} onSelect={() => onPick(null)}>
+        <Folder size={13} className="text-muted shrink-0" />
+        <span className="truncate">{rootLabel}</span>
+        {atRoot && <Check size={13} className="ml-auto text-accent shrink-0" />}
+      </Item>
+      {ordered.map(({ folder: f, depth, path }) => (
+        <Item key={f.id} title={path} style={depth > 0 ? { paddingLeft: `${12 + depth * 16}px` } : undefined} onSelect={() => onPick(f.id)}>
+          <Folder size={13} className="text-accent shrink-0" />
+          <span className="truncate">{f.name}</span>
+          {currentFolderId === f.id && <Check size={13} className="ml-auto text-accent shrink-0" />}
+        </Item>
+      ))}
+    </>
+  )
+}
+
 export default function FolderMoveSubmenu({
   folders,
   onPick,
@@ -46,8 +80,6 @@ export default function FolderMoveSubmenu({
   label = 'Move to folder',
   rootLabel = 'No folder (root)',
 }: FolderMoveSubmenuProps) {
-  const atRoot = currentFolderId == null || currentFolderId === ''
-  const ordered = orderFoldersWithPaths(folders)
   // Pick the primitive family for this surface. Both families share the same
   // props shape, so the body below is identical regardless of variant.
   const Sub = variant === 'context' ? ContextMenuSub : DropdownMenuSub
@@ -63,18 +95,7 @@ export default function FolderMoveSubmenu({
         <ChevronRight size={12} className="text-muted" />
       </SubTrigger>
       <SubContent className="min-w-[170px] max-h-[280px] overflow-y-auto">
-        <Item title={rootLabel} onSelect={() => onPick(null)}>
-          <Folder size={13} className="text-muted shrink-0" />
-          <span className="truncate">{rootLabel}</span>
-          {atRoot && <Check size={13} className="ml-auto text-accent shrink-0" />}
-        </Item>
-        {ordered.map(({ folder: f, depth, path }) => (
-          <Item key={f.id} title={path} style={depth > 0 ? { paddingLeft: `${12 + depth * 16}px` } : undefined} onSelect={() => onPick(f.id)}>
-            <Folder size={13} className="text-accent shrink-0" />
-            <span className="truncate">{f.name}</span>
-            {currentFolderId === f.id && <Check size={13} className="ml-auto text-accent shrink-0" />}
-          </Item>
-        ))}
+        <FolderPickerItems folders={folders} onPick={onPick} currentFolderId={currentFolderId} rootLabel={rootLabel} Item={Item} />
       </SubContent>
     </Sub>
   )

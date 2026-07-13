@@ -336,3 +336,90 @@ class TestHandoffChannels:
             resp = await client.get("/api/handoff-channels")
             assert resp.status == 200
             assert await resp.json() == {}
+
+
+class TestSlackLinkAnchorTitleFallback:
+    """B-lite: the fresh-anchor title must never be the raw slot key —
+    fallback chain: slot.title → first-prompt snippet → 'New session'."""
+
+    def _state(self, tmp_path):
+        state = _make_state(tmp_path)
+        state.slack_client = MagicMock()
+        state.slack_client.open_dm = AsyncMock(return_value="D123")
+        state.slack_client.post_message = AsyncMock(return_value="newts")
+        state.owner_id = "U123"
+        state.sessions.get_slack_link = MagicMock(return_value=(None, None))
+        state.sessions.set_slack_link = MagicMock()
+        state.push_slots_update = MagicMock()
+        return state
+
+    async def _link(self, state):
+        async with TestClient(TestServer(_make_slack_app(state))) as client:
+            resp = await client.post("/api/chat/slots/s1/slack-link", json={})
+            assert resp.status == 200
+
+    def _anchor_text(self, state) -> str:
+        return state.slack_client.post_message.await_args_list[0].args[1]
+
+    @pytest.mark.asyncio
+    async def test_untitled_slot_uses_first_prompt_snippet(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = self._state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        slot.title = ""
+        slot.append("user", "fix the   build\nplease")
+        slot.drain()
+        await self._link(state)
+        text = self._anchor_text(state)
+        assert "fix the build please" in text  # whitespace collapsed, one line
+        assert "s1" not in text  # raw slot key never user-visible
+
+    @pytest.mark.asyncio
+    async def test_untitled_slot_no_prompt_uses_default(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = self._state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        slot.title = ""
+        await self._link(state)
+        text = self._anchor_text(state)
+        assert "New session" in text
+        assert "s1" not in text
+
+    @pytest.mark.asyncio
+    async def test_snippet_truncated(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = self._state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        slot.title = ""
+        long_prompt = "word " * 60  # ~300 chars
+        slot.append("user", long_prompt)
+        slot.drain()
+        await self._link(state)
+        text = self._anchor_text(state)
+        assert long_prompt.strip() not in text  # truncated
+        assert "word word word" in text
+
+    @pytest.mark.asyncio
+    async def test_titled_slot_keeps_title(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = self._state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        slot.title = "Build triage"
+        slot.append("user", "hello")
+        slot.drain()
+        await self._link(state)
+        assert "Build triage" in self._anchor_text(state)
+
+    @pytest.mark.asyncio
+    async def test_default_key_title_never_leaks(self, tmp_path, monkeypatch):
+        """Fork adaptation guard: a slot fresh from get_or_create_slot carries
+        its raw key as the DEFAULT title (state.py initializes title to the
+        key); the display_title predicate must treat that as untitled so the
+        anchor shows 'New session', never the raw key."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = self._state(tmp_path)
+        state.get_or_create_slot("s1")  # title defaults to the key "s1"
+        await self._link(state)
+        text = self._anchor_text(state)
+        assert "New session" in text
+        assert "s1" not in text

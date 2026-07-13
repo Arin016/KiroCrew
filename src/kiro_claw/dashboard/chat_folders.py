@@ -72,15 +72,17 @@ def _is_single_emoji(s: str) -> bool:
 _FOLDER_ICON_MODEL = "claude-haiku-4.5"
 
 
-async def _generate_folder_icon(state: DashboardState, folder: dict) -> None:
-    """Background task: ask LLM for a single emoji for the folder name.
+async def generate_emoji_for_name(state: DashboardState, name: str) -> str:
+    """Ask the cheapest model for ONE emoji representing a folder ``name``.
 
-    Serialized via a module-level lock so concurrent folder creations don't
-    interleave streams on the shared BACKGROUND_KEY session.
+    Shared by chat folders and artifact-library folders. Serialized via a
+    module-level lock so concurrent folder creations don't interleave streams
+    on the shared BACKGROUND_KEY session. Returns ``""`` on any failure or
+    when the reply isn't exactly one emoji grapheme.
     """
 
     prompt = (
-        f"Reply with exactly ONE emoji that best represents a project folder named \"{folder['name']}\". "
+        f"Reply with exactly ONE emoji that best represents a project folder named \"{name}\". "
         "No text, no explanation, just the single emoji character."
     )
 
@@ -119,7 +121,13 @@ async def _generate_folder_icon(state: DashboardState, folder: dict) -> None:
     icon, _ = redact_exfiltration_urls(icon)
     icon, _ = redact_credentials(icon)
     # Validate: must be exactly one emoji (guard against stray LLM text).
-    if _is_single_emoji(icon):
+    return icon if _is_single_emoji(icon) else ""
+
+
+async def _generate_folder_icon(state: DashboardState, folder: dict) -> None:
+    """Background task: ask LLM for a single emoji for the folder name."""
+    icon = await generate_emoji_for_name(state, folder["name"])
+    if icon:
         if any(f["id"] == folder["id"] for f in state._folders):
             folder["icon"] = icon
             state.save_folders()

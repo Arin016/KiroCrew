@@ -23,6 +23,8 @@ from kiro_claw.acp.types import (
     STOP_REASON_CANCELLED,
     STOP_REASON_END_TURN,
     STOP_REASON_REFUSAL,
+    STOP_REASON_STALE_RECOVER,
+    STOP_REASON_TOOL_STALL,
 )
 from kiro_claw.config.loader import (
     KiroClawConfig,
@@ -73,10 +75,14 @@ from kiro_claw.dashboard.state import (
     CRON_NOTIFY_PREFIX,
     CRON_NOTIFY_RE,
     REFUSAL_RECOVERY_PREFIX,
+    STALE_RECOVERY_PREFIX,
     SUBAGENT_COMPLETION_PREFIX,
+    TOOL_STALL_RECOVERY_PREFIX,
     DashboardState,
     _ChatSlot,
     build_refusal_recovery_prompt,
+    build_stale_recovery_prompt,
+    build_tool_stall_recovery_prompt,
     is_read_only_bash,
     should_queue_refusal_recovery,
     unsafe_bash_reason,
@@ -97,11 +103,12 @@ from kiro_claw.hooks import (
 from kiro_claw.llm_helpers import (
     TRANSIENT_RETRIES,
     PromptBusyExhaustedError,
-    is_transient_backend_error,
+    acp_error_is_transient,
     transient_retry_delay,
 )
 from kiro_claw.messaging.link import SLACK_NAMESPACE
 from kiro_claw.messaging.renderer import chunk_text
+from kiro_claw.metrics.provider import get_recorder
 from kiro_claw.platform import redact_via_context
 from kiro_claw.providers.acp import is_claude_backend
 from kiro_claw.providers.base import (
@@ -126,9 +133,51 @@ from kiro_claw.security import (
 from kiro_claw.sel import sel
 from kiro_claw.slack.handler import post_linked_approval, resolve_linked_approval
 from kiro_claw.stats import Stats
-from kiro_claw.validation import ValidationError, validate_ask_user_question
+from kiro_claw.validation import ValidationError, infer_use_case, validate_ask_user_question
 
 logger = logging.getLogger(__name__)
+
+
+def _turn_outcome(stop_reason: str | None) -> str:
+    """Map an EVENT_COMPLETE stop_reason to a low-cardinality turn outcome.
+
+    Single source of truth shared by the ``kiroclaw.turn.duration`` emit in
+    ``_run_chat`` and its unit test, so the mapping can't silently drift from
+    what the test asserts (tests must exercise real production logic).
+    """
+    s = stop_reason or ""
+    if s in ("", "end_turn", "stop", "completed"):
+        return "ok"
+    if "timeout" in s:
+        return "timeout"
+    return "error"
+
+
+def _emit_turn_metric(
+    duration_ms: int | float | None, stop_reason: str | None, slot_key: str
+) -> None:
+    """Emit kiroclaw.turn.duration (best-effort).
+
+    Single source of truth shared by the ``_run_chat`` turn-completion path and
+    its unit test, so the metric name, attrs, and outcome mapping live in
+    production and any drift fails the test (tests must drive real
+    production code). One histogram powers both turn latency and fault rate.
+    """
+    if not duration_ms:
+        return
+    attrs: dict = {"outcome": _turn_outcome(stop_reason)}
+    try:
+        source = infer_use_case(slot_key)
+        if source:
+            attrs["session_source"] = source
+    except Exception:
+        pass
+    try:
+        get_recorder().histogram(
+            "kiroclaw.turn.duration", duration_ms, unit="ms", attrs=attrs
+        )
+    except Exception:
+        logger.debug("turn metric emit failed", exc_info=True)
 
 
 def _pre_tool_hooks_should_block(pre_hook_results: Any) -> bool:
@@ -1913,6 +1962,12 @@ async def _run_chat(
             )
 
         _stop_reason = ""
+        # Tool-stall metadata forwarded by the ACP watchdog on its terminal
+        # event (title / redacted command / evidence) — feeds the dedicated
+        # tool-stall recovery nudge below.
+        _stall_tool_title = ""
+        _stall_command = ""
+        _stall_evidence = ""
         async for event in event_stream:
             # Heartbeat every 5s during long operations
             if time.time() - last_heartbeat > 5:
@@ -3050,11 +3105,20 @@ async def _run_chat(
                     await persist_token_record_async(
                         slot.key, _record_model, event, provider=_provider_name
                     )
+                # ── Turn-completion histogram (OTel M2) ──
+                # kiroclaw.turn.duration → turn latency p50/p90 + fault rate.
+                _emit_turn_metric(event.duration_ms, event.stop_reason, slot.key)
                 _stop_reason = event.stop_reason
+                if _stop_reason == STOP_REASON_TOOL_STALL:
+                    _stall_tool_title = event.title
+                    _stall_command = event.tool_input
+                    _stall_evidence = event.text
                 if (
                     _stop_reason
                     and _stop_reason != STOP_REASON_END_TURN
                     and _stop_reason != STOP_REASON_CANCELLED
+                    and _stop_reason != STOP_REASON_STALE_RECOVER
+                    and _stop_reason != STOP_REASON_TOOL_STALL
                 ):
                     logger.warning(
                         "Unexpected stop_reason %r for slot %s",
@@ -3066,6 +3130,80 @@ async def _run_chat(
         # Turn stream ended: flush any withheld thinking tail (a thinking-final
         # turn never hit the loop-top flush for a following non-thinking event).
         _flush_thinking_stream()
+
+        # Auto-recover a genuinely-wedged turn. The ACP layer probed a stale turn
+        # via session/cancel and got no ack within the grace window — a confirmed
+        # wedge (a done-but-missing-frame turn would have acked and completed
+        # normally). Reset the session (kill the wedged runtime + session/load
+        # resume in the finally) and re-queue a continue-nudge so the turn
+        # finishes IN PLACE, on this same slot, with NO user message required —
+        # the finally's dequeue re-dispatches it against the resumed session,
+        # which restores the prior committed work so the model continues rather
+        # than restarts. Bounded so a permanently-broken session surfaces a clean
+        # "start a new chat" instead of looping. Complementary to CR-284525375,
+        # which surfaces the stuck sessions this cannot recover.
+        if _stop_reason == STOP_REASON_STALE_RECOVER:
+            needs_session_reset = True  # checked in finally block (reset + resume)
+
+            def _emit_stale(msg: str) -> None:
+                slot.append("error", msg, "msg msg-err")
+                state.broadcast_ws(
+                    "chat_message",
+                    {"slot": slot.key, "role": "error", "content": msg},
+                )
+
+            if _prompt_depth == 0 and slot._stale_recovery_retries < 3:
+                slot._stale_recovery_retries += 1
+                slot.queue_insert(
+                    0, f"{STALE_RECOVERY_PREFIX}\n{build_stale_recovery_prompt()}"
+                )
+                _emit_stale("⟳ Recovering a stalled turn…")
+            elif slot._stale_recovery_retries >= 3:
+                _emit_stale("Session stuck — please start a new chat.")
+            else:
+                # depth>0 (nested turn) with budget remaining: reset the session
+                # but don't re-queue (mirrors the pipe-death depth>0 handling);
+                # surface feedback so the nested turn doesn't fail silently.
+                _emit_stale("⟳ Turn stalled — please retry.")
+            return
+
+        # Dedicated tool-stall recovery — MUST precede the generic "error:"
+        # handler (the stop reason starts with "error:" by design so callers
+        # without this branch still get generic handling). The legacy routing
+        # re-queued the ORIGINAL user message verbatim: the agent received the
+        # full original ask again, restarted the task, re-ran the very command
+        # that stalled, stalled again — three cycles of rework ending in
+        # "Session stuck". Instead: a continue-nudge that names the stalled
+        # tool, points at any redirected log file, and (for stuck-input
+        # verdicts) says to re-run non-interactively. Separate retry budget
+        # from pipe-death so a stall can never burn the reconnect budget.
+        if _stop_reason == STOP_REASON_TOOL_STALL:
+
+            def _emit_stall(msg: str) -> None:
+                slot.append("error", msg, "msg msg-err")
+                state.broadcast_ws(
+                    "chat_message",
+                    {"slot": slot.key, "role": "error", "content": msg},
+                )
+
+            _idle_m = re.search(r"idle_secs=(\d+)", _stall_evidence or "")
+            _idle_secs = int(_idle_m.group(1)) if _idle_m else 0
+            _stuck = "stuck_input" in (_stall_evidence or "")
+            if _prompt_depth == 0 and slot._tool_stall_retries < 3:
+                slot._tool_stall_retries += 1
+                _body = build_tool_stall_recovery_prompt(
+                    _stall_tool_title,
+                    _idle_secs,
+                    command=_stall_command,
+                    stuck_input=_stuck,
+                )
+                slot.queue_insert(0, f"{TOOL_STALL_RECOVERY_PREFIX}\n{_body}")
+                _emit_stall("⟳ Tool appeared stalled — recovering…")
+            elif slot._tool_stall_retries >= 3:
+                _emit_stall("Session stuck — please start a new chat.")
+            else:
+                _emit_stall("⟳ Tool appeared stalled — please retry.")
+            return
 
         # CC process died mid-turn: re-queue message for automatic retry
         # (mirrors AcpProcessDied handling). Eager reconnect in the provider
@@ -3269,6 +3407,8 @@ async def _run_chat(
             slot._empty_response_retries = 0
             slot._prompt_busy_retries = 0
             slot._acp_pipe_death_retries = 0
+            slot._stale_recovery_retries = 0
+            slot._tool_stall_retries = 0
             slot._transient_5xx_retries = 0
 
         if _stop_reason == STOP_REASON_CANCELLED:
@@ -3480,7 +3620,7 @@ async def _run_chat(
                 slot.append("error", _retry_msg, "msg msg-err")
         elif (
             not _turn_emitted
-            and is_transient_backend_error(_msg)
+            and acp_error_is_transient(exc)
             and slot._transient_5xx_retries < TRANSIENT_RETRIES
         ):
             # Transient backend 5xx (InternalServerError / DispatchFailure /
@@ -3627,7 +3767,11 @@ async def _run_chat(
             next_msg, _ = redact_credentials(next_msg)
             is_cron = next_msg.startswith(CRON_NOTIFY_PREFIX)
             is_subagent = next_msg.startswith(SUBAGENT_COMPLETION_PREFIX)
-            is_recovery = next_msg.startswith(REFUSAL_RECOVERY_PREFIX)
+            is_recovery = (
+                next_msg.startswith(REFUSAL_RECOVERY_PREFIX)
+                or next_msg.startswith(STALE_RECOVERY_PREFIX)
+                or next_msg.startswith(TOOL_STALL_RECOVERY_PREFIX)
+            )
             _m = CRON_NOTIFY_RE.match(next_msg) if is_cron else None
             cron_label = _m.group(1) if _m else "cron"
             cron_label, _ = redact_exfiltration_urls(cron_label)

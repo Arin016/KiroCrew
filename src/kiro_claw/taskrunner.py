@@ -1016,11 +1016,12 @@ class TaskRunner:
             category = result.get("category", "tool")
             negative = result.get("negative")
             if self._consolidator and self._consolidator._vector_store:
-                self._consolidator._vector_store.write_lesson(
-                    rule=rule,
-                    category=category,
-                    negative=negative,
-                    source="task_runner",
+                # write_lesson embeds via blocking urllib (Ollama); offload to
+                # keep the gateway event loop responsive (same pattern as
+                # dashboard/handlers/cron.py api_lessons_create).
+                await asyncio.to_thread(
+                    self._consolidator._vector_store.write_lesson,
+                    rule, category, negative, "task_runner",
                 )
             else:
                 self._lesson_store.save(

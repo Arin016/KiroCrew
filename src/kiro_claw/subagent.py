@@ -967,6 +967,22 @@ class SubagentManager:
         """
         logger.warning("Orphan notification (Slack DM pending): %s", msg[:200])
 
+    def _live_shared_count(self, pid: int | None) -> int:
+        """Count live session-shared subagents sharing runtime *pid* (>= 1).
+
+        Used to average the shared AcpRuntime's measured RSS/CPU across the
+        sessions currently running inside it, so each shared subagent is charged
+        an empirical per-session share rather than the whole process.
+        """
+        if not pid:
+            return 1
+        n = sum(
+            1
+            for a in self._agents.values()
+            if not a.done and a._session_sharing and a._pid == pid
+        )
+        return n if n > 0 else 1
+
     def _sample_live_costs(self) -> None:
         """Sample high-water RSS/CPU for each live agent (reaper-loop piggyback).
 
@@ -978,12 +994,31 @@ class SubagentManager:
         """
         now = time.monotonic()
         for info in list(self._agents.values()):
-            # Session-sharing subagents multiplex on the parent's SHARED runtime
-            # PID, so sampling info._pid would attribute the whole shared-process
-            # subtree (parent + all sibling sessions) to this one subagent —
-            # poisoning the learned-cost store. A multiplexed session has no
-            # isolable process cost, so skip it.
-            if info.done or not info._pid or info._session_sharing:
+            if info.done or not info._pid:
+                continue
+            # Session-shared subagents run inside the parent's AcpRuntime process;
+            # every sharing subagent reports the SAME runtime PID, so naive
+            # per-PID sampling would attribute the whole shared process to each
+            # of them. Instead attribute the runtime's measured RSS/CPU divided
+            # by the number of concurrently-live shared sessions on that PID — an
+            # empirical per-session average, not a guessed constant
+            # (dynamic-subagent-sizing.md §session-sharing cost model).
+            if info._session_sharing:
+                shared_n = self._live_shared_count(pid_owner := info._pid)
+                rss_kb = _proc_rss_kb(pid_owner)
+                if rss_kb > 0 and shared_n > 0:
+                    gb = (rss_kb / (1024 * 1024)) / shared_n
+                    if gb > info.peak_rss_gb:
+                        info.peak_rss_gb = gb
+                jiffies = _subtree_cpu_jiffies(pid_owner)
+                if info._cpu_sample_ts > 0.0 and jiffies >= info._cpu_jiffies_prev and shared_n > 0:
+                    dt = now - info._cpu_sample_ts
+                    if dt > 0:
+                        cores = ((jiffies - info._cpu_jiffies_prev) / (_CLK_TCK * dt)) / shared_n
+                        if cores > info.peak_cpu_cores:
+                            info.peak_cpu_cores = cores
+                info._cpu_jiffies_prev = jiffies
+                info._cpu_sample_ts = now
                 continue
             pid = info._pid
             rss_kb = _proc_rss_kb(pid)
@@ -1003,8 +1038,6 @@ class SubagentManager:
 
     def _record_cost(self, info: SubagentInfo) -> None:
         """Persist this run's high-water RSS/CPU to the learned-cost store."""
-        if info._session_sharing:
-            return  # multiplexed on the shared runtime — no isolable per-agent cost
         if info.peak_rss_gb <= 0 and info.peak_cpu_cores <= 0:
             return  # never sampled (e.g. finished before the first reaper sweep)
         try:

@@ -2,7 +2,7 @@ import { safeSetItem } from '../utils/safeStorage'
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import Clickable from '../components/Clickable'
 import { AnimatePresence, motion } from 'framer-motion'
-import { List, CalendarDays, ClipboardList, ChevronRight, Globe, Check, History } from 'lucide-react'
+import { List, CalendarDays, ClipboardList, ChevronRight, Globe, Check, History, Trash2 } from 'lucide-react'
 import { api } from '../api/client'
 import { PageHeader, Card, CardTitle, Btn, SendBtn, Badge, SearchInput, EmptyState, Skeleton } from '../components/ui'
 import SegmentedControl from '../components/SegmentedControl'
@@ -99,6 +99,12 @@ export default function SchedulePage() {
   }, [renderTz])
   const [loadError, setLoadError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  // Batch selection + AWS-style bulk delete
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [batchConfirm, setBatchConfirm] = useState(false)
+  const [batchDeleting, setBatchDeleting] = useState(false)
+  const [batchError, setBatchError] = useState<string | null>(null)
+  const [confirmText, setConfirmText] = useState('')
   const sanitizedJobs = useMemo(() => jobs.map(j => ({ ...j, safeMessage: sanitizeLlmOutput(j.message) })), [jobs])
 
   const load = useCallback(async () => {
@@ -108,6 +114,13 @@ export default function SchedulePage() {
       const fresh: CronJob[] = d.jobs || []
       setJobs(fresh)
       setSelected(prev => prev ? fresh.find((j: CronJob) => j.id === prev.id) ?? null : null)
+      // Drop any selected IDs that no longer exist (deleted elsewhere / by us).
+      setSelectedIds(prev => {
+        if (prev.size === 0) return prev
+        const live = new Set(fresh.map(j => j.id))
+        const next = new Set([...prev].filter(id => live.has(id)))
+        return next.size === prev.size ? prev : next
+      })
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : 'Failed to load jobs')
     } finally {
@@ -153,6 +166,49 @@ export default function SchedulePage() {
     nextRun: (a: CronJob, b: CronJob) => (a.next_run_ts || 0) - (b.next_run_ts || 0),
   }), [])
   const { sorted: sortedScheduleJobs, sort: schedSort, toggle: toggleSchedSort } = useSortableTable(filteredJobs, 'cron-schedule', scheduleComparators, { key: 'nextRun', dir: 'asc' })
+
+  // ── Batch selection helpers (operate over the currently visible/filtered rows) ──
+  const allVisibleSelected = sortedScheduleJobs.length > 0 && sortedScheduleJobs.every(j => selectedIds.has(j.id))
+  const someVisibleSelected = sortedScheduleJobs.some(j => selectedIds.has(j.id))
+  const toggleOne = useCallback((id: string) => {
+    setSelectedIds(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })
+  }, [])
+  const toggleAllVisible = useCallback(() => {
+    setSelectedIds(prev => {
+      const allSel = sortedScheduleJobs.length > 0 && sortedScheduleJobs.every(j => prev.has(j.id))
+      const n = new Set(prev)
+      if (allSel) sortedScheduleJobs.forEach(j => n.delete(j.id))
+      else sortedScheduleJobs.forEach(j => n.add(j.id))
+      return n
+    })
+  }, [sortedScheduleJobs])
+  const clearSelection = useCallback(() => setSelectedIds(new Set()), [])
+  const selectedJobs = useMemo(() => jobs.filter(j => selectedIds.has(j.id)), [jobs, selectedIds])
+  const openBatchConfirm = useCallback(() => { setBatchError(null); setConfirmText(''); setBatchConfirm(true) }, [])
+  const runBatchDelete = useCallback(async () => {
+    const ids = Array.from(selectedIds)
+    if (ids.length === 0) return
+    setBatchDeleting(true); setBatchError(null)
+    try {
+      const res = await api.batchDeleteCron(ids)
+      const failed: string[] = Array.isArray(res?.failed) ? res.failed : []
+      setSelected(prev => prev && selectedIds.has(prev.id) && !failed.includes(prev.id) ? null : prev)
+      await load()
+      if (failed.length) {
+        // Keep the failures selected so the user can retry; surface the count.
+        setSelectedIds(new Set(failed))
+        setBatchError(`${failed.length} of ${ids.length} job${ids.length === 1 ? '' : 's'} could not be deleted`)
+      } else {
+        setSelectedIds(new Set())
+        setBatchConfirm(false)
+      }
+    } catch (e) {
+      setBatchError(e instanceof Error ? e.message : 'Batch delete failed')
+    } finally {
+      setBatchDeleting(false)
+    }
+  }, [selectedIds, load])
+  const confirmArmed = confirmText.trim().toLowerCase() === 'delete'
 
   return (
     <div className="flex flex-1 min-h-0 overflow-hidden">
@@ -228,8 +284,30 @@ export default function SchedulePage() {
             </>) : jobsView === 'executions' ? (
               <ExecutionsView selectedJobId={selected?.id} />
             ) : (<>
-            <div className="mb-3"><SearchInput placeholder="Filter jobs…" value={cronFilter} onChange={e => setCronFilter(e.target.value)} /></div>
+            <div className="mb-3 flex items-center gap-2">
+              <div className="flex-1 min-w-0"><SearchInput placeholder="Filter jobs…" value={cronFilter} onChange={e => setCronFilter(e.target.value)} /></div>
+              {selectedIds.size > 0 && (
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-[13px] text-muted whitespace-nowrap">{selectedIds.size} selected</span>
+                  <Btn onClick={clearSelection}>Clear</Btn>
+                  <Btn danger onClick={openBatchConfirm} title={`Delete ${selectedIds.size} selected job(s)`}>
+                    <span className="flex items-center gap-1.5"><Trash2 size={14} /> Delete {selectedIds.size} selected</span>
+                  </Btn>
+                </div>
+              )}
+            </div>
             <div className="overflow-x-auto"><table className="w-full border-collapse table-striped"><thead><tr>
+              <th className="px-2.5 py-2 border-b border-border w-[36px] text-center">
+                <input
+                  type="checkbox"
+                  aria-label="Select all jobs"
+                  title="Select / deselect all jobs matching the current filter"
+                  className="accent-accent cursor-pointer align-middle"
+                  checked={allVisibleSelected}
+                  ref={el => { if (el) el.indeterminate = !allVisibleSelected && someVisibleSelected }}
+                  onChange={toggleAllVisible}
+                />
+              </th>
               <th className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium w-[72px]">ID</th>
               <SortableHeader label="Name" sortKey="name" sort={schedSort} onToggle={toggleSchedSort} className="w-[100px]" />
               <th className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium w-[80px]">Type</th>
@@ -241,11 +319,20 @@ export default function SchedulePage() {
               <th className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium w-[210px]">Actions</th>
             </tr></thead>
             <tbody>{jobs.length === 0
-              ? <tr><td colSpan={9}><EmptyState icon={<ClipboardList className="lucide-inline" />} title="No cron jobs" /></td></tr>
+              ? <tr><td colSpan={10}><EmptyState icon={<ClipboardList className="lucide-inline" />} title="No cron jobs" /></td></tr>
               : sortedScheduleJobs.length === 0
-              ? <tr><td colSpan={9} className="text-muted italic px-2.5 py-3.5 text-sm">No matching jobs</td></tr>
+              ? <tr><td colSpan={10} className="text-muted italic px-2.5 py-3.5 text-sm">No matching jobs</td></tr>
               : sortedScheduleJobs.map(j => (
-              <tr key={j.id} className={`hover:bg-bg-hover transition-colors cursor-pointer ${selected?.id === j.id ? 'bg-accent-subtle' : ''}`} onClick={() => { setCreating(false); setSelected(selected?.id === j.id ? null : j) }}>
+              <tr key={j.id} className={`hover:bg-bg-hover transition-colors cursor-pointer ${selected?.id === j.id ? 'bg-accent-subtle' : ''} ${selectedIds.has(j.id) ? 'bg-accent-subtle/60' : ''}`} onClick={() => { setCreating(false); setSelected(selected?.id === j.id ? null : j) }}>
+                <td className="px-2.5 py-2 border-b border-border text-center" onClick={e => e.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    aria-label={`Select ${j.name}`}
+                    className="accent-accent cursor-pointer align-middle"
+                    checked={selectedIds.has(j.id)}
+                    onChange={() => toggleOne(j.id)}
+                  />
+                </td>
                 <td className="px-2.5 py-2 border-b border-border text-sm"><code>{j.id}</code></td>
                 <td className="px-2.5 py-2 border-b border-border text-sm">{j.name}</td>
                 <td className="px-2.5 py-2 border-b border-border text-sm">{j.script ? <span className="text-[var(--accent)] font-medium text-[13px]">script · python</span> : j.command ? <span className="text-[var(--warn)] font-medium text-[13px]">command · shell</span> : <span className="text-muted text-[13px]">agent · {j.agent || 'default'}</span>}</td>
@@ -296,6 +383,57 @@ export default function SchedulePage() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {batchConfirm && (
+        <Clickable
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-[100]"
+          onClick={() => { if (!batchDeleting) setBatchConfirm(false) }}
+        >
+          {/* Modal container; handlers only stop backdrop-dismiss from firing — a dialog role is non-interactive to jsx-a11y but these guards are idiomatic for a modal. */}
+          {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Delete ${selectedIds.size} scheduled jobs`}
+            className="bg-bg-elevated rounded-xl border border-border p-6 w-[460px] max-w-[92vw] shadow-xl animate-scale-in"
+            onClick={e => e.stopPropagation()}
+            onKeyDown={e => e.stopPropagation()}
+          >
+            <h3 className="text-base font-semibold text-text mb-2 flex items-center gap-2">
+              <Trash2 size={16} className="text-danger shrink-0" />
+              Delete {selectedIds.size} scheduled job{selectedIds.size === 1 ? '' : 's'}?
+            </h3>
+            <p className="text-sm text-muted mb-3">This permanently removes the selected job{selectedIds.size === 1 ? '' : 's'} and their run history. This action cannot be undone.</p>
+            <div className="max-h-[168px] overflow-y-auto rounded-md border border-border bg-bg divide-y divide-border/60 mb-4">
+              {selectedJobs.map(jb => (
+                <div key={jb.id} className="flex items-center gap-2 px-3 py-1.5 text-[13px]">
+                  <code className="text-muted shrink-0">{jb.id}</code>
+                  <span className="truncate text-text">{jb.name}</span>
+                </div>
+              ))}
+            </div>
+            <label htmlFor="batch-delete-confirm" className="block text-[13px] text-muted mb-1.5">
+              Type <code className="text-text font-semibold">delete</code> to confirm
+            </label>
+            <input
+              id="batch-delete-confirm"
+              autoFocus
+              value={confirmText}
+              onChange={e => setConfirmText(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && confirmArmed && !batchDeleting) runBatchDelete() }}
+              placeholder="delete"
+              className="w-full mb-4 px-3 py-2 rounded-md bg-bg border border-border text-sm text-text outline-none focus:border-accent"
+            />
+            <div className="flex gap-2 justify-end">
+              <Btn onClick={() => setBatchConfirm(false)} disabled={batchDeleting}>Cancel</Btn>
+              <Btn danger disabled={batchDeleting || !confirmArmed} onClick={runBatchDelete}>
+                {batchDeleting ? 'Deleting…' : `Delete ${selectedIds.size}`}
+              </Btn>
+            </div>
+            {batchError && <p className="text-danger text-[12px] mt-2">{batchError}</p>}
+          </div>
+        </Clickable>
+      )}
     </div>
   )
 }

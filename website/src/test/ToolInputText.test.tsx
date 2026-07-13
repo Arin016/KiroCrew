@@ -70,4 +70,23 @@ describe('ToolInputText', () => {
     const { container } = render(<ToolInputText text={text} />)
     expect(container.textContent).toBe(text)
   })
+
+  it('formatted mode (default) unescapes \\n inside JSON string values', () => {
+    const { container } = render(<ToolInputText text={'{"command": "a\\nb"}'} />)
+    expect(container.textContent).toContain('a\nb') // real newline
+    expect(container.textContent).not.toContain('a\\nb') // no literal backslash-n
+  })
+
+  it('raw mode preserves \\n escapes verbatim', () => {
+    const { container } = render(<ToolInputText text={'{"command": "a\\nb"}'} raw />)
+    expect(container.textContent).toContain('a\\nb') // literal backslash-n kept
+    expect(container.textContent).not.toContain('a\nb') // not turned into a newline
+  })
+
+  it('formatted mode preserves a genuine literal backslash-n (JSON \\\\n)', () => {
+    // JSON "\\n" encodes a literal backslash + n, which must NOT become a newline.
+    const { container } = render(<ToolInputText text={'{"command": "a\\\\nb"}'} />)
+    expect(container.textContent).toContain('a\\nb') // still backslash-n
+    expect(container.textContent).not.toContain('a\nb') // not a real newline
+  })
 })

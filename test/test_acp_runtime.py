@@ -937,15 +937,16 @@ async def test_tool_stall_cancels_session_not_runtime(monkeypatch):
     """A dispatched tool that goes silent must be recovered by a session-scoped
     session/cancel (so co-tenant sessions on the shared runtime survive), NOT by
     killing the runtime process. The turn ends with stop_reason 'tool_stall'."""
-    from kiro_claw.acp import session_handle as sh_mod
+    from kiro_claw.acp.session_handle import WatchdogSettings
     from kiro_claw.acp.types import EVENT_COMPLETE
-
-    monkeypatch.setattr(sh_mod, "_TOOL_STALL_TIMEOUT", 0.05)
 
     rt, reader, _ = _make_runtime()
     q = _register(rt, "sA")
     rt.send_notification = AsyncMock()  # type: ignore[method-assign]
-    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle = AcpSessionHandle(
+        "sA", q["sA"], rt,
+        watchdog=WatchdogSettings(check_after_secs=0.01, tool_stall_suspect_secs=0.05),
+    )
     handle._tool_dispatched = True   # a tool was dispatched this turn
     handle._stale_eligible = False   # the stale-turn check must NOT be what fires
 
@@ -977,14 +978,15 @@ async def test_tool_stall_recovery_completes_even_if_cancel_fails(monkeypatch):
     """If session/cancel raises or times out (an unresponsive runtime is likely
     right after a stall), the watchdog must still complete the turn — the
     bounded wait_for + except must not let recovery hang or bubble."""
-    from kiro_claw.acp import session_handle as sh_mod
+    from kiro_claw.acp.session_handle import WatchdogSettings
     from kiro_claw.acp.types import EVENT_COMPLETE
-
-    monkeypatch.setattr(sh_mod, "_TOOL_STALL_TIMEOUT", 0.05)
 
     rt, reader, _ = _make_runtime()
     q = _register(rt, "sA")
-    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle = AcpSessionHandle(
+        "sA", q["sA"], rt,
+        watchdog=WatchdogSettings(check_after_secs=0.01, tool_stall_suspect_secs=0.05),
+    )
     handle._tool_dispatched = True
     handle._stale_eligible = False
     # cancel() fails (stands in for the wait_for timeout path — both raise into
@@ -2709,35 +2711,32 @@ def test_store_session_config_syncs_effort_levels(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stale_turn_yields_end_turn(monkeypatch):
-    """R7 gap fill: a stale turn (text streamed, then no formal response within
-    the stale window) yields EVENT_COMPLETE(STOP_REASON_END_TURN) -- a benign end,
-    NOT an error (parity with AcpClient). Shared-path counterpart of AcpClient's
-    test_stale_turn_synthesizes_complete_after_text."""
-    from kiro_claw.acp import session_handle as sh_mod
-    from kiro_claw.acp.types import EVENT_COMPLETE, STOP_REASON_END_TURN
-
-    monkeypatch.setattr(sh_mod, "_STALE_TURN_TIMEOUT", 0.05)
+async def test_stale_turn_probes_then_signals_recovery():
+    """A stale turn probed via session/cancel that never acks within the grace
+    window is a confirmed wedge → the shared-runtime handle yields
+    EVENT_COMPLETE(STOP_REASON_STALE_RECOVER) so the dashboard auto-recovers
+    (reset+resume+continue-nudge). Replaces the former stale->end_turn behavior,
+    which orphaned the wedged turn until the user's next message collided with
+    'prompt already in progress'. (Stale DETECTION → probe is covered by
+    test_acp_stale_recovery.py::test_genuine_stale_probes_via_cancel.)"""
+    from kiro_claw.acp.types import EVENT_COMPLETE, STOP_REASON_STALE_RECOVER
 
     rt, reader, _ = _make_runtime()
     q = _register(rt, "sA")
     handle = AcpSessionHandle("sA", q["sA"], rt)
-    handle._stale_eligible = True    # text streamed -> stale watchdog armed
-    handle._tool_dispatched = False  # tool-stall must NOT be what fires
+    handle._turn_done.clear()  # a turn is in flight (cleared by prompt() in prod)
+    # A genuine stale turn was probed via session/cancel; the grace window has
+    # elapsed with no ack (confirmed wedge). The unresponsive-cancel branch runs
+    # at the loop top, before any queue read, so this is deterministic.
+    handle._stale_probe = True
+    handle._cancelled = True
+    handle._cancel_ts = time.monotonic() - 1.0
+    handle._cancel_grace_secs = 0.05
 
-    class _SilentQueue:
-        async def get(self):
-            await asyncio.sleep(0.06)  # advance clock past the stale window
-            raise asyncio.TimeoutError
-
-    handle._queue = _SilentQueue()  # type: ignore[assignment]
-
-    events = []
-    async for ev in handle._dispatch_events(req_id=1, timeout=30.0):
-        events.append(ev)
+    events = [ev async for ev in handle._dispatch_events(req_id=1, timeout=5.0)]
 
     assert events and events[-1].kind == EVENT_COMPLETE
-    assert events[-1].stop_reason == STOP_REASON_END_TURN
+    assert events[-1].stop_reason == STOP_REASON_STALE_RECOVER
     assert handle._turn_done.is_set()
 
 

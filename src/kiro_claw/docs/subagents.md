@@ -38,7 +38,7 @@ The `spawn_run` tool accepts:
 
 ## Limits
 
-- **Max concurrent**: 3 subagents at a time (configurable via `agent.max_subagents`)
+- **Max concurrent**: auto-sized at startup by default (`agent.max_subagents = 0`; floor 3, ceiling `agent.subagent_auto_max` = 32); set a positive integer to pin a fixed cap
 - **Timeout**: 30 minutes per subagent task, 20 minutes delivery, 5 minutes per injection attempt
 - **Turn limit**: 100 turns per subagent (configurable via `agent.subagent_max_turns`, UI max 200)
 - **Memory guard**: spawns are refused when available memory drops below 4 GB (configurable via `agent.spawn_min_memory_gb`, set to 0 to disable)

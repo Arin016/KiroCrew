@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -31,6 +32,8 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from kiro_claw.executors import subprocess_executor
+from kiro_claw.mcp_caller import CallerContext
 from kiro_claw.mcp_gateway.hashing import hash_command
 from kiro_claw.mcp_gateway.pool import READ_BUFFER_LIMIT_BYTES, PoolKey
 
@@ -245,8 +248,19 @@ def _resolve_channel_id(cli_value: Optional[str]) -> Optional[str]:
 
 
 def _build_caller_block(channel_id: Optional[str]) -> dict[str, str]:
-    """Assemble caller-identity from ``KIROCLAW_*`` env vars."""
-    session_key = os.environ.get("KIROCLAW_SESSION_KEY", "")
+    """Assemble caller-identity from ``KIROCLAW_*`` env vars.
+
+    ``session_key`` is resolved via :meth:`CallerContext.from_env`, which
+    reads ``KIROCLAW_SESSION_KEY`` first and falls back to the warm-pool PID
+    file (``config_dir()/session_pid_<pid>.txt``) by walking the process
+    ancestry. Warm-pool kiro-cli is pre-spawned with NO session key (the key
+    is only known once the session is claimed), so a bare env read here would
+    register an empty caller and gatewayd would stamp ``caller=None`` on every
+    forwarded call — silently breaking state-mutating tools (``learn_add`` et
+    al.) that need session identity. Sharing the backend-side resolver keeps
+    both ends of the wire in agreement. If the key is still unknown at register
+    (claim hasn't happened yet), the recaller loop repairs it later."""
+    session_key = CallerContext.from_env().session_key
     principal = (
         os.environ.get("KIROCLAW_PRINCIPAL") or os.environ.get("USER") or ""
     )
@@ -621,6 +635,82 @@ def _install_signal_handlers(
             pass
 
 
+# --- Warm-pool caller repair -----------------------------------------------
+
+# A warm-pool stub registers BEFORE its kiro-cli is claimed, so its Register
+# payload carries an empty ``session_key`` (the key is unknown at pool-fill
+# time). ``rekey()`` on claim only mutates the gateway-side provider object —
+# it never re-registers this stub — so gatewayd keeps ``caller=None`` for the
+# life of the connection and every state-mutating tool (``learn_add`` et al.)
+# fails with "missing X-Session-Key". These knobs bound a poll that watches for
+# the session key to materialize (the dashboard writes
+# ``session_pid_<pid>.txt`` on the claimed session's first turn) and then sends
+# a ``recaller`` control frame so gatewayd stamps the right identity from then
+# on.
+_RECALLER_POLL_INTERVAL_SECS = 1.5
+# Give up after this long: a key that never appears means a genuinely
+# key-less context (ephemeral / incognito), not a lagging claim — polling
+# forever would leak a task per such stub.
+_RECALLER_POLL_MAX_SECS = 180.0
+
+
+async def _recaller_loop(
+    writer: asyncio.StreamWriter,
+    channel_id: Optional[str],
+    stop_event: asyncio.Event,
+) -> None:
+    """Poll for a late-arriving session key and re-register the caller once.
+
+    Started only when the initial Register carried an empty ``session_key``.
+    Exits on: key found (after sending one ``recaller`` frame), bridge
+    teardown (``stop_event``), or the poll deadline. Writes a whole frame per
+    ``_write_frame`` (a single synchronous ``writer.write`` before any await),
+    so it cannot interleave partial bytes with the stdin pump sharing this
+    ``writer``.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = time.monotonic() + _RECALLER_POLL_MAX_SECS
+    while not stop_event.is_set() and time.monotonic() < deadline:
+        try:
+            # Sleep-or-wake: return promptly if the bridge tears down.
+            await asyncio.wait_for(
+                stop_event.wait(), timeout=_RECALLER_POLL_INTERVAL_SECS
+            )
+            return
+        except asyncio.TimeoutError:
+            pass
+        # ``_build_caller_block`` -> ``CallerContext.from_env`` does a
+        # synchronous /proc ancestry walk + file reads; offload it to the
+        # dedicated subprocess pool (not the shared default) so a slow or
+        # wedged filesystem read here can neither freeze the stdin-pump bridge
+        # that shares this event loop nor starve unrelated default-pool work.
+        caller = await loop.run_in_executor(
+            subprocess_executor(), _build_caller_block, channel_id
+        )
+        if not caller["session_key"]:
+            continue
+        frame = {
+            "type": "recaller",
+            "caller": caller,
+            # Flat mirror — gatewayd's ``_caller_from_register`` accepts either
+            # the nested ``caller`` dict or these top-level fields.
+            "session_key": caller["session_key"],
+            "session_type": caller["session_type"],
+            "principal_id": caller["principal_id"],
+            "channel_id": channel_id,
+        }
+        try:
+            await _write_frame(writer, frame)
+            logger.info(
+                "stub sent recaller after warm-pool claim (session_type=%s)",
+                caller["session_type"],
+            )
+        except (OSError, ConnectionError):
+            # Connection already gone — bridge will tear down on its own.
+            pass
+        return
+
+
 async def _amain(argv: Optional[list[str]] = None) -> int:
     # An invalid MC_MCP_LOG (e.g. "verbose") would make basicConfig raise
     # "Unknown level" and kill the stub BEFORE its fallback-to-per-session-exec
@@ -634,7 +724,13 @@ async def _amain(argv: Optional[list[str]] = None) -> int:
         stream=sys.stderr,
     )
     args = _parse_args(argv)
-    payload = build_register_payload(args)
+    # build_register_payload -> _build_caller_block -> CallerContext.from_env
+    # does a synchronous /proc ancestry walk + file reads (and _binary_version
+    # hashes the target binary), so offload the whole cold-start resolution to
+    # the dedicated subprocess pool (not the shared default) — consistent with
+    # _recaller_loop, so a wedged filesystem read can't starve default-pool work.
+    loop = asyncio.get_running_loop()
+    payload = await loop.run_in_executor(subprocess_executor(), build_register_payload, args)
 
     try:
         pool_label = PoolKey.from_register(payload).human_readable()
@@ -717,7 +813,28 @@ async def _amain(argv: Optional[list[str]] = None) -> int:
             fallback_exec(args)
             return 1  # unreachable
 
-    await run_bridge(reader, writer, stop_event)
+    # Warm-pool caller repair: if we registered without a session key (the
+    # kiro-cli was pool-spawned before its session was claimed), watch for the
+    # key to materialize and re-register the caller so state-mutating tools
+    # (learn_add et al.) work for the claimed session. No-op for stubs that
+    # already had a key at register.
+    recaller_task: Optional[asyncio.Task[None]] = None
+    if not payload.get("session_key"):
+        recaller_task = asyncio.create_task(
+            _recaller_loop(writer, _resolve_channel_id(args.channel_id), stop_event),
+            name="mc-mcp-stub-recaller",
+        )
+    try:
+        await run_bridge(reader, writer, stop_event)
+    finally:
+        if recaller_task is not None:
+            if not recaller_task.done():
+                recaller_task.cancel()
+            # Always await — even a task that already finished (successfully or
+            # with an exception) must have its result/exception retrieved, or
+            # asyncio logs "Task exception was never retrieved" and hides a bug.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await recaller_task
     return 0
 
 

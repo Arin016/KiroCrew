@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Pencil, Circle, Pin, Zap, Locate, Link2, Tag as TagIcon, X } from 'lucide-react'
+import { Pencil, Circle, Pin, Zap, Locate, Link2, Tag as TagIcon, X, ExternalLink, Monitor, Undo2 } from 'lucide-react'
 import type { ChatFolder } from '../types'
 import FolderMoveSubmenu from './FolderMoveSubmenu'
 import SessionColorSwatches from './SessionColorSwatches'
@@ -11,6 +11,7 @@ import { useAppSelector } from '../store'
 import { useTagPopover } from '../hooks/useTagPopover'
 import { api } from '../api/client'
 import { useSessionActions } from '../hooks/useSessionActions'
+import { useChatPopouts } from '../hooks/useChatPopouts'
 import { loadChatConfig } from '../pages/chat/ChatSettings'
 
 export interface SessionActionsMenuProps {
@@ -84,6 +85,14 @@ export default function SessionActionsMenu({
 
   // Generic, surface-agnostic actions — one definition, wired straight to the store.
   const { toggleRead, togglePin, toggleMode, copyLink, move, close } = useSessionActions(mode)
+  // Popped-out window coordination (shared singleton — one channel for all menus).
+  const { isPoppedOut, isSelfPopout, open: openPopout, focus: focusPopout, bringBack, returnSelfToMain } = useChatPopouts()
+  // This menu also renders INSIDE a popout window (via the header). There the
+  // map never contains the window's own slot (no channel self-delivery), so we
+  // must key off isSelfPopout: offering "Pop out" would window.open into the
+  // popout's own window name and reload it in place.
+  const selfPopout = isSelfPopout(slotKey)
+  const poppedOut = !selfPopout && isPoppedOut(slotKey)
   const { open: openTagPopover } = useTagPopover()
   // Tags is a board-view feature; the item shows only when board view is enabled.
   const tagColumnsEnabled = loadChatConfig().tagColumnsEnabled
@@ -143,6 +152,28 @@ export default function SessionActionsMenu({
       onReveal && (
         <Item key="reveal" onSelect={onReveal}>
           <Locate size={13} className="shrink-0 text-muted" /> Reveal in sidebar
+        </Item>
+      ),
+      // Pop out to a dedicated browser window — or, if already out, focus /
+      // bring it back. Lets you keep typing to one session while looking at an
+      // artifact or another view in the main window. Inside the popout window
+      // itself, the only meaningful action is returning to the main dashboard.
+      selfPopout ? (
+        <Item key="bring-back-self" onSelect={returnSelfToMain}>
+          <Undo2 size={13} className="shrink-0 text-muted" /> Bring back to main
+        </Item>
+      ) : poppedOut ? (
+        <Item key="focus-popout" onSelect={() => focusPopout(slotKey)}>
+          <Monitor size={13} className="shrink-0 text-muted" /> Focus popped-out window
+        </Item>
+      ) : (
+        <Item key="popout" onSelect={() => openPopout(slotKey, slot?.title)}>
+          <ExternalLink size={13} className="shrink-0 text-muted" /> Pop out to window
+        </Item>
+      ),
+      poppedOut && (
+        <Item key="bring-back" onSelect={() => bringBack(slotKey)}>
+          <Undo2 size={13} className="shrink-0 text-muted" /> Bring back to main
         </Item>
       ),
       <Item key="copy" onSelect={() => copyLink(slotKey)}>

@@ -938,6 +938,7 @@ class TestCompactCallback:
     async def test_compact_session_invokes_callback_with_key_and_pct(self, cfg):
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
         await mgr.get_or_create("dashboard:chat-1")
+        mgr.release("dashboard:chat-1")
         cb = AsyncMock()
         mgr.set_compact_callback(cb)
 
@@ -960,9 +961,57 @@ class TestCompactCallback:
         await mgr.close_all()
 
     @pytest.mark.asyncio
+    async def test_compact_session_waits_for_inflight_turn(self, cfg):
+        """kiro-cli recycle must drain the in-flight turn: while the session
+        semaphore is held (turn active) it blocks instead of SIGKILL'ing."""
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+        # get_or_create returns HOLDING the semaphore -> simulates an active turn.
+        await mgr.get_or_create("dashboard:chat-1")
+        cb = AsyncMock()
+        mgr.set_compact_callback(cb)
+
+        task = asyncio.create_task(mgr._compact_session("dashboard:chat-1", 92.0))
+        await asyncio.sleep(0.05)
+        # Still draining: not recycled, callback not fired.
+        assert not task.done()
+        assert "dashboard:chat-1" in mgr._sessions
+        cb.assert_not_awaited()
+
+        # Turn finishes -> semaphore released -> recycle proceeds.
+        mgr.release("dashboard:chat-1")
+        await asyncio.wait_for(task, timeout=2)
+        assert "dashboard:chat-1" not in mgr._sessions
+        cb.assert_awaited_once_with("dashboard:chat-1", 92.0, success=True)
+        await mgr.close_all()
+
+    @pytest.mark.asyncio
+    async def test_compact_session_force_recycles_after_timeout(
+        self, cfg, caplog, monkeypatch
+    ):
+        """A stuck turn (semaphore never released) must force-recycle after
+        _COMPACT_TIMEOUT_SECS so context still clears."""
+        monkeypatch.setattr("kiro_claw.session._COMPACT_TIMEOUT_SECS", 0.1)
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+        # Hold the semaphore and never release -> simulates a stuck turn.
+        await mgr.get_or_create("dashboard:chat-1")
+        cb = AsyncMock()
+        mgr.set_compact_callback(cb)
+
+        with caplog.at_level(logging.WARNING, logger="kiro_claw.session"):
+            await asyncio.wait_for(
+                mgr._compact_session("dashboard:chat-1", 92.0), timeout=2
+            )
+
+        assert "dashboard:chat-1" not in mgr._sessions
+        cb.assert_awaited_once_with("dashboard:chat-1", 92.0, success=True)
+        assert any("forcing recycle" in r.message for r in caplog.records)
+        await mgr.close_all()
+
+    @pytest.mark.asyncio
     async def test_compact_session_callback_exception_is_logged(self, cfg, caplog):
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
         await mgr.get_or_create("dashboard:chat-1")
+        mgr.release("dashboard:chat-1")
         cb = AsyncMock(side_effect=RuntimeError("boom"))
         mgr.set_compact_callback(cb)
 
@@ -982,6 +1031,7 @@ class TestCompactCallback:
     async def test_trigger_compaction_threads_pct_through(self, cfg):
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
         await mgr.get_or_create("dashboard:chat-2")
+        mgr.release("dashboard:chat-2")
         captured: list[tuple[str, float, bool]] = []
 
         async def cb(key, pct, *, success):
@@ -1002,6 +1052,7 @@ class TestCompactCallback:
         cfg.session.autocompact_pct = 90.0
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
         provider, _, _ = await mgr.get_or_create("dashboard:chat-3")
+        mgr.release("dashboard:chat-3")
         provider.context_usage_pct = lambda: 93.0
         captured: list[tuple[str, float, bool]] = []
 

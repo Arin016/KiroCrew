@@ -1,6 +1,6 @@
 # Slack Gateway Module
 
-Last Updated: 2026-06-29 (challenge-and-redirect REMOVED — Slack messages are processed inline; was an Amazon-internal-only posture)
+Last Updated: 2026-07-13 (slack-link fresh-anchor title fallback chain; messaging transport path + `/kiroclaw restart` / `!restart` + OPTIONS buttons in send_message/cron + AcpPromptBusy auto-reset documented; prior: challenge-and-redirect REMOVED — Slack messages are processed inline; was an Amazon-internal-only posture)
 
 ## Overview
 
@@ -51,6 +51,17 @@ The gateway runs a single asyncio loop, so any blocking call on the loop thread 
 
 ### `handle_message(slack, sessions, channel, text, thread_ts, msg_ts, user_id, approval_mode, ..., subagent_manager) -> None`
 Processes a single incoming message with streaming:
+
+**Session key discipline:** the handler derives two values at entry —
+`reply_ts = thread_ts or msg_ts` (the bare Slack thread timestamp, used for
+posting replies and as the key of thread-indexed maps: `SessionMap`'s
+thread→session index and the dashboard `_slack_to_slot` map) and
+`session_key = canonical_key(reply_ts)` (the namespaced `slack:<ts>` form,
+used for everything session-scoped: `SessionManager` registry, conversation
+log, per-thread override maps, trust set). The canonical form is stable
+across all messages of a thread; the legacy bare form is folded onto the same
+live session by `SessionManager._fold_key` (see session.md).
+
 1. Check hooks for auto-reply
 2. Check `status` keyword — reply with stats summary
 3. Check owner-only `!` commands (`!yolo`, `!agent`, `!ta`, `!allowlist`, `!dashboard`)
@@ -155,6 +166,7 @@ Command name configurable via `slack.command` in config (default: `kiroclaw`).
 | `/<command> sessions` | `_handle_slash` | List active sessions with Slack link status (Block Kit) |
 | `/<command> sessions resume <key>` | `_handle_slash` | Resume a session in the current Slack thread |
 | `/<command> dashboard` | `_handle_slash` | Generate presigned dashboard link (DM'd to user) |
+| `/<command> restart` | `_handle_restart` | Restart the gateway (owner-only; requires an `INVOCATION_ID` / systemd supervisor, else refuses). SEL-audited (approved/denied). Best-effort `save_all_slots` + `close_all` + `sel.flush` (each bounded by `wait_for`), then `os._exit(1)` so the supervisor respawns |
 
 #### Owner-Only `!` Commands (`handler.py`)
 
@@ -167,6 +179,7 @@ Restricted to `KIROCLAW_OWNER_ID`. Processed before keyword commands.
 | `!ta <name>` / `!ta off` | Switch agent for current thread only |
 | `!allowlist @user` | Grant/revoke user access |
 | `!allowlist #channel` | Add/remove tracking channel |
+| `!restart` | Restart the gateway. Bang alias intercepted in `events.py` before the LLM session; delegates to `/kiroclaw restart` (`_handle_restart`) so owner-check + supervisor guard stay a single source of truth (`handler.py:_BANG_TO_SLASH`) |
 
 #### Allowed-User `!` Commands (`handler.py`)
 
@@ -271,6 +284,7 @@ Bidirectional message mirroring between dashboard chat sessions and Slack thread
 - **Link to Dashboard button**: `LINK_DASHBOARD_ACTION` in timing footer imports thread history into a new dashboard slot
 - **`!link-to-dashboard` command**: same as button but triggered via bang command inside a thread
 - **Session resume**: shows Thread/DM choice buttons; `_handle_resume_choice()` with per-session lock for idempotency
+- **Fresh-anchor title** (`dashboard/chat_slack.py` slack-link endpoint): the new-thread anchor message title uses the fallback chain slot.title → first-prompt snippet (60 chars, whitespace-collapsed) → `"New session"` — the raw slot key is never user-visible (untitled slots default their title to the key, so the endpoint gates on `display_title != NEW_SESSION_TITLE`)
 
 ## Sessions View (`sessions_view.py`)
 
@@ -306,6 +320,10 @@ Triggers in-place ACP `/compact` on the current thread's session:
 4. Posts result (✅/❌) + timing footer
 5. On failure: removes session to force clean restart
 
+## Wedged-Session Recovery (`AcpPromptBusy`)
+
+When kiro-cli reports a prompt is still in flight ("already in progress" — a tool stall, timeout, or message race), `AcpClient` raises `AcpPromptBusy` (`acp/client.py`) with a friendly "I'm still processing a previous request… if it persists, send `!restart`" message. `handle_message` catches it and auto-resets the wedged session via `sessions.reset(session_key)` so the next message cold-starts cleanly, then records the failure (the reset itself is best-effort — a reset failure is logged, not raised).
+
 ## OPTIONS Buttons (`format.py`)
 
 LLM responses ending with `[OPTIONS: choice1 | choice2 | choice3]` are rendered as interactive Block Kit checkboxes with a Send button:
@@ -318,6 +336,18 @@ LLM responses ending with `[OPTIONS: choice1 | choice2 | choice3]` are rendered 
 6. Legacy single-choice buttons still supported via `OPTIONS_ACTION_PREFIX`
 
 Action IDs: `options_checkboxes` (toggle), `options_submit` (send). Checkbox `value` contains the choice text.
+
+Beyond the reply-finalization path in `handler.py`, two other Slack delivery paths also render `[OPTIONS: ...]` as buttons (Mesh-2603): the dashboard `send_message` MCP tool (`api_send_message` in `dashboard/handlers/messaging.py`) and cron subagent delivery (`_deliver_cron_response` in `gateway.py`). Both call `extract_options()` / `build_options_blocks()`, skip the tag parse when the caller supplies explicit `blocks` (those own their own layout), and wrap the follow-up options post in `try/except` so a failed options post never fails the primary message.
+
+## Messaging Transport (`messaging.use_transport`)
+
+A channel-neutral dispatch path that replaces the native `handle_message` stream loop with a shared `SlackTransport → TurnDriver → SlackRenderer` pipeline. Gated by `messaging.use_transport` (`MessagingConfig`, default `True` in KiroClaw — the transport abstraction is the canonical path; set `false` to fall back to the legacy native handler — `config/loader.py`). When the flag is on, `events.py:_route_message` routes the message to `handle_message_transport`; when off, nothing in the live gateway path imports the transport (it is purely additive).
+
+- **`SlackTransport`** (`slack/transport.py`): wraps `SlackClientOps` in the neutral `MessagingTransport` contract (dependency direction `slack → messaging`; the `messaging` package never imports Slack). `authorize()` is **owner-only, deny-by-default** — an empty allow-list authorizes nobody, and it SEL-audits **every** rejection (`operation="slack_transport.authorize"`, `outcome="denied"`), including empty/missing `user_id`, so the deny-by-default control is observable.
+- **`TurnDriver`** (`messaging/driver.py`): channel-neutral turn loop converting provider `AcpEvent`s into abstract `OutputEvent`s. Approval ladder mirrors the native `APPROVAL_*` contract — `APPROVAL_AUTO` / `APPROVAL_TRUST` (approve all), `APPROVAL_TRUST_READS` (approve `tool_kind == "read"`), `APPROVAL_INTERACTIVE` (deny-by-default unless the injected decider approves). Two injected predicates keep the driver channel-neutral: `auto_approve_tool` (the `spawn_run` / `auto_approve_subagent_spawn` hook predicate) and `auto_approve_session` (per-session Trust). Interactive buttons are rendered only when a decider is present — without one, `_approve()` denies by default so posting buttons would leave dead controls.
+- **`SlackRenderer` + `SlackApprovalDecider`** (`slack/renderer.py`): renders abstract output onto a Slack thread and holds the underlying `SlackClientOps` so the dashboard→Slack mirror keeps working. Approval buttons use `mc_tool_approve_` / `mc_tool_trust_` (per-session Trust) / `mc_tool_deny_` action prefixes. `SlackApprovalDecider` maintains a process-global `_REGISTRY` keyed by request id so the module-level interaction handler can `resolve_global()` a click without a direct reference to the per-turn decider; `session_for()` maps a click back to its session for per-session Trust. The decider is **deny-by-default** — it `wait_for`s the button future and returns `False` on timeout.
+- **`handle_message_transport`** (`slack/transport_dispatch.py`): agent resolution order is thread override (`!agent`) → per-channel override (`slack.channels.<id>.agent`) → configured default → canonical `"kiroclaw"` (`_DEFAULT_KIROCLAW_AGENT`). The final fallback matters: without it an empty `agent.default_agent` makes kiro-cli launch its bare built-in default with no `kiroclaw-core` server, so `spawn_run` would be missing. Fires the ack reaction + working status before the (cold-start) session acquisition, matching native ordering.
+- **`_resolve_approval_mode(orch)`** (`events.py`): the single per-message chokepoint that folds runtime YOLO (owner-toggled `/kiroclaw yolo`, TTL-capped `safety_override`) into `APPROVAL_AUTO`, evaluated fresh each message. The transport `TurnDriver` only sees this resolved mode, so both the native and transport paths honor the runtime toggle consistently rather than an unconditional auto-approve. Deny-by-default unless auto-approve is explicitly active.
 
 ## Tool Approval Flow
 

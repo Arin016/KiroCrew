@@ -61,7 +61,9 @@
     "tailwind-merge": "^3.5.0",
     "vis-data": "^8.0.3",
     "vis-network": "^10.0.2",
-    "vscode-jsonrpc": "8.2.0"
+    "vscode-jsonrpc": "8.2.0",
+    "sigma": "3.0.2",
+    "graphology": "0.26.0"
   },
   "devDependencies": {
     "@axe-core/react": "^4.10.1",

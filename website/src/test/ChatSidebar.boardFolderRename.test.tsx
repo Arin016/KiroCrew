@@ -74,14 +74,19 @@ Object.defineProperty(window, 'matchMedia', {
 import ChatSidebar from '../pages/ChatSidebar'
 
 const REVIEW = '22222222-2222-2222-2222-222222222222'
+const ONCALL = '33333333-3333-3333-3333-333333333333'
 const COL_A = 'col-aaaa'
+const COL_B = 'col-bbbb'
 const FOLDER_ID = 'folder-zzzz'
 
-const tags: ChatTag[] = [{ id: REVIEW, name: 'Review', color: '#1a1', order: 0, status: true }]
+const tags: ChatTag[] = [
+  { id: REVIEW, name: 'Review', color: '#1a1', order: 0, status: true },
+  { id: ONCALL, name: 'Oncall', color: '#a11', order: 1, status: true },
+]
 const columns: TagColumn[] = [{ id: COL_A, name: 'Review', tag_ids: [REVIEW], mode: 'any', order: 0 }]
 const folders: ChatFolder[] = [{ id: FOLDER_ID, name: 'CDF', order: 0 }]
 
-function renderSidebar() {
+function renderWith(cols: TagColumn[]) {
   const store = createTestStore({
     dashboard: {
       status: {}, connected: false, slots: [], approvalMode: 'normal',
@@ -93,7 +98,7 @@ function renderSidebar() {
   })
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   qc.setQueryData(['chat-tags'], tags)
-  qc.setQueryData(['tag-columns'], columns)
+  qc.setQueryData(['tag-columns'], cols)
   qc.setQueryData(['chat-folders'], folders)
   return render(
     <QueryClientProvider client={qc}>
@@ -111,10 +116,27 @@ function renderSidebar() {
   )
 }
 
-function colFolderHeader(container: HTMLElement): HTMLElement {
-  const el = container.querySelector(`[data-testid="col-${COL_A}-folder-${FOLDER_ID}"]`)
+function renderSidebar() {
+  return renderWith(columns)
+}
+
+// Two columns: every root folder renders in BOTH, which is what exposes the
+// per-column edit-scope bug.
+function renderMultiColumn() {
+  return renderWith([
+    { id: COL_A, name: 'Review', tag_ids: [REVIEW], mode: 'any', order: 0 },
+    { id: COL_B, name: 'Oncall', tag_ids: [ONCALL], mode: 'any', order: 1 },
+  ])
+}
+
+function colHeader(container: HTMLElement, colId: string): HTMLElement {
+  const el = container.querySelector(`[data-testid="col-${colId}-folder-${FOLDER_ID}"]`)
   expect(el).toBeTruthy()
   return el as HTMLElement
+}
+
+function colFolderHeader(container: HTMLElement): HTMLElement {
+  return colHeader(container, COL_A)
 }
 
 beforeEach(() => {
@@ -146,5 +168,28 @@ describe('board view: folder rename', () => {
     fireEvent.change(input, { target: { value: 'Renamed Folder' } })
     fireEvent.keyDown(input, { key: 'Enter' })
     await waitFor(() => expect(mocks.updateChatFolder).toHaveBeenCalledWith(FOLDER_ID, { name: 'Renamed Folder' }))
+  })
+
+  // Regression: every root folder renders in EVERY column, so an edit gated only
+  // by folder.id opened the rename input in all columns at once and the shared
+  // ref bound to the last one — the caret landed in the wrong column. The edit
+  // is now scoped to the clicked column (editScope === columnId), so exactly one
+  // input mounts, in the column that was clicked.
+  it('scopes the rename input to the clicked column, not every column', () => {
+    const { container } = renderMultiColumn()
+    // Confidence check: the folder renders in both columns before editing.
+    expect(colHeader(container, COL_A)).toBeTruthy()
+    expect(colHeader(container, COL_B)).toBeTruthy()
+
+    fireEvent.doubleClick(within(colHeader(container, COL_A)).getByText('CDF'))
+
+    // Column A (clicked) shows the input; column B does not.
+    expect(within(colHeader(container, COL_A)).getByRole('textbox')).toBeTruthy()
+    expect(within(colHeader(container, COL_B)).queryByRole('textbox')).toBeNull()
+    // And exactly one rename input (value 'CDF') exists across the whole board —
+    // the pre-fix bug rendered it in every column at once.
+    const renameInputs = Array.from(container.querySelectorAll('input'))
+      .filter(i => (i as HTMLInputElement).value === 'CDF')
+    expect(renameInputs.length).toBe(1)
   })
 })

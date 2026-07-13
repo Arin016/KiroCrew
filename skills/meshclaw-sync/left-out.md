@@ -247,6 +247,37 @@ Window: backend `b35c496b..59ec6e1d`, frontend `fdfe158b..ca99bb4`. Ported:
 | [`5d99a8d4`](https://code.amazon.com/packages/MeshClaw/commits/5d99a8d4198a5904f91eacff87b02380bf781bcb) | backend | SKIP_INTERNAL | feat(security) MCS-Jail Midway AgentContext (Mesh-1517) — Midway/MCS coupling; `jail.py` absent, MCS-Jail Brazil dep. Its one generic hunk (`sandbox.py` `userns_available()` public alias) has **no fork consumer** — only the absent `jail.py` calls it (anti-miss (b); same precedent as batch-16 `useVisibilityInterval`). `cli.py --no-jail`, `agent.jail` enum, cli_doctor jail status, config-baseline all confined to the jail. |
 | [`afed9312`](https://code.amazon.com/packages/MeshClaw/commits/afed93127c82625d7287735202eef6d449ee01da) | backend | SKIP_INTERNAL | fix(mcp-gateway) raise pooled-backend cap 20→64 — 100% confined to `mcp_gateway/` (`manager.py` `GatewaySpec` + `McpGatewayConfig` in loader.py). Fork has **no `McpGatewayConfig`** (grep empty) — no anchor. |
 
+### Batch 28 — GitHub PR (41 ported, 17 left out) — dual-repo sync 2026-07-13
+
+Branch `sync/beta-2026-07-13` off `origin/main` `4f942f3`. Window: backend
+`5dbb7778..e870fed4` (31 candidates) + frontend `3858e573..20f18813` (20) +
+7 batch-27 DEFER re-audits = **58 triaged** via a 116-agent adversarial workflow
+(analyzer + skeptic per candidate, decide by content). **41 ported (22 backend +
+19 frontend, incl. 9 PARTIAL); 17 left out** (10 SKIP_INTERNAL, 3 ALREADY_PRESENT,
+4 DEFER). Batch-27 DEFER rescues ported this batch: `3858e573` (CommandPalette
+tab-strip scroll), `5360aa4d` (split-view live tool streaming — the per-slot
+substrate now exists in the fork), `3acce399` (RL-v2 UI, PARTIAL — engine chooser
+dropped pending PR #57), and `d2240c48` resolved as PARTIAL (generic `_dm_owner`
+redacting DM exit point ported; tunnel hunks remain absent). Full per-verdict
+detail: the batch-28 block of [`last-synced.txt`](./last-synced.txt).
+
+| Upstream commit | Repo | Verdict | Reason left out |
+|---|---|---|---|
+| [`0e7322ce`](https://code.amazon.com/packages/MeshClaw/commits/0e7322ce093aa5e1a640e09d9e631a23c65ccc39) | backend | SKIP_INTERNAL | MarkBin alternative publish provider — the artifact publish-provider subsystem (Harmony/Chorus) is absent. |
+| [`0fe90c30`](https://code.amazon.com/packages/MeshClaw/commits/0fe90c30e3dd20e921c3313978cba583a9c3ac00) | backend | SKIP_INTERNAL | mimir SIM ticket assignee via assigneeIdentity — mimir integration absent. |
+| [`d87672ea`](https://code.amazon.com/packages/MeshClaw/commits/d87672ea977fdbc2f4063f114a13c4d4d7a24593) | backend | SKIP_INTERNAL | File-backed publications surface/pull upstream edits — publications subsystem absent. |
+| [`4a41b8a3`](https://code.amazon.com/packages/MeshClaw/commits/4a41b8a3207682592b2989fe75b02229492f48dd) | backend | SKIP_INTERNAL | taskkeeper strip slack-mcp slack-user-content wrapper — taskkeeper absent. |
+| [`5cdfb619`](https://code.amazon.com/packages/MeshClaw/commits/5cdfb619fa20f8097bb9f058194b95e2a5e196c5) | backend | SKIP_INTERNAL | Keyword-negation false positives — confined to the absent secretary keyword-matching regex. |
+| [`a5979e42`](https://code.amazon.com/packages/MeshClaw/commits/a5979e425c1c6fcef0265a02d47874d714671935) / [`6055397`](https://code.amazon.com/packages/MeshClawWebsite/commits/605539774c78f71645b6aa5a946a82f1ce08d69b) | both | SKIP_INTERNAL | Edit comment body — local + Chorus in-place remote edit (BE+FE pair) — Chorus publish + durable artifact-comment subsystem absent. |
+| [`d0a78b07`](https://code.amazon.com/packages/MeshClaw/commits/d0a78b070b7058daad61b603dd19b67a0b295a9a) | backend | SKIP_INTERNAL | Add defusedxml to install_requires — a dead dep in the fork (no consumer). |
+| [`7cfeed18`](https://code.amazon.com/packages/MeshClaw/commits/7cfeed18289f14deb72fae285e501ab75772a503) | backend | SKIP_INTERNAL | Work Summary app registry row — `app-registry.json` is `[]` by design. |
+| [`1984ccc`](https://code.amazon.com/packages/MeshClawWebsite/commits/1984ccc4707eec0f3b3f04d143a84e17173e7f45) | frontend | SKIP_INTERNAL | Gate Shared on provider supports_shared — publish UI surface absent. |
+| [`70898ca5`](https://code.amazon.com/packages/MeshClaw/commits/70898ca54a64dc0a56666e7ae41444767efbc4e0) / [`d5819090`](https://code.amazon.com/packages/MeshClaw/commits/d58190905baf848757d6dd85af91f9984bab73d4) | backend | ALREADY_PRESENT | AcpRuntime teardown termination + age/RSS recycle — the fork did both natively via fork PR [#43](https://github.com/kirodotdev-labs/kiroclaw/pull/43). |
+| [`e4fc0ce`](https://code.amazon.com/packages/MeshClawWebsite/commits/e4fc0ce1a18776119e646fb6031beb67a96f2339) | frontend | ALREADY_PRESENT | Follow-up-bar clickable scroll arrows — present via fork PR [#45](https://github.com/kirodotdev-labs/kiroclaw/pull/45). |
+| [`3e5d7132`](https://code.amazon.com/packages/MeshClaw/commits/3e5d7132e46c3fd7dd4394dd182fba9f58656025) | backend | **DEFER** | Reject type-unsafe authored workflow scripts — the dynamic-workflows engine is absent from the fork; fork PR [#57](https://github.com/kirodotdev-labs/kiroclaw/pull/57) (workflows engine) carries all three fixes by content. Resolves when that PR lands. |
+| [`f8383887`](https://code.amazon.com/packages/MeshClaw/commits/f8383887d8dec0f3583a3cbcf674468172e3dd45) | backend | **DEFER** | Hero SVGs for deploy_web/workflows — needs the `fd633154` builtin-ui materialization substrate. |
+| [`0000f561`](https://code.amazon.com/packages/MeshClawWebsite/commits/0000f561ecc8f750b51203290279dcdb9ee9d6a7) / [`f746d60`](https://code.amazon.com/packages/MeshClawWebsite/commits/f746d60d6beeb1b9219bcbcb0322986bb05a3793) | frontend | **DEFER** | Comment-anchor offset fix / collapse empty comment sidebar — the anchored/durable artifact-comment subsystem is absent; port when the `affffcff` base lands. |
+
 ### Batch 27 — GitHub PR (73 ported, 62 left out) — FIRST batch on the public GitHub fork
 
 **First sync run in the public GitHub checkout** (`kirodotdev-labs/kiroclaw`, ships via PR, not
@@ -284,13 +315,13 @@ detail: the batch-27 block of [`last-synced.txt`](./last-synced.txt) + the PR pr
 | [`92104fcc`](https://code.amazon.com/packages/MeshClawWebsite/commits/92104fccaa5364243a21fbabcf5ae752d84e1d1d) | frontend | SKIP_INTERNAL | Tunnel status tile — AEA-tunnel subsystem absent. |
 | [`3997c2ae`](https://code.amazon.com/packages/MeshClaw/commits/3997c2aefb4856fb1c7bff77c34702ccd074f142) / [`7b74179b`](https://code.amazon.com/packages/MeshClaw/commits/7b74179b3065e830f8bf927b66188b4c6fb0a683) | backend | SKIP_NONKIROACP | `/api/usage/cost` + per-turn token tracking — the deleted `claude_code` provider spend surface. |
 | [`c6bc2744`](https://code.amazon.com/packages/MeshClawWebsite/commits/c6bc2744182f901c3e31c74c5e1747a392ff4184) / [`f6e38b3b`](https://code.amazon.com/packages/MeshClawWebsite/commits/f6e38b3b625d46f35be0dcfcc844f490ed79c9d2) | frontend | SKIP_NONKIROACP | Claude $-spend top-bar pill / model-label dedup — provider-spend + provider-selection surface. |
-| [`3e5d7132`](https://code.amazon.com/packages/MeshClaw/commits/3e5d7132e46c3fd7dd4394dd182fba9f58656025) | backend | DEFER | Reject type-unsafe authored workflow scripts — the dynamic-workflows engine is absent from the fork. |
-| [`f8383887`](https://code.amazon.com/packages/MeshClaw/commits/f8383887d8dec0f3583a3cbcf674468172e3dd45) | backend | DEFER | Hero images for deploy_web/workflows — asset-only, low value; workflows page absent. |
-| [`d2240c48`](https://code.amazon.com/packages/MeshClaw/commits/d2240c48bbd72de6e7141fbc313c1390f9087760) | backend | DEFER | tunnel-off Slack-link warning hardening — follow-up to a tunnel base the fork has stubbed. |
-| [`0000f561`](https://code.amazon.com/packages/MeshClawWebsite/commits/0000f561ecc8f750b51203290279dcdb9ee9d6a7) | frontend | DEFER | Comment-anchor highlight offset — persisted file-artifact comment subsystem absent (same as batch-22/23 defers). |
-| [`3acce399`](https://code.amazon.com/packages/MeshClawWebsite/commits/3acce39988b768a7c8e6dfa15b5bc5ab8ce0d52b) | frontend | DEFER | Research-Lab v2 UI — `apps/auto-research/GrillTree` FE absent (backend `auto_research` exists, FE does not). |
-| [`5360aa4d`](https://code.amazon.com/packages/MeshClawWebsite/commits/5360aa4d0e8b2133de9263878f87e219bab81a87) | frontend | DEFER | Rich tool streaming in split-view panes — depends on a slot-aware ToolCallLine absent in the fork. |
-| [`3858e573`](https://code.amazon.com/packages/MeshClawWebsite/commits/3858e57307ea4d0261ac7e56b2813a3ab40aebcf) | frontend | DEFER | CommandPalette tab-strip horizontal scroll — a tiny generic Tailwind follow-up to the ported `12bfe897`; worth picking up next batch. |
+| [`3e5d7132`](https://code.amazon.com/packages/MeshClaw/commits/3e5d7132e46c3fd7dd4394dd182fba9f58656025) | backend | DEFER (still open) | Reject type-unsafe authored workflow scripts — the dynamic-workflows engine is absent from the fork. Re-audited in batch-28: still DEFER — fork PR #57 carries all three fixes by content. |
+| [`f8383887`](https://code.amazon.com/packages/MeshClaw/commits/f8383887d8dec0f3583a3cbcf674468172e3dd45) | backend | DEFER (still open) | Hero images for deploy_web/workflows — asset-only, low value; workflows page absent. Re-audited in batch-28: still DEFER — needs the `fd633154` builtin-ui materialization substrate. |
+| ~~[`d2240c48`](https://code.amazon.com/packages/MeshClaw/commits/d2240c48bbd72de6e7141fbc313c1390f9087760)~~ | backend | ~~DEFER~~ → **PORTED (PARTIAL) in batch-28** | Was: tunnel-off Slack-link warning hardening. Batch-28 rescued the generic `_dm_owner`/`_dispatch_owner_dm` redacting DM exit point (fork `5d66a45`); the tunnel `resolve_tunnel_enabled` hunks remain absent-subsystem drops. |
+| [`0000f561`](https://code.amazon.com/packages/MeshClawWebsite/commits/0000f561ecc8f750b51203290279dcdb9ee9d6a7) | frontend | DEFER (still open) | Comment-anchor highlight offset — persisted file-artifact comment subsystem absent (same as batch-22/23 defers). Re-audited in batch-28: still DEFER (with the new `f746d60`). |
+| ~~[`3acce399`](https://code.amazon.com/packages/MeshClawWebsite/commits/3acce39988b768a7c8e6dfa15b5bc5ab8ce0d52b)~~ | frontend | ~~DEFER~~ → **PORTED (PARTIAL) in batch-28** | Was: Research-Lab v2 UI — FE deemed absent. Batch-28 re-audit found the fork DOES ship `apps/auto-research/` FE; ported multi-line inputs + research-only notice (fork `ff41856`), dropped the engine chooser pending PR #57. |
+| ~~[`5360aa4d`](https://code.amazon.com/packages/MeshClawWebsite/commits/5360aa4d0e8b2133de9263878f87e219bab81a87)~~ | frontend | ~~DEFER~~ → **PORTED in batch-28** | Was: rich tool streaming in split-view panes — substrate absent. The per-slot substrate (slot-aware `sseToolActivity`/`sseToolResult` in `chatSlice.ts`) landed since; ported as fork `7631aaf`. |
+| ~~[`3858e573`](https://code.amazon.com/packages/MeshClawWebsite/commits/3858e57307ea4d0261ac7e56b2813a3ab40aebcf)~~ | frontend | ~~DEFER~~ → **PORTED in batch-28** | Was: CommandPalette tab-strip horizontal scroll (follow-up to `12bfe897`). Ported as fork `005cc26`. |
 
 > The 15 PARTIALs (generic hunks kept, internal/absent dropped) are keepers — their dropped
 > sub-hunks are recorded in the batch-27 block of [`last-synced.txt`](./last-synced.txt) and each

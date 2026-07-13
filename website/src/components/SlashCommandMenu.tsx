@@ -1,7 +1,9 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { createPortal } from 'react-dom'
 import { api } from '../api/client'
+import { useListKeyboardNav } from '../hooks/useListKeyboardNav'
+import { menuGeometry, bottomUpOrder } from '../lib/pickerMenu'
 
 interface SlashCommand {
   name: string
@@ -33,7 +35,6 @@ const FRONTEND_COMMANDS: SlashCommand[] = [
 ]
 
 export default function SlashCommandMenu({ input, anchorRef, onSelect, onClose, open = true }: Props) {
-  const [selected, setSelected] = useState(0)
   const { data: apiCommands = FALLBACK_COMMANDS } = useQuery<SlashCommand[]>({
     queryKey: ['slash-commands'],
     queryFn: () => api.slashCommands(),
@@ -47,43 +48,65 @@ export default function SlashCommandMenu({ input, anchorRef, onSelect, onClose, 
   const match = input.match(/^\/([a-z]*)$/)
   const visible = open && !!match
   const filter = match?.[1] ?? ''
-  const filtered = useMemo(
-    () => (visible ? commands.filter(c => c.name.slice(1).startsWith(filter)) : []),
-    [visible, filter, commands]
-  )
 
-  // Step 3 fix: reset selection when filter changes OR menu reopens
-  useEffect(() => { setSelected(0) }, [filter, visible])
+  // Displayed order (bottom-up when the menu opens above); resultsRef mirrors it
+  // so the keyboard-nav choose() indexes the same list the user sees.
+  const [displayed, setDisplayed] = useState<SlashCommand[]>([])
+  const resultsRef = useRef<SlashCommand[]>([])
 
-  const onKey = useCallback((e: KeyboardEvent) => {
-    if (!visible || filtered.length === 0) return
-    if (e.key === 'ArrowDown') { e.preventDefault(); setSelected(i => (i + 1) % filtered.length) }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); setSelected(i => (i - 1 + filtered.length) % filtered.length) }
-    else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); onSelect(filtered[selected >= filtered.length ? 0 : selected].name + ' ') }
-    else if (e.key === 'Escape') { e.preventDefault(); onClose() }
-  }, [visible, filtered, selected, onSelect, onClose])
+  const choose = useCallback((idx: number) => {
+    const r = resultsRef.current
+    const c = r[idx >= r.length ? 0 : idx]
+    if (c) onSelect(c.name + ' ')
+  }, [onSelect])
 
+  // Consolidated onto the SAME nav hook as the $skill / @file pickers — this is
+  // what gives the slash menu arrow-scroll and consistent Enter/Tab/Escape (it
+  // previously rolled its own selection state with no scroll-into-view).
+  const { selected, setSelected, selectedRef, itemRefs } = useListKeyboardNav({
+    open: visible,
+    count: displayed.length,
+    onChoose: choose,
+    onClose,
+  })
+
+  // Order + initial selection: bottom-up when the menu opens above the input
+  // (shared helper — identical to the other pickers). Filter is computed INSIDE
+  // the effect and keyed on primitives (visible/filter/commands) so unrelated
+  // re-renders (e.g. arrow-key selection changes) don't reset the selection.
+  useEffect(() => {
+    if (!visible) { setDisplayed([]); resultsRef.current = []; return }
+    const f = commands.filter(c => c.name.slice(1).startsWith(filter))
+    const above = anchorRef.current ? menuGeometry(anchorRef.current, f.length, 40).above : false
+    const { ordered, initialIndex } = bottomUpOrder(f, above)
+    setDisplayed(ordered); resultsRef.current = ordered
+    setSelected(initialIndex)
+  }, [visible, filter, commands, anchorRef, setSelected])
+
+  // Scroll the selected row into view once it renders (open + filter change),
+  // matching the $skill / @file pickers.
   useEffect(() => {
     if (!visible) return
-    document.addEventListener('keydown', onKey, true)
-    return () => document.removeEventListener('keydown', onKey, true)
-  }, [visible, onKey])
+    itemRefs.current[selectedRef.current]?.scrollIntoView({ block: 'nearest' })
+  }, [displayed, visible, itemRefs, selectedRef])
 
-  if (!visible || filtered.length === 0 || !anchorRef.current) return null
+  if (!visible || displayed.length === 0 || !anchorRef.current) return null
 
-  const rect = anchorRef.current.getBoundingClientRect()
-  const menuH = Math.min(filtered.length * 40 + 8, 320)
-  const above = rect.top - menuH - 4
-  const top = above > 0 ? above : rect.bottom + 4
+  const { top, left, width, maxHeight } = menuGeometry(anchorRef.current, displayed.length, 40)
 
   return createPortal(
     <div
       className="fixed z-[9999] bg-card border border-border rounded-lg shadow-lg overflow-y-auto py-1 animate-slide-up"
-      style={{ top, left: rect.left, width: Math.min(rect.width, 380), maxHeight: 320 }}
+      role="listbox"
+      style={{ top, left, width: Math.min(width, 380), maxHeight }}
     >
-      {filtered.map((cmd, i) => (
+      {displayed.map((cmd, i) => (
         <button
+          role="option"
+          aria-selected={i === selected}
+          tabIndex={-1}
           key={cmd.name}
+          ref={el => { itemRefs.current[i] = el }}
           className={`w-full text-left px-3 py-2 flex items-center gap-3 cursor-pointer transition-colors ${i === selected ? 'bg-accent-subtle text-text' : 'text-muted hover:bg-bg-hover hover:text-text'}`}
           onMouseEnter={() => setSelected(i)}
           onMouseDown={e => { e.preventDefault(); onSelect(cmd.name + ' ') }}

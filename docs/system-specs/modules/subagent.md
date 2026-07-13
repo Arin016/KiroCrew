@@ -1,6 +1,6 @@
 # Subagent Module
 
-Last Updated: 2026-05-28 (PostToolUse hook firing, subagent_id/parent_session_key/agent_role in hook payloads)
+Last Updated: 2026-07-13 (removed stale duplicated spawn_status param block; PostToolUse hook firing, subagent_id/parent_session_key/agent_role in hook payloads)
 
 ## Overview
 
@@ -12,7 +12,7 @@ Supports `on_tool_approval` callback for interactive tool approval (routed throu
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `_MAX_CONCURRENT` | 3 | Default max concurrent subagents (configurable via `agent.max_subagents`) |
+| `_MAX_CONCURRENT` | 3 | Legacy fallback / auto-size floor. `agent.max_subagents` now defaults to `0` = auto-size the cap at startup (floor 3, ceiling `agent.subagent_auto_max`, default 32); a positive value pins a fixed cap. Session-shared subagents are cost-sampled as the runtime's measured RSS/CPU divided by the live shared-session count on that PID (`_live_shared_count`), so the memory term no longer binds and the cap rises to the provider-concurrency ceiling. |
 | `_TIMEOUT_SECS` | 1800 | Hard timeout per subagent (30 minutes) |
 | `_ON_DONE_TIMEOUT` | 1200 | Outer cap: max total seconds for semaphore wait + injection (20 minutes) |
 | `INJECTION_TIMEOUT` | 300 | Inner cap: max seconds for a single `stream_and_collect` call (5 minutes) |
@@ -360,13 +360,6 @@ kwargs sourced from `cfg.agent.*`). User-facing docs:
 [`docs/configuration.md`](../../../src/kiro_claw/docs/configuration.md),
 [`docs/subagents.md`](../../../src/kiro_claw/docs/subagents.md),
 [`docs/troubleshooting.md`](../../../src/kiro_claw/docs/troubleshooting.md).
-
-```python
-spawn_status(agent_id="abc12345")
-```
-
-Parameters:
-- `agent_id` (str, required): subagent ID from the completion event (alnum, max 64 chars)
 
 ### Dashboard API: `POST /api/spawn`
 

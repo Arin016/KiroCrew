@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from kiro_claw.hooks import HOOK_REPLY, TOOL_AUTO_APPROVE, TOOL_DENY
 from kiro_claw.llm_helpers import save_conversation_turn
 from kiro_claw.messaging.driver import APPROVAL_INTERACTIVE, TurnDriver
+from kiro_claw.messaging.link import canonical_key
 from kiro_claw.platform import current_context
 from kiro_claw.sel import sel
 from kiro_claw.slack.handler import (
@@ -91,8 +92,12 @@ async def handle_message_transport(
     """
     Stats().inc_message_received()
     _t0 = time.monotonic()
-    session_key = thread_ts or msg_ts
+    # Same key discipline as native handle_message: reply_ts is the bare Slack
+    # thread timestamp (posting + thread-index key); session_key is the
+    # canonical namespaced form (registry, conversation log, thread overrides
+    # shared with handler.py module dicts).
     reply_ts = thread_ts or msg_ts
+    session_key = canonical_key(reply_ts)
 
     # ── Re-hydrate durable thread state FIRST (mirrors native ordering) ──
     # The per-thread agent/project overrides AND the durable incognito/temporary
@@ -241,7 +246,7 @@ async def handle_message_transport(
         _acquired = True
         if is_new:
             await sessions.set_channel(session_key, channel)
-        sessions.set_slack_link(session_key, session_key, channel)
+        sessions.set_slack_link(session_key, reply_ts, channel)
 
         # ── Build message with context ──
         if context_builder:

@@ -1191,7 +1191,8 @@ def _learn(args: argparse.Namespace) -> None:
     """Save, list, or remove learned corrections."""
 
     jsonl_store = LessonStore()
-    vs = VectorMemoryStore()
+    cfg = KiroClawConfig.load()
+    vs = VectorMemoryStore(embedding_dim=cfg.memory.embedding_dim)
     vs.init()
     try:
         action = getattr(args, "learn_action", None)
@@ -1245,7 +1246,8 @@ def _learn(args: argparse.Namespace) -> None:
 
 def _memory_cmd(args: argparse.Namespace) -> None:
     """Manage vector memory system."""
-    store = VectorMemoryStore()
+    cfg = KiroClawConfig.load()
+    store = VectorMemoryStore(embedding_dim=cfg.memory.embedding_dim)
     store.init()
     try:
         action = getattr(args, "mem_action", None)

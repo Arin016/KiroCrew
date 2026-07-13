@@ -139,7 +139,7 @@ Short text snippets capturing specific past events from conversations — things
 | Enabled by default | No — requires Vector Memory enabled                      |
 | Text length        | 10–2,000 chars per entry                                 |
 | Dedup              | FAISS cosine > 0.88 rejects near-duplicates              |
-| Context cap        | 12,000 chars, top-8 results per query                    |
+| Context cap        | 3,000 chars, top-8 results per query                     |
 | Max entries        | 10,000 (lowest-importance oldest pruned when exceeded)   |
 
 Example entries:
@@ -149,7 +149,7 @@ Example entries:
 [importance=0.8] C360 Embedding test failure: score DecimalType(38,18) vs expected (38,0)
 ```
 
-Search uses decay scoring (see [Fading Mechanism](#fading-mechanism)) with MMR diversity reranking (Jaccard-based, λ=0.6) to avoid redundant results. Two-stage filtering: raw cosine ≥ 0.55 pre-filter (removes irrelevant matches), then decay-adjusted scoring ranks the survivors.
+Search uses decay scoring (see [Fading Mechanism](#fading-mechanism)) with MMR diversity reranking (Jaccard-based, λ=0.6) to avoid redundant results. Two-stage filtering: a raw-cosine pre-filter (`_EPISODIC_RELEVANCE_THRESHOLD = 0.55`, relaxed to `_EPISODIC_LONG_TEXT_THRESHOLD = 0.42` for entries longer than `_EPISODIC_LONG_TEXT_CHARS = 300` chars, since long texts dilute cosine scores) removes irrelevant matches, then decay-adjusted scoring ranks the survivors.
 
 **FAISS embeddings are NOT created by default.** Episodic memory requires Vector Memory to be enabled via the dashboard. The enable flow:
 1. Click "Enable Vector Memory" in dashboard
@@ -237,8 +237,9 @@ Injected once when a new session begins:
 | Recent history             | 26,600 chars | `history/*.md` (multi-tier decay)     |
 | Skills                     | Variable     | Always-on full content, on-demand summaries |
 | Lessons                    | 37,250 chars | `[Learned corrections]` block         |
-| Episodic memory            | 12,000 chars | Top-8 relevant fragments              |
 | Semantic memory            | 12,000 chars | Structured key-value facts (vector)   |
+
+Note: `build_session_context` calls `memory.get_context()` **without** a `query`, so its episodic branch never fires — episodic memory is injected separately by `build_message` (see below), not at plain session start.
 
 ### Per Message (`build_message`)
 
@@ -246,6 +247,7 @@ Injected on every follow-up message:
 
 | Component                  | Source                                |
 |----------------------------|---------------------------------------|
+| Episodic memory            | `get_episodic_context(query_text=text, cap=3000)` — new-session messages only (skipped on follow-ups, which rely on ACP native history); top-8 relevant fragments |
 | Channel history            | `ChannelHistory.context_for()` (group channels only) |
 | Triggered skills           | On-demand skills matching message keywords |
 | Hook context               | Config-driven context rules           |
@@ -395,7 +397,7 @@ When the 165K char (~55k token) context cap is approached, each layer has its ow
 | Lessons          | 37,250 chars | Over-cap injects a `[CRITICAL ERROR — LESSONS FILE TOO LARGE]` block (model must tell the user the file is over the cap and help shrink it via `learn_remove`; shown lessons stay in effect, only over-cap content is dropped), logs at ERROR, then appends truncated lessons with `…[lessons truncated]` as fallback |
 | Semantic memory  | 12,000 chars | Lower-confidence entries dropped                 |
 | Preferences      | 4,250 chars  | Truncated                                        |
-| Episodic memory  | 12,000 chars | Top-8 results only, relevance-scored             |
+| Episodic memory  | 3,000 chars  | Top-8 results only, relevance-scored (injected per new-session message via `get_episodic_context`) |
 | **Hard total**   | **165,000 chars (~55k tokens)** | **Truncation at newline boundary after assembly** |
 
 Beyond KiroClaw's context assembly, kiro-cli has its own context window management:
@@ -520,6 +522,8 @@ Knowledge Library is a built-in surface (positioned in sidebar after Autopilot, 
 **Problem**: If two concurrent sessions write conflicting semantic entries, last-write-wins with no notification.
 **Suggestion**: Add optimistic locking (version field) to semantic entries. Surface conflicts in dashboard with merge UI.
 
+**Thread-safety today (intra-process)**: Within a single gateway process, `VectorMemoryStore` serializes all sqlite + FAISS mutations under a `threading.RLock` (`vector_memory.py`). The lock guards three critical sections — the semantic `SELECT → conflict-resolve → UPSERT` (`_write_semantic`), the episodic FAISS-add + `_faiss_id_map` append + `INSERT` (`write_episodic`), and the episodic FAISS-search + id_map lookup (`search_episodic`) — so writer worker threads and event-loop readers can't corrupt the shared connection or the non-thread-safe FAISS index. The lock is deliberately **never** held across the blocking Ollama embed (embeds run before the locked region), and every embed-bearing write is offloaded off the event loop: `HistoryConsolidator._consolidate` wraps `_write_structured_memory` in `asyncio.to_thread` (`history.py`) and the dashboard memory handlers do the same (`dashboard/handlers/memory.py`), so a slow/hung embedding endpoint no longer freezes the gateway loop. This serialization is **per-process only** — Gap 1 stays open because the RLock adds no conflict detection/notification and does not coordinate across separate KiroClaw processes.
+
 ### Gap 2: No Memory Importance Feedback Loop
 **Problem**: Episodic importance is set at write time and never updated. Frequently-retrieved memories should gain importance.
 **Suggestion**: Track retrieval count per episodic entry. Boost importance on retrieval: `importance = min(1.0, base + 0.05 × retrievals)`.
@@ -530,7 +534,7 @@ Knowledge Library is a built-in surface (positioned in sidebar after Autopilot, 
 
 ### Gap 4: No Memory Sharing Between Instances
 **Problem**: Each KiroClaw instance has isolated memory. No way to share learned lessons or project context across team members' instances.
-**Suggestion**: Export/import memory subsets (lessons, project context) as portable JSON bundles. See [Team Communication doc](team-communication.md) for broader team features.
+**Suggestion**: Export/import memory subsets (lessons, project context) as portable JSON bundles. See [persistent-agent-channels](system-specs/modules/persistent-agent-channels.md) for multi-agent collaboration features.
 
 ### Gap 5: No Selective Memory Forget
 **Problem**: Users can delete individual entries but can't say "forget everything about project X" — requires manual cleanup across all memory layers.

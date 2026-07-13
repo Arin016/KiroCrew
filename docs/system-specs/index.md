@@ -1,6 +1,6 @@
 # System Specifications
 
-Last Updated: 2026-05-10
+Last Updated: 2026-07-13
 
 ## How to Use
 
@@ -16,8 +16,11 @@ Load relevant module specs before making changes to that component. Read common 
 | [cli](modules/cli.md) | argparse CLI commands (chat, gateway, doctor, setup, manifest) |
 | [heartbeat](modules/heartbeat.md) | Periodic background tasks |
 | [history](modules/history.md) | Persistent conversation history with LLM consolidation |
+| [knowledge](modules/knowledge.md) | Knowledge Library ingest (FileReader/SUPPORTED formats incl. .org), folder watcher, LLMPool workers (sweep-shielded) |
 | [learn-cron-dashboard](modules/learn-cron-dashboard.md) | Self-learning, cron scheduler, web dashboard |
 | [memory-skills-hooks](modules/memory-skills-hooks.md) | Memory files, skill loading, message/tool hooks |
+| [messaging](modules/messaging.md) | Channel-neutral messaging transport: MessagingTransport/TurnDriver approval ladder/Renderer + ChannelLink session-key namespacing (gated via messaging.use_transport) |
+| [metrics](modules/metrics.md) | OpenTelemetry-based metrics facade: namespace/attribute guardrails, redaction/privacy contract, local-first JSONL sink, default-OFF consent model |
 | [persistent-agent-channels](modules/persistent-agent-channels.md) | Multi-agent collaboration channels |
 | [providers](modules/providers.md) | LLM provider abstraction (KiroACP / kiro-cli — the sole provider) |
 | [security](modules/security.md) | Defense-in-depth: sandbox, XPIA hardening, auth, denied commands |

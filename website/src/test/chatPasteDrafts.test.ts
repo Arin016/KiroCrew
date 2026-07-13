@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
-  PASTE_DRAFTS_KEY, PASTE_DRAFT_MAX_ENTRIES, PASTE_DRAFT_TTL_MS, PASTE_DRAFT_MAX_BYTES,
+  PASTE_DRAFTS_KEY, PASTE_DRAFT_MAX_ENTRIES, PASTE_DRAFT_TTL_MS,
   loadPasteDrafts, savePasteDrafts, setPasteDraft, __resetForTests,
 } from '../utils/chatPasteDrafts'
+import { DRAFT_MAX_STORE_BYTES } from '../utils/draftConstants'
 import type { PasteBlock } from '../utils/pasteTokens'
 
 const block = (seq: number, content = 'pasted content'): PasteBlock => ({
@@ -78,16 +79,25 @@ describe('chatPasteDrafts', () => {
     }
   })
 
-  it('drops a slot whose serialized blocks exceed the per-slot byte cap', () => {
-    const huge = block(1, 'x'.repeat(PASTE_DRAFT_MAX_BYTES + 100))
-    const drafts: Record<string, PasteBlock[]> = { 'big': [huge], 'small': [block(2, 'tiny')] }
+  it('byte-aware LRU evicts oldest slots until the blob fits, keeping the newest (Mesh-1909)', () => {
+    const drafts: Record<string, PasteBlock[]> = {}
+    // 4 slots of ~1.5 MB each = ~6 MB, over the 2 MB per-store budget. Oldest are
+    // evicted until it fits; the newest is never the casualty.
+    for (let i = 0; i < 4; i++) setPasteDraft(drafts, `slot-${i}`, [block(i, 'x'.repeat(1_500_000))])
     savePasteDrafts(drafts)
-    // Oversized slot dropped (degrades to literal token — pre-fix behavior);
-    // small slot survives. Dropping happens in place on the caller's object.
-    expect(drafts['big']).toBeUndefined()
-    expect(drafts['small']).toEqual([block(2, 'tiny')])
-    expect(loadPasteDrafts()['big']).toBeUndefined()
-    expect(loadPasteDrafts()['small']).toEqual([block(2, 'tiny')])
+    const persisted = loadPasteDrafts()
+    expect(JSON.stringify(persisted).length).toBeLessThanOrEqual(DRAFT_MAX_STORE_BYTES)
+    expect(persisted['slot-0']).toBeUndefined() // oldest evicted to make room
+    expect(persisted['slot-3']).toBeDefined()   // newest survives
+  })
+
+  it('byte-aware LRU never drops the newest slot even when it alone exceeds the budget', () => {
+    const drafts: Record<string, PasteBlock[]> = {}
+    setPasteDraft(drafts, 'newest', [block(1, 'y'.repeat(DRAFT_MAX_STORE_BYTES + 5000))])
+    savePasteDrafts(drafts)
+    // Pre-fix this slot would have been dropped (over the 512 KB hard cap) and
+    // the chip would rehydrate as a dead literal token. Now it persists.
+    expect(loadPasteDrafts()['newest']).toBeDefined()
   })
 
   it('evicts oldest entries when over cap', () => {

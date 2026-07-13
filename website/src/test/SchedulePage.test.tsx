@@ -23,6 +23,7 @@ vi.mock('../api/client', () => ({
   api: {
     crons: vi.fn(),
     deleteCron: vi.fn(),
+    batchDeleteCron: vi.fn(),
     updateCron: vi.fn().mockResolvedValue({}),
     toggleCron: vi.fn().mockResolvedValue({}),
     runCron: vi.fn().mockResolvedValue({}),
@@ -123,5 +124,73 @@ describe('SchedulePage delete button state machine', () => {
       expect(screen.getAllByRole('button', { name: 'Confirm' })).toHaveLength(1)
     })
     expect(api.deleteCron).not.toHaveBeenCalled()
+  })
+})
+
+describe('SchedulePage batch select + bulk delete', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const twoJobs = [
+    mkJob({ id: 'job-1', name: 'Nightly report' }),
+    mkJob({ id: 'job-2', name: 'Weekly digest' }),
+  ]
+
+  it('selecting rows shows the batch bar and deleting requires typing delete', async () => {
+    const { api } = await import('../api/client')
+    vi.mocked(api).crons.mockResolvedValue({ jobs: twoJobs })
+    vi.mocked(api).batchDeleteCron.mockResolvedValue({ ok: true, deleted: ['job-1', 'job-2'], failed: [] })
+
+    render(<SchedulePage />, { wrapper: Wrapper })
+    await waitFor(() => expect(screen.getByText('Nightly report')).toBeInTheDocument())
+
+    // Select both rows via their per-row checkboxes.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select Nightly report' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select Weekly digest' }))
+    expect(screen.getByText('2 selected')).toBeInTheDocument()
+
+    // Open the confirm modal — the delete button is disarmed until "delete" is typed.
+    fireEvent.click(screen.getByRole('button', { name: /Delete 2 selected/ }))
+    const modal = await screen.findByRole('dialog')
+    expect(modal).toBeInTheDocument()
+    const armBtn = screen.getByRole('button', { name: 'Delete 2' })
+    expect(armBtn).toBeDisabled()
+    expect(api.batchDeleteCron).not.toHaveBeenCalled()
+
+    fireEvent.change(screen.getByLabelText(/Type/, { selector: 'input' }), { target: { value: 'delete' } })
+    expect(armBtn).not.toBeDisabled()
+
+    vi.mocked(api).crons.mockResolvedValue({ jobs: [] })
+    fireEvent.click(armBtn)
+    await waitFor(() => expect(api.batchDeleteCron).toHaveBeenCalledWith(['job-1', 'job-2']))
+    // Modal closes and selection clears on full success.
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
+  it('keeps failed ids selected and surfaces the failure count', async () => {
+    const { api } = await import('../api/client')
+    vi.mocked(api).crons.mockResolvedValue({ jobs: twoJobs })
+    vi.mocked(api).batchDeleteCron.mockResolvedValue({ ok: false, deleted: ['job-1'], failed: ['job-2'] })
+
+    render(<SchedulePage />, { wrapper: Wrapper })
+    await waitFor(() => expect(screen.getByText('Nightly report')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select Nightly report' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select Weekly digest' }))
+    fireEvent.click(screen.getByRole('button', { name: /Delete 2 selected/ }))
+    await screen.findByRole('dialog')
+    fireEvent.change(screen.getByLabelText(/Type/, { selector: 'input' }), { target: { value: 'delete' } })
+
+    // job-1 deletes; job-2 fails and stays behind after reload.
+    vi.mocked(api).crons.mockResolvedValue({ jobs: [twoJobs[1]] })
+    fireEvent.click(screen.getByRole('button', { name: 'Delete 2' }))
+
+    await waitFor(() => expect(api.batchDeleteCron).toHaveBeenCalledWith(['job-1', 'job-2']))
+    // Modal stays open with the error; the failed job remains selected for retry.
+    expect(await screen.findByText('1 of 2 jobs could not be deleted')).toBeInTheDocument()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.getByRole('checkbox', { name: 'Select Weekly digest' })).toBeChecked())
   })
 })

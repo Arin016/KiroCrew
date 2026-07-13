@@ -16,12 +16,45 @@
 #                so frontend sync is by CONTENT within the post-snapshot window, not a
 #                clean SHA range. This SHA records the upstream tip last triaged.
 
-beta 5dbb777804337ab792956a47909fe472224b329d      # 2026-07-10 MeshClaw backend triaged tip (batch-27, GitHub fork). 88 backend candidates in the 6cf3aae0..5dbb7778 window triaged BY CONTENT (the fork is bidirectional with upstream + had a native-PR wave, so SHA reachability is NOT presence); 47 ported (many others ALREADY_PRESENT via native PRs #10-#38).
-frontend-beta 3858e57307ea4d0261ac7e56b2813a3ab40aebcf  # 2026-07-10 MeshClawWebsite triaged tip (batch-27). 47 frontend candidates in the 9b512ca..3858e573 window triaged by content; 26 ported. Tip 3858e57 itself is DEFER (CommandPalette tab-strip scroll — pairs the ported 12bfe897; small follow-up).
-mainline 45dcb603f117886648d79c7dde05e82d2d8cda2d  # 2026-07-10 MeshClaw mainline tip (upstream), advanced from 199d7853. No NEW mainline-only content to port (all in-window candidates reached the fork via beta-braveheart; every mainline-only delta is a release-merge or already triaged via beta).
+beta e870fed4e03c170c58e6a3ef45bf759a8f67d959      # 2026-07-13 MeshClaw backend triaged tip (batch-28). 31 backend candidates in the 5dbb7778..e870fed4 window triaged by content (+ backend batch-27 DEFER re-audits); 22 backend ported.
+frontend-beta 20f18813b0b8d1b78a06d1c97725fab295f12c10  # 2026-07-13 MeshClawWebsite triaged tip (batch-28). 20 frontend candidates in the 3858e573..20f18813 window triaged by content (+ frontend batch-27 DEFER re-audits); 19 frontend ported incl. the 3858e573/5360aa4d/3acce399 rescues.
+mainline 45dcb603f117886648d79c7dde05e82d2d8cda2d  # 2026-07-13 MeshClaw mainline tip (upstream), unchanged since batch-27. No NEW mainline-only content to port (all in-window candidates reached the fork via beta-braveheart; every mainline-only delta is a release-merge or already triaged via beta).
 # NOTE: this 'mainline' SHA is the UPSTREAM MeshClaw mainline tip (for the mainline-only
 # candidate check), NOT the fork's mainline — batch-12 mistakenly recorded the fork SHA
 # (796e21c5) here, which broke the `$MAIN..origin/mainline` scan. Corrected in batch-13.
+
+# --- Batch-28 (dual-repo sync 2026-07-13) ---
+# Branch sync/beta-2026-07-13 off origin/main 4f942f3. 58 candidates triaged (31 backend in
+# 5dbb7778..e870fed4 + 20 frontend in 3858e573..20f18813 + 7 batch-27 DEFER re-audits) via a
+# 116-agent adversarial workflow (analyzer + skeptic per candidate, decide by content).
+# Tally: 41 keepers PORTED (22 backend + 19 frontend, incl. 9 PARTIAL) + 17 left out.
+# LEFT OUT: 10 SKIP_INTERNAL = 0e7322ce (MarkBin publish provider — publish subsystem absent),
+#   0fe90c30 (mimir SIM assignee — mimir absent), d87672ea (file-backed publications — publish
+#   absent), 4a41b8a3 (taskkeeper slack-user-content strip — taskkeeper absent), 5cdfb619
+#   (secretary keyword-negation regex — secretary absent), a5979e42+6055397 (Chorus comment-edit
+#   BE+FE — Chorus publish absent), d0a78b07 (defusedxml dead dep — no fork consumer), 7cfeed18
+#   (Work Summary app registry row — app-registry.json is [] by design), 1984ccc (publish UI
+#   supports_shared gate — publish surface absent).
+# 3 ALREADY_PRESENT = 70898ca5+d5819090 (AcpRuntime teardown/recycle — fork PR #43 did it
+#   natively), e4fc0ce (follow-up-bar scroll arrows — via fork PR #45).
+# 4 DEFER = 3e5d7132 (workflows-engine script vetting — PR #57 carries all three fixes by
+#   content), f8383887 (hero SVGs — needs the fd633154 builtin-ui materialization substrate),
+#   0000f561+f746d60 (anchored/durable artifact-comment subsystem absent — port when the
+#   affffcff base lands).
+# BATCH-27 DEFER RESCUES ported this batch: 3858e573 CommandPalette tab-strip scroll (KEEP),
+#   5360aa4d split-view live tool streaming (KEEP — the per-slot substrate now exists),
+#   3acce399 RL-v2 UI (PARTIAL — engine chooser dropped pending PR #57). d2240c48 resolved as
+#   PARTIAL (generic _dm_owner redacting DM exit point ported; tunnel hunks remain absent).
+# Verify (independent cumulative pass): backend pytest 11834 pass / 53 skip, ONLY fail is the
+#   KNOWN pre-existing test_skills mtime flake (test_mutators_invalidate_iter_cache) — confirmed
+#   failing identically on origin/main in a clean worktree, untouched by this batch; flake8
+#   CLEAN on all 52 touched .py files. Frontend tsc -b CLEAN + 3303 vitest pass (285 files,
+#   1 skip). Step-6 de-Amazon: 0 LIVE couplings (single grep hit = "incognito" substring-matching
+#   "cognito" in a comment). KiroACP invariant HELD (provider enum ["acp"], ACP_BACKEND_CLAUDE
+#   seam 23 refs untouched, no provider selector/cc_*/bedrock_* re-added). Inclusive-language
+#   gate on added lines: 0 hits.
+# 42 commits on branch (41 ports + 1 review-nits chore c646ab9 folded onto fb9d6f9). Boundaries:
+#   beta 5dbb7778->e870fed4, frontend-beta 3858e573->20f18813, mainline unchanged 45dcb603.
 
 # --- Batch-27 follow-up (2026-07-10): folder icon picker (46c7a01) ---
 # Ported the un-triaged-tail item "folder icon picker" (MeshClawWebsite 46c7a01,

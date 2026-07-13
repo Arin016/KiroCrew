@@ -179,6 +179,20 @@ HTMLCanvasElement.prototype.getContext = function (type: string) {
   return _origGetContext.call(this, type) as any
 }
 
+// jsdom polyfill: WebGL2RenderingContext / WebGLRenderingContext. sigma (used by
+// MemoryGraphTab) references `WebGL2RenderingContext` at module top-level, so any
+// test that transitively imports sigma (App, routes, etc.) throws
+// "WebGL2RenderingContext is not defined" at import time under jsdom, which has
+// no WebGL. A bare stub class is enough — sigma is itself mocked in the
+// MemoryGraphTab test, so the stub only needs to exist for the import to resolve.
+if (typeof (globalThis as unknown as { WebGL2RenderingContext?: unknown }).WebGL2RenderingContext === 'undefined') {
+  class StubWebGL2RenderingContext {}
+  ;(globalThis as unknown as { WebGL2RenderingContext: unknown }).WebGL2RenderingContext = StubWebGL2RenderingContext
+  if (typeof (globalThis as unknown as { WebGLRenderingContext?: unknown }).WebGLRenderingContext === 'undefined') {
+    ;(globalThis as unknown as { WebGLRenderingContext: unknown }).WebGLRenderingContext = class {}
+  }
+}
+
 // Start MSW server before all tests
 beforeAll(() => server.listen({ onUnhandledRequest: 'bypass' }))
 

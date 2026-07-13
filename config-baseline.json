@@ -28,12 +28,12 @@
         "conductor_skill": false,
         "tool_search": true,
         "session_sharing": true,
-        "max_subagents": 3,
+        "max_subagents": 0,
         "spawn_min_memory_gb": 4.0,
         "subagent_mem_buffer_pct": 20,
         "subagent_cost_gb": 0.5,
         "subagent_cpu_cost_cores": 1.0,
-        "subagent_auto_max": 16,
+        "subagent_auto_max": 32,
         "subagent_spawn_stagger_secs": 2.0,
         "subagent_max_turns": 100,
         "subagent_timeout_secs": 1800,
@@ -268,10 +268,10 @@
       "sensitive": false,
       "tags": [],
       "label": "Max SubAgents",
-      "help": "Maximum amount of subagents at one time. 0 = auto-size the cap at startup from host memory/CPU and a learned per-agent cost (see dynamic-subagent-sizing docs).",
+      "help": "Maximum amount of subagents at one time. 0 = auto-size the cap at startup from host memory/CPU and a learned per-agent cost (see dynamic-subagent-sizing docs). Default; set a positive integer to pin a fixed cap.",
       "hasChildren": false,
       "enumValues": null,
-      "defaultValue": 3
+      "defaultValue": 0
     },
     {
       "path": "agent.spawn_min_memory_gb",
@@ -341,7 +341,7 @@
       "help": "Ceiling on the auto-sized subagent cap (only applies when max_subagents=0). Stands in for the LLM-provider concurrency limit the local memory/CPU formula does not model. Ignored when max_subagents is set explicitly.",
       "hasChildren": false,
       "enumValues": null,
-      "defaultValue": 16
+      "defaultValue": 32
     },
     {
       "path": "agent.subagent_spawn_stagger_secs",
@@ -643,7 +643,8 @@
       "help": "Days to keep compacted/rotated session archives before auto-cleanup. -1 disables cleanup (manage deletion manually).",
       "hasChildren": false,
       "enumValues": null,
-      "defaultValue": 30
+      "defaultValue": 30,
+      "nullable": true
     },
     {
       "path": "taskrunner",
@@ -1362,6 +1363,66 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": null
+    },
+    {
+      "path": "telemetry",
+      "kind": "core",
+      "type": "object",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Telemetry",
+      "help": "Metrics telemetry (local-first JSONL sink). Off by default.",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": {
+        "enabled": false,
+        "local_dir": "",
+        "export_interval_seconds": 60
+      }
+    },
+    {
+      "path": "telemetry.enabled",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Enabled",
+      "help": "Main switch for KiroClaw metrics telemetry. Off by default: metric call sites are no-ops and nothing is written. When on, a local-first JSONL sink under ~/.kiroclaw/metrics is enabled (no network egress).",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
+    },
+    {
+      "path": "telemetry.local_dir",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Local Metrics Dir",
+      "help": "Directory for local JSONL metric shards. Empty = ~/.kiroclaw/metrics. Supports ~ expansion.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": ""
+    },
+    {
+      "path": "telemetry.export_interval_seconds",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Export Interval (s)",
+      "help": "How often the local exporter flushes aggregated metrics to disk (>=1).",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 60
     },
     {
       "path": "stt",
@@ -2234,6 +2295,111 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": "slack"
+    },
+    {
+      "path": "watchdog",
+      "kind": "core",
+      "type": "object",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Watchdog",
+      "help": "ACP per-session watchdog / liveness-oracle windows.",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": {
+        "check_after_secs": 60.0,
+        "stale_window_secs": 300.0,
+        "tool_stall_suspect_secs": 600.0,
+        "tool_stall_hard_cap_secs": 2700.0,
+        "model_silent_probe_secs": 900.0,
+        "wellness_sample_secs": 3.0
+      }
+    },
+    {
+      "path": "watchdog.check_after_secs",
+      "kind": "core",
+      "type": "number",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Check after (s)",
+      "help": "Idle seconds on a turn before the liveness oracle is consulted at all. Below this, the dispatch loop does no watchdog work.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 60.0
+    },
+    {
+      "path": "watchdog.stale_window_secs",
+      "kind": "core",
+      "type": "number",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Stale probe window (s)",
+      "help": "Idle seconds before an UNKNOWN-verdict model-wait turn is safe-probed via session/cancel. Probes are non-lethal: a live turn auto-recovers.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 300.0
+    },
+    {
+      "path": "watchdog.tool_stall_suspect_secs",
+      "kind": "core",
+      "type": "number",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Tool stall suspect (s)",
+      "help": "Idle seconds before an UNKNOWN-verdict in-flight tool is cancelled and the turn routed to tool-stall recovery (continue-nudge, no re-run of the original message). WORKING tools (e.g. a matched live build child) are never cancelled regardless of duration.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 600.0
+    },
+    {
+      "path": "watchdog.tool_stall_hard_cap_secs",
+      "kind": "core",
+      "type": "number",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Hard cap (s)",
+      "help": "Absolute ceiling for UNKNOWN-verdict forbearance (e.g. the extended probably-thinking window). Applies ONLY to UNKNOWN verdicts — never to a WORKING session.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 2700.0
+    },
+    {
+      "path": "watchdog.model_silent_probe_secs",
+      "kind": "core",
+      "type": "number",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Silent-think probe window (s)",
+      "help": "Extended probe window for a model-wait with an established backend connection but flat counters (non-streamed server-side reasoning, e.g. long xhigh thinks). Probing a live think cancels and regenerates it, so this window is deliberately generous.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 900.0
+    },
+    {
+      "path": "watchdog.wellness_sample_secs",
+      "kind": "core",
+      "type": "number",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Wellness sample interval (s)",
+      "help": "Minimum spacing between CPU/IO counter samples used for movement deltas in the liveness oracle.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 3.0
     },
     {
       "path": "slack",

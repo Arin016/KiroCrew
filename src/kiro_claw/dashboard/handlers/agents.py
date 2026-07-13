@@ -1472,7 +1472,9 @@ async def _do_agents_sync(request: web.Request) -> web.Response:
     synced: list[str] = []
     pruned: list[str] = []
     try:
-        aim_agents = list(list_agents(include_project=False))
+        aim_agents = await asyncio.get_running_loop().run_in_executor(
+            discovery_executor(), lambda: list(list_agents(include_project=False))
+        )
         aim_names = {a.name for a in aim_agents}
 
         # Add new agents

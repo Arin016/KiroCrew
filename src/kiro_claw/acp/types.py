@@ -104,6 +104,17 @@ STOP_REASON_END_TURN = "end_turn"
 # retrying the same prompt hits the same refusal, so chat_runner surfaces an
 # actionable message instead of churning the retry ladder.
 STOP_REASON_REFUSAL = "refusal"
+# Signalled by the ACP layer when a genuinely-wedged (stale) turn was probed via
+# session/cancel and got no ack within the grace window — a confirmed wedge, not
+# a done-but-missing-frame turn (which acks and completes normally). The
+# dashboard routes this to reset+resume+continue-nudge auto-recovery.
+STOP_REASON_STALE_RECOVER = "stale_recover"
+# Signalled by the per-session watchdog when an in-flight tool was judged dead
+# / stuck / UNKNOWN-past-budget and the session was cancelled. Kept in the
+# "error:" family so callers without a dedicated branch fall back to the
+# generic error handling; chat_runner routes it to a dedicated recovery
+# (continue-nudge, NOT a verbatim re-run of the original message).
+STOP_REASON_TOOL_STALL = "error: tool stall"
 
 # ── Approval Modes ──
 

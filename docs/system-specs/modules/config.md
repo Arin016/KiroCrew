@@ -1,6 +1,6 @@
 # Config Module
 
-Last Updated: 2026-06-22 (AgentConfig: added sandbox_allow_no_isolation (SEC-009) field; agent_model_state.json sidecar: model_managed/cc_model moved out of kiro agent specs so kiro-cli deny_unknown_fields no longer drops KiroClaw agents)
+Last Updated: 2026-07-13 (Schema refresh: documented security-bounded load-time clamp — SUBAGENT_AUTO_MAX_CEILING=64 / SUBAGENT_MAX_TURNS_CEILING=200 / POOL_SIZE_MAX=10, `_clamp_security_bounds` + `config_bounds_clamped` SEL event; added clamped AgentConfig fields, SessionConfig.pool_size, MessagingConfig/SkillsConfig/TelemetryConfig/DashboardConfig (theme_mode/theme_color/onboarded) DTOs, KeywordHook + deny-by-default bot-admission, `_resolve_named_agent_model`/`kiro_agents_dir`; corrected `_resolve_agent_model` fallback to `config_package_dir()/defaults.json`. 2026-06-22: AgentConfig: added sandbox_allow_no_isolation (SEC-009) field; agent_model_state.json sidecar: model_managed/cc_model moved out of kiro agent specs so kiro-cli deny_unknown_fields no longer drops KiroClaw agents)
 
 ## Overview
 
@@ -88,7 +88,21 @@ present) is not cached.
 
 ### `KiroClawConfig._resolve_agent_model() -> str`
 Reads model from installed agent config (`~/.kiro/agents/kiroclaw.json`),
-falling back to project-level `agents/defaults.json`, then `"auto"`.
+falling back to the bundled `config_package_dir()/defaults.json` (i.e.
+`src/kiro_claw/config/defaults.json`), then `DEFAULT_MODEL`.
+
+### `KiroClawConfig._resolve_named_agent_model(agent, agents_dir=None) -> str`
+Returns a named agent's own kiro `model` field, or `""` if none. Used by
+`SessionManager.get_or_create` so an explicit global `agent.model` ranks *below*
+a per-agent model pin (per-agent pin > global default). Reads only the kiro
+`model` slot. `agents_dir` is a dependency-injection seam for tests; defaults to
+`kiro_agents_dir()`.
+
+### `kiro_agents_dir() -> Path` (`config/paths.py`)
+Leaf helper returning `~/.kiro/agents`. Lives in the leaf module so `loader.py`
+(and `_resolve_named_agent_model`'s `agents_dir` DI seam) can locate installed
+agent JSONs without importing `kiro_claw.agent` — which imports `config.loader`
+and would create an import cycle.
 
 ### `KiroClawConfig.create_provider_factory() -> Callable`
 Returns a factory for LLMProvider instances. Resolves `"auto"` model
@@ -164,11 +178,16 @@ class AgentConfig:
     enforce_denied_commands: str = "all"  # "all" or "kiroclaw"
     soft_stop_budget_secs: float = 10.0  # seconds to wait for cooperative cancel before hard kill [0.5, 60.0]
     yolo: bool = False             # permanent YOLO mode (skip tool approval); tracked via _yolo_from_config flag
+    max_subagents: int = 3         # concurrent subagent cap; 0 = auto-size from host memory/CPU. Load-time clamped to [0, 64]
+    subagent_auto_max: int = 16    # ceiling on the auto-sized cap (max_subagents=0 only). Load-time clamped to [1, 64]
+    subagent_max_turns: int = 100  # default per-subagent tool-call budget. Load-time clamped to [1, 200]
+    subagent_result_ttl_secs: int = 3600  # seconds a delivered subagent's result.txt is retained before the reaper prunes it
 
 @dataclass
 class SessionConfig:
-    timeout_secs: int = 1800       # 30 min idle timeout
+    timeout_secs: int = 3600       # 60 min idle timeout (DEFAULT_SESSION_TIMEOUT)
     autocompact_pct: float = 90.0  # context usage % at which auto-compaction triggers (5-90)
+    pool_size: int = 2             # pre-warmed kiro-cli processes kept ready for instant session start; 0 disables. Load-time clamped to [0, 10]
 
 @dataclass
 class TaskRunnerConfig:
@@ -200,6 +219,19 @@ class SttConfig:
     timeout_secs: int = 300
 
 @dataclass
+class KeywordHook:
+    keyword: str                   # trigger keyword matched against inbound messages
+    action: str                    # "spawn_session" | "notify" | "auto_reply"
+    agent: str = "kiroclaw"
+    template: str = "{message}"
+    channels: list[str] = field(default_factory=list)
+    senders: list[str] = field(default_factory=list)  # bot-admission allowlist; see deny-by-default note
+    autonudge: bool = True
+    max_cycles: int = 24
+    cooldown_seconds: int = 300
+    reply_prompt: str = ""         # auto_reply only; empty falls back to the standard draft prompt
+
+@dataclass
 class SecretaryConfig:
     enabled: bool = False
     user_id: str = ""
@@ -208,6 +240,42 @@ class SecretaryConfig:
     style_rules: list[str] = field(default_factory=list)
     alert_keywords: list[str] = field(default_factory=list)
     alert_on_name_mention: bool = False
+    test_mode: bool = False        # include own messages in inbox (for testing)
+    quick_reactions: list[str] = field(...)  # emoji names for the quick-access reaction row
+    auto_cleanup_enabled: bool = True
+    dm_retention_days: int = 90
+    channel_retention_days: int = 365
+    keyword_hooks: list[dict] = field(default_factory=list)  # KeywordHook entries (parsed into KeywordHook)
+    auto_dismiss_on_reply: bool = False
+
+@dataclass
+class MessagingConfig:
+    use_transport: bool = True     # route inbound Slack through SlackTransport → TurnDriver → SlackRenderer (the canonical path); false falls back to the native handle_message monolith
+
+@dataclass
+class SkillsConfig:
+    max_triggered: int = 3         # max skills loaded per message (>=1)
+    lazy_load: bool = False        # inject only a usage-ranked top-K of on-demand skills (long tail via skill_search / $skillname / triggers); off = legacy full skills dump
+    # ... auto_create_from_sessions / auto_refine_on_deviation / extra_paths
+
+@dataclass
+class TelemetryConfig:
+    enabled: bool = False          # main switch; off = metric call sites are no-ops, nothing written
+    local_dir: str = ""            # local JSONL shard dir; empty = ~/.kiroclaw/metrics
+    export_interval_seconds: int = 60  # local-exporter flush interval (>=1)
+
+@dataclass
+class DashboardConfig:
+    url: str = ""                  # public URL for the dashboard (used in Slack links)
+    # ... restore_sessions / bot_name / avatar / widget_density / auto_open_browser / etc.
+    theme_mode: str = ""           # "dark" | "light" | "system"; empty = unset (frontend falls back to localStorage or "system")
+    theme_color: str = ""          # color-theme slug (e.g. "kiro", "emerald", "monokai"); empty = unset
+    onboarded: bool = False        # whether the "Choose your look" onboarding modal was completed
+
+# Additional top-level DTOs (not fully expanded here — see loader.py):
+# OrchestratorConfig, CronHistoryConfig, TunnelConfig, InstancesConfig, HeartbeatConfig,
+# TaskKeeperConfig, WorkspaceConfig, MemoryStoreConfig, ExternalRegistryConfig,
+# KiroClawAgentConfig, SlackConfig.
 
 @dataclass
 class KiroClawConfig:
@@ -225,6 +293,56 @@ class KiroClawConfig:
     slack_channels: dict[str, ChannelConfig]  # per-channel config keyed by channel ID
     slack_dm_activation: str = "always"       # activation mode for DMs (D-prefix channels)
 ```
+
+### Security-Bounded Config Clamp
+
+Three resource-limit knobs are clamped to hard ceilings **at load time**, not just
+at the dashboard write gate. The ceilings are the single source of truth in
+`loader.py`:
+
+| Constant | Value | Field |
+|----------|-------|-------|
+| `SUBAGENT_AUTO_MAX_CEILING` | 64 | `agent.subagent_auto_max`, `agent.max_subagents` |
+| `SUBAGENT_MAX_TURNS_CEILING` | 200 | `agent.subagent_max_turns` |
+| `POOL_SIZE_MAX` | 10 | `session.pool_size` |
+
+`_SECURITY_BOUNDED_FIELDS` lists each `(section, key, min, max)`; the mins match
+the existing runtime floors (0/1) so a legitimate in-range value is never
+altered. `_clamp_security_bounds(data)` runs **once on the disk-read (cache-miss)
+path, before the validated dict is cached** — so subsequent cache hits already
+serve clamped values. It clamps out-of-range real integers in place (a JSON
+`true`/`false` bool or any non-int is skipped and left to dataclass
+coercion/defaults), logs a WARNING, and emits a best-effort `config_bounds_clamped`
+SEL security event (never fatal — config loading must not raise).
+
+Why load-time (not just the API): the REST API rejects out-of-range writes, but a
+direct edit of `config.json` (any process running as the same OS user — including
+a prompt-injected agent with file-write access) bypassed that gate entirely. Each
+knob controls a resource-consumption dimension (concurrent subagent processes,
+per-subagent turn budget, pre-warmed pool processes), so an inflated on-disk value
+could exhaust host memory/CPU/the process table (DoS). The dashboard write gate
+(`dashboard/handlers/core.py`) and the runtime pool cap **import these same
+constants**, so write-gate / load-clamp / runtime-cap cannot drift apart —
+closing the direct-config-edit DoS gap.
+
+### KeywordHook bot-admission (deny-by-default)
+
+`SecretaryConfig.keyword_hooks` entries parse into `KeywordHook`. The intended
+dispatch contract is deny-by-default on `KeywordHook.senders`: a `spawn_session`
+hook with an empty `senders` list is treated as unauthorized and cannot
+dispatch; when `senders` is non-empty, only messages from those sender IDs (and
+bots whose user ID is in the list) are admitted. `auto_reply` likewise requires
+at least one of `channels`/`senders`. Note: in this fork the Secretary service
+that consumes these hooks is stubbed (`slack/gateway.py` keeps
+`secretary_svc=None`), so the DTO is config-schema only until a consumer
+exists.
+
+### Dashboard theme persistence
+
+`DashboardConfig.theme_mode` / `theme_color` / `onboarded` are workspace-persistent
+(shared across ports and devices) rather than browser-local. The frontend reads
+them at boot via `GET /api/theme/boot`; empty `theme_mode`/`theme_color` mean
+unset (the frontend falls back to `localStorage` or the built-in default).
 
 ### `ChannelConfig.from_dict(data: dict) -> ChannelConfig`
 Parses a channel config entry from JSON. Invalid activation values fall back to `"mention"`.
@@ -255,7 +373,7 @@ Returns the effective config for a channel:
     "provider": "acp"
   },
   "session": {
-    "timeout_secs": 1800
+    "timeout_secs": 3600
   },
   "taskrunner": {
     "max_parallel_steps": 2
@@ -294,8 +412,8 @@ The `dashboard.url` field controls where the dashboard is reachable. From it, th
 When `agent.model` is `"auto"` (default):
 
 1. `~/.kiro/agents/kiroclaw.json` → `model` field (installed agent config)
-2. `$KIROCLAW_PROJECT_DIR/agents/defaults.json` → `model` field
-3. Falls back to `"auto"` (passed through to provider)
+2. `config_package_dir()/defaults.json` → `model` field (bundled `src/kiro_claw/config/defaults.json`)
+3. Falls back to `DEFAULT_MODEL` (passed through to provider)
 
 ## Error Handling
 

@@ -88,7 +88,7 @@ from kiro_claw.agent import _enforce_denied_commands
 from kiro_claw.config import KiroClawConfig
 from kiro_claw.config.loader import POOL_SIZE_MAX, build_provider_factory, default_project_dir
 from kiro_claw.executors import maintenance_executor
-from kiro_claw.messaging.link import ChannelLink
+from kiro_claw.messaging.link import ChannelLink, canonical_key, legacy_key
 from kiro_claw.providers.base import CancelOutcome, LLMProvider
 from kiro_claw.sel import sel
 from kiro_claw.session_map import _KIRO_SESSIONS_DIR  # noqa: F401
@@ -379,13 +379,40 @@ class _ProviderBgSession:
 class SessionManager:
     """Thread-keyed LLM provider pool with warm session pre-spawning."""
 
+    def _fold_key(self, key: str) -> str:
+        """Resolve bare/canonical Slack session-key aliases onto the live entry.
+
+        Slack thread sessions have two historical key forms: the legacy bare
+        ``thread_ts`` (``"1783733803.877979"``) and the namespaced canonical
+        form (``"slack:1783733803.877979"``, see ``messaging.link``). The
+        ``SessionMap`` thread index returns canonical keys while some callers
+        still derive bare keys, so the registry must treat both forms as the
+        SAME logical session — otherwise a lookup under one form misses a live
+        session registered under the other, and the caller cold-starts a
+        duplicate, context-free session (thread split).
+
+        Resolution order: exact match, then the canonical alias, then the
+        legacy bare alias. Unknown keys pass through unchanged so new
+        registrations keep the caller's form and non-Slack namespaces
+        (``dashboard:``, ``cron:``, ...) are never rewritten.
+        """
+        if key in self._sessions:
+            return key
+        canon = canonical_key(key)
+        if canon != key and canon in self._sessions:
+            return canon
+        bare = legacy_key(key)
+        if bare is not None and bare in self._sessions:
+            return bare
+        return key
+
     def has_session(self, key: str) -> bool:
         """Return ``True`` if an active session exists for *key*."""
-        return key in self._sessions
+        return self._fold_key(key) in self._sessions
 
     def get_provider(self, key: str) -> LLMProvider | None:
         """Return the LLM provider for *key*, or ``None``."""
-        sess = self._sessions.get(key)
+        sess = self._sessions.get(self._fold_key(key))
         return sess.provider if sess else None
 
     async def try_acquire(self, key: str) -> bool:
@@ -419,7 +446,7 @@ class SessionManager:
 
     def get_pid(self, key: str) -> int | None:
         """Return the kiro-cli PID for a session, or None."""
-        sess = self._sessions.get(key)
+        sess = self._sessions.get(self._fold_key(key))
         if not sess:
             return None
         try:
@@ -1296,6 +1323,12 @@ class SessionManager:
                 through to the provider factory as the ``model_override`` kwarg.
         """
         # Fast path: existing session — hold lock only briefly
+        # Fold bare/canonical Slack key aliases FIRST: the SessionMap thread
+        # index returns canonical ``slack:<ts>`` keys while first-message
+        # derivation historically registered the bare ``thread_ts``. Without
+        # the fold, the second in-thread message misses the live session and
+        # cold-starts a context-free duplicate (thread split).
+        key = self._fold_key(key)
         stale_provider = None
         _claimed: "tuple[_Session, bool] | None" = None
         try:
@@ -1749,6 +1782,7 @@ class SessionManager:
 
     async def reset(self, key: str) -> None:
         """Kill and recreate a session (context overflow recovery)."""
+        key = self._fold_key(key)
         async with self._lock:
             session = self._sessions.pop(key, None)
             # The new process is a fresh start — drop any stale failure
@@ -1829,6 +1863,7 @@ class SessionManager:
         Falls back to prompt-count compaction if metadata never reports %.
         Returns context usage percentage immediately — never blocks.
         """
+        key = self._fold_key(key)
         pct = provider.context_usage_pct()
 
         # Track prompts for background session recycle fallback
@@ -1943,13 +1978,31 @@ class SessionManager:
                 await self._fire_compact_callback(key, pct, success=True)
                 return
 
-            async with self._lock:
-                session = self._sessions.pop(key, None)
-            if session:
-                self._session_map.delete(key)
-                await session.provider.shutdown()
-                logger.info("Recycled session %s (context overflow)", key)
-                await self._fire_compact_callback(key, pct, success=True)
+            # kiro-cli recycle SIGKILLs the provider; drain the in-flight turn
+            # via the session semaphore first so we don't kill mid-cleanup.
+            drain = self._sessions.get(key)
+            sem = drain.semaphore if drain else None
+            sem_held = False
+            if sem is not None:
+                try:
+                    await asyncio.wait_for(sem.acquire(), timeout=_COMPACT_TIMEOUT_SECS)
+                    sem_held = True
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Session %s recycle: turn still active after %.0fs, forcing recycle",
+                        key, _COMPACT_TIMEOUT_SECS,
+                    )
+            try:
+                async with self._lock:
+                    session = self._sessions.pop(key, None)
+                if session:
+                    self._session_map.delete(key)
+                    await session.provider.shutdown()
+                    logger.info("Recycled session %s (context overflow)", key)
+                    await self._fire_compact_callback(key, pct, success=True)
+            finally:
+                if sem_held and sem is not None:
+                    sem.release()
         except Exception:
             logger.exception("Session recycle failed for %s", key)
         finally:
@@ -1971,6 +2024,7 @@ class SessionManager:
         idle kill).  The kiro-cli session files remain on disk, so
         ``session/load`` can restore the full conversation losslessly.
         """
+        key = self._fold_key(key)
         async with self._lock:
             session = self._sessions.pop(key, None)
             self._compact_cooldown_until.pop(key, None)
@@ -1989,6 +2043,7 @@ class SessionManager:
         Use for irreversible actions: permanent history deletion, bulk
         clear, or error recovery where the session state is corrupt.
         """
+        key = self._fold_key(key)
         async with self._lock:
             session = self._sessions.pop(key, None)
             self._compact_cooldown_until.pop(key, None)
@@ -2110,12 +2165,13 @@ class SessionManager:
 
     def record_success(self, key: str) -> None:
         """Reset consecutive failure counter on success."""
-        session = self._sessions.get(key)
+        session = self._sessions.get(self._fold_key(key))
         if session:
             session.consecutive_failures = 0
 
     async def record_failure(self, key: str) -> bool:
         """Increment failure counter. Returns True if circuit tripped (session reset)."""
+        key = self._fold_key(key)
         session = self._sessions.get(key)
         if not session:
             return False
@@ -2138,6 +2194,7 @@ class SessionManager:
         If *cleanup* is True and the key is a subagent session, schedule
         best-effort deletion of the provider's on-disk session files.
         """
+        key = self._fold_key(key)
         session = self._sessions.get(key)
         if session:
             if cleanup and key.startswith(_SUBAGENT_PREFIX):
@@ -2172,6 +2229,7 @@ class SessionManager:
         If *force* is True, queue even when the semaphore isn't locked yet
         (covers the startup race where a task exists but hasn't acquired the lock).
         """
+        key = self._fold_key(key)
         session = self._sessions.get(key)
         if not session:
             return False
@@ -2182,6 +2240,7 @@ class SessionManager:
 
     def dequeue(self, key: str) -> tuple[str, str, dict] | None:
         """Pop the next queued message, skipping cancelled ones."""
+        key = self._fold_key(key)
         session = self._sessions.get(key)
         if not session:
             return None
@@ -2198,6 +2257,7 @@ class SessionManager:
         Returns True if the msg_ts was found in the queue and removed.
         Returns False if not queued (may be in-flight — added to cancelled set).
         """
+        key = self._fold_key(key)
         session = self._sessions.get(key)
         if not session:
             return False
@@ -2212,6 +2272,7 @@ class SessionManager:
 
     def is_cancelled(self, key: str, msg_ts: str) -> bool:
         """Check if a message was cancelled (deleted while processing)."""
+        key = self._fold_key(key)
         session = self._sessions.get(key)
         if not session:
             return False
@@ -2222,6 +2283,7 @@ class SessionManager:
 
     def clear_queue(self, key: str) -> None:
         """Clear all queued messages and cancelled set for a session."""
+        key = self._fold_key(key)
         session = self._sessions.get(key)
         if session:
             session.queue.clear()
@@ -2229,6 +2291,7 @@ class SessionManager:
 
     async def is_provider_alive(self, key: str) -> bool | None:
         """Return True/False for provider liveness, or None if no session exists."""
+        key = self._fold_key(key)
         async with self._lock:
             sess = self._sessions.get(key)
         if sess is None:
@@ -2241,16 +2304,19 @@ class SessionManager:
 
     def get_approval_policy(self, key: str) -> str:
         """Return the approval policy for a session, or empty string."""
+        key = self._fold_key(key)
         session = self._sessions.get(key)
         return session.approval_policy if session else ""
 
     def get_agent(self, key: str) -> str:
         """Return the agent name for a session, or empty string."""
+        key = self._fold_key(key)
         session = self._sessions.get(key)
         return session.agent if session else ""
 
     def set_approval_policy(self, key: str, policy: str) -> None:
         """Set the approval policy for an existing session."""
+        key = self._fold_key(key)
         session = self._sessions.get(key)
         if session:
             old = session.approval_policy
@@ -2337,6 +2403,7 @@ class SessionManager:
 
     async def cancel_current(self, key: str, *, wait_ack_timeout: float = 0.0) -> CancelOutcome:
         """Cancel the in-flight operation for *key* without destroying the session."""
+        key = self._fold_key(key)
         session = self._sessions.get(key)
         if not session:
             return "no_turn"
@@ -2364,6 +2431,7 @@ class SessionManager:
              - no_turn → return "idle"
           4. hard kill: reset(key) → fire-and-forget respawn → on_hard → "hard"
         """
+        key = self._fold_key(key)
         session = self._sessions.get(key)
         if not session:
             return "idle"

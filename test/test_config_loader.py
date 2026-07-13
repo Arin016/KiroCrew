@@ -165,6 +165,27 @@ def _default_config() -> KiroClawConfig:
     return KiroClawConfig()
 
 
+def test_max_subagents_defaults_to_auto_sentinel() -> None:
+    """Stage 2: max_subagents defaults to the 0 ('auto') sentinel — both on the
+    bare dataclass and when hydrated from an empty config — and 0 resolves to a
+    computed cap that never regresses below the legacy floor of 3. An explicit
+    positive value is preserved verbatim.
+    """
+    from kiro_claw.subagent import resolve_max_subagents
+
+    # Bare dataclass default.
+    assert KiroClawConfig().agent.max_subagents == 0
+    # Hydrated-from-empty default (loader .get path).
+    loaded = _load_from_dict({})
+    assert loaded.agent.max_subagents == 0
+    # 0 sentinel auto-computes; floor guarantees >= 3.
+    assert resolve_max_subagents(loaded) >= 3
+    # Explicit value is honored, not auto-computed.
+    pinned = _load_from_dict({"agent": {"max_subagents": 7}})
+    assert pinned.agent.max_subagents == 7
+    assert resolve_max_subagents(pinned) == 7
+
+
 # Hypothesis strategy for safe identifier strings (no control chars, JSON-safe)
 _safe_name_st = st.text(
     alphabet=st.sampled_from("abcdefghijklmnopqrstuvwxyz0123456789_-"),
@@ -2175,6 +2196,34 @@ class TestArchiveRetentionDays:
             loaded = KiroClawConfig.load()
         assert loaded.session.archive_retention_days == 60
 
+    def test_schema_permits_null_sentinel(self) -> None:
+        """The generated JSON Schema must accept ``null`` for this field.
+
+        Regression guard (Mesh-1832): ``null`` is the disable sentinel. If the
+        schema emits a bare ``{"type": "integer"}`` then, on any host where
+        jsonschema is installed, ``validate_config_data`` strips the null and
+        the loader silently reverts to the default 30 (cleanup stays ON — the
+        opposite of intent). This assertion is interpreter-independent: it
+        checks the schema shape directly, so it fails everywhere if the
+        ``nullable`` marker regresses, not only where jsonschema is installed.
+        """
+        from kiro_claw.config.schema import JSON_SCHEMA
+
+        node = JSON_SCHEMA["properties"]["session"]["properties"]["archive_retention_days"]
+        assert "null" in node["type"], (
+            f"archive_retention_days schema must allow null, got {node['type']!r}"
+        )
+
+    def test_validation_preserves_null(self) -> None:
+        """When jsonschema runs, ``null`` must survive validation (not be stripped)."""
+        from kiro_claw.config import validation
+
+        if not validation._HAS_JSONSCHEMA:
+            pytest.skip("jsonschema not installed on this interpreter")
+        data = {"session": {"archive_retention_days": None}}
+        validated = validation.validate_config_data(data)
+        assert validated["session"]["archive_retention_days"] is None
+
 
 class TestConfigCache:
     """Validated-data cache keyed on file mtime/size (hot-path load())."""
@@ -2336,11 +2385,11 @@ class TestDynamicSubagentSizingFields:
     def test_defaults(self) -> None:
         cfg = _load_from_dict({})
         a = cfg.agent
-        assert a.max_subagents == 3  # legacy default unchanged
+        assert a.max_subagents == 0  # auto-size sentinel (0 = auto; Stage 2)
         assert a.subagent_mem_buffer_pct == 20
         assert a.subagent_cost_gb == 0.5
         assert a.subagent_cpu_cost_cores == 1.0
-        assert a.subagent_auto_max == 16
+        assert a.subagent_auto_max == 32
         assert a.subagent_spawn_stagger_secs == 2.0
 
     def test_explicit_values_load(self) -> None:

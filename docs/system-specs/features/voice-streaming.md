@@ -1,6 +1,6 @@
 # Voice Streaming — Design Document
 
-Last Updated: 2026-04-02
+Last Updated: 2026-07-13
 
 ## Overview
 
@@ -21,8 +21,8 @@ chat_chunk (WS) → sentence detection (frontend) → POST /api/voice/synthesize
 |-----------|------|------|
 | Sentence detector | `frontend/src/hooks/useWebSocket.ts` | Watches streaming chunks for sentence boundaries |
 | Playback queue | `frontend/src/hooks/useWebSocket.ts` | Queues and plays audio chunks sequentially |
-| Synthesize endpoint | `src/kiro_claw/dashboard/chat.py` | `POST /api/voice/synthesize` — splits text into sentences, calls Polly, broadcasts chunks |
-| Voice config endpoint | `src/kiro_claw/dashboard/chat.py` | `GET/PUT /api/voice/config` — read/update voice settings |
+| Synthesize endpoint | `src/kiro_claw/dashboard/chat_voice.py` | `POST /api/voice/synthesize` — splits text into sentences, calls Polly, broadcasts chunks (re-exported via `chat.py`) |
+| Voice config endpoint | `src/kiro_claw/dashboard/chat_voice.py` | `GET/PUT /api/voice/config` — read/update voice settings (re-exported via `chat.py`) |
 | Polly TTS | `src/kiro_claw/voice_reply.py` | `streaming_voice_reply()` async generator, `stitch_mp3s()` for final MP3 |
 | Settings UI | `frontend/src/pages/chat/ChatSettings.tsx` | Auto-speak toggle, voice/engine/speed/pitch pickers |
 

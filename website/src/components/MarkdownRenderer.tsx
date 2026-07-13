@@ -303,6 +303,60 @@ function rehypeSanitize() {
 const REMARK_PLUGINS: PluggableList = [remarkGfm, [remarkMath, { singleDollarTextMath: false }]]
 const REHYPE_PLUGINS: PluggableList = [[rehypeRaw, { passThrough: ['math', 'inlineMath'] }], rehypeSanitize, rehypeKatex]
 
+// Matches one source line break plus any leading tabs/spaces, so a trailing
+// space before the break doesn't survive as its own text node. Mirrors the
+// pattern used by the `remark-breaks` package.
+const SOFT_BREAK_RE = /[\t ]*(?:\r?\n|\r)/g
+
+/**
+ * remark plugin: turn soft line breaks (a lone source newline inside a
+ * paragraph, which CommonMark otherwise collapses to a space) into hard breaks
+ * (mdast `break` → <br>). This is an inlined equivalent of the `remark-breaks`
+ * package, kept local to avoid adding a runtime dependency.
+ *
+ * Opt-in via MarkdownRenderer's `softBreaks` prop and used ONLY for user
+ * messages: the chat input lets people press Shift+Enter for a newline, so
+ * those breaks must survive rendering. Assistant/LLM markdown keeps standard
+ * CommonMark soft-break-collapse.
+ *
+ * Operates on `text` nodes only, so fenced code, inline code, math, and raw
+ * HTML (whose content lives in `.value`, not `.children`) are untouched, and
+ * blank-line block separators — already parsed as distinct blocks — are not
+ * affected, so lists and paragraphs keep their normal block spacing. That is
+ * what lets user messages drop container-level `white-space: pre-wrap`, which
+ * had made react-markdown's inter-block newline text nodes render as literal
+ * blank lines and inflated list/paragraph gaps (Mesh-2695).
+ */
+function remarkSoftBreaks() {
+  const visit = (node: { type?: string; value?: string; children?: unknown[] }) => {
+    if (!node || !Array.isArray(node.children)) return
+    const out: unknown[] = []
+    for (const raw of node.children) {
+      const child = raw as { type?: string; value?: string; children?: unknown[] }
+      if (child.type === 'text' && typeof child.value === 'string' && /[\r\n]/.test(child.value)) {
+        const value = child.value
+        let start = 0
+        SOFT_BREAK_RE.lastIndex = 0
+        let match: RegExpExecArray | null
+        while ((match = SOFT_BREAK_RE.exec(value))) {
+          if (match.index > start) out.push({ type: 'text', value: value.slice(start, match.index) })
+          out.push({ type: 'break' })
+          start = match.index + match[0].length
+        }
+        if (start < value.length) out.push({ type: 'text', value: value.slice(start) })
+      } else {
+        visit(child)
+        out.push(child)
+      }
+    }
+    node.children = out
+  }
+  return (tree: unknown) => visit(tree as { children?: unknown[] })
+}
+
+// User-message variant: base remark chain plus soft-break → hard-break.
+const REMARK_PLUGINS_WITH_BREAKS: PluggableList = [...REMARK_PLUGINS, remarkSoftBreaks]
+
 /**
  * Rehype plugin that copies each hast element's source `position` onto a
  * `data-sourcepos` HTML attribute in CommonMark format `startLine:startCol-endLine:endCol`.
@@ -531,7 +585,7 @@ function stripStrayTags(content: string, openMarker: string, stripRe: RegExp): s
 const stripStrayWidgetTags = (content: string) => stripStrayTags(content, '<mcwidget', MCWIDGET_STRIP_RE)
 const stripStrayToolUseTags = (content: string) => stripStrayTags(content, '<tool_use', TOOL_USE_STRIP_RE)
 
-const MarkdownBlock = memo(function MarkdownBlock({ content, sourcePos, startLine, glow, smooth }: { content: string; sourcePos?: boolean; startLine?: number; glow?: boolean; smooth?: boolean }) {
+const MarkdownBlock = memo(function MarkdownBlock({ content, sourcePos, startLine, glow, smooth, softBreaks }: { content: string; sourcePos?: boolean; startLine?: number; glow?: boolean; smooth?: boolean; softBreaks?: boolean }) {
   // Strip any <mcwidget> or <tool_use> tags that leak through during
   // streaming transitions or when the agent emits protocol markup as text.
   // Both passes preserve mentions inside inline-code spans.
@@ -549,7 +603,7 @@ const MarkdownBlock = memo(function MarkdownBlock({ content, sourcePos, startLin
     rehypePlugins = [...baseRehype, ...tail]
   }
   const md = (
-    <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={rehypePlugins} urlTransform={urlTransform} components={MD_COMPONENTS}>
+    <ReactMarkdown remarkPlugins={softBreaks ? REMARK_PLUGINS_WITH_BREAKS : REMARK_PLUGINS} rehypePlugins={rehypePlugins} urlTransform={urlTransform} components={MD_COMPONENTS}>
       {fixCodeFences(clean)}
     </ReactMarkdown>
   )
@@ -588,7 +642,7 @@ function extractPathHintFromText(text: string | undefined): string | undefined {
   return undefined
 }
 
-function BlockRenderer({ block, prevBlock, onFileOpen, sourcePos, messageTs, widgetIndex, glow, smooth }: { block: ContentBlock; prevBlock?: ContentBlock; onFileOpen?: (path: string) => void; sourcePos?: boolean; messageTs?: string; widgetIndex?: number; glow?: boolean; smooth?: boolean }) {
+function BlockRenderer({ block, prevBlock, onFileOpen, sourcePos, messageTs, widgetIndex, glow, smooth, softBreaks }: { block: ContentBlock; prevBlock?: ContentBlock; onFileOpen?: (path: string) => void; sourcePos?: boolean; messageTs?: string; widgetIndex?: number; glow?: boolean; smooth?: boolean; softBreaks?: boolean }) {
   switch (block.type) {
     case 'diff': {
       const pathHint = prevBlock?.type === 'markdown'
@@ -615,11 +669,11 @@ function BlockRenderer({ block, prevBlock, onFileOpen, sourcePos, messageTs, wid
         ? <WidgetFrame html={block.content} title={block.language} slug={block.slug} messageTs={messageTs} widgetIndex={widgetIndex} />
         : <WidgetPlaceholder title={block.language} />
     case 'markdown':
-      return <MarkdownBlock content={block.content} sourcePos={sourcePos} startLine={block.startLine} glow={glow} smooth={smooth} />
+      return <MarkdownBlock content={block.content} sourcePos={sourcePos} startLine={block.startLine} glow={glow} smooth={smooth} softBreaks={softBreaks} />
   }
 }
 
-export default memo(function MarkdownRenderer({ content, streaming = false, onFileOpen, rawMode = false, sourcePos = false, messageTs, glow = false, smooth }: { content: string; streaming?: boolean; onFileOpen?: (path: string) => void; rawMode?: boolean; sourcePos?: boolean; messageTs?: string; glow?: boolean; smooth?: boolean }) {
+export default memo(function MarkdownRenderer({ content, streaming = false, onFileOpen, rawMode = false, sourcePos = false, messageTs, glow = false, smooth, softBreaks = false }: { content: string; streaming?: boolean; onFileOpen?: (path: string) => void; rawMode?: boolean; sourcePos?: boolean; messageTs?: string; glow?: boolean; smooth?: boolean; softBreaks?: boolean }) {
   const blocks = useBlockAssembler(content, streaming)
 
   const handleClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -690,6 +744,7 @@ export default memo(function MarkdownRenderer({ content, streaming = false, onFi
           widgetIndex={widgetIndices[i] >= 0 ? widgetIndices[i] : undefined}
           glow={glow && i === lastMarkdownIdx}
           smooth={smooth}
+          softBreaks={softBreaks}
         />
       ))}
     </div>

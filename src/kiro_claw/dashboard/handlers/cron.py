@@ -21,6 +21,7 @@ from kiro_claw.dashboard.cron_inject import (
     inject_cron_result_to_dashboard,
 )
 from kiro_claw.dashboard.state import DashboardState
+from kiro_claw.executors import cron_executor
 from kiro_claw.llm_helpers import stream_and_collect
 from kiro_claw.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
 from kiro_claw.validation import (
@@ -282,6 +283,88 @@ async def api_cron_delete(request: web.Request) -> web.Response:
         await state.crons.get_history().delete_job_history(job_id)
         state.push_refresh("crons")
     return web.json_response({"ok": ok})
+
+
+# Guardrail: cap batch size so a runaway/hostile payload can't pin the event
+# loop deleting thousands of jobs (each remove_job is a sync save + async
+# history delete). 500 comfortably exceeds any realistic schedule list.
+_MAX_BATCH_DELETE = 500
+
+
+async def api_cron_batch_delete(request: web.Request) -> web.Response:
+    """DELETE /api/crons — remove multiple cron jobs in one call.
+
+    Body: ``{"ids": ["<job_id>", ...]}``. Each id is removed independently so a
+    missing/already-deleted id (e.g. a stale UI selection, or a concurrent
+    delete) lands in ``failed`` rather than aborting the whole batch. History is
+    purged per successfully-removed job, mirroring the single-delete path, and a
+    single ``crons`` refresh is pushed after the batch instead of one per id.
+    """
+    state: DashboardState = request.app["state"]
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "request body must be a JSON object"}, status=400)
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not ids:
+        return web.json_response({"error": "ids must be a non-empty array"}, status=400)
+    if not all(isinstance(i, str) for i in ids):
+        return web.json_response({"error": "ids must be an array of strings"}, status=400)
+    # De-duplicate while preserving order (a select-all + click race can send dupes).
+    unique_ids = list(dict.fromkeys(ids))
+    if len(unique_ids) > _MAX_BATCH_DELETE:
+        return web.json_response(
+            {"error": f"too many ids (max {_MAX_BATCH_DELETE})"}, status=400
+        )
+    deleted: list[str] = []
+    failed: list[str] = []
+    loop = asyncio.get_running_loop()
+    for job_id in unique_ids:
+        try:
+            # remove_job is a synchronous file save under a lock; offload it so a
+            # large batch (up to _MAX_BATCH_DELETE) can't block the event loop.
+            removed = await loop.run_in_executor(
+                cron_executor(), state.crons.remove_job, job_id
+            )
+        except Exception:
+            # remove_job itself raised (unexpected) — record and keep going.
+            logger.warning("Batch delete failed for cron %s", job_id, exc_info=True)
+            failed.append(job_id)
+            continue
+        if not removed:
+            failed.append(job_id)
+            continue
+        # The job is gone now, so it is unconditionally a successful delete.
+        # History cleanup is best-effort: a failure there must NOT reclassify a
+        # completed delete as "failed" — that would make the UI offer a retry
+        # that can never succeed (the job no longer exists).
+        deleted.append(job_id)
+        try:
+            await state.crons.get_history().delete_job_history(job_id)
+        except Exception:
+            logger.warning(
+                "History cleanup failed for cron %s (job already removed)",
+                job_id, exc_info=True,
+            )
+    # SEL audit: a destructive batch action must record who/what/when + the
+    # affected resources and outcome. Cron IDs are non-sensitive (no
+    # creds/PII), so logging them is compliant.
+    _sel().log_api_access(
+        caller="dashboard",
+        operation="cron.batch_delete",
+        outcome="ok" if deleted else "failed",
+        source="api_cron_batch_delete",
+        resources=f"requested={unique_ids} deleted={deleted} failed={failed}",
+    )
+    if deleted:
+        state.push_refresh("crons")
+    # ok reflects whether anything was actually deleted — consistent with the
+    # single-delete endpoint (ok:false when the job didn't exist) and the audit
+    # line above, so callers can detect a fully-failed batch without inspecting
+    # the arrays.
+    return web.json_response({"ok": len(deleted) > 0, "deleted": deleted, "failed": failed})
 
 
 async def api_cron_update(request: web.Request) -> web.Response:

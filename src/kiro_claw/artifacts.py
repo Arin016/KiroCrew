@@ -36,8 +36,10 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import unicodedata
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -161,6 +163,14 @@ class Artifact:
     #: re-saved (Mesh-1654 Phase 6 — re-saving offers to bump the existing
     #: artifact's version rather than creating a parallel one).
     source_path: str = ""
+    #: Nested-folder membership (Mesh-2720). ``""`` = unfiled (library root).
+    #: An opaque folder id (see :class:`ArtifactFolderStore`), never a path —
+    #: so renaming a folder never rewrites artifact records. Setting it is a
+    #: metadata-only mutation (:meth:`ArtifactStore.set_folder`) that does NOT
+    #: bump the version. Tolerant-loaded for legacy meta.json (defaults to
+    #: unfiled). Only local artifacts carry a folder; remote/shared artifacts
+    #: have no local record to hang one on.
+    folder_id: str = ""
     #: Computed at GET time: True when the current live content differs
     #: from the latest numbered snapshot. Lets the frontend enable the
     #: Snapshot button anytime live has drifted from history — including
@@ -425,6 +435,7 @@ class ArtifactStore:
         description: str = "",
         tags: list[str] | None = None,
         source_path: str = "",
+        folder_id: str = "",
     ) -> Artifact:
         """Persist a new artifact and return it.
 
@@ -469,6 +480,7 @@ class ArtifactStore:
                 updated_at=now,
                 content=content,
                 source_path=source_path[:512] if source_path else "",
+                folder_id=folder_id or "",
             )
             # Lifecycle: emit `created` event. New artifacts are tagged
             # `events_backfilled=True` because their history starts here —
@@ -758,6 +770,24 @@ class ArtifactStore:
             self._fire_change("rename", slug)
         return art
 
+    def set_folder(self, slug: str, folder_id: str) -> Artifact:
+        """Move an artifact into a folder (Mesh-2720) — metadata-only.
+
+        Setting ``folder_id`` (``""`` = unfiled/root) is a pure metadata
+        mutation: it does NOT bump the version, write a snapshot, or emit a
+        lifecycle event — the same class as retag/rename. The caller is
+        responsible for having validated that ``folder_id`` refers to a real
+        folder (or is empty); a dangling id is tolerated at read time
+        (treated as unfiled) but should not be written deliberately.
+        """
+        slug = _validate_slug(slug)
+        with self._lock:
+            art = self._load_meta(slug)
+            art.folder_id = folder_id or ""
+            self._write_meta(art)
+            logger.info("artifact folder set: slug=%s folder_id=%s", slug, art.folder_id or "(root)")
+            return art
+
     def delete(self, slug: str) -> None:
         """Permanently delete an artifact and all of its versions."""
         slug = _validate_slug(slug)
@@ -844,6 +874,7 @@ class ArtifactStore:
         name_contains: str | None = None,
         source: str | None = None,
         source_path: str | None = None,
+        folder: str | None = None,
     ) -> _List[Artifact]:
         """List all artifacts matching the given filters (sorted newest first).
 
@@ -885,6 +916,11 @@ class ArtifactStore:
             if name_contains and name_contains.lower() not in art.name.lower():
                 continue
             if source_path is not None and art.source_path != source_path:
+                continue
+            # ``folder is None`` means "don't scope" (all folders). An explicit
+            # value — including ``""`` — scopes to that folder id, where ``""``
+            # is the unfiled/root bucket.
+            if folder is not None and art.folder_id != folder:
                 continue
             results.append(art)
         results.sort(key=lambda a: a.updated_at, reverse=True)
@@ -1113,6 +1149,7 @@ class ArtifactStore:
             events=events,
             events_backfilled=bool(raw.get("events_backfilled", False)),
             source_path=str(raw.get("source_path", "")),
+            folder_id=str(raw.get("folder_id") or ""),
         )
 
     def _read_text(self, path: Path) -> str:
@@ -1172,6 +1209,436 @@ class ArtifactStore:
         path.rmdir()
 
 
+# ── Artifact folders (Mesh-2720) ────────────────────────────────────────────
+
+#: Human-path separator for folder addressing at the MCP/API boundary
+#: (e.g. ``"Opportunity Planner/Reports"``). Distinct from the display
+#: breadcrumb separator (`` › ``); paths are never stored on artifacts.
+FOLDER_PATH_SEP = "/"
+#: Cap on folder-tree nesting depth (mirrors the chat-folder tree guard).
+MAX_FOLDER_DEPTH = 20
+
+
+class ArtifactFolderStore:
+    """Filesystem-backed store for the nested artifact-library folder tree.
+
+    Mirrors the chat-folder subsystem (``dashboard/state.py`` folders): a flat
+    JSON list persisted to ``artifact_folders.json`` in the config dir, with
+    nesting expressed via ``parent_id`` pointers rather than nested storage or
+    path strings. Membership lives on the artifact record (``Artifact.folder_id``),
+    not here. Thread-safe via a coarse lock.
+
+    A folder record is ``{id, name, order, parent_id, icon}``:
+
+    * ``id`` — opaque 12-char hex (rename-safe handle).
+    * ``name`` — display name (<= 100 chars).
+    * ``order`` — sort order among siblings.
+    * ``parent_id`` — ``""`` = root; a dangling id is tolerated as root.
+    * ``icon`` — optional single-emoji glyph (may be absent).
+    * ``color`` — optional ``#rrggbb`` display color (may be absent).
+    """
+
+    _FILE = "artifact_folders.json"
+
+    def __init__(self, path: Path | None = None) -> None:
+        self._path = (path or (config_dir() / self._FILE)).expanduser()
+        self._lock = threading.Lock()
+        self._folders: _List[dict[str, Any]] = []
+        self._load()
+
+    # ── persistence ───────────────────────────────────────────────────────
+
+    def _load(self) -> None:
+        try:
+            if self._path.exists():
+                raw = json.loads(self._path.read_text(encoding="utf-8"))
+                if isinstance(raw, list):
+                    # Drop entries lacking an id (legacy/corrupt) so downstream
+                    # walks never KeyError on a missing "id".
+                    self._folders = [
+                        f for f in raw if isinstance(f, dict) and f.get("id")
+                    ]
+        except Exception:  # noqa: BLE001 — a corrupt file must not crash boot
+            logger.warning("Failed to load artifact folders", exc_info=True)
+
+    def _save(self) -> None:
+        """Atomic JSON write (tmp + rename), mirroring state persistence."""
+        payload = json.dumps(self._folders, indent=2, sort_keys=True).encode()
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(self._path.parent), suffix=".tmp")
+        try:
+            try:
+                os.write(fd, payload)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, str(self._path))
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    # ── internal helpers (call under lock) ────────────────────────────────
+
+    def _by_id(self) -> dict[str, dict[str, Any]]:
+        return {f["id"]: f for f in self._folders if isinstance(f, dict) and f.get("id")}
+
+    def _depth(self, folder_id: str) -> int:
+        """Number of ancestors above ``folder_id`` (root folder = 0). Cycle-safe."""
+        by_id = self._by_id()
+        depth = 0
+        seen: set[str] = set()
+        fid = str(by_id.get(folder_id, {}).get("parent_id") or "")
+        while fid and fid in by_id and fid not in seen:
+            seen.add(fid)
+            depth += 1
+            fid = str(by_id[fid].get("parent_id") or "")
+        return depth
+
+    def _subtree_ids(self, folder_id: str) -> set[str]:
+        """All folder ids in the subtree rooted at ``folder_id`` (inclusive)."""
+        by_id = self._by_id()
+        if folder_id not in by_id:
+            return set()
+        out: set[str] = set()
+        stack = [folder_id]
+        while stack:
+            cur = stack.pop()
+            if cur in out:
+                continue
+            out.add(cur)
+            for f in self._folders:
+                if str(f.get("parent_id") or "") == cur and f["id"] not in out:
+                    stack.append(f["id"])
+        return out
+
+    @staticmethod
+    def _clean_name(name: Any) -> str:
+        cleaned = str(name or "").strip()[:100]
+        if not cleaned:
+            raise ArtifactValidationError("folder name required")
+        return cleaned
+
+    # ── public API ────────────────────────────────────────────────────────
+
+    def list(self) -> _List[dict[str, Any]]:
+        """Return a copy of the folder records (sorted by depth-then-order)."""
+        with self._lock:
+            return [dict(f) for f in self._ordered()]
+
+    def _ordered(self) -> _List[dict[str, Any]]:
+        # Stable pre-order-ish ordering: siblings by (order, name); the frontend
+        # does its own tree flatten, so this is a convenience for CLI/MCP output.
+        return sorted(
+            self._folders,
+            key=lambda f: (self._depth(f["id"]), int(f.get("order", 0)), str(f.get("name", ""))),
+        )
+
+    def get(self, folder_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            f = self._by_id().get(folder_id)
+            return dict(f) if f else None
+
+    def exists(self, folder_id: str) -> bool:
+        if not folder_id:
+            return False
+        with self._lock:
+            return folder_id in self._by_id()
+
+    def create(self, name: str, parent_id: str = "", color: str = "") -> dict[str, Any]:
+        """Create a folder under ``parent_id`` (``""`` = root)."""
+        name = self._clean_name(name)
+        color = self._clean_color(color)
+        with self._lock:
+            parent_id = str(parent_id or "")
+            by_id = self._by_id()
+            if parent_id and parent_id not in by_id:
+                raise ArtifactValidationError(f"parent folder not found: {parent_id}")
+            if parent_id and self._depth(parent_id) + 1 >= MAX_FOLDER_DEPTH:
+                raise ArtifactValidationError(
+                    f"folder nesting exceeds max depth {MAX_FOLDER_DEPTH}"
+                )
+            folder = {
+                "id": uuid.uuid4().hex[:12],
+                "name": name,
+                "order": len(self._folders),
+                "parent_id": parent_id,
+            }
+            if color:
+                folder["color"] = color
+            self._folders.append(folder)
+            self._save()
+            logger.info("artifact folder created: id=%s name=%s parent=%s", folder["id"], name, parent_id or "(root)")
+            return dict(folder)
+
+    def rename(self, folder_id: str, name: str) -> dict[str, Any]:
+        name = self._clean_name(name)
+        with self._lock:
+            folder = self._by_id().get(folder_id)
+            if folder is None:
+                raise ArtifactNotFoundError(f"folder not found: {folder_id}")
+            folder["name"] = name
+            self._save()
+            return dict(folder)
+
+    def reparent(self, folder_id: str, new_parent: str = "") -> dict[str, Any]:
+        """Move a folder under ``new_parent`` (``""`` = root). Cycle-guarded."""
+        with self._lock:
+            by_id = self._by_id()
+            folder = by_id.get(folder_id)
+            if folder is None:
+                raise ArtifactNotFoundError(f"folder not found: {folder_id}")
+            new_parent = str(new_parent or "")
+            if new_parent:
+                if new_parent not in by_id:
+                    raise ArtifactValidationError(f"parent folder not found: {new_parent}")
+                subtree = self._subtree_ids(folder_id)
+                # Cycle guard: a folder may not become its own descendant.
+                if new_parent in subtree:
+                    raise ArtifactValidationError(
+                        "cannot move a folder into itself or one of its descendants"
+                    )
+                # Depth guard: the deepest node in the moved subtree must still
+                # fit under MAX_FOLDER_DEPTH at the destination — otherwise two
+                # shallow subtrees could be merged past the limit that create()
+                # and resolve_path() enforce.
+                base_depth = self._depth(folder_id)
+                subtree_height = max(self._depth(sid) for sid in subtree) - base_depth
+                if self._depth(new_parent) + 1 + subtree_height >= MAX_FOLDER_DEPTH:
+                    raise ArtifactValidationError(
+                        f"folder nesting exceeds max depth {MAX_FOLDER_DEPTH}"
+                    )
+            folder["parent_id"] = new_parent
+            self._save()
+            return dict(folder)
+
+    def set_icon(self, folder_id: str, icon: str) -> dict[str, Any]:
+        with self._lock:
+            folder = self._by_id().get(folder_id)
+            if folder is None:
+                raise ArtifactNotFoundError(f"folder not found: {folder_id}")
+            folder["icon"] = str(icon or "")[:16]
+            self._save()
+            return dict(folder)
+
+    @staticmethod
+    def _clean_color(color: str) -> str:
+        """Validate a folder color: ``""`` (none) or a ``#rrggbb`` hex value."""
+        color = str(color or "").strip()
+        if color and not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+            raise ArtifactValidationError("folder color must be a #rrggbb hex value")
+        return color.lower()
+
+    def set_color(self, folder_id: str, color: str) -> dict[str, Any]:
+        """Set (or clear, with ``""``) the folder's display color."""
+        color = self._clean_color(color)
+        with self._lock:
+            folder = self._by_id().get(folder_id)
+            if folder is None:
+                raise ArtifactNotFoundError(f"folder not found: {folder_id}")
+            if color:
+                folder["color"] = color
+            else:
+                folder.pop("color", None)
+            self._save()
+            return dict(folder)
+
+    def reorder(self, orders: _List[dict[str, Any]]) -> None:
+        """Apply ``[{id, order}, ...]`` sibling ordering (minimal patch)."""
+        with self._lock:
+            by_id = self._by_id()
+            for entry in orders:
+                if not isinstance(entry, dict):
+                    continue
+                fid = entry.get("id")
+                if fid in by_id and "order" in entry:
+                    by_id[fid]["order"] = int(entry["order"])
+            self._save()
+
+    def resolve_path(self, ref: str, *, create_missing: bool = False) -> str:
+        """Resolve a folder id OR a human path to a folder id.
+
+        ``ref`` may be:
+
+        * ``""`` / ``None`` / ``"root"`` (case-insensitive) → ``""`` (root).
+        * an existing folder id → returned as-is.
+        * a ``/``-separated path (``"A/B/C"``) → walked segment-by-segment
+          from the root by (case-insensitive) name. When ``create_missing``
+          is True, missing segments are created (``mkdir -p`` semantics);
+          otherwise a missing segment raises :class:`ArtifactNotFoundError`.
+
+        Returns the resolved leaf folder id (``""`` for root).
+        """
+        ref = str(ref or "").strip()
+        if not ref or ref.lower() == "root":
+            return ""
+        with self._lock:
+            by_id = self._by_id()
+            if ref in by_id:
+                return ref
+            segments = [s.strip() for s in ref.split(FOLDER_PATH_SEP) if s.strip()]
+            if not segments:
+                return ""
+            parent = ""
+            # All-or-nothing: if a later segment fails the depth guard (or a
+            # non-create lookup misses), roll back any folders appended during
+            # this attempt so in-memory state never drifts from disk.
+            snapshot_len = len(self._folders)
+            created_any = False
+            try:
+                for seg in segments:
+                    # Normalize through the SAME truncation _clean_name applies
+                    # on create, so a >100-char segment matches the folder it
+                    # created on a prior call (lookup key == stored name) —
+                    # otherwise repeated resolves would mint duplicates.
+                    seg_norm = self._clean_name(seg).lower()
+                    match = next(
+                        (
+                            f
+                            for f in self._folders
+                            if str(f.get("parent_id") or "") == parent
+                            and str(f.get("name", "")).strip().lower() == seg_norm
+                        ),
+                        None,
+                    )
+                    if match is None:
+                        if not create_missing:
+                            raise ArtifactNotFoundError(f"folder path not found: {ref}")
+                        if parent and self._depth(parent) + 1 >= MAX_FOLDER_DEPTH:
+                            raise ArtifactValidationError(
+                                f"folder nesting exceeds max depth {MAX_FOLDER_DEPTH}"
+                            )
+                        match = {
+                            "id": uuid.uuid4().hex[:12],
+                            "name": self._clean_name(seg),
+                            "order": len(self._folders),
+                            "parent_id": parent,
+                        }
+                        self._folders.append(match)
+                        created_any = True
+                    parent = match["id"]
+            except (ArtifactValidationError, ArtifactNotFoundError):
+                # Discard folders appended during this failed attempt.
+                del self._folders[snapshot_len:]
+                raise
+            if created_any:
+                self._save()
+            return parent
+
+    def breadcrumb(self, folder_id: str, sep: str = FOLDER_PATH_SEP) -> str:
+        """Render a folder's ancestry root→leaf as a ``sep``-joined path."""
+        if not folder_id:
+            return ""
+        with self._lock:
+            by_id = self._by_id()
+            names: _List[str] = []
+            seen: set[str] = set()
+            fid = folder_id
+            while fid and fid in by_id and fid not in seen:
+                seen.add(fid)
+                names.append(str(by_id[fid].get("name", "")))
+                fid = str(by_id[fid].get("parent_id") or "")
+            names.reverse()
+            return sep.join(n for n in names if n)
+
+    def item_counts(self, artifact_store: "ArtifactStore") -> dict[str, int]:
+        """Direct-artifact count per folder id (unfiled excluded)."""
+        counts: dict[str, int] = {}
+        for art in artifact_store.list():
+            fid = getattr(art, "folder_id", "") or ""
+            if fid:
+                counts[fid] = counts.get(fid, 0) + 1
+        return counts
+
+    def list_with_counts(self, artifact_store: "ArtifactStore") -> _List[dict[str, Any]]:
+        """Folders enriched with a computed, non-persisted ``item_count``."""
+        counts = self.item_counts(artifact_store)
+        return [{**f, "item_count": counts.get(f["id"], 0)} for f in self.list()]
+
+    def delete(
+        self,
+        folder_id: str,
+        *,
+        delete_contents: bool,
+        artifact_store: "ArtifactStore",
+    ) -> dict[str, Any]:
+        """Delete a folder. ``delete_contents`` picks the semantics:
+
+        * **False (safe, default)** — delete only this folder; re-parent its
+          direct child folders and artifacts to this folder's parent (root if
+          none). Descendant folders travel up with their re-parented parent.
+        * **True (cascade)** — permanently delete the whole subtree: every
+          descendant artifact (via the guarded :meth:`ArtifactStore.delete`)
+          and every descendant folder.
+
+        Returns a summary dict describing what changed.
+        """
+        # Phase 1 (under folder lock): mutate the folder tree, decide the
+        # affected id set. Phase 2 (outside the lock): touch the artifact
+        # store, which has its own independent lock.
+        with self._lock:
+            by_id = self._by_id()
+            folder = by_id.get(folder_id)
+            if folder is None:
+                raise ArtifactNotFoundError(f"folder not found: {folder_id}")
+            parent = str(folder.get("parent_id") or "")
+            if delete_contents:
+                affected_ids = self._subtree_ids(folder_id)
+            else:
+                affected_ids = {folder_id}
+                # Re-parent direct child folders up to this folder's parent.
+                for f in self._folders:
+                    if str(f.get("parent_id") or "") == folder_id:
+                        f["parent_id"] = parent
+            self._folders = [f for f in self._folders if f.get("id") not in affected_ids]
+            self._save()
+
+        # Phase 2: artifacts. ``affected_ids`` is the subtree for cascade, or
+        # just the single folder for the safe path.
+        #
+        # Race window (accepted): Phase 2 runs OUTSIDE the folder lock (the
+        # artifact store has its own independent lock, and holding both would
+        # invite ordering deadlocks). Between Phase 1 removing the folder and
+        # this scan re-parenting/deleting its artifacts, a concurrent
+        # ``ArtifactStore.set_folder()`` could file an artifact into the
+        # just-deleted folder id. Such an artifact simply ends up with a
+        # dangling ``folder_id``, which every reader already tolerates by
+        # degrading it to Unfiled (see ``list(folder=)`` and the tree view's
+        # dangling-id handling). Acceptable for a single-user local tool; not
+        # worth cross-lock coordination.
+        deleted_slugs: _List[str] = []
+        reparented_slugs: _List[str] = []
+        for art in artifact_store.list():
+            fid = getattr(art, "folder_id", "") or ""
+            if fid not in affected_ids:
+                continue
+            if delete_contents:
+                try:
+                    artifact_store.delete(art.slug)
+                    deleted_slugs.append(art.slug)
+                except ArtifactError as exc:  # pragma: no cover — best-effort
+                    logger.warning("cascade delete failed for %s: %s", art.slug, exc)
+            else:
+                artifact_store.set_folder(art.slug, parent)
+                reparented_slugs.append(art.slug)
+        logger.info(
+            "artifact folder deleted: id=%s cascade=%s folders=%d artifacts=%d",
+            folder_id,
+            delete_contents,
+            len(affected_ids),
+            len(deleted_slugs) if delete_contents else len(reparented_slugs),
+        )
+        return {
+            "deleted_folder_ids": sorted(affected_ids),
+            "deleted_artifact_slugs": deleted_slugs,
+            "reparented_artifact_slugs": reparented_slugs,
+            "reparented_to": parent,
+            "delete_contents": delete_contents,
+        }
+
+
 # ── Module-level singleton ──────────────────────────────────────────────────
 
 _default_store: ArtifactStore | None = None
@@ -1192,3 +1659,23 @@ def reset_default_store() -> None:
     global _default_store
     with _default_store_lock:
         _default_store = None
+
+
+_default_folder_store: "ArtifactFolderStore | None" = None
+_default_folder_store_lock = threading.Lock()
+
+
+def get_default_folder_store() -> "ArtifactFolderStore":
+    """Return the process-wide default artifact-folder store (lazy-initialized)."""
+    global _default_folder_store
+    with _default_folder_store_lock:
+        if _default_folder_store is None:
+            _default_folder_store = ArtifactFolderStore()
+        return _default_folder_store
+
+
+def reset_default_folder_store() -> None:
+    """Drop the cached default folder store (test-only helper)."""
+    global _default_folder_store
+    with _default_folder_store_lock:
+        _default_folder_store = None

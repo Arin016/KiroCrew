@@ -93,6 +93,11 @@ class TestDashboardOrigin:
     def test_empty_returns_empty(self) -> None:
         assert dashboard_origin("") == ""
 
+    def test_none_returns_empty(self) -> None:
+        # None-safety guard: an explicit "url": null in config must be treated
+        # as "no origin", not crash the caller.
+        assert dashboard_origin(None) == ""  # type: ignore[arg-type]
+
     def test_https_url(self) -> None:
         assert dashboard_origin("https://kiroclaw.local") == "https://kiroclaw.local"
 

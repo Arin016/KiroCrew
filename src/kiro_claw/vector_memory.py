@@ -822,10 +822,16 @@ class VectorMemoryStore:
             "SELECT id, embedding FROM episodic_memories "
             "WHERE is_deleted = 0 AND embedding IS NOT NULL"
         ).fetchall()
+        skipped = 0
         for row in rows:
             vec = np.frombuffer(row["embedding"], dtype=np.float32).reshape(1, -1)
+            if vec.shape[1] != self._embedding_dim:
+                skipped += 1
+                continue
             self._faiss_index.add(vec)  # type: ignore[union-attr]
             self._faiss_id_map.append(row["id"])
+        if skipped:
+            logger.warning("Skipped %d episodic entries with mismatched embedding dim (expected %d)", skipped, self._embedding_dim)
         logger.info("Built FAISS index with %d vectors", len(self._faiss_id_map))
         return len(self._faiss_id_map)
 

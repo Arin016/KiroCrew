@@ -206,11 +206,29 @@ def _restore_default_child_watcher():
 
 @pytest.fixture(autouse=True)
 def _git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure git commits succeed in environments without a global git identity."""
+    """Make git tests hermetic: pin identity AND neutralize host global/system config.
+
+    Two independent host-environment bleeds must be closed for git-backed tests
+    (git_coord scenarios) to be deterministic across machines:
+
+    1. Identity — a host without a global ``user.name``/``user.email`` makes
+       ``git commit`` fail. Pin it via the ``GIT_AUTHOR_*``/``GIT_COMMITTER_*``
+       env vars.
+    2. Global/system config — the host's ``~/.gitconfig`` (via
+       ``core.excludesFile`` → e.g. ``~/.gitignore_global`` containing ``*.png``)
+       silently makes ``git add -A`` skip files, so a "commit a binary file"
+       test sees an empty tree and gets an empty sha. Point
+       ``GIT_CONFIG_GLOBAL``/``GIT_CONFIG_SYSTEM`` at ``/dev/null`` so no
+       host-level config (excludes, aliases, hooks, signing) leaks into tests.
+    """
     monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.com")
     monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
+    # Isolate from the host's global/system git config (Git >= 2.32). An empty
+    # file (/dev/null) means git reads no global or system settings.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
 
 
 @pytest.fixture(autouse=True)

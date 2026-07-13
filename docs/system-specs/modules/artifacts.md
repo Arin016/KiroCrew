@@ -93,12 +93,18 @@ doc stored as `widget` renders as raw inner HTML).
 
 | Tool | Purpose |
 |---|---|
-| `artifact_save` | Create a new artifact, returns slug |
+| `artifact_save` | Create a new artifact, returns slug; optional `folder` (id or `/`-separated human path, mkdir -p) files it in one call |
 | `artifact_get` | Read content + metadata (optionally a specific version) |
 | `artifact_update` | Modify content/name/description/tags; bumps version on content change |
 | `artifact_list` | List artifacts (filter by `tag`, `kind`, name `q`) |
 | `artifact_versions` | List version numbers for a slug |
 | `artifact_delete` | Permanent delete (artifact + all versions) |
+| `artifact_folder_list` | List the folder tree (id, name, parent_id, path, item_count) |
+| `artifact_folder_create` | Create a folder; `parent` = id or path (mkdir -p) |
+| `artifact_folder_rename` | Rename a folder (id or path) |
+| `artifact_folder_move` | Reparent a folder; cycle-guarded |
+| `artifact_folder_delete` | Delete a folder; default keeps contents (re-parent), `delete_contents=true` cascades |
+| `artifact_move` | Move an artifact into a folder / unfile it (metadata-only, no version bump) |
 
 Schemas live in `validation.py` (`ARTIFACT_*_SCHEMA`) and are registered in
 `MCP_CORE_SCHEMAS`. The MCP tool layer always proxies through the HTTP API so
@@ -122,16 +128,40 @@ The CLI proxies through the gateway HTTP API (matches `kiroclaw learn`).
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/api/artifacts` | `?tag&kind&q` filters; returns `{artifacts: […]}` |
-| `POST` | `/api/artifacts` | JSON body — creates, returns full artifact + content |
+| `GET` | `/api/artifacts` | `?tag&kind&q` filters + `?folder=` scoping (absent = all; empty = unfiled/root; id = that folder); returns `{artifacts: […]}` |
+| `POST` | `/api/artifacts` | JSON body — creates, returns full artifact + content; optional `folder` key (id or human path, mkdir -p) |
 | `GET` | `/api/artifacts/{slug}` | Returns full artifact + content |
-| `PATCH` | `/api/artifacts/{slug}` | Partial update; `content` bumps version |
+| `PATCH` | `/api/artifacts/{slug}` | Partial update; `content` bumps version; optional `folder` key (metadata-only) |
 | `DELETE` | `/api/artifacts/{slug}` | Permanent delete |
 | `GET` | `/api/artifacts/{slug}/versions` | `{slug, versions: [int]}` |
 | `GET` | `/api/artifacts/{slug}/versions/{n}` | Specific version content |
+| `GET` | `/api/artifact-folders` | Folder tree with `item_count` + breadcrumb `path` |
+| `POST` | `/api/artifact-folders` | Create folder `{name, parent?\|parent_id?, color?}`; spawns background emoji-icon task |
+| `PATCH` | `/api/artifact-folders/{id}` | Rename / reparent / reorder / icon / color |
+| `DELETE` | `/api/artifact-folders/{id}` | `?delete_contents=` picks keep (re-parent, default) vs cascade (delete subtree incl. artifacts) |
+| `PATCH` | `/api/artifacts/{slug}/folder` | Move an artifact into a folder (`{folder}` id/path or `{folder_id}` id-only) |
 
 POST/PATCH/DELETE require an unrestricted session. The body is capped at
 2 MiB; the store enforces a per-content cap of 1 MiB.
+
+**Folders (Mesh-2720):** `Artifact.folder_id` (`""` = unfiled) is an opaque,
+rename-safe membership id, tolerant-loaded for legacy meta.json.
+`ArtifactStore.set_folder()` is a metadata-only move (NO version bump);
+`list(folder=)` filters (None = all, `""` = unfiled, id = that folder).
+`ArtifactFolderStore` keeps a flat `parent_id` tree in
+`~/.kiroclaw/artifact_folders.json` — create/rename/reparent (cycle- and
+depth-guarded, `MAX_FOLDER_DEPTH` 20)/reorder/delete, breadcrumb, item counts,
+and id-or-path resolution with mkdir -p semantics (`resolve_path`, all-or-nothing
+rollback). Folder delete is an explicit choice: keep (re-parent direct children
+to the parent) vs cascade (permanently delete the whole subtree, incl.
+descendant artifacts) — never silent.
+
+**Auth note (fork adaptation):** `"/api/artifact-folders"` is registered in
+`token_auth`'s `mixed_internal_paths` in `server.py` — the 5 folder MCP tools
+authenticate via `X-Internal-Secret`, and the prefix matcher
+(`path == p or path.startswith(p + "/")`) does NOT cover the hyphenated path
+via the `"/api/artifacts"` entry. Guarded by a regression test in
+`test_artifact_folder_handlers.py`.
 
 ### Dashboard pages
 

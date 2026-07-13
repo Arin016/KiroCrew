@@ -93,6 +93,17 @@ def test_example_d_memory_binds(patch_host) -> None:
     assert compute_max_subagents(cfg) == 10
 
 
+def test_shared_marginal_cost_binds_on_provider_ceiling(patch_host) -> None:
+    # Stage 1: with session-shared marginal costs (mem≈0.05 GB, cpu≈0.25 core),
+    # even a modest 8 GB / 4 core host is no longer RAM-bound — the cap rises to
+    # the provider ceiling (hard_cap) instead of the legacy floor of 3.
+    # mem_term = floor((8*0.8)/0.05) = 128; cpu_term = floor((4*0.8)/0.25) = 12;
+    # min(128, 12, 16) = 12 (was 3 when the whole shared process was charged).
+    patch_host(8.0, 4)
+    cfg = _cfg(mem_cost=0.05, cpu_cost=0.25, hard_cap=16)
+    assert compute_max_subagents(cfg) == 12
+
+
 # --- Edge cases ------------------------------------------------------------
 
 
@@ -377,6 +388,37 @@ class TestSampleLiveCosts:
         m._sample_live_costs()
         assert called["n"] == 0  # done agent not sampled
         assert done.peak_rss_gb == 0.0
+
+    def test_session_shared_agents_record_averaged_share(self, monkeypatch) -> None:
+        """Shared subagents share ONE runtime PID; each must be charged the
+        measured RSS/CPU divided by the number of live shared sessions on that
+        PID (an empirical per-session average), not the whole shared process."""
+        import kiro_claw.subagent as sub
+        from kiro_claw.subagent import SubagentInfo
+
+        m = _mgr(running=2, max_concurrent=16, last_ts=0.0)
+        # Two shared subagents on the SAME runtime PID.
+        a = SubagentInfo(id="a1", task="t", agent="kiroclaw")
+        a._pid = 4242
+        a._session_sharing = True
+        b = SubagentInfo(id="a2", task="t", agent="kiroclaw")
+        b._pid = 4242
+        b._session_sharing = True
+        m._agents = {"a1": a, "a2": b}
+
+        # Shared runtime measures 4 GB RSS; with 2 live shared sessions each
+        # agent is charged 2 GB, never the full 4 GB.
+        monkeypatch.setattr(sub, "_proc_rss_kb", lambda pid: 4 * 1024 * 1024)
+        monkeypatch.setattr(sub, "_subtree_cpu_jiffies", lambda pid: 0)
+        m._sample_live_costs()
+
+        assert a.peak_rss_gb == pytest.approx(2.0, abs=0.01)
+        assert b.peak_rss_gb == pytest.approx(2.0, abs=0.01)
+        # Single shared session → full measured RSS (divisor 1).
+        b.done = True
+        monkeypatch.setattr(sub, "_proc_rss_kb", lambda pid: 3 * 1024 * 1024)
+        m._sample_live_costs()
+        assert a.peak_rss_gb == pytest.approx(3.0, abs=0.01)
 
 
 # ---------------------------------------------------------------------------

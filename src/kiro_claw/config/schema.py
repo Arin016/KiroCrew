@@ -169,7 +169,17 @@ def _build_field_schema(
         schema = _build_object_schema(tp)
     else:
         json_type = _python_type_to_json(tp)
-        schema["type"] = json_type
+        # A field marked ``nullable`` in its metadata accepts JSON ``null`` in
+        # addition to its base type. Needed for disable-sentinel fields where
+        # ``null`` is a meaningful value the loader normalizes (e.g.
+        # session.archive_retention_days: null → "disable cleanup", Mesh-1832).
+        # Without this the generated schema is ``{"type": "integer"}`` and
+        # jsonschema strips the null on any host where jsonschema is installed
+        # (incl. prod), silently reverting to the default — the opposite intent.
+        if meta.get("nullable"):
+            schema["type"] = [json_type, "null"]
+        else:
+            schema["type"] = json_type
 
         if json_type == "array":
             item_tp = _extract_item_type(tp)

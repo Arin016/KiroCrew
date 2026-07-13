@@ -40,7 +40,7 @@ Set via `kiroclaw config set sandbox.mode auto`.
     "conductor_skill": false,
     "max_channels": 1,
     "max_channel_agents": 3,
-    "max_subagents": 3,
+    "max_subagents": 0,
     "subagent_max_turns": 100,
     "spawn_min_memory_gb": 4.0,
     "soft_stop_budget_secs": 10.0,
@@ -100,7 +100,7 @@ Set via `kiroclaw config set sandbox.mode auto`.
 | `agent.max_channels` | Max concurrent agent channels (1-5) | `1` |
 | `agent.max_channel_agents` | Max agents per channel (1-10) | `3` |
 | `agent.soft_stop_budget_secs` | Seconds to wait for cooperative cancel before hard kill | `10.0` |
-| `agent.max_subagents` | Maximum concurrent subagents | `3` |
+| `agent.max_subagents` | Maximum concurrent subagents (`0` = auto-size at startup) | `0` |
 | `agent.subagent_max_turns` | Default tool-call budget per subagent | `100` |
 | `agent.spawn_min_memory_gb` | Minimum available memory (GB) to spawn a subagent (0 disables) | `4.0` |
 | `agent.completion_keep` | Which end of the subagent transcript to keep in the completion event injected into the parent session. Three values: `"head"` (first N chars), `"tail"` (last N chars), `"both"` (head + middle marker + tail). | `"head"` |

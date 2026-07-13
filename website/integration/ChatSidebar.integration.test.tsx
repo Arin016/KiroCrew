@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { screen, waitFor, fireEvent } from '@testing-library/react'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { screen, waitFor, fireEvent, act, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 vi.mock('@radix-ui/react-dropdown-menu', () => import('./__mocks__/@radix-ui/react-dropdown-menu'))
@@ -9,6 +9,7 @@ import ChatSidebar from '../src/pages/ChatSidebar'
 import { renderWithProviders } from './helpers'
 import { server } from './mocks/server'
 import { http, HttpResponse } from 'msw'
+import { __resetAuthRecoveryStateForTests } from '../src/api/client'
 
 const mockConfirm = vi.fn(() => true)
 Object.defineProperty(window, 'confirm', { writable: true, value: mockConfirm })
@@ -34,6 +35,20 @@ describe('ChatSidebar Folder Grouping', () => {
     vi.clearAllMocks()
     localStorage.clear()
     mockConfirm.mockReturnValue(true)
+    // Hermetic focus baseline. api/client.ts shows a session-expired banner on an
+    // unhandled auth 403 and its token input grabs focus on a rAF (client.ts
+    // ~L137). That module state latches across tests in the same file, so a
+    // later rename/create test's rAF flush lets the banner steal focus from the
+    // just-opened input → blur → commit → unmount, a jsdom-only focus-theft the
+    // real browser never hits. Stub the auth endpoints so the banner never
+    // shows, reset the module's latch + remove any stray banner, and clear any
+    // bled-in focus before each test.
+    server.use(
+      http.post('/api/auth/refresh', () => HttpResponse.json({ ok: true })),
+      http.get('/api/auth/me', () => HttpResponse.json({ ok: true })),
+    )
+    __resetAuthRecoveryStateForTests()
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
     // Default: no folders
     server.use(
       http.get('/api/chat/folders', () => HttpResponse.json([])),
@@ -51,6 +66,17 @@ describe('ChatSidebar Folder Grouping', () => {
         return HttpResponse.json({ ok: true, folder_id: body.folder_id })
       }),
     )
+  })
+
+  // Unmount + drop focus after each case so an open folder rename/create input
+  // (and document.activeElement) doesn't survive into the next test file. jsdom
+  // shares one document across files; without this the folder Escape-to-cancel
+  // test and cross-file focus assertions become order-dependent. Scoped to this
+  // file rather than a global afterEach(cleanup), which unmounts other files'
+  // in-flight async trees (e.g. HooksPage) and breaks them.
+  afterEach(() => {
+    cleanup()
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
   })
 
   it('renders all sessions without folders by default', async () => {
@@ -99,7 +125,11 @@ describe('ChatSidebar Folder Grouping', () => {
 
     await user.click(await screen.findByLabelText('More create options'))
     await user.click(await screen.findByText('New folder'))
-    expect(screen.getByPlaceholderText('Folder name…')).toBeInTheDocument()
+    const input = screen.getByPlaceholderText('Folder name…')
+    // The input is focused via a rAF effect (Mesh-2683); user.keyboard dispatches
+    // to document.activeElement, so under load Escape could land on <body> before
+    // the focus settled and the cancel handler never fired (flaky in CI).
+    await waitFor(() => expect(input).toHaveFocus())
     await user.keyboard('{Escape}')
 
     expect(screen.queryByPlaceholderText('Folder name…')).not.toBeInTheDocument()
@@ -213,6 +243,66 @@ describe('ChatSidebar Folder Grouping', () => {
     await user.keyboard('{Enter}')
 
     expect(screen.getByText('New Name')).toBeInTheDocument()
+  })
+
+  // Regression: folder rename via the hover Rename button. Upstream drives this
+  // through a folder ⋯ menu (whose Radix close-focus-restore blurs the
+  // just-opened rename input — CR-286161833 bug class); the fork's entry point
+  // is an inline hover button, so the menu-close race can't fire here, but the
+  // test still guards the user-visible survival: the input mounts, stays
+  // mounted through the rAF focus flush, and commits.
+  //
+  // Asserts mount + commit, NOT caret/selection: jsdom drops activeElement to
+  // <body> across portal teardown, so focus placement is browser-smoke
+  // verified, not here.
+  it('keeps the folder rename input open through the rename-button flow (edit not cancelled)', async () => {
+    let folders = [{ id: 'f1', name: 'Old Name', order: 0, collapsed: false }]
+    server.use(
+      http.get('/api/chat/folders', () => HttpResponse.json(folders)),
+      http.patch('/api/chat/folders/:id', async ({ request, params }) => {
+        const body = await request.json() as any
+        folders = folders.map(f => f.id === params.id ? { ...f, ...body } : f)
+        return HttpResponse.json(folders.find(f => f.id === params.id))
+      }),
+    )
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    await waitFor(() => expect(screen.getByText('Old Name')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('folder-rename-f1'))
+    // Flush the rAF focus effect (and any pending close-focus-restore).
+    for (let i = 0; i < 3; i++) {
+      await act(async () => { await new Promise(r => requestAnimationFrame(() => r(null))) })
+    }
+
+    // The edit survives: the input is still mounted. On broken code the
+    // restore blurs it, renameCommit fires, editingId clears, and the input
+    // unmounts — this would then throw.
+    const input = screen.getByDisplayValue('Old Name') as HTMLInputElement
+    expect(input).toBeInTheDocument()
+
+    // And it commits: typing a new name + Enter persists via the API.
+    fireEvent.change(input, { target: { value: 'New Name' } })
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', keyCode: 13 })
+    await waitFor(() => expect(screen.getByText('New Name')).toBeInTheDocument())
+  })
+
+  // Regression: "New folder" from the create menu opens an inline input the same
+  // way rename does, so it hit the same focus race — the caret didn't land in the
+  // box (found in manual smoke). Asserts the input mounts + survives the menu
+  // close (jsdom-reliable); caret placement is browser-smoke verified.
+  it('keeps the New folder input open through the create-menu close', async () => {
+    renderWithProviders(<ChatSidebar {...defaultProps} />)
+    fireEvent.click(await screen.findByLabelText('More create options'))
+    fireEvent.click(await screen.findByText('New folder'))
+    // Flush the menu's close-focus-restore (double rAF in the mock).
+    for (let i = 0; i < 3; i++) {
+      await act(async () => { await new Promise(r => requestAnimationFrame(() => r(null))) })
+    }
+    // The input is still present after the restore (not blurred → cancelled).
+    const input = screen.getByPlaceholderText('Folder name…')
+    expect(input).toBeInTheDocument()
+    // Dismiss it so the open create input doesn't bleed into the next test.
+    fireEvent.keyDown(input, { key: 'Escape', code: 'Escape' })
   })
 
   it('pinned sessions appear above folders', async () => {

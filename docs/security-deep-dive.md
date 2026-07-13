@@ -54,6 +54,8 @@ Two-pipe synchronization ensures correct ordering. The child retains the real UI
 
 Config: `agent.sandbox` in `~/.kiroclaw/config.json`.
 
+The env scrub additionally strips `PYTHONPATH`/`PYTHONHOME` (`strip_python_env=True`), but **only** on the foreign kiro-cli/agent spawn path — never for KiroClaw's own sandboxed Python children, which import `kiro_claw` via `PYTHONPATH` and would break if it were stripped. This isolates the foreign process from KiroClaw's `PYTHONPATH`, which would otherwise leak in and shadow the agent's (and its MCP servers') own dependencies.
+
 ### Why Standard Mode Is Safe
 
 Protection depth depends on the access path:
@@ -113,7 +115,7 @@ Regex patterns in `agents/defaults.json` blocking:
 - `cat ~/.aws/*`, `cat ~/.ssh/*` (direct reads)
 
 **Destructive operations:**
-- `rm -rf /`, `rm -rf ~`, `git push --force`
+- `rm -rf /`, `rm -rf ~`, `git push` to a protected branch (`main`/`mainline` plus the legacy Git default-branch name — force-push to a feature branch stays allowed; `--mirror`/`--all` denied; each push segment of a compound command is validated)
 - `aws * delete-*`, `aws ec2 terminate-instances`
 - `cdk destroy`, `terraform destroy`
 - `DROP TABLE`, `DROP DATABASE`
@@ -271,6 +273,10 @@ Additional controls:
 ### CSRF Protection
 
 Origin/Referer validation on POST/PUT/DELETE. Shared `check_origin()` for both HTTP middleware and WebSocket.
+
+### Host-Header Validation (DNS-Rebinding Defense)
+
+A parallel `Host`-header barrier (AVP-23427) runs alongside the Origin check as the second middleware in the chain (`host_validation_middleware`, registered before `csrf_middleware`). Unlike CSRF, it runs on **every** method — GET-based data exfiltration is the DNS-rebinding payload, and it does **not** trust a loopback `request.remote` (a rebound request *is* loopback at the socket while `Host` carries the attacker's forged domain). `check_host()` derives a hostname allowlist from `app['allowed_origins']` plus a canonical-loopback floor via `build_allowed_hosts()`, so the Host and Origin layers share one source of truth and cannot drift. The comparison is port-independent (hostname only). It is deny-by-default: an empty/missing `allowed_origins` is treated as a denial (never fail-open), and a missing `Host` is allowed only from a loopback remote (non-browser local IPC). On rejection it returns 403 and emits a SEL audit event.
 
 ### Enterprise Grid Validation
 

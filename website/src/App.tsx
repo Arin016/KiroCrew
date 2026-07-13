@@ -31,6 +31,8 @@ import { DndContext, closestCenter, MouseSensor, TouchSensor, useSensor, useSens
 import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import ChatPage from './pages/ChatPage'
+import PopoutFrame from './pages/PopoutFrame'
+import ArtifactPopoutFrame from './pages/ArtifactPopoutFrame'
 
 import ErrorBoundary from './components/ErrorBoundary'
 import Clickable from './components/Clickable'
@@ -624,6 +626,7 @@ function NotificationsBellButton() {
 export default function App() {
   const location = useLocation()
   const isEmbed = location.pathname.startsWith('/embed/')
+  const isPopout = location.pathname.startsWith('/popout/')
   const dispatch = useAppDispatch()
   const { connected, updateProgress } = useAppSelector(s => s.dashboard)
   const updateAvailable = useAppSelector(s => s.dashboard.status?.update_available)
@@ -1152,7 +1155,13 @@ export default function App() {
   return (
     <ZoomProvider>
     <WsContext.Provider value={{ subscribeLogs, subscribeSubagents, forceReconnect }}>
-    {isEmbed ? (
+    {isPopout ? (
+      <Routes>
+        <Route path="/popout/chat/:slug?" element={<ErrorBoundary><PopoutFrame /></ErrorBoundary>} />
+        <Route path="/popout/artifact/:slug" element={<ErrorBoundary><ArtifactPopoutFrame /></ErrorBoundary>} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    ) : isEmbed ? (
       <div className="h-screen w-screen overflow-hidden bg-bg flex flex-col">
         <KiroClawNavBridge />
         <EmbedTabStrip />

@@ -7,7 +7,7 @@
  *   - Empty state + list (active + history) rendering
  *   - Campaign detail: findings, evidence badges, controls, nudge
  *   - Stagnation banner
- *   - Setup wizard: steps, sub-questions, sources, validation pass/fail, submit
+ *   - Setup wizard: steps, sub-questions, validation pass/fail, submit
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
@@ -281,13 +281,11 @@ describe('ResearchLabPage', () => {
     const ta = await screen.findByPlaceholderText(/How do other teams/i)
     await user.type(ta, 'How do other teams handle API rate limiting in production?')
     await user.click(screen.getByRole('button', { name: /Next/i }))
-    // Step 1 — sources
-    await user.click(screen.getByRole('button', { name: /Next/i }))
-    // Step 2 — limits + definition of done
+    // Step 1 — limits + definition of done
     await user.type(screen.getByPlaceholderText(/AI code review/i), 'Build passes')
     await user.click(screen.getByRole('checkbox'))  // run unattended (skip questions)
     await user.click(screen.getByRole('button', { name: /Next/i }))
-    // Step 3 — review triggers validate()
+    // Step 2 — review triggers validate()
     await waitFor(() => expect(screen.getByText(/All checks passed/i)).toBeInTheDocument())
     expect(vi.mocked(api.researchValidate)).toHaveBeenCalled()
     expect(screen.getByText(/Done when: Build passes/i)).toBeInTheDocument()
@@ -303,7 +301,7 @@ describe('ResearchLabPage', () => {
   it('wizard surfaces validation errors and disables Start', async () => {
     vi.mocked(api.researchCampaigns).mockResolvedValue([])
     vi.mocked(api.researchValidate).mockResolvedValue({
-      can_start: false, errors: ['Select at least one source type'], warnings: [],
+      can_start: false, errors: ['Research scope is too broad'], warnings: [],
       estimated_cycles: 30, estimated_duration_min: 60,
     })
     const user = userEvent.setup()
@@ -314,9 +312,8 @@ describe('ResearchLabPage', () => {
     await user.type(ta, 'A sufficiently long research question to pass length check')
     await user.click(screen.getByRole('button', { name: /Next/i }))
     await user.click(screen.getByRole('button', { name: /Next/i }))
-    await user.click(screen.getByRole('button', { name: /Next/i }))
     await waitFor(() =>
-      expect(screen.getByText(/Select at least one source type/i)).toBeInTheDocument(),
+      expect(screen.getByText(/Research scope is too broad/i)).toBeInTheDocument(),
     )
     expect(screen.getByRole('button', { name: /Start Campaign/i })).toBeDisabled()
   })

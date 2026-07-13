@@ -14,6 +14,7 @@ from pathlib import Path
 
 from kiro_claw.config.loader import KiroClawConfig, config_dir
 from kiro_claw.hooks import validate_file_path
+from kiro_claw.metrics.provider import get_recorder
 from kiro_claw.security import is_sensitive_path
 from kiro_claw.sel import sel
 from kiro_claw.skill_usage import SKILL_USAGE_FILENAME, SkillUsageLedger
@@ -436,9 +437,12 @@ class SkillsLoader:
         """Load a single skill's content by name (supports nested paths)."""
         if not self._safe_name(name):
             return None
+        _t0 = time.monotonic()
         skill_file = self._dir / name / "SKILL.md"
         if skill_file.exists():
-            return skill_file.read_text(encoding="utf-8")
+            content = skill_file.read_text(encoding="utf-8")
+            self._emit_lazy_load_metric(_t0, hit=True)
+            return content
         # Check extra paths
         for extra in self._extra_paths:
             skill_file = extra / name / "SKILL.md"
@@ -447,8 +451,27 @@ class SkillsLoader:
                 if resolved is None:
                     logger.warning("Refusing to load skill from sensitive path: %s", skill_file)
                     continue
-                return Path(resolved).read_text(encoding="utf-8")
+                content = Path(resolved).read_text(encoding="utf-8")
+                self._emit_lazy_load_metric(_t0, hit=True)
+                return content
+        self._emit_lazy_load_metric(_t0, hit=False)
         return None
+
+    @staticmethod
+    def _emit_lazy_load_metric(t0: float, *, hit: bool) -> None:
+        """Best-effort OTEL emit for on-demand skill body loads."""
+        try:
+            elapsed_ms = (time.monotonic() - t0) * 1000.0
+            attrs: dict[str, str | int | bool | float] = {"hit": hit}
+            get_recorder().histogram(
+                "kiroclaw.skill.lazy_load.duration",
+                elapsed_ms,
+                unit="ms",
+                attrs=attrs,
+            )
+            get_recorder().counter("kiroclaw.skill.lazy_load.count", attrs=attrs)
+        except Exception:  # never let telemetry break skill loading
+            pass
 
     def create_skill(self, name: str, content: str) -> bool:
         """Create a new skill directory with SKILL.md.  Returns True on success."""

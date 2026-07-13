@@ -335,11 +335,28 @@ class AcpProvider(LLMProvider):
                             agent=agent or None,
                         )
                         resumed = True
-                    except Exception:
-                        logger.warning(
-                            "Failed to resume session %s, starting fresh",
-                            resume_sid, exc_info=True,
-                        )
+                    except Exception as exc:
+                        if "active in another process" in str(exc).lower():
+                            # A live provider for this kiro session exists in
+                            # THIS gateway, addressed under a different session
+                            # key (bare vs canonical ``slack:<ts>`` alias).
+                            # Starting fresh silently splits the thread into a
+                            # context-free duplicate. The alias fold in
+                            # SessionManager.get_or_create should make this
+                            # unreachable — loud, grep-able marker so any
+                            # recurrence is visible.
+                            logger.error(
+                                "Resume refused: kiro session %s is active in "
+                                "another process — likely a session-key alias "
+                                "miss (bare vs slack:<ts>); starting fresh "
+                                "orphans the live session's native history",
+                                resume_sid,
+                            )
+                        else:
+                            logger.warning(
+                                "Failed to resume session %s, starting fresh",
+                                resume_sid, exc_info=True,
+                            )
                         handle = None
                 else:
                     logger.info("Session file missing for %s, skipping load", resume_sid)

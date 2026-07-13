@@ -5,26 +5,16 @@ import { http, HttpResponse } from 'msw'
 import { renderWithProviders } from './helpers'
 import { server } from './mocks/server'
 
-// vis-network needs canvas which jsdom doesn't have
-vi.mock('vis-network', () => {
-  const MockNetwork = vi.fn().mockImplementation(() => ({ on: vi.fn(), destroy: vi.fn() }))
-  return { Network: MockNetwork }
-})
-vi.mock('vis-data', () => {
-  class MockDataSet {
-    private items: unknown[]
-    constructor(items?: unknown[]) { this.items = items ?? [] }
-    get length() { return this.items.length }
-    get = () => this.items
-    add = vi.fn((newItems: unknown[]) => {
-      this.items.push(...(Array.isArray(newItems) ? newItems : [newItems]))
-    })
-    remove = vi.fn()
-    update = vi.fn()
-    clear = vi.fn(() => { this.items = [] })
-    forEach = vi.fn((cb: (item: unknown) => void) => { this.items.forEach(cb) })
-  }
-  return { DataSet: MockDataSet }
+// sigma renders via WebGL, which jsdom doesn't provide. Mock Sigma so the
+// component's UI shell (filters, search, counts) can be tested headlessly.
+// graphology is pure JS (no WebGL) so it does not need mocking.
+vi.mock('sigma', () => {
+  const MockSigma = vi.fn().mockImplementation(() => ({
+    on: vi.fn(),
+    refresh: vi.fn(),
+    kill: vi.fn(),
+  }))
+  return { default: MockSigma }
 })
 
 import MemoryGraphTab from '../src/pages/overview/MemoryGraphTab'

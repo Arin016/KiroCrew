@@ -101,6 +101,7 @@ from kiro_claw.dashboard.handlers.agents import (  # noqa: E402, F401
 )
 from kiro_claw.dashboard.handlers.cron import (  # noqa: E402, F401
     api_cron_ack,
+    api_cron_batch_delete,
     api_cron_delete,
     api_cron_enable,
     api_cron_history,
@@ -308,6 +309,9 @@ from kiro_claw.dashboard.handlers.taskrunner import (  # noqa: E402, F401
     api_taskrunner_to_chat,
     api_taskrunner_update_plan,
     api_taskrunner_update_task,
+)
+from kiro_claw.dashboard.handlers.telemetry import (  # noqa: E402, F401
+    api_telemetry_startup,
 )
 from kiro_claw.dashboard.handlers.terminal import (  # noqa: E402, F401
     api_terminal_create,

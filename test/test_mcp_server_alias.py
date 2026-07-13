@@ -126,6 +126,53 @@ class TestNormalizeMcpServerKeys:
         assert cfg["mcpServers"]["playwright-mcp-2"] == {"command": "b"}
         assert cfg["tools"] == ["@playwright-mcp", "@playwright-mcp-2"]
 
+    def test_empty_optional_keys_collapse_no_suffix(self):
+        # Mesh-2593: a re-added slash key that differs from the canonical alias
+        # only by an empty ``args``/``env`` is the SAME server -> it must reuse
+        # the alias (overwrite) instead of minting a -2 suffix. This is the loop
+        # that produced playwright-mcp-2..5 on every build/reinstall/update.
+        cfg = {
+            "mcpServers": {
+                "playwright-mcp": {"command": "x", "args": []},
+                "npm:@playwright/mcp": {"command": "x", "env": {}},
+            },
+            "tools": ["@npm:@playwright/mcp", "@playwright-mcp"],
+            "allowedTools": [],
+        }
+        _normalize_mcp_server_keys(cfg)
+        # Exactly one entry, empty optionals stripped, no -2 minted.
+        assert cfg["mcpServers"] == {"playwright-mcp": {"command": "x"}}
+        assert cfg["tools"] == ["@playwright-mcp"]
+
+    def test_converges_preexisting_polluted_siblings(self):
+        # A config already polluted by the pre-fix bug (playwright-mcp plus
+        # equivalent -2/-3 siblings) self-heals: the siblings fold back onto the
+        # canonical alias and their @refs are redirected. A genuinely distinct
+        # sibling is preserved.
+        cfg = {
+            "mcpServers": {
+                "playwright-mcp": {"command": "x"},
+                "playwright-mcp-2": {"command": "x"},
+                "playwright-mcp-3": {"command": "x", "env": {}},
+                "playwright-mcp-4": {"command": "DISTINCT"},
+                "npm:@playwright/mcp": {"command": "x", "args": []},
+            },
+            "tools": [
+                "@npm:@playwright/mcp",
+                "@playwright-mcp-2",
+                "@playwright-mcp-4",
+            ],
+            "allowedTools": ["@playwright-mcp-3"],
+        }
+        _normalize_mcp_server_keys(cfg)
+        assert cfg["mcpServers"] == {
+            "playwright-mcp": {"command": "x"},
+            "playwright-mcp-4": {"command": "DISTINCT"},
+        }
+        # Equivalent-sibling refs redirect to the surviving alias; distinct kept.
+        assert cfg["tools"] == ["@playwright-mcp", "@playwright-mcp-4"]
+        assert cfg["allowedTools"] == ["@playwright-mcp"]
+
     def test_missing_mcpservers_noop(self):
         cfg = {"tools": []}
         _normalize_mcp_server_keys(cfg)  # must not raise

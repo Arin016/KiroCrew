@@ -3,7 +3,7 @@ import DOMPurify from 'dompurify'
 import hljs from 'highlight.js'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, AlertTriangle, Camera, ExternalLink, Download, Pencil, X, AlertCircle, RotateCcw, Plus, Sparkles } from 'lucide-react'
+import { ArrowLeft, AlertTriangle, Camera, ExternalLink, Download, Pencil, X, AlertCircle, RotateCcw, Plus, Sparkles, Monitor, Undo2, Folder as FolderIcon } from 'lucide-react'
 import { useTheme } from '../hooks/useTheme'
 import { useAppDispatch } from '../store'
 import { switchSlot } from '../store/chatSlice'
@@ -11,11 +11,16 @@ import { sanitizeCssValue } from '../lib/cssSanitize'
 import { THEME_VAR_NAMES, buildSrcdoc } from '../lib/widgetSrcdoc'
 import { api } from '../api/client'
 import { PageHeader, Card, Badge, Btn } from '../components/ui'
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '../components/ui/dropdown-menu'
 import { ContentRenderer, langFor, wrapCode } from '../components/ContentRenderer'
 import ReadingWidthToggle from '../components/ReadingWidthToggle'
 import { useReadingWidth } from '../hooks/useReadingWidth'
+import { useArtifactFolders, useMoveArtifactToFolder } from '../hooks/useArtifactFolders'
+import { FolderPickerItems } from '../components/FolderMoveSubmenu'
+import { folderBreadcrumb } from '../utils/artifactFolderTree'
 import { CommentPopover, CommentList, formatCommentsMessage, type InlineComment } from '../components/CommentOverlay'
 import { findCoords, resolveSourcePos } from '../components/MarkdownPanel'
+import { useArtifactPopouts } from '../hooks/useArtifactPopouts'
 import { PREFILL_STORAGE_KEY } from './ChatPage'
 import type { FileType } from '../components/FileRenderers'
 import type { Artifact, ArtifactEvent } from '../types'
@@ -61,6 +66,44 @@ function extForKind(kind: Artifact['kind']): string {
  * editable text formats. */
 export function isEditableKind(kind: Artifact['kind']): boolean {
   return kind === 'markdown' || kind === 'text' || kind === 'json' || kind === 'svg'
+}
+
+/**
+ * Header folder chip (Mesh-2720): shows where the artifact is filed and opens
+ * a picker to move it (metadata-only — no version bump). Mirrors the tag-chip
+ * row's inline-mutation pattern.
+ */
+function FolderChip({ artifact }: { artifact: Artifact }) {
+  const { folders } = useArtifactFolders()
+  const moveArtifact = useMoveArtifactToFolder()
+  const chain = folderBreadcrumb(folders, artifact.folder_id || '')
+  const current = chain.length ? chain[chain.length - 1] : null
+  const path = chain.map(f => f.name).join(' › ')
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className={`inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded border cursor-pointer bg-bg-elevated transition-colors ${
+            current ? 'border-border text-muted hover:text-text' : 'border-dashed border-border text-muted hover:text-text hover:border-border-strong'
+          }`}
+          title={current ? `Filed in ${path} — click to move` : 'Not in a folder — click to file'}
+          aria-label={current ? `Folder: ${path}. Move to folder` : 'Move to folder'}
+        >
+          <FolderIcon size={10} className={current ? 'text-accent' : undefined} />
+          {current ? current.name : 'folder'}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-[190px] max-h-[300px] overflow-y-auto">
+        <FolderPickerItems
+          folders={folders}
+          currentFolderId={artifact.folder_id || null}
+          onPick={(fid) => moveArtifact(artifact.slug, fid || '')}
+          Item={DropdownMenuItem}
+        />
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
 }
 
 /** Format an ISO timestamp into a short human-readable string for the
@@ -250,7 +293,53 @@ const ArtifactBodyIframe = memo(function ArtifactBodyIframe({ artifact, slug, pr
   )
 })
 
-export default function ArtifactDetailPage() {
+/**
+ * The pop-out control in the artifact detail toolbar. Opens the artifact in its
+ * own browser window and, once it's out, swaps to Focus + Bring-back (mirrors
+ * the chat session popout menu). Kept as a child so the `useArtifactPopouts`
+ * subscription only runs on the main dashboard — never inside the popout window
+ * itself (where this control isn't rendered).
+ */
+function ArtifactPopoutControl({ slug, name }: { slug: string; name: string }) {
+  const { isPoppedOut, open, focus, bringBack } = useArtifactPopouts()
+  if (isPoppedOut(slug)) {
+    return (
+      <>
+        <button
+          type="button"
+          onClick={() => focus(slug)}
+          className="p-1.5 rounded text-accent transition-colors cursor-pointer bg-transparent border border-accent"
+          title="Focus the popped-out window"
+          aria-label="Focus popped-out window"
+        >
+          <Monitor size={13} />
+        </button>
+        <button
+          type="button"
+          onClick={() => bringBack(slug)}
+          className="p-1.5 rounded text-muted hover:text-text transition-colors cursor-pointer bg-transparent border border-border"
+          title="Bring the artifact back into this window"
+          aria-label="Bring artifact back to this window"
+        >
+          <Undo2 size={13} />
+        </button>
+      </>
+    )
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => open(slug, name)}
+      className="p-1.5 rounded text-muted hover:text-text transition-colors cursor-pointer bg-transparent border border-border"
+      title="Pop out into its own window"
+      aria-label="Pop out to window"
+    >
+      <ExternalLink size={13} />
+    </button>
+  )
+}
+
+export default function ArtifactDetailPage({ popout = false }: { popout?: boolean } = {}) {
   const { slug = '' } = useParams<{ slug: string }>()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -625,40 +714,6 @@ export default function ArtifactDetailPage() {
     setTimeout(() => URL.revokeObjectURL(a.href), 60_000)
   }
 
-  const openInNewTab = () => {
-    if (!artifact) return
-    if (exportSrcdoc) {
-      const doc = document.implementation.createHTMLDocument(artifact.name || slug)
-      const charsetMeta = doc.createElement('meta')
-      charsetMeta.setAttribute('charset', 'utf-8')
-      doc.head.insertBefore(charsetMeta, doc.head.firstChild)
-      doc.body.style.margin = '0'
-      doc.body.style.height = '100vh'
-      const iframe = doc.createElement('iframe')
-      iframe.setAttribute('sandbox', 'allow-scripts allow-popups allow-popups-to-escape-sandbox')
-      iframe.setAttribute('srcdoc', exportSrcdoc)
-      iframe.style.width = '100%'
-      iframe.style.height = '100%'
-      iframe.style.border = 'none'
-      doc.body.appendChild(iframe)
-      const html = `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`
-      const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
-      const url = URL.createObjectURL(blob)
-      window.open(url, '_blank')
-      setTimeout(() => URL.revokeObjectURL(url), 60_000)
-      return
-    }
-    // markdown / text / json / svg — open the raw content in a new tab so
-    // the browser renders it with its native viewer.
-    const mime = artifact.kind === 'json' ? 'application/json'
-      : artifact.kind === 'svg' ? 'image/svg+xml'
-      : 'text/plain;charset=utf-8'
-    const blob = new Blob([artifact.content ?? ''], { type: mime })
-    const url = URL.createObjectURL(blob)
-    window.open(url, '_blank')
-    setTimeout(() => URL.revokeObjectURL(url), 60_000)
-  }
-
   if (detailQuery.isLoading || (!isCurrent && versionQuery.isLoading))
     return <div className="p-6 text-muted">Loading…</div>
   if (detailQuery.error) {
@@ -698,13 +753,16 @@ export default function ArtifactDetailPage() {
       <PageHeader title={artifact.name} subtitle={`Artifact: ${artifact.slug}`} />
       <div className="px-6 pb-8 overflow-y-auto flex-1 min-h-0">
         <div className="flex flex-wrap items-center gap-2 mb-4">
-          <Btn onClick={() => {
-            if (dirty && !window.confirm('Discard unsaved changes?')) return
-            navigate('/artifacts')
-          }} className="flex items-center gap-1">
-            <ArrowLeft size={13} /> Back
-          </Btn>
+          {!popout && (
+            <Btn onClick={() => {
+              if (dirty && !window.confirm('Discard unsaved changes?')) return
+              navigate('/artifacts')
+            }} className="flex items-center gap-1">
+              <ArrowLeft size={13} /> Back
+            </Btn>
+          )}
           <Badge variant="aim">{artifact.kind}</Badge>
+          <FolderChip artifact={artifact} />
           {artifact.tags.map((t) => (
             <span key={t} className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-bg-elevated border border-border text-muted group">
               {t}
@@ -760,7 +818,7 @@ export default function ArtifactDetailPage() {
                 user can finish the prompt themselves. For widgets (which
                 can't be edited inline) this is the ONLY way to ask the
                 agent to change the artifact. */}
-            {!editing && (
+            {!editing && !popout && (
               <button
                 type="button"
                 onClick={iterateWithAgent}
@@ -898,15 +956,11 @@ export default function ArtifactDetailPage() {
             {(!editing || previewDuringEdit) && (
               <ReadingWidthToggle value={readingWidth} onToggle={toggleReadingWidth} />
             )}
-            <button
-              type="button"
-              onClick={openInNewTab}
-              className="p-1.5 rounded text-muted hover:text-text transition-colors cursor-pointer bg-transparent border border-border"
-              title="Open in new tab"
-              aria-label="Open in new tab"
-            >
-              <ExternalLink size={13} />
-            </button>
+            {/* Pop out — opens the artifact in its own live browser window
+                (was a throwaway blob: tab). Swaps to Focus + Bring-back once
+                out. Not shown inside the popout window itself (the frame's
+                Return button handles closing). */}
+            {!popout && <ArtifactPopoutControl slug={slug} name={artifact.name} />}
             <button
               type="button"
               onClick={downloadAsHtml}

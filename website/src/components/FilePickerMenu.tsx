@@ -1,14 +1,21 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { createPortal } from 'react-dom'
+import { useQuery } from '@tanstack/react-query'
 import { FileText, Eye } from 'lucide-react'
 import { api } from '../api/client'
 import { useListKeyboardNav } from '../hooks/useListKeyboardNav'
+import { menuGeometry, bottomUpOrder } from '../lib/pickerMenu'
 
 interface FileResult {
   path: string
   name: string
   size: number
   mtime: number
+}
+
+interface FileSearchResponse {
+  results?: FileResult[]
+  root?: string
 }
 
 interface Props {
@@ -42,12 +49,43 @@ function makeRelative(path: string, root: string): string {
 }
 
 export default function FilePickerMenu({ query, anchorRef, open, onSelect, onClose, onFileOpen, project }: Props) {
-  const [results, setResults] = useState<FileResult[]>([])
-  const [loading, setLoading] = useState(false)
   const rootRef = useRef('')
   const resultsRef = useRef<FileResult[]>([])
   const onFileOpenRef = useRef(onFileOpen)
   onFileOpenRef.current = onFileOpen
+
+  // Debounce the query string — a timer + setState ONLY, not an API call, so the
+  // fetch itself stays on React Query (below). React Query handles cancellation
+  // (via the queryFn `signal`), caching, and dedup; this just throttles how often
+  // the query key changes while the user types.
+  const [debounced, setDebounced] = useState(query)
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(query), 200)
+    return () => clearTimeout(t)
+  }, [query])
+
+  // File search via React Query (consistent with the $skill / /command pickers,
+  // which already use useQuery). `enabled` gates on 2+ chars; the queryFn `signal`
+  // aborts stale requests; `placeholderData` keeps the prior results on screen
+  // while the next query resolves so the list doesn't flicker to empty.
+  const { data, isFetching } = useQuery<FileSearchResponse>({
+    queryKey: ['file-search', debounced, project],
+    queryFn: ({ signal }) => api.fileSearch(debounced, project, signal),
+    enabled: open && debounced.length >= 2,
+    placeholderData: prev => prev,
+    staleTime: 10_000,
+  })
+  rootRef.current = data?.root || ''
+
+  // Order bottom-up (shared helper) when the menu opens above. Gate on the LIVE
+  // `query` length (not the debounced one) so results clear immediately when the
+  // user drops below 2 chars; `data` is keyed on `debounced`, so it lags by up to
+  // one debounce tick — the intended debounce behavior.
+  const { ordered: results, initialIndex } = useMemo(() => {
+    const raw = (open && query.length >= 2 ? data?.results : []) || []
+    const above = anchorRef.current ? menuGeometry(anchorRef.current, raw.length, 48).above : false
+    return bottomUpOrder(raw, above)
+  }, [data, open, query, anchorRef])
 
   // Open the highlighted file in the viewer (the eye/preview action) instead of
   // inserting an @-mention. Shared by the Cmd/Ctrl+Enter path (via onChoose's
@@ -72,7 +110,7 @@ export default function FilePickerMenu({ query, anchorRef, open, onSelect, onClo
   }, [onSelect, openInViewer])
 
   // Shared Arrow/Enter/Tab/Escape + scroll-into-view (see useListKeyboardNav).
-  const { selected, setSelected, itemRefs } = useListKeyboardNav({
+  const { selected, setSelected, selectedRef, itemRefs } = useListKeyboardNav({
     open,
     count: results.length,
     onChoose: choose,
@@ -80,29 +118,32 @@ export default function FilePickerMenu({ query, anchorRef, open, onSelect, onClo
     onAltEnter: openInViewer,
   })
 
+  // Mirror the ordered results into the ref that choose()/openInViewer read at
+  // keypress time, and set the initial selection (the bottom row when the menu
+  // opens above) whenever the result set changes. Keyed on the memoized results,
+  // so arrow-key navigation (which changes `selected` but not `results`) doesn't
+  // reset the selection.
   useEffect(() => {
-    if (!open || query.length < 2) { setResults([]); resultsRef.current = []; setLoading(false); return }
-    setLoading(true)
-    const controller = new AbortController()
-    const timer = setTimeout(() => {
-      api.fileSearch(query, project, controller.signal)
-        .then(d => { setResults(d.results || []); resultsRef.current = d.results || []; rootRef.current = d.root || ''; setSelected(0) })
-        .catch(() => { if (!controller.signal.aborted) { setResults([]); resultsRef.current = [] } })
-        .finally(() => { if (!controller.signal.aborted) setLoading(false) })
-    }, 200)
-    return () => { clearTimeout(timer); controller.abort() }
-  }, [query, open, project, setSelected])
+    resultsRef.current = results
+    setSelected(initialIndex)
+  }, [results, initialIndex, setSelected])
+
+  // Scroll the selected row into view once results render (the selection is set
+  // before rows mount, so the hook's own scrollIntoView no-ops on open). Keyed
+  // on [results] so it fires on open + new search, not per-arrow (the hook
+  // already scrolls on move). Matches the $skill picker.
+  useEffect(() => {
+    if (!open) return
+    itemRefs.current[selectedRef.current]?.scrollIntoView({ block: 'nearest' })
+  }, [results, open, itemRefs, selectedRef])
 
   if (!open || !anchorRef.current) return null
 
-  const rect = anchorRef.current.getBoundingClientRect()
-  const menuH = Math.min((results.length || 1) * 48 + 8, 320)
-  const above = rect.top - menuH - 4
-  const top = above > 0 ? above : rect.bottom + 4
+  const { top, left, width, maxHeight } = menuGeometry(anchorRef.current, results.length, 48)
 
   const empty = query.length < 2
     ? <div className="px-3 py-3 text-[12px] text-muted">Type 2+ chars to search files…</div>
-    : loading
+    : isFetching
     ? <div className="px-3 py-3 text-[12px] text-muted">Searching…</div>
     : <div className="px-3 py-3 text-[12px] text-muted">No matches</div>
 
@@ -110,7 +151,7 @@ export default function FilePickerMenu({ query, anchorRef, open, onSelect, onClo
     <div
       className="fixed z-[9999] bg-card border border-border rounded-lg shadow-lg overflow-y-auto py-1 animate-slide-up"
       role="listbox"
-      style={{ top, left: rect.left, width: Math.min(rect.width, 420), maxHeight: 320 }}
+      style={{ top, left, width: Math.min(width, 420), maxHeight }}
     >
       {results.length === 0 ? empty : results.map((f, i) => (
         <div

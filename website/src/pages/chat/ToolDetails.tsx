@@ -12,10 +12,11 @@
  * details — meta row chips, segmented Input/Output toggle, preformatted
  * payload blocks — with no risk of drift.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion'
 import { Zap, Wrench } from 'lucide-react'
 import { ToolInputText } from '../../components/ToolInputText'
+import { HighlightedCode } from '../../components/CodeBlock'
 
 export function ToolDetails({ purpose, pillLabel, toolName, input, output, auto, pending, ts, hasEntry, fmtTime, barColor, layoutId, compact }: {
   purpose: string
@@ -50,6 +51,11 @@ export function ToolDetails({ purpose, pillLabel, toolName, input, output, auto,
   // Default: prefer Output if present, else Input. Tracks user intent so we
   // don't yank focus away from a section the user explicitly opened.
   const [section, setSection] = useState<'input' | 'output'>(hasOutput ? 'output' : 'input')
+  // Raw vs Formatted payload rendering (Mesh-2357). Formatted (default)
+  // unescapes \n/\t so multi-line commands are legible; Raw shows the exact
+  // verbatim payload for faithful pre-approval inspection. Only surfaced for
+  // JSON-ish payloads, where the two modes actually differ.
+  const [viewMode, setViewMode] = useState<'formatted' | 'raw'>('formatted')
   const userPickedRef = useRef(false)
   const onSectionChange = useCallback((s: 'input' | 'output') => {
     userPickedRef.current = true
@@ -67,6 +73,11 @@ export function ToolDetails({ purpose, pillLabel, toolName, input, output, auto,
   const active: 'input' | 'output' =
     section === 'output' && !hasOutput ? 'input' :
     section === 'input' && !hasInput ? 'output' : section
+  // The Raw/Formatted toggle only matters for JSON-ish payloads (the sole place
+  // the whitespace unescape applies) — hide it for plain text / diff output.
+  const activeText = active === 'input' ? input : output
+  const activeIsJson = /^\s*[{[]/.test(activeText)
+  const rawMode = viewMode === 'raw'
   // Only show the purpose line when it adds info the pill isn't already showing.
   const showPurpose = !!purpose && purpose.trim() !== pillLabel.trim()
   // Show the raw tool name when the pill is displaying something else (the
@@ -105,15 +116,20 @@ export function ToolDetails({ purpose, pillLabel, toolName, input, output, auto,
           )}
           {auto && <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-border bg-bg-elevated text-muted text-[11px] font-mono"><Zap size={10} /> Auto</span>}
           {showPurpose && <span className={`text-[12px] text-muted/50 break-words min-w-0 ${compact ? 'line-clamp-1' : ''}`}>→ {purpose}</span>}
-          {(compact ? (hasInput && hasOutput) : (hasInput || hasOutput)) && (
-            <div className="ml-auto shrink-0">
-              <ToolSegmented
-                active={active}
-                hasInput={hasInput}
-                hasOutput={hasOutput}
-                onChange={onSectionChange}
-                layoutId={layoutId}
-              />
+          {(activeIsJson || (compact ? (hasInput && hasOutput) : (hasInput || hasOutput))) && (
+            <div className="ml-auto shrink-0 flex items-center gap-1.5">
+              {activeIsJson && (
+                <ViewModeToggle mode={viewMode} onChange={setViewMode} layoutId={`${layoutId}-view`} />
+              )}
+              {(compact ? (hasInput && hasOutput) : (hasInput || hasOutput)) && (
+                <ToolSegmented
+                  active={active}
+                  hasInput={hasInput}
+                  hasOutput={hasOutput}
+                  onChange={onSectionChange}
+                  layoutId={layoutId}
+                />
+              )}
             </div>
           )}
         </div>
@@ -129,7 +145,7 @@ export function ToolDetails({ purpose, pillLabel, toolName, input, output, auto,
               transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
               className="overflow-hidden"
             >
-              <pre className={`px-2.5 py-2 bg-bg-elevated rounded-md text-[12px] font-mono whitespace-pre-wrap break-all ${compact ? 'max-h-[160px]' : 'max-h-[400px]'} overflow-y-auto leading-relaxed border border-border`}><ToolInputText text={input} /></pre>
+              <PayloadView text={input} raw={rawMode} maxH={compact ? 'max-h-[160px]' : 'max-h-[400px]'} />
             </motion.div>
           )}
           {active === 'output' && hasOutput && (
@@ -141,7 +157,7 @@ export function ToolDetails({ purpose, pillLabel, toolName, input, output, auto,
               transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
               className="overflow-hidden"
             >
-              <pre className={`px-2.5 py-2 bg-bg-elevated rounded-md text-[12px] font-mono whitespace-pre-wrap break-all ${compact ? 'max-h-[160px]' : 'max-h-[500px]'} overflow-y-auto leading-relaxed border border-border`}><ToolInputText text={output} /></pre>
+              <PayloadView text={output} raw={rawMode} maxH={compact ? 'max-h-[160px]' : 'max-h-[500px]'} />
             </motion.div>
           )}
         </AnimatePresence>
@@ -212,4 +228,134 @@ function ToolSegmented({ active, hasInput, hasOutput, onChange, layoutId }: {
       </div>
     </LayoutGroup>
   )
+}
+
+/** Formatted vs Raw payload toggle (Mesh-2357). Mirrors {@link ToolSegmented}'s
+ *  visual language — a two-segment capsule with an animated active pill — so
+ *  the two controls read as siblings. Both segments are always enabled; the
+ *  parent only renders this for JSON-ish payloads where the modes differ. */
+function ViewModeToggle({ mode, onChange, layoutId }: {
+  mode: 'formatted' | 'raw'
+  onChange: (m: 'formatted' | 'raw') => void
+  layoutId: string
+}) {
+  const segments: { key: 'formatted' | 'raw'; label: string }[] = [
+    { key: 'formatted', label: 'Formatted' },
+    { key: 'raw', label: 'Raw' },
+  ]
+  return (
+    <LayoutGroup id={layoutId}>
+      <div className="glass-surface glass-static inline-flex rounded-lg p-0.5 gap-0.5">
+        {segments.map(s => {
+          const isActive = s.key === mode
+          return (
+            <motion.button
+              key={s.key}
+              layout
+              type="button"
+              title={s.key === 'raw' ? 'Show the exact payload, escaping preserved' : 'Render escaped whitespace as real line breaks'}
+              onClick={() => onChange(s.key)}
+              whileTap={isActive ? { scale: 0.95 } : undefined}
+              transition={{ duration: 0.15 }}
+              className={`relative flex items-center px-2.5 py-1 rounded-md text-[12px] font-medium border-none transition-colors z-[1] ${
+                isActive
+                  ? 'text-accent cursor-pointer'
+                  : 'text-muted hover:text-text hover:bg-bg-hover cursor-pointer'
+              }`}
+            >
+              {isActive && (
+                <motion.div
+                  layoutId={`${layoutId}-indicator`}
+                  className="glass-surface glass-static absolute inset-0 rounded-md"
+                  transition={{ type: 'spring', stiffness: 500, damping: 35 }}
+                />
+              )}
+              <span className="relative z-[1]">{s.label}</span>
+            </motion.button>
+          )
+        })}
+      </div>
+    </LayoutGroup>
+  )
+}
+
+/** Parse text as a JSON object for the Formatted table view. Returns null for
+ *  non-objects, arrays, or unparseable/streaming payloads so the caller can
+ *  fall back to the highlighted-text renderer. */
+function tryParseJsonObject(text: string): Record<string, unknown> | null {
+  if (!/^\s*\{/.test(text)) return null
+  try {
+    const parsed = JSON.parse(text)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null
+  } catch {
+    return null
+  }
+}
+
+/** Render a single parsed JSON value. Strings decode escapes natively via
+ *  JSON.parse, so a multi-line command shows real quotes + line breaks in a
+ *  <pre> cell; scalars render inline with type coloring; nested objects/arrays
+ *  fall back to indented, highlighted JSON. */
+function JsonValue({ value, lang }: { value: unknown; lang?: string }): ReactNode {
+  if (value === null) return <span style={{ color: 'var(--json-bool)' }}>null</span>
+  if (typeof value === 'boolean') return <span style={{ color: 'var(--json-bool)' }}>{String(value)}</span>
+  if (typeof value === 'number') return <span style={{ color: 'var(--json-num)' }}>{value}</span>
+  if (typeof value === 'string') {
+    // Known command-bearing keys get worker-based bash syntax highlighting.
+    if (lang) {
+      return (
+        <pre className="m-0 whitespace-pre-wrap break-all">
+          <HighlightedCode code={value} lang={lang} className="bg-transparent" />
+        </pre>
+      )
+    }
+    if (value.includes('\n')) {
+      return (
+        <pre className="m-0 whitespace-pre-wrap break-all font-mono" style={{ color: 'var(--json-str)' }}>{value}</pre>
+      )
+    }
+    return <span className="break-all" style={{ color: 'var(--json-str)' }}>{value}</span>
+  }
+  return (
+    <pre className="m-0 whitespace-pre-wrap break-all font-mono">
+      <ToolInputText text={JSON.stringify(value, null, 2)} />
+    </pre>
+  )
+}
+
+/** Formatted table view of a parsed JSON object: one row per top-level key,
+ *  key in the left column, {@link JsonValue}-rendered value on the right. */
+function JsonTable({ data }: { data: Record<string, unknown> }): ReactNode {
+  return (
+    <table className="w-full border-collapse text-[12px] font-mono">
+      <tbody>
+        {Object.entries(data).map(([k, v]) => {
+          // Shell-command keys render their string value with bash highlighting.
+          const lang = /^(command|cmd|script|shell|bash)$/i.test(k) ? 'bash' : undefined
+          return (
+            <tr key={k} className="align-top border-b border-border/40 last:border-b-0">
+              <td className="py-1 pr-3 align-top whitespace-nowrap" style={{ color: 'var(--json-key)' }}>{k}</td>
+              <td className="py-1 align-top"><JsonValue value={v} lang={lang} /></td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </table>
+  )
+}
+
+/** Payload block for the Input/Output panes. Formatted mode renders a parsed
+ *  JSON object as a {@link JsonTable}; Raw mode (and any unparseable payload)
+ *  falls back to the verbatim/highlighted {@link ToolInputText} in a <pre>. */
+function PayloadView({ text, raw, maxH }: { text: string; raw: boolean; maxH: string }): ReactNode {
+  const base = `px-2.5 py-2 bg-bg-elevated rounded-md text-[12px] font-mono ${maxH} overflow-y-auto leading-relaxed border border-border`
+  if (!raw) {
+    const parsed = tryParseJsonObject(text)
+    if (parsed) {
+      return <div className={`${base} overflow-x-auto`}><JsonTable data={parsed} /></div>
+    }
+  }
+  return <pre className={`${base} whitespace-pre-wrap break-all`}><ToolInputText text={text} raw={raw} /></pre>
 }

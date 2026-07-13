@@ -4,6 +4,7 @@ import reducer, {
   sseConnected,
   sseDisconnected,
   sseSlots,
+  touchSlotActivity,
   sseSlotTitle,
   addSlotOptimistic,
   removeSlotOptimistic,
@@ -75,6 +76,22 @@ describe('dashboardSlice', () => {
     const state = reducer(withSlots, sseSlotTitle({ key: 'chat-1', title: 'Renamed' }))
     expect(state.slots[0].title).toBe('Renamed')
     expect(state.slots[1].title).toBe('Chat 2')
+  })
+
+  describe('touchSlotActivity', () => {
+    it('bumps the matching slot last_ts to the supplied timestamp', () => {
+      const withSlots = reducer(initial, sseSlots([slot1, slot2]))
+      const state = reducer(withSlots, touchSlotActivity({ key: 'chat-1', ts: '2026-07-09T22:00:00Z' }))
+      expect(state.slots.find(s => s.key === 'chat-1')?.last_ts).toBe('2026-07-09T22:00:00Z')
+      expect(state.slots.find(s => s.key === 'chat-2')?.last_ts).toBeUndefined()
+    })
+
+    it('is a no-op for an unknown slot key', () => {
+      const withSlots = reducer(initial, sseSlots([slot1]))
+      const state = reducer(withSlots, touchSlotActivity({ key: 'missing', ts: '2026-07-09T22:00:00Z' }))
+      expect(state.slots).toHaveLength(1)
+      expect(state.slots[0].last_ts).toBeUndefined()
+    })
   })
 
   it('addSlotOptimistic adds if not present', () => {

@@ -1,6 +1,6 @@
 # TaskRunner Module
 
-Last Updated: 2026-05-10 (pause/resume, crash recovery, force_approval gates)
+Last Updated: 2026-07-13 (batch parallel execution + execute_plan resume corrections; pause/resume, crash recovery, force_approval gates)
 
 ## Overview
 
@@ -12,51 +12,52 @@ Supports multiple concurrent tasks, interactive tool approval,
 per-step session isolation with full memory injection, git-coordinated
 step commits and reverts, independent review via actual diffs,
 cycle detection, disk persistence across restarts, activity-aware
-stall detection, and throttled parallel execution to prevent resource
+stall detection, and batched parallel execution to prevent resource
 exhaustion.
 
 ## Module Architecture
 
-The task runner is split into 7 focused modules under `src/kiro_claw/`:
+The task runner is split into an orchestrator plus 4 focused helper modules under `src/kiro_claw/`:
 
 ```
-taskrunner.py        (orchestrator, ~700 lines)
-├── task_models.py   (data models + constants, 119 lines)
-├── task_planner.py  (LLM decomposition + step parsing, ~250 lines)
-├── task_executor.py (step execution + retries + tests, ~500 lines)
-├── task_reviewer.py (acceptance review + self-review + replan, ~284 lines)
-├── task_reporter.py (status dict + chat context + watchdog, ~192 lines)
-└── task_persistence.py (save/load runs + checkpoints, ~174 lines)
+taskrunner.py        (orchestrator, ~1270 lines)
+├── task_models.py   (data models + constants, 127 lines)
+├── task_planner.py  (LLM decomposition + task parsing + parallel grouping, ~510 lines)
+├── task_executor.py (task execution + retries + tests + self-review, ~720 lines)
+└── task_reporter.py (status + notifications + progress checkpoints + resume context, ~234 lines)
 ```
 
 ### Module Responsibilities
 
 | Module | Class/Functions | Responsibility |
 |--------|----------------|----------------|
-| `task_models.py` | `StepStatus`, `Step`, `WorkingMemory`, `TaskRun`, `NotifyCallback`, constants | Shared data types and configuration constants |
-| `task_planner.py` | `TaskPlanner` | LLM spec decomposition, step parsing, dependency normalization, acceptance step creation |
-| `task_executor.py` | `TaskExecutor`, `group_parallel_steps()` | Step execution with retry/recovery budgets, prompt building, context compaction, test running, self-review |
-| `task_reviewer.py` | `TaskReviewer` | Acceptance review (LLM checks criteria), replan after failure (delegates to planner) |
-| `task_reporter.py` | `build_status_dict()`, `build_plan_chat_context()`, `watchdog_loop()` | Status reporting, plan-to-chat formatting, stall detection watchdog |
-| `task_persistence.py` | `persist_runs()`, `load_runs()`, `save_progress()`, `load_checkpoint()`, `build_resume_context()` | Standalone I/O functions for JSON run storage and TASK_PROGRESS.md checkpointing |
-| `taskrunner.py` | `TaskRunner` | Orchestrator — creates planner/executor/reviewer, manages lifecycle, delegates to modules |
+| `task_models.py` | `TaskStatus`, `Task`, `WorkingMemory`, `Project`, `NotifyCallback`, constants | Shared data types and configuration constants |
+| `task_planner.py` | `decompose()`, `parse_tasks()`, `normalize_cross_group_deps()`, `group_parallel_tasks()`, `plan_to_chat_context()`, `update_plan_tasks()`, `auto_name()` | LLM spec decomposition, task parsing, dependency normalization, parallel grouping, plan-to-chat formatting |
+| `task_executor.py` | `execute_task()`, `build_task_prompt()`, `self_review()`, `run_tests()`, `check_context()` | Task execution with retry/recovery budgets, prompt building, context compaction, test running, self-review |
+| `task_reporter.py` | `notify()`, `build_status()`, `save_progress()`, `load_checkpoint()`, `build_resume_context()`, `format_completion_summary()` | Notifications, status reporting, TASK_PROGRESS.md checkpointing, resume context |
+| `taskrunner.py` | `TaskRunner` | Orchestrator — owns run lifecycle, `_try_replan`, watchdog, run persistence (`_persist_runs`/`_load_runs`); delegates decomposition/execution/reporting to the helper modules |
 
 ### Import Graph (no cycles)
 
 ```
-task_models ← task_persistence
 task_models ← task_planner
-task_models ← task_executor
-task_models ← task_reviewer (+ task_planner for replan)
-task_models ← task_reporter
+task_models ← task_executor (+ task_planner for parallel grouping)
+task_models ← task_reporter (+ task_planner for parallel grouping)
 task_models ← taskrunner (+ all above modules)
 ```
 
 ### Backward Compatibility
 
-`taskrunner.py` re-exports all public symbols so existing imports work unchanged:
+The domain model was renamed `Step` → `Task`, `StepStatus` → `TaskStatus`, and
+`TaskRun` → `Project`. `taskrunner.py` re-exports the real symbols from
+`task_models` and also defines back-compat aliases so existing imports keep working:
 ```python
-from kiro_claw.task_models import StepStatus, Step, WorkingMemory, TaskRun, NotifyCallback  # noqa: F401
+from kiro_claw.task_models import Task, TaskStatus, WorkingMemory, Project, NotifyCallback  # noqa: F401
+
+# ── Backward-compat re-exports ──
+Step = Task
+StepStatus = TaskStatus
+TaskRun = Project
 ```
 
 These files import from `kiro_claw.taskrunner` and require no changes:
@@ -89,11 +90,11 @@ class TaskRunner:
         fresh: bool = False,
         global_timeout: float = 0.0,
         token_budget: int = 0,
-        max_parallel_steps: int = 2,
+        max_parallel_steps: int = _MAX_PARALLEL_TASKS,  # 3
     ) -> None: ...
 
-    # Internally creates: self._planner (TaskPlanner), self._executor (TaskExecutor),
-    # self._reviewer (TaskReviewer) — delegates to these modules
+    # Delegates to module-level functions: task_planner.decompose(),
+    # task_executor.execute_task()/self_review(), task_reporter.build_status()
 
     async def run(self, spec_path: str | Path, task_id: str = "", name: str = "", source: str = "file") -> TaskRun
     def start_background(self, spec_path: str | Path, agent: str = "", name: str = "", source: str = "file") -> str
@@ -130,38 +131,42 @@ dashboard_sources = {"text", "spec", "file", "chat", "dashboard"}
 
 ### Data Types
 
+Named `TaskStatus`/`Task`/`Project` in `task_models.py`; `StepStatus`/`Step`/`TaskRun`
+remain as back-compat aliases exported from `taskrunner.py`.
+
 ```python
-class StepStatus(Enum):
-    PENDING, IN_PROGRESS, REVIEWING, PASSED, FAILED, SKIPPED
+class TaskStatus(Enum):
+    PENDING, IN_PROGRESS, REVIEWING, PASSED, FAILED, SKIPPED, CANCELLED
 
 @dataclass
-class Step:
+class Task:
     index: int
     title: str
     description: str
-    status: StepStatus = PENDING
+    status: TaskStatus = PENDING
     attempts: int = 0
     error: str = ""
     result: str = ""  # updated during streaming (partial results visible)
     requires_approval: bool = False
+    force_approval: bool = False  # blocks even in YOLO mode
     depends_on: list[int] = field(default_factory=list)
 
 @dataclass
-class TaskRun:
+class Project:
     spec_path: str
     spec_content: str
-    steps: list[Step]
+    tasks: list[Task]
     started_at: float
     finished_at: float
-    status: str  # pending, running, completed, failed, cancelled
-    current_step: int
+    status: str  # pending, planned, running, completed, failed, cancelled
+    current_task: int
     error: str
     tokens_used: int
     replan_count: int
     memory: WorkingMemory
     task_id: str
     work_dir: str
-    last_step_time: float  # tracks activity for watchdog
+    last_task_time: float  # tracks activity for watchdog
     branch_name: str       # git branch for task (e.g. kiroclaw/task/{task_id})
     base_branch: str       # original branch before task started
     commit_hashes: list[str]  # per-step commit SHAs
@@ -175,7 +180,7 @@ class TaskRun:
 - `_tasks: dict[str, asyncio.Task]` — background asyncio tasks
 - `start_background()` accepts optional `agent` param, returns task_id (`{spec_stem}_{timestamp}`)
 - All `get_or_create()` calls pass `agent=self._agent` so the task runs with the specified agent
-- Each step gets its own session: `taskrunner:{task_id}:step{N}` (fresh per step, reset after)
+- Each step gets its own session: `taskrunner:{task_id}:task{N}` (fresh per step, reset after)
 - Each task gets its own work dir: `{work_dir}/{spec_stem}/`
 - `cancel(task_id)` cancels specific task; `cancel()` cancels all
 - Completed runs pruned on new start (keep last 10)
@@ -187,10 +192,10 @@ class TaskRun:
 
 Tasks can be paused and resumed without losing progress:
 
-- `pause(task_id)` — sets `run.status = "paused"`, cancels the asyncio task gracefully
-- `resume(task_id)` — restarts execution from the current step (not from beginning)
+- `pause(task_id)` — sets `run.status = "pausing"` and cancels the asyncio task gracefully; the `_execute()` `finally` block promotes `"pausing"` → `"paused"` after session cleanup
+- Resume is not a dedicated method — call `execute_plan(task_id, agent="", fresh=False)` to restart a run whose status is `"planned"`, `"paused"`, `"cancelled"`, or `"failed"`. It resets incomplete (non-passed/non-skipped) tasks to `PENDING` and re-runs from there (with `fresh=True`, resets all tasks)
 - Paused status visible in dashboard UI as distinct color/icon
-- API: `POST /api/taskrunner/{task_id}/pause`, `POST /api/taskrunner/{task_id}/resume`
+- API: `POST /api/taskrunner/{task_id}/pause`, `POST /api/taskrunner/{task_id}/execute` (resume/restart) — there is no `/resume` route
 
 ### Crash Recovery
 
@@ -209,34 +214,40 @@ Steps can be marked with `force_approval: true` in the spec. These gates block e
 - Useful for destructive operations (deploy, delete, publish)
 - Frontend: inline approval buttons rendered in project detail view
 
-## Parallel Step Throttling
+## Parallel Batch Execution
 
-Parallel groups are throttled to prevent resource exhaustion from
-simultaneous kiro-cli cold starts. Each kiro-cli process spawns ~4-5
-MCP server child processes, so N parallel steps = ~5N processes all
-initializing at once.
+Parallel groups are executed in fixed-size batches to prevent resource
+exhaustion from simultaneous kiro-cli cold starts. Each kiro-cli process
+spawns ~4-5 MCP server child processes, so N parallel tasks = ~5N processes
+all initializing at once.
 
-**Three-layer protection:**
+The resolved tasks in a parallel group are chunked into batches of
+`_MAX_PARALLEL_TASKS` (3) and each batch runs via
+`asyncio.gather(..., return_exceptions=True)`; the next batch starts only
+after the current one completes (`taskrunner.py`):
 
-1. **Semaphore** (`asyncio.Semaphore(_max_parallel_steps)`): caps concurrent
-   step sessions within a parallel group. Default 2, configurable via
-   `taskrunner.max_parallel_steps` in `~/.kiroclaw/config.json`.
-
-2. **Stagger delay** (`_PARALLEL_STAGGER_SECS = 3.0`): each step in a
-   parallel group waits `index * 3s` before starting, so cold starts
-   don't overlap their heaviest initialization phase.
-
-3. **System load guard** (`_wait_for_load()`): before spawning a session,
-   checks `os.getloadavg()`. If 1-minute load average exceeds 85% of
-   CPU count, waits up to 60s with 5s polling. Non-fatal on platforms
-   where `getloadavg` is unavailable.
-
-**Config:**
-```json
-{"taskrunner": {"max_parallel_steps": 2}}
+```python
+for batch_start in range(0, len(resolved), _MAX_PARALLEL_TASKS):
+    batch = resolved[batch_start : batch_start + _MAX_PARALLEL_TASKS]
+    batch_results = await asyncio.gather(
+        *(self._execute_single_task(run, t, history_key, session_key=...) for t in batch),
+        return_exceptions=True,
+    )
+    results.extend(batch_results)
 ```
 
-Set to 1 for sequential-only execution on resource-constrained machines.
+Per-task sessions (`taskrunner:{task_id}:task{N}`) are reset in a `finally`
+block after the loop, so sessions are cleaned up even if `CancelledError`
+interrupts a batch.
+
+There is no semaphore, per-index stagger delay, or `os.getloadavg()` load
+guard — batching is the sole throttling mechanism.
+
+> **Note (possible code bug for the owner):** `__init__` accepts
+> `max_parallel_steps` and stores it as `self._max_parallel_steps`
+> (`taskrunner.py`), but the batch loop keys off the module constant
+> `_MAX_PARALLEL_TASKS`, so the stored knob does not currently affect the
+> batch size.
 
 ## Runs Persistence
 
@@ -285,7 +296,7 @@ Loaded on `__init__` — survives gateway restarts.
     "started_at": 1771822344.0,
     "finished_at": 0,
     "steps": 3,
-    "current_step": 2,
+    "current_task": 2,
     "completed": 1,
     "failed": 0,
     "skipped": 0,
@@ -309,12 +320,9 @@ Loaded on `__init__` — survives gateway restarts.
 | `MAX_RETRIES` | 3 | Logic/test failure attempts per step |
 | `MAX_RECOVERIES` | 2 | Process crash recovery budget per step |
 | `MAX_REPLAN` | 2 | Plan revision attempts after step exhausts retries |
-| `MAX_TOTAL_STEPS` | 50 | Hard cap on total steps (including replans) |
-| `MAX_PARALLEL_STEPS` | 2 | Max concurrent step sessions in a parallel group |
-| `MAX_CONCURRENT_TASKS` | 3 | Max simultaneous task runs |
-| `PARALLEL_STAGGER_SECS` | 3.0 | Delay between parallel cold starts |
-| `LOAD_CHECK_THRESHOLD` | 0.85 | System load / cpu_count ratio to pause spawning |
-| `LOAD_CHECK_MAX_WAIT` | 60 | Max seconds to wait for load to drop |
+| `MAX_TOTAL_TASKS` | 50 | Hard cap on total tasks (including replans) |
+| `_MAX_PARALLEL_TASKS` (in `taskrunner.py`) | 3 | Batch size for tasks in a parallel group |
+| `_MAX_CONCURRENT_TASKS` (in `taskrunner.py`) | 3 | Max simultaneous task runs |
 | `CONTEXT_COMPACT_PCT` | 80.0 | Compact threshold |
 | `TEST_TIMEOUT` | 5400 | 90 min for test command |
 | `STALL_TIMEOUT` | 3600 | 60 min with no activity → warn |
@@ -322,7 +330,7 @@ Loaded on `__init__` — survives gateway restarts.
 | `DEFAULT_TOKEN_BUDGET` | 0 | 0 = unlimited |
 | `PROGRESS_FILE` | `TASK_PROGRESS.md` | Written next to spec file |
 | `SESSION_PREFIX` | `taskrunner` | Session key prefix |
-| `RUNS_FILE` | `runs.json` | Persisted runs file |
+| `_RUNS_FILE` (in `taskrunner.py`) | `runs.json` | Persisted runs file |
 
 Note: constants were renamed from `_MAX_RETRIES` → `MAX_RETRIES` etc. when moved
 to `task_models.py` (no longer private to a single file).
@@ -410,7 +418,7 @@ Two-layer approval during step execution:
 
 ## Watchdog
 
-Activity-aware stall detection. Tracks `run.last_step_time` which is bumped on:
+Activity-aware stall detection. Tracks `run.last_task_time` which is bumped on:
 - Every text chunk during LLM streaming
 - Every tool approval (auto or interactive)
 - Step/approval gate entry
@@ -420,20 +428,19 @@ Only fires when there is truly ZERO activity for the stall period.
 
 - 60 min no activity → ⚠️ warning notification
 - 2h no activity → 🔧 session reset → `AcpProcessDied` → recovery retry
-- Resets the current step session: `taskrunner:{task_id}:step{current_step}`
+- Resets the current step session: `taskrunner:{task_id}:task{current_task}`
 - Stall flag cleared on recovery (can fire again if retry also stalls)
-- `last_step_time` reset after recovery (fresh window for retry)
+- `last_task_time` reset after recovery (fresh window for retry)
 - Watchdog cancelled in `finally` block when task finishes
 - **Cannot delete or cancel a task** — only resets ACP session
 
 ## Session Management
 
-- Each step: `taskrunner:{task_id}:step{N}` — fresh session per step, reset after completion (owned by `task_executor.py`)
+- Each step: `taskrunner:{task_id}:task{N}` — fresh session per step, reset after completion (owned by `task_executor.py`)
 - Decomposition: `taskrunner:{task_id}:decompose` (throwaway, reset in finally) (owned by `task_planner.py`)
   - Returns `{"steps": [...], "acceptance_criteria": [...]}` — criteria shown in final acceptance step
   - Backward compatible with plain JSON arrays (no criteria → step-title fallback)
 - Self-review: `taskrunner:{task_id}:review` (separate session, reset in finally) (owned by `task_executor.py`)
-- Acceptance review: `taskrunner:{task_id}:acceptance` (owned by `task_reviewer.py`)
 - Context compaction at ≥80%, session reset if still ≥95% after compact
 
 Every step gets `is_new=True` on its first message, which triggers full `ContextBuilder`

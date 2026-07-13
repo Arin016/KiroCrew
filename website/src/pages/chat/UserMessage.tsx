@@ -158,21 +158,22 @@ const UserMessage = memo(function UserMessage({ content, meta, timestamp, render
   }
 
   const bubble = (
-    <div ref={userRef} onCopy={handleCopy} className={`msg-content px-4 py-1.5 text-sm leading-relaxed rounded-xl overflow-hidden min-w-0 max-w-[550px] ${isSteer ? 'bg-accent/10 text-text border border-accent/40' : 'bg-card text-card-fg'}`} style={{ overflowWrap: 'anywhere', wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
+    <div ref={userRef} onCopy={handleCopy} className={`msg-content px-4 py-1.5 text-sm leading-relaxed rounded-xl overflow-hidden min-w-0 max-w-[550px] ${isSteer ? 'bg-accent/10 text-text border border-accent/40' : 'bg-card text-card-fg'}`} style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
       {renderContent(content, meta)}
     </div>
   )
 
   return (
     <div data-role="user" className="group/msg flex flex-col items-end">
-      {/* `whiteSpace: pre-wrap` preserves user-typed line breaks (Shift+Enter).
-          react-markdown renders a single source newline as a soft break — a
-          literal "\n" text node — which the default `white-space: normal`
-          collapses to a space, so multi-line input rendered as one run-on
-          paragraph (Mesh-2056). pre-wrap restores the breaks. Child <pre> code
-          blocks set their own `white-space`, so they override the inherited
-          value and are unaffected. Mirrors the pre-wrap spans renderInlineSegment
-          already uses on the paste-adjacent path. */}
+      {/* User-typed line breaks (Shift+Enter) are preserved at the markdown
+          level, NOT via container `white-space: pre-wrap`. renderUserContentCb
+          renders user content through MarkdownRenderer with `softBreaks`, which
+          turns lone source newlines (CommonMark soft breaks) into hard breaks
+          (<br>). Container pre-wrap was removed because react-markdown emits
+          literal "\n" text nodes between block elements; under pre-wrap those
+          rendered as visible blank lines and inflated the gaps between list
+          items and paragraphs (Mesh-2695). Assistant markdown keeps standard
+          CommonMark soft-break-collapse. */}
       {isSteer ? (
         <>
           {/* Injected into the RUNNING turn — badge + accent bubble + one-shot

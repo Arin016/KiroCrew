@@ -56,6 +56,16 @@ _VALID_PACKAGE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$")
 # AIM packages whose agents are treated as kiroclaw-owned (orange badge, not purple)
 _KIROCLAW_AIM_PACKAGES = {"KiroClawAICapabilities"}
 
+# ── list_agents() result cache ──
+# list_agents() reads and JSON-parses every ~/.kiro/agents/*.json on each call.
+# Hot callers (agent picker, per-turn agent resolution) call it repeatedly, so an
+# uncached scan over 100+ AIM-installed agent files blocks the asyncio event loop.
+# Cache the parsed result keyed by (dir, include_project) and reuse it while a cheap
+# stat-only directory signature (file count + newest mtime + registry mtime) is
+# unchanged — that signature detects adds, removals, and in-place edits.
+_ListAgentsSig = tuple[tuple[int, int], int]
+_LIST_AGENTS_CACHE: dict[tuple[str, bool], tuple[_ListAgentsSig, list[AimAgent]]] = {}
+
 
 @dataclass
 class AimAgent:
@@ -606,6 +616,48 @@ def _load_project_agents() -> list[AimAgent]:
     return agents
 
 
+def _dir_signature(d: Path, include_project: bool) -> _ListAgentsSig:
+    """Cheap stat-only signature of the agents dir (+ project registry).
+
+    Captures the JSON file count and newest mtime — enough to detect adds,
+    removals, and in-place edits without reading or parsing any file — plus
+    the project-registry mtime when project agents are included. Used to
+    invalidate the :func:`list_agents` result cache.
+    """
+    count = 0
+    max_mtime = 0
+    try:
+        with os.scandir(d) as it:
+            for entry in it:
+                if not entry.name.endswith(".json"):
+                    continue
+                count += 1
+                try:
+                    m = entry.stat().st_mtime_ns
+                except OSError:
+                    m = 0
+                if m > max_mtime:
+                    max_mtime = m
+    except OSError:
+        pass
+    reg_mtime = 0
+    if include_project:
+        try:
+            reg_mtime = _registry_path().stat().st_mtime_ns
+        except OSError:
+            reg_mtime = 0
+    return ((count, max_mtime), reg_mtime)
+
+
+def clear_list_agents_cache() -> None:
+    """Drop all cached :func:`list_agents` results (forces a fresh scan next call).
+
+    Invalidation is normally automatic via the directory signature; call this
+    only to force an immediate refresh (e.g. right after writing an agent file).
+    """
+    _LIST_AGENTS_CACHE.clear()
+
+
 def list_agents(
     agents_dir: Path | None = None,
     include_project: bool = True,
@@ -618,8 +670,18 @@ def list_agents(
     Returns a list of ``AimAgent`` objects sorted by name. Each agent
     corresponds to a kiro-cli agent config file that can be selected
     via ``session/set_mode`` in the ACP protocol.
+
+    Results are cached per (directory, include_project) and reused while the
+    directory signature is unchanged, so repeated calls avoid re-reading and
+    re-parsing every agent JSON on the event loop.
     """
     d = agents_dir or _KIRO_AGENTS_DIR
+    cache_key = (str(d), include_project)
+    signature = _dir_signature(d, include_project)
+    cached = _LIST_AGENTS_CACHE.get(cache_key)
+    if cached is not None and cached[0] == signature:
+        return list(cached[1])
+
     agents: list[AimAgent] = []
 
     if d.is_dir():
@@ -717,7 +779,9 @@ def list_agents(
                 a.package,
                 existing.package,
             )
-    return list(seen.values())
+    result = list(seen.values())
+    _LIST_AGENTS_CACHE[cache_key] = (signature, result)
+    return list(result)
 
 
 # ---------------------------------------------------------------------------

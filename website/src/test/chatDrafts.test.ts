@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { DRAFTS_KEY, DRAFT_MAX_ENTRIES, DRAFT_TTL_MS, loadDrafts, saveDrafts, setDraft, __resetForTests } from '../utils/chatDrafts'
+import { DRAFT_MAX_STORE_BYTES } from '../utils/draftConstants'
 
 describe('chatDrafts', () => {
   beforeEach(() => { localStorage.clear(); __resetForTests() })
@@ -55,6 +56,27 @@ describe('chatDrafts', () => {
     expect(drafts['slot-5']).toBe('d5')
     expect(drafts[`slot-${DRAFT_MAX_ENTRIES + 4}`]).toBe(`d${DRAFT_MAX_ENTRIES + 4}`)
     expect(Object.keys(loadDrafts()).length).toBe(DRAFT_MAX_ENTRIES)
+  })
+
+  it('byte-aware LRU evicts oldest text drafts until under the store budget, keeping newest', () => {
+    // Text drafts gained a store-byte budget in the slotDraftStore migration
+    // (they previously had only entry cap + TTL). Verify the new behavior for
+    // this store specifically, not just generically in slotDraftStore.test.ts.
+    const drafts: Record<string, string> = {}
+    // 3 drafts ~1 MB each = ~3 MB, over the 2 MB budget.
+    for (let i = 0; i < 3; i++) setDraft(drafts, `chat-${i}`, 'x'.repeat(1_000_000))
+    saveDrafts(drafts)
+    const reloaded = loadDrafts()
+    expect(JSON.stringify(reloaded).length).toBeLessThanOrEqual(DRAFT_MAX_STORE_BYTES)
+    expect(reloaded['chat-0']).toBeUndefined() // oldest evicted
+    expect(reloaded['chat-2']).toBe('x'.repeat(1_000_000)) // newest survives
+  })
+
+  it('drops empty-string drafts on load (sanitize contract)', () => {
+    // setDraft never persists '' (it deletes the slot), but a hand-edited or
+    // legacy blob could contain one. The sanitize guard drops it.
+    localStorage.setItem(DRAFTS_KEY, JSON.stringify({ 'chat-empty': '', 'chat-real': 'hi' }))
+    expect(loadDrafts()).toEqual({ 'chat-real': 'hi' })
   })
 
   it('setDraft refreshes insertion order (LRU - recently edited draft is not evicted)', () => {

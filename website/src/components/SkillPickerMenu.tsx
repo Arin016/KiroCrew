@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Sparkles } from 'lucide-react'
 import { api } from '../api/client'
 import { useListKeyboardNav } from '../hooks/useListKeyboardNav'
+import { menuGeometry, bottomUpOrder } from '../lib/pickerMenu'
 
 // Mesh-588 — $skill inline trigger autocomplete.
 // Mirrors FilePickerMenu but lists skills (from /api/skills, all sources:
@@ -58,7 +59,7 @@ export default function SkillPickerMenu({ query, anchorRef, open, onSelect, onCl
   }, [onSelect])
 
   // Shared Arrow/Enter/Tab/Escape + scroll-into-view (see useListKeyboardNav).
-  const { selected, setSelected, itemRefs } = useListKeyboardNav({
+  const { selected, setSelected, selectedRef, itemRefs } = useListKeyboardNav({
     open,
     count: results.length,
     onChoose: choose,
@@ -66,31 +67,51 @@ export default function SkillPickerMenu({ query, anchorRef, open, onSelect, onCl
   })
 
   // Filter by leaf-name substring (case-insensitive). Empty query lists all,
-  // capped for menu height. Dedupe by leaf so the same $token isn't ambiguous.
+  // capped for menu height. Dedupe by leaf so the same $token isn't ambiguous
+  // (mirrors the backend's leaf-addressed resolution).
   useEffect(() => {
     if (!open) return
     const list = Array.isArray(data) ? data : []
     const q = query.toLowerCase()
     const seen = new Set<string>()
-    const filtered: SkillItem[] = []
+    const matched: SkillItem[] = []
     for (const s of list) {
       const leaf = leafOf(s.key || s.name).toLowerCase()
       if (q && !leaf.includes(q)) continue
       if (seen.has(leaf)) continue
       seen.add(leaf)
-      filtered.push(s)
-      if (filtered.length >= 50) break
+      matched.push(s)
     }
-    setResults(filtered); resultsRef.current = filtered
-    setSelected(0)
-  }, [query, open, data, setSelected])
+    const top = matched.slice(0, 50)
+    // Populate bottom-up when the menu opens above the input (shared helper —
+    // same geometry the render uses for positioning, and the same reversal the
+    // @file and /command pickers use): the first row sits at the bottom nearest
+    // the cursor with the initial selection on it; when it flips below, keep it
+    // at the top.
+    const above = anchorRef.current ? menuGeometry(anchorRef.current, top.length, 48).above : false
+    const { ordered, initialIndex } = bottomUpOrder(top, above)
+    setResults(ordered); resultsRef.current = ordered
+    // setSelected is the hook's synced setter (keeps selectedRef in lockstep),
+    // so Enter-before-arrow dispatches on this row.
+    setSelected(initialIndex)
+  }, [query, open, data, anchorRef, setSelected])
+
+  // Scroll the selected row into view once results actually render. The filter
+  // effect sets the selection (often the bottom row when the menu opens above)
+  // BEFORE those rows exist in the DOM, so the hook's own scrollIntoView (fired
+  // from setSelected) no-ops on a not-yet-mounted ref. This runs after results
+  // commit — refs are populated — so the selected row is visible on open and on
+  // query change. Keyed on [results]: arrow-key nav changes `selected` but not
+  // `results`, and the hook already scrolls on move, so this never fights
+  // per-keystroke navigation.
+  useEffect(() => {
+    if (!open) return
+    itemRefs.current[selectedRef.current]?.scrollIntoView({ block: 'nearest' })
+  }, [results, open, selectedRef, itemRefs])
 
   if (!open || !anchorRef.current) return null
 
-  const rect = anchorRef.current.getBoundingClientRect()
-  const menuH = Math.min((results.length || 1) * 48 + 8, 320)
-  const above = rect.top - menuH - 4
-  const top = above > 0 ? above : rect.bottom + 4
+  const { top, left, width, maxHeight } = menuGeometry(anchorRef.current, results.length, 48)
 
   const empty = loading
     ? <div className="px-3 py-3 text-[12px] text-muted">Loading skills…</div>
@@ -100,7 +121,7 @@ export default function SkillPickerMenu({ query, anchorRef, open, onSelect, onCl
     <div
       className="fixed z-[9999] bg-card border border-border rounded-lg shadow-lg overflow-y-auto py-1 animate-slide-up"
       role="listbox"
-      style={{ top, left: rect.left, width: Math.min(rect.width, 460), maxHeight: 320 }}
+      style={{ top, left, width: Math.min(width, 460), maxHeight }}
     >
       {results.length === 0 ? empty : results.map((s, i) => {
         const leaf = leafOf(s.key || s.name)

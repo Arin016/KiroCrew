@@ -10,6 +10,7 @@ Tests use a tmp_path fake $HOME so the real filesystem is never touched.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from kiro_claw.aim_agents import (
     AimAgent,
     _load_project_agents,
     auto_register_project,
+    clear_list_agents_cache,
     find_agent_file,
     list_agents,
     load_registry,
@@ -1131,3 +1133,129 @@ class TestFindAgentFile:
         (agents_dir / "good.json").write_text('{"name": "abc"}', encoding="utf-8")
 
         assert find_agent_file(agents_dir, "abc") == agents_dir / "good.json"
+
+
+class TestListAgentsCache:
+    """list_agents caches parsed results per (dir, include_project) and reuses
+    them while the stat-only directory signature is unchanged."""
+
+    def test_cache_hit_skips_reparse(self, tmp_path: Path) -> None:
+        """An unchanged signature returns the cached result without re-parsing."""
+        clear_list_agents_cache()
+        d = tmp_path / "agents"
+        d.mkdir()
+        f = d / "a.json"
+        f.write_text(json.dumps({"name": "v1", "model": "auto"}), encoding="utf-8")
+        file_stat = f.stat()
+
+        first = [a.name for a in list_agents(agents_dir=d, include_project=False)]
+        assert first == ["v1"]
+
+        # Rewrite the content but restore the original mtime so the signature is
+        # unchanged: a re-parse would yield "v2"; a cache hit yields "v1".
+        f.write_text(json.dumps({"name": "v2", "model": "auto"}), encoding="utf-8")
+        os.utime(f, ns=(file_stat.st_atime_ns, file_stat.st_mtime_ns))
+
+        second = [a.name for a in list_agents(agents_dir=d, include_project=False)]
+        assert second == ["v1"], "unchanged signature must return the cached result"
+
+    def test_cache_invalidates_on_add(self, tmp_path: Path) -> None:
+        """Adding a file changes the signature and is reflected immediately."""
+        clear_list_agents_cache()
+        d = tmp_path / "agents"
+        d.mkdir()
+        (d / "a.json").write_text(
+            json.dumps({"name": "a", "model": "auto"}), encoding="utf-8"
+        )
+        assert {a.name for a in list_agents(agents_dir=d, include_project=False)} == {"a"}
+
+        (d / "b.json").write_text(
+            json.dumps({"name": "b", "model": "auto"}), encoding="utf-8"
+        )
+        assert {
+            a.name for a in list_agents(agents_dir=d, include_project=False)
+        } == {"a", "b"}
+
+    def test_cache_invalidates_on_remove(self, tmp_path: Path) -> None:
+        """Removing a file changes the signature and is reflected immediately."""
+        clear_list_agents_cache()
+        d = tmp_path / "agents"
+        d.mkdir()
+        (d / "a.json").write_text(
+            json.dumps({"name": "a", "model": "auto"}), encoding="utf-8"
+        )
+        (d / "b.json").write_text(
+            json.dumps({"name": "b", "model": "auto"}), encoding="utf-8"
+        )
+        assert {
+            a.name for a in list_agents(agents_dir=d, include_project=False)
+        } == {"a", "b"}
+
+        (d / "b.json").unlink()
+        assert {a.name for a in list_agents(agents_dir=d, include_project=False)} == {"a"}
+
+    def test_cache_invalidates_on_inplace_edit(self, tmp_path: Path) -> None:
+        """An in-place content edit (newer mtime) invalidates the cache."""
+        clear_list_agents_cache()
+        d = tmp_path / "agents"
+        d.mkdir()
+        f = d / "a.json"
+        f.write_text(json.dumps({"name": "v1", "model": "auto"}), encoding="utf-8")
+        assert [
+            a.name for a in list_agents(agents_dir=d, include_project=False)
+        ] == ["v1"]
+
+        f.write_text(json.dumps({"name": "v2", "model": "auto"}), encoding="utf-8")
+        # Bump mtime forward deterministically so the signature is guaranteed newer.
+        st = f.stat()
+        os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+        assert [
+            a.name for a in list_agents(agents_dir=d, include_project=False)
+        ] == ["v2"], "an in-place edit must invalidate the cache"
+
+    def test_clear_cache_forces_rescan(self, tmp_path: Path) -> None:
+        """clear_list_agents_cache() forces a fresh scan even when the signature
+        is unchanged."""
+        clear_list_agents_cache()
+        d = tmp_path / "agents"
+        d.mkdir()
+        f = d / "a.json"
+        f.write_text(json.dumps({"name": "v1", "model": "auto"}), encoding="utf-8")
+        file_stat = f.stat()
+        assert [
+            a.name for a in list_agents(agents_dir=d, include_project=False)
+        ] == ["v1"]
+
+        # Change content but freeze the mtime so the signature would still hit ...
+        f.write_text(json.dumps({"name": "v2", "model": "auto"}), encoding="utf-8")
+        os.utime(f, ns=(file_stat.st_atime_ns, file_stat.st_mtime_ns))
+        # ... then force a clear: the next call must re-scan and see "v2".
+        clear_list_agents_cache()
+        assert [
+            a.name for a in list_agents(agents_dir=d, include_project=False)
+        ] == ["v2"]
+
+    def test_include_project_keyed_separately(self, tmp_path: Path, monkeypatch: object) -> None:
+        """The cache distinguishes include_project=True vs False for the same dir."""
+        clear_list_agents_cache()
+        reg_file = tmp_path / "registry" / "project_agents.json"
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            "kiro_claw.aim_agents._registry_path", lambda: reg_file
+        )
+        global_dir = tmp_path / "global"
+        global_dir.mkdir()
+        (global_dir / "kiroclaw.json").write_text(
+            json.dumps({"name": "kiroclaw", "model": "auto"}), encoding="utf-8"
+        )
+        proj = tmp_path / "myproj"
+        (proj / ".kiro" / "agents").mkdir(parents=True)
+        (proj / ".kiro" / "agents" / "proj-agent.json").write_text(
+            json.dumps({"name": "proj-agent", "model": "auto"}), encoding="utf-8"
+        )
+        save_registry({str(proj): ["proj-agent.json"]})
+
+        with_proj = {a.name for a in list_agents(agents_dir=global_dir, include_project=True)}
+        without_proj = {a.name for a in list_agents(agents_dir=global_dir, include_project=False)}
+        assert "proj-agent" in with_proj
+        assert "proj-agent" not in without_proj
+        assert "kiroclaw" in with_proj and "kiroclaw" in without_proj
