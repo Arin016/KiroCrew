@@ -26,6 +26,11 @@ export interface ChatMessageListProps {
   contentWidth?: string
   onApprove?: (approvalId: string, decision: string) => void
   onFileOpen?: (path: string) => void
+  /** Optional host-injected renderer for tool messages (role 'tool'/'tool_call'/
+   *  'tool_result'). Lets a Redux-connected host (e.g. the dashboard's split-view
+   *  ChatPane) render the full slot-aware ToolCallLine while this component stays
+   *  dependency-free for the embed SDK. When omitted, the bare ToolCallPill is used. */
+  renderTool?: (message: ChatMessage) => React.ReactNode
 }
 
 // ── Stable helpers (outside component) ──
@@ -83,6 +88,7 @@ const ChatMessageList = memo(function ChatMessageList({
   contentWidth = '900px',
   onApprove,
   onFileOpen,
+  renderTool,
 }: ChatMessageListProps) {
 
   // Phase 1: Build raw items — skip permissions, group thinking
@@ -195,7 +201,7 @@ const ChatMessageList = memo(function ChatMessageList({
     if (m.role === 'tool' && m.content?.startsWith('🔧')) {
       return (
         <div key={key} className="px-5 mx-auto w-full py-0.5" style={{ maxWidth: `var(--mc-content-width, ${contentWidth})` }}>
-          <ToolCallPill message={m} running={running} />
+          {renderTool ? renderTool(m) : <ToolCallPill message={m} running={running} />}
         </div>
       )
     }
@@ -203,7 +209,7 @@ const ChatMessageList = memo(function ChatMessageList({
     if (m.role === 'tool_call' || m.role === 'tool_result') {
       return (
         <div key={key} className="px-5 mx-auto w-full py-0.5" style={{ maxWidth: `var(--mc-content-width, ${contentWidth})` }}>
-          <ToolCallPill message={m} running={running} />
+          {renderTool ? renderTool(m) : <ToolCallPill message={m} running={running} />}
         </div>
       )
     }
@@ -247,7 +253,7 @@ const ChatMessageList = memo(function ChatMessageList({
     }
 
     return null
-  }, [messages, running, contentWidth, onFileOpen])
+  }, [messages, running, contentWidth, onFileOpen, renderTool])
 
   // Render a TurnItem (single or group)
   const renderItem = useCallback((item: TurnItem, _i: number) => {

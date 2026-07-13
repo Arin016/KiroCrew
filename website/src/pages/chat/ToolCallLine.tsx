@@ -12,7 +12,7 @@ import { registerToolPill } from '../../store/toolPillRegistry'
 /** Inline tool call pill. Click toggles an expanded panel below the pill that
  *  shows purpose / input / output (the same details that previously lived in
  *  the Activity sidebar's deprecated "Tools" tab). */
-export default memo(function ToolCallLine({ message, running: _running }: { message: ChatMessage; running: boolean }) {
+export default memo(function ToolCallLine({ message, running: _running, slot }: { message: ChatMessage; running: boolean; slot?: string }) {
   const dispatch = useAppDispatch()
   const label = message.content.replace(/^🔧\s*/, '')
   const toolCallId = message.meta?.tool_call_id as string | undefined
@@ -21,9 +21,13 @@ export default memo(function ToolCallLine({ message, running: _running }: { mess
   // Pull the matching toolLog entry. Returns purpose/input/output for the inline
   // expansion as well as completion status for the icon.
   const { effectiveId, isDone, isRejected, purpose, input, output, auto, ts, hasEntry } = useAppSelector(s => {
-    const log = s.chat.toolLog
-    const slotRunning = s.chat.slotRunning
-    const msgs = s.chat.messages
+    // Slot-aware: for a non-active slot (split-view pane) read that slot's
+    // per-slot tool log / messages / running state; `slot` undefined or equal to
+    // the active slot → active-slot globals (behavior identical to before).
+    const bg = slot && slot !== s.chat.activeSlot ? slot : null
+    const log = bg ? (s.chat.slotActivity[bg]?.toolLog ?? []) : s.chat.toolLog
+    const slotRunning = bg ? ((s.chat.slotRun[bg]?.state ?? 'idle') !== 'idle') : s.chat.slotRunning
+    const msgs = bg ? (s.chat.slotMessages[bg] ?? []) : s.chat.messages
 
     // Helper: check if this tool's permission was resolved as rejected
     const wasRejectedByPerm = () => {
@@ -85,7 +89,8 @@ export default memo(function ToolCallLine({ message, running: _running }: { mess
   // incorrectly lighting up all pills as pending approval.
   const hasPendingPerm = useAppSelector(s => {
     if (isDone || !toolCallId) return false
-    const msgs = s.chat.messages
+    const bg = slot && slot !== s.chat.activeSlot ? slot : null
+    const msgs = bg ? (s.chat.slotMessages[bg] ?? []) : s.chat.messages
     for (let j = msgs.length - 1; j >= 0; j--) {
       const m = msgs[j]
       if (m.role !== 'permission' || m.meta?.resolved || !m.meta?.tool_call_id) continue

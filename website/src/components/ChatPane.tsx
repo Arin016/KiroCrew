@@ -4,6 +4,8 @@ import { X, ShieldCheck, BookOpen, Handshake, Rocket, Check } from 'lucide-react
 import { SplitGlyph } from './SplitGlyph'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import ChatMessageList from '../app-sdk/ChatMessageList'
+import ToolCallLine from '../pages/chat/ToolCallLine'
+import type { ChatMessage } from '../types'
 import ChatInput from './ChatInput'
 import QueueStack from './QueueStack'
 import AgentDropdownList from './AgentDropdownList'
@@ -229,6 +231,12 @@ export default function ChatPane({
     api.cancelQueuedMessage(slotKey, queueId).catch(() => undefined)
   }, [dispatch, slotKey])
   const onInterruptQueued = useCallback((queueId: string) => { api.interruptSlot(slotKey, queueId).catch(() => undefined) }, [slotKey])
+  // Split-view panes render tool calls with the full ToolCallLine (purpose / input /
+  // output / live status) instead of the SDK's bare pill. ToolCallLine's slot-aware
+  // selectors read THIS slot's per-slot tool log, so a background pane shows the same
+  // live tool detail as the main chat view. Injected as a render prop so
+  // app-sdk/ChatMessageList stays Redux-free for the embed SDK.
+  const renderTool = useCallback((m: ChatMessage) => <ToolCallLine message={m} running={running} slot={slotKey} />, [slotKey, running])
 
   const ddInputCls = 'w-full px-2 py-1 text-[13px] font-mono bg-bg border border-border rounded text-text outline-none focus:border-accent'
 
@@ -273,7 +281,7 @@ export default function ChatPane({
           {messages.length === 0 && !running && (
             <div className="text-center text-muted text-[13px] py-8">Session ready. Type a message to start.</div>
           )}
-          <ChatMessageList messages={messages} running={running} />
+          <ChatMessageList messages={messages} running={running} renderTool={renderTool} />
           <div ref={endRef} />
         </div>
 

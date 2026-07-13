@@ -386,7 +386,7 @@ export default function CommandPalette({
         </div>
 
         {/* Tab strip */}
-        <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border" role="tablist">
+        <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border overflow-x-auto scrollbar-thin" role="tablist">
           {tabs.map((t, i) => (
             <button
               type="button"
@@ -394,7 +394,7 @@ export default function CommandPalette({
               role="tab"
               aria-selected={i === activeTab}
               onClick={() => setActiveTab(i)}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] font-medium cursor-pointer transition-colors ${
+              className={`flex shrink-0 items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] font-medium whitespace-nowrap cursor-pointer transition-colors ${
                 i === activeTab
                   ? 'bg-accent-subtle text-text'
                   : 'text-muted hover:bg-bg-hover hover:text-text'
