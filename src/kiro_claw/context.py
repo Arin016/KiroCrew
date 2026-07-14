@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -36,6 +37,10 @@ logger = logging.getLogger(__name__)
 _memory_stores: dict[str, MemoryStore] = {}
 # Lazy cache of LessonStore instances keyed by workspace name.
 _lesson_stores: dict[str, LessonStore] = {}
+# Serializes lazy store creation: build_message runs on worker threads
+# (run_in_embed_pool at every async call site), so two threads can race the
+# check-then-insert for the same workspace key. Double-checked with the lock.
+_stores_lock = threading.Lock()
 
 # Per-section budget BASE — the char count each section's percentage cap is
 # taken from. Kept at 165k so memory / lessons / history keep their existing
@@ -603,26 +608,39 @@ class ContextBuilder:
 
     @staticmethod
     def get_memory_for(workspace: str | None = None) -> MemoryStore:
-        """Return a MemoryStore for the given workspace, creating lazily."""
+        """Return a MemoryStore for the given workspace, creating lazily.
+
+        Thread-safe: build_message now runs on worker threads (offloaded via
+        run_in_embed_pool from every async call site), so concurrent first
+        requests for the same workspace must not double-init the store.
+        """
         key = workspace or "default"
         if key not in _memory_stores:
-            ws_path = workspace_dir_for(key)
-            store = MemoryStore(workspace=ws_path)
-            store.init()
-            # Share the global VectorMemoryStore so all agents get semantic/episodic reads
-            default = _memory_stores.get("default")
-            if default is not None and default.vector_store is not None:
-                store.vector_store = default.vector_store
-            _memory_stores[key] = store
+            with _stores_lock:
+                if key not in _memory_stores:
+                    ws_path = workspace_dir_for(key)
+                    store = MemoryStore(workspace=ws_path)
+                    store.init()
+                    # Share the global VectorMemoryStore so all agents get
+                    # semantic/episodic reads
+                    default = _memory_stores.get("default")
+                    if default is not None and default.vector_store is not None:
+                        store.vector_store = default.vector_store
+                    _memory_stores[key] = store
         return _memory_stores[key]
 
     @staticmethod
     def get_lessons_for(workspace: str | None = None) -> LessonStore:
-        """Return a LessonStore for the given workspace, creating lazily."""
+        """Return a LessonStore for the given workspace, creating lazily.
+
+        Thread-safe — same double-checked locking as :meth:`get_memory_for`.
+        """
         key = workspace or "default"
         if key not in _lesson_stores:
-            ws_path = workspace_dir_for(key)
-            _lesson_stores[key] = LessonStore(base_dir=ws_path)
+            with _stores_lock:
+                if key not in _lesson_stores:
+                    ws_path = workspace_dir_for(key)
+                    _lesson_stores[key] = LessonStore(base_dir=ws_path)
         return _lesson_stores[key]
 
     def __init__(

@@ -101,7 +101,7 @@ function ChatEmbed({ slotKey, agent, placeholder }: ChatEmbedProps) {
           disabled={sendMutation.isPending}
         />
         <button
-          className="p-2 rounded-md bg-accent text-white disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-80 transition-opacity"
+          className="p-2 rounded-md bg-accent text-accent-fg disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-80 transition-opacity"
           onClick={send}
           disabled={sendMutation.isPending || !input.trim()}
           title="Send"

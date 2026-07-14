@@ -21,7 +21,8 @@ import { folderBreadcrumb } from '../utils/artifactFolderTree'
 import { CommentPopover, CommentList, formatCommentsMessage, type InlineComment } from '../components/CommentOverlay'
 import { findCoords, resolveSourcePos } from '../components/MarkdownPanel'
 import { useArtifactPopouts } from '../hooks/useArtifactPopouts'
-import { PREFILL_STORAGE_KEY } from './ChatPage'
+import { forwardToMain, type NavIntent } from '../utils/artifactPopout'
+import { writePrefill } from '../utils/navIntent'
 import type { FileType } from '../components/FileRenderers'
 import type { Artifact, ArtifactEvent } from '../types'
 
@@ -636,6 +637,21 @@ export default function ArtifactDetailPage({ popout = false }: { popout?: boolea
     setComments(prev => prev.map(c => c.id === id ? { ...c, text } : c))
   }, [])
 
+  /**
+   * Single navigation dispatcher for every affordance that leaves the artifact
+   * view. In the main dashboard it navigates locally (seeding the composer
+   * prefill / active slot first). Inside a popout window it must NOT touch the
+   * router — an in-window navigate() would remount the entire dashboard inside
+   * the popout — so the intent is forwarded to a main dashboard window (or a
+   * new tab when none is alive) and this window stays pinned to its artifact.
+   */
+  const sendNav = useCallback((intent: NavIntent) => {
+    if (popout) { forwardToMain(intent); return }
+    if (intent.prefill) writePrefill(intent.prefill.slotKey, intent.prefill.prompt)
+    if (intent.slotKey) dispatch(switchSlot(intent.slotKey))
+    navigate(intent.path)
+  }, [popout, dispatch, navigate])
+
   // Build the chat-injection prompt: prefix with `Iterate on artifact <slug>:`
   // so the agent knows the subject. If pending comments exist, attach the
   // structured comment block; otherwise emit just the prefix and let the
@@ -664,17 +680,12 @@ export default function ArtifactDetailPage({ popout = false }: { popout?: boolea
     const prompt = buildPromptForChat()
     try {
       const res = await api.createChatSlot(`Artifact: ${artifact.name}`)
-      sessionStorage.setItem(
-        PREFILL_STORAGE_KEY,
-        JSON.stringify({ slotKey: res.key, prompt, ts: Date.now() }),
-      )
-      dispatch(switchSlot(res.key))
       setComments([])
-      navigate('/chat')
+      sendNav({ path: '/chat', slotKey: res.key, prefill: { slotKey: res.key, prompt } })
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : String(err))
     }
-  }, [artifact, buildPromptForChat, dispatch, navigate])
+  }, [artifact, buildPromptForChat, sendNav])
 
   // Drop popover when the user switches to edit mode or pages between
   // versions — those interactions kill the underlying selection anyway.
@@ -731,7 +742,10 @@ export default function ArtifactDetailPage({ popout = false }: { popout?: boolea
               </div>
             </div>
             <div className="mt-3">
-              <Btn onClick={() => navigate('/artifacts')}>← Back to library</Btn>
+              {/* In a popout this forwards to the main window (the popout must
+                  never become the library page); in the main app it's a plain
+                  local navigation. */}
+              <Btn onClick={() => sendNav({ path: '/artifacts' })}>← Back to library</Btn>
             </div>
           </Card>
         </div>
@@ -1066,10 +1080,7 @@ export default function ArtifactDetailPage({ popout = false }: { popout?: boolea
           <h3 className="text-[13px] font-semibold text-text-strong mb-2">Activity</h3>
           <ActivityTimeline
             events={eventsQuery.data?.events ?? []}
-            navigateToSlot={(slotKey) => {
-              dispatch(switchSlot(slotKey))
-              navigate('/chat')
-            }}
+            navigateToSlot={(slotKey) => sendNav({ path: '/chat', slotKey })}
           />
         </div>
       </div>

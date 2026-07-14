@@ -54,7 +54,7 @@ export default function DisplayTab() {
               {t.custom && (
                 <button
                   onClick={(e) => { e.stopPropagation(); editor.openEditTheme(t.value.replace('custom-', '')) }}
-                  className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-accent text-white text-[10px] leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                  className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-accent text-accent-fg text-[10px] leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
                   title="Edit theme"
                 ><Pencil className="lucide-inline" /></button>
               )}

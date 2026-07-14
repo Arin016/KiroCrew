@@ -343,7 +343,7 @@ function SubagentSettings({ cfg, onSaved }: { cfg: KiroClawCfg; onSaved: () => v
       </div>
       <div className="flex items-center gap-3 mt-3">
         <button onClick={save} disabled={!dirty || saving}
-          className="px-3 py-1.5 rounded text-sm font-medium bg-accent text-white hover:bg-accent/90 disabled:opacity-40 disabled:cursor-not-allowed">
+          className="px-3 py-1.5 rounded text-sm font-medium bg-accent text-accent-fg hover:bg-accent/90 disabled:opacity-40 disabled:cursor-not-allowed">
           {saving ? 'Saving…' : 'Save'}
         </button>
         {msg && <span className={`text-[13px] ${msgOk ? 'text-ok' : 'text-danger'}`}>{msg}</span>}

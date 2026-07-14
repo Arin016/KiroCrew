@@ -8,7 +8,9 @@ import { fetchSlots, sseStatus, setUpdateProgress, setEnabledAppIds, changeAppro
 // before `getBuiltinSurfaces()` is invoked below to compute `NAV_ITEMS`.
 import './surfaces/builtins'
 import { getBuiltinSurfaces, getBuiltinSurface, selectSurfaceBadgeCount, selectAllSurfacesAttention } from './surfaces/registry'
-import { createSlot, appendMessage, setSlotRunning } from './store/chatSlice'
+import { createSlot, appendMessage, setSlotRunning, switchSlot } from './store/chatSlice'
+import { setNavIntentHandler as setArtifactNavIntentHandler } from './utils/artifactPopout'
+import { applyNavIntentInMain } from './utils/navIntent'
 import { fetchNotifications, ackNotification } from './store/notificationsSlice'
 import { useWebSocket } from './hooks/useWebSocket'
 import { useDashboardHealthProbe } from './hooks/useDashboardHealthProbe'
@@ -626,7 +628,17 @@ function NotificationsBellButton() {
 export default function App() {
   const location = useLocation()
   const isEmbed = location.pathname.startsWith('/embed/')
-  const isPopout = location.pathname.startsWith('/popout/')
+  // Sticky popout-ness: computed from the pathname at DOCUMENT LOAD, not the
+  // live route. A window that loaded as /popout/* stays in the popout branch
+  // for its whole SPA lifetime, so no soft navigate() — present or future —
+  // can ever mount the full dashboard chrome inside a popout window.
+  // Deliberately a ref (not window.name-based): returnSelfToMain()'s deep-link
+  // fallback does a full location.assign to the main view, which is a fresh
+  // document load and correctly re-evaluates to false there.
+  const isPopout = useRef(window.location.pathname.startsWith('/popout/')).current
+  // The load-time popout URL: the wildcard route below re-pins any stray
+  // in-window navigation back to this frame instead of escaping to '/'.
+  const initialPopoutPath = useRef(window.location.pathname + window.location.search).current
   const dispatch = useAppDispatch()
   const { connected, updateProgress } = useAppSelector(s => s.dashboard)
   const updateAvailable = useAppSelector(s => s.dashboard.status?.update_available)
@@ -684,6 +696,22 @@ export default function App() {
   const terminalEnabled = terminalConfig?.enabled === true
   useEffect(() => { setTerminalEnabledFlag(terminalEnabled) }, [terminalEnabled])
   const navigate = useNavigate()
+
+  // Main-dashboard role for the artifact popout nav-intent handshake: perform
+  // navigation intents forwarded from popout windows (activity-timeline
+  // session links, "Ask agent to address", …). Popout and embed windows never
+  // register — only handler-registered windows answer nav-requests, which is
+  // what keeps a second popout from claiming another popout's navigation.
+  useEffect(() => {
+    if (isPopout || isEmbed) return
+    return setArtifactNavIntentHandler((intent) =>
+      applyNavIntentInMain(intent, {
+        navigate,
+        switchSlot: (slotKey) => { dispatch(switchSlot(slotKey)) },
+      }),
+    )
+  }, [isPopout, isEmbed, navigate, dispatch])
+
   const { colorTheme, setColorTheme, allThemes, preference: modePref, cycle: cycleMode, setTheme: setModePref, onboarded, markOnboarded } = useTheme()
   const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem('mc-onboarded'))
   // Dismiss onboarding when server reports user is already onboarded
@@ -1159,7 +1187,11 @@ export default function App() {
       <Routes>
         <Route path="/popout/chat/:slug?" element={<ErrorBoundary><PopoutFrame /></ErrorBoundary>} />
         <Route path="/popout/artifact/:slug" element={<ErrorBoundary><ArtifactPopoutFrame /></ErrorBoundary>} />
-        <Route path="*" element={<Navigate to="/" replace />} />
+        {/* Belt-and-braces: any stray in-window navigation re-pins to the
+            frame this window loaded as (isPopout is sticky, so the dashboard
+            branch is unreachable — without this the wildcard would bounce a
+            stray path to '/', which no longer matches anything here). */}
+        <Route path="*" element={<Navigate to={initialPopoutPath} replace />} />
       </Routes>
     ) : isEmbed ? (
       <div className="h-screen w-screen overflow-hidden bg-bg flex flex-col">

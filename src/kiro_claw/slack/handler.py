@@ -40,6 +40,7 @@ from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import ACTIVATION_REVIEW, KiroClawConfig, config_dir, config_path
 from kiro_claw.context import ContextBuilder
 from kiro_claw.cron import CronService, compute_next_run_ts, format_schedule, get_local_tz
+from kiro_claw.executors import run_in_embed_pool
 from kiro_claw.history import ConversationLog, HistoryConsolidator
 from kiro_claw.hooks import (
     HOOK_REPLY,
@@ -2976,7 +2977,9 @@ async def handle_message(
                         thread_ts,
                     )
 
-            full_message, _ = context_builder.build_message(
+            # Off-loop: build_message embeds the episodic query (blocking urllib).
+            full_message, _ = await run_in_embed_pool(
+                context_builder.build_message,
                 text,
                 is_new,
                 session_key,

@@ -102,7 +102,7 @@ export function KnowledgePicker({ results, query, loading, onInject, onSkip }: P
           </button>
           <button
             onClick={() => onInject(results.filter(r => selected.has(r.id)))}
-            className="px-3 py-1.5 text-[13px] bg-accent text-white rounded hover:bg-accent/80 cursor-pointer border-none"
+            className="px-3 py-1.5 text-[13px] bg-accent text-accent-fg rounded hover:bg-accent/80 cursor-pointer border-none"
           >
             Inject Context
           </button>

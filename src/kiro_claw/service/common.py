@@ -74,3 +74,27 @@ def current_platform() -> Platform:
     if sys.platform == "darwin" and shutil.which("launchctl"):
         return Platform.LAUNCHD
     return Platform.UNSUPPORTED
+
+
+def restart_command_hint() -> str:
+    """Return the shell command that actually restarts the installed gateway.
+
+    The correct command depends on how the service is installed, and the
+    scopes are not interchangeable — printing the wrong one sends the user
+    down a dead end (Mesh-2583):
+
+    * ``SYSTEMD`` — the unit is **system-level** at
+      ``/etc/systemd/system/kiroclaw.service`` (see
+      :mod:`kiro_claw.service.linux`). ``systemctl --user`` fails on AL2
+      (no per-user systemd manager), so the working command needs sudo:
+      ``sudo systemctl restart kiroclaw``.
+    * ``LAUNCHD`` / ``UNSUPPORTED`` — defer to the service-aware
+      ``kiroclaw restart`` CLI, which resolves the right mechanism itself.
+
+    Centralised so the update path and the Slack restart-failure hint share
+    one source of truth and can never drift back to the broken
+    ``systemctl --user`` string.
+    """
+    if current_platform() is Platform.SYSTEMD:
+        return f"sudo systemctl restart {SERVICE_NAME}"
+    return "kiroclaw restart"

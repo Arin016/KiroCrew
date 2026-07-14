@@ -70,7 +70,7 @@ export default function SessionArchive() {
       <div className="w-1/3 flex flex-col border border-border rounded p-2 overflow-hidden">
         <div className="flex gap-2 mb-2">
           <input aria-label="Fuzzy filter (substring match)" className="flex-1 bg-bg-2 border border-border rounded px-2 py-1 text-[13px]" placeholder="Fuzzy filter (substring match)" value={filterKey} onChange={e => setFilterKey(e.target.value)} />
-          <button className="px-2 py-1 bg-accent text-white rounded text-[13px]" onClick={loadList}>Reload</button>
+          <button className="px-2 py-1 bg-accent text-accent-fg rounded text-[13px]" onClick={loadList}>Reload</button>
         </div>
         {loading && <div className="text-muted text-[13px]">Loading…</div>}
         {error && <div className="text-red-500 text-[13px]">{error}</div>}

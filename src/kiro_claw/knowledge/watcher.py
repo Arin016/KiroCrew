@@ -131,7 +131,9 @@ class KnowledgeWatcher:
         shares the dashboard's ingestion_jobs progress row so the UI sees it too.
         """
         embedder = getattr(self.pipeline, "embedder", None)
-        if not embedder or not embedder.is_available():
+        if not embedder:
+            return
+        if not await embedder.is_available_async():
             return
         if self._reembed_task and not self._reembed_task.done():
             return

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 from aiohttp import web
 
+from kiro_claw.config.loader import KiroClawConfig, resolve_agent_bindings
 from kiro_claw.dashboard.side_context import build_side_message
 from kiro_claw.dashboard.side_state import SideState
 from kiro_claw.dashboard.state import DashboardState
@@ -24,6 +25,7 @@ from kiro_claw.llm_helpers import (
     ToolApprovalPolicy,
     stream_and_collect,
 )
+from kiro_claw.security import StreamRedactor, redact
 from kiro_claw.sel import sel
 
 logger = logging.getLogger(__name__)
@@ -52,23 +54,51 @@ async def _run_side_turn(
     side_key = _side_session_key(slot.key)
     message = build_side_message(slot, question, is_first_turn=is_first_turn)
     chunks: list[str] = []
+    # Rolling-buffer redactor for the live side stream. broadcast_side_result
+    # already redacts each frame, but per-frame redaction alone misses a secret
+    # split across streaming chunk boundaries; StreamRedactor withholds a
+    # trailing credential-class run until it's confirmed safe. Mirrors
+    # chat_runner._wsred so /side has the same protection as the main chat.
+    _wsred = StreamRedactor()
 
     def _on_chunk(text: str) -> None:
         chunks.append(text)
-        broadcast_side_result(
-            state,
-            slot_key=slot.key,
-            run_id=run_id,
-            role="assistant",
-            content=text,
-        )
+        safe = _wsred.feed(text)
+        if safe:
+            broadcast_side_result(
+                state,
+                slot_key=slot.key,
+                run_id=run_id,
+                role="assistant",
+                content=safe,
+            )
 
     provider = None
     acquired_key = ""
     try:
+        # Resolve the KiroClaw slot agent name (e.g. "default") to the real
+        # kiro-cli agent (e.g. "kiroclaw") before creating the session. Passing
+        # the raw slot name straight through to get_or_create -> create_session
+        # -> set_mode fails with "Mode '<name>' not found" because there is no
+        # matching ~/.kiro/agents/<name>.json. Mirrors chat_runner._run_chat and
+        # chat_handlers, which resolve bindings for the same reason. Best-effort:
+        # a config-load failure degrades to the raw slot.agent rather than
+        # crashing the turn.
+        kiro_agent: str | None = None
+        try:
+            cfg = KiroClawConfig.load()
+            kiro_agent = resolve_agent_bindings(cfg, slot.agent or None).kiro_agent
+        except Exception:
+            logger.warning(
+                "Side turn: failed to resolve agent bindings for slot=%s; "
+                "falling back to raw slot.agent",
+                slot.key,
+                exc_info=True,
+            )
+
         provider, _is_new, _resumed = await state.sessions.get_or_create(
             side_key,
-            agent=slot.agent or None,
+            agent=kiro_agent or slot.agent or None,
         )
         acquired_key = side_key
         try:
@@ -78,12 +108,18 @@ async def _run_side_turn(
                 approval_policy=ToolApprovalPolicy.REJECT_ALL,
                 on_chunk=_on_chunk,
             )
+            # Redact the assembled text before it is stored/broadcast as the
+            # terminal frame (which replaces the streamed deltas). Never trust
+            # LLM output on an external surface. redact() applies BOTH passes —
+            # redact_exfiltration_urls() then redact_credentials() (security.py)
+            # — so exfil URLs and credentials are both scrubbed here.
+            response_text = redact(response_text)
         except PromptBusyExhaustedError:
             logger.warning(
                 "Side turn aborted (prompt busy exhausted): slot=%s run_id=%s",
                 slot.key, run_id,
             )
-            response_text = "".join(chunks)
+            response_text = redact("".join(chunks))
             if (
                 slot._side is not None
                 and slot._side.open

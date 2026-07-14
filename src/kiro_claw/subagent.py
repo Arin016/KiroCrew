@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Protocol
 
 from kiro_claw.acp.session_provider import AcpSessionProvider
+from kiro_claw.executors import run_in_embed_pool
 
 if TYPE_CHECKING:
     from kiro_claw.acp.runtime import AcpRuntime
@@ -2035,8 +2036,10 @@ class SubagentManager:
         named_agent = bool(info.agent and _AGENT_NAME_RE.fullmatch(info.agent))
         raw_task = info._raw_task or info.task
         message = raw_task if named_agent else (_SYSTEM_PREFIX + raw_task)
-        full_message, _ = self._ctx_builder.build_message(
-            message, is_new, session_key, provider_type="claude_code" if is_cc else "acp"
+        # Off-loop: build_message embeds the episodic query (blocking urllib).
+        full_message, _ = await run_in_embed_pool(
+            self._ctx_builder.build_message,
+            message, is_new, session_key, provider_type="claude_code" if is_cc else "acp",
         )
 
         result_text = ""

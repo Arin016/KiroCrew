@@ -108,7 +108,7 @@ function FolderConfirmDialog({ fileCount, uri, onConfirm, onCancel, isPending }:
       <div className="flex gap-2 justify-end pt-1">
         <button onClick={onCancel} className="px-3 py-1.5 text-xs border border-border rounded-md text-text">Cancel</button>
         <button onClick={onConfirm} disabled={isPending}
-          className="px-3 py-1.5 text-xs bg-accent text-white rounded-md disabled:opacity-50">
+          className="px-3 py-1.5 text-xs bg-accent text-accent-fg rounded-md disabled:opacity-50">
           {isPending ? 'Starting...' : fileCount === 0 ? 'Watch Anyway' : 'Start Scanning'}
         </button>
       </div>
@@ -352,7 +352,7 @@ export default function SourcesList({ onIngest, uploadNamespace, setUploadNamesp
   return (
     <div className="space-y-3">
       <div className="flex justify-end">
-        <button onClick={() => setShowAdd(true)} className="px-3 py-1.5 text-[13px] bg-accent text-white rounded-md hover:bg-accent/80">+ Add Source</button>
+        <button onClick={() => setShowAdd(true)} className="px-3 py-1.5 text-[13px] bg-accent text-accent-fg rounded-md hover:bg-accent/80">+ Add Source</button>
       </div>
 
       {showAdd && (
@@ -406,7 +406,7 @@ export default function SourcesList({ onIngest, uploadNamespace, setUploadNamesp
               <div className="flex gap-2 justify-end">
                 <button onClick={() => setShowAdd(false)} className="px-3 py-1.5 text-xs border border-border rounded-md text-text">Cancel</button>
                 <button onClick={handleAdd} disabled={addMutation.isPending || !addUri.trim()}
-                  className="px-3 py-1.5 text-xs bg-accent text-white rounded-md disabled:opacity-50">{addMutation.isPending ? 'Adding...' : 'Add Folder'}</button>
+                  className="px-3 py-1.5 text-xs bg-accent text-accent-fg rounded-md disabled:opacity-50">{addMutation.isPending ? 'Adding...' : 'Add Folder'}</button>
               </div>
               {addMutation.isError && <div className="text-[12px] text-danger flex items-center gap-1"><AlertCircle size={12} /> {addMutation.error?.message || 'Failed to add source'}</div>}
             </>

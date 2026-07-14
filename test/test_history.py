@@ -1447,6 +1447,27 @@ class TestConsolidationDoesNotBlockLoop:
             "via asyncio.to_thread()."
         )
 
+    def test_save_lessons_caps_oversized_list(self):
+        """The LLM lessons array is capped like semantic/episodic: each
+        write_lesson can perform up to 6 blocking embeds, so an uncapped list
+        would occupy a worker thread for minutes."""
+        from kiro_claw.vector_memory import _MAX_LESSONS_PER_CONSOLIDATION
+
+        vector_store = MagicMock()
+        vector_store.write_lesson.return_value = True
+
+        c = HistoryConsolidator(
+            log=MagicMock(), memory=MagicMock(), sessions=None,
+            vector_store=vector_store, migrated=True,
+        )
+        oversized = [
+            {"rule": f"lesson number {i}", "category": "tool"}
+            for i in range(_MAX_LESSONS_PER_CONSOLIDATION * 3)
+        ]
+        c._save_lessons(oversized)
+
+        assert vector_store.write_lesson.call_count == _MAX_LESSONS_PER_CONSOLIDATION
+
 
 class TestStopEventContextInjection:
     """Tests for context.py stop_event note injection."""

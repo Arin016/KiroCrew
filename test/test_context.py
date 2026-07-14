@@ -861,3 +861,120 @@ class TestLessonsCap:
         assert "always run the formatter" in ctx
         assert "never force push to mainline" in ctx
         assert "[lessons truncated]" not in ctx
+
+
+class TestBuildMessageOffloadedAtCallSites:
+    """build_message embeds the episodic query via a blocking urllib call to
+    Ollama on new sessions. Async callers (gateway loop coroutines) wrap the
+    whole call in run_in_embed_pool — enforced statically by
+    TestAsyncCallSitesUseToThread below. These tests cover the skip branches
+    (follow-up / minimal-context must never embed) and that build_message
+    remains sync-callable (CLI, 25+ existing tests, and MagicMock-based test
+    doubles all rely on the sync signature).
+    """
+
+    def _builder(self, tmp_path):
+        return ContextBuilder(
+            memory=MemoryStore(workspace=tmp_path / "ws"),
+            skills=SkillsLoader(skills_path=tmp_path / "skills", install_builtins=False),
+            lessons=LessonStore(base_dir=tmp_path),
+        )
+
+    def test_follow_up_skips_episodic_entirely(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        vector_store = MagicMock()
+        builder = self._builder(tmp_path)
+        fake_memory = MagicMock()
+        fake_memory.vector_store = vector_store
+        fake_memory.get_context.return_value = ""
+        vector_store.get_lessons.return_value = []
+
+        with patch.object(ContextBuilder, "get_memory_for", return_value=fake_memory):
+            builder.build_message("follow up message", False, "sess-1")
+
+        vector_store.get_episodic_context.assert_not_called()
+
+    def test_minimal_context_skips_episodic(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        vector_store = MagicMock()
+        builder = self._builder(tmp_path)
+        fake_memory = MagicMock()
+        fake_memory.vector_store = vector_store
+        fake_memory.get_context.return_value = ""
+        vector_store.get_lessons.return_value = []
+        vector_store.get_semantic_context.return_value = ""
+
+        with patch.object(ContextBuilder, "get_memory_for", return_value=fake_memory):
+            builder.build_message("message", True, "sess-1", minimal_context=True)
+
+        vector_store.get_episodic_context.assert_not_called()
+
+
+class TestAsyncCallSitesUseToThread:
+    """Static guard: no async coroutine may call build_message inline.
+
+    Every production call site of ``build_message`` inside an ``async def``
+    must go through ``run_in_embed_pool`` / an executor offload (the episodic
+    query embed blocks). This walks the AST of all gateway-process modules so
+    a future call site reintroducing the inline pattern fails CI rather than
+    shipping a fourth loop-stall bug (22475ceb, _save_lessons, build_message
+    were the first three).
+
+    Scope rules mirror test_no_blocking_call_on_loop.py: a nested ``def`` /
+    ``async def`` / ``lambda`` is a separate frame (a sync helper, a thread
+    target, an offloaded callable such as ``run_in_executor(None, lambda:
+    ctx.build_message(...))``) and is NOT scanned as part of the enclosing
+    coroutine — so both sanctioned offload shapes pass. A ``# loop-ok:
+    <reason>`` trailing comment suppresses a finding.
+    """
+
+    def test_no_inline_build_message_in_async_functions(self):
+        import ast
+        from pathlib import Path
+
+        nested_scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+        src_root = Path(__file__).resolve().parent.parent / "src" / "kiro_claw"
+        offenders: list[str] = []
+
+        def _iter_frame_calls(fn: ast.AsyncFunctionDef):
+            """Yield Call nodes lexically in *fn*'s own frame — skip nested scopes."""
+            stack: list[ast.AST] = list(ast.iter_child_nodes(fn))
+            while stack:
+                node = stack.pop()
+                if isinstance(node, nested_scopes):
+                    continue  # separate frame: sync helper / thread target / lambda
+                if isinstance(node, ast.Call):
+                    yield node
+                stack.extend(ast.iter_child_nodes(node))
+
+        for py in src_root.rglob("*.py"):
+            try:
+                text = py.read_text(encoding="utf-8")
+                tree = ast.parse(text)
+            except SyntaxError:
+                continue
+            lines = text.splitlines()
+            for fn in ast.walk(tree):
+                if not isinstance(fn, ast.AsyncFunctionDef):
+                    continue
+                for call in _iter_frame_calls(fn):
+                    func = call.func
+                    # Inline call: the Call's func IS .build_message. The
+                    # sanctioned run_in_embed_pool(x.build_message, ...) form
+                    # passes the method as an ARG, so its Call func is
+                    # to_thread and never matches here.
+                    if not (isinstance(func, ast.Attribute) and func.attr == "build_message"):
+                        continue
+                    src_line = lines[call.lineno - 1] if call.lineno <= len(lines) else ""
+                    if "# loop-ok" in src_line:
+                        continue
+                    offenders.append(f"{py.relative_to(src_root)}:{call.lineno} in async {fn.name}")
+
+        assert not offenders, (
+            "build_message called inline from async coroutine(s) — the episodic "
+            "query embed blocks the event loop; wrap in run_in_embed_pool (or "
+            "add '# loop-ok: <reason>' if genuinely safe):\n  "
+            + "\n  ".join(offenders)
+        )

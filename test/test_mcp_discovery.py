@@ -16,6 +16,7 @@ from kiro_claw.mcp_discovery import (
     _probe_cache,
     _probe_remote,
     _read_jsonrpc_response,
+    _read_stdio_jsonrpc_response,
     discover_servers_to_sync,
     list_servers,
     probe_server,
@@ -1741,7 +1742,11 @@ class TestProbeStdioMalformedResponse:
         proc.stdin.drain = AsyncMock()
         proc.stdin.close = MagicMock()
         proc.stdout = MagicMock()
-        proc.stdout.readline = AsyncMock(side_effect=[init_line, list_line])
+        # Trailing b"" models a real stream reaching EOF. The probe's response
+        # reader may consume more than one line (it skips banner/blank/non-
+        # response lines), so the mock must yield EOF rather than exhausting
+        # its side_effect and raising StopAsyncIteration.
+        proc.stdout.readline = AsyncMock(side_effect=[init_line, list_line, b""])
         proc.wait = AsyncMock(return_value=0)
         proc.kill = MagicMock()
         return proc
@@ -1778,3 +1783,181 @@ class TestProbeStdioMalformedResponse:
 
         assert result.status == "ok"
         assert result.tools == []
+
+
+def _make_stream(lines: list[bytes]) -> asyncio.StreamReader:
+    """Build a StreamReader pre-fed with ``lines`` and an EOF marker."""
+    reader = asyncio.StreamReader()
+    for chunk in lines:
+        reader.feed_data(chunk)
+    reader.feed_eof()
+    return reader
+
+
+class TestReadStdioJsonrpcResponse:
+    """_read_stdio_jsonrpc_response skips banner/blank/notification lines before the response."""
+
+    @pytest.mark.asyncio
+    async def test_immediate_response(self) -> None:
+        stream = _make_stream([b'{"jsonrpc":"2.0","id":1,"result":{}}\n'])
+        resp = await _read_stdio_jsonrpc_response(stream, timeout=5)
+        assert resp == {"jsonrpc": "2.0", "id": 1, "result": {}}
+
+    @pytest.mark.asyncio
+    async def test_skips_leading_banner_line(self) -> None:
+        """A non-JSON banner (the aim self-update case) is skipped, not fatal."""
+        stream = _make_stream(
+            [
+                b"chorus-mcp v0.1.4 starting (backend: wss://chorus.aws.dev)\n",
+                b'{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}\n',
+            ]
+        )
+        resp = await _read_stdio_jsonrpc_response(stream, timeout=5)
+        assert resp is not None
+        assert resp["id"] == 1
+
+    @pytest.mark.asyncio
+    async def test_skips_blank_lines(self) -> None:
+        stream = _make_stream([b"\n", b"   \n", b'{"jsonrpc":"2.0","id":2,"result":{}}\n'])
+        resp = await _read_stdio_jsonrpc_response(stream, timeout=5)
+        assert resp is not None
+        assert resp["id"] == 2
+
+    @pytest.mark.asyncio
+    async def test_skips_notifications_without_id(self) -> None:
+        """JSON-RPC notifications (no id) are not responses — keep reading."""
+        stream = _make_stream(
+            [
+                b'{"jsonrpc":"2.0","method":"notifications/message","params":{}}\n',
+                b'{"jsonrpc":"2.0","id":1,"result":{}}\n',
+            ]
+        )
+        resp = await _read_stdio_jsonrpc_response(stream, timeout=5)
+        assert resp["id"] == 1
+
+    @pytest.mark.asyncio
+    async def test_eof_returns_none(self) -> None:
+        stream = _make_stream([b"just a banner, no json\n"])
+        resp = await _read_stdio_jsonrpc_response(stream, timeout=5)
+        assert resp is None
+
+    @pytest.mark.asyncio
+    async def test_empty_stream_returns_none(self) -> None:
+        stream = _make_stream([])
+        resp = await _read_stdio_jsonrpc_response(stream, timeout=5)
+        assert resp is None
+
+    @pytest.mark.asyncio
+    async def test_banner_flood_capped(self) -> None:
+        """More than _MAX_BANNER_LINES junk lines → give up (None), don't hang."""
+        from kiro_claw.mcp_discovery import _MAX_BANNER_LINES
+
+        lines = [b"noise\n"] * (_MAX_BANNER_LINES + 5)
+        lines.append(b'{"jsonrpc":"2.0","id":1,"result":{}}\n')
+        stream = _make_stream(lines)
+        resp = await _read_stdio_jsonrpc_response(stream, timeout=5)
+        assert resp is None
+
+    @pytest.mark.asyncio
+    async def test_skips_non_object_json_payloads(self) -> None:
+        """Bare string / array / number JSON lines are not responses — skip them."""
+        stream = _make_stream(
+            [
+                b'"unexpected-string"\n',
+                b"[1, 2, 3]\n",
+                b"42\n",
+                b'{"jsonrpc":"2.0","id":1,"result":{}}\n',
+            ]
+        )
+        resp = await _read_stdio_jsonrpc_response(stream, timeout=5)
+        assert resp is not None
+        assert resp["id"] == 1
+
+    @pytest.mark.asyncio
+    async def test_notifications_do_not_count_toward_cap(self) -> None:
+        """>_MAX_BANNER_LINES JSON-RPC notifications must NOT trip the banner cap."""
+        from kiro_claw.mcp_discovery import _MAX_BANNER_LINES
+
+        notif = b'{"jsonrpc":"2.0","method":"notifications/progress","params":{}}\n'
+        lines = [notif] * (_MAX_BANNER_LINES + 10)
+        lines.append(b'{"jsonrpc":"2.0","id":1,"result":{}}\n')
+        stream = _make_stream(lines)
+        resp = await _read_stdio_jsonrpc_response(stream, timeout=5)
+        assert resp is not None
+        assert resp["id"] == 1
+
+    @pytest.mark.asyncio
+    async def test_blank_lines_do_not_count_toward_cap(self) -> None:
+        """>_MAX_BANNER_LINES blank lines must NOT trip the banner cap."""
+        from kiro_claw.mcp_discovery import _MAX_BANNER_LINES
+
+        lines = [b"\n"] * (_MAX_BANNER_LINES + 10)
+        lines.append(b'{"jsonrpc":"2.0","id":3,"result":{}}\n')
+        stream = _make_stream(lines)
+        resp = await _read_stdio_jsonrpc_response(stream, timeout=5)
+        assert resp is not None
+        assert resp["id"] == 3
+
+    @pytest.mark.asyncio
+    async def test_cap_boundary_exact(self) -> None:
+        """Exactly _MAX_BANNER_LINES junk lines still lets the response through."""
+        from kiro_claw.mcp_discovery import _MAX_BANNER_LINES
+
+        lines = [b"noise\n"] * _MAX_BANNER_LINES
+        lines.append(b'{"jsonrpc":"2.0","id":7,"result":{}}\n')
+        stream = _make_stream(lines)
+        resp = await _read_stdio_jsonrpc_response(stream, timeout=5)
+        assert resp is not None
+        assert resp["id"] == 7
+
+    @pytest.mark.asyncio
+    async def test_cap_boundary_one_over(self) -> None:
+        """One junk line past the cap drops the response (returns None)."""
+        from kiro_claw.mcp_discovery import _MAX_BANNER_LINES
+
+        lines = [b"noise\n"] * (_MAX_BANNER_LINES + 1)
+        lines.append(b'{"jsonrpc":"2.0","id":7,"result":{}}\n')
+        stream = _make_stream(lines)
+        resp = await _read_stdio_jsonrpc_response(stream, timeout=5)
+        assert resp is None
+
+    @pytest.mark.asyncio
+    async def test_timeout_raises(self) -> None:
+        """A stream that never yields a full line times out (mapped to 'timeout')."""
+        reader = asyncio.StreamReader()  # no data, no EOF → readline blocks
+        with pytest.raises(asyncio.TimeoutError):
+            await _read_stdio_jsonrpc_response(reader, timeout=0.05)
+
+
+class TestProbeServerBannerTolerance:
+    """probe_server no longer errors when a banner precedes the handshake."""
+
+    @pytest.mark.asyncio
+    async def test_leading_banner_does_not_fail_probe(self) -> None:
+        proc = AsyncMock()
+        proc.returncode = 0
+        proc.stdin = MagicMock()
+        proc.stdin.write = MagicMock()
+        proc.stdin.drain = AsyncMock()
+        proc.stdin.close = MagicMock()
+        proc.wait = AsyncMock(return_value=0)
+        proc.stdout = AsyncMock()
+        proc.stderr = AsyncMock()
+        proc.stdout.readline = AsyncMock(
+            side_effect=[
+                b"chorus-mcp v0.1.4 starting (backend: wss://chorus.aws.dev)\n",
+                b'{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}\n',
+                b'{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read"}]}}\n',
+                b"",
+            ]
+        )
+        server = McpServerInfo(name="local-chorus-mcp", command="local-chorus-mcp")
+
+        with patch(
+            "kiro_claw.mcp_discovery.asyncio.create_subprocess_exec", return_value=proc
+        ), patch("kiro_claw.mcp_discovery.shutil.which", return_value="/usr/bin/local-chorus-mcp"):
+            result = await probe_server(server)
+
+        assert result.status == "ok"
+        assert result.tools == ["read"]
+        assert "Expecting value" not in result.error

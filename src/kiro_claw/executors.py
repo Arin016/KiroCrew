@@ -47,15 +47,22 @@ containment until that process split lands.
 
 from __future__ import annotations
 
+import asyncio
 import atexit
+import functools
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, TypeVar
+
+_T = TypeVar("_T")
 
 __all__ = [
     "maintenance_executor",
     "subprocess_executor",
     "cron_executor",
     "discovery_executor",
+    "embed_executor",
+    "run_in_embed_pool",
     "shutdown_maintenance_executor",
 ]
 
@@ -89,11 +96,26 @@ _MAX_CRON_WORKERS = 4
 # the maintenance pool's orphan-sweep workers.
 _MAX_DISCOVERY_WORKERS = 4
 
+# Ollama embed/probe offloads (consolidation lesson writes, memory import,
+# context-preview, and every build_message call — its episodic recall embeds
+# the query) block on network I/O for up to embedding_timeout_secs per call —
+# and against a HUNG endpoint every call eats the full timeout, since failures
+# are deliberately not cached.  Give them their own bounded pool so a wedged
+# Ollama parks mc-embed threads and queues further embed work behind ITSELF,
+# instead of exhausting asyncio's default executor (which the loop shares for
+# DNS resolution and every other asyncio.to_thread user).  Sized above the
+# other pools because build_message runs on every new session across all
+# surfaces (dashboard + Slack + cron + heartbeat + subagent can land
+# concurrently after a restart); with a healthy endpoint each call is fast,
+# so the cap only bites — deliberately — when Ollama is wedged.
+_MAX_EMBED_WORKERS = 8
+
 _lock = threading.Lock()
 _pool: ThreadPoolExecutor | None = None
 _subprocess_pool: ThreadPoolExecutor | None = None
 _cron_pool: ThreadPoolExecutor | None = None
 _discovery_pool: ThreadPoolExecutor | None = None
+_embed_pool: ThreadPoolExecutor | None = None
 
 
 def maintenance_executor() -> ThreadPoolExecutor:
@@ -175,14 +197,47 @@ def discovery_executor() -> ThreadPoolExecutor:
     return _discovery_pool
 
 
+def embed_executor() -> ThreadPoolExecutor:
+    """Return the process-wide Ollama embed/probe pool, creating it on first use.
+
+    Threads are named ``mc-embed``.  Separate from asyncio's default executor
+    so a hung embedding endpoint (every call eats the full
+    ``embedding_timeout_secs``; failures are deliberately not cached) parks
+    only these workers — embed work queues behind ITSELF instead of starving
+    the loop's DNS resolution and every other ``asyncio.to_thread`` user.
+    """
+    global _embed_pool
+    if _embed_pool is None:
+        with _lock:
+            if _embed_pool is None:
+                _embed_pool = ThreadPoolExecutor(
+                    max_workers=_MAX_EMBED_WORKERS,
+                    thread_name_prefix="mc-embed",
+                )
+                atexit.register(shutdown_maintenance_executor)
+    return _embed_pool
+
+
+async def run_in_embed_pool(func: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
+    """Run a blocking Ollama embed/probe callable on :func:`embed_executor`.
+
+    Drop-in replacement for ``asyncio.to_thread`` at embed call sites: same
+    signature, but the work lands on the bounded ``mc-embed`` bulkhead pool
+    instead of asyncio's shared default executor.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(embed_executor(), functools.partial(func, *args, **kwargs))
+
+
 def shutdown_maintenance_executor() -> None:
     """Shut down all maintenance pools if they were created.  Idempotent."""
-    global _pool, _subprocess_pool, _cron_pool, _discovery_pool
+    global _pool, _subprocess_pool, _cron_pool, _discovery_pool, _embed_pool
     with _lock:
         pool, _pool = _pool, None
         subprocess_pool, _subprocess_pool = _subprocess_pool, None
         cron_pool, _cron_pool = _cron_pool, None
         discovery_pool, _discovery_pool = _discovery_pool, None
+        embed_pool, _embed_pool = _embed_pool, None
     if pool is not None:
         pool.shutdown(wait=False, cancel_futures=True)
     if subprocess_pool is not None:
@@ -191,3 +246,5 @@ def shutdown_maintenance_executor() -> None:
         cron_pool.shutdown(wait=False, cancel_futures=True)
     if discovery_pool is not None:
         discovery_pool.shutdown(wait=False, cancel_futures=True)
+    if embed_pool is not None:
+        embed_pool.shutdown(wait=False, cancel_futures=True)

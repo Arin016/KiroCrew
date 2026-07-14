@@ -493,14 +493,14 @@ export default function KnowledgePage() {
         ))}
       </div>
 
-      <div className="flex-1 overflow-y-auto px-6 py-4 min-h-0" ref={listContainerRef}>
+      <div className={`flex-1 px-6 py-4 min-h-0 ${tab === 'graph' ? 'flex flex-col' : 'overflow-y-auto'}`} ref={listContainerRef}>
         <EmbeddingStatus />
         {isEmpty && tab === 'list' ? (
           <div className="flex flex-col items-center justify-center py-12 animate-rise">
             <BookOpen size={48} className="text-muted/20 mb-4" />
             <h3 className="text-lg font-bold text-text-strong mb-1">{ONBOARDING.title}</h3>
             <p className="text-sm text-muted mb-4 text-center max-w-md">{ONBOARDING.description}</p>
-            <button onClick={() => setTab('sources')} className="px-4 py-2 bg-accent text-white rounded-md text-sm hover:bg-accent/80 cursor-pointer">Go to Sources to upload files</button>
+            <button onClick={() => setTab('sources')} className="px-4 py-2 bg-accent text-accent-fg rounded-md text-sm hover:bg-accent/80 cursor-pointer">Go to Sources to upload files</button>
           </div>
         ) : tab === 'list' ? (
           selectedId ? <DetailView itemId={selectedId} onBack={() => setSelectedId(null)} onEntityClick={handleEntitySelect} /> : (
@@ -589,7 +589,7 @@ export default function KnowledgePage() {
             </>
           )
         ) : tab === 'graph' ? (
-          <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-4 flex-1 min-h-0">
             <Suspense fallback={<ContentSkeleton />}>
               <KnowledgeGraph highlightEntity={selectedEntity} onSelectEntity={(name) => {
                 setSelectedEntity(name)

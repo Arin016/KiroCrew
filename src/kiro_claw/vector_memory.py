@@ -36,6 +36,16 @@ import time
 
 from kiro_claw.config.loader import config_dir
 
+# Consolidation caps live in vector_memory_constants (a light module with no
+# heavy transitive deps) so prompt-building callers can import them at top
+# level without pulling this module's numpy/faiss imports; re-exported here so
+# existing `from kiro_claw.vector_memory import _MAX_*` paths keep working.
+from kiro_claw.vector_memory_constants import (  # noqa: F401
+    _MAX_EPISODIC_PER_CONSOLIDATION,
+    _MAX_LESSONS_PER_CONSOLIDATION,
+    _MAX_SEMANTIC_PER_CONSOLIDATION,
+)
+
 logger = logging.getLogger(__name__)
 
 # ── Optional deps ──
@@ -97,8 +107,6 @@ _EPISODIC_LONG_TEXT_THRESHOLD = 0.42  # relaxed threshold for long entries
 _EPISODIC_TEXT_MIN = 10
 _EPISODIC_TEXT_MAX = 2000
 _FAISS_SAVE_INTERVAL = 100  # save index every N writes
-_MAX_SEMANTIC_PER_CONSOLIDATION = 20
-_MAX_EPISODIC_PER_CONSOLIDATION = 10
 _MMR_LAMBDA = 0.6  # relevance vs diversity tradeoff (higher = more relevance)
 # Recall-safe upper bound on the MMR candidate pool. This is NOT a perf cap that
 # changes results — it only guards against pathological pool sizes (a vector search

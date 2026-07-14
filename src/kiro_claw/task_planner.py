@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kiro_claw.executors import run_in_embed_pool
 from kiro_claw.hooks import TOOL_DENY
 from kiro_claw.providers.base import EVENT_COMPLETE, EVENT_PERMISSION_REQUEST, EVENT_TEXT_CHUNK
 from kiro_claw.sel import sel
@@ -240,7 +241,10 @@ async def decompose(
     try:
         client, is_new, _resumed = await sessions.get_or_create(session_key, agent=agent or None)
         if ctx:
-            full_prompt, _ = ctx.build_message(prompt, is_new, session_key, agent=agent or None)
+            # Off-loop: build_message embeds the episodic query (blocking urllib).
+            full_prompt, _ = await run_in_embed_pool(
+                ctx.build_message, prompt, is_new, session_key, agent=agent or None
+            )
         else:
             full_prompt = prompt
 

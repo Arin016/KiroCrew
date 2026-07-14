@@ -2898,7 +2898,8 @@ class TestCleanupLoopResilience:
         import kiro_claw
         kiro_claw.shutdown_event.clear()
         with patch("asyncio.wait_for", side_effect=_fast_wait_for), \
-             patch.object(mgr, "_expire_idle", side_effect=_expire_then_stop):
+             patch.object(mgr, "_expire_idle", side_effect=_expire_then_stop), \
+             patch("kiro_claw.session.find_orphan_mcp_candidates", return_value=[]):
             await asyncio.wait_for(mgr._cleanup_loop(), timeout=5)
 
         assert call_count >= 2
@@ -2930,7 +2931,8 @@ class TestCleanupLoopResilience:
         import kiro_claw
         kiro_claw.shutdown_event.clear()
         with patch("asyncio.wait_for", side_effect=_fast_wait_for), \
-             patch.object(mgr, "_expire_idle", side_effect=_crash_and_stop):
+             patch.object(mgr, "_expire_idle", side_effect=_crash_and_stop), \
+             patch("kiro_claw.session.find_orphan_mcp_candidates", return_value=[]):
             with caplog.at_level(logging.ERROR):
                 await asyncio.wait_for(mgr._cleanup_loop(), timeout=5)
 

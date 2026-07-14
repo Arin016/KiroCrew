@@ -15,6 +15,7 @@ from typing import Any
 from aiohttp import web
 
 from kiro_claw.dashboard.state import DashboardState
+from kiro_claw.executors import run_in_embed_pool
 from kiro_claw.sandbox import wrap_argv
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.vector_memory import SemanticRejectCode
@@ -696,7 +697,10 @@ async def api_memory_import(request: web.Request) -> web.Response:
         data = await request.json()
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
-    counts = store.import_memory(data)
+    # import_memory embeds each imported entry via blocking urllib to Ollama
+    # (unbounded — one per entry); offload so a large import can't stall the
+    # gateway event loop.
+    counts = await run_in_embed_pool(store.import_memory, data)
     return web.json_response(counts)
 
 
@@ -711,7 +715,11 @@ async def api_memory_context_preview(request: web.Request) -> web.Response:
         q_lower = query.lower()
         filtered = [ln for ln in lines if q_lower in ln.lower() or ln.startswith("[")]
         semantic_ctx = "\n".join(filtered) if any(not ln.startswith("[") for ln in filtered) else ""
-    episodic_ctx = store.get_episodic_context(query_text=query) if query else ""
+    # get_episodic_context embeds the query via blocking urllib to Ollama;
+    # offload to keep the dashboard event loop responsive.
+    episodic_ctx = (
+        await run_in_embed_pool(store.get_episodic_context, query_text=query) if query else ""
+    )
     return web.json_response(
         {
             "semantic_context": semantic_ctx,
@@ -756,7 +764,10 @@ async def api_memory_observability(request: web.Request) -> web.Response:
     query = request.query.get("q", "")[:500]
     stats = store.memory_stats()
     rejections = store.get_rejection_stats()
-    preview = store.get_context_preview(query_text=query)
+    # get_context_preview with a query embeds the query AND every non-lesson
+    # semantic row (blocking urllib per row) — the worst on-loop amplification
+    # in the store; offload so it can't stall the gateway event loop.
+    preview = await run_in_embed_pool(store.get_context_preview, query_text=query)
     return web.json_response(
         {
             "stats": stats,

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Network, RotateCcw } from 'lucide-react'
-import type { Simulation, SimulationNodeDatum, SimulationLinkDatum } from 'd3'
+import type { Simulation, SimulationNodeDatum, SimulationLinkDatum, ZoomBehavior, Selection } from 'd3'
 import { EmptyState } from '../../components/ui'
 import { knowledgeApi } from './api'
 import type { GraphData } from './types'
@@ -21,6 +21,13 @@ export default function KnowledgeGraph({ onSelectEntity, highlightEntity }: { on
   const zoomRef = useRef<{ reset: () => void; zoomToNode?: (name: string) => void } | null>(null)
   const simRef = useRef<Simulation<SimNode, SimEdge> | null>(null)
   const renderedKeyRef = useRef<string>('')
+  // Graph bounds + zoom/selection refs captured after layout so a container
+  // resize (viewport change, devtools toggle, split view) can recompute the
+  // fit transform from current SVG dimensions instead of cached stale values.
+  const graphBoundsRef = useRef<{ cx: number; cy: number; bw: number; bh: number; pad: number } | null>(null)
+  const d3ZoomRef = useRef<ZoomBehavior<SVGSVGElement, unknown> | null>(null)
+  const d3SelectionRef = useRef<Selection<SVGSVGElement, unknown, null, undefined> | null>(null)
+  const d3Ref = useRef<typeof import('d3') | null>(null)
   const onSelectRef = useRef(onSelectEntity)
   onSelectRef.current = onSelectEntity
   const highlightRef = useRef(highlightEntity)
@@ -95,6 +102,7 @@ export default function KnowledgeGraph({ onSelectEntity, highlightEntity }: { on
     let aborted = false
     import('d3').then(d3 => {
       if (aborted) return
+      d3Ref.current = d3
       const s = d3.select(svg)
       const g = s.append('g')
 
@@ -128,8 +136,23 @@ export default function KnowledgeGraph({ onSelectEntity, highlightEntity }: { on
       const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2
       const fitTransform = d3.zoomIdentity.translate(width / 2 - cx * scale, height / 2 - cy * scale).scale(scale)
       s.call(zoom.transform, fitTransform)
+
+      // Store bounds + zoom refs for resize recomputation
+      graphBoundsRef.current = { cx, cy, bw, bh, pad }
+      d3ZoomRef.current = zoom
+      d3SelectionRef.current = s
+
       zoomRef.current = {
-        reset: () => s.transition().duration(300).call(zoom.transform, fitTransform),
+        reset: () => {
+          // Recompute fitTransform from current SVG dimensions
+          const w = svg.clientWidth || 800, h = svg.clientHeight || 500
+          const bounds = graphBoundsRef.current
+          const d3m = d3Ref.current
+          if (!bounds || !d3m) return
+          const sc = Math.min((w - bounds.pad * 2) / bounds.bw, (h - bounds.pad * 2) / bounds.bh, 1.5)
+          const ft = d3m.zoomIdentity.translate(w / 2 - bounds.cx * sc, h / 2 - bounds.cy * sc).scale(sc)
+          s.transition().duration(300).call(zoom.transform, ft)
+        },
         zoomToNode: (name: string) => {
           const target = simNodes.find((n) => n.name === name)
           if (!target) return
@@ -190,12 +213,31 @@ export default function KnowledgeGraph({ onSelectEntity, highlightEntity }: { on
     return () => { aborted = true; simRef.current?.stop() }
   }, [graph])
 
+  // Recompute fit on SVG resize (viewport changes, devtools toggle, split view)
+  useEffect(() => {
+    const svg = svgRef.current
+    if (!svg) return
+    const ro = new ResizeObserver(() => {
+      const bounds = graphBoundsRef.current
+      const zoom = d3ZoomRef.current
+      const sel = d3SelectionRef.current
+      const d3 = d3Ref.current
+      if (!bounds || !zoom || !sel || !d3) return
+      const w = svg.clientWidth || 800, h = svg.clientHeight || 500
+      const sc = Math.min((w - bounds.pad * 2) / bounds.bw, (h - bounds.pad * 2) / bounds.bh, 1.5)
+      const ft = d3.zoomIdentity.translate(w / 2 - bounds.cx * sc, h / 2 - bounds.cy * sc).scale(sc)
+      sel.call(zoom.transform, ft)
+    })
+    ro.observe(svg)
+    return () => ro.disconnect()
+  }, [graph])
+
   if (isLoading) return <div className="text-muted text-sm p-4">Loading graph...</div>
   if (!graph || !graph.nodes.length) return <EmptyState icon={<Network size={40} />} title="No graph data yet" subtitle="Ingest documents to build the entity graph" />
 
   return (
-    <div className="border border-border rounded-lg overflow-hidden">
-      <div className="px-4 py-2 border-b border-border flex items-center gap-3 text-[12px] text-muted">
+    <div className="border border-border rounded-lg overflow-hidden flex flex-col flex-1 min-h-0">
+      <div className="px-4 py-2 border-b border-border flex items-center gap-3 text-[12px] text-muted shrink-0">
         <span>{graph.nodes.length} nodes, {graph.edges.length} edges</span>
         <button onClick={() => zoomRef.current?.reset()} className="px-2 py-0.5 text-[11px] border border-border rounded hover:bg-bg-elevated bg-transparent cursor-pointer text-muted flex items-center gap-1">
           <RotateCcw size={10} /> Recenter
@@ -204,7 +246,7 @@ export default function KnowledgeGraph({ onSelectEntity, highlightEntity }: { on
           {Object.entries(TYPE_COLORS).map(([t, c]) => <span key={t} className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: c }} />{t}</span>)}
         </span>
       </div>
-      <svg ref={svgRef} className="w-full bg-bg-elevated" style={{ height: '500px' }} />
+      <svg ref={svgRef} className="w-full flex-1 min-h-0 bg-bg-elevated" style={{ minHeight: '300px' }} />
     </div>
   )
 }

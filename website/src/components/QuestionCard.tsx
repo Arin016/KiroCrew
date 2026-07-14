@@ -98,7 +98,7 @@ function QuestionCard({ questions, onSubmit }: QuestionCardProps) {
         <button
           onClick={handleSubmit}
           disabled={!hasAnyAnswer}
-          className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-[13px] font-medium cursor-pointer transition-all disabled:opacity-30 disabled:cursor-not-allowed bg-accent text-white hover:bg-accent-hover border-none"
+          className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-[13px] font-medium cursor-pointer transition-all disabled:opacity-30 disabled:cursor-not-allowed bg-accent text-accent-fg hover:bg-accent-hover border-none"
         >
           <MessageSquare size={14} /> Submit
         </button>

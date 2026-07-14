@@ -19,6 +19,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -682,3 +683,303 @@ def unregister_protected_pid(pid: int) -> None:
 def _protected_pids() -> set[int]:
     with _PROTECTED_LOCK:
         return set(_PROTECTED_PIDS)
+
+
+# ── Untracked orphan MCP sweep (defense-in-depth, Mesh-1870) ──────────
+# Catches KiroClaw-spawned MCP subtrees that escaped PID-file tracking.
+# Split into find + kill so the caller can re-verify active PIDs between phases.
+
+_ORPHAN_SWEEP_MAX_KILLS = 30
+_ORPHAN_MIN_AGE_SECONDS = 120  # Never reap processes younger than this
+
+# Entrypoints that positively identify a KiroClaw-spawned MCP/worker process.
+# Each marker MUST be unique to a process KiroClaw itself launches — the sweep
+# SIGKILLs any user-owned orphan that matches, so a marker naming a server the
+# core does not spawn would reap an unrelated process. The upstream MeshClaw
+# reaper also lists ``builder-mcp`` (the Amazon-internal server it manages), but
+# this public fork never spawns ``builder-mcp`` (the CPP companion contributes
+# it, not the core), so that marker is deliberately omitted here.
+_MCP_ENTRYPOINT_MARKERS = (
+    b"kiroclaw_sandbox_",       # sandbox wrapper script (session-spawned)
+    b"kiro_claw.mcp_gateway.stub",  # gateway pool worker (not gatewayd itself)
+)
+
+# Gateway/CLI entrypoints — these are peer gateways, never orphan MCP targets.
+# Checked BEFORE _MCP_ENTRYPOINT_MARKERS to prevent prefix overlap.
+_GATEWAY_MARKERS = (
+    b"kiro_claw.mcp_gateway.gatewayd",
+    b"kiro_claw.cli",
+    b"kiro_claw.__main__",
+)
+
+
+def _our_orphan_pids() -> list[int]:
+    """PIDs owned by current user whose parent is init (pid 1) or systemd --user."""
+    my_uid = os.getuid()
+    # An orphaned process reparents to init (pid 1) or the nearest subreaper
+    # (systemd --user), never back to its original launcher. We deliberately do
+    # NOT include the gateway's launcher ppid: doing so would widen the
+    # candidate set to the launcher's other live children (peer processes from
+    # the same shell/tmux/supervisor), adding wrong-kill surface with no
+    # orphan-reaping benefit.
+    accepted_ppids: set[int] = {1}
+    try:
+        if sys.platform == "linux":
+            # Two /proc passes: pass 1 detects systemd --user subreaper PIDs,
+            # pass 2 classifies orphans (needs the complete subreaper set
+            # before any child can be matched against accepted_ppids).
+            result: list[int] = []
+            for entry in Path("/proc").iterdir():
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    if entry.stat().st_uid != my_uid:
+                        continue
+                    pid = int(entry.name)
+                    # Detect systemd --user (user-session subreaper)
+                    try:
+                        if (entry / "comm").read_text().strip() == "systemd":
+                            accepted_ppids.add(pid)
+                    except OSError:
+                        pass
+                except (OSError, ValueError):
+                    continue
+            # Second pass now that accepted_ppids is complete
+            for entry in Path("/proc").iterdir():
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    if entry.stat().st_uid != my_uid:
+                        continue
+                    pid = int(entry.name)
+                    for ln in (entry / "status").read_text().splitlines():
+                        if ln.startswith("PPid:"):
+                            parts = ln.split(maxsplit=1)
+                            if len(parts) < 2:
+                                break
+                            if int(parts[1]) in accepted_ppids:
+                                result.append(pid)
+                            break
+                except (OSError, ValueError, IndexError):
+                    pass
+            return result
+        else:
+            result = []
+            out = subprocess.check_output(
+                ["ps", "-o", "pid=,ppid=", "-U", str(my_uid)],
+                stderr=subprocess.DEVNULL, timeout=5,
+            )
+            for ln in out.decode().splitlines():
+                parts = ln.split()
+                if len(parts) == 2 and parts[0].isdigit():
+                    pid, ppid = int(parts[0]), int(parts[1])
+                    if ppid in accepted_ppids:
+                        result.append(pid)
+            return result
+    except Exception:
+        logger.warning("_our_orphan_pids failed", exc_info=True)
+    return []
+
+
+def _is_orphan_mcp(cmdline: bytes) -> bool:
+    """True if cmdline matches a KiroClaw MCP entrypoint (not a peer gateway)."""
+    # Exclude peer gateways — they're not orphan MCP targets
+    if any(marker in cmdline for marker in _GATEWAY_MARKERS):
+        return False
+    # Parse argv: null-separated on Linux, space-separated on macOS ps output
+    args = cmdline.split(b"\x00")
+    if len(args) == 1:
+        args = cmdline.split(b" ")
+    argv0 = args[0].rsplit(b"/", 1)[-1]
+    # A sandbox/worker script exec'd directly via its shebang puts the script
+    # (not a python interpreter) in argv0 — match the marker there too so such
+    # orphans aren't missed.
+    if any(marker in argv0 for marker in _MCP_ENTRYPOINT_MARKERS):
+        return True
+    # Otherwise require python interpreter + known entrypoint in remaining args
+    if b"python" not in argv0:
+        return False
+    return any(
+        any(marker in a for marker in _MCP_ENTRYPOINT_MARKERS)
+        for a in args[1:]
+    )
+
+
+def find_orphan_mcp_candidates(active_pids: set[int]) -> list[int]:
+    """Scan process table for orphaned MCP processes not in any active set.
+
+    Returns candidate PIDs. Caller should re-verify against fresh active PIDs
+    before killing (two-phase pattern to eliminate races).
+    """
+    candidates: list[int] = []
+    my_pid = os.getpid()
+    now = time.time()
+
+    for pid in _our_orphan_pids():
+        if pid == my_pid or pid in active_pids:
+            continue
+        try:
+            if sys.platform == "linux":
+                cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+                # Use /proc/pid/stat field 22 (starttime in clock ticks) for
+                # canonical process age — immune to /proc mtime heuristic issues.
+                pid_age = _linux_pid_age(pid, now)
+            else:
+                # Single ps call fetches both age and command (two -o flags
+                # avoid the BSD header-label comma ambiguity). etime is
+                # whitespace-free, so split(None, 1) cleanly separates the
+                # two fields.
+                ps_out = subprocess.check_output(
+                    ["ps", "-o", "etime=", "-o", "command=", "-p", str(pid)],
+                    stderr=subprocess.DEVNULL, timeout=2,
+                )
+                fields = ps_out.split(None, 1)
+                pid_age = _parse_etime(
+                    fields[0].decode() if fields else ""
+                )
+                cmdline = fields[1] if len(fields) > 1 else b""
+        except Exception:
+            logger.debug(
+                "Orphan candidate probe failed for pid %s", pid,
+                exc_info=True,
+            )
+            continue
+        if pid_age < _ORPHAN_MIN_AGE_SECONDS:
+            continue
+        if not _is_orphan_mcp(cmdline):
+            continue
+        candidates.append(pid)
+
+    return candidates
+
+
+def _linux_pid_age(pid: int, now: float) -> float:
+    """Process age in seconds using /proc/pid/stat starttime (canonical)."""
+    try:
+        stat_data = Path(f"/proc/{pid}/stat").read_text()
+        # Field 22 is starttime (after comm which may contain spaces/parens)
+        close_paren = stat_data.rfind(")")
+        fields = stat_data[close_paren + 2:].split()
+        starttime_ticks = int(fields[19])  # field 22 is index 19 after state
+        clk_tck = os.sysconf("SC_CLK_TCK")
+        uptime = float(Path("/proc/uptime").read_text().split()[0])
+        boot_time = now - uptime
+        start_seconds = boot_time + (starttime_ticks / clk_tck)
+        return now - start_seconds
+    except (OSError, ValueError, IndexError):
+        return 0.0  # Cannot determine age — min-age guard will skip
+
+
+def _parse_etime(etime: str) -> float:
+    """Parse ps etime format [[DD-]HH:]MM:SS into seconds."""
+    try:
+        days = 0
+        if "-" in etime:
+            day_part, etime = etime.split("-", 1)
+            days = int(day_part)
+        parts = etime.split(":")
+        if len(parts) == 3:
+            return days * 86400 + int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        elif len(parts) == 2:
+            return days * 86400 + int(parts[0]) * 60 + int(parts[1])
+    except (ValueError, IndexError):
+        pass
+    return 0.0
+
+
+def kill_orphan_mcps(pids: list[int]) -> int:
+    """Kill confirmed orphan MCP processes. Uses killpg if isolated, else direct kill.
+
+    Re-verifies cmdline immediately before kill to mitigate PID-reuse TOCTOU.
+    """
+    my_pgid = os.getpgrp()
+    my_pid = os.getpid()
+    killed = 0
+    for pid in pids:
+        if killed >= _ORPHAN_SWEEP_MAX_KILLS:
+            break
+        if pid == my_pid:
+            continue
+        try:
+            # Re-verify identity right before kill (TOCTOU mitigation):
+            # PID may have been recycled between find and kill phases.
+            if sys.platform == "linux":
+                cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+            else:
+                cmdline = subprocess.check_output(
+                    ["ps", "-o", "command=", "-p", str(pid)],
+                    stderr=subprocess.DEVNULL, timeout=2,
+                )
+            if not _is_orphan_mcp(cmdline):
+                continue
+            pgid = os.getpgid(pid)
+            if pgid == pid and pgid != my_pgid and pgid > 1:
+                os.killpg(pgid, signal.SIGKILL)
+                killed += 1
+                _sel_orphan_kill(pid, pgid, cmdline, "killpg")
+            else:
+                # Candidate already passed UID + orphan-ppid + positive MCP
+                # marker + two-phase active-PID re-verify + cmdline re-check.
+                # Direct os.kill of the confirmed-orphan PID only — NOT a tree
+                # walk. _kill_pid_tree is gated by kiro-cli/claude markers that
+                # MCP processes don't carry. If this orphan shares a pgid (not
+                # its own group leader) and has children, those children that
+                # carry an MCP marker are reclaimed on a subsequent sweep; any
+                # without a marker were never sweep candidates to begin with.
+                os.kill(pid, signal.SIGKILL)
+                killed += 1
+                _sel_orphan_kill(pid, pgid, cmdline, "kill")
+        except (
+            ProcessLookupError,
+            PermissionError,
+            OSError,
+            subprocess.SubprocessError,
+        ) as exc:
+            try:
+                # Lazy import: session_pid is imported early by acp.runtime, so
+                # a module-level `from kiro_claw.sel import sel` would be circular.
+                from kiro_claw.sel import sel
+                sel().log_tool_invocation(
+                    session_key="gateway",
+                    agent="kiroclaw",
+                    source="background",
+                    tool_name="orphan_mcp_sweep",
+                    tool_kind="process_kill",
+                    outcome="failed",
+                    resources=f"pid={pid}",
+                    metadata={"error": str(exc)},
+                )
+            except Exception:
+                logger.debug(
+                    "SEL orphan-kill audit failed", exc_info=True
+                )
+    if killed:
+        logger.warning(
+            "Orphan MCP sweep: killed %d untracked process(es)", killed
+        )
+    return killed
+
+
+def _sel_orphan_kill(
+    pid: int, pgid: int, cmdline: bytes, method: str
+) -> None:
+    """Emit SEL audit event for an orphan MCP kill."""
+    try:
+        # Lazy import to avoid a circular import (see kill_orphan_mcps).
+        from kiro_claw.sel import sel
+        sel().log_tool_invocation(
+            session_key="gateway",
+            agent="kiroclaw",
+            source="background",
+            tool_name="orphan_mcp_sweep",
+            tool_kind="process_kill",
+            outcome="completed",
+            resources=f"pid={pid} pgid={pgid} method={method}",
+            metadata={
+                "cmdline": cmdline[:200].decode(
+                    "utf-8", errors="replace"
+                ),
+            },
+        )
+    except Exception:
+        logger.debug("SEL orphan-kill audit failed", exc_info=True)

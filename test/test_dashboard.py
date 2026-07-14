@@ -66,6 +66,44 @@ class TestNotificationPersistence:
         monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
         assert _load_notifications() == []
 
+    def test_load_redacts_preexisting_rows(self, monkeypatch, tmp_path) -> None:
+        """Rows persisted before delivery-time redaction are redacted at load."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        path = tmp_path / "notifications.jsonl"
+        secret = "AKIAIOSFODNN7EXAMPLE"
+        row = {
+            "kind": "cron",
+            "title": "Job",
+            "body": f"leaked key {secret}",
+            "ts": "2026-01-01T00:00:00+00:00",
+            "meta_note": f"nested {secret}",
+        }
+        path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+        loaded = _load_notifications()
+        assert len(loaded) == 1
+        assert secret not in loaded[0]["body"]
+        assert secret not in loaded[0]["meta_note"]
+        # ts is exempt from redaction and must survive verbatim
+        assert loaded[0]["ts"] == "2026-01-01T00:00:00+00:00"
+
+    def test_load_skips_wrong_shape_row_without_discarding_history(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A valid-JSON row with an unexpected shape (normalize/redact raises)
+        is skipped per-line; surrounding good rows survive."""
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        path = tmp_path / "notifications.jsonl"
+        lines = [
+            json.dumps({"kind": "cron", "title": "Before", "body": "ok"}),
+            json.dumps([1, 2, 3]),  # valid JSON, wrong shape — normalize_note raises
+            json.dumps({"kind": "cron", "title": "After", "body": "ok"}),
+        ]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        loaded = _load_notifications()
+        assert [n["title"] for n in loaded] == ["Before", "After"]
+
     def test_load_corrupted_lines_skipped(self, monkeypatch, tmp_path) -> None:
         """Corrupted JSON lines are skipped during load."""
         monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
@@ -121,6 +159,45 @@ class TestNotificationPersistence:
         assert len(loaded) == 1
         assert loaded[0]["title"] == "Test Job"
         assert "ts" in loaded[0]  # timestamp added
+
+    def test_deliver_note_redacts_nested_strings(self, monkeypatch, tmp_path) -> None:
+        """Redaction descends into nested structures like action labels.
+
+        The ``actions`` field is a list of dicts whose string values can
+        carry LLM-derived content; a top-level-only scan would let secrets
+        in nested fields reach SSE clients and JSONL on disk.
+        """
+        monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
+        state = DashboardState(
+            sessions=MagicMock(count=0),
+            crons=MagicMock(),
+            lessons=MagicMock(),
+            start_time=0.0,
+        )
+        state._deliver_note(
+            {
+                "ts": "2026-07-12T00:00:00Z",
+                "kind": "cron",
+                "title": "key AKIAIOSFODNN7EXAMPLE in title",
+                "body": "b",
+                "actions": [
+                    {"id": "a1", "label": "key AKIAIOSFODNN7EXAMPLE in label"},
+                ],
+                "extra": {"nested": ["key AKIAIOSFODNN7EXAMPLE in list"]},
+            }
+        )
+
+        note = state._notification_log[0]
+        # Top-level strings still redacted
+        assert "AKIAIOSFODNN7EXAMPLE" not in note["title"]
+        # Nested strings inside lists of dicts redacted
+        assert "AKIAIOSFODNN7EXAMPLE" not in note["actions"][0]["label"]
+        assert note["actions"][0]["id"] == "a1"
+        # Arbitrary nesting (dict -> list) redacted
+        assert "AKIAIOSFODNN7EXAMPLE" not in note["extra"]["nested"][0]
+        # Persisted JSONL is clean too
+        loaded = _load_notifications()
+        assert "AKIAIOSFODNN7EXAMPLE" not in json.dumps(loaded[0])
 
     def test_state_loads_existing_on_init(self, monkeypatch, tmp_path) -> None:
         """DashboardState.__init__ loads existing notifications from disk."""

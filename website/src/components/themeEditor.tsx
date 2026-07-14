@@ -318,7 +318,7 @@ export function ThemeEditorPanel({ editor }: { editor: ReturnType<typeof useThem
       )}
 
       <div className="flex items-center gap-2 mt-3">
-        <Btn onClick={saveTheme} className="bg-accent text-white hover:bg-accent-hover" disabled={saving}>
+        <Btn onClick={saveTheme} className="bg-accent text-accent-fg hover:bg-accent-hover" disabled={saving}>
           {saving ? 'Saving…' : isEditing ? 'Update Theme' : 'Save Theme'}
         </Btn>
         <Btn onClick={closeEditor}>Cancel</Btn>

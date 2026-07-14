@@ -1116,6 +1116,9 @@ class _FakeEmbedder:
     def is_available(self) -> bool:
         return True
 
+    async def is_available_async(self) -> bool:
+        return self.is_available()
+
     def embed_for_item(self, title, summary, content=None):
         self.embedded_titles.append(title)
         return [0.1, 0.2, 0.3, 0.4]

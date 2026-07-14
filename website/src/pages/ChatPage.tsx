@@ -50,7 +50,10 @@ import { extractPromptFromToken, extractSlackContextFromToken } from '../utils/t
 const GROUPABLE = new Set(['permission'])
 /** Delay (ms) before scrolling to bottom after a state update, giving React time to commit. */
 const SCROLL_AFTER_RENDER_MS = 100
-export const PREFILL_STORAGE_KEY = 'kiroclaw_prefill'
+// Canonical home is utils/navIntent (shared with the popout nav-intent
+// applier); re-exported here for this page's historical importers.
+export { PREFILL_STORAGE_KEY } from '../utils/navIntent'
+import { PREFILL_STORAGE_KEY } from '../utils/navIntent'
 import WelcomeView from '../components/WelcomeView'
 import { usePanelState, useDiffPanel } from '../hooks/usePanelState'
 import { useFilteredDropdown } from '../hooks/useFilteredDropdown'
@@ -462,15 +465,6 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   const contextPct = useAppSelector(s => s.chat.slotContextPct[s.chat.activeSlot ?? ''] ?? 0)
   const contextTokens = useAppSelector(s => s.chat.slotContextTokens?.[s.chat.activeSlot ?? ''])
   const subagents = useAppSelector(s => s.chat.subagents)
-  // Hard-lock the composer while background sub-agents run for the active slot
-  // (Decision B) — matches SubagentProgressBar's "active" derivation. Tangential
-  // questions go to the Activity-panel side chat, not the main thread.
-  const subagentsRunning = useMemo(
-    () => Object.values(subagents).some(
-      a => a.status === 'running' || a.status === 'tool' || a.status === 'pending',
-    ),
-    [subagents],
-  )
   const toolLog = useAppSelector(s => s.chat.toolLog)
   const activityOpen = useAppSelector(s => s.chat.activityOpen)
   const slotHasMore = useAppSelector(s => s.chat.slotHasMore)
@@ -758,6 +752,30 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     // setPendingAgent is a stable useState setter, so including it keeps this a
     // mount-only "consume the one-shot window global" effect.
   }, [setPendingAgent])
+
+  // Consume ?prefill= — the no-main-window fallback path for navigation
+  // intents forwarded from a popout (see utils/popoutController.ts). The
+  // fallback opens `/chat?sid=<slot>&prefill=<prompt>` in a fresh tab, which
+  // has no sessionStorage of its own yet: seed PREFILL_STORAGE_KEY from the
+  // param so the slot-restore effect prefills the composer when the ?sid slot
+  // activates, then strip the param (keep ?sid) so the prompt doesn't leak
+  // into history/bookmarks or re-seed on refresh.
+  useEffect(() => {
+    if (embedded) return
+    const sp = new URLSearchParams(window.location.search)
+    const prefill = sp.get('prefill')
+    if (prefill === null) return
+    const sid = sp.get('sid') || sp.get('slot')
+    if (sid && prefill) {
+      safeSetSessionItem(
+        PREFILL_STORAGE_KEY,
+        JSON.stringify({ slotKey: sid, prompt: prefill, ts: Date.now() }),
+      )
+    }
+    sp.delete('prefill')
+    const qs = sp.toString()
+    window.history.replaceState({}, '', window.location.pathname + (qs ? `?${qs}` : ''))
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Consume prompt from token payload (channel challenge-and-redirect flow).
   // The prompt is HMAC-signed in the token — server validates the signature
@@ -3070,8 +3088,6 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
                    follow-up during the stop window instead of being silently blocked. */
                 false
               }
-              subagentsRunning={subagentsRunning}
-              onOpenSideChat={() => dispatch(openActivityToTab('side'))}
               autoFocusKey={activeSlot}
               prefillHint={prefillHint}
               onDismissHint={() => setPrefillHint(false)}

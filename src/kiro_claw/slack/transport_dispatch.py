@@ -21,6 +21,7 @@ import re
 import time
 from typing import TYPE_CHECKING, Any
 
+from kiro_claw.executors import run_in_embed_pool
 from kiro_claw.hooks import HOOK_REPLY, TOOL_AUTO_APPROVE, TOOL_DENY
 from kiro_claw.llm_helpers import save_conversation_turn
 from kiro_claw.messaging.driver import APPROVAL_INTERACTIVE, TurnDriver
@@ -250,7 +251,9 @@ async def handle_message_transport(
 
         # ── Build message with context ──
         if context_builder:
-            full_message, _ = context_builder.build_message(
+            # Off-loop: build_message embeds the episodic query (blocking urllib).
+            full_message, _ = await run_in_embed_pool(
+                context_builder.build_message,
                 text,
                 is_new,
                 session_key,

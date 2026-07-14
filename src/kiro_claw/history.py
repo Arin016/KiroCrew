@@ -20,12 +20,18 @@ from typing import TYPE_CHECKING
 
 from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import KiroClawConfig, config_dir
+from kiro_claw.executors import run_in_embed_pool
 from kiro_claw.llm_helpers import ToolApprovalPolicy, stream_and_collect_json
 from kiro_claw.messaging.link import legacy_key
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
 from kiro_claw.session import BACKGROUND_KEY
 from kiro_claw.skills import AutoSkillProvenance
+from kiro_claw.vector_memory_constants import (
+    _MAX_EPISODIC_PER_CONSOLIDATION,
+    _MAX_LESSONS_PER_CONSOLIDATION,
+    _MAX_SEMANTIC_PER_CONSOLIDATION,
+)
 
 if TYPE_CHECKING:
     from kiro_claw.learn import LessonStore
@@ -1238,13 +1244,14 @@ class HistoryConsolidator:
                     "Do NOT create near-duplicate keys (e.g. project.x.approach AND project.x.refined). "
                     'To DELETE a stale/invalidated key, set "delete": true (e.g. pet died → delete '
                     "user.pet.name; project cancelled → delete project.x.status). "
-                    "Max 20 items."
+                    f"Max {_MAX_SEMANTIC_PER_CONSOLIDATION} items."
                 )
                 keys.append(
                     '"episodic": Array of conversation fragments worth remembering. '
                     'Each: {"text": "...", "tags": ["tag1"], "importance": 0.0-1.0}. '
                     "Rules: text 10-2000 chars, factual. importance 0.9+ = critical, "
-                    "0.7-0.9 = useful, 0.5-0.7 = minor. Skip greetings/small talk. Max 10 items. "
+                    "0.7-0.9 = useful, 0.5-0.7 = minor. Skip greetings/small talk. "
+                    f"Max {_MAX_EPISODIC_PER_CONSOLIDATION} items. "
                     "IMPORTANT: Do NOT write simple key-value facts here that belong in semantic "
                     "(e.g. 'Favorite color: blue'). Episodic is for events, decisions, and context "
                     "— not for duplicating semantic facts."
@@ -1270,6 +1277,7 @@ class HistoryConsolidator:
                     '(e.g. "no, do X", "always Y", "never Z"). '
                     'Each: {"rule": "...", "negative": "...", "category": "tool|preference|knowledge"}. '
                     "Empty [] if no corrections. Skip general preferences. "
+                    f"Max {_MAX_LESSONS_PER_CONSOLIDATION} items. "
                     "IMPORTANT: Only extract lessons that the user did NOT explicitly ask "
                     "to remember (those are already saved via learn_add). Only extract "
                     "implicit corrections the user made without saying 'remember'."
@@ -1344,7 +1352,7 @@ class HistoryConsolidator:
             # asyncio.create_task). Running it inline stalls the whole gateway loop
             # if the embedding endpoint is slow/hung (heartbeats, Slack, dashboard).
             if self._vector_store:
-                await asyncio.to_thread(self._write_structured_memory, result, key)
+                await run_in_embed_pool(self._write_structured_memory, result, key)
 
             # Markdown writes (backward compat — skip if migrated)
             if not self._migrated:
@@ -1362,7 +1370,7 @@ class HistoryConsolidator:
             if (self._lesson_store or self._vector_store) and (
                 raw_lessons := result.get("lessons")
             ):
-                await asyncio.to_thread(self._save_lessons, raw_lessons)
+                await run_in_embed_pool(self._save_lessons, raw_lessons)
 
             # Auto skill creation / refinement (Mesh-677, Hermes loop).
             # Guarded by flag + eligibility — failures are logged, never fatal.
@@ -1389,6 +1397,17 @@ class HistoryConsolidator:
         """Save extracted lessons from consolidation result."""
         if not isinstance(raw, list):
             return
+
+        # Cap like semantic/episodic: each write_lesson can perform up to 6
+        # blocking embeds, so an uncapped LLM lessons array would occupy a
+        # worker thread for minutes.
+        if len(raw) > _MAX_LESSONS_PER_CONSOLIDATION:
+            logger.warning(
+                "Consolidation returned %d lessons; capping to %d",
+                len(raw),
+                _MAX_LESSONS_PER_CONSOLIDATION,
+            )
+            raw = raw[:_MAX_LESSONS_PER_CONSOLIDATION]
 
         # Prefer vector store (dedup-aware) over JSONL
         if self._vector_store:
@@ -1432,11 +1451,6 @@ class HistoryConsolidator:
         """Write semantic + episodic entries from consolidation result."""
         if not self._vector_store:
             return
-        from kiro_claw.vector_memory import (
-            _MAX_EPISODIC_PER_CONSOLIDATION,
-            _MAX_SEMANTIC_PER_CONSOLIDATION,
-        )
-
         source = f"consolidation:{key}"
 
         # Semantic entries

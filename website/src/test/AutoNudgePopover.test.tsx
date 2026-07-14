@@ -1,0 +1,124 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { render, screen, fireEvent, act } from '@testing-library/react'
+import AutoNudgePopover, { type AutoNudgeLoop } from '../components/AutoNudgePopover'
+import { __resetForTests, loadGoalDraft, saveGoalDraft } from '../utils/goalDrafts'
+import { DRAFT_SAVE_DEBOUNCE_MS } from '../utils/draftConstants'
+
+const anchorRect = { left: 100, right: 140, top: 400, bottom: 432, width: 40, height: 32, x: 100, y: 400, toJSON: () => ({}) } as DOMRect
+
+const SLOT = 'chat-1-100'
+
+function renderPopover(loop: AutoNudgeLoop | null) {
+  return render(
+    <AutoNudgePopover
+      slotKey={SLOT}
+      anchorRect={anchorRect}
+      loop={loop}
+      onClose={() => {}}
+      onChange={() => {}}
+    />,
+  )
+}
+
+const makeLoop = (over: Partial<AutoNudgeLoop> = {}): AutoNudgeLoop => ({
+  id: 'l1', slot_key: SLOT, message: 'active loop goal',
+  idle_secs: 90, max_cycles: 3, cycle_count: 1, active: true, last_fire_ts: 0, ...over,
+})
+
+describe('AutoNudgePopover goal persistence', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    __resetForTests()
+    // Popover only calls fetch on Save/Stop; stub so nothing escapes the test.
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve({ loop: null }) })) as unknown as typeof fetch)
+  })
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
+
+  const goalBox = () => screen.getByPlaceholderText(/Describe what you want the agent to accomplish/i) as HTMLTextAreaElement
+
+  it('remembers the user-typed goal and restores it after the loop is gone (the reported bug)', () => {
+    vi.useFakeTimers()
+    // 1. User opens the popover (no loop yet) and types a custom goal.
+    const first = renderPopover(null)
+    fireEvent.change(goalBox(), { target: { value: 'Ship the BYOA gate harness' } })
+    // Debounced: not written synchronously. Advancing past the debounce persists it.
+    expect(loadGoalDraft(SLOT)).toBeNull()
+    act(() => { vi.advanceTimersByTime(DRAFT_SAVE_DEBOUNCE_MS) })
+    expect(loadGoalDraft(SLOT)?.message).toBe('Ship the BYOA gate harness')
+    first.unmount()
+
+    // 2. The loop is stopped elsewhere → ChatPage passes loop={null} on re-open.
+    //    Before the fix this fell back to the default template.
+    renderPopover(null)
+    expect(goalBox().value).toBe('Ship the BYOA gate harness')
+  })
+
+  it('flushes a pending debounced edit on unmount (a fast close does not lose the last keystrokes)', () => {
+    vi.useFakeTimers()
+    const view = renderPopover(null)
+    fireEvent.change(goalBox(), { target: { value: 'closing fast' } })
+    // Close BEFORE the debounce fires — the unmount flush must still persist it.
+    expect(loadGoalDraft(SLOT)).toBeNull()
+    view.unmount()
+    expect(loadGoalDraft(SLOT)?.message).toBe('closing fast')
+  })
+
+  it('does not persist the pristine default (an untouched popover pins nothing, on open or close)', () => {
+    vi.useFakeTimers()
+    const view = renderPopover(null)
+    // Opened, never edited → the edit-guard means no write, on debounce OR unmount.
+    act(() => { vi.advanceTimersByTime(DRAFT_SAVE_DEBOUNCE_MS) })
+    expect(loadGoalDraft(SLOT)).toBeNull()
+    view.unmount()
+    expect(loadGoalDraft(SLOT)).toBeNull()
+  })
+
+  it('opening with an existing stored draft does not rewrite it (a mere view must not touch the store)', () => {
+    // Seed a draft, snapshot the raw storage, then open (no edit) and close.
+    // The stored bytes must be identical — no TTL refresh, no LRU bump.
+    saveGoalDraft(SLOT, { message: 'remembered goal', idleSecs: 120, maxCycles: 5 })
+    const draftsBefore = localStorage.getItem('mc-goal-drafts')
+    const tsBefore = localStorage.getItem('mc-goal-drafts-ts')
+
+    const view = renderPopover(null)
+    expect(goalBox().value).toBe('remembered goal') // restored on open
+    view.unmount() // close without editing
+
+    expect(localStorage.getItem('mc-goal-drafts')).toBe(draftsBefore)
+    expect(localStorage.getItem('mc-goal-drafts-ts')).toBe(tsBefore)
+  })
+
+  it('prefers the live loop message over a stored draft when a loop is running', () => {
+    saveGoalDraft(SLOT, { message: 'stale draft goal', idleSecs: 60, maxCycles: 0 })
+    renderPopover(makeLoop({ message: 'active loop goal' }))
+    expect(goalBox().value).toBe('active loop goal')
+  })
+
+  it('opening with a live loop never writes the loop config into the draft store', () => {
+    vi.useFakeTimers()
+    // No stored draft. Open with a live loop, let any timer fire, then close.
+    const view = renderPopover(makeLoop())
+    act(() => { vi.advanceTimersByTime(DRAFT_SAVE_DEBOUNCE_MS) })
+    view.unmount()
+    // The live loop's config must NOT have been mirrored into the user-draft store.
+    expect(loadGoalDraft(SLOT)).toBeNull()
+  })
+
+  it('editing while a loop is running does not persist to the draft store (loop is authoritative)', () => {
+    vi.useFakeTimers()
+    const view = renderPopover(makeLoop())
+    fireEvent.change(goalBox(), { target: { value: 'tweaked while running' } })
+    act(() => { vi.advanceTimersByTime(DRAFT_SAVE_DEBOUNCE_MS) })
+    view.unmount()
+    expect(loadGoalDraft(SLOT)).toBeNull()
+  })
+
+  it('falsy loop fields fall back to default template / 60 / 0, not bare "" / 0 (|| not ??)', () => {
+    // A loop with an empty message and idle_secs/max_cycles of 0 must show the
+    // default template + 60, matching pre-fix behavior — regression guard for
+    // the || → ?? operator change flagged in review.
+    renderPopover(makeLoop({ message: '', idle_secs: 0, max_cycles: 0 }))
+    expect(goalBox().value).toContain('north star')
+    expect((screen.getByDisplayValue('60') as HTMLInputElement).value).toBe('60')
+  })
+})

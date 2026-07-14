@@ -531,6 +531,87 @@ async def _probe_remote(server: McpServerInfo) -> McpServerInfo:
     return server
 
 
+# Cap on how many *non-JSON banner* lines to skip while waiting for the
+# JSON-RPC handshake. Only undecodable banner/log lines count toward this cap;
+# blank lines and well-formed JSON-RPC notifications are bounded by the shared
+# timeout budget alone (so a chatty-but-spec-compliant server that emits many
+# notifications before its response is not mis-capped). A well-behaved server
+# emits its response immediately; a chatty launcher (e.g. ``aim`` mid-self-
+# update) may prepend a banner line or two.
+_MAX_BANNER_LINES = 50
+
+
+async def _read_stdio_jsonrpc_response(
+    stream: asyncio.StreamReader, timeout: float, name: str = ""
+) -> dict | None:
+    """Read stdout until a JSON-RPC *response* object appears.
+
+    stdio MCP servers must speak newline-delimited JSON, but some processes —
+    or launchers that front them, like ``aim`` while self-updating — print a
+    human-readable banner or a blank line to stdout *before* the handshake.
+    The probe used to read the first line and ``json.loads`` it directly, so a
+    single stray line raised ``Expecting value: line 1 column 1 (char 0)`` and
+    a healthy server was reported as errored (cached for up to 30 min).
+
+    This consumes lines within one overall ``timeout`` budget, skipping blank
+    lines, non-JSON lines, and JSON-RPC *notifications* (objects without an
+    ``id``), and returns the first JSON object that carries an ``id`` (a
+    response). Only non-JSON *banner* lines count toward ``_MAX_BANNER_LINES``;
+    blanks and notifications are bounded by the timeout alone. Returns ``None``
+    on EOF or once more than ``_MAX_BANNER_LINES`` banner lines have arrived
+    (the flood case is logged). Raises ``asyncio.TimeoutError`` if the deadline
+    elapses, so the caller's existing timeout handling is preserved.
+
+    Note the divergent sibling: the remote HTTP/SSE path uses
+    :func:`_read_jsonrpc_response`, which returns ``{}`` (not ``None``) on an
+    empty response and does NOT filter notifications. Keep the two straight —
+    do not copy one call site's null-handling to the other.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    banner_lines = 0
+    first_banner = ""
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        line = await asyncio.wait_for(stream.readline(), timeout=remaining)
+        if not line:
+            # EOF — process closed stdout without responding. Preserve the
+            # "non-JSON was on stdout" signal the old json.loads error used to
+            # surface, so a banner-then-EOF probe is still diagnosable.
+            if banner_lines:
+                logger.debug(
+                    "MCP probe [%s]: EOF after %d banner line(s); first banner: %r",
+                    name or "?", banner_lines, first_banner,
+                )
+            return None
+        text = line.decode(errors="replace").strip()
+        if not text:
+            continue  # blank line — bounded by the timeout budget, not the cap
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            # Non-JSON banner/log line (e.g. `aim` self-update). Only these
+            # count toward the flood cap.
+            banner_lines += 1
+            if not first_banner:
+                first_banner = text[:120]
+            if banner_lines > _MAX_BANNER_LINES:
+                logger.warning(
+                    "MCP probe [%s]: no JSON-RPC response after %d banner "
+                    "line(s); first banner: %r",
+                    name or "?", banner_lines, first_banner,
+                )
+                return None
+            continue
+        # A JSON-RPC response always carries "id"; skip notifications (objects
+        # with "method" and no "id") and non-object payloads. These do NOT
+        # count toward the banner cap — the timeout budget bounds them.
+        if isinstance(parsed, dict) and "id" in parsed:
+            return parsed
+
+
 async def probe_server(server: McpServerInfo) -> McpServerInfo:
     """Probe a single MCP server by spawning it and sending initialize.
 
@@ -597,14 +678,19 @@ async def probe_server(server: McpServerInfo) -> McpServerInfo:
         proc.stdin.write(init_req.encode())
         await proc.stdin.drain()
 
-        # Read initialize response
-        line = await asyncio.wait_for(proc.stdout.readline(), timeout=_get_probe_timeout())
-        if not line:
+        # Read initialize response. Skip any leading non-JSON banner/log
+        # lines the server (or a launcher like ``aim`` mid-self-update) may
+        # emit on stdout before the JSON-RPC handshake — otherwise a single
+        # stray line makes json.loads() raise and a healthy server is wrongly
+        # marked errored.
+        resp = await _read_stdio_jsonrpc_response(
+            proc.stdout, _get_probe_timeout(), name=server.name
+        )
+        if resp is None:
             server.status = "error"
             server.error = "no response"
             return server
 
-        resp = json.loads(line.decode())
         if isinstance(resp, dict) and resp.get("error"):
             server.status = "error"
             err = resp["error"]
@@ -639,9 +725,10 @@ async def probe_server(server: McpServerInfo) -> McpServerInfo:
         proc.stdin.write(list_req.encode())
         await proc.stdin.drain()
 
-        line2 = await asyncio.wait_for(proc.stdout.readline(), timeout=_get_probe_timeout())
-        if line2:
-            resp2 = json.loads(line2.decode())
+        resp2 = await _read_stdio_jsonrpc_response(
+            proc.stdout, _get_probe_timeout(), name=server.name
+        )
+        if resp2 is not None:
             result = resp2.get("result", {}) if isinstance(resp2, dict) else {}
             tools_data = result.get("tools", []) if isinstance(result, dict) else []
             server.tools = [
@@ -649,6 +736,16 @@ async def probe_server(server: McpServerInfo) -> McpServerInfo:
                 for t in tools_data
                 if isinstance(t, dict) and (name := t.get("name", ""))
             ]
+        else:
+            # initialize succeeded but tools/list yielded no response (banner
+            # flood or EOF on this read). Report the server ok, but log so an
+            # empty tool list is distinguishable from a server that genuinely
+            # exposes no tools.
+            logger.debug(
+                "MCP probe [%s]: tools/list returned no response after a "
+                "successful initialize; reporting ok with unknown tools",
+                server.name,
+            )
 
         server.status = "ok"
 

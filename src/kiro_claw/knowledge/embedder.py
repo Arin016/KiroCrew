@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.request
 
+from kiro_claw.executors import run_in_embed_pool
 from kiro_claw.knowledge.chunker import CHUNK_OVERLAP, CHUNK_TOKEN_SIZE
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,11 @@ class OllamaEmbedder:
         self._last_check: float = 0.0
 
     def is_available(self) -> bool:
-        """Check if Ollama is reachable. Caches positive result; negative cached with TTL."""
+        """Check if Ollama is reachable. Caches positive result; negative cached with TTL.
+
+        Blocking (urllib probe, 3s timeout on a hung connection) — coroutines on
+        the gateway event loop MUST use :meth:`is_available_async` instead.
+        """
         if self._available is True:
             return True
         if self._available is False and (time.time() - self._last_check) < NEGATIVE_CACHE_TTL:
@@ -62,6 +67,19 @@ class OllamaEmbedder:
         if not self._available:
             logger.info("Ollama not available at %s — embeddings disabled", self.base_url)
         return bool(self._available)
+
+    async def is_available_async(self) -> bool:
+        """Loop-safe :meth:`is_available` — runs the blocking probe off-loop.
+
+        Single greppable offload point for the availability probe: dashboard
+        handlers and the knowledge watcher call this instead of each carrying
+        its own ``run_in_executor(None, embedder.is_available)`` boilerplate
+        (the copy-paste drift that let inline probes stall the gateway loop).
+        """
+        # Fast path: cached-positive needs no thread hop.
+        if self._available is True:
+            return True
+        return await run_in_embed_pool(self.is_available)
 
     def embed(self, text: str) -> list[float] | None:
         """Embed a single text. Returns float list or None on failure."""

@@ -31,6 +31,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -39,6 +40,7 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.websockets import SocketModeClient as WSSocketModeClient
 
 import kiro_claw
+import kiro_claw.crash_guard as crash_guard
 from kiro_claw import shutdown_event
 from kiro_claw.acp.client import AcpError, AcpProcessDied
 from kiro_claw.autonudge import (
@@ -80,7 +82,7 @@ from kiro_claw.dashboard.origin import (
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.dashboard.token_auth import MAX_SESSION_TTL_SECS, generate_token
 from kiro_claw.embeddings import OllamaManager, _validate_url, make_sync_embed_fn
-from kiro_claw.executors import cron_executor, maintenance_executor
+from kiro_claw.executors import cron_executor, maintenance_executor, run_in_embed_pool
 from kiro_claw.frontend import build_frontend_async
 from kiro_claw.heartbeat import (
     HEARTBEAT_TASK_TIMEOUT_SECS,
@@ -112,6 +114,7 @@ from kiro_claw.providers.base import LLMEvent
 from kiro_claw.safety_override import safety_override
 from kiro_claw.security import redact, redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
+from kiro_claw.service.common import restart_command_hint
 from kiro_claw.session import HEARTBEAT_KEY, SessionManager
 from kiro_claw.skills import SkillsLoader
 from kiro_claw.slack.client import RealSlackClient
@@ -1459,8 +1462,10 @@ class GatewayOrchestrator:
                             extra_env=job.env or None,
                         )
                         _acq = True
-                        full_message, _ = self.ctx_builder.build_message(
-                            msg, True, interactive=False, agent=agent
+                        # Off-loop: build_message embeds the episodic query.
+                        full_message, _ = await run_in_embed_pool(
+                            self.ctx_builder.build_message,
+                            msg, True, interactive=False, agent=agent,
                         )
                         result_text = await stream_and_collect(
                             client,
@@ -1514,7 +1519,9 @@ class GatewayOrchestrator:
                         + "\n".join(f"- {a}" for a in job.acked_items)
                     )
                 _provider = self._cfg.agent.provider if hasattr(self, "_cfg") else "acp"
-                full_message, _ = self.ctx_builder.build_message(
+                # Off-loop: build_message embeds the episodic query.
+                full_message, _ = await run_in_embed_pool(
+                    self.ctx_builder.build_message,
                     msg, True, interactive=False, agent=job.agent_id or None,
                     provider_type=_provider,
                     minimal_context=job.minimal_context,
@@ -1931,7 +1938,10 @@ class GatewayOrchestrator:
                 # system-prompt copies of the same instruction can drift out
                 # of effective context (CR-268592581 rationale).
                 injected = _HEARTBEAT_KEEP_INJECTION + task_text
-                full_message, _ = self.ctx_builder.build_message(injected, is_new)
+                # Off-loop: build_message embeds the episodic query.
+                full_message, _ = await run_in_embed_pool(
+                    self.ctx_builder.build_message, injected, is_new
+                )
 
                 # A heartbeat turn runs unattended. Bound it with a hard deadline
                 # (mirrors cron's _execute_with_timeout) as defense in depth so
@@ -2737,7 +2747,7 @@ class GatewayOrchestrator:
                         _footer_client = client
                         _provider = self._cfg.agent.provider if hasattr(self, "_cfg") else "acp"
                         if self.ctx_builder:
-                            msg, _ = self.ctx_builder.build_message(announce, is_new, parent_key, provider_type=_provider)
+                            msg, _ = await run_in_embed_pool(self.ctx_builder.build_message, announce, is_new, parent_key, provider_type=_provider)
                         else:
                             msg = announce
                         response = await asyncio.wait_for(
@@ -2881,7 +2891,7 @@ class GatewayOrchestrator:
                     acquired = True
                     _provider = self._cfg.agent.provider if hasattr(self, "_cfg") else "acp"
                     if self.ctx_builder:
-                        msg, _ = self.ctx_builder.build_message(announce, is_new, parent_key, provider_type=_provider)
+                        msg, _ = await run_in_embed_pool(self.ctx_builder.build_message, announce, is_new, parent_key, provider_type=_provider)
                     else:
                         msg = announce
                     cron_response = await asyncio.wait_for(
@@ -3739,6 +3749,12 @@ class GatewayOrchestrator:
             os.execv(sys.executable, [sys.executable, "-m", "kiro_claw"] + sys.argv[1:])
         except Exception:
             logger.warning("Auto-update failed", exc_info=True)
+            if self.dashboard_state:
+                # Surface the platform-correct manual restart command so a failed
+                # auto-restart doesn't leave the user guessing (Mesh-2583).
+                self.dashboard_state.push_update_progress(
+                    "failed", f"Restart failed — run: {restart_command_hint()}"
+                )
 
     # ------------------------------------------------------------------
     # Main run loop
@@ -3775,6 +3791,18 @@ class GatewayOrchestrator:
 
     async def run(self) -> None:
         """Start all services and block until shutdown signal."""
+        # ── Crash guard (D1/D2 of Lorikeets-3929) ──
+        # Install the asyncio exception handler on the running loop.
+        # atexit + excepthook were already installed in cli.py before asyncio.run().
+        crash_guard.install_loop_handler(asyncio.get_running_loop())
+
+        # Log process identity to the gateway log (D3 of Lorikeets-3929)
+        logger.info(
+            "=== GATEWAY PID=%d STARTED AT %s ===",
+            os.getpid(),
+            datetime.now(timezone.utc).isoformat(),
+        )
+
         # Raise FD limit — each kiro-cli session uses ~6 FDs (3 pipes)
         # plus MCP server subprocesses. Default macOS limit (256) is too low.
         import resource

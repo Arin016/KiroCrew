@@ -186,7 +186,7 @@ function SetupWizard({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
     <div className="max-w-2xl mx-auto">
       <div className="flex items-center gap-1 mb-6">{steps.map((s, i) => (
         <div key={s} className="flex items-center gap-1">
-          <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${i <= step ? 'bg-accent text-white font-bold' : 'bg-border text-muted'}`}>{i + 1}</div>
+          <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${i <= step ? 'bg-accent text-accent-fg font-bold' : 'bg-border text-muted'}`}>{i + 1}</div>
           <span className={`text-xs ${i === step ? 'text-text' : 'text-muted'}`}>{s}</span>
           {i < 2 && <div className="w-8 h-px bg-border" />}
         </div>
@@ -246,8 +246,8 @@ function SetupWizard({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
 
       <div className="flex justify-between mt-6">
         <button className="text-sm text-muted hover:text-text" onClick={step === 0 ? onCancel : () => setStep(step - 1)}>{step === 0 ? 'Cancel' : '← Back'}</button>
-        {step < 2 ? <button className="text-sm px-3 py-1.5 rounded-md bg-accent text-white disabled:opacity-50" disabled={step === 0 && question.length < 20} onClick={() => setStep(step + 1)}>Next →</button>
-          : <button className="text-sm px-3 py-1.5 rounded-md bg-accent text-white disabled:opacity-50" disabled={!validation?.can_start || submitting} onClick={submit}>{submitting ? 'Starting...' : 'Start Campaign'}</button>}
+        {step < 2 ? <button className="text-sm px-3 py-1.5 rounded-md bg-accent text-accent-fg disabled:opacity-50" disabled={step === 0 && question.length < 20} onClick={() => setStep(step + 1)}>Next →</button>
+          : <button className="text-sm px-3 py-1.5 rounded-md bg-accent text-accent-fg disabled:opacity-50" disabled={!validation?.can_start || submitting} onClick={submit}>{submitting ? 'Starting...' : 'Start Campaign'}</button>}
       </div>
     </div>
   )
@@ -357,7 +357,7 @@ function ForkFlow({ parentId, onCancel, onDone }: { parentId: string; onCancel: 
     <div className="text-sm text-muted">Challenge the findings from "{question?.slice(0, 60)}…", then fork into a new campaign.</div>
     {error && <div className="text-xs text-danger">{error}</div>}
     {tree.length === 0 ? (
-      <button className="text-sm px-3 py-1.5 rounded-md bg-accent text-white disabled:opacity-50" disabled={grilling || !question} onClick={startChallenge}>{grilling ? 'Challenging…' : <><Flame size={12} className="inline" /> Challenge Findings →</>}</button>
+      <button className="text-sm px-3 py-1.5 rounded-md bg-accent text-accent-fg disabled:opacity-50" disabled={grilling || !question} onClick={startChallenge}>{grilling ? 'Challenging…' : <><Flame size={12} className="inline" /> Challenge Findings →</>}</button>
     ) : (
       <>
         <div className="text-xs text-muted">Answer challenges to refine, or just pick sub-questions and fork.</div>
@@ -368,7 +368,7 @@ function ForkFlow({ parentId, onCancel, onDone }: { parentId: string; onCancel: 
         </div>
         <div className="flex justify-between mt-4">
           <button className="text-sm text-muted" onClick={() => { clearPersisted(); onCancel() }}>Cancel</button>
-          <button className="text-sm px-3 py-1.5 rounded-md bg-accent text-white disabled:opacity-50" disabled={subCount === 0 || forking} onClick={doFork}>{forking ? 'Forking…' : `Fork with ${subCount} sub-questions →`}</button>
+          <button className="text-sm px-3 py-1.5 rounded-md bg-accent text-accent-fg disabled:opacity-50" disabled={subCount === 0 || forking} onClick={doFork}>{forking ? 'Forking…' : `Fork with ${subCount} sub-questions →`}</button>
         </div>
       </>
     )}
@@ -497,7 +497,7 @@ function SubQuestionAdder({ id, campaign }: { id: string; campaign: Campaign }) 
       {ACTIVE_STATUSES.includes(campaign.status) && <div className="mt-2">
         <div className="flex items-center gap-2">
           <GrowTextarea ariaLabel="Add guidance or a sub-question" className="flex-1 text-xs p-1.5 rounded bg-bg border border-border" placeholder="Add guidance or a sub-question… (Enter; Shift+Enter for newline)" value={text} onChange={setText} onSubmit={() => { if (text.trim()) addMut.mutate(text.trim()) }} />
-          <button className="text-xs px-2 py-1 rounded bg-accent text-white disabled:opacity-50" disabled={!text.trim() || addMut.isPending} onClick={() => addMut.mutate(text.trim())}>{addMut.isPending ? '…' : 'Add'}</button>
+          <button className="text-xs px-2 py-1 rounded bg-accent text-accent-fg disabled:opacity-50" disabled={!text.trim() || addMut.isPending} onClick={() => addMut.mutate(text.trim())}>{addMut.isPending ? '…' : 'Add'}</button>
         </div>
         <div className="text-[10px] text-muted mt-1">Free-form — a sub-question or an instruction the agent should follow next cycle.</div>
       </div>}
@@ -571,7 +571,7 @@ function CampaignDetail({ id, onBack, onFork, onOpen }: { id: string; onBack: ()
       <div className="text-sm font-medium text-warn flex items-center gap-1"><AlertTriangle size={14} /> Research Stalled</div>
       <div className="text-xs mt-1">No new findings in the last 5 cycles.</div>
       <div className="flex gap-2 mt-2">
-        <button className="text-xs px-2 py-1 rounded bg-accent text-white" onClick={() => setShowNudge(true)}>Give direction</button>
+        <button className="text-xs px-2 py-1 rounded bg-accent text-accent-fg" onClick={() => setShowNudge(true)}>Give direction</button>
         <button className="text-xs px-2 py-1 rounded bg-bg-elevated" onClick={() => actionMut.mutate('stop')}>Stop</button>
         <button className="text-xs px-2 py-1 rounded bg-bg-elevated" onClick={() => actionMut.mutate('resume')}>Continue</button>
       </div>
@@ -581,13 +581,13 @@ function CampaignDetail({ id, onBack, onFork, onOpen }: { id: string; onBack: ()
       <div className="text-sm mt-1">{campaign.pending_question || 'The agent is waiting for your direction.'}</div>
       <textarea aria-label="Your answer" className="w-full p-2 mt-2 rounded text-sm bg-bg border border-border resize-y" rows={2} value={answerText} onChange={e => setAnswerText(e.target.value)} placeholder="Your answer..." />
       <div className="flex gap-2 mt-2 justify-end">
-        <button className="text-xs px-2 py-1 rounded bg-accent text-white disabled:opacity-50" onClick={() => nudgeMut.mutate(answerText)} disabled={!answerText || nudgeMut.isPending}>{nudgeMut.isPending ? 'Sending…' : 'Answer & resume'}</button>
+        <button className="text-xs px-2 py-1 rounded bg-accent text-accent-fg disabled:opacity-50" onClick={() => nudgeMut.mutate(answerText)} disabled={!answerText || nudgeMut.isPending}>{nudgeMut.isPending ? 'Sending…' : 'Answer & resume'}</button>
       </div>
     </div>}
     {campaign.status === 'failed' && <div className="p-3 rounded-md mb-4 border border-danger bg-danger/10">
       <div className="text-sm font-medium text-danger flex items-center gap-1"><AlertTriangle size={14} /> Research stopped</div>
       <div className="text-xs mt-1">{campaign.error_message || 'The campaign stopped unexpectedly.'} Findings so far are preserved below.</div>
-      <button className="text-xs px-2 py-1 mt-2 rounded bg-accent text-white" onClick={() => actionMut.mutate('resume')}><Play size={12} className="inline" /> Resume</button>
+      <button className="text-xs px-2 py-1 mt-2 rounded bg-accent text-accent-fg" onClick={() => actionMut.mutate('resume')}><Play size={12} className="inline" /> Resume</button>
     </div>}
     {(campaign.status === 'complete' || campaign.status === 'stopped') && !isActive && (
       <div className="p-3 rounded-md mb-4 border border-accent bg-accent/5">
@@ -607,7 +607,7 @@ function CampaignDetail({ id, onBack, onFork, onOpen }: { id: string; onBack: ()
       <textarea aria-label="Nudge direction" className="w-full p-2 rounded text-sm bg-bg border border-border resize-y" rows={3} value={nudgeText} onChange={e => setNudgeText(e.target.value)} placeholder="Focus on..." />
       <div className="flex gap-2 mt-2 justify-end">
         <button className="text-xs text-muted" onClick={() => setShowNudge(false)}>Cancel</button>
-        <button className="text-xs px-2 py-1 rounded bg-accent text-white disabled:opacity-50" onClick={() => nudgeMut.mutate(nudgeText)} disabled={!nudgeText || nudgeMut.isPending}>{nudgeMut.isPending ? 'Sending…' : 'Send'}</button>
+        <button className="text-xs px-2 py-1 rounded bg-accent text-accent-fg disabled:opacity-50" onClick={() => nudgeMut.mutate(nudgeText)} disabled={!nudgeText || nudgeMut.isPending}>{nudgeMut.isPending ? 'Sending…' : 'Send'}</button>
       </div>
     </div>}
     <div className="mt-4">
@@ -647,14 +647,14 @@ export default function ResearchLabPage() {
   return <div className="px-6 py-4">
     <div className="flex items-center justify-between mb-4">
       <h1 className="text-lg font-semibold flex items-center gap-2"><FlaskConical size={20} /> Research Lab</h1>
-      <button className="text-sm px-3 py-1.5 rounded-md bg-accent text-white disabled:opacity-50" disabled={!!active} onClick={() => setView('wizard')} title={active ? 'One campaign at a time' : ''}>+ New Campaign</button>
+      <button className="text-sm px-3 py-1.5 rounded-md bg-accent text-accent-fg disabled:opacity-50" disabled={!!active} onClick={() => setView('wizard')} title={active ? 'One campaign at a time' : ''}>+ New Campaign</button>
     </div>
     <div className="text-xs text-muted mb-4 flex items-start gap-1"><Lock size={12} className="mt-0.5 shrink-0" /> <span><span className="font-medium">Research-only.</span> Research Lab investigates and reports — it never takes actions on your systems (no writes, deployments, or code changes). Any next step that requires acting is handed off to the main agent for you to review and drive.</span></div>
     {isLoading ? <div className="text-sm text-muted">Loading...</div> : campaigns.length === 0 ? (
       <div className="text-center py-12">
         <FlaskConical size={48} className="mx-auto text-muted mb-3" />
         <div className="text-sm text-muted">Run autonomous research campaigns</div>
-        <button className="mt-3 text-sm px-3 py-1.5 rounded-md bg-accent text-white" onClick={() => setView('wizard')}>+ New Campaign</button>
+        <button className="mt-3 text-sm px-3 py-1.5 rounded-md bg-accent text-accent-fg" onClick={() => setView('wizard')}>+ New Campaign</button>
       </div>
     ) : <div className="space-y-3">
       {active && <div><div className="text-xs font-medium text-muted mb-1">ACTIVE</div>

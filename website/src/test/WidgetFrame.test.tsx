@@ -166,11 +166,21 @@ describe('WidgetFrame theme passthrough', () => {
     expect(iframe.className).not.toMatch(/\bbg-white\b/)
   })
 
-  it('preserves the CSP meta and the Tailwind CDN script tag', () => {
+  it('preserves the CSP meta and loads the Tailwind runtime same-origin', () => {
     const { container } = wrap(<WidgetFrame html="<p>hi</p>" title="T" />)
     const srcdoc = getSrcdoc(container)
     expect(srcdoc).toMatch(/Content-Security-Policy/)
-    expect(srcdoc).toMatch(/cdn\.tailwindcss\.com/)
+    // AEA fix (Mesh-2518): Tailwind loads from the dashboard origin, not the CDN.
+    expect(srcdoc).not.toMatch(/cdn\.tailwindcss\.com/)
+    expect(srcdoc).toMatch(/\/vendor\/tailwindcss-browser\.js/)
+    // script-src grants no 'unsafe-eval' and pins the dashboard origin to the
+    // single vendored runtime FILE (least-privilege), not the whole origin.
+    expect(srcdoc).not.toContain("'unsafe-eval'")
+    expect(srcdoc).toContain(
+      `'unsafe-inline' ${window.location.origin}/vendor/tailwindcss-browser.js https://cdn.jsdelivr.net`,
+    )
+    // Runtime <script> src is origin-prefixed (absolute), not a bare '/vendor/...' path.
+    expect(srcdoc).toContain(`src="${window.location.origin}/vendor/tailwindcss-browser.js"`)
   })
 
   it('falls back to browser defaults when no theme vars are readable', () => {
@@ -200,23 +210,22 @@ describe('WidgetFrame theme passthrough', () => {
     expect(srcdoc).not.toMatch(/color-scheme:light dark/)
   })
 
-  it('configures Tailwind with darkMode:"class" and tags <body> with the resolved mode', () => {
+  it('drives dark mode via v4 custom-variant + <body> class, loaded same-origin', () => {
     // Widgets use Tailwind `dark:` variants (e.g. `bg-white dark:bg-slate-900`).
-    // By default Tailwind's CDN drives `dark:` off the OS media query, which is
-    // wrong inside the iframe: the iframe has no way to know the dashboard's
-    // resolved mode. We set darkMode:'class' and put the mode on <body> so
-    // `dark:` tracks the dashboard, not the OS.
+    // Inside the iframe the OS media query is wrong (it can't know the
+    // dashboard's resolved mode), so we register a `.dark`-class custom variant
+    // (v4) and put the mode on <body> so `dark:` tracks the dashboard.
     const { container } = wrap(<WidgetFrame html="<p>hi</p>" title="T" />)
     const srcdoc = getSrcdoc(container)
-    expect(srcdoc).toMatch(/tailwind\.config\s*=\s*\{\s*darkMode\s*:\s*['"]class['"]/)
+    expect(srcdoc).toMatch(/@custom-variant dark \(&:where\(\.dark, \.dark \*\)\)/)
     expect(srcdoc).toMatch(/<body class="dark">/)
-    // Tailwind config script must come AFTER the CDN loads the runtime, or
-    // the assignment lands on an undefined `tailwind` global and silently
-    // falls back to media-query darkMode.
-    const cdnIdx = srcdoc.indexOf('cdn.tailwindcss.com')
-    const configIdx = srcdoc.indexOf('tailwind.config')
-    expect(cdnIdx).toBeGreaterThan(-1)
-    expect(configIdx).toBeGreaterThan(cdnIdx)
+    // AEA fix (Mesh-2518): Tailwind must not load from the public CDN.
+    expect(srcdoc).not.toContain('cdn.tailwindcss.com')
+    // Directives block must precede the runtime <script> so the dark variant
+    // registers before first paint (ordering regression guard).
+    expect(srcdoc.indexOf('text/tailwindcss')).toBeLessThan(
+      srcdoc.indexOf(`src="${window.location.origin}/vendor/tailwindcss-browser.js"`),
+    )
   })
 
   it('re-renders the srcdoc when the active theme changes (M1 regression guard)', async () => {

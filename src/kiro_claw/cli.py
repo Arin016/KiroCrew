@@ -47,6 +47,7 @@ from kiro_claw.config.loader import (
     build_provider_factory,
 )
 from kiro_claw.constants import env_flag_enabled
+from kiro_claw.crash_guard import install as _install_crash_guard
 from kiro_claw.dashboard.state import set_build_info
 from kiro_claw.env import git_build_info
 from kiro_claw.gateway_lock import GatewayLock, GatewayLockError
@@ -1511,12 +1512,25 @@ Examples:
             pass  # config missing or corrupt — keep default WARNING
     logging.getLogger("kiro_claw").setLevel(level)
 
-    # Persistent file log — respects the configured log_level
+    # Persistent file log — respects the configured log_level.
+    # On startup, rotate gateway.log → gateway.log.prev so a crash's final
+    # lines are never lost (Lorikeets-3929 D3).  Only for `gateway` subcommand
+    # to avoid renaming the file while the gateway is actively writing.
     _log_file = config_dir() / "gateway.log"
+    if args.command == "gateway":
+        _prev_log = _log_file.with_suffix(".log.prev")
+        if _log_file.exists() and _log_file.stat().st_size > 0:
+            try:
+                _log_file.rename(_prev_log)
+            except OSError:
+                pass  # race or permission — keep going
     _fh = RotatingFileHandler(_log_file, maxBytes=2 * 1024 * 1024, backupCount=3)
     _fh.setLevel(level)
     _fh.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s [PID %(process)d]: %(message)s",
+            datefmt="%H:%M:%S",
+        )
     )
     logging.getLogger("kiro_claw").addHandler(_fh)
 
@@ -1595,6 +1609,10 @@ Examples:
         # keys off to decide whether to arm itself (see start_dashboard). Cheap
         # and gateway-only — other CLI subcommands are short-lived and skip it.
         faulthandler.enable()
+        # Install crash breadcrumbs (atexit + excepthook) before asyncio.run
+        # so any fatal exception writes to crash.log (Lorikeets-3929 D1).
+        # The asyncio loop handler is installed later inside run().
+        _install_crash_guard()
         gw_kwargs = _resolve_gateway_args(args)
         # Resolve the running build's git branch+commit ONCE here in the sync
         # entrypoint: provably AFTER KIROCLAW_PROJECT_DIR detection (top of main())

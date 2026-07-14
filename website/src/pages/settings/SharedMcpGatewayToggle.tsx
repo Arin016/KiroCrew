@@ -64,7 +64,7 @@ export function SharedMcpGatewayToggle() {
         maxWidth={460}
         footer={<>
           <button className={`${btn} border border-border text-text hover:bg-bg-hover`} onClick={() => setPhase('idle')}>Cancel</button>
-          <button className={`${btn} bg-accent text-white hover:bg-accent-hover`} onClick={() => run(target)}>Continue</button>
+          <button className={`${btn} bg-accent text-accent-fg hover:bg-accent-hover`} onClick={() => run(target)}>Continue</button>
         </>}
       >
         <div className="text-[13px] text-text">This restarts all active sessions onto the new MCP routing — in-flight work will be interrupted. Your dashboard stays signed in. Continue?</div>
@@ -77,7 +77,7 @@ export function SharedMcpGatewayToggle() {
         title={phase === 'done' ? 'Done' : phase === 'failed' ? 'Could not apply' : (target ? 'Enabling shared MCP gateway' : 'Disabling shared MCP gateway')}
         maxWidth={460}
         footer={phase === 'done' ? (
-          <button className={`${btn} bg-accent text-white hover:bg-accent-hover`} onClick={() => setPhase('idle')}>Close</button>
+          <button className={`${btn} bg-accent text-accent-fg hover:bg-accent-hover`} onClick={() => setPhase('idle')}>Close</button>
         ) : phase === 'failed' ? (<>
           <button className={`${btn} border border-border text-text hover:bg-bg-hover`} onClick={() => setPhase('idle')}>Close</button>
           {target && <button className={`${btn} bg-danger text-white hover:opacity-90`} onClick={() => run(false)}>Roll back (disable)</button>}

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Callable
 from kiro_claw import git_coord, shutdown_event
 from kiro_claw.acp.client import AcpProcessDied
 from kiro_claw.config.loader import KiroClawConfig
+from kiro_claw.executors import run_in_embed_pool
 from kiro_claw.hooks import TOOL_DENY, fire_tool_hooks, get_global_hook_store
 from kiro_claw.llm_helpers import stream_and_collect_json
 from kiro_claw.providers.base import (
@@ -302,7 +303,9 @@ async def execute_task(
 
             task_prompt = await build_task_prompt(run, task, attempt, work_dir)
             if ctx:
-                full_prompt, _ = ctx.build_message(
+                # Off-loop: build_message embeds the episodic query (blocking urllib).
+                full_prompt, _ = await run_in_embed_pool(
+                    ctx.build_message,
                     task_prompt, is_new, session_key, agent=agent or None,
                     provider_type=KiroClawConfig.load().agent.provider,
                 )

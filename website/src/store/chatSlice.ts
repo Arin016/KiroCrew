@@ -181,7 +181,12 @@ function applyNonActiveFrame(
   }
   if (role === '_segment') {
     for (let i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i].role === 'streaming') { msgs[i].role = 'assistant'; msgs[i].rawText = msgs[i].content; break }
+      if (msgs[i].role === 'streaming') {
+        const raw = msgs[i].content
+        const isPlaceholder = !raw || (/^[\s.\-…·•–—]{2,}$/.test(raw) && /[.\-…·•–—]/.test(raw)) || raw === '…'
+        if (isPlaceholder) { msgs.splice(i, 1) } else { msgs[i].role = 'assistant'; msgs[i].rawText = msgs[i].content }
+        break
+      }
     }
     return
   }
@@ -979,8 +984,19 @@ const chatSlice = createSlice({
       if (role === '_segment') {
         for (let i = state.messages.length - 1; i >= 0; i--) {
           if (state.messages[i].role === 'streaming') {
-            state.messages[i].role = 'assistant'
-            state.messages[i].rawText = state.messages[i].content
+            // Drop trivially meaningless placeholder content that the model
+            // emits before tool calls ("...", "…", "---", ". . .", etc.).
+            // Only drop patterns that are EXCLUSIVELY composed of 2+ repeated
+            // punctuation/whitespace chars — never single characters which could
+            // be the start of legitimate content (list markers, etc.).
+            const raw = state.messages[i].content
+            const isPlaceholder = !raw || (/^[\s.\-…·•–—]{2,}$/.test(raw) && /[.\-…·•–—]/.test(raw)) || raw === '…'
+            if (isPlaceholder) {
+              state.messages.splice(i, 1)
+            } else {
+              state.messages[i].role = 'assistant'
+              state.messages[i].rawText = state.messages[i].content
+            }
             break
           }
         }

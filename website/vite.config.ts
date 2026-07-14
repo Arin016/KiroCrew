@@ -5,6 +5,7 @@ import react from '@vitejs/plugin-react'
 import { readFileSync } from 'fs'
 import http from 'http'
 import path from 'path'
+import { TAILWIND_RUNTIME_PATH, TAILWIND_RUNTIME_SRC } from './src/lib/vendorPaths'
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf-8'))
 const backendPort = process.env.KIROCLAW_PORT || 5476
@@ -79,8 +80,44 @@ function appImportMapPlugin(): Plugin {
   }
 }
 
+/**
+ * Serve the Tailwind v4 browser runtime from the dashboard's own origin at
+ * `/vendor/tailwindcss-browser.js`. The sandboxed widget iframe (a null-origin
+ * blob) loads Tailwind from here instead of the public cdn.tailwindcss.com,
+ * which AEA-enforced environments block — crashing the whole page on artifact
+ * render (Mesh-2518). The file is copied from the tracked @tailwindcss/browser
+ * npm dependency at build time (NOT a committed blob), satisfying BSC14
+ * software-supply-chain.
+ */
+function tailwindRuntimePlugin(): Plugin {
+  const RUNTIME_SRC = TAILWIND_RUNTIME_SRC
+  const SERVE_PATH = TAILWIND_RUNTIME_PATH
+  return {
+    name: 'kiroclaw-tailwind-runtime',
+    // Dev: the build output doesn't exist, so serve straight from node_modules.
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if ((req.url || '').split('?')[0] === SERVE_PATH) {
+          res.setHeader('Content-Type', 'text/javascript; charset=utf-8')
+          res.end(readFileSync(RUNTIME_SRC))
+          return
+        }
+        next()
+      })
+    },
+    // Build: emit into dist/vendor/, served same-origin like the /vendor/*.mjs stubs.
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: TAILWIND_RUNTIME_PATH.replace(/^\//, ''),
+        source: readFileSync(RUNTIME_SRC),
+      })
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [react(), tokenProxyPlugin(), appImportMapPlugin()],
+  plugins: [react(), tokenProxyPlugin(), appImportMapPlugin(), tailwindRuntimePlugin()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
@@ -95,6 +132,11 @@ export default defineConfig({
     setupFiles: './integration/setup.ts',
     css: true,
     pool: 'forks',  // More stable than threads on ARM64 build fleet (avoids ERR_IPC_CHANNEL_CLOSED)
+    // Default 5s is too tight for tests that ``await import(...)`` inside the
+    // body: under a full concurrent forks run the collect phase can starve the
+    // dynamic import past 5s and it times out. 15s gives headroom for
+    // load-induced flakes while still failing real hangs.
+    testTimeout: 15000,
     include: ['integration/**/*.test.{ts,tsx}', 'src/**/*.test.{ts,tsx}'],
     onConsoleLog: (log) => !log.includes('was not wrapped in act('),
     // Coverage emitted when ``vitest run --coverage`` is passed (see the

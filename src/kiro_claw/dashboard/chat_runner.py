@@ -87,6 +87,7 @@ from kiro_claw.dashboard.state import (
     should_queue_refusal_recovery,
     unsafe_bash_reason,
 )
+from kiro_claw.executors import run_in_embed_pool
 from kiro_claw.hooks import (
     HOOK_EVENT_AGENT_SPAWN,
     HOOK_EVENT_POST_TOOL_USE,
@@ -1849,7 +1850,11 @@ async def _run_chat(
                 folder_path = state.folder_breadcrumb(slot.folder_id) or None
                 slot._folder_changed = False
             message = _maybe_inject_persona(message, getattr(slot, "color_theme", ""), is_new)
-            full_message, _ = state.context_builder.build_message(
+            # build_message performs blocking work (episodic query embed via
+            # urllib to Ollama, file reads) — run off-loop (mc-embed bulkhead)
+            # so a slow embedding endpoint can't stall the gateway event loop.
+            full_message, _ = await run_in_embed_pool(
+                state.context_builder.build_message,
                 message,
                 is_new,
                 session_key,

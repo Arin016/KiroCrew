@@ -27,6 +27,29 @@
 export const HEARTBEAT_MS = 5_000
 /** A popout unseen for longer than this is considered gone and pruned. */
 export const STALE_MS = 12_000
+/**
+ * How long a popout waits for a main window to claim a forwarded navigation
+ * intent before falling back to opening the destination in a new tab.
+ * BroadcastChannel delivery is effectively synchronous between live same-origin
+ * windows, so this only needs to absorb event-loop scheduling jitter.
+ */
+export const NAV_CLAIM_MS = 250
+
+/**
+ * A navigation the popout wants performed in the MAIN dashboard window.
+ * Popout windows are pinned to their entity — any affordance that would leave
+ * it (open a chat session, go back to the library) forwards one of these
+ * instead of navigating locally, which would mount the whole dashboard inside
+ * the popout window.
+ */
+export type NavIntent = {
+  /** Destination route in the main dashboard, e.g. '/chat' or '/artifacts'. Must not carry a query string. */
+  path: string
+  /** Chat slot to activate before navigating. */
+  slotKey?: string
+  /** Composer prefill to seed for a slot (rides the message — sessionStorage is per-window). */
+  prefill?: { slotKey: string; prompt: string }
+}
 
 export type PopoutMsg =
   | { t: 'open'; id: string }
@@ -35,6 +58,13 @@ export type PopoutMsg =
   | { t: 'pong'; id: string }
   | { t: 'focus'; id: string }
   | { t: 'bring-back'; id: string }
+  // Navigation-intent handshake (popout → main). Two-phase claim so that with
+  // several main dashboard tabs open, exactly ONE performs the navigation:
+  // the popout broadcasts a request, every main offers, the popout picks the
+  // first offer and addresses the go at that main's id.
+  | { t: 'nav-request'; nonce: string; intent: NavIntent }
+  | { t: 'nav-offer'; nonce: string; mainId: string }
+  | { t: 'nav-go'; nonce: string; mainId: string; intent: NavIntent }
 
 /** entity id -> epoch ms the window was last seen alive. */
 export type PopoutMap = Record<string, number>
@@ -105,8 +135,22 @@ export interface PopoutController {
   returnSelfToMain(): void
   /** Register THIS window as the live popout for `id` (responder role). Returns cleanup. */
   registerPopout(id: string): () => void
+  /**
+   * From inside a popout: forward a navigation intent to a main dashboard
+   * window (claim handshake picks exactly one). When no main claims it within
+   * `NAV_CLAIM_MS`, the destination opens in a new full browser tab instead.
+   */
+  forwardToMain(intent: NavIntent): void
+  /**
+   * Register THIS window as willing to perform forwarded navigation intents
+   * (main dashboard role). Only windows with a registered handler answer
+   * `nav-request`s — popout and embed windows never register. Returns cleanup.
+   */
+  setNavIntentHandler(fn: (intent: NavIntent) => void): () => void
   /** Test-only: swap the navigation sink (jsdom can't redefine window.location). */
   __setNavigateForTests(fn: (url: string) => void): void
+  /** Test-only: swap the new-tab sink (asserts the no-main fallback). */
+  __setWindowOpenForTests(fn: (url: string, target: string) => void): void
   /** Test-only: reset all instance state between cases. */
   __resetForTests(): void
 }
@@ -129,6 +173,16 @@ export function createPopoutController(opts: PopoutControllerOptions): PopoutCon
   let selfId: string | null = null
   /** Handles for popouts THIS window opened — lets us focus/close them directly. */
   const handles = new Map<string, Window | null>()
+  /**
+   * Main-role identity for the nav-intent claim handshake. Distinct from
+   * `selfId` (which marks the POPOUT role) — a window becomes claim-eligible
+   * only by registering a nav-intent handler, so `mainId` is minted lazily.
+   */
+  let mainId: string | null = null
+  /** Registered by the main dashboard shell; popouts/embeds never register one. */
+  let navIntentHandler: ((intent: NavIntent) => void) | null = null
+  /** The popout side's in-flight forwarded navigation, if any. */
+  let pendingNav: { nonce: string; intent: NavIntent; timer: ReturnType<typeof setTimeout> } | null = null
 
   /**
    * Guarded console output. The window-control paths (open / focus / close) can
@@ -163,6 +217,23 @@ export function createPopoutController(opts: PopoutControllerOptions): PopoutCon
   }
 
   function handleMessage(msg: PopoutMsg): void {
+    // Forwarder role: accept the first claim for an in-flight nav intent.
+    // Keyed on pendingNav (not selfId) — only the window that posted the
+    // matching nav-request can hold the nonce.
+    if (msg.t === 'nav-offer' && pendingNav && msg.nonce === pendingNav.nonce) {
+      // First offer wins: address the go at exactly that main so multiple
+      // dashboard tabs don't all navigate. Later offers find pendingNav
+      // cleared and are ignored.
+      clearTimeout(pendingNav.timer)
+      const { nonce, intent } = pendingNav
+      pendingNav = null
+      post({ t: 'nav-go', nonce, mainId: msg.mainId, intent })
+      // Best-effort: raise a main window. The claimed main may not be the
+      // opener, but same-origin child→opener focus is the one reliably
+      // permitted path; the main also self-focuses on handling the intent.
+      try { window.opener?.focus?.() } catch (e) { logDebug('opener focus vetoed', e) }
+      return
+    }
     // Popout responder role: answer liveness pings and honor control messages
     // addressed to this window's entity.
     if (selfId) {
@@ -174,6 +245,19 @@ export function createPopoutController(opts: PopoutControllerOptions): PopoutCon
         return
       }
       if (msg.t === 'bring-back' && msg.id === selfId) { returnSelfToMain(); return }
+    }
+    // Main dashboard role: claim + perform forwarded navigation intents. Only
+    // windows that registered a handler participate (popouts/embeds don't).
+    if (navIntentHandler) {
+      if (msg.t === 'nav-request') {
+        if (!mainId) mainId = randomId()
+        post({ t: 'nav-offer', nonce: msg.nonce, mainId })
+        return
+      }
+      if (msg.t === 'nav-go') {
+        if (msg.mainId === mainId) navIntentHandler(msg.intent)
+        return
+      }
     }
     const now = Date.now()
     const next = pruneStale(applyMessage(map, msg, now), now)
@@ -349,8 +433,61 @@ export function createPopoutController(opts: PopoutControllerOptions): PopoutCon
     }
   }
 
+  /** Unguessable-enough id for the claim handshake (no security role — just collision avoidance). */
+  function randomId(): string {
+    try { return crypto.randomUUID() } catch { return `${Date.now()}-${Math.random().toString(36).slice(2)}` }
+  }
+
+  /**
+   * New-tab indirection for the no-main fallback: swappable in tests (jsdom's
+   * `window.open` is also spyable, but a dedicated sink keeps parity with the
+   * `navigate` indirection above and avoids popup-blocker noise in assertions).
+   */
+  let windowOpen = (url: string, target: string): void => { window.open(url, target) }
+
+  /**
+   * Absolute destination URL for the no-main fallback. The new tab is a fresh
+   * JS context with no Redux store to dispatch into, so the slot selection and
+   * composer prefill ride as query params the main `/chat` route already (or
+   * newly) understands: `?sid=` selects the slot, `?prefill=` seeds the
+   * composer for it.
+   */
+  function navFallbackUrl(intent: NavIntent): string {
+    const params = new URLSearchParams()
+    if (intent.slotKey) params.set('sid', intent.slotKey)
+    if (intent.prefill) params.set('prefill', intent.prefill.prompt)
+    const qs = params.toString()
+    return `${window.location.origin}${intent.path}${qs ? `?${qs}` : ''}`
+  }
+
+  function forwardToMain(intent: NavIntent): void {
+    ensureChannel()
+    // Supersede any still-pending forward — the newest user gesture wins.
+    if (pendingNav) { clearTimeout(pendingNav.timer); pendingNav = null }
+    const nonce = randomId()
+    const timer = setTimeout(() => {
+      // No main window claimed the intent — it either doesn't exist or is
+      // gone. Open the destination as a full browser tab instead; the popout
+      // stays pinned to its entity either way.
+      pendingNav = null
+      windowOpen(navFallbackUrl(intent), '_blank')
+    }, NAV_CLAIM_MS)
+    pendingNav = { nonce, intent, timer }
+    post({ t: 'nav-request', nonce, intent })
+  }
+
+  function setNavIntentHandler(fn: (intent: NavIntent) => void): () => void {
+    ensureChannel()
+    navIntentHandler = fn
+    return () => { if (navIntentHandler === fn) navIntentHandler = null }
+  }
+
   function __setNavigateForTests(fn: (url: string) => void): void {
     navigate = fn
+  }
+
+  function __setWindowOpenForTests(fn: (url: string, target: string) => void): void {
+    windowOpen = fn
   }
 
   function __resetForTests(): void {
@@ -364,11 +501,16 @@ export function createPopoutController(opts: PopoutControllerOptions): PopoutCon
     selfId = null
     handles.clear()
     navigate = (url: string) => window.location.assign(url)
+    windowOpen = (url: string, target: string) => { window.open(url, target) }
+    mainId = null
+    navIntentHandler = null
+    if (pendingNav) { clearTimeout(pendingNav.timer); pendingNav = null }
   }
 
   return {
     subscribe, getSnapshot, openPopout, focusPopout, bringBack,
     isSelfPopout, returnSelfToMain, registerPopout,
-    __setNavigateForTests, __resetForTests,
+    forwardToMain, setNavIntentHandler,
+    __setNavigateForTests, __setWindowOpenForTests, __resetForTests,
   }
 }

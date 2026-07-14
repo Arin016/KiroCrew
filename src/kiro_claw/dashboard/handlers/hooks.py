@@ -12,6 +12,7 @@ from aiohttp import web
 
 from kiro_claw.config.loader import KiroClawConfig
 from kiro_claw.dashboard.state import DashboardState
+from kiro_claw.executors import run_in_embed_pool
 from kiro_claw.validation import sanitize_string
 
 logger = logging.getLogger(__name__)
@@ -388,7 +389,9 @@ async def _run_hook_inner(
     client, is_new, resumed = await state.sessions.get_or_create(session_key, agent=agent)
     full_message = message
     if is_new and state.context_builder:
-        full_message, _ = state.context_builder.build_message(
+        # Off-loop: build_message embeds the episodic query (blocking urllib).
+        full_message, _ = await run_in_embed_pool(
+            state.context_builder.build_message,
             message, is_new, session_key, agent=agent, resumed=resumed,
             provider_type=KiroClawConfig.load().agent.provider,
         )

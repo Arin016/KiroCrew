@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from kiro_claw.acp.types import EVENT_COMPACTION_STATUS, EVENT_COMPLETE
+from kiro_claw.executors import run_in_embed_pool
 from kiro_claw.hooks import TOOL_AUTO_APPROVE, TOOL_DENY
 from kiro_claw.messaging.driver import APPROVAL_INTERACTIVE, TurnDriver
 from kiro_claw.messaging.link import (
@@ -244,7 +245,9 @@ class TelegramDispatcher:
             _acquired = True
             if is_new:
                 await self.sessions.set_channel(session_key, channel_id)
-            full_message, _ = self.ctx_builder.build_message(
+            # Off-loop: build_message embeds the episodic query (blocking urllib).
+            full_message, _ = await run_in_embed_pool(
+                self.ctx_builder.build_message,
                 text,
                 is_new,
                 session_key,

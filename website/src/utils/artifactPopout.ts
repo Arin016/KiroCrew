@@ -4,8 +4,10 @@ import {
   pruneStale,
   HEARTBEAT_MS,
   STALE_MS,
+  NAV_CLAIM_MS,
   type PopoutMap,
   type PopoutMsg,
+  type NavIntent,
 } from './popoutController'
 
 /**
@@ -23,8 +25,8 @@ import {
 
 export const ARTIFACT_POPOUT_CHANNEL = 'kiroclaw-artifact-popout'
 
-export { HEARTBEAT_MS, STALE_MS, applyMessage, pruneStale }
-export type { PopoutMap, PopoutMsg }
+export { HEARTBEAT_MS, STALE_MS, NAV_CLAIM_MS, applyMessage, pruneStale }
+export type { PopoutMap, PopoutMsg, NavIntent }
 
 /**
  * Stable, filesystem-safe window name for an artifact. `window.open` reuses (and
@@ -70,7 +72,21 @@ export const isSelfPopout = controller.isSelfPopout
 export const returnSelfToMain = controller.returnSelfToMain
 /** Register THIS window as the live popout for `slug` (responder role). Returns cleanup. */
 export const registerPopout = controller.registerPopout
+/**
+ * From inside an artifact popout: forward a navigation intent (open a chat
+ * session, go to the library, …) to a main dashboard window instead of
+ * navigating locally — the popout window stays pinned to its artifact. Falls
+ * back to a new browser tab when no main window claims it.
+ */
+export const forwardToMain = controller.forwardToMain
+/**
+ * Register THIS window as the performer of forwarded navigation intents
+ * (main dashboard role — App.tsx's non-popout shell). Returns cleanup.
+ */
+export const setNavIntentHandler = controller.setNavIntentHandler
 /** Test-only: swap the navigation sink (jsdom can't redefine window.location). */
 export const __setNavigateForTests = controller.__setNavigateForTests
+/** Test-only: swap the new-tab sink (asserts the no-main fallback). */
+export const __setWindowOpenForTests = controller.__setWindowOpenForTests
 /** Test-only: reset all module state between cases. */
 export const __resetForTests = controller.__resetForTests

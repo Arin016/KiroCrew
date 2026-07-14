@@ -23,6 +23,12 @@ from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import DASHBOARD_PORT, config_dir
 from kiro_claw.dashboard.side_state import SideState
 from kiro_claw.knowledge.store import KnowledgeStore
+from kiro_claw.notifications.bus import (
+    NotificationBus,
+    NotificationValidationError,
+    normalize_note,
+    payload_from_legacy,
+)
 from kiro_claw.safety_override import safety_override
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
@@ -1120,6 +1126,9 @@ class DashboardState:
         self._notify_event = asyncio.Event()
         self._notification_log: list[dict[str, Any]] = _load_notifications()
         self._unread_count: int = 0
+        # Notification bus (schema v2) — notify() adapts legacy calls onto it;
+        # _deliver_note is the delivery sink (log, count, broadcast, persist).
+        self.notification_bus = NotificationBus(sink=self._deliver_note)
         self._slots: dict[str, _ChatSlot] = {}
         self._slack_to_slot: dict[str, str] = {}  # Slack session_key → slot name
         self._slot_counter = 0
@@ -1497,15 +1506,35 @@ class DashboardState:
             logger.debug("Failed to persist open_slots.json", exc_info=True)
 
     def notify(self, kind: str, title: str, body: str, *, meta: dict | None = None) -> None:
-        """Push a notification to ALL connected SSE clients and persist to disk."""
-        note: dict[str, Any] = {
-            "kind": kind,
-            "title": title,
-            "body": body,
-            "ts": datetime.now(tz=timezone.utc).isoformat(),
-        }
-        if meta:
-            note.update(meta)
+        """Push a notification to ALL connected SSE clients and persist to disk.
+
+        Legacy adapter over the notification bus (see
+        docs/request-for-change/rfc-local-notification-bus.md): builds a
+        schema-v2 payload (source="system", channel="system.<kind>") and pushes
+        it through :class:`NotificationBus`, which validates and hands the
+        enriched note back to :meth:`_deliver_note`.
+        """
+        payload = payload_from_legacy(kind, title, body, meta)
+        try:
+            self.notification_bus.push(payload)
+        except NotificationValidationError:
+            # Legacy callers never validated inputs; keep the old
+            # never-raises contract and log instead.
+            logger.warning("Dropped invalid notification (kind=%s)", kind, exc_info=True)
+
+    def _deliver_note(self, note: dict[str, Any]) -> None:
+        """Delivery sink for the notification bus: log, count, broadcast, persist.
+
+        Central redaction point: notes can carry LLM-derived content (agent
+        results, cron summaries — including flat-merged meta values and
+        nested structures like action labels), so every string value is
+        scanned recursively before reaching any external surface (SSE
+        clients, JSONL on disk). Most callers already redact at the call
+        site; this is defense-in-depth ahead of Phase 2 app producers.
+        """
+        for key, value in note.items():
+            if key != "ts":
+                note[key] = _redact_note_value(value)
         self._notification_log.append(note)
         self._unread_count += 1
         self._broadcast(note)
@@ -2124,6 +2153,27 @@ class DashboardState:
 # ── Notification persistence ──
 
 
+def _redact_note_value(value: Any) -> Any:
+    """Recursively redact every string inside a notification note value.
+
+    Notes carry LLM-derived content in nested structures too (e.g. the
+    ``actions`` field is a list of dicts whose ``label`` values may be
+    model output), so redaction must descend into lists and dicts rather
+    than only scanning top-level strings.
+    """
+    if isinstance(value, str):
+        if not value:
+            return value
+        value, _ = redact_exfiltration_urls(value)
+        value, _ = redact_credentials(value)
+        return value
+    if isinstance(value, list):
+        return [_redact_note_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_note_value(item) for key, item in value.items()}
+    return value
+
+
 def _notifications_path() -> Path:
     """Path to the notifications JSONL file."""
     return config_dir() / _NOTIFICATIONS_FILE
@@ -2141,8 +2191,20 @@ def _load_notifications() -> list[dict[str, Any]]:
             if not line:
                 continue
             try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
+                parsed = normalize_note(json.loads(line))
+                # Redact at load: rows written before delivery-time redaction
+                # existed may carry unredacted LLM-derived content; they are
+                # served to SSE clients straight from this list.
+                for key, value in parsed.items():
+                    if key != "ts":
+                        parsed[key] = _redact_note_value(value)
+                entries.append(parsed)
+            except Exception:  # noqa: BLE001 — skip the bad row, not the whole file
+                # normalize_note/_redact_note_value can raise on valid-JSON
+                # rows with unexpected shapes (e.g. a top-level array); keep
+                # the per-line skip semantics instead of losing all history
+                # to the outer except.
+                logger.debug("Skipping malformed notification row", exc_info=True)
                 continue
         # Keep only the most recent N
         return entries[-_MAX_PERSISTED_NOTIFICATIONS:]

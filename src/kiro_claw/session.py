@@ -109,6 +109,10 @@ from kiro_claw.session_pid import _untrack_session_pid as _untrack_session_pid  
 from kiro_claw.session_pid import (  # noqa: F401
     cleanup_orphaned_sessions as cleanup_orphaned_sessions,
 )
+from kiro_claw.session_pid import (
+    find_orphan_mcp_candidates,
+    kill_orphan_mcps,
+)
 from kiro_claw.stats import Stats
 
 # The standalone ClaudeCodeProvider was removed in the KiroACP-only refactor;
@@ -2612,6 +2616,55 @@ class SessionManager:
                             )
             except Exception:
                 logger.debug("Orphan PID sweep failed", exc_info=True)
+
+            # Untracked orphan MCP sweep (defense-in-depth, Mesh-1870)
+            try:
+                sweep_pids, sweep_ok = _collect_active_pids(self._sessions)
+                sweep_pids.update(self._pool_pids())
+                sweep_pids.update(self._in_flight_pids())
+                sweep_pids.update(self._companion_runtime_pids())
+                if sweep_ok:
+                    # Identify candidates in thread (blocking I/O)
+                    candidates = await asyncio.get_running_loop().run_in_executor(
+                        maintenance_executor(),
+                        find_orphan_mcp_candidates, sweep_pids
+                    )
+                    # Re-verify against fresh active PIDs before killing
+                    if candidates:
+                        fresh_pids, fresh_ok = _collect_active_pids(
+                            self._sessions
+                        )
+                        fresh_pids.update(self._pool_pids())
+                        fresh_pids.update(self._in_flight_pids())
+                        fresh_pids.update(self._companion_runtime_pids())
+                        if fresh_ok:
+                            confirmed = [
+                                p for p in candidates if p not in fresh_pids
+                            ]
+                            if confirmed:
+                                await asyncio.get_running_loop().run_in_executor(
+                                    maintenance_executor(),
+                                    kill_orphan_mcps, confirmed
+                                )
+                        else:
+                            # Distinguish "reaper skipped" from "no orphans":
+                            # fresh re-verification was unreliable, so we
+                            # fail closed and kill nothing this cycle.
+                            logger.warning(
+                                "Orphan MCP sweep skipped kill phase: fresh "
+                                "active-PID re-verification unreliable "
+                                "(fresh_ok=False)"
+                            )
+                else:
+                    # Fail closed: active-PID enumeration was unreliable, so
+                    # the whole sweep no-ops. Log so on-call can tell this
+                    # apart from a benign "ran, found no orphans" cycle.
+                    logger.warning(
+                        "Orphan MCP sweep skipped: active-PID enumeration "
+                        "unreliable (sweep_ok=False)"
+                    )
+            except Exception:
+                logger.warning("Orphan MCP sweep failed", exc_info=True)
 
             # Periodically re-enforce deniedCommands (catches manual edits)
             try:

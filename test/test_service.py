@@ -965,3 +965,49 @@ class TestMacOSControlPaths:
         monkeypatch.setattr(sys, "argv", ["/some/path/kiroclaw"])
         with patch("kiro_claw.service.common.shutil.which", return_value=None):
             assert "kiroclaw" in svc_common.kiroclaw_bin()
+
+
+class TestRestartCommandHint:
+    """`restart_command_hint` returns a command that matches how the
+    service is actually installed (Mesh-2583).
+
+    The bug was the update path and the Slack restart-failure hint both
+    hardcoding ``systemctl --user restart kiroclaw``, which fails on the
+    system-level systemd unit. The helper centralises the correct command
+    per platform.
+    """
+
+    def test_systemd_returns_sudo_systemctl(self, monkeypatch):
+        from kiro_claw.service import common as svc_common
+
+        monkeypatch.setattr(
+            svc_common, "current_platform", lambda: Platform.SYSTEMD
+        )
+        assert svc_common.restart_command_hint() == f"sudo systemctl restart {SERVICE_NAME}"
+
+    def test_launchd_returns_service_aware_cli(self, monkeypatch):
+        from kiro_claw.service import common as svc_common
+
+        monkeypatch.setattr(
+            svc_common, "current_platform", lambda: Platform.LAUNCHD
+        )
+        assert svc_common.restart_command_hint() == "kiroclaw restart"
+
+    def test_unsupported_returns_service_aware_cli(self, monkeypatch):
+        from kiro_claw.service import common as svc_common
+
+        monkeypatch.setattr(
+            svc_common, "current_platform", lambda: Platform.UNSUPPORTED
+        )
+        assert svc_common.restart_command_hint() == "kiroclaw restart"
+
+    def test_never_returns_broken_user_scope_command(self, monkeypatch):
+        """Regression: no platform may emit the broken `systemctl --user`
+        string that Mesh-2583 was filed against."""
+        from kiro_claw.service import common as svc_common
+
+        for platform in Platform:
+            monkeypatch.setattr(
+                svc_common, "current_platform", lambda p=platform: p
+            )
+            assert "systemctl --user" not in svc_common.restart_command_hint()

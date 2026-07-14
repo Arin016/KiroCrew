@@ -48,10 +48,21 @@ describe('widgetSrcdoc', () => {
     expect(out).toContain('mc-widget-action')
   })
 
-  it('includes the Tailwind CDN script and dark-mode config', () => {
+  it('loads Tailwind same-origin (no public CDN) with v4 dark-mode directives', () => {
     const out = buildSrcdoc({ html: '', themeVars: {}, mode: 'dark' })
-    expect(out).toContain('cdn.tailwindcss.com')
-    expect(out).toContain("darkMode:'class'")
+    // AEA fix (Mesh-2518): must NOT fetch Tailwind from the public CDN.
+    expect(out).not.toContain('cdn.tailwindcss.com')
+    // v4 drives dark: off a .dark class via a custom variant, not tailwind.config.
+    expect(out).toContain('@custom-variant dark')
+    expect(out).toContain('text/tailwindcss')
+    // The directives block must precede the runtime <script> so the custom dark
+    // variant registers before first paint (ordering regression guard).
+    expect(out.indexOf('text/tailwindcss')).toBeLessThan(
+      out.indexOf(`src="${window.location.origin}/vendor/tailwindcss-browser.js"`),
+    )
+    // The null-origin iframe can't use a bare path — the runtime <script> src
+    // must be absolute (origin-prefixed), not just '/vendor/...'.
+    expect(out).toContain(`src="${window.location.origin}/vendor/tailwindcss-browser.js"`)
   })
 
   it('sets the strict CSP', () => {
@@ -59,6 +70,15 @@ describe('widgetSrcdoc', () => {
     expect(out).toContain("default-src 'none'")
     expect(out).toContain("connect-src 'none'")
     expect(out).toContain("base-uri 'none'")
+    // 'unsafe-eval' MUST NOT be granted anywhere: the Tailwind v4 runtime needs
+    // no eval and widget JS must get no dynamic-exec primitive in the sandbox.
+    expect(out).not.toContain("'unsafe-eval'")
+    // script-src pins the dashboard origin to the single vendored runtime FILE
+    // (least-privilege), not the whole origin (a null-origin iframe can't use
+    // 'self'). Assert the exact path-scoped source precedes the jsdelivr host.
+    expect(out).toContain(
+      `'unsafe-inline' ${window.location.origin}/vendor/tailwindcss-browser.js https://cdn.jsdelivr.net`,
+    )
   })
 
   it('exports the canonical theme variable names', () => {

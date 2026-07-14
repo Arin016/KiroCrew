@@ -17,6 +17,7 @@ from aiohttp import web
 
 from kiro_claw.artifacts import get_default_store
 from kiro_claw.config.loader import KiroClawConfig
+from kiro_claw.executors import run_in_embed_pool
 from kiro_claw.knowledge.agent_fetch import fetch_url_content
 from kiro_claw.knowledge.artifact_ingest import ArtifactKnowledgeSync
 from kiro_claw.knowledge.chunker import HeadingAwareChunker
@@ -198,11 +199,17 @@ async def list_items(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid page/limit"}, status=400)
 
     if q:
-        # Use hybrid search: FTS5 keyword + graph traversal + optional vector + RRF fusion
+        # Use hybrid search: FTS5 keyword + graph traversal + optional vector + RRF fusion.
+        # The availability probe and retriever.search (blocking query embed to
+        # Ollama) both do synchronous network I/O — run off-loop, mirroring
+        # search_for_context below.
         embedder = request.app.get("knowledge_embedder")
-        embed_fn = embedder.embed if embedder and embedder.is_available() else None
+        embed_fn = embedder.embed if embedder and await embedder.is_available_async() else None
         retriever = HybridRetriever(store, embedder=embed_fn)
-        all_results = retriever.search(q, limit=limit * 3)  # over-fetch to allow filtering
+        # mc-embed bulkhead: the search's query embed blocks on Ollama.
+        all_results = await run_in_embed_pool(
+            retriever.search, q, limit=limit * 3
+        )  # over-fetch to allow filtering
         # Batch fetch all candidate items (avoid N+1)
         result_ids = [r["id"] for r in all_results]
         if result_ids:
@@ -978,11 +985,12 @@ async def get_stats(request: web.Request) -> web.Response:
     embedder = request.app.get("knowledge_embedder")
     if embedder:
         embedded_count = store.db.execute("SELECT COUNT(*) FROM items WHERE embedding IS NOT NULL").fetchone()[0]
+        available = await embedder.is_available_async()
         stats["embeddings"] = {
             "enabled": True,
             "provider": "ollama",
             "model": embedder.model,
-            "available": embedder.is_available(),
+            "available": available,
             "embedded_items": embedded_count,
         }
     else:
@@ -1138,9 +1146,11 @@ async def get_embedding_status(request: web.Request) -> web.Response:
     embedded = store.db.execute(
         "SELECT COUNT(*) as c FROM items WHERE status = 'active' AND embedding IS NOT NULL"
     ).fetchone()["c"]
+    # Polled every 30s by the frontend — loop-safe probe.
+    available = await embedder.is_available_async() if embedder else False
     return web.json_response({
         "enabled": embedder is not None,
-        "available": embedder.is_available() if embedder else False,
+        "available": available,
         "model": embedder.model if embedder else None,
         "total_items": total,
         "embedded_items": embedded,
@@ -1194,7 +1204,7 @@ async def batch_embed_items(request: web.Request) -> web.Response:
     embedder = request.app.get("knowledge_embedder")
     if not embedder:
         return web.json_response({"error": "Embedding not enabled"}, status=400)
-    if not embedder.is_available():
+    if not await embedder.is_available_async():
         return web.json_response({"error": "Ollama not reachable"}, status=503)
 
     body = await request.json() if request.can_read_body else {}
@@ -1322,13 +1332,13 @@ async def search_for_context(request: web.Request) -> web.Response:
         limit = top_n
 
     embedder = request.app.get("knowledge_embedder")
-    embed_fn = embedder.embed if embedder and embedder.is_available() else None
+    embed_fn = embedder.embed if embedder and await embedder.is_available_async() else None
     retriever = HybridRetriever(store, embedder=embed_fn)
-    loop = asyncio.get_running_loop()
     # HybridRetriever.search attaches citation fields (source identity + the
     # per-document locator) inside this executor call, so all sqlite access
-    # stays on the connection's thread.
-    results = await loop.run_in_executor(None, lambda: retriever.search(q, limit=limit))
+    # stays on the connection's thread. mc-embed bulkhead: the query embed
+    # blocks on Ollama.
+    results = await run_in_embed_pool(retriever.search, q, limit=limit)
 
     cards = []
     total_tokens = 0

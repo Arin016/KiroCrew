@@ -149,7 +149,7 @@ const UserMessage = memo(function UserMessage({ content, meta, timestamp, render
           <button onClick={cancel} className="px-2.5 py-1 text-[13px] text-muted hover:text-text rounded border border-border hover:bg-hover transition-colors" title="Cancel (Esc)">
             Cancel
           </button>
-          <button onClick={submit} className="flex items-center gap-1 px-2.5 py-1 text-[13px] bg-accent text-white rounded hover:bg-accent/80 transition-colors" title="Send (Enter)">
+          <button onClick={submit} className="flex items-center gap-1 px-2.5 py-1 text-[13px] bg-accent text-accent-fg rounded hover:bg-accent/80 transition-colors" title="Send (Enter)">
             <Send size={10} /> Send
           </button>
         </div>

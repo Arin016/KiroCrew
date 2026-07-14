@@ -37,6 +37,8 @@
 // - WidgetFrame.tsx (inline <mcwidget> rendering in chat)
 // - ArtifactDetailPage.tsx (full-screen artifact view at /artifacts/<slug>)
 
+import { TAILWIND_RUNTIME_PATH } from './vendorPaths'
+
 /** CSS custom properties the parent app exposes to widgets. Resolved against
  * document.documentElement and serialized into the sandboxed srcdoc so widget
  * HTML can use `style="background: var(--bg)"` or Tailwind arbitrary values
@@ -51,11 +53,28 @@ export const THEME_VAR_NAMES = [
   '--danger', '--danger-subtle', '--info',
 ] as const
 
-const CSP =
+// CSP for the sandboxed widget iframe. `scriptOrigin` is the dashboard's own
+// origin (window.location.origin); the iframe loads the same-origin Tailwind v4
+// runtime from exactly `scriptOrigin + TAILWIND_RUNTIME_PATH`, replacing public
+// cdn.tailwindcss.com (which AEA-enforced environments block and which crashed
+// the page on artifact render, Mesh-2518).
+//
+// script-src is least-privilege (ARCC cnt_XWQ2MLdcuH25VA, "allowlist only
+// necessary sources"): the dashboard origin is pinned to the single vendored
+// runtime FILE, not the whole origin, so an injected/compromised widget cannot
+// load arbitrary scripts from other dashboard endpoints. 'unsafe-eval' is NOT
+// granted (ARCC cnt_ArLamIpfHaFn9Z): the Tailwind v4 runtime uses zero
+// eval/Function/WebAssembly and Chart.js/D3 do not need it, so widget JS gets no
+// dynamic-exec primitive inside the sandbox. 'unsafe-inline' stays: arbitrary
+// inline widget <script>/<style> is the core feature and cannot use nonce/hash.
+// A null-origin iframe cannot use 'self', which is why the origin is spelled out.
+// jsdelivr/cdnjs remain for widget-authored Chart.js/D3 (same-origin + SRI is a
+// follow-up). Tailwind v4 emits CSS as inline <style>, so style-src needs no CDN.
+const cspFor = (scriptOrigin: string): string =>
   "default-src 'none'; " +
-  "script-src 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com " +
+  `script-src 'unsafe-inline' ${scriptOrigin}${TAILWIND_RUNTIME_PATH} ` +
   "https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; " +
-  "style-src 'unsafe-inline' https://cdn.tailwindcss.com; " +
+  "style-src 'unsafe-inline'; " +
   "img-src data: blob:; font-src data:; connect-src 'none'; " +
   "form-action 'none'; base-uri 'none';"
 
@@ -191,13 +210,25 @@ const HEIGHT_REPORTER_BODY = `(function(){
   });
 })();`
 
-/** Force Tailwind's `dark:` variant to be driven by `class="dark"` on <body>
- * rather than the default `prefers-color-scheme: dark` media query. The
- * iframe has no way to know the parent app's resolved theme — when the
- * user runs the dashboard in dark mode on a light-mode OS, the media query
- * reports light and every `dark:` class would be ignored. The config block
- * must run before any widget HTML so the CDN applies it to the first JIT pass. */
-const TAILWIND_CONFIG_BODY = "tailwind.config={darkMode:'class'}"
+/** Same-origin path to the Tailwind v4 browser runtime. A Vite plugin
+ * (tailwindRuntimePlugin in vite.config.ts) copies @tailwindcss/browser's IIFE
+ * build here at build time from the tracked npm dependency — so it is served
+ * from the dashboard's own origin (not the public CDN that AEA blocks) and is
+ * NOT a committed blob (BSC14 supply-chain). Prefixed with window.location.origin
+ * below because the sandboxed iframe is null-origin and can't use a bare path.
+ * Defined once in ./vendorPaths and imported above so the consumer path can't
+ * drift from vite.config.ts's dev-serve + build-emit sites. */
+
+/** Tailwind v4 browser build: dark mode is driven by a `.dark` class on <body>
+ * (set below) via a custom variant — NOT the v3 `tailwind.config` global, which
+ * v4 removed. The @tailwindcss/browser runtime auto-injects preflight + theme +
+ * utilities on load (verified via headless render: base reset AND utilities apply
+ * without an explicit `@import "tailwindcss"`), so this block only registers the
+ * dark variant. Injected as a `<style type="text/tailwindcss">` block the runtime
+ * compiles on load; it must precede the runtime script so the variant registers
+ * before first paint. */
+const TAILWIND_V4_DIRECTIVES =
+  '@custom-variant dark (&:where(.dark, .dark *));'
 
 function buildThemeCss(vars: Record<string, string>, mode: 'dark' | 'light'): string {
   const rootBody = Object.entries(vars).map(([k, v]) => `${k}:${v}`).join(';')
@@ -272,21 +303,29 @@ export function buildSrcdoc({
   viewport.setAttribute('content', 'width=device-width, initial-scale=1')
   head.appendChild(viewport)
 
+  // Dashboard's own origin — serves the Vite-emitted, same-origin Tailwind v4
+  // runtime asset so the null-origin iframe makes NO public-CDN fetch (the
+  // fetch AEA-enforced environments block). window is guaranteed here (the SSR
+  // path returns above), so location.origin is always defined.
+  const scriptOrigin = window.location.origin
+
   // <meta CSP>
   const csp = doc.createElement('meta')
   csp.setAttribute('http-equiv', 'Content-Security-Policy')
-  csp.setAttribute('content', CSP)
+  csp.setAttribute('content', cspFor(scriptOrigin))
   head.appendChild(csp)
 
-  // Tailwind CDN script
-  const tailwind = doc.createElement('script')
-  tailwind.setAttribute('src', 'https://cdn.tailwindcss.com')
-  head.appendChild(tailwind)
-
-  // Tailwind dark-mode config script
-  const tailwindCfg = doc.createElement('script')
-  tailwindCfg.textContent = TAILWIND_CONFIG_BODY
+  // Tailwind v4 dark-mode directives (compiled by the runtime on load). Placed
+  // before the runtime script so the custom variant is registered first.
+  const tailwindCfg = doc.createElement('style')
+  tailwindCfg.setAttribute('type', 'text/tailwindcss')
+  tailwindCfg.textContent = TAILWIND_V4_DIRECTIVES
   head.appendChild(tailwindCfg)
+
+  // Same-origin Tailwind v4 browser runtime (replaces public cdn.tailwindcss.com).
+  const tailwind = doc.createElement('script')
+  tailwind.setAttribute('src', scriptOrigin + TAILWIND_RUNTIME_PATH)
+  head.appendChild(tailwind)
 
   // <style> with base body styles + theme vars
   const style = doc.createElement('style')
@@ -348,9 +387,9 @@ function buildSrcdocSSR({ html, themeVars, mode, includeHeightReporter }: BuildS
     `<!DOCTYPE html><html><head>` +
     `<meta charset="utf-8">` +
     `<meta name="viewport" content="width=device-width, initial-scale=1">` +
-    `<meta http-equiv="Content-Security-Policy" content="${CSP}">` +
-    `<script src="https://cdn.tailwindcss.com"><\/script>` +
-    `<script>${TAILWIND_CONFIG_BODY}<\/script>` +
+    `<meta http-equiv="Content-Security-Policy" content="${cspFor('')}">` +
+    `<style type="text/tailwindcss">${TAILWIND_V4_DIRECTIVES}</style>` +
+    `<script src="${TAILWIND_RUNTIME_PATH}"><\/script>` +
     `<style>${styleCss}</style>` +
     `</head><body class="${mode}">` +
     `<!-- SSR fallback: LLM body omitted -->` +

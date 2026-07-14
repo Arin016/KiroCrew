@@ -247,6 +247,23 @@ Window: backend `b35c496b..59ec6e1d`, frontend `fdfe158b..ca99bb4`. Ported:
 | [`5d99a8d4`](https://code.amazon.com/packages/MeshClaw/commits/5d99a8d4198a5904f91eacff87b02380bf781bcb) | backend | SKIP_INTERNAL | feat(security) MCS-Jail Midway AgentContext (Mesh-1517) — Midway/MCS coupling; `jail.py` absent, MCS-Jail Brazil dep. Its one generic hunk (`sandbox.py` `userns_available()` public alias) has **no fork consumer** — only the absent `jail.py` calls it (anti-miss (b); same precedent as batch-16 `useVisibilityInterval`). `cli.py --no-jail`, `agent.jail` enum, cli_doctor jail status, config-baseline all confined to the jail. |
 | [`afed9312`](https://code.amazon.com/packages/MeshClaw/commits/afed93127c82625d7287735202eef6d449ee01da) | backend | SKIP_INTERNAL | fix(mcp-gateway) raise pooled-backend cap 20→64 — 100% confined to `mcp_gateway/` (`manager.py` `GatewaySpec` + `McpGatewayConfig` in loader.py). Fork has **no `McpGatewayConfig`** (grep empty) — no anchor. |
 
+### Batch 29 — GitHub PR (16 ported, 5 left out) — dual-repo sync 2026-07-14
+
+Window: backend `e870fed4..3b679515` (11 candidates) + frontend
+`20f18813..2a70682` (10) = **21 triaged** via a 42-agent adversarial workflow
+(analyzer + skeptic per candidate, decide by content; unanimous). **16 ported
+(7 backend KEEP + 1 RFC doc + 7 frontend KEEP + 2 PARTIAL); 5 left out** (3
+ALREADY_PRESENT, 2 DEFER — the comment-lifecycle pair). Full per-verdict detail:
+the batch-29 block of [`last-synced.txt`](./last-synced.txt).
+
+| Upstream commit | Repo | Verdict | Reason left out |
+|---|---|---|---|
+| [`38fa6701`](https://code.amazon.com/packages/MeshClaw/commits/38fa6701a8a8acd09adbb692ababc0317318fb54) | backend | ALREADY_PRESENT | `accepts_no_extension` in `/api/knowledge/config` — present at `knowledge.py` via fork PR #61. |
+| [`d2b685f0`](https://code.amazon.com/packages/MeshClaw/commits/d2b685f0f51cb81787f2fb61bcba1fd2d520218e) | backend | ALREADY_PRESENT | acp session_handle review nits (dead clause, single-shot probe flag) — already in the fork. |
+| [`3db7ede`](https://code.amazon.com/packages/MeshClawWebsite/commits/3db7ede) | frontend | ALREADY_PRESENT | Knowledge upload accept filter driven from backend config — present at `knowledge/index.tsx` via fork PR #61. |
+| [`475146ca`](https://code.amazon.com/packages/MeshClaw/commits/475146caa019888fc5ee6784efe50c469d438452) | backend | **DEFER** | feat(artifacts) comment lifecycle — audited agent delete + orphaned-anchor detection. Builds on a persistent `ArtifactComment` store (comments.json sidecar, provider sync) that the fork does NOT have — the fork uses a session-only `InlineComment`/`CommentOverlay` model. Porting requires the whole comment base first. |
+| [`86315dc`](https://code.amazon.com/packages/MeshClawWebsite/commits/86315dc) | frontend | **DEFER** | feat(artifacts) comment lifecycle UI — orphaned-anchor warning + comment activity events. Frontend pair of `475146ca`; depends on the same absent durable-comment subsystem (`CommentsSidebar.tsx` absent). |
+
 ### Batch 28 — GitHub PR (41 ported, 17 left out) — dual-repo sync 2026-07-13
 
 Branch `sync/beta-2026-07-13` off `origin/main` `4f942f3`. Window: backend

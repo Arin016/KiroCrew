@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 from kiro_claw import git_coord, shutdown_event
+from kiro_claw.executors import run_in_embed_pool
 from kiro_claw.llm_helpers import stream_and_collect_json
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
@@ -1019,7 +1020,7 @@ class TaskRunner:
                 # write_lesson embeds via blocking urllib (Ollama); offload to
                 # keep the gateway event loop responsive (same pattern as
                 # dashboard/handlers/cron.py api_lessons_create).
-                await asyncio.to_thread(
+                await run_in_embed_pool(
                     self._consolidator._vector_store.write_lesson,
                     rule, category, negative, "task_runner",
                 )
